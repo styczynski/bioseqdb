@@ -55,6 +55,7 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.pipeline_ops;
 import bioseq.scheduler.supervisor_pg;
 
 #define BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION process_sequences_dna4_w4

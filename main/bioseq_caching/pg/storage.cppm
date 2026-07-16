@@ -1013,7 +1013,11 @@ struct PgAtomicReservationCounter {
     [[nodiscard]] bool compare_exchange(
             std::uint64_t& expected,
             std::uint64_t desired) noexcept {
-        return pg_atomic_compare_exchange_u64(value, &expected, desired);
+        uint64 native_expected = static_cast<uint64>(expected);
+        const bool exchanged = pg_atomic_compare_exchange_u64(
+            value, &native_expected, static_cast<uint64>(desired));
+        expected = static_cast<std::uint64_t>(native_expected);
+        return exchanged;
     }
 
     [[nodiscard]] bool try_subtract(std::uint64_t bytes) noexcept {
@@ -1983,7 +1987,8 @@ void clear_unreserved_ledger_slot(
     if (reference.tier == BlockBackingTierV1::Dsa &&
         !entry.live_accounted) {
         const auto desired = checked_add(
-            pg_atomic_read_u64(&g_registry_root->hot_live_bytes),
+            static_cast<std::uint64_t>(
+                pg_atomic_read_u64(&g_registry_root->hot_live_bytes)),
             entry.reserved_bytes);
         if (!desired.has_value()) {
             LWLockRelease(g_storage_lock);
@@ -3228,7 +3233,8 @@ bool publish_shared_dsa_allocation(
         return false;
     }
     const auto desired = checked_add(
-        pg_atomic_read_u64(&g_registry_root->hot_live_bytes),
+        static_cast<std::uint64_t>(
+            pg_atomic_read_u64(&g_registry_root->hot_live_bytes)),
         entry.accounted_bytes);
     if (!desired.has_value()) {
         LWLockRelease(g_storage_lock);

@@ -175,6 +175,10 @@ class ClusterInputs:
     output_root: Path
     run_label: str = "private_pg"
     bootstraps: tuple[Path, ...] = ()
+    # Optional per-bootstrap log-file stems, parallel to `bootstraps`. When a
+    # consumer supplies fewer labels than bootstraps, the remainder fall back to
+    # `bootstrap_{index}`. Consumers use this for stable, readable log names.
+    bootstrap_labels: tuple[str, ...] = ()
     library_dirs: tuple[Path, ...] = ()
     preload_libraries: tuple[str, ...] = ()
     data_dir_parent: Path | None = None
@@ -294,7 +298,12 @@ class UniquePrivateCluster:
         )
         self._database_created = True
         for index, bootstrap in enumerate(self.inputs.bootstraps):
-            self._bootstrap(bootstrap, f"bootstrap_{index}")
+            label = (
+                self.inputs.bootstrap_labels[index]
+                if index < len(self.inputs.bootstrap_labels)
+                else f"bootstrap_{index}"
+            )
+            self._bootstrap(bootstrap, label)
 
     def _bootstrap(self, bootstrap: Path, label: str) -> None:
         self._append_lifecycle(f"executing {label} {bootstrap}")

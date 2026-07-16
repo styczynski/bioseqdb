@@ -13,6 +13,7 @@ module;
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -50,14 +51,106 @@ using LinearOperator = std::array<std::uint64_t, 64>;
 
 inline constexpr auto table = make_table();
 
+using SlicingTables =
+    std::array<std::array<std::uint64_t, 256>, 16>;
+
+/// slicing_tables[N][x] is byte x followed by N zero bytes. The
+/// 32 KiB slicing-by-16 image fits comfortably in Apple arm64 L1 and removes
+/// the byte-at-a-time dependency chain without changing the normal, MSB-first
+/// ECMA-182 polynomial convention. The same code is the portable fallback.
+[[nodiscard]] consteval SlicingTables make_slicing_tables() noexcept {
+    SlicingTables tables{};
+    tables[0] = table;
+    for (std::size_t slice = 1; slice < tables.size(); ++slice) {
+        for (std::size_t index = 0; index < tables[slice].size(); ++index) {
+            const std::uint64_t previous = tables[slice - 1u][index];
+            tables[slice][index] = table[previous >> 56u]
+                ^ (previous << 8u);
+        }
+    }
+    return tables;
+}
+
+inline constexpr auto slicing_tables = make_slicing_tables();
+
+[[nodiscard]] inline std::uint64_t load_big_endian_u64(
+        const std::byte* bytes) noexcept {
+    std::uint64_t value;
+    std::memcpy(&value, bytes, sizeof(value));
+    if constexpr (std::endian::native == std::endian::little) {
+        value = std::byteswap(value);
+    }
+    return value;
+}
+
+[[nodiscard]] inline std::uint64_t slicing_eight(
+        std::uint64_t value) noexcept {
+    return slicing_tables[7][(value >> 56u) & 0xffu]
+        ^ slicing_tables[6][(value >> 48u) & 0xffu]
+        ^ slicing_tables[5][(value >> 40u) & 0xffu]
+        ^ slicing_tables[4][(value >> 32u) & 0xffu]
+        ^ slicing_tables[3][(value >> 24u) & 0xffu]
+        ^ slicing_tables[2][(value >> 16u) & 0xffu]
+        ^ slicing_tables[1][(value >> 8u) & 0xffu]
+        ^ slicing_tables[0][value & 0xffu];
+}
+
+/// Runtime bulk update. Sixteen independent table contributions replace
+/// sixteen serial byte recurrences. memcpy communicates unaligned safety and
+/// is lowered to ordinary unaligned 64-bit loads by optimizing compilers.
+[[nodiscard]] inline std::uint64_t update_bulk(
+        std::uint64_t checksum,
+        const std::byte* bytes,
+        std::size_t byte_count) noexcept {
+    while (byte_count >= 16u) {
+        const std::uint64_t first = checksum
+            ^ load_big_endian_u64(bytes);
+        const std::uint64_t second = load_big_endian_u64(bytes + 8u);
+        checksum =
+            slicing_tables[15][(first >> 56u) & 0xffu]
+            ^ slicing_tables[14][(first >> 48u) & 0xffu]
+            ^ slicing_tables[13][(first >> 40u) & 0xffu]
+            ^ slicing_tables[12][(first >> 32u) & 0xffu]
+            ^ slicing_tables[11][(first >> 24u) & 0xffu]
+            ^ slicing_tables[10][(first >> 16u) & 0xffu]
+            ^ slicing_tables[9][(first >> 8u) & 0xffu]
+            ^ slicing_tables[8][first & 0xffu]
+            ^ slicing_tables[7][(second >> 56u) & 0xffu]
+            ^ slicing_tables[6][(second >> 48u) & 0xffu]
+            ^ slicing_tables[5][(second >> 40u) & 0xffu]
+            ^ slicing_tables[4][(second >> 32u) & 0xffu]
+            ^ slicing_tables[3][(second >> 24u) & 0xffu]
+            ^ slicing_tables[2][(second >> 16u) & 0xffu]
+            ^ slicing_tables[1][(second >> 8u) & 0xffu]
+            ^ slicing_tables[0][second & 0xffu];
+        bytes += 16u;
+        byte_count -= 16u;
+    }
+    if (byte_count >= 8u) {
+        checksum = slicing_eight(
+            checksum ^ load_big_endian_u64(bytes));
+        bytes += 8u;
+        byte_count -= 8u;
+    }
+    while (byte_count != 0u) {
+        const std::uint8_t table_index = static_cast<std::uint8_t>(
+            (checksum >> 56u) ^ std::to_integer<std::uint8_t>(*bytes));
+        checksum = table[table_index] ^ (checksum << 8u);
+        ++bytes;
+        --byte_count;
+    }
+    return checksum;
+}
+
 [[nodiscard]] constexpr std::uint64_t apply_operator(
         const LinearOperator& operation,
         std::uint64_t value) noexcept {
     std::uint64_t result = 0;
-    for (std::size_t bit = 0; bit < operation.size(); ++bit) {
-        if ((value & (std::uint64_t{1} << bit)) != 0) {
-            result ^= operation[bit];
-        }
+    while (value != 0u) {
+        const std::size_t bit = static_cast<std::size_t>(
+            std::countr_zero(value));
+        result ^= operation[bit];
+        value &= value - 1u;
     }
     return result;
 }
@@ -83,6 +176,68 @@ inline constexpr auto table = make_table();
     operation = square_operator(operation); // four zero bits
     operation = square_operator(operation); // one zero byte
     return operation;
+}
+
+[[nodiscard]] constexpr LinearOperator identity_operator() noexcept {
+    LinearOperator identity{};
+    for (std::size_t bit = 0; bit < identity.size(); ++bit) {
+        identity[bit] = std::uint64_t{1} << bit;
+    }
+    return identity;
+}
+
+[[nodiscard]] constexpr LinearOperator compose_operators(
+        const LinearOperator& outer,
+        const LinearOperator& inner) noexcept {
+    LinearOperator composition{};
+    for (std::size_t bit = 0; bit < composition.size(); ++bit) {
+        composition[bit] = apply_operator(outer, inner[bit]);
+    }
+    return composition;
+}
+
+/// Precompose a fixed zero-byte advance at compile time. Keeping only the
+/// resulting 64 basis images costs 512 bytes and turns a matching runtime
+/// advance into one linear-operator application.
+[[nodiscard]] consteval LinearOperator make_zero_byte_advance_operator(
+        std::uint64_t zero_byte_count) noexcept {
+    LinearOperator result = identity_operator();
+    LinearOperator power = zero_byte_operator();
+    while (zero_byte_count != 0u) {
+        if ((zero_byte_count & 1u) != 0u) {
+            result = compose_operators(power, result);
+        }
+        zero_byte_count >>= 1u;
+        if (zero_byte_count != 0u) {
+            power = square_operator(power);
+        }
+    }
+    return result;
+}
+
+// Format-5's dominant full payload row. 8,064 has six set bits, so the
+// generic path otherwise performs six separate 64-bit operator scans.
+inline constexpr std::uint64_t full_row_byte_count = 8'064u;
+inline constexpr LinearOperator full_row_zero_byte_operator =
+    make_zero_byte_advance_operator(full_row_byte_count);
+
+/// Constant-evaluation fallback for arbitrary lengths. Runtime callers use
+/// the cached powers below; this avoids making their initialization part of
+/// the public constexpr contract.
+[[nodiscard]] constexpr std::uint64_t advance_zero_bytes_constexpr(
+        std::uint64_t checksum,
+        std::uint64_t zero_byte_count) noexcept {
+    LinearOperator power = zero_byte_operator();
+    while (zero_byte_count != 0u) {
+        if ((zero_byte_count & 1u) != 0u) {
+            checksum = apply_operator(power, checksum);
+        }
+        zero_byte_count >>= 1u;
+        if (zero_byte_count != 0u) {
+            power = square_operator(power);
+        }
+    }
+    return checksum;
 }
 
 inline const auto zero_byte_operator_powers = [] {
@@ -121,15 +276,27 @@ struct Crc64Ecma182 {
 
     /// Add an arbitrary byte span to the checksum state.
     constexpr void update(std::span<const std::byte> bytes) noexcept {
-        for (std::byte byte : bytes) {
-            update_byte(std::to_integer<std::uint8_t>(byte));
+        if consteval {
+            for (std::byte byte : bytes) {
+                update_byte(std::to_integer<std::uint8_t>(byte));
+            }
+        } else {
+            value = crc64_ecma182_detail::update_bulk(
+                value, bytes.data(), bytes.size());
         }
     }
 
     /// Add the raw bytes of a string view to the checksum state.
     constexpr void update(std::string_view bytes) noexcept {
-        for (char byte : bytes) {
-            update_byte(static_cast<std::uint8_t>(byte));
+        if consteval {
+            for (char byte : bytes) {
+                update_byte(static_cast<std::uint8_t>(byte));
+            }
+        } else {
+            value = crc64_ecma182_detail::update_bulk(
+                value,
+                reinterpret_cast<const std::byte*>(bytes.data()),
+                bytes.size());
         }
     }
 
@@ -158,9 +325,19 @@ struct Crc64Ecma182 {
 /// Advance one zero-initialized, no-final-XOR CRC state by zero bytes. The
 /// persisted ECMA-182 convention is linear, so callers may combine already
 /// authenticated checksums without rereading their raw byte images.
-[[nodiscard]] inline std::uint64_t crc64_ecma182_advance_zero_bytes(
+[[nodiscard]] constexpr std::uint64_t crc64_ecma182_advance_zero_bytes(
         std::uint64_t checksum,
         std::uint64_t zero_byte_count) noexcept {
+    if (zero_byte_count == crc64_ecma182_detail::full_row_byte_count) {
+        return crc64_ecma182_detail::apply_operator(
+            crc64_ecma182_detail::full_row_zero_byte_operator, checksum);
+    }
+
+    if consteval {
+        return crc64_ecma182_detail::advance_zero_bytes_constexpr(
+            checksum, zero_byte_count);
+    }
+
     std::size_t power = 0;
     while (zero_byte_count != 0) {
         if ((zero_byte_count & 1u) != 0) {
@@ -190,13 +367,34 @@ struct Crc64Ecma182 {
         index_sub_key_t sub_key,
         std::uint32_t chunk_no,
         std::uint32_t chunk_bytes) noexcept {
-    Crc64Ecma182 crc;
-    crc.update_little_endian(generation_id);
-    crc.update_little_endian(std::bit_cast<std::uint32_t>(position_segment));
-    crc.update_little_endian(std::bit_cast<std::uint64_t>(sub_key));
-    crc.update_little_endian(chunk_no);
-    crc.update_little_endian(chunk_bytes);
-    return crc.checksum();
+    if consteval {
+        Crc64Ecma182 crc;
+        crc.update_little_endian(generation_id);
+        crc.update_little_endian(
+            std::bit_cast<std::uint32_t>(position_segment));
+        crc.update_little_endian(std::bit_cast<std::uint64_t>(sub_key));
+        crc.update_little_endian(chunk_no);
+        crc.update_little_endian(chunk_bytes);
+        return crc.checksum();
+    } else {
+        std::array<std::byte, 28> encoded{};
+        std::size_t offset = 0u;
+        const auto append_little_endian = [&]<class UInt>(UInt input) {
+            for (std::size_t byte = 0u; byte < sizeof(UInt); ++byte) {
+                encoded[offset++] = static_cast<std::byte>(input & 0xffu);
+                input >>= 8u;
+            }
+        };
+        append_little_endian(generation_id);
+        append_little_endian(
+            std::bit_cast<std::uint32_t>(position_segment));
+        append_little_endian(std::bit_cast<std::uint64_t>(sub_key));
+        append_little_endian(chunk_no);
+        append_little_endian(chunk_bytes);
+        Crc64Ecma182 crc;
+        crc.update(encoded);
+        return crc.checksum();
+    }
 }
 
 /// Checksum one payload row over its fixed LE address/size prefix and raw blob.

@@ -13,6 +13,8 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <catch2/matchers/catch_matchers.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -1050,6 +1052,31 @@ TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
     std::uint64_t oversized = (std::numeric_limits<std::uint64_t>::max)();
     REQUIRE(merge_counter(oversized, 0));
     REQUIRE(oversized == sql_bigint_value_max);
+
+    PipelineOperationalStats stage_timing_delta{};
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::query_sketch)].host_wall_ns = 7u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::seed_lookup)].host_wall_ns = 11u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::chain_score)].host_wall_ns = 13u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::region_generation)].host_wall_ns = 17u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::left_extension)].host_wall_ns = 19u;
+    PipelineOperationalStats stage_timing_aggregate{};
+    stage_timing_aggregate.merge(stage_timing_delta);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::query_sketch)].host_wall_ns == 7u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::seed_lookup)].host_wall_ns == 11u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::chain_score)].host_wall_ns == 13u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::region_generation)].host_wall_ns == 17u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::left_extension)].host_wall_ns == 19u);
+    REQUIRE_FALSE(stage_timing_aggregate.stats_saturated);
 
     PipelineOperationalStats operational{};
     operational.target_rows = sql_bigint_value_max;
@@ -2315,6 +2342,78 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
         &PipelineOperationalStats::format5_reader_control_payload_capacity_bytes);
 }
 
+TEST_CASE("Format-6 reader receipts preserve max peaks and report-once owners",
+          "[pipe][pipeline-stats][format6][identity][saturation]") {
+    using namespace bioseq::pipeline_stats;
+
+    PipelineOperationalStats first{};
+    auto& first_f6 = first.format6_reader_evidence;
+    first_f6.format_version = 6;
+    first_f6.sessions = 1;
+    first_f6.identity_present = true;
+    first_f6.generation_id = 71;
+    first_f6.source_identity[0] = std::byte{0x11};
+    first_f6.source_content_crc64 = 91;
+    first_f6.compatibility_digest[0] = std::byte{0x22};
+    first_f6.directory_rows = 2;
+    first_f6.posting_ranges_delivered = 3;
+    first_f6.posting_range_crc_receipts = 1;
+    first_f6.posting_semantic_receipts = 3;
+    first_f6.directory_phase_peak_bytes = 100;
+    first_f6.control_phase_peak_bytes = 300;
+    first_f6.posting_phase_peak_bytes = 200;
+    first_f6.peak_admitted_bytes = 300;
+    first_f6.owner_bytes_present = true;
+    first_f6.retained_owner_bytes = 80;
+    first_f6.admitted_bytes = 80;
+
+    PipelineOperationalStats second = first;
+    auto& second_f6 = second.format6_reader_evidence;
+    second_f6.directory_rows = 4;
+    second_f6.posting_ranges_delivered = 5;
+    second_f6.posting_range_crc_receipts = 2;
+    second_f6.posting_semantic_receipts = 5;
+    second_f6.directory_phase_peak_bytes = 500;
+    second_f6.control_phase_peak_bytes = 250;
+    second_f6.posting_phase_peak_bytes = 450;
+    second_f6.peak_admitted_bytes = 500;
+
+    PipelineOperationalStats aggregate{};
+    aggregate.merge(first);
+    aggregate.merge(second);
+    const auto& merged = aggregate.format6_reader_evidence;
+    REQUIRE(merged.sessions == 2);
+    REQUIRE(merged.directory_rows == 6);
+    REQUIRE(merged.posting_ranges_delivered == 8);
+    REQUIRE(merged.posting_range_crc_receipts == 3);
+    REQUIRE(merged.posting_semantic_receipts == 8);
+    REQUIRE(merged.directory_phase_peak_bytes == 500);
+    REQUIRE(merged.control_phase_peak_bytes == 300);
+    REQUIRE(merged.posting_phase_peak_bytes == 450);
+    REQUIRE(merged.peak_admitted_bytes == 500);
+    REQUIRE(merged.retained_owner_bytes == 80);
+    REQUIRE(merged.admitted_bytes == 80);
+    REQUIRE_FALSE(aggregate.operational_identity_conflict);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats mismatched_owner = first;
+    mismatched_owner.format6_reader_evidence.retained_owner_bytes = 81;
+    aggregate.merge(mismatched_owner);
+    REQUIRE(aggregate.operational_identity_conflict);
+
+    PipelineOperationalStats at_limit{};
+    at_limit.format6_reader_evidence.directory_rows =
+        sql_bigint_value_max;
+    PipelineOperationalStats overflow{};
+    overflow.format6_reader_evidence.directory_rows = 1;
+    at_limit.merge(overflow);
+    REQUIRE(
+        at_limit.format6_reader_evidence.directory_rows
+        == sql_bigint_value_max);
+    REQUIRE(at_limit.format6_reader_evidence.saturated);
+    REQUIRE(at_limit.stats_saturated);
+}
+
 TEST_CASE("DOC0371 aggregate environment drift reclassifies both job sets",
           "[pipe][pipeline-stats][identity][environment][drift]") {
     using namespace bioseq::pipeline_stats;
@@ -2507,6 +2606,34 @@ struct ProbeBatchSink {
     [[gnu::always_inline]] void on_completed() noexcept { ++*on_completed_count; }
 };
 
+struct ExactFilterProbeSink {
+    std::vector<AlignRegion>* observed;
+    int* on_batch_count;
+
+    void on_batch_pair(
+        std::span<AlignRegion> regions,
+        std::span<const ::bioseq::chaining::Anchor> /*anchors*/) {
+        observed->assign(regions.begin(), regions.end());
+        ++*on_batch_count;
+    }
+
+    void on_completed() noexcept {}
+};
+
+struct PrefilterProbeSink {
+    std::vector<AlignRegion>* observed;
+    int* on_batch_count;
+
+    void on_batch_pair(
+        std::span<AlignRegion> regions,
+        std::span<const ::bioseq::chaining::Anchor> /*anchors*/) {
+        observed->assign(regions.begin(), regions.end());
+        ++*on_batch_count;
+    }
+
+    void on_completed() noexcept {}
+};
+
 TEST_CASE("EmitToken trait surface", "[pipe][emit-token-traits]") {
     SECTION("EmitTokenTraits") {
         static_assert(!std::is_copy_constructible_v<EmitToken<SinkStage>>);
@@ -2579,6 +2706,106 @@ TEST_CASE("MapqStage::process_pair delegates exactly once",
         std::span<AlignRegion>{regions.data(), regions.size()},
         std::span<::bioseq::chaining::Anchor>{anchors.data(), anchors.size()});
     REQUIRE(on_batch_count == 1);
+}
+
+TEST_CASE("ExactEditFilterStage applies strict bounds and resets classification state",
+          "[pipe][edit-distance][exact-filter]")
+{
+    using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    params.compute_edit_distance = true;
+    params.exact_edit_filter_enabled = true;
+    params.exact_edit_filter_exclusive_upper_bound = 5;
+
+    std::vector<AlignRegion> observed;
+    int on_batch_count = 0;
+    ExactFilterProbeSink probe{&observed, &on_batch_count};
+    ExactEditFilterStage stage{{}, params};
+    auto bound = stage.template attach<Cep>(probe);
+
+    std::vector<AlignRegion> regions(4);
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+        AlignRegion& region = regions[index];
+        region.has_alignment = true;
+        region.anchor_start = static_cast<std::int32_t>(100u + index);
+        region.parent = 91;
+        region.secondary_score = 92;
+        region.secondary_count = 93;
+        region.secondary_dp_max = 94;
+        region.mapq = 95;
+    }
+    regions[0].edit_distance = 5;
+    regions[1].edit_distance = 4;
+    regions[2].edit_distance = 0;
+    regions[3].edit_distance = 8;
+    std::vector<::bioseq::chaining::Anchor> anchors;
+
+    bound.on_batch_pair(
+        std::span<AlignRegion>{regions},
+        std::span<::bioseq::chaining::Anchor>{anchors});
+
+    REQUIRE(on_batch_count == 1);
+    REQUIRE(observed.size() == 2);
+    REQUIRE(observed[0].anchor_start == 101);
+    REQUIRE(observed[1].anchor_start == 102);
+    for (std::size_t index = 0; index < observed.size(); ++index) {
+        CAPTURE(index);
+        CHECK(observed[index].region_id == static_cast<std::int32_t>(index));
+        CHECK(observed[index].parent == -1);
+        CHECK(observed[index].secondary_score == 0);
+        CHECK(observed[index].secondary_count == 0);
+        CHECK(observed[index].secondary_dp_max == 0);
+        CHECK(observed[index].mapq == 0);
+    }
+}
+
+TEST_CASE("ExactEditFilterStage rejects nonpositive bounds and missing traceback",
+          "[pipe][edit-distance][exact-filter][fail-loud]")
+{
+    using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
+    std::vector<::bioseq::chaining::Anchor> anchors;
+
+    SECTION("nonpositive bound rejects every exact alignment") {
+        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        params.compute_edit_distance = true;
+        params.exact_edit_filter_enabled = true;
+        params.exact_edit_filter_exclusive_upper_bound = 0;
+        std::vector<AlignRegion> observed;
+        int on_batch_count = 0;
+        ExactFilterProbeSink probe{&observed, &on_batch_count};
+        ExactEditFilterStage stage{{}, params};
+        auto bound = stage.template attach<Cep>(probe);
+        std::vector<AlignRegion> regions(1);
+        regions[0].has_alignment = true;
+        regions[0].edit_distance = 0;
+
+        bound.on_batch_pair(
+            std::span<AlignRegion>{regions},
+            std::span<::bioseq::chaining::Anchor>{anchors});
+        REQUIRE(on_batch_count == 1);
+        REQUIRE(observed.empty());
+    }
+
+    SECTION("missing traceback fails loudly") {
+        ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+        params.compute_edit_distance = true;
+        params.exact_edit_filter_enabled = true;
+        params.exact_edit_filter_exclusive_upper_bound = 1;
+        std::vector<AlignRegion> observed;
+        int on_batch_count = 0;
+        ExactFilterProbeSink probe{&observed, &on_batch_count};
+        ExactEditFilterStage stage{{}, params};
+        auto bound = stage.template attach<Cep>(probe);
+        std::vector<AlignRegion> regions(1);
+        regions[0].has_alignment = false;
+
+        REQUIRE_THROWS_WITH(
+            bound.on_batch_pair(
+                std::span<AlignRegion>{regions},
+                std::span<::bioseq::chaining::Anchor>{anchors}),
+            "exact edit filter received a region without alignment traceback");
+        REQUIRE(on_batch_count == 0);
+    }
 }
 
 // DOC0254 §14.4 — `SingleEmissionInvariant`.
@@ -2697,12 +2924,55 @@ TEST_CASE("KSW2 batched proof rejects zero and tampered evidence",
 
     MatchResultCollection first;
     first.record_ksw2_batched_execution_proof(valid);
+    first.record_query_sketch_host_time(7u);
+    first.record_seed_lookup_host_time(11u);
+    first.record_chain_score_host_time(13u);
+    first.record_region_generation_host_time(17u);
+    first.record_alignment_result_host_time(19u);
     MatchResultCollection second;
     second.record_ksw2_batched_execution_proof(valid);
+    second.record_query_sketch_host_time(11u);
+    second.record_seed_lookup_host_time(19u);
+    second.record_chain_score_host_time(23u);
+    second.record_region_generation_host_time(29u);
+    second.record_alignment_result_host_time(31u);
     first.combine_execution_proof(second);
     REQUIRE(first.ksw2_batched_execution_accepted(true));
     REQUIRE(first.ksw2_batched_execution_proof.align_region_invocations
             == 2u);
+    REQUIRE(first.query_sketch_host_wall_ns == 18u);
+    REQUIRE(first.seed_lookup_host_wall_ns == 30u);
+    REQUIRE(first.chain_score_host_wall_ns == 36u);
+    REQUIRE(first.region_generation_host_wall_ns == 46u);
+    REQUIRE(first.alignment_result_host_wall_ns == 50u);
+    REQUIRE_FALSE(first.host_stage_timing_saturated);
+}
+
+TEST_CASE("Host timing phase handoff is non-overlapping and mergeable",
+          "[pipe][pipeline-stats][host-timing]") {
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+
+    MatchResultCollection collection;
+    collection.begin_region_host_phase(100u);
+    collection.transition_region_to_alignment_result_host_phase(
+        130u, /*alignment_enabled=*/true);
+    collection.finish_alignment_result_host_phase(180u);
+
+    REQUIRE(collection.region_generation_host_wall_ns == 30u);
+    REQUIRE(collection.alignment_result_host_wall_ns == 50u);
+    REQUIRE(collection.region_generation_host_wall_ns
+            + collection.alignment_result_host_wall_ns == 80u);
+    REQUIRE_FALSE(collection.region_host_phase_active);
+    REQUIRE_FALSE(collection.alignment_result_host_phase_active);
+    REQUIRE_FALSE(collection.host_stage_timing_saturated);
+
+    MatchResultCollection saturated;
+    saturated.record_alignment_result_host_time(
+        (std::numeric_limits<std::uint64_t>::max)());
+    saturated.record_alignment_result_host_time(1u);
+    REQUIRE(saturated.alignment_result_host_wall_ns
+            == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(saturated.host_stage_timing_saturated);
 }
 
 // =============================================================================
@@ -2763,7 +3033,11 @@ TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch
     }
     SECTION("MinimizerAlgorithmType — every enum value routes correctly") {
         using Reg = algorithm_enum_values<MA>;
-        for (MA v : {MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH}) {
+        for (MA v : {MA::SCALAR,
+                     MA::SIMD_MINIMAP2_SLOW,
+                     MA::TWO_STACK_NTHASH,
+                     MA::VULKAN_MINIMAP_INT,
+                     MA::PAPER_NTHASH_SIMD}) {
             MA captured = static_cast<MA>(0xFF);
             doc0256_test_helpers::value_capture_callable<MA> cb{&captured};
             const MA result = enum_dispatch_pack<MA, MA, Reg::default_value>(
@@ -3544,10 +3818,10 @@ TEST_CASE("DOC0256 — value_dispatch_smallest_ge picks the right bucket",
           "[pipe][doc0256][value-dispatch-smallest-ge]")
 {
     // The bucket list is the union of `compute_breakpoints_for<K>()` across
-    // every K in `kmer_size_buckets`. With the default
-    // PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 2, kmer_size_buckets = {15, 7, 27}
+    // every K in `kmer_size_buckets`. With
+    // BIOSEQ_OPTTIMIZATION_LEVEL >= 4, kmer_size_buckets = {15, 7, 27}
     // and the union resolves to L = {7, 15, 17, 27, 33, 49, 63}. With
-    // PIPELINE_TEMPLATE_BRANCHING_LEVEL = 1, kmer_size_buckets = {15} and
+    // BIOSEQ_OPTTIMIZATION_LEVEL <= 3, kmer_size_buckets = {15} and
     // the union collapses to K=15's per-K breakpoints. Gate the table
     // accordingly so the test stays meaningful at both branching levels.
     if constexpr (kmer_size_buckets.size() >= 3u) {
@@ -3760,7 +4034,7 @@ TEST_CASE("DOC0256 — dispatch_chain heterogeneous NTTPs (L, K, BAA)",
         REQUIRE(baa_out == BAA::KSW2);
     }
     // Gated by `kmer_size_buckets.size()`: only run when the K=7 dispatch
-    // branch is actually compiled in. PIPELINE_TEMPLATE_BRANCHING_LEVEL=1
+    // branch is actually compiled in. BIOSEQ_OPTTIMIZATION_LEVEL <= 3
     // collapses kmer_size_buckets to {15u} for faster builds, in which case
     // the dispatch chain has no K=7 leaf — the test would assert against
     // the smallest-ge fallback (which is K=15) and spuriously fail.
@@ -3942,10 +4216,10 @@ TEST_CASE("DOC0256 — non-canonical kmer_size resolves to the right L bucket",
             REQUIRE(k_out == kmer_size_default);
             // round_up_seq_len_log2(1<<10, k) = max(10, k) = k for k in {11, 21}.
             // Then seq_len_log2_step picks the smallest L >= k from the
-            // (union over kmer_size_buckets) breakpoint list. With the
-            // default PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 2 that list is
+            // (union over kmer_size_buckets) breakpoint list. With
+            // BIOSEQ_OPTTIMIZATION_LEVEL >= 4 that list is
             // {7, 15, 17, 27, 33, 49, 63}: k=11 → L=15;  k=21 → L=27.
-            // With PIPELINE_TEMPLATE_BRANCHING_LEVEL == 1, only K=15 is in
+            // With BIOSEQ_OPTTIMIZATION_LEVEL <= 3, only K=15 is in
             // the union so the list collapses to K=15's per-K breakpoints
             // {15, 33, 63}: k=11 → L=15; k=21 → L=33.
             if constexpr (kmer_size_buckets.size() >= 3u) {
@@ -4066,6 +4340,133 @@ using range_t  = compact_sequence_range<dna4_u64>;
 }
 
 }  // namespace doc0307_e2e
+
+TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable routes",
+          "[pipe][sneaky-snake][prefilter][composition]") {
+    using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
+    using ::bioseq::chaining::Anchor;
+    using doc0307_e2e::dna4_u64;
+    using doc0307_e2e::range_t;
+
+    const auto dna4_from_ascii = [](std::string_view text) {
+        std::vector<seq::dna4> result(text.size());
+        for (std::size_t index = 0; index < text.size(); ++index) {
+            result[index].assign_char(text[index]);
+        }
+        return result;
+    };
+    const auto make_anchor = [](
+        std::uint64_t query_position,
+        std::uint64_t ref_position,
+        bool reverse) {
+        return Anchor{
+            .ref_position = ref_position,
+            .query_position = query_position,
+            .is_reverse = static_cast<std::uint32_t>(reverse),
+            .query_span = 8u,
+            .flags = 0u,
+            .segment_id = 0u,
+        };
+    };
+
+    std::string query_text(224u, 'A');
+    constexpr std::string_view reverse_source =
+        "ACGTTGCAAGTCCTAGGATCCGATTTACGGCATGCAATCG";
+    static_assert(reverse_source.size() == 40u);
+    query_text.replace(16u, reverse_source.size(), reverse_source);
+    std::string target_text = query_text;
+    // Region 1 owns two individually accepted, equal-length gaps. Their
+    // lower bounds aggregate to two and reject only at the region boundary.
+    target_text[72] = 'C';
+    target_text[104] = 'C';
+    // Region 3 is reverse-strand.  Its query-coordinate window [168, 208)
+    // mirrors to the non-palindromic forward source [16, 56), so this checks
+    // coordinate mirroring and reversal as well as base complementation.
+    const auto complement_ascii = [](char base) {
+        switch (base) {
+            case 'A': return 'T';
+            case 'C': return 'G';
+            case 'G': return 'C';
+            case 'T': return 'A';
+            default: return base;
+        }
+    };
+    for (std::size_t offset = 0; offset < reverse_source.size(); ++offset) {
+        target_text[168u + offset] = complement_ascii(
+            reverse_source[reverse_source.size() - 1u - offset]);
+    }
+
+    range_t query_range(dna4_from_ascii(query_text));
+    range_t target_range(dna4_from_ascii(target_text));
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
+    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+
+    const std::vector<Anchor> anchors{
+        make_anchor(15u, 15u, false),
+        make_anchor(31u, 31u, false),
+        make_anchor(63u, 63u, false),
+        make_anchor(95u, 95u, false),
+        make_anchor(127u, 127u, false),
+        make_anchor(143u, 143u, false),
+        make_anchor(159u, 164u, false),
+        make_anchor(175u, 175u, true),
+        make_anchor(207u, 207u, true),
+    };
+
+    for (const PrefilterBackendType backend : {
+             PrefilterBackendType::SCALAR,
+             PrefilterBackendType::SIMD}) {
+        CAPTURE(static_cast<unsigned>(backend));
+        Minimap2Params params;
+        params.prefilter_enabled = true;
+        params.compute_edit_distance = true;
+        params.prefilter_backend = backend;
+        params.prefilter_max_edits = 1u;
+        params.min_ksw_len = 1;
+
+        std::vector<AlignRegion> regions(4u);
+        regions[0].anchor_start = 0;
+        regions[0].seed_count = 2;
+        regions[1].anchor_start = 2;
+        regions[1].seed_count = 3;
+        regions[2].anchor_start = 5;
+        regions[2].seed_count = 2;
+        regions[3].anchor_start = 7;
+        regions[3].seed_count = 2;
+        regions[3].is_reverse = true;
+
+        MatchResultCollection proof;
+        std::vector<AlignRegion> observed;
+        int on_batch_count = 0;
+        PrefilterProbeSink probe{&observed, &on_batch_count};
+        PrefilterStage<dna4_u64, dna4_u64> stage{
+            {}, params, &lazy_query, &lazy_target, &proof};
+        auto bound = stage.template attach<Cep>(probe);
+        bound.on_batch_pair(
+            std::span<AlignRegion>{regions},
+            std::span<const Anchor>{anchors});
+
+        REQUIRE(on_batch_count == 1);
+        REQUIRE(observed.size() == 2u);
+        CHECK(observed[0].anchor_start == 0);
+        CHECK(observed[1].anchor_start == 7);
+        REQUIRE(proof.sneaky_snake_prefilter_execution_proof_present);
+        const auto& route = proof.sneaky_snake_prefilter_execution_proof;
+        CHECK(route.dispatches == 1u);
+        CHECK(route.scalar_dispatches
+              == (backend == PrefilterBackendType::SCALAR ? 1u : 0u));
+        CHECK(route.simd_dispatches
+              == (backend == PrefilterBackendType::SIMD ? 1u : 0u));
+        CHECK(route.jobs == 5u);
+        CHECK(route.evaluated_jobs == 4u);
+        CHECK(route.length_difference_jobs == 1u);
+        CHECK(route.unsupported_jobs == 0u);
+        CHECK(route.rejected_jobs == 1u);
+        CHECK(route.rejected_regions == 2u);
+        CHECK(route.surviving_regions == 2u);
+        CHECK_FALSE(route.saturated);
+    }
+}
 
 TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32 ranges",
           "[pipe][exact-simd][resident][vector_stream][route][proof]") {
@@ -4245,6 +4646,14 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
             == ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof{});
     REQUIRE(result.scalar_pipeline_execution_proof.target_minimizers
             == ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof{});
+    REQUIRE(result.query_sketch_host_wall_ns > 0u);
+    REQUIRE(result.seed_lookup_host_wall_ns > 0u);
+    REQUIRE(result.chain_score_host_wall_ns > 0u);
+    REQUIRE(result.region_generation_host_wall_ns > 0u);
+    REQUIRE(result.alignment_result_host_wall_ns > 0u);
+    REQUIRE_FALSE(result.region_host_phase_active);
+    REQUIRE_FALSE(result.alignment_result_host_phase_active);
+    REQUIRE_FALSE(result.host_stage_timing_saturated);
     REQUIRE(result.scalar_pipeline_execution_proof.chain_score_calls == 0u);
     REQUIRE(result.scalar_pipeline_execution_proof.chain_backtrack_calls == 0u);
     REQUIRE(result.scalar_pipeline_execution_proof.ksw2_left_calls == 0u);

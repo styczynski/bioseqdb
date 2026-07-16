@@ -632,6 +632,19 @@ inline void add_stage_host_time(
     add_operational_counter(stats, destination, elapsed_ns);
 }
 
+[[nodiscard]] inline std::uint64_t dispatch_host_now_ns() noexcept {
+    const auto now = bioseq::instr::clock::now_ns();
+    return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
+}
+
+[[nodiscard]] inline std::uint64_t elapsed_dispatch_host_ns(
+        const std::uint64_t started_ns) noexcept {
+    const std::uint64_t finished_ns = dispatch_host_now_ns();
+    const std::uint64_t elapsed_ns = finished_ns >= started_ns
+        ? finished_ns - started_ns : 0u;
+    return elapsed_ns > 0 ? elapsed_ns : 1u;
+}
+
 inline void record_block_aligner_execution_evidence(
         ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         const MatchResultCollection* execution_proof) noexcept {
@@ -669,6 +682,37 @@ inline void record_unattested_job(
         const MatchResultCollection* execution_proof,
         const bool consumed_shared_cached_query_proof,
         bool& cached_query_minimizer_proof_operation_accounted) noexcept {
+    if (execution_proof != nullptr) {
+        // CPU/SIMD stages write into the operation-local result collection;
+        // consume that delta once here, after any parallel row has joined.
+        // ChainStage is intentionally inclusive, so chain_backtrack remains
+        // zero. The left_extension timing slot likewise owns the coarse
+        // alignment-through-result interval; gap/right remain available for a
+        // later measured split. These owners never overlap.
+        // query_sketch is only the per-operation sketch recorded below or by
+        // MinimizerStage; the BatchJoin query-union preparation that precedes
+        // persisted payload delivery has a different lifetime owner and must
+        // be published separately rather than charged here twice.
+        using Stage = ::bioseq::pipeline_stats::PipelineStage;
+        add_stage_host_time(
+            stats, Stage::query_sketch,
+            execution_proof->query_sketch_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::seed_lookup,
+            execution_proof->seed_lookup_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::chain_score,
+            execution_proof->chain_score_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::region_generation,
+            execution_proof->region_generation_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::left_extension,
+            execution_proof->alignment_result_host_wall_ns);
+        stats.operational.stats_saturated =
+            stats.operational.stats_saturated
+            || execution_proof->host_stage_timing_saturated;
+    }
     ::bioseq::pipeline_stats::PipelineJobExecutionStats job{};
     job.requested_backend = backend_from_selected_params(params);
     job.requested_simd_chaining_policy =
@@ -3045,6 +3089,130 @@ try_materialize_target_for_segment_workers(
     }
 }
 
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY)
+/// Compare every locator field before one resident target is shared by a
+/// query-parallel batch. The comparison stays PostgreSQL-free so it can also
+/// serve as a preflight proof before any worker is entered.
+[[nodiscard]] constexpr bool same_dispatch_target_locator(
+        const bioseq::storage::seq_locator& left,
+        const bioseq::storage::seq_locator& right) noexcept {
+    return left.version == right.version
+        && left.bucket_idx == right.bucket_idx
+        && left._pad_2 == right._pad_2
+        && left.shard_idx == right.shard_idx
+        && left.num_fragments == right.num_fragments
+        && left._pad_4 == right._pad_4
+        && left.total_bp_size == right.total_bp_size
+        && left.first_sub_row_no == right.first_sub_row_no
+        && left.source_epoch == right.source_epoch;
+}
+
+/// Validate the complete immutable Format-6 reader identity before it is
+/// borrowed concurrently. No worker may observe a partially authenticated,
+/// mixed-format, or legacy-transcoded prepared group.
+[[nodiscard]] inline bool format6_parallel_reader_identity_valid(
+        const BatchProcessor::CpuPreparedIndexGroup& group,
+        const std::uint64_t target_bp_size) noexcept {
+    if (!group.persisted_format6_reader.has_value()
+        || group.persisted_grouped32_reader.has_value()
+        || group.persisted_shape_v5_reader.has_value()
+        || group.target_index
+        || group.target_index_source
+            != ::bioseq::pipeline_stats::TargetIndexSource::persisted
+        || group.persisted_generation_id == 0u
+        || group.persisted_source_identity == 0u
+        || !group.persisted_format6_source_identity_present
+        || group.persisted_format6_source_identity
+            == std::array<std::byte, 16>{}
+        || group.persisted_source_identity
+            != format6_source_diagnostic_token(
+                group.persisted_format6_source_identity)
+        || !group.query_hash_union.empty()
+        || group.query_hash_union.capacity() != 0u
+        || group.persisted_format6_reader->target_length() != target_bp_size) {
+        return false;
+    }
+
+    const auto& receipt = group.persisted_read_stats.format6;
+    const auto& memory =
+        group.persisted_format6_reader->memory_evidence();
+    const std::uint64_t phase_peak = std::max({
+        receipt.directory_phase_peak_bytes,
+        receipt.control_phase_peak_bytes,
+        receipt.posting_phase_peak_bytes,
+    });
+    return receipt.format_version
+            == bioseq::indexing::kMinimizerFormat6Version
+        && receipt.sessions == 1u
+        && receipt.generation_id == group.persisted_generation_id
+        && receipt.source_identity
+            == group.persisted_format6_source_identity
+        && receipt.directory_row_crc_receipts == receipt.directory_rows
+        && receipt.control_row_crc_receipts == receipt.control_rows
+        && receipt.posting_row_crc_receipts == receipt.posting_rows
+        && receipt.control_block_crc_receipts
+            == receipt.selected_block_count
+        && receipt.control_semantic_receipts
+            == receipt.selected_block_count
+        && receipt.posting_ranges_delivered
+            == receipt.posting_semantic_receipts
+        && receipt.posting_range_crc_receipts
+            <= receipt.posting_ranges_delivered
+        && receipt.query_count == memory.query_count
+        && memory.query_count
+            == group.canonical_query_hash_union_u32.size()
+        && receipt.accepted_hash_count == memory.accepted_hash_count
+        && receipt.retained_position_count
+            == memory.retained_position_count
+        && receipt.peak_admitted_bytes == phase_peak
+        && receipt.retained_owner_bytes == receipt.admitted_bytes
+        && receipt.admitted_bytes
+            == group.persisted_format6_reader->admitted_bytes()
+        && receipt.generic_source_fallback_calls == 0u
+        && receipt.failures == 0u
+        && !receipt.saturated;
+}
+
+/// Attach the retained query-sketch proof after a worker has joined. The
+/// prebuilt-minimizer entry point must not publish its own query proof; this
+/// check makes duplicate attachment fail closed on the PostgreSQL thread.
+inline void attach_retained_format6_query_proof(
+        MatchResultCollection& collection,
+        const pipe::MinimizerRangeExecutionProof& proof) {
+    const bool exact_query_proof_absent =
+        !collection.exact_simd_query_execution_proof_present
+        && collection.exact_simd_query_execution_proof
+            == decltype(collection.exact_simd_query_execution_proof){};
+    const bool scalar_query_proof_absent =
+        collection.scalar_pipeline_execution_proof.query_minimizers
+            == decltype(collection.scalar_pipeline_execution_proof
+                .query_minimizers){};
+    const bool paper_query_proof_absent =
+        !collection.paper_nthash_query_execution_proof_present
+        && collection.paper_nthash_query_execution_proof
+            == decltype(collection.paper_nthash_query_execution_proof){};
+    if (!scalar_query_proof_absent
+        || !exact_query_proof_absent
+        || !paper_query_proof_absent) {
+        raise_typed_dispatch_pg_error_as_cpp(
+            ERRCODE_INTERNAL_ERROR,
+            "persisted query sketch proof was recorded more than once");
+    }
+    if (proof.exact_simd_present) {
+        collection.record_exact_simd_query_execution_proof(
+            proof.exact_simd);
+    }
+    if (proof.paper_nthash_present) {
+        collection.record_paper_nthash_query_execution_proof(
+            proof.paper_nthash);
+    }
+    if (proof.scalar_present) {
+        collection.record_scalar_query_minimizer_execution_proof(
+            proof.scalar);
+    }
+}
+#endif
+
 #if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER) \
     && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
 // Keep the PG-backed scanner row path as a separate function so GCC does not
@@ -3075,6 +3243,7 @@ template <class S>
     // the shared operation only once on the first proof-valid consumer.
     consumed_shared_cached_query_proof = false;
     bool row_consumed_persisted_query_sketch = false;
+	std::uint64_t query_sketch_host_wall_ns = 0;
 	auto* cpu_prepared_target = scanner_pg_ctx->cpu_prepared_target;
 	if (cpu_prepared_target != nullptr) {
 		if (selected_vulkan_execution(params)) {
@@ -3097,6 +3266,8 @@ template <class S>
     std::optional<std::vector<MinimapSketchData>> row_query_minimizers;
     std::optional<pipe::MinimizerRangeExecutionProof>
         row_query_minimizer_proof;
+    const BatchProcessor::CpuPreparedQuerySketch*
+        retained_prepared_query_sketch = nullptr;
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
     using SP = bioseq::storage::sequence_scanner_pg<S>;
@@ -3226,8 +3397,11 @@ template <class S>
             auto ensure_q =
                 [&query_minimizers, &query_minimizer_proof,
                  &query_seq, &idx_params,
-                 &row_consumed_persisted_query_sketch] {
+                 &row_consumed_persisted_query_sketch,
+                 &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
+                    const std::uint64_t query_sketch_started_ns =
+                        dispatch_host_now_ns();
                     if (selected_vulkan_execution(idx_params)) {
                         bioseq::gpu::vulkan::VulkanRuntimeError err{
                             "persisted Vulkan query sketch cannot use the CPU prepared-index path"};
@@ -3260,6 +3434,8 @@ template <class S>
 					}
                     query_minimizers.emplace(std::move(qc).extract_sketches_data());
                     query_minimizer_proof.emplace(std::move(proof));
+					query_sketch_host_wall_ns = elapsed_dispatch_host_ns(
+						query_sketch_started_ns);
 				} else if (!query_minimizer_proof.has_value()) {
 					raise_typed_dispatch_pg_error_as_cpp(
 						ERRCODE_DATA_CORRUPTED,
@@ -3284,8 +3460,86 @@ template <class S>
 					&& prepared_group->persisted_grouped32_reader.has_value();
 				const bool has_shape_v5_reader = prepared_group != nullptr
 					&& prepared_group->persisted_shape_v5_reader.has_value();
+				const bool has_format6_reader = prepared_group != nullptr
+					&& prepared_group->persisted_format6_reader.has_value();
+				const bool has_full_format6_source_identity =
+					prepared_group != nullptr
+					&& prepared_group->
+						persisted_format6_source_identity_present;
+				const bool format6_identity_valid =
+					prepared_group == nullptr
+					|| (!has_format6_reader
+						? !has_full_format6_source_identity
+							&& prepared_group->
+								persisted_format6_source_identity
+									== std::array<std::byte, 16>{}
+						: has_full_format6_source_identity
+							&& prepared_group->persisted_source_identity
+								== format6_source_diagnostic_token(
+									prepared_group->
+										persisted_format6_source_identity));
+				const bool canonical_owner_exclusive =
+					prepared_group == nullptr
+					|| (has_format6_reader
+						? prepared_group->query_hash_union.capacity() == 0u
+						: prepared_group->
+							canonical_query_hash_union_u32.capacity() == 0u);
+				bool format6_read_receipt_valid = !has_format6_reader;
+				if (has_format6_reader) {
+					const auto& receipt =
+						prepared_group->persisted_read_stats.format6;
+					const auto& memory =
+						prepared_group->persisted_format6_reader->
+							memory_evidence();
+					const std::uint64_t phase_peak = std::max({
+						receipt.directory_phase_peak_bytes,
+						receipt.control_phase_peak_bytes,
+						receipt.posting_phase_peak_bytes,
+					});
+					format6_read_receipt_valid =
+						receipt.format_version
+							== bioseq::indexing::kMinimizerFormat6Version
+						&& receipt.sessions == 1u
+						&& receipt.generation_id
+							== prepared_group->persisted_generation_id
+						&& receipt.source_identity
+							== prepared_group->
+								persisted_format6_source_identity
+						&& receipt.directory_row_crc_receipts
+							== receipt.directory_rows
+						&& receipt.control_row_crc_receipts
+							== receipt.control_rows
+						&& receipt.posting_row_crc_receipts
+							== receipt.posting_rows
+						&& receipt.control_block_crc_receipts
+							== receipt.selected_block_count
+						&& receipt.control_semantic_receipts
+							== receipt.selected_block_count
+						&& receipt.posting_ranges_delivered
+							== receipt.posting_semantic_receipts
+						&& receipt.posting_range_crc_receipts
+							<= receipt.posting_ranges_delivered
+						&& receipt.query_count == memory.query_count
+						&& receipt.accepted_hash_count
+							== memory.accepted_hash_count
+						&& receipt.retained_position_count
+							== memory.retained_position_count
+						&& receipt.peak_admitted_bytes == phase_peak
+						&& receipt.retained_owner_bytes
+							== receipt.admitted_bytes
+						&& receipt.admitted_bytes
+							== prepared_group->
+								persisted_format6_reader->
+									admitted_bytes()
+						&& receipt.generic_source_fallback_calls == 0u
+						&& receipt.failures == 0u
+						&& !receipt.saturated;
+				}
 				if (prepared_group == nullptr
-					|| has_grouped32_reader == has_shape_v5_reader
+					|| !BatchProcessor::exactly_one_native_persisted_reader(
+						has_grouped32_reader,
+						has_shape_v5_reader,
+						has_format6_reader)
 					|| (has_grouped32_reader
 						&& !prepared_group->persisted_grouped32_reader->ready())
 					|| (has_shape_v5_reader
@@ -3294,33 +3548,81 @@ template <class S>
 					|| prepared_group->target_index_source
 						!= ::bioseq::pipeline_stats::TargetIndexSource::persisted
 					|| prepared_group->persisted_generation_id == 0
-					|| prepared_group->persisted_source_identity == 0) {
+					|| prepared_group->persisted_source_identity == 0
+					|| !format6_identity_valid
+					|| !canonical_owner_exclusive
+					|| !format6_read_receipt_valid) {
 					raise_required_persisted_index_error(
 						scanner_pg_ctx,
 						scanner_pg_ctx->target_rownos[i],
 						"the exact READY native persisted reader is absent, incomplete, duplicated, or "
 						"mixed with a legacy assembled index");
 				}
-				ensure_q();
-				if (has_shape_v5_reader) {
-					collection = minimap2_port_with_index_pg_checked(
-						fq_pg,
-						ft_pg,
-						*query_minimizers,
-						*prepared_group->persisted_shape_v5_reader,
-						idx_params,
-						/*gpu_index_cache=*/nullptr,
-						bioseq::indexing::GpuIndexCacheIdentity{});
-				} else {
-					collection = minimap2_port_with_index_pg_checked(
-						fq_pg,
-						ft_pg,
-						*query_minimizers,
-						*prepared_group->persisted_grouped32_reader,
-						idx_params,
-						/*gpu_index_cache=*/nullptr,
-						bioseq::indexing::GpuIndexCacheIdentity{});
-				}
+					if (has_format6_reader) {
+						if (scanner_pg_ctx->explicit_query_ordinals) {
+							retained_prepared_query_sketch =
+								prepared_group->find_retained_query_sketch(
+									scanner_pg_ctx->query_ordinals[i]);
+						}
+						if (retained_prepared_query_sketch != nullptr) {
+							const auto backend =
+								pipe::target_index_sketch_backend_from_params(
+									idx_params);
+							if (retained_prepared_query_sketch->query_bp_size
+									!= static_cast<std::uint64_t>(
+										query_seq.bp_size())
+								|| !pipe::minimizer_range_proof_matches_backend(
+									backend,
+									retained_prepared_query_sketch->proof,
+									/*require_nonempty_vector_work=*/false,
+									pipe::ExactSimdRangeRoute::
+										require_continuation)) {
+								raise_typed_dispatch_pg_error_as_cpp(
+									ERRCODE_DATA_CORRUPTED,
+									"retained Format-6 query sketch proof does not "
+									"match the selected minimizer backend");
+							}
+							row_consumed_persisted_query_sketch = true;
+						} else {
+							/* Admission is deliberately best-effort.  A missing
+							 * ordinal keeps the pre-existing typed ensure_q
+							 * route as the correctness fallback. */
+							ensure_q();
+						}
+						const std::vector<MinimapSketchData>&
+							alignment_query_minimizers =
+								retained_prepared_query_sketch != nullptr
+								? retained_prepared_query_sketch->minimizers
+								: *query_minimizers;
+						collection = minimap2_port_with_index_pg_checked(
+							fq_pg,
+							ft_pg,
+							alignment_query_minimizers,
+							*prepared_group->persisted_format6_reader,
+							idx_params,
+							/*gpu_index_cache=*/nullptr,
+							bioseq::indexing::GpuIndexCacheIdentity{});
+					} else if (has_shape_v5_reader) {
+						ensure_q();
+						collection = minimap2_port_with_index_pg_checked(
+							fq_pg,
+							ft_pg,
+							*query_minimizers,
+							*prepared_group->persisted_shape_v5_reader,
+							idx_params,
+							/*gpu_index_cache=*/nullptr,
+							bioseq::indexing::GpuIndexCacheIdentity{});
+					} else {
+						ensure_q();
+						collection = minimap2_port_with_index_pg_checked(
+							fq_pg,
+							ft_pg,
+							*query_minimizers,
+							*prepared_group->persisted_grouped32_reader,
+							idx_params,
+							/*gpu_index_cache=*/nullptr,
+							bioseq::indexing::GpuIndexCacheIdentity{});
+					}
 				++prepared_group->persisted_reader_queries;
 				assembled = true;
 				scanner_pg_ctx->target_index_sources[i] =
@@ -4188,11 +4490,22 @@ template <class S>
                 : minimap_port_pg_checked(fq_pg, ft_pg, params);
     }
 
+    if (query_sketch_host_wall_ns != 0u) {
+        collection.record_query_sketch_host_time(
+            query_sketch_host_wall_ns);
+    }
     if (row_consumed_persisted_query_sketch) {
-		const auto& completed_query_proof = per_row_query_mode
-			? row_query_minimizer_proof
-			: cached_query_minimizer_proof;
-		if (!completed_query_proof.has_value()) {
+		const pipe::MinimizerRangeExecutionProof* completed_query_proof =
+			retained_prepared_query_sketch != nullptr
+				? &retained_prepared_query_sketch->proof
+				: per_row_query_mode
+					? row_query_minimizer_proof
+						? &*row_query_minimizer_proof
+						: nullptr
+					: cached_query_minimizer_proof
+						? &*cached_query_minimizer_proof
+						: nullptr;
+		if (completed_query_proof == nullptr) {
 			raise_typed_dispatch_pg_error_as_cpp(
 				ERRCODE_DATA_CORRUPTED,
 				"consumed persisted query minimizers have no operation proof");
@@ -6179,11 +6492,307 @@ template <class S>
 					"Vulkan dedicated route admission", detail);
 			}
 
+            auto& pool = bioseq::parallelism::GlobalPool::instance();
+            /*
+             * The persisted Format-6 scanner path historically serialized one
+             * complete query at a time because its fragmented target could not
+             * enter worker code. For a shared target, authenticate every
+             * query/locator/reader identity on the PostgreSQL thread, copy the
+             * packed target once under the existing admission authority, then
+             * fan independent queries across the task pool. Workers borrow only
+             * immutable resident sequence bytes, retained query sketches, and
+             * the immutable selective reader; they never call PostgreSQL.
+             *
+             * TaskParallelRegion::query_batch owns the outer parallel region,
+             * so every inner align_regions/segment region observes an active
+             * TaskParallelScope and executes serially within its query worker.
+             * Any failed preflight or resident admission falls through to the
+             * established scanner_pg row loop below.
+             */
+            const bool may_parallel_persisted_format6 =
+                persisted_required
+                && use_scanner_pg
+                && scanner_pg_ctx != nullptr
+                && scanner_pg_ctx->explicit_query_ordinals
+                && per_row_query_mode
+                && per_row_query_hdrs != nullptr
+                && !dispatch_params.enable_profiling
+                && !selected_vulkan_execution(dispatch_params)
+                && bioseq::parallelism::task_parallel(pool.mode())
+                && pool.max_concurrency() > 1
+                && batch_size
+                    >= bioseq::parallelism::TaskParallelMinTriggers::
+                        MIN_QUERY_COUNT
+                && scanner_pg_ctx->cpu_prepared_target != nullptr;
+            if (may_parallel_persisted_format6) {
+                auto* const prepared_target =
+                    scanner_pg_ctx->cpu_prepared_target;
+                bool batch_identity_valid =
+                    prepared_target->unions_ready
+                    && prepared_target->target_rowno >= 0
+                    && prepared_target->query_count
+                        >= static_cast<std::uint64_t>(batch_size)
+                    && prepared_target->target_bp_size
+                        > static_cast<std::uint64_t>(
+                            kPgSegmentationThresholdBp);
+                const std::int64_t shared_target_rowno =
+                    prepared_target->target_rowno;
+                const std::uint64_t shared_target_bp_size =
+                    prepared_target->target_bp_size;
+                const bioseq::storage::seq_locator* shared_locator = nullptr;
+                BatchProcessor::CpuPreparedIndexGroup* format6_group = nullptr;
+                std::vector<const BatchProcessor::CpuPreparedQuerySketch*>
+                    retained_query_sketches(batch_size, nullptr);
+                std::vector<Minimap2Params> format6_query_params(batch_size);
+
+                for (std::size_t row = 0;
+                     batch_identity_valid && row < batch_size;
+                     ++row) {
+                    const pgseq_t* const row_query_hdr =
+                        (*per_row_query_hdrs)[row];
+                    const pgseq_t* const target_hdr = target_hdrs[row];
+                    const auto& locator =
+                        scanner_pg_ctx->target_locators[row];
+                    if (row_query_hdr == nullptr
+                        || row_query_hdr->alphabet_code != alphabet_code
+                        || row_query_hdr->storage_unit_byte_width
+                            != storage_unit_byte_width
+                        || !locator.has_value()
+                        || scanner_pg_ctx->target_rownos[row]
+                            != shared_target_rowno
+                        || (row != 0u
+                            && scanner_pg_ctx->query_ordinals[row - 1u]
+                                >= scanner_pg_ctx->query_ordinals[row])
+                        || locator->total_bp_size != shared_target_bp_size
+                        || (target_hdr != nullptr
+                            && (target_hdr->alphabet_code != alphabet_code
+                                || target_hdr->storage_unit_byte_width
+                                    != storage_unit_byte_width
+                                || target_hdr->bp_size
+                                    != shared_target_bp_size))) {
+                        batch_identity_valid = false;
+                        break;
+                    }
+                    if (shared_locator == nullptr) {
+                        shared_locator = &*locator;
+                    } else if (!same_dispatch_target_locator(
+                                   *shared_locator, *locator)) {
+                        batch_identity_valid = false;
+                        break;
+                    }
+
+                    const std::size_t min_bp = std::min<std::size_t>(
+                        static_cast<std::size_t>(row_query_hdr->bp_size),
+                        static_cast<std::size_t>(shared_target_bp_size));
+                    Minimap2Params params = dispatch_params;
+                    params.kmer_size = 15;
+                    params.window_size = 10;
+                    if (min_bp < 50u) {
+                        params.min_chain_score = 10;
+                        params.min_seed_count = 1;
+                    } else if (min_bp < 200u) {
+                        params.min_chain_score = 20;
+                        params.min_seed_count = 2;
+                    }
+                    const auto backend =
+                        pipe::target_index_sketch_backend_from_params(params);
+                    auto* const group = prepared_target->find_group(
+                        params.kmer_size,
+                        params.window_size,
+                        params.max_occ,
+                        backend);
+                    if (group == nullptr
+                        || (format6_group != nullptr
+                            && format6_group != group)) {
+                        batch_identity_valid = false;
+                        break;
+                    }
+                    format6_group = group;
+                    const auto* const retained =
+                        group->find_retained_query_sketch(
+                            scanner_pg_ctx->query_ordinals[row]);
+                    if (retained == nullptr
+                        || retained->query_bp_size
+                            != static_cast<std::uint64_t>(
+                                row_query_hdr->bp_size)
+                        || !pipe::minimizer_range_proof_matches_backend(
+                            backend,
+                            retained->proof,
+                            /*require_nonempty_vector_work=*/false,
+                            pipe::ExactSimdRangeRoute::
+                                require_continuation)) {
+                        batch_identity_valid = false;
+                        break;
+                    }
+                    retained_query_sketches[row] = retained;
+                    format6_query_params[row] = params;
+                }
+
+                batch_identity_valid =
+                    batch_identity_valid
+                    && shared_locator != nullptr
+                    && format6_group != nullptr
+                    && format6_parallel_reader_identity_valid(
+                        *format6_group, shared_target_bp_size);
+                if (batch_identity_valid) {
+                    using SP = bioseq::storage::sequence_scanner_pg<S>;
+                    constexpr std::size_t letters_per_unit =
+                        compact_sequence_range<S>::traits::letters_per_unit;
+                    const std::uint64_t total_units =
+                        (shared_target_bp_size + letters_per_unit - 1u)
+                        / letters_per_unit;
+                    const std::size_t padding = static_cast<std::size_t>(
+                        total_units * letters_per_unit
+                        - shared_target_bp_size);
+                    SP target_scanner(
+                        scanner_pg_ctx->db_oid,
+                        scanner_pg_ctx->tablespace_oid,
+                        scanner_pg_ctx->main_relfilenode,
+                        scanner_pg_ctx->mmsearch_seq_attno,
+                        *shared_locator,
+                        padding,
+                        scanner_pg_ctx->snapshot,
+                        scanner_pg_ctx->caches,
+                        scanner_pg_ctx->parent_mctx);
+                    bioseq::storage::lazy_compact_sequence<S, SP>
+                        fragmented_target{std::move(target_scanner)};
+                    auto resident =
+                        try_materialize_target_for_segment_workers(
+                            fragmented_target,
+                            static_cast<std::uint64_t>(
+                                shared_target_rowno));
+                    if (resident.has_value()) {
+                        const auto resident_target =
+                            bioseq::storage::make_lazy_in_memory(
+                                resident->range);
+                        const auto* const format6_reader =
+                            &*format6_group->persisted_format6_reader;
+                        std::vector<MatchResultCollection>
+                            format6_collections(batch_size);
+                        (void)run_aligner_pg_checked(
+                            "persisted Format-6 query-parallel batch",
+                            [&format6_collections,
+                             &format6_query_params,
+                             &resident_target,
+                             &retained_query_sketches,
+                             per_row_query_hdrs,
+                             format6_reader,
+                             batch_size]() -> MatchResultCollection {
+                                bioseq::parallelism::parallel_for_pipeline(
+                                    0,
+                                    batch_size,
+                                    1,
+                                    bioseq::parallelism::
+                                        TaskParallelMinTriggers::
+                                            MIN_QUERY_COUNT,
+                                    bioseq::parallelism::
+                                        TaskParallelRegion::query_batch,
+                                    [&format6_collections,
+                                     &format6_query_params,
+                                     &resident_target,
+                                     &retained_query_sketches,
+                                     per_row_query_hdrs,
+                                     format6_reader](
+                                            const std::size_t lo,
+                                            const std::size_t hi) {
+                                        for (std::size_t row = lo;
+                                             row < hi;
+                                             ++row) {
+                                            compact_sequence_range<S>
+                                                query_seq{
+                                                    *(*per_row_query_hdrs)[row]};
+                                            const auto lazy_query =
+                                                bioseq::storage::
+                                                    make_lazy_in_memory(
+                                                        query_seq);
+                                            format6_collections[row] =
+                                                minimap2_port_with_index(
+                                                    lazy_query,
+                                                    resident_target,
+                                                    retained_query_sketches[row]
+                                                        ->minimizers,
+                                                    *format6_reader,
+                                                    format6_query_params[row],
+                                                    /*gpu_index_cache=*/nullptr,
+                                                    bioseq::indexing::
+                                                        GpuIndexCacheIdentity{});
+                                        }
+                                    });
+                                return {};
+                            });
+
+                        for (std::size_t row = 0;
+                             row < batch_size;
+                             ++row) {
+                            attach_retained_format6_query_proof(
+                                format6_collections[row],
+                                retained_query_sketches[row]->proof);
+                            scanner_pg_ctx->target_index_sources[row] =
+                                ::bioseq::pipeline_stats::
+                                    TargetIndexSource::persisted;
+                            scanner_pg_ctx->persisted_generation_ids[row] =
+                                format6_group->persisted_generation_id;
+                            scanner_pg_ctx->persisted_source_identities[row] =
+                                format6_group->persisted_source_identity;
+                        }
+                        format6_group->persisted_reader_queries +=
+                            static_cast<std::uint64_t>(batch_size);
+
+                        const auto requested_source =
+                            requested_target_index_source(scanner_pg_ctx);
+                        for (std::size_t row = 0;
+                             row < batch_size;
+                             ++row) {
+                            bioseq::pg_utils::invoke_pg_as_cpp(
+                                [] { CHECK_FOR_INTERRUPTS(); });
+                            if (record_target_operational_outcomes) {
+                                record_target_row(stats);
+                                record_target_index_outcome(
+                                    stats,
+                                    requested_source,
+                                    ::bioseq::pipeline_stats::
+                                        TargetIndexSource::persisted);
+                            }
+                            record_unattested_job(
+                                stats,
+                                format6_query_params[row],
+                                requested_source,
+                                ::bioseq::pipeline_stats::
+                                    TargetIndexSource::persisted,
+                                scanner_pg_ctx,
+                                row,
+                                /*per_row_query_mode=*/true,
+                                broadcast_query_ordinal,
+                                &format6_collections[row],
+                                /*consumed_shared_cached_query_proof=*/false,
+                                cached_query_minimizer_proof_operation_accounted);
+                            bioseq_log<DBG>(
+                                "[bioseq] pg: BatchProcessor row query_id={} "
+                                "target_bp_size={} k={} w={} min_chain_score={} "
+                                "min_seed_count={} prebuilt_index=true produced "
+                                "{} match(es) [format6-query-parallel]",
+                                static_cast<int>(query_ids[row]),
+                                shared_target_bp_size,
+                                format6_query_params[row].kmer_size,
+                                format6_query_params[row].window_size,
+                                format6_query_params[row].min_chain_score,
+                                format6_query_params[row].min_seed_count,
+                                format6_collections[row].size());
+                            if (!format6_collections[row].empty()) {
+                                results[query_ids[row]] =
+                                    std::move(
+                                        format6_collections[row].results);
+                            }
+                        }
+                        return results;
+                    }
+                }
+            }
+
             std::vector<std::uint8_t> parallel_done;
             std::vector<MatchResultCollection> parallel_collections;
             std::vector<Minimap2Params> parallel_params;
 
-            auto& pool = bioseq::parallelism::GlobalPool::instance();
             const bool may_dispatch_parallel =
                 !dispatch_params.enable_profiling
                 && !selected_vulkan_execution(dispatch_params)

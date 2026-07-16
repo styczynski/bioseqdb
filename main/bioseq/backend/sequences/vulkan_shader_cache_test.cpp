@@ -1409,7 +1409,7 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 38);
+    REQUIRE(keys.size() == 39);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         return gv::cache_file_stem(a) < gv::cache_file_stem(b);
@@ -1441,6 +1441,8 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         gv::ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::align_extend_simple_cigar, 384u, 64u, 512u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::sneaky_snake_rank_batch, 384u, 64u, 512u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::generate_units, 384u, 256u, 64u)));
     CHECK(contains_key(keys, gv::make_shader_key(
@@ -3721,6 +3723,69 @@ TEST_CASE("score-only affine extension has one provider-compatible AOT variant",
     const auto msl = gv::spirv_to_msl(spirv, key, gv::MslVersion{});
     REQUIRE(msl);
     CHECK(msl->wg_x == 1u);
+    CHECK(msl->wg_y == 1u);
+    CHECK(msl->wg_z == 1u);
+}
+
+TEST_CASE("SneakySnake rank batch has an exact provider-compatible ABI",
+          "[shader_cache][sneaky-snake][reflection][no-fallback]") {
+    STATIC_REQUIRE(gv::k_gpu_sneaky_snake_submaze_length == 512u);
+    STATIC_REQUIRE(gv::k_gpu_sneaky_snake_max_edits == 31u);
+    STATIC_REQUIRE(gv::k_gpu_sneaky_snake_status_ok == 0u);
+    STATIC_REQUIRE(
+        gv::k_gpu_sneaky_snake_status_length_difference_only == 1u);
+    STATIC_REQUIRE(gv::k_gpu_sneaky_snake_status_unsupported == 2u);
+    STATIC_REQUIRE(sizeof(gv::GpuSneakySnakeJobWire) == 20u);
+    STATIC_REQUIRE(alignof(gv::GpuSneakySnakeJobWire) == 4u);
+    STATIC_REQUIRE(offsetof(gv::GpuSneakySnakeJobWire, max_edits) == 16u);
+    STATIC_REQUIRE(sizeof(gv::GpuSneakySnakeResultWire) == 16u);
+    STATIC_REQUIRE(alignof(gv::GpuSneakySnakeResultWire) == 4u);
+    STATIC_REQUIRE(offsetof(gv::GpuSneakySnakeResultWire, accepted) == 8u);
+    STATIC_REQUIRE(sizeof(gv::GpuSneakySnakePush) == 4u);
+
+    const auto key = gv::make_shader_key(
+        gv::ShaderKind::sneaky_snake_rank_batch, 384u, 64u, 512u);
+    REQUIRE(gv::valid_shader_variant_key(key));
+    CHECK_FALSE(gv::valid_shader_variant_key(gv::make_shader_key(
+        gv::ShaderKind::sneaky_snake_rank_batch, 384u, 32u, 512u)));
+    CHECK_FALSE(gv::valid_shader_variant_key(gv::make_shader_key(
+        gv::ShaderKind::sneaky_snake_rank_batch, 384u, 64u, 511u)));
+    REQUIRE(gv::checked_shader_kind(key.kind)
+            == gv::ShaderKind::sneaky_snake_rank_batch);
+    REQUIRE(gv::descriptor_layout_for(key.to_request().kind)
+            == gv::DescriptorLayoutKind::align_extension);
+    REQUIRE(gv::descriptor_binding_count(
+        gv::descriptor_layout_for(key.to_request().kind)) == 4u);
+    REQUIRE(gv::push_constant_size(key.to_request().kind) == 4u);
+    REQUIRE(gv::expected_shader_workgroup_size(key)
+            == (gv::ShaderWorkgroupSize{64u, 1u, 1u}));
+
+    const std::string body = gv::shader_body_for_digest(
+        gv::ShaderKind::sneaky_snake_rank_batch);
+    CHECK(body.find("MAX_SUPPORTED_EDITS = 31u") != std::string::npos);
+    CHECK(body.find("subgroup") == std::string::npos);
+    CHECK(body.find("atomic") == std::string::npos);
+
+    const auto spirv = gv::compile_shader_spirv(key.to_request());
+    REQUIRE_FALSE(spirv.empty());
+    const auto scan = gv::scan_spirv_layout(spirv);
+    CHECK(scan.has_binding_array_stride(0u, 0u, 4u));
+    CHECK(scan.has_binding_array_stride(0u, 1u, 4u));
+    CHECK(scan.has_binding_array_stride(0u, 2u, 20u));
+    CHECK(scan.has_binding_struct_offsets(
+        0u, 2u,
+        std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}));
+    CHECK(scan.has_binding_array_stride(0u, 3u, 16u));
+    CHECK(scan.has_binding_struct_offsets(
+        0u, 3u,
+        std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
+    CHECK(scan.has_push_constant_offsets(
+        std::array<std::uint32_t, 1>{0u}));
+    REQUIRE(gv::validate_spirv_layout(key, spirv));
+
+    const auto msl = gv::spirv_to_msl(spirv, key, gv::MslVersion{});
+    REQUIRE(msl);
+    CHECK(msl->wg_x == 64u);
     CHECK(msl->wg_y == 1u);
     CHECK(msl->wg_z == 1u);
 }

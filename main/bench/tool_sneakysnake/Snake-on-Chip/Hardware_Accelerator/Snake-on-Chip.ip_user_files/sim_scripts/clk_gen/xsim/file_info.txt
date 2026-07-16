@@ -1,0 +1,4 @@
+Language File-Name          IP       Library         File-Path                                                         
+Verilog, clk_gen_clk_wiz.v, clk_gen, xil_defaultlib, ../../../../GateKeeper.srcs/sources_1/ip/clk_gen/clk_gen_clk_wiz.v
+Verilog, clk_gen.v,         clk_gen, xil_defaultlib, ../../../../GateKeeper.srcs/sources_1/ip/clk_gen/clk_gen.v        
+Verilog, glbl.v,            *,       xil_defaultlib, glbl.v                                                            

@@ -214,6 +214,15 @@ struct documented_entity {
     std::optional<source_span> declaration;
     std::optional<std::string> implementation_entity_id;
     std::vector<std::string> overload_ids;
+    // Overload-group members as (identity signature, base-aware route); populated
+    // transiently at render time for the group page, never serialized (§12.3).
+    std::vector<std::pair<std::string, std::string>> overload_members;
+    // Container child index as (label, base-aware route): class/struct members and
+    // module/namespace children, populated transiently at render time (§12.3).
+    std::vector<std::pair<std::string, std::string>> child_members;
+    // Resolved base-aware route of implementation_entity_id, for the "Implemented by"
+    // cross-link; populated transiently at render time (§12.2).
+    std::string implemented_by_route;
     std::map<std::string, std::string, std::less<>> attributes;
     std::string route_path;  // leading-slash, base-independent site route
 };
@@ -223,6 +232,57 @@ struct sql_catalog_snapshot {
     std::string server_version;
     std::string extension_version;
     std::string staged_artifact_sha256;
+};
+
+// One executed landing-page runnable slot (§15.2). `visible_sql` is the visible
+// phase only; hidden setup/teardown never enters this projection (§5.1). `result`
+// is meaningful only when has_result is set and the visible phase returned rows.
+struct landing_example_view {
+    std::string slot;
+    std::string visible_sql;
+    bool has_result{};
+    sql_result_set result;
+};
+
+// Per-module / SQL-domain documentation totals for the coverage report (§11.4).
+struct coverage_group_view {
+    std::string group;
+    std::uint32_t public_total{};
+    std::uint32_t documented_total{};
+};
+
+// The fully resolved, database-independent site model written by `website execute`
+// (schema bioseq.website.site_model/v1, §5.1/§180) and consumed by `website render`
+// without a cluster. It carries only normalized semantic projections: resolved
+// tutorial/landing trees, executed visible-result models, the entity graph with
+// base-independent routes, coverage, and server/extension provenance. It never
+// carries setup/teardown SQL, credentials, OIDs, timings, or machine paths, so the
+// same model can be rendered at two base paths without re-executing SQL.
+struct site_model {
+    std::string schema_version;   // bioseq.website.site_model/v1
+    std::string parser_version;
+    std::string binding_schema_version;
+    site_version version;
+    std::string site_title;
+    std::string source_revision;
+    std::vector<tutorial> tutorials;               // content stripped of hidden SQL
+    std::vector<landing_example_view> landing_examples;
+    std::vector<documented_entity> cpp_entities;   // base-independent route_path
+    std::vector<documented_entity> sql_entities;   // allowlisted public SQL pages
+    std::vector<documented_entity> omitted_sql_entities;  // §11.4 inventory-only
+    std::uint32_t coverage_public_total{};
+    std::uint32_t coverage_documented_total{};
+    std::vector<std::string> coverage_missing;             // undocumented, non-fatal
+    std::vector<std::string> coverage_missing_parameters;  // undocumented parameters
+    std::vector<std::string> coverage_missing_returns;     // undocumented return values
+    std::vector<std::string> coverage_fatal_missing;       // required/referenced, undocumented
+    std::vector<coverage_group_view> coverage_groups;      // totals by module / SQL domain
+    std::string postgres_server_version;
+    std::string extension_version;
+    std::string staged_extension_sha256;
+    std::vector<plan_input> inputs;   // path + content hash, for the site manifest
+    std::string plan_signature;       // semantic hash of the plan input
+    std::string cpp_signature;        // semantic hash of the C++ entity input
 };
 
 template <typename executor_t>
@@ -255,12 +315,19 @@ struct site_view {
     std::uint32_t copyright_year{};
     std::optional<std::string> status_label;
     std::string version;
+    std::string assets_base_url;
     std::string css_url;
     std::string js_url;
     std::string favicon_url;
+    std::string prism_js_url;
+    std::string prism_css_url;
+    std::string social_image_url;
     std::string documentation_url;
     std::string tutorials_url;
     std::string reference_url;
+    std::string search_index_url;
+    std::string versions_url;
+    std::string versions_page_url;
     std::string nav_documentation;
     std::string nav_tutorials;
     std::string nav_reference;

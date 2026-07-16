@@ -140,6 +140,11 @@ inline void merge_cold_index_preparation_stats(
     delta.cold_index_heap_tid_forward_gap = source.heap_tid_forward_gap;
     delta.cold_index_heap_tid_backward_jump = source.heap_tid_backward_jump;
     delta.cold_index_extent_crc_bytes = source.extent_crc_bytes;
+    delta.cold_index_extent_crc_raw_bytes_hashed =
+        source.extent_crc_raw_bytes_hashed;
+    delta.cold_index_extent_crc_combined_bytes =
+        source.extent_crc_combined_bytes;
+    delta.cold_index_extent_crc_combine_rows = source.extent_crc_combine_rows;
     delta.cold_index_row_crc_bytes = source.row_crc_bytes;
     delta.cold_index_tuple_form_bytes = source.tuple_form_bytes;
     delta.cold_index_toast_values = source.toast_values;
@@ -157,6 +162,65 @@ inline void merge_cold_index_preparation_stats(
     delta.cold_index_shared_blks_read = source.shared_blks_read;
     delta.stats_saturated = source.stats_saturated;
     destination.merge(delta);
+}
+
+inline void map_format6_read_evidence(
+		::bioseq::pipeline_stats::PipelineOperationalStats& destination,
+		const bioseq::storage::indexing::MinimizerGenerationReadStats& source)
+		noexcept {
+	const auto& input = source.format6;
+	auto& output = destination.format6_reader_evidence;
+	output.format_version = input.format_version;
+	output.sessions = input.sessions;
+	output.identity_present = input.sessions != 0u;
+	output.generation_id = input.generation_id;
+	output.source_identity = input.source_identity;
+	output.source_content_crc64 = input.source_content_crc64;
+	output.compatibility_digest = input.compatibility_digest;
+	output.directory_rows = input.directory_rows;
+	output.directory_bytes = input.directory_bytes;
+	output.control_rows = input.control_rows;
+	output.control_bytes = input.control_bytes;
+	output.posting_rows = input.posting_rows;
+	output.posting_bytes = input.posting_bytes;
+	output.directory_row_crc_receipts =
+		input.directory_row_crc_receipts;
+	output.directory_stream_crc_receipts =
+		input.directory_stream_crc_receipts;
+	output.control_row_crc_receipts =
+		input.control_row_crc_receipts;
+	output.control_block_crc_receipts =
+		input.control_block_crc_receipts;
+	output.control_semantic_receipts =
+		input.control_semantic_receipts;
+	output.posting_row_crc_receipts =
+		input.posting_row_crc_receipts;
+	output.posting_ranges_delivered =
+		input.posting_ranges_delivered;
+	output.posting_range_crc_receipts =
+		input.posting_range_crc_receipts;
+	output.posting_semantic_receipts =
+		input.posting_semantic_receipts;
+	output.authorized_posting_bytes =
+		input.authorized_posting_bytes;
+	output.query_count = input.query_count;
+	output.selected_block_count = input.selected_block_count;
+	output.accepted_hash_count = input.accepted_hash_count;
+	output.retained_position_count = input.retained_position_count;
+	output.directory_phase_peak_bytes =
+		input.directory_phase_peak_bytes;
+	output.control_phase_peak_bytes =
+		input.control_phase_peak_bytes;
+	output.posting_phase_peak_bytes =
+		input.posting_phase_peak_bytes;
+	output.peak_admitted_bytes = input.peak_admitted_bytes;
+	output.owner_bytes_present = input.sessions != 0u;
+	output.retained_owner_bytes = input.retained_owner_bytes;
+	output.admitted_bytes = input.admitted_bytes;
+	output.generic_source_fallback_calls =
+		input.generic_source_fallback_calls;
+	output.failures = input.failures;
+	output.saturated = input.saturated;
 }
 
 /// Publish one authenticated generation-session read exactly once.  GPU and
@@ -210,6 +274,7 @@ inline void merge_generation_read_stats(
 	delta.persisted_source_fragment_rows_read =
 		source.source_fragment_rows_read;
 	delta.persisted_source_decoded_bp = source.source_decoded_bp;
+	map_format6_read_evidence(delta, source);
 	destination.merge(delta);
 	merge_cold_index_preparation_stats(destination, source.cold);
 }
@@ -1241,10 +1306,12 @@ public:
 		const bool vulkan_requested =
 			::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested(
 				base_params);
-        std::vector<const pgseq_t*> query_headers;
-        std::vector<pgseq_t*> detoast_copies;
-        query_headers.reserve(all_queries.size());
-        detoast_copies.reserve(all_queries.size());
+		std::vector<const pgseq_t*> query_headers;
+		std::vector<std::uint64_t> query_ordinals;
+		std::vector<pgseq_t*> detoast_copies;
+		query_headers.reserve(all_queries.size());
+		query_ordinals.reserve(all_queries.size());
+		detoast_copies.reserve(all_queries.size());
         std::uint64_t previous_ordinal = 0;
         bool first = true;
         for (const JoinQueryRef& query : all_queries) {
@@ -1287,6 +1354,7 @@ public:
 					 errmsg("BioseqBatchJoin query typmod changed during preparation")));
 			}
 			query_headers.push_back(query_header);
+			query_ordinals.push_back(query.ordinal);
 			if (reinterpret_cast<void*>(query_header)
 				!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
 				detoast_copies.push_back(query_header);
@@ -1325,18 +1393,10 @@ public:
 							*executor_read_context,
 							join_gpu_prepared_shape_v5_target);
 					} else {
-						processor.prepare_cpu_shared_query_unions(
-							mmsearch_context.alphabet_code,
-							mmsearch_context.storage_unit_byte_width,
-							target_bp_size,
-							query_headers,
-							base_params,
-							/*include_persisted_parameter_group=*/true,
-							join_cpu_prepared_target);
 						if (index_read_requirement
 								== bioseq::indexing::IndexReadRequirement::
 									require_compatible_persisted) {
-							processor.prepare_cpu_persisted_grouped32_target(
+							processor.prepare_cpu_persisted_native_target(
 								user_main_database_oid,
 								user_main_tablespace_oid,
 								user_main_relfilenode,
@@ -1346,7 +1406,25 @@ public:
 								join_active_read_policy->index_name,
 								static_cast<std::uint64_t>(
 									join_cpu_prepared_target.target_rowno),
+								target_bp_size,
+								mmsearch_context.alphabet_code,
+								mmsearch_context.storage_unit_byte_width,
+								query_headers,
+								query_ordinals,
+								base_params,
 								*executor_read_context,
+								join_cpu_prepared_target);
+						} else {
+							processor.prepare_cpu_shared_query_unions(
+								mmsearch_context.alphabet_code,
+								mmsearch_context.storage_unit_byte_width,
+								target_bp_size,
+								query_headers,
+								query_ordinals,
+								base_params,
+								/*include_persisted_parameter_group=*/true,
+								::bioseq::simd::HWY_NAMESPACE::BatchProcessor::
+									CpuQueryUnionStorage::minimizer_sketch,
 								join_cpu_prepared_target);
 						}
 					}
@@ -2111,6 +2189,22 @@ public:
 					 errmsg("BioseqBatchJoin prepared-target counters are inconsistent")));
 			}
 			auto& operational = last_stats.operational;
+			if (!join_cpu_prepared_target
+					.query_union_prepare_host_wall_published
+				&& join_cpu_prepared_target
+					.query_union_prepare_host_wall_ns != 0u) {
+				const std::size_t query_sketch_stage =
+					::bioseq::pipeline_stats::stage_index(
+						::bioseq::pipeline_stats::PipelineStage::query_sketch);
+				operational.stats_saturated =
+					::bioseq::pipeline_stats::merge_counter(
+						operational.timing[query_sketch_stage].host_wall_ns,
+						join_cpu_prepared_target
+							.query_union_prepare_host_wall_ns)
+					|| operational.stats_saturated;
+				join_cpu_prepared_target
+					.query_union_prepare_host_wall_published = true;
+			}
 			::bioseq::pipeline_stats::PipelineOperationalStats prepared_delta{};
 			prepared_delta.cpu_prepared_index_builds =
 				prepared_after[0] - prepared_before[0];
@@ -2125,7 +2219,8 @@ public:
 					operational, join_cold_policy_stats);
 				for (const auto& group : join_cpu_prepared_target.groups) {
 					if (!group.persisted_grouped32_reader
-						&& !group.persisted_shape_v5_reader) continue;
+						&& !group.persisted_shape_v5_reader
+						&& !group.persisted_format6_reader) continue;
 					const auto& read = group.persisted_read_stats;
 					::bioseq::pipeline_stats::PipelineOperationalStats read_delta{};
 					read_delta.persisted_generation_read_sessions = 1;
@@ -2197,6 +2292,7 @@ public:
 						read.source_fragment_rows_read;
 					read_delta.persisted_source_decoded_bp =
 						read.source_decoded_bp;
+					map_format6_read_evidence(read_delta, read);
 					if (group.persisted_shape_v5_reader) {
 						const auto memory_evidence =
 							group.persisted_shape_v5_reader->memory_evidence();
@@ -2302,7 +2398,8 @@ public:
 					[](const auto& group) noexcept {
 						return (group.target_index != nullptr
 								|| group.persisted_grouped32_reader.has_value()
-								|| group.persisted_shape_v5_reader.has_value())
+								|| group.persisted_shape_v5_reader.has_value()
+								|| group.persisted_format6_reader.has_value())
 							&& group.build_set_checksum_present
 							&& group.build_set_checksum
 								== group.key_set_checksum;

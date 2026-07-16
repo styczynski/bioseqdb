@@ -11,9 +11,12 @@
 <meta property="og:description" content="{{ page.description }}">
 <meta property="og:type" content="website">
 <meta property="og:url" content="{{ page.canonical }}">
-<meta name="twitter:card" content="summary">
+<meta property="og:image" content="{{ site.social_image_url }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{{ site.social_image_url }}">
 <link rel="icon" href="{{ site.favicon_url }}">
 <link rel="stylesheet" href="{{ site.css_url }}">
+<link rel="stylesheet" href="{{ site.prism_css_url }}">
 <script type="application/ld+json">{{ page.jsonld }}</script>
 {% block head_extra %}{% endblock %}
 </head>
@@ -22,20 +25,88 @@
 <header class="site-header">
   <nav class="site-nav" aria-label="Primary">
     <a class="brand" href="{{ site.base_path }}">{{ site.title }}</a>
-    <ul class="nav-links">
-      <li><a href="{{ nav.documentation }}">{{ site.nav.documentation }}</a></li>
-      <li><a href="{{ nav.tutorials }}">{{ site.nav.tutorials }}</a></li>
-      <li><a href="{{ nav.reference }}">{{ site.nav.reference }}</a></li>
-    </ul>
-    <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-primary" aria-label="Toggle navigation menu">
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+    </button>
+    <div class="nav-primary" id="nav-primary">
+      <ul class="nav-links">
+        <li><a href="{{ nav.documentation }}">{{ site.nav.documentation }}</a></li>
+        <li><a href="{{ nav.tutorials }}">{{ site.nav.tutorials }}</a></li>
+        <li><a href="{{ nav.reference }}">{{ site.nav.reference }}</a></li>
+      </ul>
+      <div class="nav-actions">
+        <a class="search-button" id="search-button" href="{{ nav.reference }}" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="search-dialog">
+          <span class="search-button-label">Search</span>
+          <kbd class="search-button-kbd" aria-hidden="true">Ctrl K</kbd>
+        </a>
+        <details class="version-selector" id="version-selector">
+          <summary class="version-current">{{ site.version }}</summary>
+          <div class="version-menu">
+            <ul class="version-list" id="version-list" data-versions="{{ site.versions_url }}">
+              <li><a href="{{ nav.documentation }}" aria-current="true">{{ site.version }}</a></li>
+            </ul>
+            <a class="version-all" href="{{ site.versions_page_url }}">All versions</a>
+          </div>
+        </details>
+        <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+      </div>
+    </div>
   </nav>
 </header>
-<main id="main">
+<dialog class="search-dialog" id="search-dialog" data-search-index="{{ site.search_index_url }}" aria-label="Search documentation">
+  <form class="search-form" method="dialog" role="search">
+    <label class="search-label" for="search-input">Search documentation</label>
+    <input type="search" id="search-input" class="search-input" role="combobox" aria-expanded="true" aria-controls="search-results" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search tutorials, SQL, and C++ reference">
+    <button type="submit" class="search-close" value="close">Close</button>
+  </form>
+  <div class="search-results" id="search-results" role="listbox" aria-label="Search results"></div>
+  <p class="search-status" id="search-status" role="status" aria-live="polite"></p>
+  <p class="search-fallback"><a href="{{ nav.reference }}">Browse the full reference index</a></p>
+</dialog>
+<div class="layout{% if page.doc_nav %} layout-doc{% endif %}">
+  {% if page.breadcrumb %}
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+    {% for c in page.breadcrumb %}
+      <li>{% if c.url %}<a href="{{ c.url }}">{{ c.name }}</a>{% else %}<span aria-current="page">{{ c.name }}</span>{% endif %}</li>
+    {% endfor %}
+    </ol>
+  </nav>
+  {% endif %}
+  {% if page.doc_nav %}
+  <aside class="doc-nav" aria-label="Documentation navigation">
+    <nav>
+    {% for s in page.doc_nav %}
+      <p class="doc-nav-title">{{ s.label }}</p>
+      <ul>
+      {% for i in s.items %}
+        <li><a href="{{ i.url }}">{{ i.label }}</a></li>
+      {% endfor %}
+      </ul>
+    {% endfor %}
+    </nav>
+  </aside>
+  {% endif %}
+  <main id="main">
 {% block main %}{% endblock %}
-</main>
+  </main>
+  {% if page.on_this_page %}
+  <aside class="doc-toc" aria-label="On this page">
+    <p class="doc-toc-title">On this page</p>
+    <ul>
+    {% for h in page.on_this_page %}
+      <li class="toc-l{{ h.level }}"><a href="#{{ h.anchor }}">{{ h.text }}</a></li>
+    {% endfor %}
+    </ul>
+  </aside>
+  {% endif %}
+</div>
 <footer class="site-footer">
   <p>&#169; {{ site.copyright_year }} {{ site.copyright_holder }}{% if site.status_label %} &#183; {{ site.status_label }}{% endif %} &#183; {{ site.version }}</p>
 </footer>
+<script src="{{ site.prism_js_url }}"></script>
 <script type="module" src="{{ site.js_url }}"></script>
 {% block scripts %}{% endblock %}
 </body>

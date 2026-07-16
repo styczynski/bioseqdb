@@ -1,0 +1,78 @@
+# Provenance lock for the vendored PRODUCTION static assets that ship inside the
+# generated site's content-addressed bundle (§4.4, §12.6, §133, §292). Every
+# entry records upstream URL/tag, license path, and the exact SHA-256 of the file
+# as committed under main/website/static/. Builds are OFFLINE: the generator copies
+# these bytes verbatim into the bundle and never downloads them; this file is the
+# human-auditable record of what those bytes are and where they came from.
+#
+# The separate main/website/third_party.lock.yaml locks the Python/Playwright
+# VALIDATION toolchain (schema bioseq.website.python_toolchain.lock/v1); this file
+# locks the assets served to end users.
+schema: bioseq.website.static_assets.lock/v1
+
+# Prism syntax highlighter (§12.6): the committed prism.min.js is the minimal core
+# concatenated with exactly the language grammars the site highlights, in
+# dependency order (clike -> c -> cpp; bash, sql, cmake, json, yaml). The bundle's
+# own SHA-256 is what the build verifies; the component list records the upstream
+# provenance of each concatenated part so the bundle can be reproduced byte-for-byte.
+prism:
+  version: "1.30.0"
+  license: MIT
+  license_file: vendor/prism/LICENSE
+  license_sha256: 2b947f0901a7ffcf08a89957da9783c0e9c6e72cb6ce8e959f501ab5409e4d2b
+  upstream: https://unpkg.com/prismjs@1.30.0/
+  homepage: https://prismjs.com/
+  bundle:
+    path: vendor/prism/prism.min.js
+    sha256: a45c26906ba7f7661c9d7721fd7adb67936a159bc6106be1d451d33e795c9696
+    components:  # upstream file + SHA-256, concatenated in this exact order
+      - { file: components/prism-core.min.js,  sha256: 6caad316dd991f24f8004e0b9c19c055cb5829ff65e973fbee406f96d81b8e7e }
+      - { file: components/prism-clike.min.js, sha256: c76ba4e240932bdc75546be30e550f5ba5e13815ff71511c76e9e27ac3072444 }
+      - { file: components/prism-c.min.js,     sha256: 9e05cf21207bff46afbf80cb8f43bb58bc4a4a87b68f28bc0470342f69345209 }
+      - { file: components/prism-cpp.min.js,   sha256: 12077d9ea67882c149066e94843a6ede9036994b3724bfc45b31d97619328e14 }
+      - { file: components/prism-bash.min.js,  sha256: 6260814110e5182f2956e3bd257429548d9dbf2a9b66a63719b26cf9fac966a7 }
+      - { file: components/prism-sql.min.js,   sha256: 3fc5f8ce69950ec73adc972f061df42aaea78faa4864709134ea2adc083f3a33 }
+      - { file: components/prism-cmake.min.js, sha256: 396b5dbd10b253da47571a76be989ee39aa4bfc41ecd2436ab08294d2205476d }
+      - { file: components/prism-json.min.js,  sha256: 956d86baa5ae7ec4106758f354ac2d140bdcd7fc103dece02f73ed12b8d663e4 }
+      - { file: components/prism-yaml.min.js,  sha256: 719c8e8b8c344dc9de510c729f65ba840b1502a0a8e7e25e2ad19ee715f65c02 }
+  theme:
+    path: vendor/prism/prism.min.css
+    upstream_file: themes/prism-tomorrow.min.css
+    sha256: 1b15fe2971998a048aebb60f26f6eed76122071db9ef3b995abd003224f52a98
+
+# Self-hosted WOFF2 web fonts (§292). Latin subset from Google Fonts; each family
+# is SIL Open Font License 1.1. Space Grotesk and IBM Plex Sans ship as variable
+# faces; IBM Plex Mono ships as three static weights.
+fonts:
+  license: SIL OFL 1.1
+  families:
+    - name: Space Grotesk
+      upstream: https://fonts.gstatic.com/s/spacegrotesk/v22/
+      license_file: licenses/OFL-SpaceGrotesk.txt
+      license_sha256: 564ce565c371c5e5bbf286006565a7c9aa55a9f56e7ca58d56e05d649dd61a72
+      files:
+        - { path: fonts/space-grotesk-var.woff2, weight: "500 700", sha256: 0640890476fc1198ab4de571fb658de443c4d85b66466ec09534a8737ab1ce9d }
+    - name: IBM Plex Sans
+      upstream: https://fonts.gstatic.com/s/ibmplexsans/v23/
+      license_file: licenses/OFL-IBMPlexSans.txt
+      license_sha256: 7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da
+      files:
+        - { path: fonts/ibm-plex-sans-var.woff2, weight: "400 600", sha256: e2291e842cf5af167122a22881a740c7f2dda7716f1e8cd76680264f4a859470 }
+    - name: IBM Plex Mono
+      upstream: https://fonts.gstatic.com/s/ibmplexmono/v20/
+      license_file: licenses/OFL-IBMPlexMono.txt
+      license_sha256: 7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da
+      files:
+        - { path: fonts/ibm-plex-mono-400.woff2, weight: "400", sha256: 08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7 }
+        - { path: fonts/ibm-plex-mono-500.woff2, weight: "500", sha256: 01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22 }
+        - { path: fonts/ibm-plex-mono-600.woff2, weight: "600", sha256: 0d1f0b8d0722224e32e9f28261bdc86c79115be73444ae5eceb73976a1bcdf83 }
+
+# Social share cards referenced by site.yaml default_social_image and tutorial
+# frontmatter (§15.5). First-party project assets (no upstream); listed here so the
+# lock is a complete inventory of every media file in the shipped bundle.
+media:
+  license: project-owned (Bioseq contributors)
+  files:
+    - { path: media/social_card.png, sha256: 5a09b23db5be89253ee80fdd9d2924e613d6b8b96c490774082b50989e6f0559 }
+    - { path: media/sequence_column_type.png, sha256: dfaf4cd117ac78fd5a01401812db457dffdcb2348069bac2e2f1f4c7fca91322 }
+    - { path: media/cinematic_band.mp4, sha256: 89890c8476f08f06ae289fdb3392ce938591b8b4d3a9ae8ecc3bb62d6189d5b0 }

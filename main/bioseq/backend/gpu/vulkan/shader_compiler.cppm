@@ -107,6 +107,9 @@ enum class ShaderKind : std::uint8_t {
     // host-side control decode or target-index rebuild is part of this path.
     phase_c_shape_v5_seed_count,
     phase_c_shape_v5_seed_emit,
+    // Rank-buffer SneakySnake prefilter. Appended to preserve every existing
+    // ShaderKind cache ordinal.
+    sneaky_snake_rank_batch,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -239,6 +242,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return DescriptorLayoutKind::seq_sort;
         case ShaderKind::align_extend_banded_affine:  return DescriptorLayoutKind::align_extension;
         case ShaderKind::align_extend_simple_cigar:   return DescriptorLayoutKind::align_extension_cigar;
+        case ShaderKind::sneaky_snake_rank_batch:     return DescriptorLayoutKind::align_extension;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -309,6 +313,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return 40;  // SeqSortPush (10 × u32)
         case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
         case ShaderKind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
+        case ShaderKind::sneaky_snake_rank_batch:     return 4;   // GpuSneakySnakePush
     }
     return 0;
 }
@@ -5277,6 +5282,173 @@ void main() {
 }
 )GLSL";
 
+/// Rank-buffer SneakySnake lower-bound filter. One invocation owns one job and
+/// grid-strides over the batch. Equal-length inputs are evaluated in bounded
+/// MAX_SPAN-symbol submazes; unequal and unsupported valid shapes are retained
+/// conservatively without subgroup collectives or atomics.
+constexpr std::string_view kSneakySnakeRankBatchBody = R"GLSL(
+layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
+
+const uint MAX_SUPPORTED_EDITS = 31u;
+const uint STATUS_OK = 0u;
+const uint STATUS_LENGTH_DIFFERENCE_ONLY = 1u;
+const uint STATUS_UNSUPPORTED = 2u;
+
+struct SneakySnakeJob {
+    uint query_offset;
+    uint target_offset;
+    uint query_length;
+    uint target_length;
+    uint max_edits;
+};
+
+struct SneakySnakeResult {
+    uint lower_bound;
+    uint status;
+    uint accepted;
+    uint reserved;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer QueryRanks {
+    uint query_ranks[];
+};
+layout(std430, set = 0, binding = 1) readonly buffer TargetRanks {
+    uint target_ranks[];
+};
+layout(std430, set = 0, binding = 2) readonly buffer Jobs {
+    SneakySnakeJob jobs[];
+};
+layout(std430, set = 0, binding = 3) buffer Results {
+    SneakySnakeResult results[];
+};
+
+layout(push_constant) uniform Params {
+    uint job_count;
+} pc;
+
+uint matching_run(
+    SneakySnakeJob job,
+    uint position,
+    uint submaze_end,
+    int diagonal)
+{
+    int64_t query_position = int64_t(position) + int64_t(diagonal);
+    if (query_position < 0
+        || query_position >= int64_t(job.query_length)) {
+        return 0u;
+    }
+
+    uint query_cursor = uint(query_position);
+    uint run_limit = min(
+        submaze_end - position,
+        job.query_length - query_cursor);
+    uint run = 0u;
+    while (run < run_limit) {
+        if (target_ranks[job.target_offset + position + run]
+            != query_ranks[job.query_offset + query_cursor + run]) {
+            break;
+        }
+        ++run;
+    }
+    return run;
+}
+
+void write_result(
+    uint job_index,
+    uint lower_bound,
+    uint status,
+    bool accepted)
+{
+    results[job_index].lower_bound = lower_bound;
+    results[job_index].status = status;
+    results[job_index].accepted = accepted ? 1u : 0u;
+    results[job_index].reserved = 0u;
+}
+
+void solve_job(uint job_index) {
+    SneakySnakeJob job = jobs[job_index];
+    if (job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
+        write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
+        return;
+    }
+
+    if (job.query_length != job.target_length) {
+        uint length_difference = job.query_length > job.target_length
+            ? job.query_length - job.target_length
+            : job.target_length - job.query_length;
+        write_result(
+            job_index,
+            length_difference,
+            STATUS_LENGTH_DIFFERENCE_ONLY,
+            length_difference <= job.max_edits);
+        return;
+    }
+
+    uint lower_bound = 0u;
+    uint submaze_begin = 0u;
+    while (submaze_begin < job.query_length) {
+        uint remaining = job.query_length - submaze_begin;
+        uint submaze_length = min(uint(MAX_SPAN), remaining);
+        uint submaze_end = submaze_begin + submaze_length;
+        uint position = submaze_begin;
+        uint escape_round = 0u;
+
+        while (position < submaze_end && escape_round < uint(MAX_SPAN)) {
+            uint remaining_in_submaze = submaze_end - position;
+            uint best_run = matching_run(
+                job, position, submaze_end, 0);
+            uint max_shift = min(job.max_edits, job.query_length);
+            for (uint shift = 1u;
+                 shift <= max_shift && best_run < remaining_in_submaze;
+                 ++shift) {
+                best_run = max(
+                    best_run,
+                    matching_run(
+                        job,
+                        position,
+                        submaze_end,
+                        -int(shift)));
+                if (best_run == remaining_in_submaze) break;
+                best_run = max(
+                    best_run,
+                    matching_run(
+                        job,
+                        position,
+                        submaze_end,
+                        int(shift)));
+            }
+
+            if (best_run == remaining_in_submaze) {
+                position = submaze_end;
+                break;
+            }
+
+            ++lower_bound;
+            if (lower_bound > job.max_edits) {
+                write_result(job_index, lower_bound, STATUS_OK, false);
+                return;
+            }
+            position += best_run + 1u;
+            ++escape_round;
+        }
+        submaze_begin = submaze_end;
+    }
+
+    write_result(job_index, lower_bound, STATUS_OK, true);
+}
+
+void main() {
+    uint64_t stride = uint64_t(gl_NumWorkGroups.x)
+        * uint64_t(gl_WorkGroupSize.x);
+    if (stride == uint64_t(0)) return;
+    for (uint64_t job_index = uint64_t(gl_GlobalInvocationID.x);
+         job_index < uint64_t(pc.job_count);
+         job_index += stride) {
+        solve_job(uint(job_index));
+    }
+}
+)GLSL";
+
 /// Score/end-point-only banded affine extension. This prototype runs one
 /// scalar DP per job and dispatches the batch as grid-strided workgroups. The
 /// ABI is intentionally symbol-rank based (`uint` per symbol) so parent
@@ -7215,6 +7387,8 @@ enum class SeqSortStage : std::uint8_t {
             return std::string{kAlignmentExtensionBandedAffineBody};
         case ShaderKind::align_extend_simple_cigar:
             return std::string{kAlignmentExtensionSimpleCigarBody};
+        case ShaderKind::sneaky_snake_rank_batch:
+            return std::string{kSneakySnakeRankBatchBody};
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }
@@ -7361,6 +7535,12 @@ std::vector<std::uint32_t> compile_shader_spirv(const ShaderCompileRequest& requ
         && (request.max_span == 0 || request.max_span > 512)) {
         throw ShaderCompileError(fmt::format(
             "compile_shader_spirv: alignment max_span {} out of range (1..512)",
+            request.max_span));
+    }
+    if (request.kind == ShaderKind::sneaky_snake_rank_batch
+        && request.max_span != 512u) {
+        throw ShaderCompileError(fmt::format(
+            "compile_shader_spirv: SneakySnake submaze span {} must be 512",
             request.max_span));
     }
 

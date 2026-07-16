@@ -639,9 +639,8 @@ void mark_failed(void *, TransitionLedgerErrorV1) noexcept {
   if (value == nullptr) {
     return false;
   }
-  std::uint64_t observed = pg_atomic_read_u64(value);
-  const std::uint64_t maximum =
-      (std::numeric_limits<std::uint64_t>::max)();
+  uint64 observed = pg_atomic_read_u64(value);
+  const uint64 maximum = (std::numeric_limits<uint64>::max)();
   while (observed != maximum) {
     if (pg_atomic_compare_exchange_u64(value, &observed, observed + 1U)) {
       return true;
@@ -655,11 +654,12 @@ void mark_failed(void *, TransitionLedgerErrorV1) noexcept {
   if (value == nullptr) {
     return false;
   }
-  std::uint64_t observed = pg_atomic_read_u64(value);
-  const std::uint64_t maximum =
-      (std::numeric_limits<std::uint64_t>::max)();
-  while (amount <= maximum - observed) {
-    if (pg_atomic_compare_exchange_u64(value, &observed, observed + amount)) {
+  uint64 observed = pg_atomic_read_u64(value);
+  const uint64 native_amount = static_cast<uint64>(amount);
+  const uint64 maximum = (std::numeric_limits<uint64>::max)();
+  while (native_amount <= maximum - observed) {
+    if (pg_atomic_compare_exchange_u64(
+            value, &observed, observed + native_amount)) {
       return true;
     }
   }
@@ -671,9 +671,11 @@ void mark_failed(void *, TransitionLedgerErrorV1) noexcept {
   if (value == nullptr) {
     return false;
   }
-  std::uint64_t observed = pg_atomic_read_u64(value);
-  while (observed >= amount) {
-    if (pg_atomic_compare_exchange_u64(value, &observed, observed - amount)) {
+  uint64 observed = pg_atomic_read_u64(value);
+  const uint64 native_amount = static_cast<uint64>(amount);
+  while (observed >= native_amount) {
+    if (pg_atomic_compare_exchange_u64(
+            value, &observed, observed - native_amount)) {
       return true;
     }
   }

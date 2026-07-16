@@ -108,7 +108,26 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   if(DEFINED ENV{BIOSEQ_LIBCXX_MODULES_JSON})
     set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}")
   else()
-    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json)
+    # The official LLVM tarball and apt.llvm.org packages install this file in
+    # different locations.  Detached build workers do not necessarily inherit
+    # bootstrap.sh's BIOSEQ_LIBCXX_MODULES_JSON profile export, so discover the
+    # two supported layouts directly from the selected LLVM root.
+    set(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES
+      "${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+      "${BIOSEQ_LLVM_ROOT}/lib/libc++.modules.json")
+    foreach(_BIOSEQ_LIBCXX_MODULES_JSON
+        IN LISTS _BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES)
+      if(EXISTS "${_BIOSEQ_LIBCXX_MODULES_JSON}")
+        set(CMAKE_CXX_STDLIB_MODULES_JSON "${_BIOSEQ_LIBCXX_MODULES_JSON}")
+        break()
+      endif()
+    endforeach()
+    if(NOT CMAKE_CXX_STDLIB_MODULES_JSON)
+      message(FATAL_ERROR
+        "libc++.modules.json was not found under BIOSEQ_LLVM_ROOT='${BIOSEQ_LLVM_ROOT}'")
+    endif()
+    unset(_BIOSEQ_LIBCXX_MODULES_JSON)
+    unset(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES)
   endif()
   # CMake 4.2 + Ninja on the AWS box cannot relink the PostgreSQL extension to
   # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
@@ -208,6 +227,14 @@ project(
   LANGUAGES CXX
 )
 
+# CMake's import-std support creates this static helper during project().  Its
+# objects are folded into static libraries that are subsequently linked into
+# the PostgreSQL shared modules, so they must be position-independent too.
+if(TARGET __cmake_cxx26)
+  set_property(TARGET __cmake_cxx26
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "22.1.6")
   message(FATAL_ERROR
@@ -306,6 +333,17 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   include(CTest)
 endif()
 
+# The website builds on the core extension (module BMIs, the extension DSO, and
+# the private-cluster prerequisites), so require BIOSEQ_BUILD_CORE and export a
+# compile database for the Clang structural pass (§17.1).
+if(BIOSEQ_BUILD_WEBSITE)
+  if(NOT BIOSEQ_BUILD_CORE)
+    message(FATAL_ERROR
+      "BIOSEQ_BUILD_WEBSITE=ON requires BIOSEQ_BUILD_CORE=ON")
+  endif()
+  set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+endif()
+
 # Provision the reusable isolated code generator once for the enabled component
 # union (external API clients + website). The external/website consumers depend
 # on the returned bioseq_codegen / bioseq_codegen_project targets and never
@@ -343,6 +381,12 @@ if(BIOSEQ_BUILD_CORE)
   add_subdirectory(vendor)
 endif()
 
+# The website pipeline consumes postgresql_bioseq's target properties and BMIs,
+# so it is added after add_subdirectory(bioseq) (§17.1).
+if(BIOSEQ_BUILD_WEBSITE)
+  add_subdirectory(website)
+endif()
+
 if(BIOSEQ_BUILD_PAPERS)
   add_subdirectory(papers)
 endif()
@@ -373,7 +417,7 @@ if(BIOSEQ_BUILD_CORE AND BIOSEQ_BUILD_CACHE
 
   add_custom_target(test_bioseq_cache_bioseq_private
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/run_private_provider_tests.py"
       --kind bioseq-provider
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"

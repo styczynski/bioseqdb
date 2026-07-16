@@ -1192,6 +1192,19 @@ CREATE OR REPLACE FUNCTION bioseq.block_length(el ANYELEMENT)
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
+-- Exact unit-cost edit count for the alignment emitted by the mmsearch custom
+-- scan.  A predicate such as `bioseq.edit(seq) < 10` is split by the custom
+-- planner: SneakySnake receives max_edits=9 before DP, and this exact value is
+-- checked after alignment.  The deliberately high standalone cost prevents a
+-- missed custom scan from looking like a useful scalar execution path.
+CREATE OR REPLACE FUNCTION bioseq.edit(el ANYELEMENT)
+    RETURNS BIGINT
+    AS 'MODULE_PATHNAME', 'bioseq_edit_stub'
+    LANGUAGE C IMMUTABLE STRICT
+    PARALLEL SAFE
+    COST 100000
+    SUPPORT bioseq_placeholder_support;
+
 CREATE OR REPLACE FUNCTION bioseq.mapq(el ANYELEMENT)
     RETURNS INTEGER
     AS 'MODULE_PATHNAME', 'bioseq_mapq_stub'
@@ -1314,6 +1327,11 @@ CREATE TYPE bioseq.seq (
     INTERNALLENGTH = VARIABLE
 );
 
+COMMENT ON TYPE bioseq.seq IS
+    'Compact, alphabet-aware biological sequence column type: a variable-length, '
+    'TOAST-able value storing a nucleotide or protein sequence for indexing, '
+    'similarity search, and analysis inside PostgreSQL.';
+
 -- 3a. Self-cast function to apply typmod coercion after bioseq.seq_in.
 CREATE OR REPLACE FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
     RETURNS bioseq.seq
@@ -1420,6 +1438,9 @@ CREATE OR REPLACE FUNCTION bioseq.len(bioseq.seq)
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_len'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+COMMENT ON FUNCTION bioseq.len(bioseq.seq) IS
+    'Length of a bioseq.seq value in biological symbols (residues).';
+
 CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
     RETURNS bigint
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_unit_len'
@@ -1450,6 +1471,9 @@ CREATE OR REPLACE FUNCTION bioseq.symbol_count(el bioseq.seq, sym text)
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE
     SUPPORT bioseq_symbol_count_support;
 
+COMMENT ON FUNCTION bioseq.symbol_count(bioseq.seq, text) IS
+    'Number of occurrences of a given symbol within a bioseq.seq value.';
+
 -- ============================================================================
 -- mmsearch — WHERE-qual stub over two bioseq.seq values.
 -- Declared here (after bioseq.seq is fully registered) so the parser can
@@ -1462,6 +1486,11 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq)
     LANGUAGE C IMMUTABLE STRICT
     SUPPORT mmsearch_support
     PARALLEL SAFE;
+
+COMMENT ON FUNCTION mmsearch(bioseq.seq, bioseq.seq) IS
+    'Similarity-search predicate: true when the query sequence aligns to the '
+    'target under default aligner options. The columnar custom scan rewrites '
+    'this qualification at plan time.';
 
 -- ============================================================================
 -- aligner_options — composite type for per-call overrides of
@@ -1522,6 +1551,10 @@ CREATE TYPE bioseq_aligner_options AS (
     vulkan_index_cache_enabled boolean,
     index_read_requirement      integer
 );
+
+COMMENT ON TYPE bioseq_aligner_options IS
+    'Per-call aligner tuning options (k-mer and window sizes, gap and chaining '
+    'limits) for the mmsearch similarity predicate.';
 
 CREATE OR REPLACE FUNCTION aligner_options(
     kmer_size                 integer  DEFAULT NULL,
@@ -1586,6 +1619,9 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq,
     LANGUAGE C IMMUTABLE
     SUPPORT mmsearch_support
     PARALLEL SAFE;
+
+COMMENT ON FUNCTION mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options) IS
+    'Similarity-search predicate with explicit per-call aligner options.';
 
 -- ============================================================================
 -- bioseq.list_metadata — DOC0279 §12.1/§12.2. One row per (user bioseq table,
@@ -2016,6 +2052,12 @@ LANGUAGE C VOLATILE PARALLEL UNSAFE
 AS 'MODULE_PATHNAME',
    'bioseq_last_alignment_format5_reader_memory_evidence_v2';
 
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format6_reader_evidence()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format6_reader_evidence';
+
 CREATE OR REPLACE FUNCTION bioseq.last_alignment_persisted_gpu_operation_evidence_v1()
 RETURNS jsonb
 LANGUAGE C VOLATILE PARALLEL RESTRICTED
@@ -2287,6 +2329,49 @@ COMMENT ON FUNCTION
     'DOC0371 administrative cold-benchmark proof: validate one source-bound '
     'READY revision-3 minimizer generation without reading payload extents or '
     'enabling the live ordinal-2 reader.';
+
+CREATE OR REPLACE FUNCTION bioseq.inspect_ready_minimizer_format6_generation(
+    rel regclass,
+    index_name text,
+    query_key bigint)
+RETURNS jsonb
+AS 'MODULE_PATHNAME',
+   'bioseq_inspect_ready_minimizer_format6_generation'
+LANGUAGE C STABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE EXECUTE ON FUNCTION
+    bioseq.inspect_ready_minimizer_format6_generation(
+        regclass, text, bigint)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq.inspect_ready_minimizer_format6_generation(
+        regclass, text, bigint) IS
+    'Administrative setup/restart audit of one source-bound READY Format-6 '
+    'generation, including exact metadata and directory/control/posting '
+    'catalog row, byte, and CRC receipts.';
+
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.format6_parallel_scan_probe(
+        source_table regclass,
+        index_name text,
+        sequence_rowno bigint,
+        requested_workers integer)
+RETURNS jsonb
+AS 'MODULE_PATHNAME',
+   'bioseq_internal_format6_parallel_scan_probe'
+LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE EXECUTE ON FUNCTION
+    bioseq_internal.format6_parallel_scan_probe(
+        regclass, text, bigint, integer)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.format6_parallel_scan_probe(
+        regclass, text, bigint, integer) IS
+    'Test-only Format-6 transport POC. requested_workers=0 runs the same '
+    'exact READY-generation row/PLAIN/address-CRC validation serially; a '
+    'positive value launches one core ParallelContext with a shared heap '
+    'ParallelTableScanDesc while the leader participates. This function '
+    'does not alter production dispatch.';
+
 CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_build_fixture(
     source_table regclass,
     index_name text,

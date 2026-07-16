@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bioseq</title>
+<meta name="description" content="PostgreSQL-native biological sequence analysis.">
+<link rel="canonical" href="https://styczynski.github.io/">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta property="og:title" content="Bioseq">
+<meta property="og:type" content="website">
+<link rel="icon" href="/assets/deadbeef/favicon.svg">
+<link rel="stylesheet" href="/assets/deadbeef/css/site.css">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"Bioseq"}</script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to main content</a>
+<header class="site-header">
+  <nav class="site-nav" aria-label="Primary">
+    <a class="brand" href="/">Bioseq</a>
+    <ul class="nav-links">
+      <li><a href="/v0.1/">Documentation</a></li>
+      <li><a href="/v0.1/tutorials/">Tutorials</a></li>
+      <li><a href="/v0.1/reference/">Reference</a></li>
+    </ul>
+    <a class="repo-link" href="https://github.com/styczynski/bioseqdb" rel="noreferrer">GitHub</a>
+  </nav>
+</header>
+<main id="main">
+<section class="landing-hero" id="top">
+  <h1 class="landing-hero-title">PostgreSQL-native biological sequence analysis</h1>
+  <p class="lede">A normal SELECT becomes a sequence search the moment mmsearch() appears in the WHERE clause.</p>
+  <div class="install-row">
+    <code class="install-code" id="hero-install-code">CREATE EXTENSION bioseq;</code>
+    <button type="button" class="copy-button" data-copy-target="hero-install-code" aria-label="Copy the install command">Copy</button>
+  </div>
+</section>
+<section class="landing-section" id="showcase" aria-labelledby="showcase-heading">
+  <h2 id="showcase-heading">SQL showcase</h2>
+  <div class="tabs" data-tabs>
+    <div role="tablist" aria-label="SQL examples">
+      <button id="tab-a" role="tab" aria-controls="panel-a" aria-selected="true">Storage</button>
+      <button id="tab-b" role="tab" aria-controls="panel-b" aria-selected="false">Search</button>
+    </div>
+    <div id="panel-a" role="tabpanel" aria-labelledby="tab-a">
+      <pre><code>SELECT bioseq.len(sequence) FROM reads;</code></pre>
+    </div>
+    <div id="panel-b" role="tabpanel" aria-labelledby="tab-b">
+      <pre><code>SELECT id FROM reads WHERE mmsearch(sequence, 'ACGT');</code></pre>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="site-footer">
+  <p>&#169; 2026 Bioseq contributors &#183; Alpha &#183; v0.1</p>
+</footer>
+<script type="module" src="/assets/deadbeef/js/main.js"></script>
+</body>
+</html>

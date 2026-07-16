@@ -90,6 +90,7 @@ apt-get install -y --no-install-recommends \
   rsync ninja-build \
   zlib1g-dev libssl-dev \
   minimap2 \
+  doxygen \
   xorg-dev libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev \
   libxfixes-dev libxcursor-dev libxinerama-dev \
   libxcb1-dev libxcb-util-dev libxcb-keysyms1-dev libxcb-icccm4-dev libxcb-image0-dev \
@@ -219,6 +220,32 @@ fi
 chown -R "$TARGET_USER:$TARGET_USER" "$VCPKG_ROOT" 2>/dev/null || true
 # Shared binary cache so reconfigures (and a clean re-provision sharing a snapshot) stay fast.
 mkdir -p /opt/vcpkg-cache && chmod 0777 /opt/vcpkg-cache
+
+# --- 7b. Website validation toolchain (§4.4/§11.1): Doxygen 1.9.8 is installed
+# above via apt (Ubuntu Noble). The generated-site validators (html5lib) and the
+# pinned Playwright browser acceptance run from a hash-locked virtualenv the build
+# creates from main/website/tests/requirements.lock; pre-cache its wheels and the
+# Chromium browser here so an offline `bioseq_website` build never reaches the
+# network. Non-fatal: the build re-resolves against the lock if the cache is cold.
+echo "[bootstrap] website validation toolchain (Doxygen $(doxygen --version 2>/dev/null || echo '?'), Playwright, html5lib)"
+WEBSITE_LOCK="$REPO_DEST/main/website/tests/requirements.lock"
+PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+mkdir -p /opt/pip-cache "$PLAYWRIGHT_BROWSERS_PATH" && chmod 0777 /opt/pip-cache "$PLAYWRIGHT_BROWSERS_PATH"
+if [ -f "$WEBSITE_LOCK" ]; then
+  python3 -m pip download --require-hashes --dest /opt/pip-cache \
+    -r "$WEBSITE_LOCK" 2>/dev/null \
+    || echo "[bootstrap] WARNING: website wheel pre-cache incomplete; build will re-resolve"
+  PW_VENV=/opt/website-playwright-venv
+  python3 -m venv "$PW_VENV" 2>/dev/null \
+    && "$PW_VENV/bin/pip" install --no-index --find-links /opt/pip-cache \
+         --require-hashes -r "$WEBSITE_LOCK" 2>/dev/null \
+    && PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS_PATH" \
+         "$PW_VENV/bin/playwright" install chromium 2>/dev/null \
+    || echo "[bootstrap] WARNING: Playwright chromium pre-install skipped; browser tests SKIP until provisioned"
+  chmod -R a+rwX "$PLAYWRIGHT_BROWSERS_PATH" /opt/pip-cache 2>/dev/null || true
+else
+  echo "[bootstrap] WARNING: $WEBSITE_LOCK missing; website toolchain not pre-cached"
+fi
 
 # --- 8. Discover the libc++ modules.json (multiarch sub-path varies) ---------
 MODULES_JSON="$(find "$LLVM_ROOT/" -name 'libc++.modules.json' 2>/dev/null | head -1)"

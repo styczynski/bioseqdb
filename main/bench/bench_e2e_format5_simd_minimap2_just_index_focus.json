@@ -19,11 +19,43 @@
         "description": "Canonical production task-parallel scheduler"
       }
     },
+    "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Production all-SIMD cold transient target-index build plus mapping"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_fragment",
+        "enum": ["minimizers_per_fragment"],
+        "description": "Canonical MPF recompute policy"
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": ["task_parallel"],
+        "description": "Canonical production task-parallel scheduler"
+      }
+    },
     "minimap2_just_index": {
       "_": {
         "type": "integer",
         "default": 0,
         "description": "minimap2 map-only baseline over an untimed prebuilt .mmi"
+      },
+      "threads": {
+        "type": "integer",
+        "default": 0,
+        "enum": [0],
+        "description": "Resolve to exact parity with the live bioseq scheduler max_threads"
+      }
+    },
+    "minimap2_no_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "minimap2 target-index build plus mapping"
       },
       "threads": {
         "type": "integer",
@@ -61,7 +93,7 @@
   },
   "bench_e2e": {
     "tags": ["e2e", "diagnostic", "cold-index", "format5", "simd-minimap2"],
-    "description": "Focused production Format-5 all-SIMD cold just_index versus minimap2 map-only. The exact two-row acceptance contract permits an all-row cases filter without weakening the default six-row signoff contract.",
+    "description": "Corrected four-row production comparison: Bioseq and minimap2 with persisted and recomputed target indexes.",
     "fast": false,
     "concurrency": {
       "bench_lock": true,
@@ -80,14 +112,23 @@
           "minimizer_index": ["minimizers_per_fragment"],
           "pipeline_mode": ["task_parallel"]
         },
+        "bioseq_block_simd_dp_two_stack_nthash_no_index": {
+          "minimizer_index": ["minimizers_per_fragment"],
+          "pipeline_mode": ["task_parallel"]
+        },
         "minimap2_just_index": {
+          "threads": [0]
+        },
+        "minimap2_no_index": {
           "threads": [0]
         }
       },
       "acceptance": {
         "exact_algorithm_rows": [
           "bioseq_block_simd_dp_two_stack_nthash_just_index",
-          "minimap2_just_index"
+          "bioseq_block_simd_dp_two_stack_nthash_no_index",
+          "minimap2_just_index",
+          "minimap2_no_index"
         ],
         "exact_test_case_iterations": {
           "E2E_2GBP_DNA4": 1
@@ -104,8 +145,12 @@
         "match_count": {"type": "evaluation", "rules": []},
         "expected_match_count": {"type": "evaluation", "rules": []},
         "correct_match_count": {"type": "evaluation", "rules": []},
+        "exact_primary_count_accepted": {"type": "evaluation", "rules": []},
+        "strand_result_count": {"type": "evaluation", "rules": []},
+        "correct_strand_count": {"type": "evaluation", "rules": []},
         "cigar_result_count": {"type": "evaluation", "rules": []},
         "correct_cigar_count": {"type": "evaluation", "rules": []},
+        "cigar_replay_count": {"type": "evaluation", "rules": []},
         "max_position_offset_bp": {"type": "evaluation", "rules": []},
         "pipeline_proof_present": {"type": "evaluation", "rules": []},
         "pipeline_proof_attached_to_measurement": {"type": "evaluation", "rules": []},
@@ -147,6 +192,9 @@
         "format5_reader_retained_layout_checks": {"type": "evaluation", "rules": []},
         "format5_reader_retained_layout_failures": {"type": "evaluation", "rules": []},
         "format5_reader_memory_evidence_saturated": {"type": "evaluation", "rules": []},
+        "extent_crc_raw_bytes_hashed": {"type": "evaluation", "rules": []},
+        "extent_crc_combined_bytes": {"type": "evaluation", "rules": []},
+        "extent_crc_combine_rows": {"type": "evaluation", "rules": []},
         "requested_backend_simd_cpu": {"type": "evaluation", "rules": []},
         "actual_backend_simd_cpu": {"type": "evaluation", "rules": []},
         "requested_target_index_source_persisted": {"type": "evaluation", "rules": []},

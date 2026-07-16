@@ -31,21 +31,7 @@
  */
 module;
 
-// FIXME: This should be put inside some build-time config
-/**
-Special value that controls template instantiation explosion:
-level 0: one kmer bucket length, always assume int64 L of sequence
-level 1: one kmer bucket length
-level 2: default kmer bucket lengths
-level 3: allow SpecCep specialisations
-
-General rule:
-- Lower level means faster build, smaller BMI
-- Higher level means exponentially slower build, larger executable binary size, but more efficient runtime code execution
-
-For testing/benchmarking faster iteration you can use level 1, level 3 requires massive hour-long builds
-*/
-#define PIPELINE_TEMPLATE_BRANCHING_LEVEL 1
+#include "headers/pg_build_config.h"
 
 // DOC0256 §R17 — the chain primitive (`pipe::detail::dispatch_chain`) relies
 // on tree-inlining of [[gnu::always_inline]] recursive instantiations.  Both
@@ -79,6 +65,7 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #include "common.h"
 
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -121,6 +108,8 @@ import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.rmq;
 import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.minimap_port;
+import bioseq.sequences.prefilters.sneaky_snake;
+import bioseq.sequences.prefilters.sneaky_snake_vulkan;
 import bioseq.common.context;
 import bioseq.instr;
 import bioseq.storage.scanner;
@@ -513,6 +502,160 @@ inline void merge_report_once_identity(
     identity_conflict = true;
 }
 
+/// Exact Format-6 cold-reader receipt kept out of the frozen alignment-stats
+/// column ABI. Identity fields are merged only when identical; counters use
+/// the same saturating arithmetic as the rest of the operational snapshot.
+struct Format6ReaderOperationalEvidence {
+    std::uint64_t format_version = 0;
+    std::uint64_t sessions = 0;
+    bool identity_present = false;
+    std::uint64_t generation_id = 0;
+    std::array<std::byte, 16> source_identity{};
+    std::uint64_t source_content_crc64 = 0;
+    std::array<std::byte, 32> compatibility_digest{};
+    std::uint64_t directory_rows = 0;
+    std::uint64_t directory_bytes = 0;
+    std::uint64_t control_rows = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t posting_rows = 0;
+    std::uint64_t posting_bytes = 0;
+    std::uint64_t directory_row_crc_receipts = 0;
+    std::uint64_t directory_stream_crc_receipts = 0;
+    std::uint64_t control_row_crc_receipts = 0;
+    std::uint64_t control_block_crc_receipts = 0;
+    std::uint64_t control_semantic_receipts = 0;
+    std::uint64_t posting_row_crc_receipts = 0;
+    std::uint64_t posting_ranges_delivered = 0;
+    std::uint64_t posting_range_crc_receipts = 0;
+    std::uint64_t posting_semantic_receipts = 0;
+    std::uint64_t authorized_posting_bytes = 0;
+    std::uint64_t query_count = 0;
+    std::uint64_t selected_block_count = 0;
+    std::uint64_t accepted_hash_count = 0;
+    std::uint64_t retained_position_count = 0;
+    std::uint64_t directory_phase_peak_bytes = 0;
+    std::uint64_t control_phase_peak_bytes = 0;
+    std::uint64_t posting_phase_peak_bytes = 0;
+    std::uint64_t peak_admitted_bytes = 0;
+    bool owner_bytes_present = false;
+    std::uint64_t retained_owner_bytes = 0;
+    std::uint64_t admitted_bytes = 0;
+    std::uint64_t generic_source_fallback_calls = 0;
+    std::uint64_t failures = 0;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool operator==(
+        const Format6ReaderOperationalEvidence&) const noexcept = default;
+
+    [[nodiscard]] bool merge(
+            const Format6ReaderOperationalEvidence& rhs,
+            bool& identity_conflict) noexcept {
+        bool overflow = saturated || rhs.saturated;
+        const auto add = [&overflow](
+                std::uint64_t& destination,
+                const std::uint64_t increment) noexcept {
+            overflow = merge_counter(destination, increment) || overflow;
+        };
+        if (rhs.format_version != 0u) {
+            if (format_version == 0u) {
+                format_version = rhs.format_version;
+            } else if (format_version != rhs.format_version) {
+                identity_conflict = true;
+            }
+        }
+        const bool destination_identity_payload =
+            generation_id != 0u
+            || source_identity != std::array<std::byte, 16>{}
+            || source_content_crc64 != 0u
+            || compatibility_digest != std::array<std::byte, 32>{};
+        const bool incoming_identity_payload =
+            rhs.generation_id != 0u
+            || rhs.source_identity != std::array<std::byte, 16>{}
+            || rhs.source_content_crc64 != 0u
+            || rhs.compatibility_digest != std::array<std::byte, 32>{};
+        if ((!identity_present && destination_identity_payload)
+            || (!rhs.identity_present && incoming_identity_payload)) {
+            identity_conflict = true;
+        }
+        if (rhs.identity_present) {
+            if (!identity_present) {
+                identity_present = true;
+                generation_id = rhs.generation_id;
+                source_identity = rhs.source_identity;
+                source_content_crc64 = rhs.source_content_crc64;
+                compatibility_digest = rhs.compatibility_digest;
+            } else if (generation_id != rhs.generation_id
+                || source_identity != rhs.source_identity
+                || source_content_crc64 != rhs.source_content_crc64
+                || compatibility_digest != rhs.compatibility_digest) {
+                identity_conflict = true;
+            }
+        }
+        const bool destination_owner_payload =
+            retained_owner_bytes != 0u || admitted_bytes != 0u;
+        const bool incoming_owner_payload =
+            rhs.retained_owner_bytes != 0u || rhs.admitted_bytes != 0u;
+        if ((!owner_bytes_present && destination_owner_payload)
+            || (!rhs.owner_bytes_present && incoming_owner_payload)) {
+            identity_conflict = true;
+        }
+        if (rhs.owner_bytes_present) {
+            if (!owner_bytes_present) {
+                owner_bytes_present = true;
+                retained_owner_bytes = rhs.retained_owner_bytes;
+                admitted_bytes = rhs.admitted_bytes;
+            } else if (retained_owner_bytes != rhs.retained_owner_bytes
+                || admitted_bytes != rhs.admitted_bytes) {
+                identity_conflict = true;
+            }
+        }
+        add(sessions, rhs.sessions);
+        add(directory_rows, rhs.directory_rows);
+        add(directory_bytes, rhs.directory_bytes);
+        add(control_rows, rhs.control_rows);
+        add(control_bytes, rhs.control_bytes);
+        add(posting_rows, rhs.posting_rows);
+        add(posting_bytes, rhs.posting_bytes);
+        add(directory_row_crc_receipts,
+            rhs.directory_row_crc_receipts);
+        add(directory_stream_crc_receipts,
+            rhs.directory_stream_crc_receipts);
+        add(control_row_crc_receipts, rhs.control_row_crc_receipts);
+        add(control_block_crc_receipts,
+            rhs.control_block_crc_receipts);
+        add(control_semantic_receipts,
+            rhs.control_semantic_receipts);
+        add(posting_row_crc_receipts, rhs.posting_row_crc_receipts);
+        add(posting_ranges_delivered, rhs.posting_ranges_delivered);
+        add(posting_range_crc_receipts,
+            rhs.posting_range_crc_receipts);
+        add(posting_semantic_receipts,
+            rhs.posting_semantic_receipts);
+        add(authorized_posting_bytes, rhs.authorized_posting_bytes);
+        add(query_count, rhs.query_count);
+        add(selected_block_count, rhs.selected_block_count);
+        add(accepted_hash_count, rhs.accepted_hash_count);
+        add(retained_position_count, rhs.retained_position_count);
+        directory_phase_peak_bytes = std::max(
+            directory_phase_peak_bytes,
+            rhs.directory_phase_peak_bytes);
+        control_phase_peak_bytes = std::max(
+            control_phase_peak_bytes,
+            rhs.control_phase_peak_bytes);
+        posting_phase_peak_bytes = std::max(
+            posting_phase_peak_bytes,
+            rhs.posting_phase_peak_bytes);
+        peak_admitted_bytes = std::max(
+            peak_admitted_bytes,
+            rhs.peak_admitted_bytes);
+        add(generic_source_fallback_calls,
+            rhs.generic_source_fallback_calls);
+        add(failures, rhs.failures);
+        saturated = overflow;
+        return overflow;
+    }
+};
+
 /// Once-per-buffer operational counters and report-once identities.
 struct PipelineOperationalStats {
     std::array<PipelineStageTiming, pipeline_stage_count> timing{};
@@ -599,6 +742,7 @@ struct PipelineOperationalStats {
     std::uint64_t format5_reader_retained_layout_checks = 0;
     std::uint64_t format5_reader_retained_layout_failures = 0;
     bool format5_reader_memory_evidence_saturated = false;
+    Format6ReaderOperationalEvidence format6_reader_evidence{};
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
     // authenticity witness use has_nthash_vector_activity() instead of
@@ -714,6 +858,9 @@ struct PipelineOperationalStats {
     std::uint64_t cold_index_heap_tid_forward_gap = 0;
     std::uint64_t cold_index_heap_tid_backward_jump = 0;
     std::uint64_t cold_index_extent_crc_bytes = 0;
+    std::uint64_t cold_index_extent_crc_raw_bytes_hashed = 0;
+    std::uint64_t cold_index_extent_crc_combined_bytes = 0;
+    std::uint64_t cold_index_extent_crc_combine_rows = 0;
     std::uint64_t cold_index_row_crc_bytes = 0;
     std::uint64_t cold_index_tuple_form_bytes = 0;
     std::uint64_t cold_index_toast_values = 0;
@@ -880,6 +1027,9 @@ struct PipelineOperationalStats {
         format5_reader_memory_evidence_saturated =
             format5_reader_memory_evidence_saturated
             || rhs.format5_reader_memory_evidence_saturated;
+        saturated = format6_reader_evidence.merge(
+            rhs.format6_reader_evidence,
+            operational_identity_conflict) || saturated;
         add(nthash_vector_batches, rhs.nthash_vector_batches);
         add(nthash_resident_vector_stream_kernel_calls,
             rhs.nthash_resident_vector_stream_kernel_calls);
@@ -1056,6 +1206,12 @@ struct PipelineOperationalStats {
             rhs.cold_index_heap_tid_backward_jump);
         add(cold_index_extent_crc_bytes,
             rhs.cold_index_extent_crc_bytes);
+        add(cold_index_extent_crc_raw_bytes_hashed,
+            rhs.cold_index_extent_crc_raw_bytes_hashed);
+        add(cold_index_extent_crc_combined_bytes,
+            rhs.cold_index_extent_crc_combined_bytes);
+        add(cold_index_extent_crc_combine_rows,
+            rhs.cold_index_extent_crc_combine_rows);
         add(cold_index_row_crc_bytes, rhs.cold_index_row_crc_bytes);
         add(cold_index_tuple_form_bytes,
             rhs.cold_index_tuple_form_bytes);
@@ -3209,6 +3365,26 @@ inline constexpr bool paper_nthash_has_canonical_two_bit_packing =
 
 // DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
+
+using HostStageClock = std::chrono::steady_clock;
+
+[[nodiscard]] inline std::uint64_t host_stage_now_ns() noexcept {
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        HostStageClock::now().time_since_epoch()).count();
+    return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
+}
+
+[[nodiscard]] inline std::uint64_t elapsed_host_stage_ns(
+        const std::uint64_t started_ns) noexcept {
+    const std::uint64_t finished_ns = host_stage_now_ns();
+    const std::uint64_t elapsed = finished_ns >= started_ns
+        ? finished_ns - started_ns : 0u;
+    // A stage that executed is positive evidence even on a platform whose
+    // steady-clock tick is coarser than one nanosecond. The clamp can add at
+    // most one nanosecond and keeps focused tests independent of clock
+    // resolution without sleeping.
+    return elapsed > 0 ? elapsed : 1u;
+}
 
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
@@ -5623,6 +5799,7 @@ struct MinimizerStage
     // ignore it.
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
     MatchResultCollection* proof_dst = nullptr;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     // DOC0254 §5.4 / §8.4: the kernel writes directly into the per-query
     // arena slab via `sketch_collector_arena_adapter`, eliminating the
@@ -5633,6 +5810,8 @@ struct MinimizerStage
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& /*ignored*/, EmitToken<Sink>&& token) {
+        const std::uint64_t host_stage_started = host_timing_dst == nullptr
+            ? 0u : host_stage_now_ns();
         const std::size_t window_size = Cep::generic_fallback
             ? static_cast<std::size_t>(runtime_w)
             : Cep::window_len;
@@ -5778,6 +5957,10 @@ struct MinimizerStage
                 params, collector, *query_seq_, window_size, kmer_size);
         }
 
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->record_query_sketch_host_time(
+                elapsed_host_stage_ns(host_stage_started));
+        }
         return std::move(token).emit_batch(std::span<const MinimizerT>{
             sketches_slab.data(), sketches_slab.size()});
     }
@@ -5925,6 +6108,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr;
     MatchResultCollection* proof_dst = nullptr;
     PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     // DOC0307 §5.2 — host/device accessors for both the std::span CPU shape and
     // the MinimizerBatchView device shape.
@@ -5951,6 +6135,8 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
         EmitToken<Sink>&& token)
     {
+        const std::uint64_t host_stage_started = host_timing_dst == nullptr
+            ? 0u : host_stage_now_ns();
         const int32_t kmer_size = Cep::generic_fallback
             ? params.kmer_size
             : static_cast<int32_t>(Cep::kmer_len);
@@ -6173,6 +6359,11 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             (void)post_seed_owned_lifetime->complete_seed_user();
         }
 
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->record_seed_lookup_host_time(
+                elapsed_host_stage_ns(host_stage_started));
+        }
+
         return std::move(token).emit_batch(
             std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
     }
@@ -6223,10 +6414,13 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
     ChainingParams cp;
     sequence_size_t query_len = 0;
     MatchResultCollection* proof_dst = nullptr;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& anchors_in, EmitToken<Sink>&& token) {
+        const std::uint64_t host_stage_started = host_timing_dst == nullptr
+            ? 0u : host_stage_now_ns();
         ChainingParams active_cp = cp;
         active_cp.query_len = query_len;
         const std::span<const Anchor> anchors_span{
@@ -6294,6 +6488,11 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
             Kernel::call(anchors_span, active_cp, chains_slab, reordered_slab);
         }
 
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->record_chain_score_host_time(
+                elapsed_host_stage_ns(host_stage_started));
+        }
+
         return std::move(token).emit_batch_pair(
             std::span<Chain> {chains_slab.data(),    chains_slab.size()},
             std::span<Anchor>{reordered_slab.data(), reordered_slab.size()});
@@ -6344,10 +6543,14 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
     static constexpr std::string_view stage_name = "RegionStage";
 
     sequence_size_t query_len = 0;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     template <is_constexpr_aligner_params Cep, class CB, class AB, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process_pair(CB&& chains, AB&& anchors, EmitToken<Sink>&& token) {
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->begin_region_host_phase(host_stage_now_ns());
+        }
         // `AlignRegion` owns a `std::vector<CigarOp>` so the slab uses the
         // placement-new pattern; no intermediate `std::vector` is needed.
         auto regions_slab = make_arena_slab<AlignRegion>();
@@ -6505,6 +6708,349 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>,
 };
 
 /**
+ * Query-scoped SneakySnake lower-bound gate.  Only mandatory global
+ * seed-to-seed fills are evaluated; local left/right extension windows are
+ * intentionally excluded.  A region is removed only when the sum of proven
+ * per-fill lower bounds exceeds the SQL predicate's maximum edit count.
+ */
+template <supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QR>::traits::storage_unit>>
+struct PrefilterStage
+    : StageBase<PrefilterStage<QR, TR, Scanner>, AlignRegion> {
+    static constexpr std::string_view stage_name = "PrefilterStage";
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
+    const bioseq::storage::lazy_compact_sequence<TR, Scanner>* target_seq_;
+    MatchResultCollection* proof_dst_ = nullptr;
+
+    [[nodiscard]] static constexpr std::string_view backend_name(
+        PrefilterBackendType backend) noexcept {
+        switch (backend) {
+            case PrefilterBackendType::AUTO: return "auto";
+            case PrefilterBackendType::SCALAR: return "scalar";
+            case PrefilterBackendType::SIMD: return "highway_simd";
+            case PrefilterBackendType::VULKAN: return "vulkan";
+        }
+        return "unknown";
+    }
+
+    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    EmittedToken<Sink> process_pair(
+        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (!params.prefilter_enabled || !params.compute_edit_distance
+            || regions.size() == 0) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+
+        static const auto* prefilter_region =
+            bioseq::instr::register_region_static("sneaky_snake_prefilter");
+        auto prefilter_scope = bioseq::instr::region(prefilter_region);
+
+        std::vector<std::uint8_t> query_ranks;
+        std::vector<std::uint8_t> target_ranks;
+        std::vector<SneakySnakeJob> jobs;
+        std::vector<std::size_t> job_regions;
+        const std::uint64_t max_flat_offset =
+            (std::numeric_limits<std::uint32_t>::max)();
+
+        for (std::size_t region_index = 0;
+             region_index < regions.size(); ++region_index) {
+            const AlignRegion& region = regions[region_index];
+            (void)for_each_mandatory_alignment_gap(
+                region,
+                std::span<const Anchor>{anchors.data(), anchors.size()},
+                params,
+                [this, &query_ranks, &target_ranks, &jobs, &job_regions,
+                 &region, region_index, max_flat_offset](
+                    const MandatoryAlignmentGapWindow& window) {
+                    const std::uint64_t query_length =
+                        window.query_end - window.query_start;
+                    const std::uint64_t target_length =
+                        window.target_end - window.target_start;
+                    if (window.query_end > query_seq_->bp_size()
+                        || window.target_end > target_seq_->bp_size()
+                        || query_length > max_flat_offset
+                        || target_length > max_flat_offset
+                        || query_ranks.size() > max_flat_offset - query_length
+                        || target_ranks.size() > max_flat_offset - target_length) {
+                        /* Unsupported valid geometry is a conservative accept,
+                         * never a hidden fallback or false rejection. */
+                        return true;
+                    }
+
+                    const auto query_offset = static_cast<std::uint32_t>(
+                        query_ranks.size());
+                    const auto target_offset = static_cast<std::uint32_t>(
+                        target_ranks.size());
+                    query_ranks.resize(
+                        query_ranks.size() + static_cast<std::size_t>(query_length));
+                    target_ranks.resize(
+                        target_ranks.size() + static_cast<std::size_t>(target_length));
+                    std::span<std::uint8_t> query_destination{
+                        query_ranks.data() + query_offset,
+                        static_cast<std::size_t>(query_length)};
+                    std::span<std::uint8_t> target_destination{
+                        target_ranks.data() + target_offset,
+                        static_cast<std::size_t>(target_length)};
+                    if (region.is_reverse) {
+                        query_seq_->template to_encoded_into<true, false>(
+                            query_destination,
+                            static_cast<std::size_t>(window.query_start),
+                            static_cast<std::size_t>(window.query_end));
+                    } else {
+                        query_seq_->template to_encoded_into<false, false>(
+                            query_destination,
+                            static_cast<std::size_t>(window.query_start),
+                            static_cast<std::size_t>(window.query_end));
+                    }
+                    target_seq_->template to_encoded_into<false, false>(
+                        target_destination,
+                        static_cast<std::size_t>(window.target_start),
+                        static_cast<std::size_t>(window.target_end));
+                    jobs.push_back(SneakySnakeJob{
+                        .query_offset = query_offset,
+                        .target_offset = target_offset,
+                        .query_length = static_cast<std::uint32_t>(query_length),
+                        .target_length = static_cast<std::uint32_t>(target_length),
+                        .max_edits = params.prefilter_max_edits,
+                    });
+                    job_regions.push_back(region_index);
+                    return true;
+                });
+        }
+
+        if (jobs.empty()) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+
+        const SneakySnakeBatchInput input{
+            .query_ranks = query_ranks,
+            .target_ranks = target_ranks,
+            .jobs = jobs,
+        };
+        std::vector<SneakySnakeResult> results;
+        const PrefilterBackendType selected = params.prefilter_backend
+            == PrefilterBackendType::AUTO
+                ? PrefilterBackendType::SIMD
+                : params.prefilter_backend;
+        switch (selected) {
+            case PrefilterBackendType::SCALAR:
+                results = sneaky_snake_scalar_batch(input);
+                break;
+            case PrefilterBackendType::SIMD:
+            case PrefilterBackendType::AUTO:
+                results = sneaky_snake_simd_batch(input);
+                break;
+            case PrefilterBackendType::VULKAN: {
+                std::vector<::bioseq::sequences::prefilters::
+                    SneakySnakeVulkanJob> vulkan_jobs;
+                vulkan_jobs.reserve(jobs.size());
+                for (const SneakySnakeJob& job : jobs) {
+                    vulkan_jobs.push_back({
+                        .query_offset = job.query_offset,
+                        .target_offset = job.target_offset,
+                        .query_length = job.query_length,
+                        .target_length = job.target_length,
+                        .max_edits = job.max_edits,
+                    });
+                }
+                const auto vulkan_results =
+                    ::bioseq::sequences::prefilters::
+                        run_sneaky_snake_vulkan_batch(
+                            query_ranks, target_ranks, vulkan_jobs);
+                results.reserve(vulkan_results.size());
+                for (const auto& result : vulkan_results) {
+                    results.push_back(SneakySnakeResult{
+                        .lower_bound = result.lower_bound,
+                        .status = result.status,
+                        .accepted = result.accepted,
+                        .reserved = result.reserved,
+                    });
+                }
+                break;
+            }
+        }
+        if (results.size() != jobs.size()) {
+            throw std::runtime_error(
+                "SneakySnake backend returned the wrong result count");
+        }
+
+        const std::size_t input_region_count = regions.size();
+        std::uint64_t evaluated_jobs = 0u;
+        std::uint64_t length_difference_jobs = 0u;
+        std::uint64_t unsupported_jobs = 0u;
+        std::uint64_t rejected_jobs = 0u;
+        std::vector<std::uint64_t> lower_bounds(regions.size(), 0u);
+        std::vector<bool> keep(regions.size(), true);
+        for (std::size_t index = 0; index < results.size(); ++index) {
+            const SneakySnakeResult& result = results[index];
+            const std::size_t region_index = job_regions[index];
+            switch (static_cast<SneakySnakeStatus>(result.status)) {
+                case SneakySnakeStatus::success:
+                    ++evaluated_jobs;
+                    break;
+                case SneakySnakeStatus::conservative_unequal:
+                    ++length_difference_jobs;
+                    break;
+                case SneakySnakeStatus::unsupported_conservative:
+                    ++unsupported_jobs;
+                    break;
+                default:
+                    throw std::runtime_error(
+                        "SneakySnake backend returned an unknown status");
+            }
+            if (!sneaky_snake_accepted(result)) ++rejected_jobs;
+            if (result.status == static_cast<std::uint32_t>(
+                    SneakySnakeStatus::unsupported_conservative)) continue;
+            lower_bounds[region_index] =
+                bioseq::parallelism::saturating_add(
+                    lower_bounds[region_index],
+                    static_cast<std::uint64_t>(result.lower_bound));
+            if (!sneaky_snake_accepted(result)
+                || lower_bounds[region_index] > params.prefilter_max_edits) {
+                keep[region_index] = false;
+            }
+        }
+
+        std::size_t output_size = 0;
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            if (!keep[index]) continue;
+            if (output_size != index) {
+                regions.data()[output_size] = std::move(regions.data()[index]);
+            }
+            ++output_size;
+        }
+        if (proof_dst_ == nullptr) {
+            throw std::logic_error(
+                "SneakySnake prefilter stage has no execution-proof sink");
+        }
+        SneakySnakePrefilterExecutionProof call_proof{};
+        call_proof.record_batch(
+            selected,
+            static_cast<std::uint64_t>(jobs.size()),
+            evaluated_jobs,
+            length_difference_jobs,
+            unsupported_jobs,
+            rejected_jobs,
+            static_cast<std::uint64_t>(input_region_count - output_size),
+            static_cast<std::uint64_t>(output_size));
+        proof_dst_->record_sneaky_snake_prefilter_execution_proof(call_proof);
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), output_size},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
+    }
+
+    template <is_constexpr_aligner_params Cep>
+    [[nodiscard]] StageDescription describe() const {
+        StageDescription desc;
+        desc.stage_name = std::string{stage_name};
+        if (params.prefilter_enabled) {
+            StageAlgorithmDescription algorithm;
+            algorithm.name = "SneakySnake edit lower bound";
+            algorithm.parameters.push_back({
+                "backend", std::string{backend_name(params.prefilter_backend)}});
+            algorithm.parameters.push_back({
+                "max_edits", std::to_string(params.prefilter_max_edits)});
+            algorithm.parameters.push_back({
+                "submaze_width",
+                std::to_string(sneaky_snake_default_submaze_width)});
+            algorithm.computed_properties.push_back({
+                "domain", "mandatory seed-to-seed global fills"});
+            algorithm.computed_properties.push_back({
+                "survivor_check", "exact post-alignment edit distance"});
+            desc.algorithm = std::move(algorithm);
+        }
+        return desc;
+    }
+};
+
+/**
+ * Authoritative exact edit-distance predicate gate.
+ *
+ * This runs after traceback has populated `AlignRegion::edit_distance` and
+ * before the final primary/secondary and MAPQ pass.  Consequently a candidate
+ * that does not satisfy the SQL predicate cannot influence the classification
+ * or mapping-quality metadata of a candidate that does.  The earlier
+ * SneakySnake stage remains only a conservative work-avoidance gate.
+ */
+struct ExactEditFilterStage
+    : StageBase<ExactEditFilterStage, AlignRegion> {
+    static constexpr std::string_view stage_name = "ExactEditFilterStage";
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+
+    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    EmittedToken<Sink> process_pair(
+        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (!params.exact_edit_filter_enabled) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+        if (!params.compute_edit_distance) {
+            throw std::logic_error(
+                "exact edit filter requires exact edit-distance accounting");
+        }
+
+        const std::int64_t exclusive_upper_bound =
+            params.exact_edit_filter_exclusive_upper_bound;
+        std::size_t output_size = 0;
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            AlignRegion& region = regions.data()[index];
+            if (!region.has_alignment) {
+                throw std::runtime_error(
+                    "exact edit filter received a region without alignment traceback");
+            }
+            const bool keep = exclusive_upper_bound > 0
+                && region.edit_distance < static_cast<std::uint64_t>(
+                    exclusive_upper_bound);
+            if (!keep) continue;
+
+            if (output_size != index) {
+                regions.data()[output_size] = std::move(region);
+            }
+            AlignRegion& survivor = regions.data()[output_size];
+            survivor.region_id = static_cast<std::int32_t>(output_size);
+            survivor.parent = -1;
+            survivor.secondary_score = 0;
+            survivor.secondary_count = 0;
+            survivor.secondary_dp_max = 0;
+            survivor.mapq = 0;
+            ++output_size;
+        }
+
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), output_size},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
+    }
+
+    template <is_constexpr_aligner_params Cep>
+    [[nodiscard]] StageDescription describe() const {
+        StageDescription desc;
+        desc.stage_name = std::string{stage_name};
+        if (params.exact_edit_filter_enabled) {
+            StageAlgorithmDescription algorithm;
+            algorithm.name = "Exact edit-distance predicate";
+            algorithm.parameters.push_back({
+                "exclusive_upper_bound",
+                std::to_string(
+                    params.exact_edit_filter_exclusive_upper_bound)});
+            algorithm.computed_properties.push_back({
+                "classification_domain", "exact predicate survivors"});
+            desc.algorithm = std::move(algorithm);
+        }
+        return desc;
+    }
+};
+
+/**
  * @brief Stage 8: base-level alignment via the chosen aligner (conditional).
  *
  * DOC0254 §6.3 — reparameterised on `Kernel = kernel_t<BAA>`.  Algorithm
@@ -6526,10 +7072,15 @@ struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> 
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>*             target_seq_;
     bool                                          enabled;
     MatchResultCollection*                        proof_dst_;
+    MatchResultCollection*                        host_timing_dst_;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (host_timing_dst_ != nullptr) {
+            host_timing_dst_->transition_region_to_alignment_result_host_phase(
+                host_stage_now_ns(), enabled);
+        }
         if (enabled) {
             if constexpr (Kernel::emits_scalar_ksw2_execution_proof) {
                 if (proof_dst_ == nullptr) {
@@ -6677,6 +7228,7 @@ struct SinkStage {
     MatchResultCollection* dst_;
     sequence_size_t        query_len  = 0;
     sequence_size_t        target_len = 0;
+    MatchResultCollection* host_timing_dst_ = nullptr;
 
     [[gnu::always_inline]] inline void on_batch(std::span<AlignRegion> regions) {
         dst_->results.reserve(dst_->results.size() + regions.size());
@@ -6687,9 +7239,20 @@ struct SinkStage {
             dst_->results.push_back(
                 region_to_match_result(std::move(region_slot), query_len, target_len));
         }
+        if (host_timing_dst_ != nullptr
+            && host_timing_dst_->alignment_result_host_phase_active) {
+            host_timing_dst_->finish_alignment_result_host_phase(
+                host_stage_now_ns());
+        }
     }
 
-    [[gnu::always_inline]] inline void on_completed() noexcept { /* no-op */ }
+    [[gnu::always_inline]] inline void on_completed() noexcept {
+        if (host_timing_dst_ != nullptr
+            && host_timing_dst_->alignment_result_host_phase_active) {
+            host_timing_dst_->finish_alignment_result_host_phase(
+                host_stage_now_ns());
+        }
+    }
 };
 
 // =============================================================================
@@ -6744,6 +7307,9 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
 // 9.4 make_minimap_pipeline — single source of truth for the pipeline shape
 // =============================================================================
 
+[[nodiscard]] inline bool vulkan_components_requested(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept;
+
 /**
  * @brief Build the full minimap pipeline value for one (Cep, BAA, CA, MA, EP).
  *
@@ -6777,6 +7343,8 @@ template <is_constexpr_aligner_params Cep,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr)
 {
+    MatchResultCollection* host_timing_dst =
+        vulkan_components_requested(params) ? nullptr : &output_collection;
     MatchResultCollection* chaining_proof_dst = nullptr;
     if constexpr (CA
             == ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2
@@ -6795,29 +7363,34 @@ template <is_constexpr_aligner_params Cep,
     auto tail = make_pipeline<Cep>(
         IndexStage<IndexT>{ {}, &target_index, gpu_index_identity },
         SeedHitStage{ {}, params, query_len, gpu_index_cache,
-                      &output_collection, post_seed_owned_lifetime },
+                      &output_collection, post_seed_owned_lifetime,
+                      host_timing_dst },
         ChainStage<kernel_t<CA>>{
             {}, params.to_chaining_params(), query_len,
-            chaining_proof_dst },
-        RegionStage{ {}, query_len },
+            chaining_proof_dst, host_timing_dst },
+        RegionStage{ {}, query_len, host_timing_dst },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
         DivergenceStage<MinimizerT, QueryMinimizers>{
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
+        PrefilterStage<QR, TR, Scanner>{
+            {}, params, &query_seq, &target_seq, &output_collection },
         AlignStage<kernel_t<BAA>, QR, TR, Scanner>{
-            {}, params, &scoring_matrix, &query_seq, &target_seq, params.do_cigar,
-            alignment_proof_dst },
+            {}, params, &scoring_matrix, &query_seq, &target_seq,
+            params.do_cigar || params.compute_edit_distance,
+            alignment_proof_dst, host_timing_dst },
+        ExactEditFilterStage{{}, params},
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
         MapqStage{ {}, params, params.compute_mapq },
-        SinkStage{ &output_collection, query_len, target_len }
+        SinkStage{ &output_collection, query_len, target_len, host_timing_dst }
     );
 
     if constexpr (EP == EntryPoint::FromSequence) {
         MinimizerStage<MinimizerT, kernel_t<MA>, QR, Scanner> head{
             {}, &query_seq, params.window_size, params.kmer_size, params,
-            &output_collection };
+            &output_collection, host_timing_dst };
         return head.template attach<Cep>(std::move(tail));
     } else {
         return tail;
@@ -6848,6 +7421,9 @@ template <is_constexpr_aligner_params Cep,
         || params.vulkan_fused_frontend_enabled
         || params.vulkan_gpu_index_build_enabled
         || params.vulkan_extend_enabled
+        || (params.prefilter_enabled
+            && params.prefilter_backend ==
+               ::bioseq::simd::HWY_NAMESPACE::PrefilterBackendType::VULKAN)
         || params.minimizer_algorithm ==
                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
                    VULKAN_MINIMAP_INT
@@ -6877,6 +7453,9 @@ template <is_constexpr_aligner_params Cep,
                    BLOCK_ALIGNER
         && !params.compute_divergence
         && !params.compute_mapq
+        && !params.compute_edit_distance
+        && !params.exact_edit_filter_enabled
+        && !params.prefilter_enabled
         && params.max_occ >= 0
         && (!params.do_cigar || params.vulkan_extend_enabled);
 }
@@ -6933,6 +7512,9 @@ template <is_constexpr_aligner_params Cep,
         && !params.do_cigar
         && !params.compute_divergence
         && !params.compute_mapq
+        && !params.compute_edit_distance
+        && !params.exact_edit_filter_enabled
+        && !params.prefilter_enabled
         && params.max_occ >= 0;
 }
 
@@ -7783,7 +8365,7 @@ using ::bioseq::common::templating::value_sequence;
 /// Canonical k-mer values the bench/postgres paths instantiate.  The leading
 /// entry is the default for non-canonical kmer_size — see kmer_size_default.
 ///
-/// DOC0271 Phase 1 / PIPELINE_TEMPLATE_BRANCHING_LEVEL — the array's SIZE must
+/// DOC0271 Phase 1 / BIOSEQ_OPTTIMIZATION_LEVEL — the array's SIZE must
 /// match its element count, not be hard-coded to 3. A `std::array<size_t, 3>`
 /// with only `{15u}` initialised silently zeroes the trailing two slots, and
 /// the consteval dispatch table then enumerates K=0, which instantiates
@@ -7791,7 +8373,7 @@ using ::bioseq::common::templating::value_sequence;
 /// trips an undefined-shift constexpr error in `index.cppm:151`. `std::to_array`
 /// deduces the array size from the initialiser so the two stay in lockstep.
 inline constexpr auto kmer_size_buckets = std::to_array<std::size_t>({
-    #if PIPELINE_TEMPLATE_BRANCHING_LEVEL <= 1
+    #if BIOSEQ_OPTTIMIZATION_LEVEL <= 3
     15u
     #else
     15u, 7u, 27u
@@ -8076,20 +8658,12 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
     using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::SCALAR;
-#if defined(__APPLE__)
     using value_list = value_sequence<target_t,
         target_t::SCALAR,
         target_t::SIMD_MINIMAP2_SLOW,
         target_t::TWO_STACK_NTHASH,
         target_t::VULKAN_MINIMAP_INT,
         target_t::PAPER_NTHASH_SIMD>;
-#else
-    using value_list = value_sequence<target_t,
-        target_t::SCALAR,
-        target_t::SIMD_MINIMAP2_SLOW,
-        target_t::TWO_STACK_NTHASH,
-        target_t::PAPER_NTHASH_SIMD>;
-#endif
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(
@@ -8304,13 +8878,13 @@ struct pipeline_run_leaf {
             transient_target_index_owner = nullptr)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
-        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL == 0
+        #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
         using FallbackCep = ConstexprAlignerFallbackParams<63>;
         #else
         using FallbackCep = ConstexprAlignerFallbackParams<L>;
         #endif
 
-        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 3
+        #if BIOSEQ_OPTTIMIZATION_LEVEL >= 5
         // Cep selection — lifted from the deleted `dispatch_on_specialisation`.
         // Both Cep instantiations are present in the binary; the runtime
         // `if` picks one.  Compile-time impact: identical to the v0 body.
@@ -8405,7 +8979,7 @@ struct describe_leaf {
         const int32_t& target_len)
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
-        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL == 0
+        #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
         using FallbackCep = ConstexprAlignerFallbackParams<63>;
         #else
         using FallbackCep = ConstexprAlignerFallbackParams<L>;
@@ -8419,7 +8993,7 @@ struct describe_leaf {
             "describe_leaf relies on MA default = SCALAR.  Update both call "
             "sites if the MA default ever changes.");
 
-        #if PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 3
+        #if BIOSEQ_OPTTIMIZATION_LEVEL >= 5
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(K))
         {
@@ -8941,11 +9515,15 @@ template <class MinimizerT,
         target_minimizers = std::move(target_collector).extract_sketches_data();
     }
 
+    const std::uint64_t query_sketch_started_ns =
+        pipe::host_stage_now_ns();
     sketch_collector_t<MinimizerT> query_collector;
     const MinimizerSketchExecutionProof query_sketch_proof =
         sketch_into_collector<MinimizerT>(
         query_collector, query_seq, window_len, kmer_len, params);
     const auto query_minimizers = std::move(query_collector).extract_sketches_data();
+    const std::uint64_t query_sketch_host_wall_ns =
+        pipe::elapsed_host_stage_ns(query_sketch_started_ns);
     const bool query_route_valid =
         minimizer_sketch_proof_matches_selected_route(
             params.minimizer_algorithm, query_sketch_proof);
@@ -8975,6 +9553,7 @@ template <class MinimizerT,
         minimap2_port<MinimizerT, QueryRange, TargetRange, Scanner>(
         query_seq, target_seq, query_minimizers,
         std::move(owned_target_minimizers), params);
+    result.record_query_sketch_host_time(query_sketch_host_wall_ns);
     record_minimizer_sketch_execution_proof(
         result, query_sketch_proof, MinimizerSketchRole::query);
     if (!phase_c_gpu_index) {

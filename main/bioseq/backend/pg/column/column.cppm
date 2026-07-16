@@ -643,7 +643,7 @@ bioseq_guc_init()
 							 PGC_USERSET, 0, NULL, NULL, NULL);
 	DefineCustomBoolVariable(
 		"bioseq.aligner.grouped32_persisted_generation_enabled",
-		"Opt into locator-backed format-4 READY minimizer publication; requires all asynchronous persistence settings and INSERT-time minimizer maintenance to be disabled.",
+		"Opt into locator-backed native READY minimizer publication (selective Format 6 for registered profiles, authenticated Format 5 otherwise); requires asynchronous persistence and INSERT-time minimizer maintenance to be disabled.",
 		NULL,
 		&bioseq_aligner_grouped32_persisted_generation_enabled,
 		false,

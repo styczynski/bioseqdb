@@ -1,0 +1,40 @@
+{# Runnable landing slot 'hero_query' (§15.2): the annotated hero SELECT that
+   shows how one mmsearch() predicate turns an ordinary query into a sequence
+   search. Renders only the visible SQL and the executed result rows; the hidden
+   setup/teardown SQL from landing_examples.md never reaches the site. Context
+   (an executed sql_example projection): examples.hero_query.visible_sql and
+   examples.hero_query.result, whose result.columns each carry a name and whose
+   result.rows are lists of cells with is_null and text. #}
+<div class="code-card" id="example-hero-query">
+  <div class="code-card-head">
+    <span class="code-dot code-dot-a" aria-hidden="true"></span>
+    <span class="code-dot code-dot-b" aria-hidden="true"></span>
+    <span class="code-dot code-dot-c" aria-hidden="true"></span>
+    <span class="code-card-name">query.sql</span>
+    <button type="button" class="copy-button" data-copy-target="sql-hero-query" aria-label="Copy the hero query">Copy</button>
+  </div>
+  <pre class="code-block"><code class="language-sql" id="sql-hero-query">{{ examples.hero_query.visible_sql }}</code></pre>
+  {% if examples.hero_query.result %}
+  <div class="result-panel">
+    <table class="result-table">
+      <caption>Executed query result</caption>
+      <thead>
+        <tr>
+        {% for col in examples.hero_query.result.columns %}
+          <th scope="col">{{ col.name }}</th>
+        {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+      {% for row in examples.hero_query.result.rows %}
+        <tr>
+        {% for cell in row %}
+          <td>{% if cell.is_null %}<span class="cell-null">NULL</span>{% else %}{{ cell.text }}{% endif %}</td>
+        {% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>

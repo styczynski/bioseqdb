@@ -114,6 +114,7 @@ struct VulkanStaticVariantInputs {
         case static_cast<std::uint32_t>(ShaderKind::seq_sort_prefix_check_generic):
         case static_cast<std::uint32_t>(ShaderKind::align_extend_banded_affine):
         case static_cast<std::uint32_t>(ShaderKind::align_extend_simple_cigar):
+        case static_cast<std::uint32_t>(ShaderKind::sneaky_snake_rank_batch):
             return static_cast<ShaderKind>(raw);
         default:
             throw ShaderCompileError("unknown shader kind " + std::to_string(raw));
@@ -257,6 +258,9 @@ struct VulkanStaticVariantInputs {
             return key.tile_size == 384u
                 && (key.local_size == 1u || key.local_size == 64u)
                 && key.max_span == 512u;
+        case ShaderKind::sneaky_snake_rank_batch:
+            return key.tile_size == 384u && key.local_size == 64u
+                && key.max_span == 512u;
         default:
             return false;
     }
@@ -325,6 +329,7 @@ inline void for_each_static_shader_variant(
     emit(make_shader_key(ShaderKind::align_extend_banded_affine, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 1u, 512u));
     emit(make_shader_key(ShaderKind::align_extend_simple_cigar, 384u, 64u, 512u));
+    emit(make_shader_key(ShaderKind::sneaky_snake_rank_batch, 384u, 64u, 512u));
 }
 
 /// Explicit, measurable grouped32 ABI2 preseed set. It is intentionally not

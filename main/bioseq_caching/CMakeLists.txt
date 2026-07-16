@@ -147,16 +147,12 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_regress
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/test_run_private_cluster.py"
-    COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
       --kind regress
       --runner "${BIOSEQ_CACHE_PG_REGRESS}"
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      --extension-control "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
-      --extension-script "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
       --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/regress"
       --schedule "${CMAKE_CURRENT_LIST_DIR}/test/regress/parallel_schedule"
       --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_regress"
@@ -165,14 +161,12 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_isolation
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
       --kind isolation
       --runner "${BIOSEQ_CACHE_PG_ISOLATION_REGRESS}"
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      --extension-control "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
-      --extension-script "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
       --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/isolation"
       --schedule "${CMAKE_CURRENT_LIST_DIR}/test/isolation/isolation_schedule"
       --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_isolation"
@@ -181,13 +175,11 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_tap
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
       --kind tap
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"
       --bootstrap "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache_test_bootstrap.sql"
-      --extension-control "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache.control"
-      --extension-script "${CMAKE_CURRENT_BINARY_DIR}/bioseq_cache--1.0.sql"
       --prove "${BIOSEQ_CACHE_PROVE}"
       --inputdir "${CMAKE_CURRENT_LIST_DIR}/test/tap"
       --output-root "${CMAKE_CURRENT_BINARY_DIR}/private_tap"

@@ -27,7 +27,7 @@
  *
  * The sequence / sequence_chunk relations materialize an owning_sequence_payload
  * (the retrieved nucleotide letters + region metadata) into the bioseq.seq
- * column via stdc_convert_from_cstr<pgseq_t, seq::dna5> + pg_alloc.
+ * column via the active pgseq unconstrained-input alphabet + pg_alloc.
  *
  *-------------------------------------------------------------------------
  */
@@ -615,15 +615,17 @@ fill_record_location(const prov::owning_catalog_row& row, std::size_t sub_index,
 	set_timestamptz(slot, 16, row.audit.completed_at);              /* retrieved_at NOT NULL */
 }
 
-/* Build a bioseq.seq varlena Datum from raw nucleotide letters. dna5 preserves
- * A/C/G/T/N (U->T; any other IUPAC/junk byte -> N); the factory pallocs in
+/* Build a bioseq.seq varlena Datum from raw nucleotide letters. Production
+ * profiles use dna5 (A/C/G/T/N; U->T); the level-0 iteration profile uses
+ * dna4 and intentionally rejects non-dna4 input. The factory pallocs in
  * CurrentMemoryContext and writes the varlena header, mirroring bioseq.seq_in. */
 inline void
 set_seq(TupleTableSlot* slot, std::size_t i, std::string_view bases)
 {
 	pgseq_t* header =
-		::bioseq::simd::active_target::stdc_convert_from_cstr<pgseq_t, seq::dna5>(
-			static_cast<std::uint8_t>(1),
+		::bioseq::simd::active_target::stdc_convert_from_cstr<
+			pgseq_t, pgseq_unconstrained_input_alphabet>(
+			pgseq_normalize_storage_unit_byte_width(1u),
 			static_cast<pgseq_t::bp_size_t>(bases.size()),
 			bases.empty() ? "" : bases.data(),
 			pg_alloc);

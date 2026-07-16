@@ -57,6 +57,12 @@ inline constexpr std::uint32_t k_gpu_alignment_extension_max_band_width = 512u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_ok = 0u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_unsupported_geometry = 1u;
 inline constexpr std::uint32_t k_gpu_alignment_extension_status_cigar_overflow = 2u;
+inline constexpr std::uint32_t k_gpu_sneaky_snake_submaze_length = 512u;
+inline constexpr std::uint32_t k_gpu_sneaky_snake_max_edits = 31u;
+inline constexpr std::uint32_t k_gpu_sneaky_snake_status_ok = 0u;
+inline constexpr std::uint32_t
+    k_gpu_sneaky_snake_status_length_difference_only = 1u;
+inline constexpr std::uint32_t k_gpu_sneaky_snake_status_unsupported = 2u;
 // DOC0371 persisted-index foundation. The directory is uploaded exactly as the
 // header-free revision-3 96-byte little-endian entry stream; the shader reads
 // these word offsets directly and returns only stable directory ordinals.
@@ -1897,6 +1903,31 @@ struct GpuAlignmentExtensionParams {
     std::uint32_t reserved0 = 0;
 };
 
+/// One rank-buffer SneakySnake filter job. Offsets and lengths are expressed
+/// in symbols inside the caller-provided flat uint8 rank streams.
+struct GpuSneakySnakeJobWire {
+    std::uint32_t query_offset = 0;
+    std::uint32_t target_offset = 0;
+    std::uint32_t query_length = 0;
+    std::uint32_t target_length = 0;
+    std::uint32_t max_edits = 0;
+};
+
+/// Conservative lower-bound decision for one SneakySnake job. `accepted` is
+/// always zero or one; status 1 means only the unequal-length lower bound was
+/// evaluated and status 2 means the valid job shape was conservatively kept.
+struct GpuSneakySnakeResultWire {
+    std::uint32_t lower_bound = 0;
+    std::uint32_t status = k_gpu_sneaky_snake_status_ok;
+    std::uint32_t accepted = 1;
+    std::uint32_t reserved = 0;
+};
+
+/// Push constants for one grid-strided SneakySnake batch dispatch.
+struct GpuSneakySnakePush {
+    std::uint32_t job_count = 0;
+};
+
 /// CIGAR-capable extension job ABI (DOC0354 Part 2). This exact-match first
 /// implementation uses the same wire shape the future traceback kernel will
 /// consume, so host/result/cigar buffers do not need another ABI migration.
@@ -2019,6 +2050,22 @@ static_assert(offsetof(GpuAlignmentExtensionResultWire, target_end) == 8);
 static_assert(offsetof(GpuAlignmentExtensionResultWire, status) == 12);
 static_assert(std::is_standard_layout_v<GpuAlignmentExtensionParams>);
 static_assert(sizeof(GpuAlignmentExtensionParams) == 40);
+static_assert(std::is_standard_layout_v<GpuSneakySnakeJobWire>);
+static_assert(sizeof(GpuSneakySnakeJobWire) == 20);
+static_assert(offsetof(GpuSneakySnakeJobWire, query_offset) == 0);
+static_assert(offsetof(GpuSneakySnakeJobWire, target_offset) == 4);
+static_assert(offsetof(GpuSneakySnakeJobWire, query_length) == 8);
+static_assert(offsetof(GpuSneakySnakeJobWire, target_length) == 12);
+static_assert(offsetof(GpuSneakySnakeJobWire, max_edits) == 16);
+static_assert(std::is_standard_layout_v<GpuSneakySnakeResultWire>);
+static_assert(sizeof(GpuSneakySnakeResultWire) == 16);
+static_assert(offsetof(GpuSneakySnakeResultWire, lower_bound) == 0);
+static_assert(offsetof(GpuSneakySnakeResultWire, status) == 4);
+static_assert(offsetof(GpuSneakySnakeResultWire, accepted) == 8);
+static_assert(offsetof(GpuSneakySnakeResultWire, reserved) == 12);
+static_assert(std::is_standard_layout_v<GpuSneakySnakePush>);
+static_assert(sizeof(GpuSneakySnakePush) == 4);
+static_assert(offsetof(GpuSneakySnakePush, job_count) == 0);
 static_assert(std::is_standard_layout_v<GpuAlignmentCigarJobWire>);
 static_assert(sizeof(GpuAlignmentCigarJobWire) == 48);
 static_assert(offsetof(GpuAlignmentCigarJobWire, query_symbol_offset) == 0);

@@ -1,21 +1,262 @@
 {% extends "base.html.j2" %}
+{# Production marketing landing page (section 15.1, 15.2). A semantic port of
+   design_source/index.html: no inline styles, no inline event handlers, no
+   design-component runtime, no external fonts/media. The shared frame (header,
+   footer, CSP, asset URLs) is owned by base.html.j2; this template fills only
+   the main block with the single top-level heading plus the ported sections.
+   Runnable SQL results are never hard-coded here: each named slot is rendered
+   from an executed-example projection by a partial under partials/ (section
+   15.2 slot keys hero_query, sequence_storage, similarity_search). The reveal,
+   connector, capability-tracer, workflow-progress and media-band interactions
+   are progressive enhancements wired by static/js/landing.mjs and gated on
+   prefers-reduced-motion; the page is fully readable and usable without them.
+   Context keys used: page.eyebrow / page.headline / page.lede / page.install,
+   nav.documentation / nav.tutorials / nav.reference, site.status_label /
+   site.repository_url / site.assets_base_url, and the examples.<slot> collection. #}
 {% block main %}
-<section class="hero">
-  <p class="eyebrow">{{ page.eyebrow }}</p>
-  <h1>{{ page.headline }}</h1>
-  <p class="lede">{{ page.lede }}</p>
-  <p class="hero-actions">
-    <a class="button primary" href="{{ nav.documentation }}">Read the docs</a>
-    <a class="button" href="{{ nav.tutorials }}">See the tutorials</a>
-  </p>
-  <p class="install"><code>{{ page.install }}</code></p>
+<section class="landing-hero" id="top">
+  <div class="landing-hero-inner">
+    <p class="eyebrow">{{ page.eyebrow }}</p>
+    <h1 class="landing-hero-title">{{ page.headline }}</h1>
+    <p class="lede landing-hero-lede">{{ page.lede }}</p>
+    <p class="hero-actions">
+      <a class="button primary" href="{{ nav.documentation }}">Read the docs</a>
+      <a class="button" href="#examples">See the examples</a>
+      <a class="button" href="{{ nav.reference }}">API reference</a>
+    </p>
+    <div class="install-row">
+      <span class="install-prompt" aria-hidden="true">$</span>
+      <code class="install-code" id="hero-install-code">{{ page.install }}</code>
+      <button type="button" class="copy-button" data-copy-target="hero-install-code" aria-label="Copy the install command">Copy</button>
+    </div>
+    {% if site.status_label %}
+    <p class="hero-status"><span class="status-dot" aria-hidden="true"></span>{{ site.status_label }}</p>
+    {% endif %}
+  </div>
 </section>
-<section class="landing-reference" aria-labelledby="landing-ref-h">
-  <h2 id="landing-ref-h">Explore the reference</h2>
-  <ul class="card-grid">
-    <li class="card"><a href="{{ nav.reference }}">C++ and SQL API reference</a></li>
-    <li class="card"><a href="{{ nav.tutorials }}">Tutorials</a></li>
-    <li class="card"><a href="{{ nav.documentation }}">Documentation home</a></li>
+
+<section class="landing-section" id="query" aria-labelledby="query-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">Reading the query</p>
+    <h2 id="query-heading">One SELECT, now sequence-aware</h2>
+    <p class="section-lede">A normal query becomes a sequence search the moment <code>mmsearch()</code> appears in the WHERE clause. Everything else is SQL you already write.</p>
+  </div>
+  <div class="annotate-grid" data-connectors>
+    <svg class="connector-layer" aria-hidden="true" focusable="false" preserveAspectRatio="none"></svg>
+    <div class="annotate-code" data-connector-anchor>
+      {% include "partials/landing_hero_query.html.j2" %}
+    </div>
+    <ul class="callout-list">
+      <li class="callout callout-select" data-connector-source>
+        <span class="callout-token">SELECT</span>
+        <p>Select any metadata from the table just like ordinary Postgres. Join, filter, and project columns exactly as you normally would.</p>
+      </li>
+      <li class="callout callout-where" data-connector-source>
+        <span class="callout-token">WHERE mmsearch()</span>
+        <p>Adding <code>mmsearch()</code> to the WHERE clause activates a custom scan that performs the alignments efficiently.</p>
+      </li>
+      <li class="callout callout-type" data-connector-source>
+        <span class="callout-token">bioseq.seq('dna4', 64)</span>
+        <p>Bioseq supports different sequence alphabets and storage widths, chosen right in the column type modifier.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<section class="landing-section" id="workflow" aria-labelledby="workflow-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">One workflow</p>
+    <h2 id="workflow-heading">Load, query, and scale in one place</h2>
+    <p class="section-lede">Every step is ordinary SQL. Nothing leaves the database, so sequence work and metadata work stay together.</p>
+  </div>
+  <div class="workflow" data-workflow>
+    <div class="workflow-progress" aria-hidden="true"><span class="workflow-progress-fill" data-workflow-progress></span></div>
+    <ol class="workflow-grid">
+      <li class="workflow-card" data-wf-step>
+        <span class="workflow-num">01</span>
+        <span class="workflow-title">Load</span>
+        <span class="workflow-desc">Stream FASTA and FASTQ files straight into tables.</span>
+      </li>
+      <li class="workflow-card" data-wf-step>
+        <span class="workflow-num">02</span>
+        <span class="workflow-title">Query</span>
+        <span class="workflow-desc">Find sequence matches with mmsearch inside a normal SELECT.</span>
+      </li>
+      <li class="workflow-card" data-wf-step>
+        <span class="workflow-num">03</span>
+        <span class="workflow-title">Filter</span>
+        <span class="workflow-desc">Combine matches with metadata filters in the same query.</span>
+      </li>
+      <li class="workflow-card" data-wf-step>
+        <span class="workflow-num">04</span>
+        <span class="workflow-title">Inspect</span>
+        <span class="workflow-desc">Read alignment context such as match start and end.</span>
+      </li>
+      <li class="workflow-card" data-wf-step>
+        <span class="workflow-num">05</span>
+        <span class="workflow-title">Scale</span>
+        <span class="workflow-desc">Work with very large records without splitting them by hand.</span>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<section class="landing-section" id="capabilities" aria-labelledby="capabilities-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">What Bioseq gives you</p>
+    <h2 id="capabilities-heading">A sequence engine that speaks SQL</h2>
+    <p class="section-lede">Select a capability to trace where it runs in the system. Every capability is ordinary SQL on top of a Postgres-native engine.</p>
+  </div>
+  <div class="capability-tracer" data-capability-tracer>
+    <div class="capability-diagram" aria-hidden="true">
+      <p class="capability-diagram-title">System architecture</p>
+      <div class="arch-flow">
+        <span class="arch-node" data-arch-node="sql">SQL</span>
+        <span class="arch-node" data-arch-node="pg">Postgres</span>
+        <span class="arch-node" data-arch-node="meta">Metadata</span>
+        <span class="arch-node" data-arch-node="index">Index</span>
+        <span class="arch-node" data-arch-node="shard">Columnar shards</span>
+        <span class="arch-node" data-arch-node="engine">Execution engine</span>
+        <span class="arch-node" data-arch-node="cpu">CPU / SIMD</span>
+        <span class="arch-node" data-arch-node="gpu">GPU / Vulkan</span>
+      </div>
+    </div>
+    <div class="capability-options" role="group" aria-label="Capabilities">
+      <button type="button" class="capability-option" data-trace="sql" aria-pressed="false">
+        <span class="capability-chip">mmsearch()</span>
+        <span class="capability-title">SQL-native search</span>
+        <span class="capability-desc">mmsearch is a predicate you drop into a WHERE clause. Everything around it is the SQL you already write.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="meta" aria-pressed="false">
+        <span class="capability-chip">seq + meta</span>
+        <span class="capability-title">Sequences beside metadata</span>
+        <span class="capability-desc">A sequence column sits next to ordinary columns, so one query filters by organism, date, length, and sequence match.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="pg" aria-pressed="false">
+        <span class="capability-chip">bioseq.load()</span>
+        <span class="capability-title">Streaming loads</span>
+        <span class="capability-desc">Stream FASTA and FASTQ files into tables. Header fields can map to typed columns as they arrive.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="index" aria-pressed="false">
+        <span class="capability-chip">SET = on</span>
+        <span class="capability-title">Current indexes</span>
+        <span class="capability-desc">Keep sequence indexes current as records are inserted, or rebuild them after a bulk load.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="shard" aria-pressed="false">
+        <span class="capability-chip">columnar</span>
+        <span class="capability-title">Columnar storage</span>
+        <span class="capability-desc">A columnar layout lets scans read only the columns a query actually needs.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="cpu" aria-pressed="false">
+        <span class="capability-chip">SIMD</span>
+        <span class="capability-title">Vectorized CPU paths</span>
+        <span class="capability-desc">Selected operations use SIMD vectorized paths on the CPU.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="gpu" aria-pressed="false">
+        <span class="capability-chip">Vulkan</span>
+        <span class="capability-title">GPU paths</span>
+        <span class="capability-desc">Selected search, indexing, and alignment workloads can run on Vulkan-backed GPU paths.</span>
+      </button>
+      <button type="button" class="capability-option" data-trace="engine" aria-pressed="false">
+        <span class="capability-chip">parallel</span>
+        <span class="capability-title">Parallel execution</span>
+        <span class="capability-desc">Large scans, index builds, and batch alignment run in parallel.</span>
+      </button>
+    </div>
+  </div>
+</section>
+
+<section class="landing-section" id="examples" aria-labelledby="examples-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">The SQL</p>
+    <h2 id="examples-heading">Runnable examples, executed against Bioseq</h2>
+    <p class="section-lede">Store sequences beside their metadata, then search them with one predicate. Every result table below is produced by running the query against the extension at build time.</p>
+  </div>
+  <div class="tabs" data-tabs>
+    <div class="tablist" role="tablist" aria-label="SQL examples">
+      <button type="button" class="tab" role="tab" id="tab-storage" aria-controls="panel-storage" aria-selected="true">Store sequences</button>
+      <button type="button" class="tab" role="tab" id="tab-search" aria-controls="panel-search" aria-selected="false" tabindex="-1">Similarity search</button>
+    </div>
+    <div class="tabpanel" role="tabpanel" id="panel-storage" aria-labelledby="tab-storage" tabindex="0">
+      {% include "partials/landing_sequence_storage.html.j2" %}
+    </div>
+    <div class="tabpanel" role="tabpanel" id="panel-search" aria-labelledby="tab-search" tabindex="0">
+      {% include "partials/landing_similarity_search.html.j2" %}
+    </div>
+  </div>
+</section>
+
+<section class="landing-section landing-media" id="media" aria-labelledby="media-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">Under the hood</p>
+    <h2 id="media-heading">Built to keep pace with the instrument</h2>
+    <p class="section-lede">Vectorized CPU paths, Vulkan-backed GPU acceleration, and parallel scans &#8212; the search runs where the data already lives.</p>
+  </div>
+  <figure class="media-band" data-reveal>
+    <video class="media-band-video" data-media-band muted loop playsinline controls preload="metadata" width="1280" height="720">
+      <source src="{{ site.assets_base_url }}media/cinematic_band.mp4" type="video/mp4">
+      <p class="media-band-fallback">A short loop of Bioseq's vectorized and GPU-accelerated search paths. <a href="{{ nav.documentation }}">Read how the engine works</a>.</p>
+    </video>
+    <figcaption class="media-band-caption">The search runs on vectorized CPU paths, Vulkan-backed GPU paths, and parallel scans, right where the data lives.</figcaption>
+  </figure>
+</section>
+
+<section class="landing-section" id="scale" aria-labelledby="scale-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">Built for big records</p>
+    <h2 id="scale-heading">One record, any size</h2>
+    <p class="section-lede">Bioseq stores sequence lengths across the full 64-bit range. Very large sequences are sharded internally, so a long chromosome or assembly stays a single row.</p>
+  </div>
+  <ul class="stat-grid" data-reveal>
+    <li class="stat-card stat-card-wide">
+      <span class="stat-num">2<sup>64</sup></span>
+      <span class="stat-label">Sequence length range, the full 64-bit class</span>
+    </li>
+    <li class="stat-card">
+      <span class="stat-num">1 row</span>
+      <span class="stat-label">Per record, however long</span>
+    </li>
+    <li class="stat-card stat-card-accent">
+      <span class="stat-num">auto</span>
+      <span class="stat-label">Internal sharding, no manual splits</span>
+    </li>
   </ul>
+</section>
+
+<section class="landing-section" id="who" aria-labelledby="who-heading">
+  <div class="section-head" data-reveal>
+    <p class="eyebrow">Who uses Bioseq</p>
+    <h2 id="who-heading">Built for teams working at sequence scale</h2>
+  </div>
+  <ul class="audience-grid" data-reveal>
+    <li class="audience-card">
+      <span class="audience-title">Bioinformatics teams</span>
+      <span class="audience-desc">Search reads, references, and samples without leaving SQL.</span>
+    </li>
+    <li class="audience-card">
+      <span class="audience-title">Research groups</span>
+      <span class="audience-desc">Keep sequences and annotations together for reproducible queries.</span>
+    </li>
+    <li class="audience-card">
+      <span class="audience-title">Platform engineers</span>
+      <span class="audience-desc">Load and index new data on a schedule your systems already run.</span>
+    </li>
+    <li class="audience-card">
+      <span class="audience-title">Data teams</span>
+      <span class="audience-desc">Join sequence matches with the rest of your tables.</span>
+    </li>
+  </ul>
+</section>
+
+<section class="landing-cta" id="cta" aria-labelledby="cta-heading">
+  <div class="cta-card" data-reveal>
+    <h2 id="cta-heading" class="cta-title">Query biological sequences with SQL you already know.</h2>
+    <p class="cta-lede">Load your reads and references, keep them beside their metadata, and search everything in one place.</p>
+    <p class="cta-actions">
+      <a class="button primary" href="{{ nav.documentation }}">Read the docs</a>
+      <a class="button" href="{{ nav.tutorials }}">See the tutorials</a>
+      <a class="button" href="{{ site.repository_url }}" rel="noreferrer">View on GitHub</a>
+    </p>
+  </div>
 </section>
 {% endblock %}

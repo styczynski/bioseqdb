@@ -1,0 +1,32 @@
+Copyright 1986-2015 Xilinx, Inc. All Rights Reserved.
+------------------------------------------------------------------------------------
+| Tool Version : Vivado v.2015.4 (lin64) Build 1412921 Wed Nov 18 09:44:32 MST 2015
+| Date         : Tue Jun 21 04:32:15 2016
+| Host         : jalapeno running 64-bit unknown
+| Command      : upgrade_ip
+| Device       : xc7vx690tffg1761-2
+------------------------------------------------------------------------------------
+
+Upgrade Log for IP 'pcie3_7x_0'
+
+1. Summary
+----------
+
+CAUTION (success, with warnings) in the upgrade of pcie3_7x_0 from xilinx.com:ip:pcie3_7x:3.0 (Rev. 3) to xilinx.com:ip:pcie3_7x:4.1 (Rev. 1)
+
+After upgrade, an IP may have parameter and port differences compared to the original customization. Please review the parameters within the IP customization GUI to ensure proper functionality. Also, please review the updated IP instantiation template to ensure proper connectivity, and update your design if required.
+
+2. Connection Warnings
+----------------------
+
+Detected external port differences while upgrading IP 'pcie3_7x_0'. These changes may impact your design.
+
+
+-upgraded port 'm_axis_cq_tready' width 1 differs from original width 22
+-upgraded port 'm_axis_rc_tready' width 1 differs from original width 22
+
+3. Upgrade messages
+-------------------
+
+Set parameter PF0_LINK_STATUS_SLOT_CLOCK_CONFIG to value true (source 'default')
+

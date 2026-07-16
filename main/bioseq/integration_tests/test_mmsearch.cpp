@@ -35,6 +35,7 @@ constexpr std::string_view kDuplicateTargets = "mmsearch_duplicate_targets_int";
 constexpr std::string_view kMissingIndex = "mmsearch_missing_index_int";
 constexpr std::string_view kBatchJoinTarget = "mmsearch_batch_join_target_int";
 constexpr std::string_view kBatchJoinQueries = "mmsearch_batch_join_queries_int";
+constexpr std::string_view kSneakySnakeEdits = "mmsearch_sneaky_snake_edits_int";
 constexpr std::string_view kAsyncMpsWorkerLeaves =
 	"mmsearch_async_mps_worker_leaves_int";
 
@@ -656,7 +657,7 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         " AND (simd->'block_aligner_execution_proof'->>'forbidden_scalar_biological_fallbacks')::bigint=0 "
         " AND NOT (simd->'block_aligner_execution_proof'->>'saturated')::boolean, "
         "jsonb_typeof(cold)='object', "
-        "(SELECT count(*) FROM jsonb_object_keys(cold))=56, "
+        "(SELECT count(*) FROM jsonb_object_keys(cold))=59, "
         "cold ?& ARRAY["
         " 'schema','version','timing_semantics','decode_timing_available',"
         " 'transfer_timing_available','target_relation_reuses',"
@@ -674,7 +675,9 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         " 'payload_rows_delivered','payload_rows_scanned',"
         " 'payload_bytes_scanned','payload_rows_skipped',"
         " 'heap_tid_adjacent','heap_tid_forward_gap',"
-        " 'heap_tid_backward_jump','extent_crc_bytes','row_crc_bytes',"
+        " 'heap_tid_backward_jump','extent_crc_bytes',"
+        " 'extent_crc_raw_bytes_hashed','extent_crc_combined_bytes',"
+        " 'extent_crc_combine_rows','row_crc_bytes',"
         " 'tuple_form_bytes','policy_ns','source_ns','bind_ns','head_ns',"
         " 'directory_ns','payload_ns','decode_ns','transfer_ns','close_ns',"
         " 'shared_blks_hit','shared_blks_read','stats_saturated'] "
@@ -1061,23 +1064,25 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
         "q.id, t.pk, "
         "bioseq.score(t.pk) + 1 AS adjusted_score, "
         "bioseq.query_end(t.pk) - bioseq.query_start(t.pk) AS query_span, "
-        "bioseq.has_cigar(t.pk) AS has_cigar");
+        "bioseq.has_cigar(t.pk) AS has_cigar, "
+        "bioseq.edit(t.pk) AS edit_distance");
     const auto plan = explain_text<false>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Bioseq Residual Mmsearch Qual: absent"));
 	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
-	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 4"));
+	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 5"));
     REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
 
     const auto rows = query_rows(ctx, sql + " ORDER BY q.id, t.pk;");
     REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
-		REQUIRE(row.size() == 5);
+		REQUIRE(row.size() == 6);
         REQUIRE(row[0].has_value());
         REQUIRE(row[1].has_value());
         REQUIRE(row[2].has_value());
         REQUIRE(row[3].has_value());
 		REQUIRE(row[4].has_value());
+		REQUIRE(row[5].has_value());
 		/* Alignment scores are legitimately zero for this tiny exact fixture, so
 		 * adjusted_score=1 is valid.  The direct-call score stub returns -1 and
 		 * would instead produce the excluded sentinel value zero. */
@@ -1090,8 +1095,20 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
 		/* has_cigar is both an unprunable Block Aligner consumer and a separate
 		 * no-stub guard: the SQL rendezvous stub returns false. */
 		REQUIRE(*row[4] == "t");
+		/* Identical query/target fixtures prove BatchJoin requests and publishes
+		 * the exact edit count rather than executing the fail-closed SQL stub. */
+		REQUIRE(std::stoll(*row[5]) == 0);
     }
     require_batch_join_stats(ctx, 1, 2);
+
+    const auto wrapped_sequence_helper = sql_error(
+        ctx,
+        batch_join_sql(
+            1,
+            "bioseq.edit(COALESCE(t.seq0, t.seq0)) AS edit_distance"));
+    REQUIRE(wrapped_sequence_helper.sqlstate == "0A000");
+    REQUIRE(wrapped_sequence_helper.contains(
+        "bioseq.edit projection must reference the mmsearch target column"));
 }
 
 TEST_CASE("BioseqBatchJoin base ProjectionPath guard is exact and fail closed",
@@ -1535,18 +1552,16 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 	}
 }
 
-TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS",
-			  "[mmsearch][batch-join][just-index][format5][simd]"
-			  "[generation-publication][one-open][cold-route][full]") {
+TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPF and MPS",
+			  "[mmsearch][batch-join][just-index][format6][simd]"
+			  "[generation-publication][one-open][cold-route][selective]") {
 	for (const std::string_view index_name : {
 			std::string_view{"minimizers_per_fragment"},
 			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
-			// Disable the legacy INSERT-time writer before the target row is
-			// created. Setting this after seed_batch_join_target() leaves a
-			// same-name logged legacy sidecar that the strict UNLOGGED Format-5
-			// creator must correctly reject rather than silently replace.
+			// Disable INSERT-time persistence before creating the target so the
+			// production update below owns the only generation publication.
 			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
 			seed_batch_join_target(ctx);
 			load_batch_join_queries(ctx, 2);
@@ -1578,14 +1593,6 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS
 			REQUIRE(query_scalar_int(ctx, fmt::format(
 				"SELECT bioseq.update_index('{}'::regclass, '{}');",
 				kBatchJoinTarget, index_name)) == 1);
-			const row_t publication = query_one(ctx, fmt::format(
-				"SELECT generation_id::text, gpu_abi_version::text "
-				"FROM bioseq.inspect_ready_minimizer_generation("
-				"'{}'::regclass, '{}', {});",
-				kBatchJoinTarget, index_name, rowno));
-			REQUIRE(publication.size() == 2u);
-			REQUIRE(std::stoll(publication[0].value()) > 0);
-			REQUIRE(publication[1].value_or("") == "3");
 
 			require_batch_join_aligned_query_rows(
 				ctx,
@@ -1593,421 +1600,246 @@ TEST_CASE("ordinal-2 BatchJoin directly consumes production Format-5 MPF and MPS
 					2, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
 				2,
 				"t");
-			const row_t proof = query_one(ctx,
-				"SELECT requested_backend, actual_backend, "
-				"requested_target_index_source, actual_target_index_source, "
-				"persisted_generation_id::text, persisted_source_identity, "
-				"persisted_relation_opens::text, persisted_index_scans::text, "
-				"recomputed_target_index_rows::text, "
-				"persisted_hash_build_calls::text, pair_sort_calls::text, "
-				"host_pair_materialization_calls::text, "
-				"backend_fallbacks::text, nthash_vector_batches::text, "
-				"simd_chain_vector_batches::text, "
-				"persisted_source_parent_rows_read::text, "
-				"persisted_source_catalog_rows_read::text, "
-				"persisted_source_catalog_index_scans::text, "
-				"persisted_source_fragment_rows_read::text, "
-				"persisted_source_decoded_bp::text, "
-				"persisted_legacy_globalize_calls::text, "
-				"persisted_legacy_rebase_calls::text "
-				"FROM bioseq.last_alignment_execution_stats() "
-				"WHERE stage='query_sketch';");
-			REQUIRE(proof.size() == 22);
-			REQUIRE(proof[0].value_or("") == "simd_cpu");
-			REQUIRE(proof[1].value_or("") == "simd_cpu");
-			REQUIRE(proof[2].value_or("") == "persisted");
-			REQUIRE(proof[3].value_or("") == "persisted");
-			REQUIRE(std::stoll(proof[4].value()) > 0);
-			REQUIRE(!proof[5].value_or("").empty());
-			REQUIRE(proof[6].value_or("") == "1");
-			REQUIRE(proof[7].value_or("") == "3");
-			for (std::size_t zero : {8u, 9u, 10u, 11u, 12u}) {
-				REQUIRE(proof[zero].value_or("") == "0");
-			}
-			REQUIRE(std::stoll(proof[13].value()) > 0);
-			REQUIRE(std::stoll(proof[14].value()) > 0);
-			REQUIRE(proof[15].value_or("") == "1");
-			REQUIRE(proof[16].value_or("") == "1");
-			REQUIRE(proof[17].value_or("") == "1");
-			for (std::size_t zero : {18u, 19u, 20u, 21u}) {
-				REQUIRE(proof[zero].value_or("") == "0");
-			}
-
-			const row_t cold = query_one(ctx,
-				"WITH stats AS ("
-				" SELECT cold_index_preparation AS cold,"
-				" persisted_head_scans, persisted_manifest_directory_scans,"
-				" persisted_range_scan_calls, persisted_bulk_read_calls,"
-				" persisted_toast_values_read,"
-				" persisted_detoast_bytes, stats_saturated AS scalar_saturated"
-				" FROM bioseq.last_alignment_execution_stats()"
-				" WHERE stage='query_sketch'"
-				") SELECT "
-				"jsonb_typeof(cold) = 'object', "
-				"cold->>'schema' = 'bioseq.cold_index_preparation', "
-				"jsonb_typeof(cold->'schema') = 'string', "
-				"(cold->>'version')::bigint = 1, "
-				"jsonb_typeof(cold->'version') = 'number', "
-				"jsonb_typeof(cold->'stats_saturated') = 'boolean' "
-				"AND cold->>'timing_semantics' = "
-				"'payload_inclusive_wall_v1' "
-				"AND jsonb_typeof(cold->'timing_semantics') = 'string', "
-				"NOT (cold->>'stats_saturated')::boolean "
-				"AND jsonb_typeof(cold->'decode_timing_available') = "
-				"'boolean' AND NOT "
-				"(cold->>'decode_timing_available')::boolean "
-				"AND jsonb_typeof(cold->'transfer_timing_available') = "
-				"'boolean' AND NOT "
-				"(cold->>'transfer_timing_available')::boolean, "
-				"cold ?& ARRAY["
-				" 'schema', 'version', 'timing_semantics',"
-				" 'decode_timing_available',"
-				" 'transfer_timing_available', 'stats_saturated',"
-				" 'target_relation_reuses', 'target_relation_extra_opens',"
-				" 'parent_random_reads',"
-				" 'policy_heap_opens', 'policy_index_opens',"
-				" 'source_heap_opens', 'source_index_opens',"
-				" 'fragment_heap_opens', 'sidecar_heap_opens',"
-				" 'sidecar_index_opens', 'policy_schema_validations',"
-				" 'source_schema_validations', 'sidecar_schema_validations',"
-				" 'lock_acquires', 'lock_releases', 'snapshot_registers',"
-				" 'route_empty', 'route_selective', 'route_full',"
-				" 'route_candidate_rows', 'route_full_rows',"
-				" 'route_candidate_bytes', 'route_full_bytes',"
-				" 'route_selective_cost', 'route_full_cost',"
-				" 'memory_reroutes', 'payload_bytes_requested',"
-				" 'payload_bytes_delivered', 'payload_rows_requested',"
-				" 'payload_rows_delivered', 'payload_rows_scanned',"
-				" 'payload_bytes_scanned', 'payload_rows_skipped',"
-				" 'heap_tid_adjacent',"
-				" 'heap_tid_forward_gap', 'heap_tid_backward_jump',"
-				" 'extent_crc_bytes', 'row_crc_bytes', 'tuple_form_bytes',"
-				" 'policy_ns', 'source_ns', 'bind_ns', 'head_ns',"
-				" 'directory_ns', 'payload_ns', 'decode_ns', 'transfer_ns',"
-				" 'close_ns', 'shared_blks_hit', 'shared_blks_read'"
-				"]::text[], "
-				"(SELECT count(*) FROM jsonb_object_keys(cold)) = 56, "
-				"NOT EXISTS ("
-				" SELECT 1 FROM jsonb_each(cold) AS entry"
-				" WHERE entry.key NOT IN ("
-				" 'schema', 'timing_semantics',"
-				" 'decode_timing_available',"
-				" 'transfer_timing_available', 'decode_ns',"
-				" 'transfer_ns', 'stats_saturated')"
-				" AND jsonb_typeof(entry.value) <> 'number'"
-				") AND jsonb_typeof(cold->'decode_ns') = 'null' "
-				"AND jsonb_typeof(cold->'transfer_ns') = 'null', "
-				"(cold->>'target_relation_reuses')::bigint = 1, "
-				"(cold->>'target_relation_extra_opens')::bigint = 0, "
-				"(cold->>'parent_random_reads')::bigint = 1, "
-				"(cold->>'policy_heap_opens')::bigint = 1, "
-				"(cold->>'policy_index_opens')::bigint = 1, "
-				"(cold->>'source_heap_opens')::bigint = 1, "
-				"(cold->>'source_index_opens')::bigint = 1, "
-				"(cold->>'sidecar_heap_opens')::bigint = 1, "
-				"(cold->>'sidecar_index_opens')::bigint = 1, "
-				"(cold->>'policy_schema_validations')::bigint = 1 "
-				" AND (cold->>'source_schema_validations')::bigint = 1 "
-				" AND (cold->>'sidecar_schema_validations')::bigint = 1, "
-				"(cold->>'lock_acquires')::bigint "
-				" = (cold->>'lock_releases')::bigint, "
-				"(cold->>'snapshot_registers')::bigint = 0, "
-				"(cold->>'route_empty')::bigint "
-				" + (cold->>'route_selective')::bigint "
-				" + (cold->>'route_full')::bigint = 1, "
-				"(cold->>'route_empty')::bigint = 0 "
-				" AND (cold->>'route_selective')::bigint = 0 "
-				" AND (cold->>'route_full')::bigint = 1, "
-				/* Format 5 currently has only its authenticated one-scan full
-				 * reader. Unlike grouped32, it does not run the selective-route
-				 * planner, so candidate estimates must remain explicitly zero. */
-				"(cold->>'route_candidate_rows')::bigint = 0 "
-				" AND (cold->>'route_candidate_bytes')::bigint = 0, "
-				"(cold->>'route_full_rows')::bigint > 0 "
-				" AND (cold->>'route_full_bytes')::bigint > 0 "
-				" AND (cold->>'route_full_cost')::bigint "
-				" > (cold->>'route_full_rows')::bigint "
-				" AND (cold->>'route_selective_cost')::bigint = 0, "
-				"(cold->>'memory_reroutes')::bigint = 0, "
-				"(cold->>'payload_bytes_requested')::bigint "
-				" = (cold->>'payload_bytes_delivered')::bigint "
-				" AND (cold->>'payload_bytes_delivered')::bigint "
-				" = (cold->>'payload_bytes_scanned')::bigint "
-				" AND (cold->>'payload_bytes_delivered')::bigint > 0, "
-				"(cold->>'payload_rows_requested')::bigint "
-				" = (cold->>'payload_rows_delivered')::bigint "
-				" AND (cold->>'payload_rows_delivered')::bigint "
-				" = (cold->>'payload_rows_scanned')::bigint "
-				" AND (cold->>'payload_rows_skipped')::bigint = 0 "
-				" AND (cold->>'payload_rows_delivered')::bigint > 0, "
-				"(cold->>'heap_tid_adjacent')::bigint "
-				" + (cold->>'heap_tid_forward_gap')::bigint "
-				" + (cold->>'heap_tid_backward_jump')::bigint + 1 "
-				" = (cold->>'payload_rows_scanned')::bigint, "
-				"(cold->>'extent_crc_bytes')::bigint "
-				" = (cold->>'payload_bytes_delivered')::bigint "
-				" AND (cold->>'row_crc_bytes')::bigint "
-				" = (cold->>'payload_bytes_scanned')::bigint, "
-				"(cold->>'tuple_form_bytes')::bigint = 0, "
-				"(cold->>'payload_ns')::bigint >= 0, "
-				"(cold->>'policy_ns')::bigint >= 0 "
-				" AND (cold->>'source_ns')::bigint >= 0 "
-				" AND (cold->>'bind_ns')::bigint >= 0 "
-				" AND (cold->>'head_ns')::bigint >= 0 "
-				" AND (cold->>'directory_ns')::bigint >= 0 "
-				" AND (cold->>'payload_ns')::bigint >= 0 "
-				" AND (cold->>'close_ns')::bigint >= 0, "
-				"NOT (cold ?| ARRAY["
-				" 'head_scans', 'directory_scans', 'payload_range_scans',"
-				" 'toast_values', 'detoast_bytes']::text[]) "
-				"AND persisted_head_scans = 1 "
-				"AND persisted_manifest_directory_scans = 1 "
-				"AND persisted_range_scan_calls = 1 "
-				"AND persisted_bulk_read_calls = 1 "
-				"AND persisted_toast_values_read = 0 "
-				"AND persisted_detoast_bytes = 0 "
-				"AND (cold->>'stats_saturated')::boolean = scalar_saturated "
-				"FROM stats;");
-			REQUIRE(cold.size() == 35);
-			for (const auto& assertion : cold) {
-				REQUIRE(assertion.value_or("") == "t");
-			}
-
-			const row_t memory = query_one(ctx,
-				"WITH stats AS ("
-				" SELECT execution_id, backend_pid, database_oid,"
-				" persisted_generation_read_sessions, persisted_extents_read,"
-				" stats_saturated"
-				" FROM bioseq.last_alignment_execution_stats_v2()"
-				" WHERE stage='query_sketch'"
+			const row_t proof = query_one(ctx, fmt::format(
+				"WITH audit AS MATERIALIZED ("
+				" SELECT bioseq.inspect_ready_minimizer_format6_generation("
+				"  '{}'::regclass, '{}', {}) AS value"
 				"), evidence AS MATERIALIZED ("
-				" SELECT bioseq."
-				"last_alignment_format5_reader_memory_evidence() AS value"
+				" SELECT bioseq.last_alignment_format6_reader_evidence() AS value"
+				"), stats AS MATERIALIZED ("
+				" SELECT * FROM bioseq.last_alignment_execution_stats()"
+				" WHERE stage='query_sketch'"
+				"), documents AS ("
+				" SELECT audit.value AS audit, evidence.value AS evidence,"
+				"  audit.value->'source' AS source_doc,"
+				"  audit.value->'head' AS head_doc,"
+				"  audit.value->'manifest' AS manifest_doc,"
+				"  audit.value->'metadata' AS metadata_doc,"
+				"  audit.value->'streams'->0 AS directory_stream,"
+				"  audit.value->'streams'->1 AS control_stream,"
+				"  audit.value->'streams'->2 AS posting_stream,"
+				"  stats.*"
+				" FROM audit CROSS JOIN evidence CROSS JOIN stats"
+				"), parts AS ("
+				" SELECT documents.*,"
+				"  manifest_doc->'compatibility' AS compatibility_doc"
+				" FROM documents"
 				") SELECT "
-				"jsonb_typeof(evidence.value) = 'object', "
-				"(SELECT count(*) FROM jsonb_object_keys(evidence.value)) = 13 "
-				"AND evidence.value ?& ARRAY["
-				" 'schema','version','execution_id','backend_pid','database_oid',"
-				" 'format5_reader_capacity_accounting_passes',"
-				" 'format5_reader_global_position_storage_preparations',"
-				" 'format5_reader_global_position_storage_allocations',"
-				" 'format5_reader_position_append_growth_reservations',"
-				" 'format5_reader_retained_position_count',"
-				" 'format5_reader_retained_position_capacity',"
-				" 'format5_reader_memory_evidence_saturated','stats_saturated'"
-				"]::text[], "
-				"evidence.value->>'schema' = "
-				" 'bioseq.format5_reader_memory_evidence' "
-				"AND jsonb_typeof(evidence.value->'schema') = 'string' "
-				"AND (evidence.value->>'version')::bigint = 1 "
-				"AND jsonb_typeof(evidence.value->'version') = 'number', "
-				"NOT EXISTS ("
-				" SELECT 1 FROM jsonb_each(evidence.value) AS entry"
-				" WHERE entry.key IN ("
-				"  'version','execution_id','backend_pid','database_oid',"
-				"  'format5_reader_capacity_accounting_passes',"
-				"  'format5_reader_global_position_storage_preparations',"
-				"  'format5_reader_global_position_storage_allocations',"
-				"  'format5_reader_position_append_growth_reservations',"
-				"  'format5_reader_retained_position_count',"
-				"  'format5_reader_retained_position_capacity'"
-				" ) AND jsonb_typeof(entry.value) <> 'number'"
-				"), "
-				"(evidence.value->>'execution_id')::bigint = stats.execution_id "
-				"AND (evidence.value->>'backend_pid')::bigint = stats.backend_pid "
-				"AND (evidence.value->>'database_oid')::bigint = stats.database_oid, "
-				"(evidence.value->>"
-				"'format5_reader_global_position_storage_preparations')::bigint "
-				" = stats.persisted_generation_read_sessions "
-				"AND (evidence.value->>"
-				"'format5_reader_global_position_storage_allocations')::bigint "
-				" = stats.persisted_generation_read_sessions "
-				"AND stats.persisted_generation_read_sessions = 1, "
-				"(evidence.value->>"
-				"'format5_reader_position_append_growth_reservations')::bigint = 0 "
-				"AND (evidence.value->>'format5_reader_retained_position_count')"
-				"::bigint > 0 "
-				"AND (evidence.value->>'format5_reader_retained_position_capacity')"
-				"::bigint >= (evidence.value->>"
-				"'format5_reader_retained_position_count')::bigint, "
-				"(evidence.value->>'format5_reader_capacity_accounting_passes')"
-				"::numeric >= 7 * stats.persisted_generation_read_sessions::numeric "
-				" + stats.persisted_extents_read::numeric "
-				"AND stats.persisted_extents_read::numeric "
-				">= 2 * stats.persisted_generation_read_sessions::numeric "
-				"AND mod(stats.persisted_extents_read::numeric, 2) = 0 "
-				"AND (evidence.value->>"
-				"'format5_reader_capacity_accounting_passes')::numeric "
-				"<= 7 * stats.persisted_generation_read_sessions::numeric "
-				" + 3 * stats.persisted_extents_read::numeric "
-				"AND mod((evidence.value->>"
-				"'format5_reader_capacity_accounting_passes')::numeric "
-				" - 7 * stats.persisted_generation_read_sessions::numeric "
-				" - stats.persisted_extents_read::numeric, 4) = 0 "
-				"AND ((evidence.value->>"
-				"'format5_reader_capacity_accounting_passes')::numeric "
-				" - 7 * stats.persisted_generation_read_sessions::numeric "
-				" - stats.persisted_extents_read::numeric) / 4 "
-				"<= stats.persisted_extents_read::numeric / 2, "
-				"jsonb_typeof(evidence.value->"
-				"'format5_reader_memory_evidence_saturated') = 'boolean' "
-				"AND NOT (evidence.value->>"
-				"'format5_reader_memory_evidence_saturated')::boolean "
-				"AND jsonb_typeof(evidence.value->'stats_saturated') = 'boolean' "
-				"AND (evidence.value->>'stats_saturated')::boolean "
-				"    = stats.stats_saturated "
-				"AND NOT (evidence.value->>'stats_saturated')::boolean "
-				"FROM stats CROSS JOIN evidence;");
-			REQUIRE(memory.size() == 9u);
-				for (const auto& assertion : memory) {
-					REQUIRE(assertion.value_or("") == "t");
-				}
-
-				const row_t memory_v2 = query_one(ctx,
-					"WITH stats AS ("
-					" SELECT execution_id, backend_pid, database_oid,"
-					" persisted_generation_read_sessions, stats_saturated"
-					" FROM bioseq.last_alignment_execution_stats_v2()"
-					" WHERE stage='query_sketch'"
-					"), evidence AS MATERIALIZED ("
-					" SELECT bioseq."
-					"last_alignment_format5_reader_memory_evidence_v2() AS value"
-					") SELECT "
-					"jsonb_typeof(evidence.value) = 'object' "
-					"AND (SELECT count(*) FROM jsonb_object_keys(evidence.value)) = 27 "
-					"AND evidence.value ?& ARRAY["
-					" 'schema','version','execution_id','backend_pid','database_oid',"
-					" 'format5_reader_capacity_accounting_passes',"
-					" 'format5_reader_global_position_storage_preparations',"
-					" 'format5_reader_global_position_storage_allocations',"
-					" 'format5_reader_position_append_growth_reservations',"
-					" 'format5_reader_retained_position_count',"
-					" 'format5_reader_retained_position_capacity',"
-					" 'format5_reader_directory_capacity_bytes',"
-					" 'format5_reader_query_hash_capacity_bytes',"
-					" 'format5_reader_query_record_capacity_bytes',"
-					" 'format5_reader_ordinal_route_capacity_bytes',"
-					" 'format5_reader_selected_extent_capacity_bytes',"
-					" 'format5_reader_current_selected_control_capacity_bytes',"
-					" 'format5_reader_global_position_capacity_bytes',"
-					" 'format5_reader_control_payload_capacity_bytes',"
-					" 'format5_reader_owned_capacity_bytes',"
-					" 'format5_reader_admitted_bytes',"
-					" 'format5_reader_exact_position_image_checks',"
-					" 'format5_reader_exact_position_image_failures',"
-					" 'format5_reader_retained_layout_checks',"
-					" 'format5_reader_retained_layout_failures',"
-					" 'format5_reader_memory_evidence_saturated','stats_saturated'"
-					"]::text[], "
-					"evidence.value->>'schema' = "
-					" 'bioseq.format5_reader_memory_evidence' "
-					"AND (evidence.value->>'version')::bigint = 2, "
-					"NOT EXISTS ("
-					" SELECT 1 FROM jsonb_each(evidence.value) AS entry"
-					" WHERE entry.key NOT IN ("
-					"  'schema','format5_reader_memory_evidence_saturated',"
-					"  'stats_saturated'"
-					" ) AND jsonb_typeof(entry.value) <> 'number'"
-					"), "
-					"(evidence.value->>'execution_id')::bigint = stats.execution_id "
-					"AND (evidence.value->>'backend_pid')::bigint = stats.backend_pid "
-					"AND (evidence.value->>'database_oid')::bigint = stats.database_oid, "
-					"(evidence.value->>"
-					"'format5_reader_global_position_storage_preparations')::bigint "
-					" = stats.persisted_generation_read_sessions "
-					"AND (evidence.value->>"
-					"'format5_reader_global_position_storage_allocations')::bigint "
-					" = stats.persisted_generation_read_sessions "
-					"AND stats.persisted_generation_read_sessions = 1, "
-					"(evidence.value->>"
-					"'format5_reader_position_append_growth_reservations')::bigint = 0 "
-					"AND (evidence.value->>'format5_reader_retained_position_count')"
-					"::bigint > 0 "
-					"AND (evidence.value->>'format5_reader_retained_position_capacity')"
-					"::bigint = (evidence.value->>"
-					"'format5_reader_retained_position_count')::bigint, "
-					"(evidence.value->>"
-					"'format5_reader_global_position_capacity_bytes')::numeric "
-					" = 8 * (evidence.value->>"
-					"'format5_reader_retained_position_count')::numeric, "
-					"(evidence.value->>"
-					"'format5_reader_exact_position_image_checks')::bigint "
-					" = stats.persisted_generation_read_sessions "
-					"AND (evidence.value->>"
-					"'format5_reader_exact_position_image_failures')::bigint = 0, "
-					"(evidence.value->>'format5_reader_retained_layout_checks')::bigint "
-					" = stats.persisted_generation_read_sessions "
-					"AND (evidence.value->>"
-					"'format5_reader_retained_layout_failures')::bigint = 0, "
-					"(evidence.value->>'format5_reader_owned_capacity_bytes')::numeric "
-					" = (evidence.value->>"
-					"'format5_reader_directory_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_query_hash_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_query_record_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_ordinal_route_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_selected_extent_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_current_selected_control_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_global_position_capacity_bytes')::numeric "
-					" + (evidence.value->>"
-					"'format5_reader_control_payload_capacity_bytes')::numeric, "
-					"(evidence.value->>'format5_reader_owned_capacity_bytes')::bigint "
-					" = (evidence.value->>'format5_reader_admitted_bytes')::bigint "
-					"AND (evidence.value->>"
-					"'format5_reader_query_hash_capacity_bytes')::bigint > 0 "
-					"AND (evidence.value->>"
-					"'format5_reader_current_selected_control_capacity_bytes')::bigint = 0 "
-					"AND (evidence.value->>"
-					"'format5_reader_control_payload_capacity_bytes')::bigint = 0, "
-					"(evidence.value->>'format5_reader_directory_capacity_bytes')::bigint > 0 "
-					"AND (evidence.value->>"
-					"'format5_reader_query_record_capacity_bytes')::bigint > 0 "
-					"AND (evidence.value->>"
-					"'format5_reader_ordinal_route_capacity_bytes')::bigint > 0 "
-					"AND (evidence.value->>"
-					"'format5_reader_selected_extent_capacity_bytes')::bigint > 0, "
-					"jsonb_typeof(evidence.value->"
-					"'format5_reader_memory_evidence_saturated') = 'boolean' "
-					"AND NOT (evidence.value->>"
-					"'format5_reader_memory_evidence_saturated')::boolean "
-					"AND jsonb_typeof(evidence.value->'stats_saturated') = 'boolean' "
-					"AND (evidence.value->>'stats_saturated')::boolean "
-					" = stats.stats_saturated "
-					"AND NOT (evidence.value->>'stats_saturated')::boolean "
-					"FROM stats CROSS JOIN evidence;");
-				REQUIRE(memory_v2.size() == 13u);
-				for (const auto& assertion : memory_v2) {
-					REQUIRE(assertion.value_or("") == "t");
-				}
-
-				/* Extra secondary indexes must not increase the cold reader's open
-			 * count: it binds and validates only the exact named primary index. */
-			exec_sql(ctx,
-				"CREATE INDEX sequence_source_version_user_relid_probe_idx "
-				"ON bioseq_internal.sequence_source_version(user_relid);");
-			require_batch_join_aligned_query_rows(
-				ctx,
-				batch_join_sql(
-					2, "q.id, bioseq.has_cigar(t.pk) AS has_cigar"),
-				2,
-				"t");
-			const row_t dynamic_source_indexes = query_one(ctx,
-				"SELECT requested_backend='simd_cpu', "
-				"actual_backend='simd_cpu', backend_fallbacks=0, "
-				"(cold_index_preparation->>'source_heap_opens')::bigint=1, "
-				"(cold_index_preparation->>'source_index_opens')::bigint=1, "
-				"(cold_index_preparation->>'source_schema_validations')::bigint=1 "
-				"FROM bioseq.last_alignment_execution_stats() "
-				"WHERE stage='query_sketch';");
-			REQUIRE(dynamic_source_indexes.size() == 6);
-			for (const auto& assertion : dynamic_source_indexes) {
+				/* Exact schemas and ownership bind the inspector, timed reader,
+				 * and executor snapshot to this backend execution. */
+				"jsonb_typeof(audit)='object' "
+				"AND audit->>'schema'="
+				" 'bioseq.ready_minimizer_format6_generation' "
+				"AND (audit->>'version')::bigint=1 "
+				"AND (audit->>'format_version')::bigint=6 "
+				"AND jsonb_typeof(evidence)='object' "
+				"AND evidence->>'schema'='bioseq.format6_reader_evidence' "
+				"AND (evidence->>'version')::bigint=1 "
+				"AND (evidence->>'execution_id')::bigint=execution_id "
+				"AND (evidence->>'backend_pid')::bigint=backend_pid "
+				"AND (evidence->>'database_oid')::bigint=database_oid::bigint "
+				"AND (audit->>'database_oid')::bigint=database_oid::bigint, "
+				/* Full 128-bit source identity is the correctness authority;
+				 * the legacy scalar stats identity is diagnostic only. */
+				"(head_doc->>'generation_id')::bigint>0 "
+				"AND (manifest_doc->>'generation_id')::bigint="
+				" (head_doc->>'generation_id')::bigint "
+				"AND (evidence->>'generation_id')::bigint="
+				" (head_doc->>'generation_id')::bigint "
+				"AND persisted_generation_id="
+				" (head_doc->>'generation_id')::bigint "
+				"AND source_doc->>'source_identity' "
+				" = head_doc->>'source_identity' "
+				"AND source_doc->>'source_identity' "
+				" = manifest_doc->>'source_identity' "
+				"AND source_doc->>'source_identity' "
+				" = evidence->>'source_identity' "
+				"AND source_doc->>'source_identity' "
+				" ~ '^[0-9a-f]{{32}}$' "
+				"AND source_doc->>'source_content_crc64' "
+				" = head_doc->>'source_content_crc64' "
+				"AND source_doc->>'source_content_crc64' "
+				" = manifest_doc->>'source_content_crc64' "
+				"AND source_doc->>'source_content_crc64' "
+				" = evidence->>'source_content_crc64' "
+				"AND source_doc->>'source_content_crc64' "
+				" ~ '^[0-9a-f]{{16}}$' "
+				"AND head_doc->>'compatibility_digest' "
+				" = manifest_doc->>'compatibility_digest' "
+				"AND head_doc->>'compatibility_digest' "
+				" = evidence->>'compatibility_digest' "
+				"AND head_doc->>'compatibility_digest' "
+				" ~ '^[0-9a-f]{{64}}$' "
+				"AND persisted_source_identity IS NOT NULL "
+				"AND persisted_source_identity<>'', "
+				/* Source locator, profile, and fixed metadata sizes must agree. */
+				"(audit->>'main_relfilenode')::bigint>0 "
+				"AND (audit->>'column_attno')::bigint>0 "
+				"AND audit->>'index_name'='{}' "
+				"AND (audit->>'query_key')::bigint="
+				" (source_doc->>'sequence_rowno')::bigint "
+				"AND (audit->>'query_key')::bigint="
+				" (head_doc->>'query_key')::bigint "
+				"AND (source_doc->>'source_epoch')::bigint>0 "
+				"AND (source_doc->>'source_epoch')::bigint="
+				" (head_doc->>'source_epoch')::bigint "
+				"AND (source_doc->>'source_epoch')::bigint="
+				" (manifest_doc->>'source_epoch')::bigint "
+				"AND (source_doc->>'total_bp_size')::bigint="
+				" (manifest_doc->>'target_length')::bigint "
+				"AND (source_doc->>'alphabet_code')::bigint=0 "
+				"AND (compatibility_doc->>'alphabet_code')::bigint=0 "
+				"AND (compatibility_doc->>'kmer_size')::bigint=15 "
+				"AND (compatibility_doc->>'window_size')::bigint=10 "
+				"AND (compatibility_doc->>'hash_width_bytes')::bigint=4 "
+				"AND (compatibility_doc->>'stored_posting_width_bytes')"
+				"::bigint=4 "
+				"AND jsonb_typeof(head_doc->'dense_seal_present')='boolean' "
+				"AND (metadata_doc->>'head_rows')::bigint=1 "
+				"AND (metadata_doc->>'head_bytes')::bigint=224 "
+				"AND (metadata_doc->>'manifest_rows')::bigint=1 "
+				"AND (metadata_doc->>'manifest_bytes')::bigint=336, "
+				/* The administrative audit independently rereads every physical
+				 * row and must reproduce each logical stream exactly. */
+				"directory_stream->>'kind'='directory' "
+				"AND control_stream->>'kind'='controls' "
+				"AND posting_stream->>'kind'='postings' "
+				"AND (directory_stream->>'exact_catalog_rows')::bigint="
+				" (directory_stream->>'row_count')::bigint "
+				"AND (directory_stream->>'exact_catalog_bytes')::bigint="
+				" (directory_stream->>'logical_bytes')::bigint "
+				"AND directory_stream->>'exact_catalog_stream_crc64'="
+				" directory_stream->>'stream_crc64' "
+				"AND (control_stream->>'exact_catalog_rows')::bigint="
+				" (control_stream->>'row_count')::bigint "
+				"AND (control_stream->>'exact_catalog_bytes')::bigint="
+				" (control_stream->>'logical_bytes')::bigint "
+				"AND control_stream->>'exact_catalog_stream_crc64'="
+				" control_stream->>'stream_crc64' "
+				"AND (posting_stream->>'exact_catalog_rows')::bigint="
+				" (posting_stream->>'row_count')::bigint "
+				"AND (posting_stream->>'exact_catalog_bytes')::bigint="
+				" (posting_stream->>'logical_bytes')::bigint "
+				"AND posting_stream->>'exact_catalog_stream_crc64'="
+				" posting_stream->>'stream_crc64', "
+				/* Logical byte and PostgreSQL row-count equations reject
+				 * truncated, padded, or relabelled streams. */
+				"(directory_stream->>'logical_bytes')::numeric="
+				" 80*(directory_stream->>'element_count')::numeric "
+				"AND (directory_stream->>'element_count')::bigint="
+				" (manifest_doc->>'directory_entry_count')::bigint "
+				"AND directory_stream->>'stream_crc64'="
+				" manifest_doc->>'authenticated_directory_crc64' "
+				"AND (control_stream->>'element_count')::bigint="
+				" (manifest_doc->>'unique_hash_count')::bigint "
+				"AND (control_stream->>'logical_bytes')::bigint="
+				" (manifest_doc->>'total_control_bytes')::bigint "
+				"AND (posting_stream->>'element_count')::bigint="
+				" (manifest_doc->>'total_posting_count')::bigint "
+				"AND (posting_stream->>'logical_bytes')::bigint="
+				" (manifest_doc->>'total_posting_bytes')::bigint "
+				"AND (posting_stream->>'logical_bytes')::numeric="
+				" 4*(posting_stream->>'element_count')::numeric "
+				"AND (directory_stream->>'row_count')::bigint="
+				" ((directory_stream->>'logical_bytes')::bigint+8063)/8064 "
+				"AND (control_stream->>'row_count')::bigint="
+				" ((control_stream->>'logical_bytes')::bigint+8063)/8064 "
+				"AND (posting_stream->>'row_count')::bigint="
+				" ((posting_stream->>'logical_bytes')::bigint+8063)/8064, "
+				/* The live route owns one persisted reader and executes the
+				 * requested SIMD implementation without rebuilding the target. */
+				"requested_backend='simd_cpu' AND actual_backend='simd_cpu' "
+				"AND requested_target_index_source='persisted' "
+				"AND actual_target_index_source='persisted' "
+				"AND persisted_generation_read_sessions=1 "
+				"AND persisted_relation_opens=1 "
+				"AND persisted_index_scans>0 "
+				"AND (evidence->>'format_version')::bigint=6 "
+				"AND (evidence->>'sessions')::bigint=1 "
+				"AND nthash_vector_batches>0 "
+				"AND simd_chain_vector_batches>0, "
+				/* The directory is the sole full timed stream. */
+				"(evidence->>'directory_rows')::bigint="
+				" (directory_stream->>'row_count')::bigint "
+				"AND (evidence->>'directory_bytes')::bigint="
+				" (directory_stream->>'logical_bytes')::bigint "
+				"AND (evidence->>'directory_row_crc_receipts')::bigint="
+				" (evidence->>'directory_rows')::bigint "
+				"AND (evidence->>'directory_stream_crc_receipts')::bigint=1, "
+				/* Only selected controls are read, and each selected block has
+				 * both an authenticated CRC and a semantic receipt. */
+				"(evidence->>'control_rows')::bigint>0 "
+				"AND (evidence->>'control_bytes')::bigint>0 "
+				"AND (evidence->>'control_row_crc_receipts')::bigint="
+				" (evidence->>'control_rows')::bigint "
+				"AND (evidence->>'control_block_crc_receipts')::bigint="
+				" (evidence->>'selected_block_count')::bigint "
+				"AND (evidence->>'control_semantic_receipts')::bigint="
+				" (evidence->>'selected_block_count')::bigint, "
+				/* Posting byte authority is exact even when a selected byte
+				 * interval occupies only part of a row or block. */
+				"(evidence->>'posting_rows')::bigint>0 "
+				"AND (evidence->>'posting_bytes')::bigint>0 "
+				"AND (evidence->>'posting_row_crc_receipts')::bigint="
+				" (evidence->>'posting_rows')::bigint "
+				"AND (evidence->>'posting_ranges_delivered')::bigint>0 "
+				"AND (evidence->>'posting_semantic_receipts')::bigint="
+				" (evidence->>'posting_ranges_delivered')::bigint "
+				"AND (evidence->>'posting_range_crc_receipts')::bigint<="
+				" (evidence->>'posting_ranges_delivered')::bigint "
+				"AND (evidence->>'retained_position_count')::bigint>0 "
+				"AND (evidence->>'authorized_posting_bytes')::numeric="
+				" 4*(evidence->>'retained_position_count')::numeric "
+				"AND (evidence->>'authorized_posting_bytes')::bigint<="
+				" (evidence->>'posting_bytes')::bigint, "
+				/* Selectivity and exact retained ownership are performance
+				 * requirements, not optional diagnostic counters. */
+				"(evidence->>'query_count')::bigint>0 "
+				"AND (evidence->>'accepted_hash_count')::bigint>0 "
+				"AND (evidence->>'accepted_hash_count')::bigint<="
+				" (evidence->>'query_count')::bigint "
+				"AND (evidence->>'selected_block_count')::bigint>0 "
+				"AND (evidence->>'selected_block_count')::bigint<="
+				" (manifest_doc->>'directory_entry_count')::bigint "
+				"AND (evidence->>'directory_phase_peak_bytes')::bigint>0 "
+				"AND (evidence->>'control_phase_peak_bytes')::bigint>0 "
+				"AND (evidence->>'posting_phase_peak_bytes')::bigint>0 "
+				"AND (evidence->>'peak_admitted_bytes')::bigint="
+				" GREATEST("
+				"  (evidence->>'directory_phase_peak_bytes')::bigint,"
+				"  (evidence->>'control_phase_peak_bytes')::bigint,"
+				"  (evidence->>'posting_phase_peak_bytes')::bigint) "
+				"AND (evidence->>'retained_owner_bytes')::bigint>0 "
+				"AND (evidence->>'retained_owner_bytes')::bigint="
+				" (evidence->>'admitted_bytes')::bigint, "
+				/* No legacy assembly, source fallback, recomputation, or
+				 * backend fallback may hide behind a successful mapping. */
+				"(evidence->>'legacy_assembly_calls')::bigint=0 "
+				"AND (evidence->>'legacy_globalize_calls')::bigint=0 "
+				"AND (evidence->>'legacy_rebase_calls')::bigint=0 "
+				"AND (evidence->>'recompute_calls')::bigint=0 "
+				"AND (evidence->>'generic_source_fallback_calls')::bigint=0 "
+				"AND (evidence->>'backend_fallbacks')::bigint=0 "
+				"AND (evidence->>'failures')::bigint=0 "
+				"AND NOT (evidence->>'saturated')::boolean "
+				"AND NOT (evidence->>'operational_identity_conflict')::boolean "
+				"AND NOT (evidence->>'stats_saturated')::boolean "
+				"AND recomputed_target_index_rows=0 "
+				"AND persisted_hash_build_calls=0 "
+				"AND pair_sort_calls=0 "
+				"AND host_pair_materialization_calls=0 "
+				"AND backend_fallbacks=0 "
+				"AND persisted_legacy_globalize_calls=0 "
+				"AND persisted_legacy_rebase_calls=0 "
+				"AND NOT operational_identity_conflict "
+				"AND NOT stats_saturated "
+				"FROM parts;",
+				kBatchJoinTarget, index_name, rowno, index_name));
+			REQUIRE(proof.size() == 11u);
+			for (const auto& assertion : proof) {
 				REQUIRE(assertion.value_or("") == "t");
 			}
+
 		}
 	}
 }
@@ -2684,6 +2516,178 @@ TEST_CASE("mmsearch parity: bioseq.enable_bioseq_index_scan on/off agree",
 TEST_CASE("mmsearch parity: bioseq.aligner.enable_profiling on/off agree",
           "[mmsearch][parity][toggle]") {
     check_single_guc_parity("bioseq.aligner.enable_profiling");
+}
+
+TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter",
+          "[mmsearch][sneaky-snake][edit][integration]") {
+    auto ctx = fresh_context({kSneakySnakeEdits});
+    std::string query(320, 'A');
+    std::uint32_t state = 0x9e3779b9u;
+    constexpr std::string_view alphabet = "ACGT";
+    for (char& base : query) {
+        state ^= state << 13u;
+        state ^= state >> 17u;
+        state ^= state << 5u;
+        base = alphabet[state & 3u];
+    }
+    auto with_substitutions = [&query, alphabet](const std::size_t count) {
+        std::string sequence = query;
+        for (std::size_t index = 0; index < count; ++index) {
+            const std::size_t position = 32u + index * 27u;
+            const std::size_t rank = alphabet.find(sequence[position]);
+            sequence[position] = alphabet[(rank + 1u) & 3u];
+        }
+        return sequence;
+    };
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kSneakySnakeEdits},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 2,
+            .using_bioseq = true,
+        },
+        {
+            seq_row{.pk = 1, .sequences = {query, query}},
+            seq_row{.pk = 2, .sequences = {
+                with_substitutions(9), query}},
+            seq_row{.pk = 3, .sequences = {
+                with_substitutions(10), query}},
+        });
+    exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';");
+    exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 10;");
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+    const std::string exact_projection_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
+        "       bioseq.cigar(seq0) "
+        "FROM {} WHERE mmsearch(seq0, {}) ORDER BY pk;",
+        kSneakySnakeEdits,
+        query_literal);
+    const auto exact_rows = query_rows(ctx, exact_projection_sql);
+    REQUIRE(exact_rows.size() == 3);
+    REQUIRE(exact_rows[0][0] == std::optional<std::string>{"1"});
+    REQUIRE(exact_rows[0][1] == std::optional<std::string>{"0"});
+    REQUIRE(exact_rows[1][0] == std::optional<std::string>{"2"});
+    REQUIRE(exact_rows[1][1] == std::optional<std::string>{"9"});
+    REQUIRE(exact_rows[2][0] == std::optional<std::string>{"3"});
+    REQUIRE(exact_rows[2][1] == std::optional<std::string>{"10"});
+
+    const std::string sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
+        "       bioseq.cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10 "
+        "ORDER BY pk;",
+        kSneakySnakeEdits,
+        query_literal);
+    const auto vectorized = query_rows(ctx, sql);
+    exec_sql(ctx, "SET bioseq.enable_vectorization = off;");
+    const auto scalar = query_rows(ctx, sql);
+    REQUIRE(vectorized == scalar);
+    REQUIRE(vectorized.size() == 2);
+    REQUIRE(vectorized[0][0] == std::optional<std::string>{"1"});
+    REQUIRE(vectorized[0][1] == std::optional<std::string>{"0"});
+    REQUIRE(vectorized[1][0] == std::optional<std::string>{"2"});
+    REQUIRE(vectorized[1][1] == std::optional<std::string>{"9"});
+    for (const auto& row : vectorized) {
+        REQUIRE(row.size() == 4);
+        REQUIRE(row[2].has_value());
+        REQUIRE(row[3].has_value());
+        REQUIRE(is_valid_cigar(*row[3]));
+    }
+
+    const auto plan = explain_text<true>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "SneakySnake edit lower bound"));
+    REQUIRE(plan_contains(plan, "max_edits: 9"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 10"));
+
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 1;",
+        kSneakySnakeEdits,
+        query_literal)) == 1);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 0;",
+        kSneakySnakeEdits,
+        query_literal)) == 0);
+
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10;",
+        kSneakySnakeEdits,
+        query_literal)) == 2);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10::bigint;",
+        kSneakySnakeEdits,
+        query_literal)) == 2);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10::smallint;",
+        kSneakySnakeEdits,
+        query_literal)) == 2);
+
+    const auto wrong_column = sql_error(ctx, fmt::format(
+        "SELECT pk FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq1) < 10;",
+        kSneakySnakeEdits,
+        query_literal));
+    REQUIRE(wrong_column.sqlstate == "0A000");
+    REQUIRE(wrong_column.contains(
+        "bioseq.edit predicate must reference the mmsearch target column"));
+
+    const auto wrong_projection = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(seq1) FROM {} WHERE mmsearch(seq0, {});",
+        kSneakySnakeEdits,
+        query_literal));
+    REQUIRE(wrong_projection.sqlstate == "0A000");
+    REQUIRE(wrong_projection.contains(
+        "bioseq.edit projection must reference the mmsearch target column"));
+
+    const auto wrapped_wrong_projection = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(COALESCE(seq1, seq1)) FROM {} "
+        "WHERE mmsearch(seq0, {});",
+        kSneakySnakeEdits,
+        query_literal));
+    REQUIRE(wrapped_wrong_projection.sqlstate == "0A000");
+    REQUIRE(wrapped_wrong_projection.contains(
+        "bioseq.edit projection must reference the mmsearch target column"));
+}
+
+TEST_CASE("bioseq.edit rejects unsupported predicate shapes",
+          "[mmsearch][sneaky-snake][edit][fail-closed]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    const std::string sql = fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0, {}) "
+        "AND bioseq.edit(seq0) <= 10;",
+        kHoe,
+        hoe_probe_literal());
+    const auto error = sql_error(ctx, sql);
+    REQUIRE(error.sqlstate == "0A000");
+    REQUIRE(error.contains("unsupported bioseq.edit predicate"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    const auto direct_error = sql_error(ctx, "SELECT bioseq.edit(1);");
+    REQUIRE(direct_error.sqlstate == "0A000");
+    REQUIRE(direct_error.contains(
+        "bioseq.edit requires a bioseq alignment custom scan"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    const auto scan_without_alignment = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(seq0) FROM {} LIMIT 1;", kHoe));
+    REQUIRE(scan_without_alignment.sqlstate == "0A000");
+    REQUIRE(scan_without_alignment.contains(
+        "bioseq.edit requires mmsearch in the same scan"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
 TEST_CASE("mmsearch with all-NULL aligner_options matches the GUC defaults",
@@ -3644,7 +3648,7 @@ struct projection_probe {
     std::string_view pg_typename;  // "int4", "bool", "float4", "text"
 };
 
-constexpr std::array<projection_probe, 13> kProjectionHelpers = {{
+constexpr std::array<projection_probe, 14> kProjectionHelpers = {{
     {"bioseq.score(pk)",                  "int4"},
     {"bioseq.dp_score(pk)",               "int4"},
     {"bioseq.dp_max_score(pk)",           "int4"},
@@ -3655,6 +3659,7 @@ constexpr std::array<projection_probe, 13> kProjectionHelpers = {{
     // so the projections RETURN BIGINT (int8), not int4.
     {"bioseq.num_matches(pk)",            "int8"},
     {"bioseq.block_length(pk)",           "int8"},
+    {"bioseq.edit(pk)",                   "int8"},
     {"bioseq.mapq(pk)",                   "int4"},
     {"bioseq.target_len(pk)",             "int8"},
     {"bioseq.query_len(pk)",              "int8"},
@@ -3692,7 +3697,7 @@ TEMPLATE_TEST_CASE_SIG(
     "Every MatchResult projection helper executes and casts to its declared type",
     "[mmsearch][projections][matrix]",
     ((size_t Idx), Idx),
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13) {
     static_assert(Idx < kProjectionHelpers.size());
     check_projection_helper(kProjectionHelpers[Idx]);
 }

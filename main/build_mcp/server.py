@@ -103,11 +103,16 @@ WORKSPACE_ROOT = PROJECT_ROOT.parent
 # box-side server.py is invoked with BIOSEQ_BUILD_PRESET=aws-x64-linux, so the
 # worker configures/builds build/aws-x64-linux/ (the Linux/libc++/x64-linux-triplet
 # tree the verify.sh provisioning already populated) instead of the macOS/arm64
-# bench-opt tree. On a normal local checkout the env vars are unset and these
-# fall back to the everyday DOC0270 presets. The build dir always derives from the
+# bench-opt tree. Explicit environment overrides remain authoritative; without
+# one, Linux hosts select the existing aws-x64-linux family and non-Linux hosts
+# retain the everyday DOC0270 bench-opt family. The build dir always derives from the
 # preset name (every CMakePresets entry uses binaryDir ${sourceDir}/build/${presetName}),
 # so overriding the preset name is sufficient — no separate dir override needed.
-DEFAULT_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET", "bench-opt")
+_HOST_DEFAULT_BUILD_PRESET = (
+    "aws-x64-linux" if sys.platform.startswith("linux") else "bench-opt"
+)
+DEFAULT_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_BUILD_PRESET", _HOST_DEFAULT_BUILD_PRESET)
 
 
 def _default_debug_preset(production_preset: str) -> str:
@@ -282,7 +287,26 @@ def _safe_parallel_jobs() -> int:
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
-AWS_HEAVY_JOBS = "4"
+
+
+def _safe_heavy_jobs() -> int:
+    """Throttle the highest-RSS module compiles within the global job cap."""
+    override = os.environ.get("BIOSEQ_BUILD_HEAVY_JOBS")
+    if override:
+        try:
+            requested = int(override)
+        except ValueError as exc:
+            raise RuntimeError(
+                "BIOSEQ_BUILD_HEAVY_JOBS must be a positive integer") from exc
+        if requested <= 0:
+            raise RuntimeError(
+                "BIOSEQ_BUILD_HEAVY_JOBS must be a positive integer")
+        return requested
+    return max(1, min(4, CMAKE_PARALLEL_JOBS // 2))
+
+
+AWS_HEAVY_JOBS = str(_safe_heavy_jobs())
+AWS_DEBUG_HEAVY_JOBS = str(max(1, int(AWS_HEAVY_JOBS) // 2))
 AWS_GCC_TYPED_DISPATCH_OPT_LEVEL = "O1"
 AWS_GCC_TYPED_DISPATCH_JOBS = "1"
 AWS_GCC161_CXX_FLAGS = (
@@ -608,15 +632,31 @@ MODES: Dict[str, ModeDefinition] = {
         label="Static documentation website",
         docs=(
             "Build the isolated website code generator (GCC 16.1 ExternalProject) "
-            "against the Clang-22 core tree. Later phases extend this mode with "
-            "postgresql_bioseq staging, the private-cluster runner test, and the "
-            "bioseq_website render/publish target."),
+            "against the Clang-22 core tree and stage the relocatable postgresql_bioseq "
+            "extension, then run the private-cluster runner test and the bioseq_website "
+            "target: Doxygen + Clang index, private-cluster runnable SQL, render, "
+            "independent html5lib/§20.7 validation, pinned-browser acceptance, and the "
+            "atomic publish. build_only stops at the generator for fast iteration."),
         is_verb_plular=False,
-        targets=["bioseq_codegen_project"],
+        # The generator plus the extension the site stages into its private cluster.
+        targets=["bioseq_codegen_project", "postgresql_bioseq"],
         commands=[],
+        # §17.3/§17.5: on a full (non-build_only) run, drive the private-cluster
+        # runner test and then the whole render/validate/browser/publish pipeline.
+        # bioseq_website self-stages its own private PostgreSQL, so no external
+        # cluster is provisioned here; uses_private_cluster is the reporting label.
+        post_build_targets=("bioseq_private_postgres_tests", "bioseq_website"),
+        uses_private_cluster=True,
         preset_family="website",
         binary_subdir="website",
-        required_cache_variables={"BIOSEQ_BUILD_WEBSITE": "ON"},
+        # §726/§17.5: the website MCP mode forces the pinned-browser acceptance layer
+        # ON. It runs only when the full bioseq_website target is built (the browser
+        # step degrades to a clean SKIP when Chromium is unprovisioned), so enabling it
+        # here never affects the generator-only build_only iteration path.
+        required_cache_variables={
+            "BIOSEQ_BUILD_WEBSITE": "ON",
+            "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
+        },
     ),
     "unit+integration": ModeDefinition(
         lock_group="tests",
@@ -782,6 +822,11 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
+# §17.5: the website pipeline is a local, build-tree-only target (Doxygen + a
+# private PostgreSQL cluster + pinned-browser acceptance) that never runs on the
+# remote build runner. remote-run must reject it explicitly rather than dispatch a
+# build that cannot succeed there.
+REMOTE_RUN_REJECTED_MODES: Set[str] = {"website"}
 BENCH_CLI_MODES: tuple[str, ...] = tuple(sorted(
     mode for mode, details in MODES.items()
     if details.is_bench_mode and details.commands
@@ -1441,8 +1486,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     # explicit start_build argument below is the sole supported override.
     env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
-    if not _is_aws_preset(active_preset):
-        _ensure_local_toolchain_environment(env, active_build_dir)
+    # The local MCP may itself run on the provisioned Linux build host.  Keep
+    # the provisioned environment when present, but also recover VCPKG_ROOT
+    # from an existing configured tree for a fresh sibling test/debug tree.
+    _ensure_local_toolchain_environment(env, active_build_dir)
     if _is_aws_clang_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
     elif _is_aws_gcc_preset(active_preset):
@@ -1560,15 +1607,20 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     log_handle,
                     f"unexpected generator {current_generator!r}; AWS presets require Ninja",
                 )
+            desired_heavy_jobs = (
+                AWS_DEBUG_HEAVY_JOBS
+                if _is_debug_preset(active_preset)
+                else AWS_HEAVY_JOBS
+            )
             current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
             repair_args = [
-                f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
+                f"-DBIOSEQ_HEAVY_JOBS={desired_heavy_jobs}",
             ]
             repair_unset_args = []
             repair_reasons = []
-            if current_heavy_jobs != AWS_HEAVY_JOBS:
+            if current_heavy_jobs != desired_heavy_jobs:
                 repair_reasons.append(
-                    f"BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
+                    f"BIOSEQ_HEAVY_JOBS={desired_heavy_jobs} "
                     f"(was {current_heavy_jobs or 'unset'})")
             if _is_aws_clang_preset(active_preset):
                 current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")
@@ -3859,6 +3911,11 @@ def tool_remote_run(arguments: dict) -> str:
         if mode not in VALID_MODES:
             return (f"Invalid mode '{mode}'. remote-run build modes: "
                     f"{', '.join(sorted(VALID_MODES))}.")
+        if mode in REMOTE_RUN_REJECTED_MODES:
+            return (f"Mode '{mode}' is not supported by remote-run: the website "
+                    "pipeline is a local build-tree-only target (Doxygen + a private "
+                    "PostgreSQL cluster + pinned-browser acceptance). Build it locally "
+                    "with start_build mode=website.")
         build_only = parse_bool("build_only", arguments.get("build_only", False))
         debug = parse_bool("debug", arguments.get("debug", False))
         bench_filter = arguments.get("filter")

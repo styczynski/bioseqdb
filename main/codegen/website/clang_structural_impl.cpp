@@ -23,9 +23,13 @@
 #include <clang/Tooling/CompilationDatabase.h>
 #include <clang/Tooling/JSONCompilationDatabase.h>
 #include <clang/Tooling/Tooling.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/ADT/StringRef.h>
+#include <llvm/Support/FileSystem.h>
+#include <llvm/Support/Path.h>
 
 #include <cstddef>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -163,9 +167,20 @@ struct structural_visitor : clang::RecursiveASTVisitor<structural_visitor> {
             record.parameters.push_back(std::move(info));
         }
         signature += ")";
-        if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
-            method != nullptr && method->isConst()) {
-            signature += " const";
+        // Preserve the cv- and ref-qualifiers that distinguish member-function
+        // overloads (§12.1), in declaration order `const volatile &`/`&&`.
+        if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function)) {
+            if (method->isConst()) {
+                signature += " const";
+            }
+            if (method->isVolatile()) {
+                signature += " volatile";
+            }
+            if (method->getRefQualifier() == clang::RQ_LValue) {
+                signature += " &";
+            } else if (method->getRefQualifier() == clang::RQ_RValue) {
+                signature += " &&";
+            }
         }
         record.normalized_signature = std::move(signature);
         record.member_kind = member_kind_of(function);
@@ -289,9 +304,36 @@ void deduplicate(std::vector<entity>& entities) {
     entities = std::move(unique);
 }
 
-// Strips object/dependency/scan/diagnostic/BMI-output flags and adds
-// -fsyntax-only (§11.3). Retains -fmodule-file/import PCMs, standard, include,
-// define, target, and ABI flags.
+// Inlines an `@response-file` argument, or passes a plain argument through. clang
+// tooling feeds compile-command arguments straight to CompilerInvocation, which -
+// unlike the clang driver - does NOT expand `@file` arguments, so CMake's per-module
+// import response file (`@.../foo.cppm.o.modmap`) would otherwise be misread as an
+// input file named `@...`. The module map lists one argument per line; it is read
+// relative to the current directory, which the scan pins to the compile db root so
+// the map and the relative `-fmodule-file=` paths inside it resolve.
+void append_expanded(const std::string& arg,
+                     clang::tooling::CommandLineArguments& out) {
+    if (arg.empty() || arg.front() != '@') {
+        out.push_back(arg);
+        return;
+    }
+    std::ifstream stream(arg.substr(1));
+    if (!stream) {
+        out.push_back(arg);  // leave it to clang to report the missing file
+        return;
+    }
+    // The module map is whitespace-separated (e.g. `-x c++-module` is two tokens and
+    // every module file its own token); no path in the build tree contains a space,
+    // so a plain whitespace split reproduces the driver's tokenisation.
+    std::string token;
+    while (stream >> token) {
+        out.push_back(token);
+    }
+}
+
+// Expands response files, strips object/dependency/scan/diagnostic/BMI-output flags,
+// and adds -fsyntax-only (§11.3). Retains -fmodule-file/import PCMs, standard,
+// include, define, target, and ABI flags.
 clang::tooling::ArgumentsAdjuster allowlist_adjuster() {
     return [](const clang::tooling::CommandLineArguments& args,
               llvm::StringRef) -> clang::tooling::CommandLineArguments {
@@ -299,10 +341,15 @@ clang::tooling::ArgumentsAdjuster allowlist_adjuster() {
             "-o", "-MF", "-MT", "-MQ", "-MJ", "--serialize-diagnostics"};
         static const std::set<std::string> drop_flag = {
             "-c", "-MD", "-MMD", "-MG", "-MP", "-M", "-MM"};
+        clang::tooling::CommandLineArguments expanded;
+        expanded.reserve(args.size() + 16);
+        for (const std::string& arg : args) {
+            append_expanded(arg, expanded);
+        }
         clang::tooling::CommandLineArguments result;
-        result.reserve(args.size() + 1);
-        for (std::size_t index = 0; index < args.size(); ++index) {
-            const std::string& arg = args[index];
+        result.reserve(expanded.size() + 1);
+        for (std::size_t index = 0; index < expanded.size(); ++index) {
+            const std::string& arg = expanded[index];
             if (drop_flag.count(arg) != 0) {
                 continue;
             }
@@ -383,6 +430,112 @@ struct edges_factory : clang::tooling::FrontendActionFactory {
 
 }  // namespace
 
+// Runs the process from the compile database's directory for the guard's lifetime
+// and restores the previous directory on destruction. The compile commands are
+// generated with a `directory` of the build root and reference their module maps
+// (`@.../foo.cppm.o.modmap`) - and the relative `-fmodule-file=` BMI paths inside
+// them - relative to it. ClangTool applies that directory only to its virtual file
+// system, but response-file expansion resolves against the real working directory,
+// so those paths must be reachable from the process CWD too (§11.3).
+class scoped_compile_db_cwd {
+  public:
+    explicit scoped_compile_db_cwd(const std::string& compile_database) {
+        if (llvm::sys::fs::current_path(previous_)) {
+            return;  // cannot read CWD; leave it untouched
+        }
+        const llvm::StringRef directory =
+            llvm::sys::path::parent_path(compile_database);
+        if (!directory.empty()) {
+            restore_ = !static_cast<bool>(llvm::sys::fs::set_current_path(directory));
+        }
+    }
+    scoped_compile_db_cwd(const scoped_compile_db_cwd&) = delete;
+    scoped_compile_db_cwd& operator=(const scoped_compile_db_cwd&) = delete;
+    ~scoped_compile_db_cwd() {
+        if (restore_) {
+            static_cast<void>(llvm::sys::fs::set_current_path(previous_));
+        }
+    }
+
+  private:
+    llvm::SmallString<256> previous_;
+    bool restore_ = false;
+};
+
+// Keeps only the units that this configuration actually builds: a unit is buildable
+// when at least one of its compile commands is satisfiable - every `@response` file
+// it names (the module map) exists. A unit compiled solely by targets this build does
+// not produce (test/bench-only helpers) has no satisfiable command and is not part of
+// the shipped library's reachable universe, so it is dropped rather than failing the
+// whole scan; clang tooling already skips units that have no compile command at all.
+// Module-map paths resolve against the current directory, which scoped_compile_db_cwd
+// pins to the compile db root before this runs.
+[[nodiscard]] bool command_is_satisfiable(
+    const clang::tooling::CompileCommand& command) {
+    for (const std::string& arg : command.CommandLine) {
+        if (!arg.empty() && arg.front() == '@'
+            && !llvm::sys::fs::exists(arg.substr(1))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<std::string> buildable_units(
+    const clang::tooling::CompilationDatabase& database,
+    const std::vector<std::string>& reachable_units) {
+    std::vector<std::string> kept;
+    kept.reserve(reachable_units.size());
+    for (const std::string& unit : reachable_units) {
+        for (const clang::tooling::CompileCommand& command :
+             database.getCompileCommands(unit)) {
+            if (command_is_satisfiable(command)) {
+                kept.push_back(unit);
+                break;
+            }
+        }
+    }
+    return kept;
+}
+
+// A unit present in several targets (a test/bench helper plus the shipped library)
+// yields one compile command per target. Only the shipped target's command has its
+// `@response` module map materialised in a library-only build, and a module unit's
+// provided module and export-import edges are identical across targets. This wrapper
+// therefore hands ClangTool exactly the first satisfiable command per unit, so the
+// scan never runs an unbuildable (test/bench-only) command whose module map is absent.
+class satisfiable_compilation_database final
+    : public clang::tooling::CompilationDatabase {
+  public:
+    explicit satisfiable_compilation_database(
+        const clang::tooling::CompilationDatabase& inner)
+        : inner_(inner) {}
+
+    std::vector<clang::tooling::CompileCommand> getCompileCommands(
+        llvm::StringRef file) const override {
+        std::vector<clang::tooling::CompileCommand> commands =
+            inner_.getCompileCommands(file);
+        for (clang::tooling::CompileCommand& command : commands) {
+            if (command_is_satisfiable(command)) {
+                return {std::move(command)};
+            }
+        }
+        return {};
+    }
+
+    std::vector<std::string> getAllFiles() const override {
+        return inner_.getAllFiles();
+    }
+
+    std::vector<clang::tooling::CompileCommand>
+    getAllCompileCommands() const override {
+        return inner_.getAllCompileCommands();
+    }
+
+  private:
+    const clang::tooling::CompilationDatabase& inner_;
+};
+
 module_graph scan_module_edges_from_db(
     const std::vector<std::string>& reachable_units,
     const std::string& compile_database) {
@@ -397,7 +550,10 @@ module_graph scan_module_edges_from_db(
         throw std::runtime_error("cannot load compile database " + compile_database
                                  + ": " + load_error);
     }
-    clang::tooling::ClangTool tool(*database, reachable_units);
+    const scoped_compile_db_cwd cwd(compile_database);
+    const std::vector<std::string> units = buildable_units(*database, reachable_units);
+    const satisfiable_compilation_database satisfiable(*database);
+    clang::tooling::ClangTool tool(satisfiable, units);
     tool.appendArgumentsAdjuster(allowlist_adjuster());
     edges_factory factory(&result.units);
     if (tool.run(&factory) != 0) {
@@ -448,7 +604,10 @@ index run_structural_from_db(
                                  + ": " + load_error);
     }
     std::set<std::string> reachable_files(reachable_units.begin(), reachable_units.end());
-    clang::tooling::ClangTool tool(*database, reachable_units);
+    const scoped_compile_db_cwd cwd(compile_database);
+    const std::vector<std::string> units = buildable_units(*database, reachable_units);
+    const satisfiable_compilation_database satisfiable(*database);
+    clang::tooling::ClangTool tool(satisfiable, units);
     tool.appendArgumentsAdjuster(allowlist_adjuster());
     structural_factory factory(&result.entities, &reachable_files);
     if (tool.run(&factory) != 0) {
