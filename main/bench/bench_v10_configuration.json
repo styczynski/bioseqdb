@@ -287,6 +287,20 @@
             ["simd_prefilter_preserves_exact_threshold_results", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
           ]
         },
+        "threshold_truth_pair_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_uses_same_threshold_truth", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_uses_same_threshold_truth", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "threshold_correct_pair_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_preserves_threshold_correct_pairs", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_preserves_threshold_correct_pairs", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
         "primary_correct_fraction": {"type": "evaluation", "rules": []},
         "mean_position_offset_bp": {"type": "evaluation", "rules": []}
       }

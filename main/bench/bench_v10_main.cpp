@@ -20,6 +20,7 @@
  */
 #include "common_simd.h"
 #include "common.h"
+#include "prefilter_pipeline_truth.hpp"
 
 #include <simdjson.h>
 #include <nlohmann/json.hpp>
@@ -156,6 +157,7 @@ struct AlignerOutput {
     std::size_t total_results          = 0;
     std::size_t correct_pairs          = 0;
     std::size_t total_pairs            = 0;
+    std::vector<std::uint8_t> correct_pair_flags;
     double      sum_abs_position_offset = 0.0;
     bool        vulkan_hardware_unavailable = false;
     /// The three Vulkan-labelled rows in this historical report_76 matrix are
@@ -3133,6 +3135,7 @@ static_assert([] {
 
     AlignerOutput output;
     output.total_pairs = input.pairs.size();
+    output.correct_pair_flags.assign(input.pairs.size(), 0u);
     output.historical_partial_gpu_probe =
         dispatch.historical_partial_gpu_probe;
     output.all_gpu_acceptance_eligible = false;
@@ -3303,6 +3306,7 @@ static_assert([] {
             output.sum_abs_position_offset += static_cast<double>(abs_offset);
             if (abs_offset < kPositionTolerance &&
                 match.is_reverse == pair.is_reverse) {
+                output.correct_pair_flags[pair_index] = 1u;
                 output.correct_pairs += 1;
             }
         }
@@ -4353,11 +4357,11 @@ record_prefilter_pipeline_match_count_parity(
     return metrics;
 }
 
-/// The prefilter pipeline has datasets whose exact-threshold truth set is
-/// intentionally empty.  In that case no correct pair can be dropped, so the
-/// historical global "primary correctness must not decrease" metric is
-/// vacuously satisfied.  Match-count parity and the explicit prefilter proof
-/// metrics above continue to gate the actual pipeline result.
+/// Evaluate primary correctness against an independent exact-threshold truth
+/// set. This work is outside the timed callback. In particular, a generated
+/// dataset may contain input pairs but no pair whose ground-truth interval has
+/// ED <= E; that empty truth set has complete recall, while a nonempty truth
+/// set with no returned correct pairs remains a real zero and will regress.
 [[nodiscard]] std::map<std::string, double> evaluate_prefilter_pipeline(
     std::string_view algorithm,
     const ParamMap& params,
@@ -4365,9 +4369,54 @@ record_prefilter_pipeline_match_count_parity(
     const AlignerOutput& output)
 {
     auto metrics = evaluate_aligner(algorithm, params, input, output);
-    if (!output.vulkan_hardware_unavailable && output.total_pairs == 0) {
-        metrics.insert_or_assign("primary_correct_fraction", 1.0);
+    if (output.vulkan_hardware_unavailable) {
+        return metrics;
     }
+
+    if (input.pairs.size() != input.queries_acgt.size()
+        || input.pairs.size() != input.targets_acgt.size()) {
+        throw std::logic_error(
+            "prefilter truth oracle input vectors are not in lock-step");
+    }
+
+    if (output.correct_pair_flags.size() != input.pairs.size()) {
+        throw std::logic_error(
+            "prefilter correctness flags are not in lock-step with inputs");
+    }
+    std::vector<std::uint8_t> threshold_truth_flags(
+        input.pairs.size(), 0u);
+    for (std::size_t index = 0u; index < input.pairs.size(); ++index) {
+        const auto& pair = input.pairs[index];
+        const auto& target = input.targets_acgt[index];
+        if (pair.truth_target_start > pair.truth_target_end
+            || pair.truth_target_end > target.size()) {
+            throw std::logic_error(
+                "prefilter truth oracle interval is outside the target");
+        }
+        const std::string truth =
+            bioseq::bench_prefilter_truth::oriented_truth_sequence(
+                std::string_view{target}.substr(
+                    pair.truth_target_start,
+                    pair.truth_target_end - pair.truth_target_start),
+                pair.is_reverse);
+        threshold_truth_flags[index] =
+            bioseq::bench_prefilter_truth::edit_distance_within(
+                input.queries_acgt[index], truth, output.edit_threshold)
+            ? 1u : 0u;
+    }
+    const auto correctness =
+        bioseq::bench_prefilter_truth::summarize_primary_correctness(
+            threshold_truth_flags, output.correct_pair_flags);
+    if (correctness.observed_correct_pairs != output.correct_pairs) {
+        throw std::logic_error(
+            "prefilter per-pair correctness flags disagree with aggregate");
+    }
+    metrics.insert_or_assign("threshold_truth_pair_count",
+        static_cast<double>(correctness.truth_pairs));
+    metrics.insert_or_assign("threshold_correct_pair_count",
+        static_cast<double>(correctness.correct_truth_pairs));
+    metrics.insert_or_assign("primary_correct_fraction",
+        correctness.fraction);
     return metrics;
 }
 

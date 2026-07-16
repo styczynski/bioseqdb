@@ -13,6 +13,7 @@
 #include "common_simd.h"
 #include "common.h"
 #include "SneakySnake.h"
+#include "prefilter_pipeline_truth.hpp"
 
 #include <simdjson.h>
 
@@ -141,64 +142,6 @@ struct PrefilterOutput {
     const bioseq::bench_framework::ResolvedExecutionTuple& tuple) noexcept
 {
     return max_edits_from_params(tuple.params);
-}
-
-/// Exact global Levenshtein threshold predicate using only the 2E+1 band.
-/// It deliberately returns only ED <= E because FAR/FRR need classification,
-/// not the full distance, and the work is kept outside benchmark timing.
-[[nodiscard]] bool edit_distance_within(
-    std::string_view query,
-    std::string_view target,
-    std::uint32_t max_edits)
-{
-    const std::size_t m = query.size();
-    const std::size_t n = target.size();
-    const std::size_t e = static_cast<std::size_t>(max_edits);
-    const std::size_t difference = m >= n ? m - n : n - m;
-    if (difference > e) {
-        return false;
-    }
-    if (m == 0u || n == 0u) {
-        return std::max(m, n) <= e;
-    }
-
-    const std::uint32_t inf = max_edits ==
-            (std::numeric_limits<std::uint32_t>::max)()
-        ? max_edits
-        : max_edits + 1u;
-    std::vector<std::uint32_t> previous(n + 1u, inf);
-    std::vector<std::uint32_t> current(n + 1u, inf);
-    for (std::size_t j = 0u; j <= std::min(n, e); ++j) {
-        previous[j] = static_cast<std::uint32_t>(j);
-    }
-
-    for (std::size_t i = 1u; i <= m; ++i) {
-        const std::size_t low = i > e ? i - e : 1u;
-        const std::size_t high = std::min(n, i + e);
-        current[0] = i <= e ? static_cast<std::uint32_t>(i) : inf;
-        if (low > 1u) {
-            current[low - 1u] = inf;
-        }
-        std::uint32_t row_minimum = inf;
-        for (std::size_t j = low; j <= high; ++j) {
-            const std::uint32_t substitution = previous[j - 1u]
-                + static_cast<std::uint32_t>(query[i - 1u] != target[j - 1u]);
-            const std::uint32_t deletion = previous[j] == inf
-                ? inf : previous[j] + 1u;
-            const std::uint32_t insertion = current[j - 1u] == inf
-                ? inf : current[j - 1u] + 1u;
-            current[j] = std::min({substitution, deletion, insertion, inf});
-            row_minimum = std::min(row_minimum, current[j]);
-        }
-        if (high < n) {
-            current[high + 1u] = inf;
-        }
-        if (row_minimum > max_edits) {
-            return false;
-        }
-        previous.swap(current);
-    }
-    return previous[n] <= max_edits;
 }
 
 [[nodiscard]] RunConstraints estimate_prefilter_resources(
@@ -378,8 +321,9 @@ void append_rank_bytes(
                     0,
                     geometry);
                 prepared.reference_accepted[index] = accepted != 0 ? 1u : 0u;
-                prepared.truth_within_threshold[index] = edit_distance_within(
-                    input.queries[index], input.targets[index], threshold)
+                prepared.truth_within_threshold[index] =
+                    bioseq::bench_prefilter_truth::edit_distance_within(
+                        input.queries[index], input.targets[index], threshold)
                     ? 1u : 0u;
             }
         }
