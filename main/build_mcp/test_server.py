@@ -48,5 +48,31 @@ class BenchE2eConfigOverrideTests(unittest.TestCase):
         self.assertIn("must name a .json file", non_json_error)
 
 
+class RemoteRunWebsiteRejectionTests(unittest.TestCase):
+    """website is a local build-tree-only target (Doxygen + private PostgreSQL
+    + pinned browser); remote-run must refuse it explicitly."""
+
+    def test_website_is_a_valid_build_mode(self):
+        # It must be a real mode, otherwise the rejection below is meaningless
+        # (it would be caught by the generic invalid-mode guard instead).
+        self.assertIn("website", server.VALID_MODES)
+
+    def test_website_is_registered_as_rejected(self):
+        self.assertIn("website", server.REMOTE_RUN_REJECTED_MODES)
+
+    def test_remote_run_build_rejects_website(self):
+        message = server.tool_remote_run({"operation": "build", "mode": "website"})
+
+        self.assertIn("not supported by remote-run", message)
+        self.assertIn("start_build mode=website", message)
+
+    def test_remote_run_does_not_reject_ordinary_modes(self):
+        # Every other build mode stays eligible for remote-run.
+        self.assertEqual(
+            server.REMOTE_RUN_REJECTED_MODES & server.VALID_MODES,
+            {"website"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
