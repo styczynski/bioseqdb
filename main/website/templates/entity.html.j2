@@ -5,6 +5,14 @@
   <p class="kind">{{ entity.domain }} {{ entity.kind }}</p>
   {% if entity.summary %}<p class="summary">{{ entity.summary }}</p>{% endif %}
   {% if entity.normalized_signature %}<pre class="signature"><code>{{ entity.normalized_signature }}</code></pre>{% endif %}
+  {% if entity.overloads %}
+  <h2>Overloads</h2>
+  <ul class="overloads">
+  {% for o in entity.overloads %}
+    <li><a href="{{ o.url }}"><code>{{ o.signature }}</code></a></li>
+  {% endfor %}
+  </ul>
+  {% endif %}
   {% if entity.parameters %}
   <h2>Parameters</h2>
   <dl class="parameters">
@@ -14,5 +22,14 @@
   </dl>
   {% endif %}
   {% if entity.return_type %}<p class="returns">Returns <code>{{ entity.return_type }}</code></p>{% endif %}
+  {% if entity.implemented_by %}<p class="implemented-by">Implemented by <a href="{{ entity.implemented_by }}">source definition</a></p>{% endif %}
+  {% if entity.members %}
+  <h2>Members</h2>
+  <ul class="members">
+  {% for m in entity.members %}
+    <li><a href="{{ m.url }}"><code>{{ m.name }}</code></a></li>
+  {% endfor %}
+  </ul>
+  {% endif %}
 </article>
 {% endblock %}

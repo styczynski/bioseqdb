@@ -251,3 +251,24 @@ img, video { max-width: 100%; height: auto; }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.001ms !important; scroll-behavior: auto !important; transition-duration: 0.001ms !important; }
 }
+
+/* Entity-reference tooltip (§12.4). Positioned by tooltips.mjs via inline top/left. */
+.entity-ref { text-decoration: underline dotted; cursor: help; }
+.entity-tooltip {
+  position: absolute;
+  z-index: 50;
+  max-width: 22rem;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: #0d1c2b;
+  color: var(--text, #e9f1f8);
+  border: 1px solid var(--surface-border, rgba(255, 255, 255, 0.10));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 0.85rem;
+  line-height: 1.4;
+  pointer-events: none;
+}
+.entity-tooltip[hidden] { display: none; }
+.entity-tooltip .tt-title { display: block; font-weight: 600; }
+.entity-tooltip .tt-signature { display: block; margin: 4px 0; font-family: var(--font-mono, monospace); font-size: 0.8rem; color: var(--accent-cyan, #46b8de); white-space: pre-wrap; }
+.entity-tooltip .tt-summary { display: block; color: var(--text-muted, #9db1c2); }

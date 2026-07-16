@@ -144,6 +144,28 @@ def _exercise_tabs(page) -> None:
     _check(panel.is_visible(), "selected tab panel is not visible")
 
 
+def _exercise_tooltip(page) -> None:
+    """If entity-ref tooltips are present (§12.4), verify keyboard focus shows a
+    populated tooltip and Escape dismisses it (§20.7)."""
+    refs = page.locator("a.entity-ref[data-entity-id][data-entity-data-url]")
+    if refs.count() == 0:
+        return
+    ref = refs.first
+    ref.scroll_into_view_if_needed()
+    ref.focus()
+    tip = page.locator("#entity-tooltip")
+    try:
+        tip.wait_for(state="visible", timeout=3000)
+    except Exception as error:  # noqa: BLE001
+        raise AssertionFail(f"entity-ref focus did not show a tooltip: {error}")
+    _check(bool(tip.inner_text().strip()), "tooltip shown with no content")
+    page.keyboard.press("Escape")
+    try:
+        tip.wait_for(state="hidden", timeout=3000)
+    except Exception as error:  # noqa: BLE001
+        raise AssertionFail(f"Escape did not dismiss the tooltip: {error}")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -187,6 +209,8 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
 
             if label == "landing":
                 _exercise_tabs(page)
+            if label == "tutorial":
+                _exercise_tooltip(page)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

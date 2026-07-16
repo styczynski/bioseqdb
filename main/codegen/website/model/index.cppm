@@ -214,6 +214,15 @@ struct documented_entity {
     std::optional<source_span> declaration;
     std::optional<std::string> implementation_entity_id;
     std::vector<std::string> overload_ids;
+    // Overload-group members as (identity signature, base-aware route); populated
+    // transiently at render time for the group page, never serialized (§12.3).
+    std::vector<std::pair<std::string, std::string>> overload_members;
+    // Container child index as (label, base-aware route): class/struct members and
+    // module/namespace children, populated transiently at render time (§12.3).
+    std::vector<std::pair<std::string, std::string>> child_members;
+    // Resolved base-aware route of implementation_entity_id, for the "Implemented by"
+    // cross-link; populated transiently at render time (§12.2).
+    std::string implemented_by_route;
     std::map<std::string, std::string, std::less<>> attributes;
     std::string route_path;  // leading-slash, base-independent site route
 };
@@ -233,6 +242,13 @@ struct landing_example_view {
     std::string visible_sql;
     bool has_result{};
     sql_result_set result;
+};
+
+// Per-module / SQL-domain documentation totals for the coverage report (§11.4).
+struct coverage_group_view {
+    std::string group;
+    std::uint32_t public_total{};
+    std::uint32_t documented_total{};
 };
 
 // The fully resolved, database-independent site model written by `website execute`
@@ -256,8 +272,11 @@ struct site_model {
     std::vector<documented_entity> omitted_sql_entities;  // §11.4 inventory-only
     std::uint32_t coverage_public_total{};
     std::uint32_t coverage_documented_total{};
-    std::vector<std::string> coverage_missing;        // public, undocumented, non-fatal
-    std::vector<std::string> coverage_fatal_missing;  // required, undocumented
+    std::vector<std::string> coverage_missing;             // undocumented, non-fatal
+    std::vector<std::string> coverage_missing_parameters;  // undocumented parameters
+    std::vector<std::string> coverage_missing_returns;     // undocumented return values
+    std::vector<std::string> coverage_fatal_missing;       // required/referenced, undocumented
+    std::vector<coverage_group_view> coverage_groups;      // totals by module / SQL domain
     std::string postgres_server_version;
     std::string extension_version;
     std::string staged_extension_sha256;

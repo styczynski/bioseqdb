@@ -1314,6 +1314,11 @@ CREATE TYPE bioseq.seq (
     INTERNALLENGTH = VARIABLE
 );
 
+COMMENT ON TYPE bioseq.seq IS
+    'Compact, alphabet-aware biological sequence column type: a variable-length, '
+    'TOAST-able value storing a nucleotide or protein sequence for indexing, '
+    'similarity search, and analysis inside PostgreSQL.';
+
 -- 3a. Self-cast function to apply typmod coercion after bioseq.seq_in.
 CREATE OR REPLACE FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
     RETURNS bioseq.seq
@@ -1420,6 +1425,9 @@ CREATE OR REPLACE FUNCTION bioseq.len(bioseq.seq)
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_len'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+COMMENT ON FUNCTION bioseq.len(bioseq.seq) IS
+    'Length of a bioseq.seq value in biological symbols (residues).';
+
 CREATE OR REPLACE FUNCTION bioseq.unit_len(bioseq.seq)
     RETURNS bigint
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_unit_len'
@@ -1450,6 +1458,9 @@ CREATE OR REPLACE FUNCTION bioseq.symbol_count(el bioseq.seq, sym text)
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE
     SUPPORT bioseq_symbol_count_support;
 
+COMMENT ON FUNCTION bioseq.symbol_count(bioseq.seq, text) IS
+    'Number of occurrences of a given symbol within a bioseq.seq value.';
+
 -- ============================================================================
 -- mmsearch — WHERE-qual stub over two bioseq.seq values.
 -- Declared here (after bioseq.seq is fully registered) so the parser can
@@ -1462,6 +1473,11 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq)
     LANGUAGE C IMMUTABLE STRICT
     SUPPORT mmsearch_support
     PARALLEL SAFE;
+
+COMMENT ON FUNCTION mmsearch(bioseq.seq, bioseq.seq) IS
+    'Similarity-search predicate: true when the query sequence aligns to the '
+    'target under default aligner options. The columnar custom scan rewrites '
+    'this qualification at plan time.';
 
 -- ============================================================================
 -- aligner_options — composite type for per-call overrides of
@@ -1522,6 +1538,10 @@ CREATE TYPE bioseq_aligner_options AS (
     vulkan_index_cache_enabled boolean,
     index_read_requirement      integer
 );
+
+COMMENT ON TYPE bioseq_aligner_options IS
+    'Per-call aligner tuning options (k-mer and window sizes, gap and chaining '
+    'limits) for the mmsearch similarity predicate.';
 
 CREATE OR REPLACE FUNCTION aligner_options(
     kmer_size                 integer  DEFAULT NULL,
@@ -1586,6 +1606,9 @@ CREATE OR REPLACE FUNCTION mmsearch(el bioseq.seq, query bioseq.seq,
     LANGUAGE C IMMUTABLE
     SUPPORT mmsearch_support
     PARALLEL SAFE;
+
+COMMENT ON FUNCTION mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options) IS
+    'Similarity-search predicate with explicit per-call aligner options.';
 
 -- ============================================================================
 -- bioseq.list_metadata — DOC0279 §12.1/§12.2. One row per (user bioseq table,

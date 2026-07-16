@@ -296,6 +296,11 @@ namespace {
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
+    boost::json::array overload_ids;
+    for (const std::string& id : entity.overload_ids) {
+        overload_ids.push_back(boost::json::value(id));
+    }
+    object["overload_ids"] = std::move(overload_ids);
     boost::json::object attributes;
     for (const auto& [key, value] : entity.attributes) {
         attributes[key] = value;
@@ -412,6 +417,29 @@ namespace {
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
+    if (!entity.overload_members.empty()) {
+        boost::json::array overloads;
+        for (const auto& member : entity.overload_members) {
+            boost::json::object item;
+            item["signature"] = html_escape(member.first);
+            item["url"] = html_escape(member.second);
+            overloads.push_back(std::move(item));
+        }
+        object["overloads"] = std::move(overloads);
+    }
+    if (!entity.child_members.empty()) {
+        boost::json::array members;
+        for (const auto& member : entity.child_members) {
+            boost::json::object item;
+            item["name"] = html_escape(member.first);
+            item["url"] = html_escape(member.second);
+            members.push_back(std::move(item));
+        }
+        object["members"] = std::move(members);
+    }
+    if (!entity.implemented_by_route.empty()) {
+        object["implemented_by"] = html_escape(entity.implemented_by_route);
+    }
     return object;
 }
 
@@ -665,6 +693,12 @@ namespace {
         documented.default_value = as_optional_string(fields.at("default"));
         entity.parameters.push_back(std::move(documented));
     }
+    if (const boost::json::value* overload_ids = object.if_contains("overload_ids");
+        overload_ids != nullptr && overload_ids->is_array()) {
+        for (const boost::json::value& id : overload_ids->as_array()) {
+            entity.overload_ids.push_back(std::string(id.as_string()));
+        }
+    }
     if (const boost::json::value& attributes = object.at("attributes");
         attributes.is_object()) {
         for (const auto& field : attributes.as_object()) {
@@ -817,11 +851,30 @@ namespace {
         missing.push_back(boost::json::value(entry));
     }
     coverage["missing"] = std::move(missing);
+    boost::json::array missing_parameters;
+    for (const std::string& entry : model.coverage_missing_parameters) {
+        missing_parameters.push_back(boost::json::value(entry));
+    }
+    coverage["missing_parameters"] = std::move(missing_parameters);
+    boost::json::array missing_returns;
+    for (const std::string& entry : model.coverage_missing_returns) {
+        missing_returns.push_back(boost::json::value(entry));
+    }
+    coverage["missing_returns"] = std::move(missing_returns);
     boost::json::array fatal_missing;
     for (const std::string& entry : model.coverage_fatal_missing) {
         fatal_missing.push_back(boost::json::value(entry));
     }
     coverage["fatal_missing"] = std::move(fatal_missing);
+    boost::json::array groups;
+    for (const coverage_group_view& group : model.coverage_groups) {
+        boost::json::object entry;
+        entry["group"] = group.group;
+        entry["public_total"] = static_cast<std::int64_t>(group.public_total);
+        entry["documented_total"] = static_cast<std::int64_t>(group.documented_total);
+        groups.push_back(std::move(entry));
+    }
+    coverage["groups"] = std::move(groups);
     root["coverage"] = std::move(coverage);
     boost::json::object provenance;
     provenance["postgres_server_version"] = model.postgres_server_version;
@@ -891,6 +944,28 @@ namespace {
         coverage.at("documented_total").to_number<std::int64_t>());
     for (const boost::json::value& entry : coverage.at("missing").as_array()) {
         model.coverage_missing.push_back(std::string(entry.as_string()));
+    }
+    if (const auto* parameters = coverage.if_contains("missing_parameters")) {
+        for (const boost::json::value& entry : parameters->as_array()) {
+            model.coverage_missing_parameters.push_back(std::string(entry.as_string()));
+        }
+    }
+    if (const auto* returns = coverage.if_contains("missing_returns")) {
+        for (const boost::json::value& entry : returns->as_array()) {
+            model.coverage_missing_returns.push_back(std::string(entry.as_string()));
+        }
+    }
+    if (const auto* groups = coverage.if_contains("groups")) {
+        for (const boost::json::value& entry : groups->as_array()) {
+            const boost::json::object& fields = entry.as_object();
+            coverage_group_view view;
+            view.group = std::string(fields.at("group").as_string());
+            view.public_total = static_cast<std::uint32_t>(
+                fields.at("public_total").to_number<std::int64_t>());
+            view.documented_total = static_cast<std::uint32_t>(
+                fields.at("documented_total").to_number<std::int64_t>());
+            model.coverage_groups.push_back(std::move(view));
+        }
     }
     for (const boost::json::value& entry : coverage.at("fatal_missing").as_array()) {
         model.coverage_fatal_missing.push_back(std::string(entry.as_string()));
@@ -1152,24 +1227,39 @@ namespace {
 /// @param missing_summary Public entities missing docs (non-fatal warnings).
 /// @param fatal_missing Required/tutorial-referenced entities missing docs.
 /// @return Canonical JSON ending in one newline (schema documentation_coverage/v1).
+[[nodiscard]] boost::json::array serialize_id_array(
+    const std::vector<std::string>& ids) {
+    boost::json::array array;
+    for (const std::string& id : ids) {
+        array.push_back(boost::json::value(id));
+    }
+    return array;
+}
+
 [[nodiscard]] std::string serialize_coverage(
     std::size_t public_total, std::size_t documented_total,
     const std::vector<std::string>& missing_summary,
-    const std::vector<std::string>& fatal_missing) {
+    const std::vector<std::string>& missing_parameters,
+    const std::vector<std::string>& missing_returns,
+    const std::vector<std::string>& fatal_missing,
+    const std::vector<coverage_group_view>& groups) {
     boost::json::object root;
     root["schema"] = "bioseq.website.documentation_coverage/v1";
     root["public_total"] = static_cast<std::int64_t>(public_total);
     root["documented_total"] = static_cast<std::int64_t>(documented_total);
-    boost::json::array warnings;
-    for (const std::string& id : missing_summary) {
-        warnings.push_back(boost::json::value(id));
+    boost::json::array group_array;
+    for (const coverage_group_view& group : groups) {
+        boost::json::object entry;
+        entry["group"] = group.group;
+        entry["public_total"] = static_cast<std::int64_t>(group.public_total);
+        entry["documented_total"] = static_cast<std::int64_t>(group.documented_total);
+        group_array.push_back(std::move(entry));
     }
-    root["missing_summary"] = std::move(warnings);
-    boost::json::array fatal;
-    for (const std::string& id : fatal_missing) {
-        fatal.push_back(boost::json::value(id));
-    }
-    root["fatal_missing"] = std::move(fatal);
+    root["groups"] = std::move(group_array);
+    root["missing_summary"] = serialize_id_array(missing_summary);
+    root["missing_parameters"] = serialize_id_array(missing_parameters);
+    root["missing_returns"] = serialize_id_array(missing_returns);
+    root["fatal_missing"] = serialize_id_array(fatal_missing);
     return serialize_canonical(root);
 }
 

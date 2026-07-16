@@ -78,6 +78,9 @@ void expect(bool condition, std::string_view detail) {
 
 }  // namespace
 
+// Defined after the reference index it exercises; driven by run_website_smoke.
+void run_website_reference_smoke();
+
 /// @brief Exercises every integrated parser/renderer/serializer once.
 ///
 /// This is the functional half of the website self-test: it links and runs
@@ -221,6 +224,10 @@ void run_website_smoke() {
                && sql_api_rejects("schema: s\ninclude_schemas: []\n"
                                   "public_entities: [sql:type:bioseq.seq]\n"),
            "sql_api.yaml rejects unknown keys, duplicates, and empty sequences");
+
+    // Overload-group routing/rendering is checked in run_website_reference_smoke,
+    // defined after the reference index it exercises.
+    run_website_reference_smoke();
 
     // Clang 22 structural/export pass (§11.3): exported module members are
     // recorded with kind/signature; a non-exported namespace is excluded.
@@ -952,14 +959,41 @@ struct entity_reference_index {
     const std::vector<documented_entity>& cpp_entities,
     const std::vector<documented_entity>& sql_entities) {
     entity_reference_index index;
+    // A name an overload_group owns must resolve to the GROUP page, not to any one
+    // member overload (§12.3): collect grouped names so each member skips indexing
+    // its shared qualified/display name and only the group claims the bare name.
+    std::set<std::string, std::less<>> grouped_names;
+    std::set<std::string, std::less<>> real_spellings;
+    for (const documented_entity& entity : sql_entities) {
+        if (entity.kind == entity_kind::overload_group) {
+            grouped_names.insert(entity.qualified_name);
+        }
+    }
+    for (const documented_entity& entity : cpp_entities) {
+        real_spellings.insert(entity.qualified_name);
+    }
+    for (const documented_entity& entity : sql_entities) {
+        real_spellings.insert(entity.qualified_name);
+    }
     const auto add_entity = [&](const documented_entity& entity) {
         const entity_query_domain domain = entity.domain == entity_domain::sql
             ? entity_query_domain::sql : entity_query_domain::cpp;
-        index.add(domain, entity.qualified_name, entity.canonical_id);
         index.add(domain, entity.canonical_id, entity.canonical_id);
-        index.add(domain, entity.display_name, entity.canonical_id);
         index.add(entity_query_domain::canonical_id, entity.canonical_id,
                   entity.canonical_id);
+        const bool name_owned_by_group = entity.kind != entity_kind::overload_group
+            && entity.domain == entity_domain::sql
+            && grouped_names.contains(entity.qualified_name);
+        if (!name_owned_by_group) {
+            index.add(domain, entity.qualified_name, entity.canonical_id);
+            index.add(domain, entity.display_name, entity.canonical_id);
+            // The `any` domain backs the `#name` prose shorthand (§10.5): a name that
+            // exists in both C++ and SQL collides here and is reported as ambiguous.
+            index.add(entity_query_domain::any, entity.qualified_name,
+                      entity.canonical_id);
+            index.add(entity_query_domain::any, entity.display_name,
+                      entity.canonical_id);
+        }
     };
     for (const documented_entity& entity : cpp_entities) {
         add_entity(entity);
@@ -967,7 +1001,114 @@ struct entity_reference_index {
     for (const documented_entity& entity : sql_entities) {
         add_entity(entity);
     }
+    // Extension-qualified authoring alias `bioseq.<name>` for public-schema SQL
+    // entities owned by the extension, when no real entity has that spelling (§10.4):
+    // `#bioseq.mmsearch` resolves to the public.mmsearch overload group.
+    for (const documented_entity& entity : sql_entities) {
+        const std::size_t dot = entity.qualified_name.find('.');
+        const std::string schema =
+            dot == std::string::npos ? std::string() : entity.qualified_name.substr(0, dot);
+        const std::string bare = dot == std::string::npos
+            ? entity.qualified_name : entity.qualified_name.substr(dot + 1);
+        const bool member_of_group = entity.kind != entity_kind::overload_group
+            && grouped_names.contains(entity.qualified_name);
+        if (schema == "bioseq" || member_of_group) {
+            continue;  // already bioseq-qualified, or the group owns the alias
+        }
+        const std::string alias = "bioseq." + bare;
+        if (real_spellings.contains(alias)) {
+            continue;  // a real entity already owns this spelling
+        }
+        index.add(entity_query_domain::sql, alias, entity.canonical_id);
+        index.add(entity_query_domain::any, alias, entity.canonical_id);
+    }
     return index;
+}
+
+// Splits one prose text run into text + shorthand entity_link nodes (§10.5). A
+// shorthand is `#` at a text-start/whitespace boundary, followed by an ASCII
+// identifier whose components join with `.` or `::`; anything else stays literal.
+void split_shorthand_text(const std::string& text,
+                          std::vector<document_node>& out) {
+    const auto is_start = [](char character) {
+        return (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z') || character == '_';
+    };
+    const auto is_part = [&](char character) {
+        return is_start(character) || (character >= '0' && character <= '9');
+    };
+    std::string pending;
+    const auto flush = [&]() {
+        if (pending.empty()) {
+            return;
+        }
+        if (!out.empty() && out.back().kind == document_node_kind::text) {
+            out.back().text += pending;
+        } else {
+            out.push_back(document_node{.kind = document_node_kind::text, .text = pending});
+        }
+        pending.clear();
+    };
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const bool boundary = index == 0
+            || static_cast<unsigned char>(text[index - 1]) <= ' ';
+        if (text[index] == '#' && boundary && index + 1 < text.size()
+            && is_start(text[index + 1])) {
+            std::size_t cursor = index + 1;
+            std::string name;
+            while (cursor < text.size()) {
+                if (is_part(text[cursor])) {
+                    name.push_back(text[cursor]);
+                    ++cursor;
+                } else if (text[cursor] == '.' && cursor + 1 < text.size()
+                           && is_start(text[cursor + 1])) {
+                    name.push_back('.');
+                    ++cursor;
+                } else if (text[cursor] == ':' && cursor + 2 < text.size()
+                           && text[cursor + 1] == ':' && is_start(text[cursor + 2])) {
+                    name += "::";
+                    cursor += 2;
+                } else {
+                    break;
+                }
+            }
+            if (!name.empty()) {
+                flush();
+                document_node node;
+                node.kind = document_node_kind::entity_link;
+                node.target = name;
+                node.attributes.emplace("shorthand", "1");
+                out.push_back(std::move(node));
+                index = cursor;
+                continue;
+            }
+        }
+        pending.push_back(text[index]);
+        ++index;
+    }
+    flush();
+}
+
+// Rewrites `#name` prose shorthands into entity_link nodes (§10.5), only inside
+// prose: headings, code, links, and existing entity links are left untouched.
+void apply_entity_shorthand(std::vector<document_node>& nodes, bool in_prose) {
+    std::vector<document_node> rebuilt;
+    for (document_node& node : nodes) {
+        if (in_prose && node.kind == document_node_kind::text) {
+            split_shorthand_text(node.text, rebuilt);
+            continue;
+        }
+        const bool child_prose = in_prose
+            && node.kind != document_node_kind::heading
+            && node.kind != document_node_kind::code_span
+            && node.kind != document_node_kind::code_block
+            && node.kind != document_node_kind::link
+            && node.kind != document_node_kind::entity_link;
+        apply_entity_shorthand(node.children, child_prose);
+        rebuilt.push_back(std::move(node));
+    }
+    nodes = std::move(rebuilt);
 }
 
 // Resolves every entity_link in a tutorial's content against the entity graph and
@@ -979,35 +1120,60 @@ void resolve_entity_links(std::vector<document_node>& nodes,
                           const std::string& where) {
     for (document_node& node : nodes) {
         if (node.kind == document_node_kind::entity_link) {
-            const std::optional<unresolved_entity_query> query =
-                parse_entity_reference(node.target,
-                                       node.source ? *node.source : source_span{});
-            if (!query) {
-                throw std::runtime_error("malformed entity reference [[" + node.target
-                    + "]] in " + where);
+            // A `#name` prose shorthand (§10.5) resolves name-only against every
+            // domain; the explicit `[[domain:...]]` wiki form names its own domain.
+            const bool shorthand = node.attributes.contains("shorthand");
+            const std::string display = shorthand ? "#" + node.target
+                                                  : "[[" + node.target + "]]";
+            unresolved_entity_query query;
+            if (shorthand) {
+                query.domain = entity_query_domain::any;
+                query.spelling = node.target;
+            } else if (std::optional<unresolved_entity_query> parsed =
+                           parse_entity_reference(
+                               node.target, node.source ? *node.source : source_span{})) {
+                query = std::move(*parsed);
+            } else {
+                throw std::runtime_error(
+                    "malformed entity reference " + display + " in " + where);
             }
             const std::string key =
-                entity_reference_index::domain_key(query->domain) + query->spelling;
+                entity_reference_index::domain_key(query.domain) + query.spelling;
             const auto found = index.by_key.find(key);
             if (found == index.by_key.end()) {
-                throw std::runtime_error("unresolved entity reference [[" + node.target
-                    + "]] in " + where);
+                throw std::runtime_error(
+                    "unresolved entity reference " + display + " in " + where);
             }
             if (found->second.empty()) {
-                throw std::runtime_error("ambiguous entity reference [[" + node.target
-                    + "]] in " + where);
+                throw std::runtime_error(
+                    "ambiguous entity reference " + display + " in " + where
+                    + " (use an explicit sql:/cpp: form)");
             }
             node.attributes["entity_id"] = found->second;
             // A `spelling|label` reference names its own display text; otherwise the
             // node's Markdown link text is the label. Only when neither exists does the
             // spelling become the label (so a resolved route never shows as raw text).
-            if (query->label) {
-                node.attributes["entity_label"] = *query->label;
+            if (query.label) {
+                node.attributes["entity_label"] = *query.label;
             } else if (node.text.empty() && node.children.empty()) {
-                node.attributes["entity_label"] = query->spelling;
+                node.attributes["entity_label"] = query.spelling;
             }
         }
         resolve_entity_links(node.children, index, where);
+    }
+}
+
+// Collects the canonical IDs that resolved entity links target across a document
+// tree (§10.4). These "referenced" entities join the required set for coverage:
+// a public entity a tutorial links to must be documented or the build fails.
+void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
+                                   std::set<std::string>& referenced) {
+    for (const document_node& node : nodes) {
+        if (const auto found = node.attributes.find("entity_id");
+            found != node.attributes.end()) {
+            referenced.insert(found->second);
+        }
+        collect_referenced_entity_ids(node.children, referenced);
     }
 }
 
@@ -1093,6 +1259,41 @@ void resolve_entity_links(std::vector<document_node>& nodes,
         model.omitted_sql_entities = std::move(omitted);
     }
 
+    // Synthesize an overload-group page for every allowlisted SQL function name that
+    // carries more than one signature (§12.1/§12.3): the group owns the bare-name
+    // reference and lists each member's identity signature. Grouping runs on the
+    // post-allowlist kept set, so an inventory-only overload never creates a page.
+    {
+        std::map<std::string, std::vector<const documented_entity*>, std::less<>> by_name;
+        for (const documented_entity& entity : model.sql_entities) {
+            if (entity.kind == entity_kind::sql_function) {
+                by_name[entity.qualified_name].push_back(&entity);
+            }
+        }
+        std::vector<documented_entity> groups;
+        for (const auto& [name, members] : by_name) {
+            if (members.size() < 2) {
+                continue;
+            }
+            documented_entity group;
+            group.domain = entity_domain::sql;
+            group.kind = entity_kind::overload_group;
+            group.qualified_name = name;
+            const std::size_t dot = name.rfind('.');
+            group.display_name = dot == std::string::npos ? name : name.substr(dot + 1);
+            group.canonical_id = "sql:overload_group:" + name;
+            group.summary_text = "Overloaded SQL function with "
+                + std::to_string(members.size()) + " signatures.";
+            for (const documented_entity* member : members) {
+                group.overload_ids.push_back(member->canonical_id);
+            }
+            groups.push_back(std::move(group));
+        }
+        model.sql_entities.insert(model.sql_entities.end(),
+                                  std::make_move_iterator(groups.begin()),
+                                  std::make_move_iterator(groups.end()));
+    }
+
     const execution_target target = resolve_execution_target(options);
     if (target.have_connection && !target.probe_conninfo.empty()) {
         private_cluster_executor probe(target.probe_conninfo);
@@ -1114,6 +1315,7 @@ void resolve_entity_links(std::vector<document_node>& nodes,
         build_entity_reference_index(model.cpp_entities, model.sql_entities);
 
     for (tutorial& item : plan.tutorials) {
+        apply_entity_shorthand(item.content, true);
         resolve_entity_links(item.content, reference_index, item.source_path);
         std::map<std::string, sql_example_result, std::less<>> results;
         if (target.have_connection) {
@@ -1140,17 +1342,136 @@ void resolve_entity_links(std::vector<document_node>& nodes,
     }
     model.tutorials = std::move(plan.tutorials);
 
+    // Coverage spans both the configured public C++ modules and the allowlisted SQL
+    // domain (§11.4); synthetic overload-group aggregates are routing pages, not
+    // documentable entities, so they are excluded from the totals.
+    std::vector<documented_entity> coverage_entities = model.cpp_entities;
+    for (const documented_entity& entity : model.sql_entities) {
+        if (entity.kind != entity_kind::overload_group) {
+            coverage_entities.push_back(entity);
+        }
+    }
+    // Every entity a tutorial links to must be documented (§11.4/§11.6): collect the
+    // resolved references so an undocumented referenced entity is fatal, not a warning.
+    std::set<std::string> referenced;
+    for (const tutorial& item : model.tutorials) {
+        collect_referenced_entity_ids(item.content, referenced);
+    }
+    const std::vector<std::string> referenced_ids(referenced.begin(), referenced.end());
     const coverage_report coverage = compute_coverage(
-        model.cpp_entities, config.required_documentation_entities, {});
+        coverage_entities, config.required_documentation_entities, referenced_ids);
     model.coverage_public_total = static_cast<std::uint32_t>(coverage.public_total);
     model.coverage_documented_total =
         static_cast<std::uint32_t>(coverage.documented_total);
     model.coverage_missing = coverage.missing_summary;
+    model.coverage_missing_parameters = coverage.missing_parameters;
+    model.coverage_missing_returns = coverage.missing_returns;
     model.coverage_fatal_missing = coverage.fatal_missing;
+    for (const coverage_group_report& group : coverage.groups) {
+        model.coverage_groups.push_back(coverage_group_view{
+            group.group, static_cast<std::uint32_t>(group.public_total),
+            static_cast<std::uint32_t>(group.documented_total)});
+    }
+    // §11.4: the build fails when a required or tutorial-referenced public entity is
+    // undocumented. C++ required coverage is also gated at cpp_index; this is the
+    // single point that enforces the same policy over the live allowlisted SQL domain.
+    if (!coverage.fatal_missing.empty()) {
+        std::string joined;
+        for (const std::string& id : coverage.fatal_missing) {
+            joined += (joined.empty() ? "" : ", ") + id;
+        }
+        throw std::runtime_error(
+            "required/referenced documentation missing for: " + joined);
+    }
     return model;
 }
 
 }  // namespace
+
+/// @brief Self-tests overload-group routing and group-page rendering (§12.3).
+///
+/// A name carrying several allowlisted signatures gets a synthetic overload_group
+/// that owns the bare-name reference (so a name-only link resolves to the group
+/// page instead of being rejected as ambiguous), while every concrete overload
+/// stays addressable by its canonical id; the group page view lists each member's
+/// identity signature with its route.
+void run_website_reference_smoke() {
+    documented_entity overload_a;
+    overload_a.domain = entity_domain::sql;
+    overload_a.kind = entity_kind::sql_function;
+    overload_a.qualified_name = "public.mmsearch";
+    overload_a.display_name = "mmsearch";
+    overload_a.canonical_id = "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)";
+    documented_entity overload_b = overload_a;
+    overload_b.canonical_id =
+        "sql:function:public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)";
+    documented_entity mmsearch_group;
+    mmsearch_group.domain = entity_domain::sql;
+    mmsearch_group.kind = entity_kind::overload_group;
+    mmsearch_group.qualified_name = "public.mmsearch";
+    mmsearch_group.display_name = "mmsearch";
+    mmsearch_group.canonical_id = "sql:overload_group:public.mmsearch";
+    const entity_reference_index grouped_index = build_entity_reference_index(
+        {}, {overload_a, overload_b, mmsearch_group});
+    const auto lookup = [&](entity_query_domain domain, std::string_view spelling) {
+        const auto found = grouped_index.by_key.find(
+            entity_reference_index::domain_key(domain) + std::string(spelling));
+        return found == grouped_index.by_key.end() ? std::string() : found->second;
+    };
+    expect(lookup(entity_query_domain::sql, "public.mmsearch")
+               == "sql:overload_group:public.mmsearch"
+           && lookup(entity_query_domain::sql, "mmsearch")
+               == "sql:overload_group:public.mmsearch"
+           && lookup(entity_query_domain::canonical_id,
+                     "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)")
+               == "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+           "overload-group name resolves to the group; members keep canonical ids");
+
+    // §10.5 shorthand resolves name-only against the `any` domain, and the
+    // extension-qualified `bioseq.<name>` alias resolves to the same target.
+    expect(lookup(entity_query_domain::any, "mmsearch")
+               == "sql:overload_group:public.mmsearch"
+           && lookup(entity_query_domain::any, "bioseq.mmsearch")
+               == "sql:overload_group:public.mmsearch",
+           "#mmsearch shorthand and the bioseq.mmsearch alias resolve to the group");
+    std::vector<document_node> shorthand_split;
+    split_shorthand_text("see #bioseq.mmsearch and ##notshorthand", shorthand_split);
+    int shorthand_links = 0;
+    std::string shorthand_target;
+    for (const document_node& node : shorthand_split) {
+        if (node.kind == document_node_kind::entity_link) {
+            ++shorthand_links;
+            shorthand_target = node.target;
+        }
+    }
+    expect(shorthand_links == 1 && shorthand_target == "bioseq.mmsearch",
+           "shorthand splitter extracts a single #name entity reference");
+
+    documented_entity group_view = mmsearch_group;
+    group_view.overload_members = {
+        {"public.mmsearch(bioseq.seq,bioseq.seq)", "/v0.1/reference/sql/function/a/"},
+        {"public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)",
+         "/v0.1/reference/sql/function/b/"}};
+    const std::string group_json = serialize_single_entity(group_view);
+    expect(group_json.find("\"overloads\"") != std::string::npos
+               && group_json.find("bioseq_aligner_options") != std::string::npos,
+           "overload-group page view serializes member signatures");
+
+    // Container pages (§12.3) carry a child index; an implementation cross-link
+    // (§12.2) resolves to the implementing entity's route.
+    documented_entity container;
+    container.domain = entity_domain::cpp;
+    container.kind = entity_kind::struct_;
+    container.qualified_name = "bioseq::io::seq";
+    container.child_members = {{"read", "/v0.1/reference/cpp/function/read-abc/"},
+                               {"size", "/v0.1/reference/cpp/function/size-def/"}};
+    container.implemented_by_route = "/v0.1/reference/cpp/function/impl-ghi/";
+    const std::string container_json = serialize_single_entity(container);
+    expect(container_json.find("\"members\"") != std::string::npos
+               && container_json.find("read-abc") != std::string::npos
+               && container_json.find("\"implemented_by\"") != std::string::npos,
+           "container page view serializes child index and implemented-by link");
+}
 
 /// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
 ///
@@ -1284,9 +1605,17 @@ namespace {
         merged, config.required_documentation_entities, {});
 
     write_if_different(output, serialize_cpp_entities(merged, structural.clang_version));
+    std::vector<coverage_group_view> coverage_groups;
+    for (const coverage_group_report& group : coverage.groups) {
+        coverage_groups.push_back(coverage_group_view{
+            group.group, static_cast<std::uint32_t>(group.public_total),
+            static_cast<std::uint32_t>(group.documented_total)});
+    }
     write_if_different(coverage_output,
                        serialize_coverage(coverage.public_total, coverage.documented_total,
-                                          coverage.missing_summary, coverage.fatal_missing));
+                                          coverage.missing_summary, coverage.missing_parameters,
+                                          coverage.missing_returns, coverage.fatal_missing,
+                                          coverage_groups));
     if (!coverage.fatal_missing.empty()) {
         std::string joined;
         for (const std::string& id : coverage.fatal_missing) {
@@ -1857,6 +2186,80 @@ void rewrite_entity_link_routes(
     for (const documented_entity& entity : all_entities) {
         route_by_id.emplace(entity.canonical_id, entity.route_path);
     }
+
+    // Bind each overload-group's members to their identity signature + base-aware
+    // route so the group page can link to every concrete overload (§12.3).
+    for (documented_entity& group : sql_entities) {
+        if (group.kind != entity_kind::overload_group) {
+            continue;
+        }
+        for (const std::string& member_id : group.overload_ids) {
+            const auto member = std::ranges::find_if(
+                sql_entities, [&](const documented_entity& candidate) {
+                    return candidate.canonical_id == member_id;
+                });
+            if (member == sql_entities.end()) {
+                continue;
+            }
+            const auto route = route_by_id.find(member_id);
+            group.overload_members.emplace_back(
+                member->normalized_signature,
+                route != route_by_id.end() ? route->second : std::string());
+        }
+    }
+
+    // Container child index (§12.3): group every entity under its parent's qualified
+    // name so class/struct pages list their members and module/namespace pages list
+    // their children. The parent is the qualified name minus its last top-level
+    // `::` component (template/parameter `::` are skipped via depth tracking).
+    const auto parent_of = [](std::string_view name) -> std::string {
+        int depth = 0;
+        std::size_t last = std::string::npos;
+        for (std::size_t index = 0; index + 1 < name.size(); ++index) {
+            const char character = name[index];
+            if (character == '<' || character == '(') {
+                ++depth;
+            } else if ((character == '>' || character == ')') && depth > 0) {
+                --depth;
+            } else if (depth == 0 && character == ':' && name[index + 1] == ':') {
+                last = index;
+            }
+        }
+        return last == std::string::npos ? std::string()
+                                         : std::string(name.substr(0, last));
+    };
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>, std::less<>>
+        children_by_parent;
+    for (const documented_entity& entity : all_entities) {
+        if (entity.kind == entity_kind::overload_group) {
+            continue;  // routing aggregate, not a structural child
+        }
+        const std::string parent = parent_of(entity.qualified_name);
+        if (!parent.empty()) {
+            children_by_parent[parent].emplace_back(entity.display_name,
+                                                    entity.route_path);
+        }
+    }
+    for (auto& [parent, children] : children_by_parent) {
+        std::ranges::sort(children);
+    }
+    const auto attach_relations = [&](std::vector<documented_entity>& list) {
+        for (documented_entity& entity : list) {
+            if (const auto found = children_by_parent.find(entity.qualified_name);
+                found != children_by_parent.end()) {
+                entity.child_members = found->second;
+            }
+            if (entity.implementation_entity_id) {
+                if (const auto route = route_by_id.find(*entity.implementation_entity_id);
+                    route != route_by_id.end()) {
+                    entity.implemented_by_route = route->second;
+                }
+            }
+        }
+    };
+    attach_relations(cpp_entities);
+    attach_relations(sql_entities);
+
     const std::string tooltip_json = serialize_entity_tooltips(all_entities);
     const std::string tooltip_url =
         url(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json) + ".json");
@@ -1961,15 +2364,30 @@ void rewrite_entity_link_routes(
     render_domain("sql", "SQL", sql_entities);
 
     // Documentation-coverage page and machine-readable report (§11.4), taken from
-    // the resolved model so execute and render agree exactly.
-    std::string missing_json = "[";
-    for (std::size_t index = 0; index < model.coverage_missing.size(); ++index) {
-        if (index > 0) {
-            missing_json.push_back(',');
+    // the resolved model so execute and render agree exactly. Missing docs are broken
+    // out into summary/parameter/return dimensions and totalled per module/SQL domain.
+    const auto id_array = [&](const std::vector<std::string>& ids) {
+        std::string out = "[";
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            if (index > 0) {
+                out.push_back(',');
+            }
+            out += json_text(ids[index]);
         }
-        missing_json += json_text(model.coverage_missing[index]);
+        out.push_back(']');
+        return out;
+    };
+    std::string groups_json = "[";
+    for (std::size_t index = 0; index < model.coverage_groups.size(); ++index) {
+        const coverage_group_view& group = model.coverage_groups[index];
+        if (index > 0) {
+            groups_json.push_back(',');
+        }
+        groups_json += "{\"group\":" + json_text(group.group)
+            + ",\"public_total\":" + std::to_string(group.public_total)
+            + ",\"documented_total\":" + std::to_string(group.documented_total) + "}";
     }
-    missing_json.push_back(']');
+    groups_json.push_back(']');
     render(version + "/documentation-coverage/index.html", "coverage.html.j2",
            "{\"title\":" + json_text("Documentation coverage")
                + ",\"description\":" + json_text("Public API documentation coverage")
@@ -1977,12 +2395,18 @@ void rewrite_entity_link_routes(
                + json_text(canonical(version + "/documentation-coverage/index.html"))
                + ",\"public_total\":" + std::to_string(model.coverage_public_total)
                + ",\"documented_total\":" + std::to_string(model.coverage_documented_total)
-               + ",\"missing\":" + missing_json + "}",
+               + ",\"groups\":" + groups_json
+               + ",\"missing\":" + id_array(model.coverage_missing)
+               + ",\"missing_parameters\":" + id_array(model.coverage_missing_parameters)
+               + ",\"missing_returns\":" + id_array(model.coverage_missing_returns)
+               + ",\"fatal_missing\":" + id_array(model.coverage_fatal_missing) + "}",
            "", "");
     writer.emit(route(version + "/documentation-coverage.json"),
                 serialize_coverage(model.coverage_public_total,
                                    model.coverage_documented_total,
-                                   model.coverage_missing, model.coverage_fatal_missing));
+                                   model.coverage_missing, model.coverage_missing_parameters,
+                                   model.coverage_missing_returns, model.coverage_fatal_missing,
+                                   model.coverage_groups));
 
     // Versions manifest, versions page, and per-version search index (§15.1, §12.5).
     const std::vector<std::string> version_labels{version};

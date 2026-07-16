@@ -5,6 +5,7 @@
 // markers, so this single entry is inert on documentation/reference pages.
 
 import { initTabs } from "./tabs.mjs";
+import { initTooltips } from "./tooltips.mjs";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -40,5 +41,6 @@ function initCopyButtons() {
 document.addEventListener("DOMContentLoaded", () => {
   initCopyButtons();
   initTabs();
+  initTooltips();
   document.documentElement.dataset.reducedMotion = reduceMotion ? "true" : "false";
 });

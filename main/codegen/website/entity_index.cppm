@@ -22,12 +22,22 @@ import bioseq.codegen.support;
 // policy stage.
 namespace bioseq::codegen::website {
 
+/// @brief Per-module / SQL-domain documentation totals (§11.4 breakdown).
+struct coverage_group_report {
+    std::string group;              // C++ module/top namespace, or "sql:<schema>"
+    std::size_t public_total{};
+    std::size_t documented_total{};
+};
+
 /// @brief Documentation-coverage summary for the configured public surface (§11.4).
 struct coverage_report {
     std::size_t public_total{};
     std::size_t documented_total{};
-    std::vector<std::string> missing_summary;   // public, undocumented, non-fatal
-    std::vector<std::string> fatal_missing;     // required/tutorial-referenced, undocumented
+    std::vector<std::string> missing_summary;    // public, undocumented, non-fatal
+    std::vector<std::string> missing_parameters; // functions with undocumented parameters
+    std::vector<std::string> missing_returns;    // value-returning functions with no @return
+    std::vector<std::string> fatal_missing;      // required/tutorial-referenced, undocumented
+    std::vector<coverage_group_report> groups;   // totals by module / SQL domain
 };
 
 /// @brief Maps an entity kind to its canonical-ID and route token (§12.1).
@@ -221,6 +231,44 @@ void attach_documentation(documented_entity& target, const documented_entity& so
     return merged;
 }
 
+// Does the documentation tree carry a Doxygen admonition of the given kind?
+// @param/@return are projected as admonition nodes whose "kind" attribute is
+// "param:<direction>"/"return" (see doxygen_xml.cppm), so a prefix match locates
+// any parameter documentation and an exact match locates the return documentation.
+[[nodiscard]] bool documentation_has_admonition(
+    const std::vector<document_node>& nodes, std::string_view kind, bool prefix) {
+    for (const document_node& node : nodes) {
+        if (node.kind == document_node_kind::admonition) {
+            if (const auto found = node.attributes.find("kind");
+                found != node.attributes.end()
+                && (prefix ? std::string_view(found->second).starts_with(kind)
+                           : std::string_view(found->second) == kind)) {
+                return true;
+            }
+        }
+        if (documentation_has_admonition(node.children, kind, prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Coverage bucket (§11.4 breakdown): SQL entities group by "sql:<schema>", C++
+// entities by their owning module, falling back to the top namespace component.
+[[nodiscard]] std::string coverage_group_of(const documented_entity& entity) {
+    if (entity.domain == entity_domain::sql) {
+        const std::size_t dot = entity.qualified_name.find('.');
+        return "sql:" + (dot == std::string::npos ? std::string("public")
+                                                   : entity.qualified_name.substr(0, dot));
+    }
+    if (entity.module_name && !entity.module_name->empty()) {
+        return *entity.module_name;
+    }
+    const std::size_t sep = entity.qualified_name.find("::");
+    return sep == std::string::npos ? entity.qualified_name
+                                    : entity.qualified_name.substr(0, sep);
+}
+
 /// @brief Computes documentation coverage over the public surface (§11.4).
 /// @param entities Canonical merged public entities.
 /// @param required_ids Canonical IDs marked public-documentation-required.
@@ -236,19 +284,50 @@ void attach_documentation(documented_entity& target, const documented_entity& so
     coverage_report report;
     for (const documented_entity& entity : entities) {
         ++report.public_total;
+        const std::string group_key = coverage_group_of(entity);
+        coverage_group_report* group = nullptr;
+        for (coverage_group_report& candidate : report.groups) {
+            if (candidate.group == group_key) {
+                group = &candidate;
+                break;
+            }
+        }
+        if (group == nullptr) {
+            report.groups.push_back(coverage_group_report{group_key, 0, 0});
+            group = &report.groups.back();
+        }
+        ++group->public_total;
         if (!entity.summary_text.empty()) {
             ++report.documented_total;
-            continue;
-        }
-        if (listed(required_ids, entity.canonical_id)
-            || listed(referenced_ids, entity.canonical_id)) {
+            ++group->documented_total;
+        } else if (listed(required_ids, entity.canonical_id)
+                   || listed(referenced_ids, entity.canonical_id)) {
             report.fatal_missing.push_back(entity.canonical_id);
         } else {
             report.missing_summary.push_back(entity.canonical_id);
         }
+        // Parameter/return documentation applies to C++ functions, whose @param/@return
+        // live in the Doxygen tree; SQL functions carry only a catalog summary.
+        if (entity.domain == entity_domain::cpp
+            && entity.kind == entity_kind::function) {
+            if (!entity.parameters.empty()
+                && !documentation_has_admonition(entity.documentation, "param:", true)) {
+                report.missing_parameters.push_back(entity.canonical_id);
+            }
+            if (entity.return_type && *entity.return_type != "void"
+                && !documentation_has_admonition(entity.documentation, "return", false)) {
+                report.missing_returns.push_back(entity.canonical_id);
+            }
+        }
     }
     std::ranges::sort(report.fatal_missing);
     std::ranges::sort(report.missing_summary);
+    std::ranges::sort(report.missing_parameters);
+    std::ranges::sort(report.missing_returns);
+    std::ranges::sort(report.groups, [](const coverage_group_report& lhs,
+                                        const coverage_group_report& rhs) {
+        return lhs.group < rhs.group;
+    });
     return report;
 }
 
