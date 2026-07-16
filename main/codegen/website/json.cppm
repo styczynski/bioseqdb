@@ -1132,6 +1132,9 @@ namespace {
     site_object["css_url"] = site.css_url;
     site_object["js_url"] = site.js_url;
     site_object["favicon_url"] = site.favicon_url;
+    site_object["prism_js_url"] = site.prism_js_url;
+    site_object["prism_css_url"] = site.prism_css_url;
+    site_object["social_image_url"] = site.social_image_url;
     boost::json::object nav_labels;
     nav_labels["documentation"] = site.nav_documentation;
     nav_labels["tutorials"] = site.nav_tutorials;
@@ -1160,6 +1163,9 @@ namespace {
         json_ld["url"] = page_object_ref.contains("canonical")
             ? page_object_ref.at("canonical") : boost::json::value("");
         json_ld["isPartOf"] = site.title;
+        if (!site.social_image_url.empty()) {
+            json_ld["image"] = site.social_image_url;
+        }
         page_object_ref["jsonld"] = boost::json::serialize(json_ld);
     }
 

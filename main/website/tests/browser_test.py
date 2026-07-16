@@ -166,6 +166,27 @@ def _exercise_tooltip(page) -> None:
         raise AssertionFail(f"Escape did not dismiss the tooltip: {error}")
 
 
+def _exercise_copy(page) -> None:
+    """If a fenced code block is present (§10.5), verify every Copy button is
+    keyboard-focusable and targets a real code element by id (§20.7)."""
+    buttons = page.locator("button.copy-button[data-copy-target]")
+    count = buttons.count()
+    if count == 0:
+        return
+    for index in range(count):
+        button = buttons.nth(index)
+        target_id = button.get_attribute("data-copy-target")
+        _check(bool(target_id), "copy button has an empty data-copy-target")
+        target = page.locator(f"#{target_id}")
+        _check(target.count() == 1,
+               f"copy button target #{target_id} does not resolve to one element")
+    # The first button must be reachable and operable by keyboard (no exception).
+    first = buttons.first
+    first.focus()
+    _check(first.evaluate("el => el === document.activeElement"),
+           "copy button did not accept keyboard focus")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -211,6 +232,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_tabs(page)
             if label == "tutorial":
                 _exercise_tooltip(page)
+                _exercise_copy(page)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

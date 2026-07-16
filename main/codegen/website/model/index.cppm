@@ -318,6 +318,9 @@ struct site_view {
     std::string css_url;
     std::string js_url;
     std::string favicon_url;
+    std::string prism_js_url;
+    std::string prism_css_url;
+    std::string social_image_url;
     std::string documentation_url;
     std::string tutorials_url;
     std::string reference_url;

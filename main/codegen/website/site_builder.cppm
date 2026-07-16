@@ -2078,6 +2078,16 @@ void rewrite_entity_link_routes(
     site.css_url = url(bundle_prefix + "css/site.css");
     site.js_url = url(bundle_prefix + "js/main.js");
     site.favicon_url = url(bundle_prefix + "favicon.svg");
+    site.prism_js_url = url(bundle_prefix + "vendor/prism/prism.min.js");
+    site.prism_css_url = url(bundle_prefix + "vendor/prism/prism.min.css");
+    // The configured default social image lives in the immutable bundle under
+    // media/; drop the authoring "static/" prefix to get its bundle-relative path
+    // and bind it as an absolute OpenGraph/Twitter image URL (§15.5).
+    std::string social_relative = config.default_social_image;
+    if (social_relative.starts_with("static/")) {
+        social_relative.erase(0, std::string_view("static/").size());
+    }
+    site.social_image_url = config.canonical_origin + url(bundle_prefix + social_relative);
     site.documentation_url = url(version + "/");
     site.tutorials_url = url(version + "/tutorials/");
     site.reference_url = url(version + "/reference/");

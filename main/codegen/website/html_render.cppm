@@ -1,6 +1,7 @@
 module;
 
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -56,6 +57,47 @@ void append_escaped_attribute(std::string& out, std::string_view text) {
     return lowered;
 }
 
+// A fenced language token normalized to its Prism grammar class and a visible
+// label (§10.5). Aliases collapse to one grammar; an unrecognized token carries an
+// empty class so the block renders as plain, unhighlighted text.
+struct code_language_view {
+    std::string_view prism_class;
+    std::string_view label;
+};
+
+[[nodiscard]] code_language_view classify_code_language(std::string_view raw) {
+    const std::string lowered = to_ascii_lower(raw);
+    if (lowered == "bash" || lowered == "shell" || lowered == "sh") return {"bash", "Bash"};
+    if (lowered == "sql") return {"sql", "SQL"};
+    if (lowered == "cpp" || lowered == "c++" || lowered == "cppm" || lowered == "cxx") {
+        return {"cpp", "C++"};
+    }
+    if (lowered == "cmake") return {"cmake", "CMake"};
+    if (lowered == "json") return {"json", "JSON"};
+    if (lowered == "yaml" || lowered == "yml") return {"yaml", "YAML"};
+    return {"", "Text"};
+}
+
+// A stable, page-unique DOM id for one code block, derived from its exact source
+// text plus its ordinal on the page: the Copy button targets it and it must never
+// collide (the html5lib validator rejects duplicate ids, §20.7). Identical blocks
+// on one page differ by ordinal.
+[[nodiscard]] std::string code_block_id(std::string_view text, std::size_t ordinal) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const char character : text) {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= 1099511628211ULL;
+    }
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string id = "code-";
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        id.push_back(digits[(hash >> shift) & 0xF]);
+    }
+    id.push_back('-');
+    id += std::to_string(ordinal);
+    return id;
+}
+
 // Accepts only inert href schemes: relative/fragment/absolute-path links and the
 // http(s)/mailto schemes. Anything else (javascript:, data:, vbscript:, unknown
 // scheme) collapses to a harmless fragment so a hostile link cannot execute.
@@ -79,6 +121,7 @@ void append_escaped_attribute(std::string& out, std::string_view text) {
 
 struct html_writer {
     std::string out;
+    std::size_t code_ordinal{0};
 
     void render_children(const std::vector<document_node>& children) {
         for (const document_node& child : children) {
@@ -138,16 +181,30 @@ struct html_writer {
             out += "</code>";
             break;
         case document_node_kind::code_block: {
-            const std::string_view language = attribute_or(node, "language", "");
-            out += "<pre><code";
-            if (!language.empty()) {
+            // Every fenced block carries a visible language label, a keyboard-focusable
+            // Copy button bound by id to the exact source (no inline handler; main.js
+            // wires the click and the polite live region), and a Prism grammar class so
+            // the vendored highlighter can decorate it client-side (§10.5).
+            const code_language_view language =
+                classify_code_language(attribute_or(node, "language", ""));
+            const std::string id = code_block_id(node.text, code_ordinal++);
+            out += "<figure class=\"doc-code\"><figcaption class=\"doc-code-bar\">"
+                   "<span class=\"doc-code-lang\">";
+            append_escaped_text(out, language.label);
+            out += "</span><button type=\"button\" class=\"copy-button\" data-copy-target=\"";
+            append_escaped_attribute(out, id);
+            out += "\" aria-label=\"Copy code to clipboard\">Copy</button></figcaption>"
+                   "<pre><code id=\"";
+            append_escaped_attribute(out, id);
+            out.push_back('"');
+            if (!language.prism_class.empty()) {
                 out += " class=\"language-";
-                append_escaped_attribute(out, language);
+                append_escaped_attribute(out, language.prism_class);
                 out.push_back('"');
             }
             out.push_back('>');
             append_escaped_text(out, node.text);
-            out += "</code></pre>";
+            out += "</code></pre></figure>";
             break;
         }
         case document_node_kind::link: {
