@@ -2340,6 +2340,78 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
         &PipelineOperationalStats::format5_reader_control_payload_capacity_bytes);
 }
 
+TEST_CASE("Format-6 reader receipts preserve max peaks and report-once owners",
+          "[pipe][pipeline-stats][format6][identity][saturation]") {
+    using namespace bioseq::pipeline_stats;
+
+    PipelineOperationalStats first{};
+    auto& first_f6 = first.format6_reader_evidence;
+    first_f6.format_version = 6;
+    first_f6.sessions = 1;
+    first_f6.identity_present = true;
+    first_f6.generation_id = 71;
+    first_f6.source_identity[0] = std::byte{0x11};
+    first_f6.source_content_crc64 = 91;
+    first_f6.compatibility_digest[0] = std::byte{0x22};
+    first_f6.directory_rows = 2;
+    first_f6.posting_ranges_delivered = 3;
+    first_f6.posting_range_crc_receipts = 1;
+    first_f6.posting_semantic_receipts = 3;
+    first_f6.directory_phase_peak_bytes = 100;
+    first_f6.control_phase_peak_bytes = 300;
+    first_f6.posting_phase_peak_bytes = 200;
+    first_f6.peak_admitted_bytes = 300;
+    first_f6.owner_bytes_present = true;
+    first_f6.retained_owner_bytes = 80;
+    first_f6.admitted_bytes = 80;
+
+    PipelineOperationalStats second = first;
+    auto& second_f6 = second.format6_reader_evidence;
+    second_f6.directory_rows = 4;
+    second_f6.posting_ranges_delivered = 5;
+    second_f6.posting_range_crc_receipts = 2;
+    second_f6.posting_semantic_receipts = 5;
+    second_f6.directory_phase_peak_bytes = 500;
+    second_f6.control_phase_peak_bytes = 250;
+    second_f6.posting_phase_peak_bytes = 450;
+    second_f6.peak_admitted_bytes = 500;
+
+    PipelineOperationalStats aggregate{};
+    aggregate.merge(first);
+    aggregate.merge(second);
+    const auto& merged = aggregate.format6_reader_evidence;
+    REQUIRE(merged.sessions == 2);
+    REQUIRE(merged.directory_rows == 6);
+    REQUIRE(merged.posting_ranges_delivered == 8);
+    REQUIRE(merged.posting_range_crc_receipts == 3);
+    REQUIRE(merged.posting_semantic_receipts == 8);
+    REQUIRE(merged.directory_phase_peak_bytes == 500);
+    REQUIRE(merged.control_phase_peak_bytes == 300);
+    REQUIRE(merged.posting_phase_peak_bytes == 450);
+    REQUIRE(merged.peak_admitted_bytes == 500);
+    REQUIRE(merged.retained_owner_bytes == 80);
+    REQUIRE(merged.admitted_bytes == 80);
+    REQUIRE_FALSE(aggregate.operational_identity_conflict);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats mismatched_owner = first;
+    mismatched_owner.format6_reader_evidence.retained_owner_bytes = 81;
+    aggregate.merge(mismatched_owner);
+    REQUIRE(aggregate.operational_identity_conflict);
+
+    PipelineOperationalStats at_limit{};
+    at_limit.format6_reader_evidence.directory_rows =
+        sql_bigint_value_max;
+    PipelineOperationalStats overflow{};
+    overflow.format6_reader_evidence.directory_rows = 1;
+    at_limit.merge(overflow);
+    REQUIRE(
+        at_limit.format6_reader_evidence.directory_rows
+        == sql_bigint_value_max);
+    REQUIRE(at_limit.format6_reader_evidence.saturated);
+    REQUIRE(at_limit.stats_saturated);
+}
+
 TEST_CASE("DOC0371 aggregate environment drift reclassifies both job sets",
           "[pipe][pipeline-stats][identity][environment][drift]") {
     using namespace bioseq::pipeline_stats;

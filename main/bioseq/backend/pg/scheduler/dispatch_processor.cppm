@@ -149,6 +149,7 @@ import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
 import bioseq.indexing.type;
 import bioseq.indexing.traits;
+import bioseq.indexing.storage;
 import bioseq.indexing.minimizer_index;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_sequence;
@@ -184,6 +185,43 @@ namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
 export constexpr size_t kDispatchBatchCapacity = 8192;
+
+/**
+ * Existing pipeline evidence has a frozen u64 source field, while Format-6
+ * authenticates a 128-bit source identity.  This domain-separated token is
+ * diagnostic only: every Format-6 correctness decision retains and compares
+ * all 128 authenticated bits.
+ */
+export [[nodiscard]] constexpr std::uint64_t
+format6_source_diagnostic_token(
+		const std::array<std::byte, 16>& source_identity) noexcept {
+	std::array<std::byte, 32> bytes{
+		std::byte{'B'}, std::byte{'S'}, std::byte{'E'}, std::byte{'Q'},
+		std::byte{'F'}, std::byte{'6'}, std::byte{'D'}, std::byte{'I'},
+		std::byte{'A'}, std::byte{'G'}, std::byte{'v'}, std::byte{'1'},
+		std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}};
+	for (std::size_t index = 0; index < source_identity.size(); ++index) {
+		bytes[16u + index] = source_identity[index];
+	}
+	const std::uint64_t token =
+		bioseq::indexing::crc64_ecma182(bytes);
+	return token == 0u ? 0x9e3779b97f4a7c15ull : token;
+}
+
+namespace {
+constexpr std::array<std::byte, 16> kFormat6DiagnosticIdentityA{
+	std::byte{1}};
+constexpr std::array<std::byte, 16> kFormat6DiagnosticIdentityB{
+	std::byte{2}};
+static_assert(format6_source_diagnostic_token(
+	std::array<std::byte, 16>{}) != 0u);
+static_assert(format6_source_diagnostic_token(kFormat6DiagnosticIdentityA)
+	!= 0u);
+static_assert(format6_source_diagnostic_token(kFormat6DiagnosticIdentityA)
+	== format6_source_diagnostic_token(kFormat6DiagnosticIdentityA));
+static_assert(format6_source_diagnostic_token(kFormat6DiagnosticIdentityA)
+	!= format6_source_diagnostic_token(kFormat6DiagnosticIdentityB));
+} // namespace
 /*
  * BatchProcessor drives minimap_port across a batch of (query, target)
  * pairs that all share the same (alphabet_code, storage_unit_byte_width) typmod. The
@@ -207,6 +245,18 @@ export enum class BatchInvocationRole : std::uint8_t {
 
 export class BatchProcessor {
 public:
+	enum class CpuQueryUnionStorage : std::uint8_t {
+		minimizer_sketch,
+		canonical_u32,
+	};
+
+	struct CpuPreparedQuerySketch {
+		std::uint64_t query_ordinal = 0;
+		std::uint64_t query_bp_size = 0;
+		std::vector<MinimapSketchData> minimizers{};
+		pipe::MinimizerRangeExecutionProof proof{};
+	};
+
 	struct CpuPreparedIndexGroup {
 		std::int32_t kmer_size = 0;
 		std::int32_t window_size = 0;
@@ -214,6 +264,18 @@ public:
 		MinimizerSketchBackend sketch_backend =
 			MinimizerSketchBackend::Scalar;
 		std::vector<MinimapSketchData> query_hash_union{};
+		/* Format-6 borrows this exact sorted-unique canonical image for its
+		 * complete lifetime.  It is mutually exclusive with query_hash_union:
+		 * publication is authenticated before the scheduler chooses which
+		 * representation to construct, so there is never a second Q-sized
+		 * conversion owner or sort.  Declaring it before the reader makes
+		 * reverse destruction release the borrowing reader first. */
+		std::vector<std::uint32_t> canonical_query_hash_union_u32{};
+		/* Format-6 preparation may retain the exact per-query sketch produced
+		 * while filling canonical_query_hash_union_u32.  Missing ordinals are
+		 * intentional admission fallbacks and are sketched by ensure_q in the
+		 * typed row path. */
+		std::vector<CpuPreparedQuerySketch> retained_query_sketches{};
 		/* Declared before target_index so destruction releases the owned
 		 * index storage before returning its admission reservation. */
 		std::optional<bioseq::parallelism::MemoryPermit> target_index_permit{};
@@ -229,6 +291,8 @@ public:
 		 * silently relabelled or transcoded through the legacy hashmap. */
 		std::optional<bioseq::indexing::PreparedShapeV5QueryReader>
 			persisted_shape_v5_reader{};
+		std::optional<bioseq::indexing::MinimizerFormat6SelectiveReader>
+			persisted_format6_reader{};
 		::bioseq::pipeline_stats::TargetIndexSource target_index_source =
 			::bioseq::pipeline_stats::TargetIndexSource::none;
 		std::uint64_t key_set_checksum = 0;
@@ -238,11 +302,33 @@ public:
 		std::uint64_t persisted_reader_loads = 0;
 		std::uint64_t persisted_reader_queries = 0;
 		std::uint64_t persisted_generation_id = 0;
+		/* Correctness authority for Format-6.  The legacy u64 field below is
+		 * retained only for the existing pipeline evidence ABI and must never
+		 * be used to authenticate a Format-6 source. */
+		std::array<std::byte, 16> persisted_format6_source_identity{};
+		bool persisted_format6_source_identity_present = false;
 		std::uint64_t persisted_source_identity = 0;
 		bioseq::storage::indexing::MinimizerGenerationReadStats
 			persisted_read_stats{};
 		bool build_set_checksum_present = false;
 		std::uint64_t build_set_checksum = 0;
+
+		[[nodiscard]] const CpuPreparedQuerySketch*
+		find_retained_query_sketch(
+				const std::uint64_t query_ordinal) const noexcept {
+			const auto found = std::lower_bound(
+				retained_query_sketches.begin(),
+				retained_query_sketches.end(),
+				query_ordinal,
+				[](const CpuPreparedQuerySketch& sketch,
+				   const std::uint64_t ordinal) noexcept {
+					return sketch.query_ordinal < ordinal;
+				});
+			return found != retained_query_sketches.end()
+					&& found->query_ordinal == query_ordinal
+				? &*found
+				: nullptr;
+		}
 	};
 
 	/* One object per physical target row.  It survives every 8192-query wave
@@ -267,6 +353,9 @@ public:
 		 * the corresponding deallocate-before-release order at destruction. */
 		std::uint64_t query_union_admission_bytes = 0;
 		std::optional<bioseq::parallelism::MemoryPermit> query_union_permit{};
+		std::uint64_t query_sketch_cache_admission_bytes = 0;
+		std::optional<bioseq::parallelism::MemoryPermit>
+			query_sketch_cache_permit{};
 
 		CpuPreparedTarget() = default;
 		CpuPreparedTarget(const CpuPreparedTarget&) = delete;
@@ -277,6 +366,8 @@ public:
 			std::vector<CpuPreparedIndexGroup>{}.swap(groups);
 			query_union_admission_bytes = 0;
 			query_union_permit.reset();
+			query_sketch_cache_admission_bytes = 0;
+			query_sketch_cache_permit.reset();
 		}
 		[[nodiscard]] bool release_group_query_hash_union_noexcept(
 				CpuPreparedIndexGroup& group) noexcept {
@@ -288,7 +379,9 @@ public:
 			if (released_bytes
 					== (std::numeric_limits<std::uint64_t>::max)()
 				|| !query_union_permit.has_value()
-				|| query_union_admission_bytes < released_bytes) {
+				|| query_union_admission_bytes < released_bytes
+				|| !group.canonical_query_hash_union_u32.empty()
+				|| group.canonical_query_hash_union_u32.capacity() != 0u) {
 				return false;
 			}
 			// The native persisted reader owns its canonical hash image now.
@@ -372,6 +465,34 @@ public:
 	 */
 	[[nodiscard]] static bool
 	cpu_prepared_target_same_object_reprepare_probe() {
+		/* The same existing SQL probe also guards the Format-6 borrowed-view
+		 * lifetime: moving the target must transfer the group allocation
+		 * without moving or duplicating its canonical u32 image. */
+		{
+			CpuPreparedTarget source;
+			source.groups.emplace_back();
+			auto& canonical =
+				source.groups.front().canonical_query_hash_union_u32;
+			canonical = {3u, 7u, 11u};
+			const std::uint32_t* const borrowed = canonical.data();
+			const bioseq::indexing::CanonicalQueryHashView view{
+				.values32 = std::span<const std::uint32_t>{canonical},
+				.width_bytes = sizeof(std::uint32_t),
+				.storage_width_bytes = sizeof(std::uint32_t),
+			};
+			CpuPreparedTarget moved{std::move(source)};
+			if (moved.groups.size() != 1u
+				|| !moved.groups.front().query_hash_union.empty()
+				|| moved.groups.front().query_hash_union.capacity() != 0u
+				|| moved.groups.front().
+					canonical_query_hash_union_u32.data() != borrowed
+				|| view.size() != 3u
+				|| view.at(0u) != 3u
+				|| view.at(1u) != 7u
+				|| view.at(2u) != 11u) {
+				return false;
+			}
+		}
 		bioseq::parallelism::MemoryAdmissionController admission;
 		CpuPreparedTarget target;
 		auto populate = [&](const std::size_t sketch_capacity) -> bool {
@@ -468,6 +589,25 @@ public:
 			&& admission.reserved_bytes() == 0u;
 	}
 
+	[[nodiscard]] static constexpr bool
+	exactly_one_native_persisted_reader(
+			const bool grouped32,
+			const bool shape_v5,
+			const bool format6) noexcept {
+		return static_cast<unsigned>(grouped32)
+			+ static_cast<unsigned>(shape_v5)
+			+ static_cast<unsigned>(format6) == 1u;
+	}
+
+	[[nodiscard]] static constexpr bool
+	format6_f5_fallback_allowed(
+			const bool head_absent,
+			const bool profile_applicable,
+			const bool stream_io_started) noexcept {
+		return !stream_io_started
+			&& (head_absent || !profile_applicable);
+	}
+
 	[[nodiscard]] static Minimap2Params effective_params_for_pair(
 		const Minimap2Params& base,
 		std::size_t min_bp) noexcept;
@@ -477,21 +617,29 @@ public:
 		std::uint8_t storage_unit_byte_width,
 		std::uint64_t target_bp_size,
 		std::span<const pgseq_t* const> query_headers,
+		std::span<const std::uint64_t> query_ordinals,
 		const Minimap2Params& base_params,
 		bool include_persisted_parameter_group,
+		CpuQueryUnionStorage union_storage,
 		CpuPreparedTarget& prepared_target);
 
-	void prepare_cpu_persisted_grouped32_target(
+	void prepare_cpu_persisted_native_target(
 		Oid database_oid,
 		Oid tablespace_oid,
 		Oid main_relfilenode,
 		Oid user_relid,
-			std::int16_t column_attno,
-			std::string_view index_name,
-			std::uint64_t sequence_rowno,
-			const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
-				executor_read,
-			CpuPreparedTarget& prepared_target);
+		std::int16_t column_attno,
+		std::string_view index_name,
+		std::uint64_t sequence_rowno,
+		std::uint64_t target_bp_size,
+		std::uint8_t alphabet_code,
+		std::uint8_t storage_unit_byte_width,
+		std::span<const pgseq_t* const> query_headers,
+		std::span<const std::uint64_t> query_ordinals,
+		const Minimap2Params& base_params,
+		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
+			executor_read,
+		CpuPreparedTarget& prepared_target);
 
 	void prepare_gpu_persisted_shape_v5_target(
 		Oid database_oid,
@@ -617,6 +765,32 @@ public:
 
 };
 
+static_assert(BatchProcessor::exactly_one_native_persisted_reader(
+	true, false, false));
+static_assert(BatchProcessor::exactly_one_native_persisted_reader(
+	false, true, false));
+static_assert(BatchProcessor::exactly_one_native_persisted_reader(
+	false, false, true));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	false, false, false));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	true, true, false));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	true, false, true));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	false, true, true));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	true, true, true));
+static_assert(BatchProcessor::format6_f5_fallback_allowed(
+	true, false, false));
+static_assert(BatchProcessor::format6_f5_fallback_allowed(
+	false, false, false));
+static_assert(!BatchProcessor::format6_f5_fallback_allowed(
+	false, true, false));
+static_assert(!BatchProcessor::format6_f5_fallback_allowed(
+	true, false, true));
+static_assert(!BatchProcessor::format6_f5_fallback_allowed(
+	false, false, true));
 
 } // namespace bioseq::simd::HWY_NAMESPACE
 HWY_AFTER_NAMESPACE();

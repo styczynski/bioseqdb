@@ -16,9 +16,13 @@ module;
 #include "utils/inval.h"
 #include "utils/snapmgr.h"
 #include "utils/memutils.h"
+extern "C" {
+#include "storage/buffile.h"
+}
 #include <algorithm>
 #include <array>
 #include <concepts>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <expected>
@@ -51,6 +55,7 @@ import bioseq.indexing.storage;
 import bioseq.indexing.traits;
 import bioseq.indexing.registry;
 import bioseq.indexing.minimizer_hashmap;
+import bioseq.indexing.minimizer_hashmap_format6;
 import bioseq.indexing.minimizer_sequence;
 import bioseq.sequences.minimap_port;   // DOC0345 Patch I — MinimizerAlgorithmType (spec's bioseq.pipeline.minimap_port name does not exist)
 import bioseq.sequences.kmers;          // DOC0345 Patch I — MinimizerSketchBackend, minimizer_sketch_backend_name
@@ -666,10 +671,21 @@ inline void rebuild_one_fragmented_maybe_resident(
     idx.rebuild_one_fragmented(name, store, lazy, backend);
 }
 
-/// Opt-in locator-backed MPF/MPS publication bridge. The definition lives
-/// after the proof-bearing publication type and coordinator; the guarded POC
-/// route can therefore use a PostgreSQL scanner without weakening the returned
-/// proof to a caller-selected enum.
+/// Opt-in locator-backed MPF/MPS Format-6 publication bridge.  The existing
+/// persistence GUC selects this production branch without introducing another
+/// feature flag; frozen Format-5 generations remain readable.
+template <class R, class Scanner>
+inline void build_and_verify_minimizer_format6_generation_pg(
+        Oid user_relid,
+        std::int16_t column_attno,
+        std::string_view index_name,
+        const seq_locator& locator,
+        std::uint64_t sequence_rowno,
+        Snapshot registered_source_snapshot,
+        IndexStorageFragmentPg& storage,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend);
+
 template <class R, class Scanner>
 inline void build_and_verify_grouped32_minimizer_generation_pg(
         Oid user_relid,
@@ -1180,7 +1196,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 });
                             } else if (use_grouped32_generation) {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                build_and_verify_grouped32_minimizer_generation_pg(
+                                build_and_verify_minimizer_format6_generation_pg(
                                     rel_oid, seq_attno, name, loc, rowno,
                                     rs->snapshot, store, lazy, backend);
                             } else {
@@ -1639,6 +1655,45 @@ struct ReadyMinimizerGenerationInspection {
     std::int16_t column_attno = 0;
 };
 
+/// One fully authenticated Format-6 logical-stream receipt.  The descriptor
+/// fields are publication authority; the exact_catalog_* fields are recomputed
+/// by a bounded, row-aligned reread under the same registered MVCC snapshot.
+struct ReadyMinimizerFormat6StreamInspection {
+    bioseq::indexing::MinimizerFormat6StreamKind kind =
+        bioseq::indexing::MinimizerFormat6StreamKind::directory;
+    std::uint64_t element_count = 0;
+    std::uint64_t logical_bytes = 0;
+    std::uint64_t row_count = 0;
+    std::uint64_t stream_crc64 = 0;
+    std::uint64_t exact_catalog_rows = 0;
+    std::uint64_t exact_catalog_bytes = 0;
+    std::uint64_t exact_catalog_stream_crc64 = 0;
+};
+
+/// Separate Format-6 restart/audit surface.  This must not be folded into the
+/// frozen Format-5 inspector: the two sentinels have different identity widths,
+/// metadata sizes, and stream equations.
+struct ReadyMinimizerFormat6Inspection {
+    Oid database_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    std::int16_t column_attno = 0;
+    std::uint64_t query_key = 0;
+    std::array<char, NAMEDATALEN> table_name{};
+    std::array<char, NAMEDATALEN> index_name{};
+    Rev3AuthoritativeSourceLocator source{};
+    std::uint64_t source_content_crc64 = 0;
+    std::array<std::byte, 16> source_identity{};
+    bioseq::indexing::MinimizerFormat6Head head{};
+    bioseq::indexing::MinimizerFormat6Manifest manifest{};
+    bioseq::indexing::EncodedMinimizerFormat6Head encoded_head{};
+    bioseq::indexing::EncodedMinimizerFormat6Manifest encoded_manifest{};
+    std::uint64_t head_rows = 0;
+    std::uint64_t head_bytes = 0;
+    std::uint64_t manifest_rows = 0;
+    std::uint64_t manifest_bytes = 0;
+    std::array<ReadyMinimizerFormat6StreamInspection, 3> streams{};
+};
+
 [[nodiscard]] inline std::int16_t
 single_seq_attno_for_inspection(Oid rel_oid);
 
@@ -1864,12 +1919,944 @@ static_assert(!publicly_relabelable_ready_minimizer_publication<
     pg_unreachable();
 }
 
+/// One bounded first-pass record.  The file is PostgreSQL-owned temporary
+/// scratch and is never a publication artifact, so native words are sufficient:
+/// it is rewound and consumed inside this statement by the same backend.
+struct MinimizerFormat6HashCountRecordPg {
+    std::uint64_t hash = 0;
+    std::uint64_t exact_count = 0;
+};
+static_assert(sizeof(MinimizerFormat6HashCountRecordPg) == 16u);
+
+/// PG BufFile scratch for Format-6's count-before-postings contract.  A first
+/// replay writes one fixed record per distinct hash; the second replay reads
+/// records in lockstep while postings stream directly into the logical encoder.
+/// PostgreSQL's ResourceOwner owns a file after any ERROR.  Success closes it
+/// explicitly; exception paths only abandon the C++ handle.
+class MinimizerFormat6HashCountScratchPg {
+private:
+    static constexpr std::size_t kRecordsPerIo = 4'096u;
+
+    BufFile* file_ = nullptr;
+    std::array<MinimizerFormat6HashCountRecordPg, kRecordsPerIo> buffer_{};
+    std::uint64_t record_count_ = 0u;
+    std::uint64_t records_read_ = 0u;
+    std::size_t buffered_records_ = 0u;
+    std::size_t next_buffered_record_ = 0u;
+    bool reading_ = false;
+
+    void flush_write_buffer_() {
+        if (buffered_records_ == 0u) return;
+        const std::size_t bytes =
+            buffered_records_ * sizeof(MinimizerFormat6HashCountRecordPg);
+        bioseq::pg_utils::invoke_pg_as_cpp([this, bytes] {
+            BufFileWrite(file_, buffer_.data(), bytes);
+        });
+        buffered_records_ = 0u;
+    }
+
+public:
+    MinimizerFormat6HashCountScratchPg() {
+        file_ = bioseq::pg_utils::invoke_pg_as_cpp(
+            [] { return BufFileCreateTemp(false); });
+        if (file_ == nullptr) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_OUT_OF_MEMORY,
+                "Format-6 hash-count scratch could not be created");
+        }
+    }
+
+    MinimizerFormat6HashCountScratchPg(
+        const MinimizerFormat6HashCountScratchPg&) = delete;
+    MinimizerFormat6HashCountScratchPg& operator=(
+        const MinimizerFormat6HashCountScratchPg&) = delete;
+    MinimizerFormat6HashCountScratchPg(
+        MinimizerFormat6HashCountScratchPg&&) = delete;
+    MinimizerFormat6HashCountScratchPg& operator=(
+        MinimizerFormat6HashCountScratchPg&&) = delete;
+    ~MinimizerFormat6HashCountScratchPg() = default;
+
+    void append(const MinimizerFormat6HashCountRecordPg& record) {
+        if (file_ == nullptr || reading_ || records_read_ != 0u
+            || record.exact_count == 0u
+            || record_count_
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 hash-count scratch append state is invalid");
+        }
+        buffer_[buffered_records_++] = record;
+        if (buffered_records_ == buffer_.size()) {
+            flush_write_buffer_();
+        }
+        ++record_count_;
+    }
+
+    void rewind_for_read() {
+        if (file_ == nullptr || reading_ || records_read_ != 0u) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 hash-count scratch rewind state is invalid");
+        }
+        flush_write_buffer_();
+        if (bioseq::pg_utils::invoke_pg_as_cpp([this] {
+                    return BufFileSeek(file_, 0, 0, SEEK_SET);
+                }) != 0) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_IO_ERROR,
+                "Format-6 hash-count scratch rewind failed");
+        }
+        reading_ = true;
+        buffered_records_ = 0u;
+        next_buffered_record_ = 0u;
+    }
+
+    [[nodiscard]] std::optional<MinimizerFormat6HashCountRecordPg>
+    read_next() {
+        if (file_ == nullptr || !reading_
+            || records_read_ > record_count_) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 hash-count scratch read state is invalid");
+        }
+        if (records_read_ == record_count_) {
+            return std::nullopt;
+        }
+        if (next_buffered_record_ == buffered_records_) {
+            const std::uint64_t remaining = record_count_ - records_read_;
+            buffered_records_ = static_cast<std::size_t>(
+                std::min<std::uint64_t>(remaining, buffer_.size()));
+            next_buffered_record_ = 0u;
+            const std::size_t bytes = buffered_records_
+                * sizeof(MinimizerFormat6HashCountRecordPg);
+            bioseq::pg_utils::invoke_pg_as_cpp([this, bytes] {
+                BufFileReadExact(file_, buffer_.data(), bytes);
+            });
+        }
+        const MinimizerFormat6HashCountRecordPg record =
+            buffer_[next_buffered_record_++];
+        ++records_read_;
+        if (record.exact_count == 0u) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 hash-count scratch contains an empty hash");
+        }
+        return record;
+    }
+
+    [[nodiscard]] std::uint64_t record_count() const noexcept {
+        return record_count_;
+    }
+
+    [[nodiscard]] std::uint64_t records_read() const noexcept {
+        return records_read_;
+    }
+
+    void close_checked() {
+        if (file_ != nullptr
+            && (!reading_ || records_read_ != record_count_)) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 hash-count scratch closed before complete replay");
+        }
+        BufFile* closing = std::exchange(file_, nullptr);
+        if (closing != nullptr) {
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [closing] { BufFileClose(closing); });
+        }
+    }
+
+    void abandon_after_pg_error_noexcept() noexcept {
+        file_ = nullptr;
+    }
+};
+
+/// Validate and count one globally sorted replay without retaining postings.
+/// The single target-wide segment used by the producer is what makes hash
+/// ordering global instead of restarting at every persisted position segment.
+struct MinimizerFormat6CountReplayPg {
+    MinimizerFormat6HashCountScratchPg* scratch = nullptr;
+    std::uint64_t target_length = 0u;
+    std::uint64_t maximum_hash = 0u;
+    std::uint64_t current_hash = 0u;
+    std::uint64_t current_count = 0u;
+    std::uint64_t previous_position = 0u;
+    std::uint64_t event_count = 0u;
+    bool have_hash = false;
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    flush_hash() {
+        if (!have_hash) return {};
+        if (scratch == nullptr || current_count == 0u) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::row_count);
+        }
+        scratch->append(MinimizerFormat6HashCountRecordPg{
+            .hash = current_hash,
+            .exact_count = current_count,
+        });
+        current_count = 0u;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    accept(const bioseq::indexing::CanonicalMinimizerEvent& event) {
+        const std::uint64_t position = event.encoded_position >> 1u;
+        if (scratch == nullptr || target_length == 0u
+            || event.hash > maximum_hash || position >= target_length) {
+            return std::unexpected(
+                event.hash > maximum_hash
+                    ? bioseq::indexing::MinimizerGenerationWireError::hash_range
+                    : bioseq::indexing::MinimizerGenerationWireError::
+                        position_range);
+        }
+        if (have_hash) {
+            if (event.hash < current_hash
+                || (event.hash == current_hash
+                    && event.encoded_position <= previous_position)) {
+                return std::unexpected(
+                    event.hash == current_hash
+                        && event.encoded_position == previous_position
+                    ? bioseq::indexing::MinimizerGenerationWireError::
+                        duplicate_event
+                    : bioseq::indexing::MinimizerGenerationWireError::
+                        row_order);
+            }
+            if (event.hash != current_hash) {
+                if (auto flushed = flush_hash(); !flushed) return flushed;
+                current_hash = event.hash;
+            }
+        } else {
+            current_hash = event.hash;
+            have_hash = true;
+        }
+        if (current_count
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || event_count
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::
+                    arithmetic_overflow);
+        }
+        ++current_count;
+        ++event_count;
+        previous_position = event.encoded_position;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    finish() {
+        return flush_hash();
+    }
+};
+
+/// Consume the second identical replay in lockstep with first-pass count
+/// records.  Only the current 16-byte record and encoder-owned row buffers are
+/// live, even when one hash owns billions of postings.
+struct MinimizerFormat6EncodeReplayPg {
+    MinimizerFormat6HashCountScratchPg* scratch = nullptr;
+    bioseq::indexing::MinimizerFormat6LogicalEncoder* encoder = nullptr;
+    std::optional<bioseq::indexing::MinimizerFormat6Error>* format_error =
+        nullptr;
+    std::uint64_t target_length = 0u;
+    std::uint64_t maximum_hash = 0u;
+    std::uint64_t current_hash = 0u;
+    std::uint64_t previous_position = 0u;
+    std::uint64_t event_count = 0u;
+    bool hash_open = false;
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    report_format_error(bioseq::indexing::MinimizerFormat6Error error) {
+        if (format_error != nullptr) {
+            *format_error = error;
+        }
+        return std::unexpected(
+            bioseq::indexing::MinimizerGenerationWireError::
+                compatibility_mismatch);
+    }
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    close_hash() {
+        if (!hash_open) return {};
+        if (auto ended = encoder->end_hash(); !ended) {
+            return report_format_error(ended.error());
+        }
+        hash_open = false;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    open_hash(std::uint64_t hash) {
+        const auto record = scratch->read_next();
+        if (!record || record->hash != hash) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::
+                    replay_mismatch);
+        }
+        if (auto begun = encoder->begin_hash(
+                record->hash, record->exact_count); !begun) {
+            return report_format_error(begun.error());
+        }
+        current_hash = hash;
+        hash_open = true;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    accept(const bioseq::indexing::CanonicalMinimizerEvent& event) {
+        const std::uint64_t position = event.encoded_position >> 1u;
+        if (scratch == nullptr || encoder == nullptr || target_length == 0u
+            || event.hash > maximum_hash || position >= target_length) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::
+                    replay_mismatch);
+        }
+        if (!hash_open || event.hash != current_hash) {
+            if (hash_open && event.hash < current_hash) {
+                return std::unexpected(
+                    bioseq::indexing::MinimizerGenerationWireError::
+                        replay_mismatch);
+            }
+            if (auto closed = close_hash(); !closed) return closed;
+            if (auto opened = open_hash(event.hash); !opened) return opened;
+        } else if (event.encoded_position <= previous_position) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::
+                    replay_mismatch);
+        }
+        if (auto appended = encoder->append_posting(
+                event.encoded_position); !appended) {
+            return report_format_error(appended.error());
+        }
+        if (event_count
+                == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::
+                    arithmetic_overflow);
+        }
+        ++event_count;
+        previous_position = event.encoded_position;
+        return {};
+    }
+
+    [[nodiscard]] std::expected<
+        void, bioseq::indexing::MinimizerGenerationWireError>
+    finish() {
+        if (auto closed = close_hash(); !closed) return closed;
+        if (scratch == nullptr
+            || scratch->records_read() != scratch->record_count()) {
+            return std::unexpected(
+                bioseq::indexing::MinimizerGenerationWireError::
+                    replay_mismatch);
+        }
+        return {};
+    }
+};
+
+/// Minimal proof-bearing result for the production Format-6 cutover.  The
+/// private storage token has already enforced complete payload/manifest reread
+/// before this value can exist, and the published head is byte-compared below.
+struct ReadyMinimizerFormat6PublicationPg {
+    std::uint64_t generation_id = 0u;
+    std::uint64_t query_key = 0u;
+    std::uint64_t source_epoch = 0u;
+    std::uint64_t source_content_crc64 = 0u;
+    std::uint64_t unique_hash_count = 0u;
+    std::uint64_t total_posting_count = 0u;
+    bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend selected_backend =
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar;
+    bioseq::indexing::MinimizerFormat6Head head{};
+    bioseq::indexing::MinimizerFormat6Manifest manifest{};
+    std::optional<std::uint64_t> replaced_generation_id{};
+    bool published = false;
+};
+
+/// Build and atomically publish one Format-6 generation from a fragmented
+/// PostgreSQL source.  Both historical MPF/MPS index names use the same
+/// canonical target-wide logical shape in Format-6.  Native minimizers are
+/// collected once into PostgreSQL-owned sorted spill runs; two bounded replays
+/// then satisfy the encoder's exact-count-before-postings contract.
+template <class R, class Scanner>
+[[nodiscard]] inline ReadyMinimizerFormat6PublicationPg
+build_and_publish_minimizer_format6_generation_pg(
+        Oid user_relid,
+        std::int16_t column_attno,
+        std::string_view index_name,
+        const seq_locator& locator,
+        std::uint64_t sequence_rowno,
+        Snapshot registered_source_snapshot,
+        IndexStorageFragmentPg& storage,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+    static_assert(std::same_as<
+        Scanner, bioseq::storage::sequence_scanner_pg<R>>,
+        "Format-6 publisher requires the PostgreSQL scanner type");
+    using Backend =
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
+    using MpsIndex =
+        bioseq::indexing::MinimizerSequenceMergedIndex<IndexStorageFragmentPg>;
+    using Sequence = bioseq::storage::lazy_compact_sequence<R, Scanner>;
+    using Traits = typename Sequence::traits;
+    using CanonicalSequenceConfig = sequence_custom_alphabet<
+        typename Traits::alphabet_type,
+        typename Traits::storage_unit>;
+    static_assert(Traits::bits_per_char
+        == compact_sequence_range<CanonicalSequenceConfig>::traits::
+            bits_per_char,
+        "Format-6 publisher requires canonical PostgreSQL packing");
+
+    const bool is_minimizer =
+        index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        || index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+    const bool active_snapshot_ready =
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            return ActiveSnapshotSet()
+                && IsMVCCSnapshot(GetActiveSnapshot());
+        });
+    if (!OidIsValid(user_relid) || column_attno <= 0 || !is_minimizer
+        || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
+        || locator.version != kLocatorVersion || locator.source_epoch == 0u
+        || locator.total_bp_size == 0u || locator.num_fragments == 0u
+        || registered_source_snapshot == nullptr
+        || !IsMVCCSnapshot(registered_source_snapshot)
+        || registered_source_snapshot->regd_count == 0
+        || !active_snapshot_ready) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "Format-6 minimizer generation coordinator input is invalid");
+    }
+    if (backend != Backend::Scalar && backend != Backend::ExactSimd
+        && backend != Backend::PaperNtHashSimd
+        && backend != Backend::VulkanSegment) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "Format-6 minimizer generation backend is invalid");
+    }
+    if (sequence.scanner().is_in_memory_mode()) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "Format-6 minimizer generation requires a PostgreSQL-backed lazy sequence");
+    }
+
+    constexpr std::uint16_t kWindowSize = 10u;
+    constexpr std::uint16_t kKmerSize = 15u;
+    constexpr std::uint64_t letters_per_unit = Traits::letters_per_unit;
+    static_assert(letters_per_unit != 0u);
+    const std::uint64_t expected_units =
+        locator.total_bp_size / letters_per_unit
+        + (locator.total_bp_size % letters_per_unit != 0u ? 1u : 0u);
+    const std::size_t expected_padding = static_cast<std::size_t>(
+        locator.total_bp_size % letters_per_unit == 0u
+            ? 0u
+            : letters_per_unit
+                - locator.total_bp_size % letters_per_unit);
+    if (static_cast<std::uint64_t>(sequence.bp_size())
+            != locator.total_bp_size
+        || static_cast<std::uint64_t>(sequence.size()) != expected_units
+        || sequence.number_of_fragments() != locator.num_fragments
+        || sequence.padding() != expected_padding) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_DATA_CORRUPTED,
+            "Format-6 minimizer lazy sequence shape disagrees with its locator");
+    }
+
+    const RelationIdentity relation_identity =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [user_relid] { return index_relation_identity(user_relid); });
+    if (relation_identity.db_oid != MyDatabaseId
+        || !OidIsValid(relation_identity.tablespace_oid)
+        || !OidIsValid(relation_identity.relfilenode)
+        || storage.db_oid_ != relation_identity.db_oid
+        || storage.tablespace_oid_ != relation_identity.tablespace_oid
+        || storage.main_relfilenode_ != relation_identity.relfilenode
+        || storage.user_relid_ != user_relid
+        || storage.column_attno_ != column_attno
+        || storage.index_name_ != index_name
+        || storage.bucket_idx_ != locator.bucket_idx
+        || storage.shard_idx_ != locator.shard_idx
+        || storage.query_key_ != sequence_rowno
+        || !sequence.scanner().matches_pg_binding(
+            relation_identity.db_oid,
+            relation_identity.tablespace_oid,
+            relation_identity.relfilenode,
+            column_attno,
+            locator,
+            expected_padding,
+            registered_source_snapshot)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_DATA_CORRUPTED,
+            "Format-6 minimizer storage identity disagrees with its source");
+    }
+
+    const bioseq::indexing::MinimizerSchemeIdentity scheme =
+        bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
+
+    struct BuildState {
+        Rev3IndexAdministrationIdentity identity{};
+        std::optional<Rev3AuthoritativeSourceProof> source_proof;
+        Rev3AuthoritativeSourceLocator source{};
+        std::uint64_t source_content_checksum = 0u;
+        std::optional<IndexStorageMinimizerFormat6WriterPg> writer;
+        std::optional<MinimizerFormat6HashCountScratchPg> count_scratch;
+        std::optional<ReadyMinimizerFormat6Token> ready_token;
+        std::optional<bioseq::indexing::MinimizerFormat6Error> format_error;
+        bioseq::indexing::MpsGenerationExecutionEvidence execution{};
+    };
+    auto* state = new BuildState{
+        .identity = Rev3IndexAdministrationIdentity{
+            .database_oid = relation_identity.db_oid,
+            .tablespace_oid = relation_identity.tablespace_oid,
+            .main_relfilenode = relation_identity.relfilenode,
+            .user_relid = user_relid,
+            .column_attno = column_attno,
+            .index_name = std::string{index_name},
+            .table_name = storage.this_table_name(),
+        },
+    };
+    ReadyMinimizerFormat6PublicationPg result{
+        .query_key = sequence_rowno,
+        .source_epoch = locator.source_epoch,
+        .selected_backend = backend,
+    };
+
+    try {
+        state->source_proof.emplace(
+            derive_rev3_authoritative_source_proof_pg(
+                state->identity, sequence_rowno,
+                registered_source_snapshot));
+        state->source =
+            state->source_proof->source_for_diagnostics();
+        state->source_content_checksum = state->source_proof
+            ->source_content_checksum_for_diagnostics();
+        if (state->source.sequence_rowno != sequence_rowno
+            || !rev3_same_seq_locator(state->source.locator, locator)
+            || state->source.alphabet_code
+                != pgseq_supported_alphabets::index_of<
+                    typename Traits::alphabet_type>()
+            || state->source.storage_unit_byte_width
+                != sizeof(typename Traits::storage_unit)
+            || state->source.padding_letters != sequence.padding()
+            || state->source.locator.total_bp_size != sequence.bp_size()
+            || state->source.locator.num_fragments
+                != sequence.number_of_fragments()) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 authoritative source proof disagrees with the passed lazy sequence");
+        }
+        result.source_content_crc64 = state->source_content_checksum;
+
+        const auto derived_compatibility = bioseq::indexing::
+            minimizer_format6_compatibility_for_backend(
+                backend,
+                state->source.alphabet_code,
+                kKmerSize,
+                kWindowSize,
+                locator.total_bp_size);
+        if (!derived_compatibility) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_FEATURE_NOT_SUPPORTED,
+                "source/backend combination has no canonical Format-6 profile",
+                fmt::format(
+                    "backend={} alphabet_code={} k={} w={} format_error={}",
+                    bioseq::simd::HWY_NAMESPACE::
+                        minimizer_sketch_backend_name(backend),
+                    state->source.alphabet_code,
+                    kKmerSize, kWindowSize,
+                    static_cast<unsigned>(derived_compatibility.error())));
+        }
+        const bioseq::indexing::MinimizerFormat6Compatibility compatibility =
+            *derived_compatibility;
+
+        ensure_vulkan_index_build_runtime_ready(backend);
+        result.generation_id = bioseq::pg_utils::invoke_pg_as_cpp(
+            [] { return allocate_minimizer_generation_id_pg(); });
+        state->writer.emplace(storage.begin_format6_generation_write(
+            sequence_rowno, result.generation_id));
+        state->count_scratch.emplace();
+
+        const bioseq::indexing::MinimizerFormat6GenerationOptions options{
+            .generation_id = result.generation_id,
+            .query_key = sequence_rowno,
+            .source_epoch = locator.source_epoch,
+            .source_content_crc64 = state->source_content_checksum,
+            .target_length = locator.total_bp_size,
+            .compatibility = compatibility,
+        };
+        const std::uint64_t maximum_hash =
+            bioseq::indexing::minimizer_format6_max_hash(compatibility);
+
+        auto spill = MpsIndex::spill_generation_replay_runs_serial(
+            storage,
+            sequence,
+            backend,
+            /*core_span_bp=*/0u,
+            /*position_segment_span_bp=*/locator.total_bp_size,
+            &state->execution);
+        if (!spill) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 minimizer spill producer failed",
+                fmt::format(
+                    "backend={} wire_error={}",
+                    bioseq::simd::HWY_NAMESPACE::
+                        minimizer_sketch_backend_name(backend),
+                    static_cast<unsigned>(spill.error())));
+        }
+
+        std::optional<bioseq::indexing::MinimizerFormat6EncodedMetadata>
+            encoded_metadata;
+        {
+            auto producer = MpsIndex::make_generation_replay_producer(
+                storage,
+                locator.total_bp_size,
+                std::move(*spill),
+                locator.total_bp_size);
+
+            MinimizerFormat6CountReplayPg count_pass{
+                .scratch = &*state->count_scratch,
+                .target_length = locator.total_bp_size,
+                .maximum_hash = maximum_hash,
+            };
+            auto counted = producer.scan_sorted_events(
+                locator.total_bp_size,
+                bioseq::indexing::CanonicalMinimizerEventReceiver{
+                    .context = &count_pass,
+                    .emit_fn = +[](
+                            void* context,
+                            const bioseq::indexing::CanonicalMinimizerEvent&
+                                event)
+                        -> std::expected<
+                            void,
+                            bioseq::indexing::MinimizerGenerationWireError> {
+                        return static_cast<MinimizerFormat6CountReplayPg*>(
+                            context)->accept(event);
+                    },
+                });
+            if (counted) counted = count_pass.finish();
+            if (!counted) {
+                ready_minimizer_error_as_cpp(
+                    ERRCODE_DATA_CORRUPTED,
+                    "Format-6 count replay failed",
+                    fmt::format(
+                        "wire_error={}",
+                        static_cast<unsigned>(counted.error())));
+            }
+            state->count_scratch->rewind_for_read();
+
+            bioseq::indexing::MinimizerFormat6LogicalEncoder encoder{
+                options,
+                state->writer->logical_stream_sink(),
+            };
+            MinimizerFormat6EncodeReplayPg encode_pass{
+                .scratch = &*state->count_scratch,
+                .encoder = &encoder,
+                .format_error = &state->format_error,
+                .target_length = locator.total_bp_size,
+                .maximum_hash = maximum_hash,
+            };
+            auto emitted = producer.scan_sorted_events(
+                locator.total_bp_size,
+                bioseq::indexing::CanonicalMinimizerEventReceiver{
+                    .context = &encode_pass,
+                    .emit_fn = +[](
+                            void* context,
+                            const bioseq::indexing::CanonicalMinimizerEvent&
+                                event)
+                        -> std::expected<
+                            void,
+                            bioseq::indexing::MinimizerGenerationWireError> {
+                        return static_cast<MinimizerFormat6EncodeReplayPg*>(
+                            context)->accept(event);
+                    },
+                });
+            if (emitted) emitted = encode_pass.finish();
+            if (!emitted
+                || count_pass.event_count != encode_pass.event_count) {
+                ready_minimizer_error_as_cpp(
+                    ERRCODE_DATA_CORRUPTED,
+                    "Format-6 posting replay failed",
+                    fmt::format(
+                        "wire_error={} format_error={} counted={} emitted={}",
+                        emitted
+                            ? 0u
+                            : static_cast<unsigned>(emitted.error()) + 1u,
+                        state->format_error
+                            ? static_cast<unsigned>(*state->format_error) + 1u
+                            : 0u,
+                        count_pass.event_count,
+                        encode_pass.event_count));
+            }
+            auto finished = encoder.finish();
+            if (!finished) {
+                state->format_error = finished.error();
+                ready_minimizer_error_as_cpp(
+                    ERRCODE_DATA_CORRUPTED,
+                    "Format-6 logical encoder failed",
+                    fmt::format(
+                        "format_error={}",
+                        static_cast<unsigned>(finished.error())));
+            }
+            encoded_metadata.emplace(std::move(*finished));
+            state->execution = producer.execution_evidence();
+        }
+
+        const auto expected_source_identity =
+            bioseq::indexing::minimizer_format6_source_identity(
+                sequence_rowno,
+                locator.source_epoch,
+                state->source_content_checksum,
+                locator.total_bp_size);
+        const auto expected_compatibility_digest =
+            bioseq::indexing::minimizer_format6_compatibility_digest(
+                compatibility);
+        const auto& metadata = *encoded_metadata;
+        if (metadata.head.generation_id != result.generation_id
+            || metadata.head.query_key != sequence_rowno
+            || metadata.head.source_epoch != locator.source_epoch
+            || metadata.head.source_identity != expected_source_identity
+            || metadata.head.source_content_crc64
+                != state->source_content_checksum
+            || metadata.head.compatibility_digest
+                != expected_compatibility_digest
+            || metadata.head.dense_seal.has_value()
+            || metadata.manifest.generation_id != result.generation_id
+            || metadata.manifest.source_epoch != locator.source_epoch
+            || metadata.manifest.source_identity != expected_source_identity
+            || metadata.manifest.source_content_crc64
+                != state->source_content_checksum
+            || metadata.manifest.target_length != locator.total_bp_size
+            || metadata.manifest.compatibility != compatibility
+            || metadata.manifest.compatibility_digest
+                != expected_compatibility_digest
+            || metadata.manifest.unique_hash_count
+                != state->count_scratch->record_count()
+            || metadata.manifest.total_posting_count
+                != state->execution.spilled_event_count) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 encoded metadata identity disagrees");
+        }
+
+        const auto before_release = storage.segment_spill_storage_binding();
+        const std::uint64_t expected_visited =
+            state->execution.spilled_event_count
+                    <= (std::numeric_limits<std::uint64_t>::max)() / 2u
+                ? state->execution.spilled_event_count * 2u
+                : (std::numeric_limits<std::uint64_t>::max)();
+        if (!state->execution.spill_accepted()
+            || state->execution.selected_backend != backend
+            || state->execution.minimizer_scheme != scheme
+            || state->execution.target_length != locator.total_bp_size
+            || state->execution.window_size != kWindowSize
+            || state->execution.kmer_size != kKmerSize
+            || state->execution.generation_wire_format
+                != bioseq::indexing::MinimizerGenerationWireFormat::invalid
+            || state->execution.replay_scan_count != 2u
+            || state->execution.replay_merge_pass_count != 2u
+            || state->execution.replay_reroute_pass_count != 0u
+            || state->execution.replay_completed_scan_count != 2u
+            || state->execution.replay_failed_scan_count != 0u
+            || state->execution.replay_binding_checked_failed_scan_count != 0u
+            || state->execution.replay_illegal_span_transition_count != 0u
+            || state->execution.replay_first_completed_event_count
+                != state->execution.spilled_event_count
+            || state->execution.replay_last_completed_event_count
+                != state->execution.spilled_event_count
+            || state->execution.replay_first_completed_content_digest
+                != state->execution.spill_content_digest
+            || state->execution.replay_last_completed_content_digest
+                != state->execution.spill_content_digest
+            || state->execution.replay_final_span_bp
+                != locator.total_bp_size
+            || state->execution.replay_final_storage_binding
+                != before_release
+            || state->execution.replay_visited_event_count != expected_visited
+            || !before_release.valid()) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 selected backend replay proof was rejected");
+        }
+
+        storage.release_runs();
+        const auto after_release = storage.segment_spill_storage_binding();
+        if (after_release.generation_token != before_release.generation_token
+            || before_release.mutation_version
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || after_release.mutation_version
+                != before_release.mutation_version + 1u) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 spill resources did not release atomically");
+        }
+        state->count_scratch->close_checked();
+        state->count_scratch.reset();
+
+        result.unique_hash_count = metadata.manifest.unique_hash_count;
+        result.total_posting_count =
+            metadata.manifest.total_posting_count;
+        result.head = metadata.head;
+        result.manifest = metadata.manifest;
+        state->ready_token.emplace(
+            state->writer->seal_and_validate_ready(
+                metadata, std::move(*state->source_proof)));
+        state->source_proof.reset();
+        state->writer.reset();
+        storage.close_checked();
+        inject_rev3_pg_failure_as_cpp(
+            Rev3PgFailureInjection::generation_storage_close,
+            "format6_generation_storage_close");
+
+        ReadyMinimizerFormat6PublishedHeadReceipt publication_receipt =
+            publish_ready_minimizer_format6_head_pg(
+                std::move(*state->ready_token));
+        state->ready_token.reset();
+        if (publication_receipt.query_key != sequence_rowno
+            || publication_receipt.head != metadata.head
+            || publication_receipt.head_bytes != metadata.encoded_head) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "Format-6 publication did not return the byte-exact proven head");
+        }
+        result.replaced_generation_id =
+            publication_receipt.replaced_generation_id;
+        result.published = true;
+        delete state;
+        state = nullptr;
+    } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+        storage.abandon_after_pg_error_noexcept();
+        if (state->count_scratch) {
+            state->count_scratch->abandon_after_pg_error_noexcept();
+        }
+        state->ready_token.reset();
+        state->writer.reset();
+        state->source_proof.reset();
+        delete state;
+        state = nullptr;
+        throw;
+    } catch (...) {
+        storage.abandon_after_pg_error_noexcept();
+        if (state->count_scratch) {
+            state->count_scratch->abandon_after_pg_error_noexcept();
+        }
+        state->ready_token.reset();
+        state->writer.reset();
+        state->source_proof.reset();
+        delete state;
+        state = nullptr;
+        throw;
+    }
+    return result;
+}
+
+/// Production caller-side seal: publication must preserve the requested
+/// backend and exact source/generation identities returned by the encoder.
+template <class R, class Scanner>
+inline void build_and_verify_minimizer_format6_generation_pg(
+        Oid user_relid,
+        std::int16_t column_attno,
+        std::string_view index_name,
+        const seq_locator& locator,
+        std::uint64_t sequence_rowno,
+        Snapshot registered_source_snapshot,
+        IndexStorageFragmentPg& storage,
+        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+    using Traits =
+        typename bioseq::storage::lazy_compact_sequence<R, Scanner>::traits;
+    constexpr std::uint16_t kWindowSize = 10u;
+    constexpr std::uint16_t kKmerSize = 15u;
+    constexpr std::uint16_t kAlphabetCode =
+        pgseq_supported_alphabets::index_of<
+            typename Traits::alphabet_type>();
+    if constexpr (kAlphabetCode != 0u) {
+        // Avoid instantiating the large Format-6 publisher for alphabet
+        // specializations which are statically outside its registry.
+        build_and_verify_grouped32_minimizer_generation_pg(
+            user_relid,
+            column_attno,
+            index_name,
+            locator,
+            sequence_rowno,
+            registered_source_snapshot,
+            storage,
+            sequence,
+            backend);
+        return;
+    } else {
+        const auto compatibility = bioseq::indexing::
+            minimizer_format6_compatibility_for_backend(
+                backend,
+                kAlphabetCode,
+                kKmerSize,
+                kWindowSize,
+                locator.total_bp_size);
+        if (!compatibility) {
+            // Future DNA4 parameter profiles which are not in the Format-6
+            // registry continue on the frozen Format-5 route.
+            build_and_verify_grouped32_minimizer_generation_pg(
+                user_relid,
+                column_attno,
+                index_name,
+                locator,
+                sequence_rowno,
+                registered_source_snapshot,
+                storage,
+                sequence,
+                backend);
+            return;
+        }
+        const ReadyMinimizerFormat6PublicationPg publication =
+            build_and_publish_minimizer_format6_generation_pg(
+                user_relid,
+                column_attno,
+                index_name,
+                locator,
+                sequence_rowno,
+                registered_source_snapshot,
+                storage,
+                sequence,
+                backend);
+        if (!publication.published
+            || publication.generation_id == 0u
+            || publication.query_key != sequence_rowno
+            || publication.source_epoch != locator.source_epoch
+            || publication.selected_backend != backend
+            || publication.head.generation_id != publication.generation_id
+            || publication.head.query_key != sequence_rowno
+            || publication.head.source_epoch != locator.source_epoch
+            || publication.manifest.generation_id != publication.generation_id
+            || publication.manifest.source_epoch != locator.source_epoch
+            || publication.manifest.target_length != locator.total_bp_size
+            || publication.unique_hash_count
+                != publication.manifest.unique_hash_count
+            || publication.total_posting_count
+                != publication.manifest.total_posting_count) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "normal Format-6 minimizer rebuild publication proof was rejected",
+                fmt::format(
+                    "index={} backend={}",
+                    index_name,
+                    bioseq::simd::HWY_NAMESPACE::
+                        minimizer_sketch_backend_name(backend)));
+        }
+    }
+}
+
 /// Build, completely reread, and atomically publish one Format-5 MPF or MPS
 /// generation from an already-authoritative PostgreSQL-backed lazy sequence.
 ///
-/// Ordinary update_index uses this route for PostgreSQL locator-backed MPF/MPS
-/// sources only while the explicit grouped32 persistence GUC is enabled.
-/// INSERT/load and default ordinary rebuilds retain their existing route.
+/// Ordinary update_index retains this frozen route for PostgreSQL-backed
+/// alphabet/parameter profiles not registered by Format-6.  Format-5 fixtures
+/// and readers remain unchanged; DNA4/15/10 production publication uses the
+/// Format-6 coordinator above.
 /// The caller retains both the registered source snapshot and metadata-age
 /// ownership. `storage.begin_generation_write()` creates a missing canonical
 /// sidecar or reuses an exact one; legacy/malformed same-name relations require
@@ -5695,6 +6682,386 @@ exercise_rev3_generation_storage_state_impl(
                 static_cast<unsigned>(rel_oid), state.row_count));
     }
     return state.result;
+}
+
+/// Resolve and fully authenticate one READY Format-6 generation. Unlike the
+/// legacy inspector below, this path proves the 128-bit source identity and
+/// bounded-rereads every logical stream so restart audits receive recomputed
+/// directory/control/posting row, byte, and CRC receipts.
+[[nodiscard]] inline ReadyMinimizerFormat6Inspection
+inspect_ready_minimizer_format6_generation_impl(
+        Oid rel_oid,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno) {
+    const bool is_bioseq_table = OidIsValid(rel_oid)
+        && bioseq::pg_utils::invoke_pg_as_cpp(
+            [rel_oid] { return IsBioseqColumnTableAmTable(rel_oid); });
+    if (!is_bioseq_table) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_WRONG_OBJECT_TYPE,
+            "bioseq Format-6 inspection requires a USING bioseq table");
+    }
+    const Oid user_id = GetUserId();
+    if (!bioseq::pg_utils::invoke_pg_as_cpp(
+            [rel_oid, user_id] {
+                return object_ownercheck(
+                    RelationRelationId, rel_oid, user_id);
+            })) {
+        bioseq::pg_utils::invoke_pg_as_cpp([rel_oid] {
+            aclcheck_error(
+                ACLCHECK_NOT_OWNER, OBJECT_TABLE, get_rel_name(rel_oid));
+        });
+    }
+    if (index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        && index_name != MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "bioseq Format-6 inspection requires a minimizer index",
+            fmt::format("index_name={}", index_name));
+    }
+    if (!bioseq::indexing::sql_bigint_can_represent(sequence_rowno)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+            "bioseq Format-6 inspection query key exceeds BIGINT");
+    }
+    if (bioseq_aligner_kmer_size != 15
+        || bioseq_aligner_window_size != 10) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "bioseq Format-6 inspection requires the registered k=15,w=10 profile");
+    }
+
+    const std::int16_t seq_attno =
+        single_seq_attno_for_inspection(rel_oid);
+    const RelationIdentity relation_identity =
+        index_relation_identity(rel_oid);
+    if (!OidIsValid(relation_identity.db_oid)
+        || !OidIsValid(relation_identity.tablespace_oid)
+        || !OidIsValid(relation_identity.relfilenode)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_UNDEFINED_TABLE,
+            "bioseq Format-6 inspection source relation is unavailable");
+    }
+    Snapshot active_snapshot = GetActiveSnapshot();
+    if (active_snapshot == nullptr || !IsMVCCSnapshot(active_snapshot)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "bioseq Format-6 inspection requires an active MVCC snapshot");
+    }
+
+    Snapshot registered_snapshot = nullptr;
+    ReadyMinimizerFormat6Inspection result{};
+    try {
+        registered_snapshot = bioseq::pg_utils::invoke_pg_as_cpp(
+            [active_snapshot] { return RegisterSnapshot(active_snapshot); });
+        if (registered_snapshot == nullptr
+            || registered_snapshot->regd_count == 0) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_INTERNAL_ERROR,
+                "bioseq Format-6 inspection could not register its snapshot");
+        }
+
+        const Rev3IndexAdministrationIdentity identity{
+            .database_oid = relation_identity.db_oid,
+            .tablespace_oid = relation_identity.tablespace_oid,
+            .main_relfilenode = relation_identity.relfilenode,
+            .user_relid = rel_oid,
+            .column_attno = seq_attno,
+            .index_name = std::string{index_name},
+        };
+        const ReadyMinimizerFormat6MetadataIdentityPg inspected =
+            inspect_ready_minimizer_format6_metadata_pg(
+                identity, sequence_rowno, registered_snapshot);
+        const std::string table_name = format_seqidx_name(
+            index_name,
+            relation_identity.db_oid,
+            relation_identity.tablespace_oid,
+            relation_identity.relfilenode,
+            seq_attno,
+            inspected.source.locator.bucket_idx,
+            inspected.source.locator.shard_idx);
+        if (table_name.empty()
+            || table_name.size() >= result.table_name.size()
+            || index_name.size() >= result.index_name.size()) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_NAME_TOO_LONG,
+                "bioseq Format-6 inspection identity name is too long");
+        }
+
+        const auto expected_compatibility = bioseq::indexing::
+            minimizer_format6_compatibility_for_backend(
+                resolve_index_sketch_backend_from_gucs(),
+                inspected.source.alphabet_code,
+                15u,
+                10u,
+                inspected.source.locator.total_bp_size);
+        if (!expected_compatibility
+            || inspected.manifest.compatibility
+                != *expected_compatibility
+            || inspected.head.query_key != sequence_rowno
+            || inspected.source.sequence_rowno != sequence_rowno
+            || inspected.head.source_epoch
+                != inspected.source.locator.source_epoch
+            || inspected.manifest.source_epoch
+                != inspected.source.locator.source_epoch
+            || inspected.head.source_content_crc64
+                != inspected.source_content_checksum
+            || inspected.manifest.source_content_crc64
+                != inspected.source_content_checksum
+            || inspected.manifest.target_length
+                != inspected.source.locator.total_bp_size
+            || inspected.head.source_identity
+                != bioseq::indexing::minimizer_format6_source_identity(
+                    sequence_rowno,
+                    inspected.source.locator.source_epoch,
+                    inspected.source_content_checksum,
+                    inspected.source.locator.total_bp_size)
+            || inspected.head.source_identity
+                != inspected.manifest.source_identity
+            || !inspected.source_counters.timed_equation_holds()) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "bioseq Format-6 inspection source/profile identity disagrees");
+        }
+
+        static_assert(
+            bioseq::indexing::kMinimizerFormat6HeadBytes == 224u);
+        static_assert(
+            bioseq::indexing::kMinimizerFormat6ManifestBytes == 336u);
+        const auto ceil_rows = [](std::uint64_t bytes) noexcept {
+            return bytes
+                    / bioseq::indexing::kMinimizerFormat6RowPayloadBytes
+                + (bytes
+                        % bioseq::indexing::
+                            kMinimizerFormat6RowPayloadBytes
+                    != 0u
+                    ? 1u : 0u);
+        };
+        std::uint64_t expected_first_row = 0;
+        for (std::size_t stream_index = 0;
+             stream_index < inspected.manifest.streams.size();
+             ++stream_index) {
+            const auto& descriptor =
+                inspected.manifest.streams[stream_index];
+            const auto& catalog =
+                inspected.exact_catalog_streams[stream_index];
+            if (descriptor.encoding_version != 1u
+                || descriptor.row_count
+                    != ceil_rows(descriptor.logical_bytes)
+                || descriptor.first_row_ordinal != expected_first_row
+                || catalog.kind != descriptor.kind
+                || catalog.exact_catalog_rows != descriptor.row_count
+                || catalog.exact_catalog_bytes
+                    != descriptor.logical_bytes
+                || catalog.exact_catalog_stream_crc64
+                    != descriptor.stream_crc64
+                || descriptor.row_count
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - expected_first_row) {
+                ready_minimizer_error_as_cpp(
+                    ERRCODE_DATA_CORRUPTED,
+                    "bioseq Format-6 inspection stream receipt disagrees",
+                    fmt::format("stream_index={}", stream_index));
+            }
+            expected_first_row += descriptor.row_count;
+            result.streams[stream_index] = {
+                .kind = descriptor.kind,
+                .element_count = descriptor.element_count,
+                .logical_bytes = descriptor.logical_bytes,
+                .row_count = descriptor.row_count,
+                .stream_crc64 = descriptor.stream_crc64,
+                .exact_catalog_rows = catalog.exact_catalog_rows,
+                .exact_catalog_bytes = catalog.exact_catalog_bytes,
+                .exact_catalog_stream_crc64 =
+                    catalog.exact_catalog_stream_crc64,
+            };
+        }
+        const auto& directory = inspected.manifest.streams[0];
+        const auto& controls = inspected.manifest.streams[1];
+        const auto& postings = inspected.manifest.streams[2];
+        const unsigned __int128 expected_directory_bytes =
+            static_cast<unsigned __int128>(directory.element_count)
+            * bioseq::indexing::kMinimizerFormat6DirectoryEntryBytes;
+        const unsigned __int128 expected_posting_bytes =
+            static_cast<unsigned __int128>(postings.element_count)
+            * inspected.manifest.compatibility
+                .stored_posting_width_bytes;
+        if (directory.kind
+                != bioseq::indexing::MinimizerFormat6StreamKind::directory
+            || controls.kind
+                != bioseq::indexing::MinimizerFormat6StreamKind::controls
+            || postings.kind
+                != bioseq::indexing::MinimizerFormat6StreamKind::postings
+            || directory.element_width
+                != bioseq::indexing::
+                    kMinimizerFormat6DirectoryEntryBytes
+            || directory.element_count
+                != inspected.manifest.directory_entry_count
+            || expected_directory_bytes != directory.logical_bytes
+            || directory.stream_crc64
+                != inspected.manifest.authenticated_directory_crc64
+            || controls.element_count
+                != inspected.manifest.unique_hash_count
+            || controls.logical_bytes
+                != inspected.manifest.total_control_bytes
+            || postings.element_count
+                != inspected.manifest.total_posting_count
+            || postings.logical_bytes
+                != inspected.manifest.total_posting_bytes
+            || expected_posting_bytes != postings.logical_bytes) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_DATA_CORRUPTED,
+                "bioseq Format-6 inspection manifest stream equations disagree");
+        }
+
+        result.database_oid = relation_identity.db_oid;
+        result.main_relfilenode = relation_identity.relfilenode;
+        result.column_attno = seq_attno;
+        result.query_key = sequence_rowno;
+        std::ranges::copy(table_name, result.table_name.begin());
+        std::ranges::copy(index_name, result.index_name.begin());
+        result.source = inspected.source;
+        result.source_content_crc64 =
+            inspected.source_content_checksum;
+        result.source_identity = inspected.head.source_identity;
+        result.head = inspected.head;
+        result.manifest = inspected.manifest;
+        result.encoded_head = inspected.encoded_head;
+        result.encoded_manifest = inspected.encoded_manifest;
+        result.head_rows = 1;
+        result.head_bytes = result.encoded_head.size();
+        result.manifest_rows = 1;
+        result.manifest_bytes = result.encoded_manifest.size();
+
+        Snapshot finished_snapshot =
+            std::exchange(registered_snapshot, nullptr);
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [finished_snapshot] {
+                UnregisterSnapshot(finished_snapshot);
+            });
+    } catch (...) {
+        // The translated PostgreSQL ERROR owns snapshot cleanup.
+        registered_snapshot = nullptr;
+        throw;
+    }
+    return result;
+}
+
+/// Test-only process-parallel storage probe. Unlike the administrative
+/// inspector above, this path does not serially audit all three streams before
+/// the timed scan; it validates READY metadata/source authority once, then
+/// delegates the exact row transport experiment to chunked_storage.
+[[nodiscard]] inline MinimizerFormat6ParallelScanProbePg
+format6_parallel_scan_probe_impl(
+        Oid rel_oid,
+        std::string_view index_name,
+        std::uint64_t sequence_rowno,
+        std::uint32_t requested_workers) {
+    const bool is_bioseq_table = OidIsValid(rel_oid)
+        && bioseq::pg_utils::invoke_pg_as_cpp(
+            [rel_oid] {
+                return IsBioseqColumnTableAmTable(rel_oid);
+            });
+    if (!is_bioseq_table) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_WRONG_OBJECT_TYPE,
+            "bioseq Format-6 parallel scan probe requires a USING bioseq table");
+    }
+    const Oid user_id = GetUserId();
+    if (!bioseq::pg_utils::invoke_pg_as_cpp(
+            [rel_oid, user_id] {
+                return object_ownercheck(
+                    RelationRelationId, rel_oid, user_id);
+            })) {
+        bioseq::pg_utils::invoke_pg_as_cpp([rel_oid] {
+            aclcheck_error(
+                ACLCHECK_NOT_OWNER, OBJECT_TABLE,
+                get_rel_name(rel_oid));
+        });
+    }
+    if (index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        && index_name != MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "bioseq Format-6 parallel scan probe requires a minimizer index",
+            fmt::format("index_name={}", index_name));
+    }
+    if (!bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
+        || requested_workers > 64u) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
+            "bioseq Format-6 parallel scan probe parameter is out of range",
+            fmt::format(
+                "sequence_rowno={} requested_workers={}",
+                sequence_rowno, requested_workers));
+    }
+    if (bioseq_aligner_kmer_size != 15
+        || bioseq_aligner_window_size != 10) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "bioseq Format-6 parallel scan probe requires the registered k=15,w=10 profile");
+    }
+
+    const std::int16_t seq_attno =
+        single_seq_attno_for_inspection(rel_oid);
+    const RelationIdentity relation_identity =
+        index_relation_identity(rel_oid);
+    if (!OidIsValid(relation_identity.db_oid)
+        || !OidIsValid(relation_identity.tablespace_oid)
+        || !OidIsValid(relation_identity.relfilenode)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_UNDEFINED_TABLE,
+            "bioseq Format-6 parallel scan probe source relation is unavailable");
+    }
+    Snapshot active_snapshot = GetActiveSnapshot();
+    if (active_snapshot == nullptr
+        || !IsMVCCSnapshot(active_snapshot)) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "bioseq Format-6 parallel scan probe requires an active MVCC snapshot");
+    }
+
+    Snapshot registered_snapshot = nullptr;
+    try {
+        registered_snapshot = bioseq::pg_utils::invoke_pg_as_cpp(
+            [active_snapshot] {
+                return RegisterSnapshot(active_snapshot);
+            });
+        if (registered_snapshot == nullptr
+            || registered_snapshot->regd_count == 0) {
+            ready_minimizer_error_as_cpp(
+                ERRCODE_INTERNAL_ERROR,
+                "bioseq Format-6 parallel scan probe could not register its snapshot");
+        }
+        const Rev3IndexAdministrationIdentity identity{
+            .database_oid = relation_identity.db_oid,
+            .tablespace_oid = relation_identity.tablespace_oid,
+            .main_relfilenode = relation_identity.relfilenode,
+            .user_relid = rel_oid,
+            .column_attno = seq_attno,
+            .index_name = std::string{index_name},
+        };
+        Rev3CatalogSourceProof proof =
+            derive_rev3_catalog_source_proof_pg(
+                identity, sequence_rowno,
+                registered_snapshot);
+        MinimizerFormat6ParallelScanProbePg result =
+            probe_ready_minimizer_format6_parallel_scan_pg(
+                identity, sequence_rowno,
+                registered_snapshot, std::move(proof),
+                requested_workers);
+        Snapshot finished_snapshot =
+            std::exchange(registered_snapshot, nullptr);
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [finished_snapshot] {
+                UnregisterSnapshot(finished_snapshot);
+            });
+        return result;
+    } catch (...) {
+        // The SQL ERROR boundary owns registered snapshot cleanup.
+        registered_snapshot = nullptr;
+        throw;
+    }
 }
 
 /// Resolve and fully validate one READY revision-3 generation under one

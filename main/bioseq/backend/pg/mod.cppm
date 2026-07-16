@@ -683,6 +683,20 @@ template<std::size_t N>
 	return result;
 }
 
+template<std::size_t N>
+[[nodiscard]] std::string fixed_hex_bytes(
+		const std::array<std::byte, N>& bytes)
+{
+	constexpr char digits[] = "0123456789abcdef";
+	std::string result(N * 2, '0');
+	for (std::size_t i = 0; i < N; ++i) {
+		const std::uint8_t value = std::to_integer<std::uint8_t>(bytes[i]);
+		result[i * 2] = digits[(value >> 4U) & 0x0fU];
+		result[i * 2 + 1] = digits[value & 0x0fU];
+	}
+	return result;
+}
+
 [[nodiscard]] std::string cold_index_preparation_json(
 		const bioseq::pipeline_stats::PipelineOperationalStats& stats)
 {
@@ -1024,6 +1038,376 @@ template<std::size_t N>
 		? "true" : "false";
 	result += R"(,"stats_saturated":)";
 	result += operational.stats_saturated ? "true" : "false";
+	result += '}';
+	return result;
+}
+
+[[nodiscard]] std::string format6_reader_evidence_json(
+		const alignment_exec::AlignmentExecutionSnapshot& snapshot)
+{
+	const auto& operational = snapshot.pipeline.operational;
+	const auto& evidence = operational.format6_reader_evidence;
+	std::string result =
+		R"({"schema":"bioseq.format6_reader_evidence","version":1)";
+	result.reserve(3'072);
+	const auto append_signed = [&result](
+			const std::string_view key,
+			const std::int64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append_string = [&result](
+			const std::string_view key,
+			const std::string_view value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":\"";
+		result.append(value);
+		result += '"';
+	};
+	append_signed("execution_id", snapshot.execution_id);
+	append_signed("backend_pid", snapshot.backend_pid);
+	append("database_oid", snapshot.database_oid);
+	append("format_version", evidence.format_version);
+	append("sessions", evidence.sessions);
+	append("generation_id", evidence.generation_id);
+	append_string(
+		"source_identity",
+		fixed_hex_bytes(evidence.source_identity));
+	append_string(
+		"source_content_crc64",
+		fixed_hex_u64(evidence.source_content_crc64));
+	append_string(
+		"compatibility_digest",
+		fixed_hex_bytes(evidence.compatibility_digest));
+	append("directory_rows", evidence.directory_rows);
+	append("directory_bytes", evidence.directory_bytes);
+	append("control_rows", evidence.control_rows);
+	append("control_bytes", evidence.control_bytes);
+	append("posting_rows", evidence.posting_rows);
+	append("posting_bytes", evidence.posting_bytes);
+	append(
+		"directory_row_crc_receipts",
+		evidence.directory_row_crc_receipts);
+	append(
+		"directory_stream_crc_receipts",
+		evidence.directory_stream_crc_receipts);
+	append(
+		"control_row_crc_receipts",
+		evidence.control_row_crc_receipts);
+	append(
+		"control_block_crc_receipts",
+		evidence.control_block_crc_receipts);
+	append(
+		"control_semantic_receipts",
+		evidence.control_semantic_receipts);
+	append(
+		"posting_row_crc_receipts",
+		evidence.posting_row_crc_receipts);
+	append(
+		"posting_ranges_delivered",
+		evidence.posting_ranges_delivered);
+	append(
+		"posting_range_crc_receipts",
+		evidence.posting_range_crc_receipts);
+	append(
+		"posting_semantic_receipts",
+		evidence.posting_semantic_receipts);
+	append(
+		"authorized_posting_bytes",
+		evidence.authorized_posting_bytes);
+	append("query_count", evidence.query_count);
+	append("selected_block_count", evidence.selected_block_count);
+	append("accepted_hash_count", evidence.accepted_hash_count);
+	append(
+		"retained_position_count",
+		evidence.retained_position_count);
+	append(
+		"directory_phase_peak_bytes",
+		evidence.directory_phase_peak_bytes);
+	append(
+		"control_phase_peak_bytes",
+		evidence.control_phase_peak_bytes);
+	append(
+		"posting_phase_peak_bytes",
+		evidence.posting_phase_peak_bytes);
+	append("peak_admitted_bytes", evidence.peak_admitted_bytes);
+	append("retained_owner_bytes", evidence.retained_owner_bytes);
+	append("admitted_bytes", evidence.admitted_bytes);
+	append(
+		"legacy_assembly_calls",
+		operational.persisted_hash_build_calls);
+	append(
+		"legacy_globalize_calls",
+		operational.persisted_legacy_globalize_calls);
+	append(
+		"legacy_rebase_calls",
+		operational.persisted_legacy_rebase_calls);
+	append(
+		"recompute_calls",
+		operational.recomputed_target_index_rows);
+	append(
+		"generic_source_fallback_calls",
+		evidence.generic_source_fallback_calls);
+	append("backend_fallbacks", operational.backend_fallbacks);
+	append("failures", evidence.failures);
+	result += R"(,"saturated":)";
+	result += evidence.saturated ? "true" : "false";
+	result += R"(,"operational_identity_conflict":)";
+	result += operational.operational_identity_conflict
+		? "true" : "false";
+	result += R"(,"stats_saturated":)";
+	result += operational.stats_saturated ? "true" : "false";
+	result += '}';
+	return result;
+}
+
+[[nodiscard]] std::string ready_minimizer_format6_inspection_json(
+		const bioseq::storage::indexing::
+			ReadyMinimizerFormat6Inspection& inspection)
+{
+	std::string result =
+		R"({"schema":"bioseq.ready_minimizer_format6_generation","version":1,"format_version":6)";
+	result.reserve(4'096);
+	const auto append = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	const auto append_string = [&result](
+			const std::string_view key,
+			const std::string_view value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":\"";
+		result.append(value);
+		result += '"';
+	};
+	const auto bounded_name = []<std::size_t N>(
+			const std::array<char, N>& value) {
+		const auto end = std::find(value.begin(), value.end(), '\0');
+		return std::string_view{
+			value.data(),
+			static_cast<std::size_t>(end - value.begin())};
+	};
+	const auto stream_kind_name = [](
+			const bioseq::indexing::MinimizerFormat6StreamKind kind)
+			-> std::string_view {
+		switch (kind) {
+			case bioseq::indexing::MinimizerFormat6StreamKind::directory:
+				return "directory";
+			case bioseq::indexing::MinimizerFormat6StreamKind::controls:
+				return "controls";
+			case bioseq::indexing::MinimizerFormat6StreamKind::postings:
+				return "postings";
+		}
+		return "invalid";
+	};
+
+	append("database_oid", inspection.database_oid);
+	append("main_relfilenode", inspection.main_relfilenode);
+	append(
+		"column_attno",
+		static_cast<std::uint64_t>(inspection.column_attno));
+	append("query_key", inspection.query_key);
+	append_string("table_name", bounded_name(inspection.table_name));
+	append_string("index_name", bounded_name(inspection.index_name));
+
+	const auto& source = inspection.source;
+	result += R"(,"source":{"sequence_rowno":)";
+	result += std::to_string(source.sequence_rowno);
+	result += R"(,"locator_version":)";
+	result += std::to_string(source.locator.version);
+	result += R"(,"bucket_idx":)";
+	result += std::to_string(source.locator.bucket_idx);
+	result += R"(,"shard_idx":)";
+	result += std::to_string(source.locator.shard_idx);
+	result += R"(,"num_fragments":)";
+	result += std::to_string(source.locator.num_fragments);
+	result += R"(,"total_bp_size":)";
+	result += std::to_string(source.locator.total_bp_size);
+	result += R"(,"first_sub_row_no":)";
+	result += std::to_string(source.locator.first_sub_row_no);
+	result += R"(,"source_epoch":)";
+	result += std::to_string(source.locator.source_epoch);
+	result += R"(,"padding_letters":)";
+	result += std::to_string(source.padding_letters);
+	result += R"(,"alphabet_code":)";
+	result += std::to_string(source.alphabet_code);
+	result += R"(,"storage_unit_byte_width":)";
+	result += std::to_string(source.storage_unit_byte_width);
+	result += R"(,"source_content_crc64":")";
+	result += fixed_hex_u64(inspection.source_content_crc64);
+	result += R"(","source_identity":")";
+	result += fixed_hex_bytes(inspection.source_identity);
+	result += R"("})";
+
+	const auto& head = inspection.head;
+	result += R"(,"head":{"generation_id":)";
+	result += std::to_string(head.generation_id);
+	result += R"(,"query_key":)";
+	result += std::to_string(head.query_key);
+	result += R"(,"source_epoch":)";
+	result += std::to_string(head.source_epoch);
+	result += R"(,"source_identity":")";
+	result += fixed_hex_bytes(head.source_identity);
+	result += R"(","source_content_crc64":")";
+	result += fixed_hex_u64(head.source_content_crc64);
+	result += R"(","compatibility_digest":")";
+	result += fixed_hex_bytes(head.compatibility_digest);
+	result += R"(","manifest_address_bound_row_crc64":")";
+	result += fixed_hex_u64(head.manifest_address_bound_row_crc64);
+	result += R"(","manifest_payload_crc64":")";
+	result += fixed_hex_u64(head.manifest_payload_crc64);
+	result += R"(","head_crc64":")";
+	result += fixed_hex_u64(head.head_crc64);
+	result += R"(","dense_seal_present":)";
+	result += head.dense_seal.has_value() ? "true" : "false";
+	result += '}';
+
+	const auto& manifest = inspection.manifest;
+	const auto& compatibility = manifest.compatibility;
+	result += R"(,"manifest":{"generation_id":)";
+	result += std::to_string(manifest.generation_id);
+	result += R"(,"source_epoch":)";
+	result += std::to_string(manifest.source_epoch);
+	result += R"(,"source_identity":")";
+	result += fixed_hex_bytes(manifest.source_identity);
+	result += R"(","source_content_crc64":")";
+	result += fixed_hex_u64(manifest.source_content_crc64);
+	result += R"(","target_length":)";
+	result += std::to_string(manifest.target_length);
+	result += R"(,"unique_hash_count":)";
+	result += std::to_string(manifest.unique_hash_count);
+	result += R"(,"total_posting_count":)";
+	result += std::to_string(manifest.total_posting_count);
+	result += R"(,"compatibility_digest":")";
+	result += fixed_hex_bytes(manifest.compatibility_digest);
+	result += R"(","authenticated_directory_crc64":")";
+	result += fixed_hex_u64(manifest.authenticated_directory_crc64);
+	result += R"(","generation_crc64":")";
+	result += fixed_hex_u64(manifest.generation_crc64);
+	result += R"(","total_control_bytes":)";
+	result += std::to_string(manifest.total_control_bytes);
+	result += R"(,"total_posting_bytes":)";
+	result += std::to_string(manifest.total_posting_bytes);
+	result += R"(,"directory_entry_count":)";
+	result += std::to_string(manifest.directory_entry_count);
+	result += R"(,"compatibility":{"hash_scheme_id":)";
+	result += std::to_string(compatibility.hash_scheme_id);
+	result += R"(,"hash_scheme_version":)";
+	result += std::to_string(compatibility.hash_scheme_version);
+	result += R"(,"alphabet_code":)";
+	result += std::to_string(compatibility.alphabet_code);
+	result += R"(,"kmer_size":)";
+	result += std::to_string(compatibility.kmer_size);
+	result += R"(,"window_size":)";
+	result += std::to_string(compatibility.window_size);
+	result += R"(,"hash_width_bytes":)";
+	result += std::to_string(compatibility.hash_width_bytes);
+	result += R"(,"stored_posting_width_bytes":)";
+	result += std::to_string(
+		compatibility.stored_posting_width_bytes);
+	result += R"(,"position_encoding_version":)";
+	result += std::to_string(
+		compatibility.position_encoding_version);
+	result += R"(,"hash_semantics_version":)";
+	result += std::to_string(compatibility.hash_semantics_version);
+	result += R"(,"count_semantics_version":)";
+	result += std::to_string(compatibility.count_semantics_version);
+	result += R"(,"producer_backend_id":)";
+	result += std::to_string(compatibility.producer_backend_id);
+	result += R"(,"producer_backend_version":)";
+	result += std::to_string(compatibility.producer_backend_version);
+	result += R"(,"controls_per_block":)";
+	result += std::to_string(compatibility.controls_per_block);
+	result += R"(,"hash_seed":)";
+	result += std::to_string(compatibility.hash_seed);
+	result += R"(}})";
+
+	result += R"(,"metadata":{"head_rows":)";
+	result += std::to_string(inspection.head_rows);
+	result += R"(,"head_bytes":)";
+	result += std::to_string(inspection.head_bytes);
+	result += R"(,"manifest_rows":)";
+	result += std::to_string(inspection.manifest_rows);
+	result += R"(,"manifest_bytes":)";
+	result += std::to_string(inspection.manifest_bytes);
+	result += '}';
+
+	result += R"(,"streams":[)";
+	for (std::size_t index = 0; index < inspection.streams.size(); ++index) {
+		if (index != 0u) result += ',';
+		const auto& stream = inspection.streams[index];
+		result += R"({"kind":")";
+		result.append(stream_kind_name(stream.kind));
+		result += R"(","element_count":)";
+		result += std::to_string(stream.element_count);
+		result += R"(,"logical_bytes":)";
+		result += std::to_string(stream.logical_bytes);
+		result += R"(,"row_count":)";
+		result += std::to_string(stream.row_count);
+		result += R"(,"stream_crc64":")";
+		result += fixed_hex_u64(stream.stream_crc64);
+		result += R"(","exact_catalog_rows":)";
+		result += std::to_string(stream.exact_catalog_rows);
+		result += R"(,"exact_catalog_bytes":)";
+		result += std::to_string(stream.exact_catalog_bytes);
+		result += R"(,"exact_catalog_stream_crc64":")";
+		result += fixed_hex_u64(
+			stream.exact_catalog_stream_crc64);
+		result += R"("})";
+	}
+	result += "]}";
+	return result;
+}
+
+[[nodiscard]] std::string format6_parallel_scan_probe_json(
+		const bioseq::storage::indexing::
+			MinimizerFormat6ParallelScanProbePg& proof)
+{
+	std::string result =
+		R"({"schema":"bioseq_internal.format6_parallel_scan_probe","version":1)";
+	result.reserve(768);
+	const auto append = [&result](
+			const std::string_view key,
+			const std::uint64_t value) {
+		result += ",\"";
+		result.append(key);
+		result += "\":";
+		result += std::to_string(value);
+	};
+	append("requested_workers", proof.requested_workers);
+	append("launched_workers", proof.launched_workers);
+	append("generation_id", proof.generation_id);
+	append("query_key", proof.query_key);
+	append("expected_rows", proof.expected_rows);
+	append("scanned_rows", proof.scanned_rows);
+	append("expected_bytes", proof.expected_bytes);
+	append("scanned_bytes", proof.scanned_bytes);
+	append("duplicate_rows", proof.duplicate_rows);
+	append("missing_rows", proof.missing_rows);
+	append("corrupt_rows", proof.corrupt_rows);
+	append("elapsed_ns", proof.elapsed_ns);
+	result += R"(,"checksum_digest":")";
+	result += fixed_hex_u64(proof.checksum_digest);
+	result += R"(","receipt_digest":")";
+	result += fixed_hex_u64(proof.receipt_digest);
+	result += R"(","leader_participated":)";
+	result += proof.leader_participated ? "true" : "false";
 	result += '}';
 	return result;
 }
@@ -2541,6 +2925,22 @@ Datum bioseq_last_alignment_format5_reader_memory_evidence_v2(
 		jsonb_in, CStringGetDatum(encoded.c_str())));
 }
 
+/* Exact Format-6 timed-reader identity, physical-I/O and ownership receipt. */
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_last_alignment_format6_reader_evidence);
+Datum bioseq_last_alignment_format6_reader_evidence(PG_FUNCTION_ARGS) {
+	if (!last_alignment_execution_snapshot.has_value()) {
+		PG_RETURN_NULL();
+	}
+	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+		*last_alignment_execution_snapshot;
+	(void)validate_alignment_snapshot_environment(snapshot);
+	const std::string encoded =
+		format6_reader_evidence_json(snapshot);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
 /* Exact accepted persisted Shape-V5 GPU operation/job causal ledger. */
 CXX_PG_FUNCTION_INFO_V1(
 	bioseq_last_alignment_persisted_gpu_operation_evidence_v1);
@@ -3077,6 +3477,136 @@ Datum bioseq_inspect_ready_minimizer_generation(PG_FUNCTION_ARGS) {
 	HeapTuple tuple = values.form_tuple(tupdesc);
 	PG_RETURN_DATUM(bioseq::pg_utils::pg_datum::from_heap_tuple(tuple).raw());
 }
+
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_inspect_ready_minimizer_format6_generation);
+Datum bioseq_inspect_ready_minimizer_format6_generation(
+		PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::int64_t signed_query_key = PG_GETARG_INT64(2);
+	if (signed_query_key < 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("bioseq Format-6 inspection query key is negative")));
+	}
+	using Inspection = bioseq::storage::indexing::
+		ReadyMinimizerFormat6Inspection;
+	static_assert(std::is_trivially_destructible_v<Inspection>);
+	Inspection inspection{};
+	ErrorData* inspection_pg_error = nullptr;
+	bool inspection_cpp_error = false;
+	bool inspection_unknown_cpp_error = false;
+	char inspection_error_detail[512] = "std::exception without detail";
+	try {
+		inspection = bioseq::storage::indexing::
+			inspect_ready_minimizer_format6_generation_impl(
+				rel,
+				std::string_view{
+					VARDATA_ANY(nm),
+					static_cast<std::size_t>(
+						VARSIZE_ANY_EXHDR(nm))},
+				static_cast<std::uint64_t>(signed_query_key));
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		inspection_pg_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			inspection_error_detail,
+			error.what() == nullptr
+				? "std::exception without detail"
+				: error.what(),
+			sizeof(inspection_error_detail));
+		inspection_cpp_error = true;
+	} catch (...) {
+		inspection_unknown_cpp_error = true;
+	}
+	if (inspection_pg_error != nullptr) {
+		ReThrowError(inspection_pg_error);
+	}
+	if (inspection_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq Format-6 inspection raised a C++ exception"),
+			 errdetail_internal("%s", inspection_error_detail)));
+	}
+	if (inspection_unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq Format-6 inspection raised an unknown C++ exception")));
+	}
+	const std::string encoded =
+		ready_minimizer_format6_inspection_json(inspection);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_internal_format6_parallel_scan_probe);
+Datum bioseq_internal_format6_parallel_scan_probe(
+		PG_FUNCTION_ARGS) {
+	const Oid rel = PG_GETARG_OID(0);
+	text* nm = PG_GETARG_TEXT_PP(1);
+	const std::int64_t signed_query_key = PG_GETARG_INT64(2);
+	const std::int32_t signed_workers = PG_GETARG_INT32(3);
+	if (signed_query_key < 0 || signed_workers < 0
+		|| signed_workers > 64) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("bioseq Format-6 parallel scan probe parameters are invalid")));
+	}
+	using Proof = bioseq::storage::indexing::
+		MinimizerFormat6ParallelScanProbePg;
+	static_assert(std::is_trivially_destructible_v<Proof>);
+	Proof proof{};
+	ErrorData* pg_error = nullptr;
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	char error_detail[512] = "std::exception without detail";
+	try {
+		proof = bioseq::storage::indexing::
+			format6_parallel_scan_probe_impl(
+				rel,
+				std::string_view{
+					VARDATA_ANY(nm),
+					static_cast<std::size_t>(
+						VARSIZE_ANY_EXHDR(nm))},
+				static_cast<std::uint64_t>(
+					signed_query_key),
+				static_cast<std::uint32_t>(
+					signed_workers));
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		pg_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			error_detail,
+			error.what() == nullptr
+				? "std::exception without detail"
+				: error.what(),
+			sizeof(error_detail));
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+	if (pg_error != nullptr) {
+		ReThrowError(pg_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq Format-6 parallel scan probe raised a C++ exception"),
+			 errdetail_internal("%s", error_detail)));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq Format-6 parallel scan probe raised an unknown C++ exception")));
+	}
+	const std::string encoded =
+		format6_parallel_scan_probe_json(proof);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
 CXX_PG_FUNCTION_INFO_V1(bioseq_internal_rev3_test_build_fixture);
 Datum bioseq_internal_rev3_test_build_fixture(PG_FUNCTION_ARGS) {
 	constexpr std::size_t kColumnCount = 20;

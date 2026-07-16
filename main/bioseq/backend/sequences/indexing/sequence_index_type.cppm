@@ -124,12 +124,26 @@ constexpr index_sub_key_t TEMP_RUN_BASE     = index_sub_key_t{1} << 62;
 /// directory stores the logical/control key below this base; the position row
 /// key is derived as POSITION_EXTENT_BASE + logical_key.
 constexpr index_sub_key_t POSITION_EXTENT_BASE = index_sub_key_t{1} << 61;
+/// Format-6 READY head.  It is deliberately distinct from the revision-3
+/// Format-5 head so either generation can remain independently authoritative
+/// while the production reader dispatches by the exact authenticated wire.
+constexpr index_sub_key_t FORMAT6_GENERATION_HEAD_SUB_KEY =
+    std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{3};
+/// Reserved for the optional authenticated dense-heap seal (DOC0381).  The
+/// baseline Format-6 B-tree route leaves this row absent and the head seal flag
+/// clear.
+constexpr index_sub_key_t FORMAT6_DENSE_SEAL_SUB_KEY =
+    std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{2};
 /// Revision-3 generation-head row, directly below the legacy directory sentinel.
 constexpr index_sub_key_t GENERATION_HEAD_SUB_KEY =
     std::numeric_limits<index_sub_key_t>::max() - index_sub_key_t{1};
 constexpr index_sub_key_t DIRECTORY_SUB_KEY = std::numeric_limits<index_sub_key_t>::max();
 static_assert(POSITION_EXTENT_BASE > 0);
 static_assert(POSITION_EXTENT_BASE + POSITION_EXTENT_BASE == TEMP_RUN_BASE);
+static_assert(FORMAT6_GENERATION_HEAD_SUB_KEY > TEMP_RUN_BASE);
+static_assert(FORMAT6_GENERATION_HEAD_SUB_KEY
+    < FORMAT6_DENSE_SEAL_SUB_KEY);
+static_assert(FORMAT6_DENSE_SEAL_SUB_KEY < GENERATION_HEAD_SUB_KEY);
 static_assert(GENERATION_HEAD_SUB_KEY > TEMP_RUN_BASE);
 static_assert(GENERATION_HEAD_SUB_KEY < DIRECTORY_SUB_KEY);
 static_assert(DIRECTORY_SUB_KEY > TEMP_RUN_BASE);

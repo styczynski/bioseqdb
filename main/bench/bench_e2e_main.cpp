@@ -332,6 +332,8 @@ struct E2eOutput {
     std::int64_t persisted_manifest_rows_read = -1;
     std::int64_t persisted_manifest_bytes_read = -1;
     std::int64_t persisted_format5_manifest_contract_valid = -1;
+    std::int64_t persisted_format6_contract_valid = -1;
+    std::int64_t persisted_format_version = -1;
     std::int64_t cold_index_schema_valid = -1;
     std::int64_t cold_index_route_empty = -1;
     std::int64_t cold_index_route_selective = -1;
@@ -371,6 +373,23 @@ struct E2eOutput {
     std::int64_t format5_reader_retained_layout_failures = -1;
     std::int64_t format5_reader_memory_evidence_saturated = -1;
     nlohmann::json format5_reader_memory_evidence = nullptr;
+    std::int64_t format6_directory_rows = -1;
+    std::int64_t format6_directory_bytes = -1;
+    std::int64_t format6_control_rows = -1;
+    std::int64_t format6_control_bytes = -1;
+    std::int64_t format6_posting_rows = -1;
+    std::int64_t format6_posting_bytes = -1;
+    std::int64_t format6_posting_ranges_delivered = -1;
+    std::int64_t format6_selected_block_count = -1;
+    std::int64_t format6_accepted_hash_count = -1;
+    std::int64_t format6_retained_position_count = -1;
+    std::int64_t format6_authorized_posting_bytes = -1;
+    std::int64_t format6_peak_admitted_bytes = -1;
+    std::int64_t format6_retained_owner_bytes = -1;
+    std::int64_t format6_admitted_bytes = -1;
+    std::int64_t format6_failures = -1;
+    std::int64_t format6_saturated = -1;
+    nlohmann::json format6_reader_evidence = nullptr;
     std::int64_t persisted_gpu_operation_evidence_schema_valid = -1;
     std::int64_t persisted_gpu_operation_evidence_accepted = -1;
     std::int64_t persisted_gpu_operation_evidence_complete = -1;
@@ -417,6 +436,11 @@ struct E2eOutput {
     std::int64_t pre_restart_persisted_generation_id = -1;
     std::int64_t pre_restart_persisted_gpu_abi_version = -1;
     std::string pre_restart_persisted_source_identity;
+    std::int64_t pre_restart_persisted_format_version = -1;
+    std::int64_t post_restart_persisted_format_version = -1;
+    nlohmann::json pre_restart_format6_ready_audit = nullptr;
+    nlohmann::json post_restart_format6_ready_audit = nullptr;
+    std::int64_t format6_restart_audit_accepted = -1;
     // Dedicated no-index lifecycle evidence.  Do not overload the persisted
     // just_index fields: no_index proves an untimed base-data load with no
     // sidecar, a post-load PostgreSQL restart, and an index-free fresh backend
@@ -498,6 +522,14 @@ struct E2eOutput {
 static_assert(
     E2eOutput::kAlignmentSnapshotColumnCount
     == E2eOutput::kAlignmentSnapshotV1ColumnCount + 1);
+
+[[nodiscard]] bool e2e_expects_format6(const E2eInput& in) noexcept;
+[[nodiscard]] nlohmann::json capture_format6_ready_audit(
+    const it::connection_test_context& connection,
+    const std::string& table,
+    std::string_view minimizer_index,
+    std::int64_t sequence_rowno,
+    const E2eInput& in);
 
 [[nodiscard]] std::optional<JustIndexSetupKind>
 e2e_just_index_setup_kind(std::string_view name) {
@@ -2082,6 +2114,78 @@ inline constexpr auto kFormat5ReaderMemoryEvidenceKeys =
     });
 static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 27);
 
+inline constexpr auto kFormat6ReaderEvidenceKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "execution_id", "backend_pid", "database_oid",
+        "format_version", "sessions", "generation_id", "source_identity",
+        "source_content_crc64", "compatibility_digest", "directory_rows",
+        "directory_bytes", "control_rows", "control_bytes", "posting_rows",
+        "posting_bytes", "directory_row_crc_receipts",
+        "directory_stream_crc_receipts", "control_row_crc_receipts",
+        "control_block_crc_receipts", "control_semantic_receipts",
+        "posting_row_crc_receipts", "posting_ranges_delivered",
+        "posting_range_crc_receipts", "posting_semantic_receipts",
+        "authorized_posting_bytes", "query_count", "selected_block_count",
+        "accepted_hash_count",
+        "retained_position_count", "directory_phase_peak_bytes",
+        "control_phase_peak_bytes", "posting_phase_peak_bytes",
+        "peak_admitted_bytes", "retained_owner_bytes", "admitted_bytes",
+        "legacy_assembly_calls", "legacy_globalize_calls",
+        "legacy_rebase_calls", "recompute_calls",
+        "generic_source_fallback_calls", "backend_fallbacks", "failures",
+        "saturated", "operational_identity_conflict", "stats_saturated",
+    });
+static_assert(kFormat6ReaderEvidenceKeys.size() == 47);
+
+inline constexpr auto kFormat6ReadyAuditKeys =
+    std::to_array<std::string_view>({
+        "schema", "version", "format_version", "database_oid",
+        "main_relfilenode", "column_attno", "query_key", "table_name",
+        "index_name", "source", "head", "manifest", "metadata", "streams",
+    });
+inline constexpr auto kFormat6ReadySourceKeys =
+    std::to_array<std::string_view>({
+        "sequence_rowno", "locator_version", "bucket_idx", "shard_idx",
+        "num_fragments", "total_bp_size", "first_sub_row_no", "source_epoch",
+        "padding_letters", "alphabet_code", "storage_unit_byte_width",
+        "source_content_crc64", "source_identity",
+    });
+inline constexpr auto kFormat6ReadyHeadKeys =
+    std::to_array<std::string_view>({
+        "generation_id", "query_key", "source_epoch", "source_identity",
+        "source_content_crc64", "compatibility_digest",
+        "manifest_address_bound_row_crc64", "manifest_payload_crc64",
+        "head_crc64", "dense_seal_present",
+    });
+inline constexpr auto kFormat6ReadyManifestKeys =
+    std::to_array<std::string_view>({
+        "generation_id", "source_epoch", "source_identity",
+        "source_content_crc64", "target_length", "unique_hash_count",
+        "total_posting_count", "compatibility_digest",
+        "authenticated_directory_crc64", "generation_crc64",
+        "total_control_bytes", "total_posting_bytes",
+        "directory_entry_count", "compatibility",
+    });
+inline constexpr auto kFormat6ReadyCompatibilityKeys =
+    std::to_array<std::string_view>({
+        "hash_scheme_id", "hash_scheme_version", "alphabet_code",
+        "kmer_size", "window_size", "hash_width_bytes",
+        "stored_posting_width_bytes", "position_encoding_version",
+        "hash_semantics_version", "count_semantics_version",
+        "producer_backend_id", "producer_backend_version",
+        "controls_per_block", "hash_seed",
+    });
+inline constexpr auto kFormat6ReadyMetadataKeys =
+    std::to_array<std::string_view>({
+        "head_rows", "head_bytes", "manifest_rows", "manifest_bytes",
+    });
+inline constexpr auto kFormat6ReadyStreamKeys =
+    std::to_array<std::string_view>({
+        "kind", "element_count", "logical_bytes", "row_count",
+        "stream_crc64", "exact_catalog_rows", "exact_catalog_bytes",
+        "exact_catalog_stream_crc64",
+    });
+
 inline constexpr auto kSimdExecutionEvidenceKeys =
     std::to_array<std::string_view>({
         "schema", "version", "requested_policy", "observed_policy",
@@ -2609,6 +2713,113 @@ void capture_format5_reader_memory_evidence(
         evidence["format5_reader_memory_evidence_saturated"].get<bool>()
             ? 1 : 0;
     out.format5_reader_memory_evidence = evidence;
+}
+
+void capture_format6_reader_evidence(
+        const it::connection_test_context& connection,
+        E2eOutput& out) {
+    const it::row_t row = it::query_one(
+        connection,
+        "SELECT bioseq.last_alignment_format6_reader_evidence();");
+    if (row.size() != 1) {
+        abort_pipeline_proof_capture(
+            "Format-6 reader evidence has an invalid scalar shape");
+    }
+    const nlohmann::json evidence = parse_exact_json_cell(
+        row.front(), "Format-6 reader evidence JSON failed to parse");
+    const bool header_valid = json_has_exact_keys(
+            evidence, kFormat6ReaderEvidenceKeys)
+        && evidence["schema"].is_string()
+        && evidence["schema"] == "bioseq.format6_reader_evidence"
+        && evidence["version"].is_number_integer()
+        && evidence["version"] == 1
+        && evidence["saturated"].is_boolean()
+        && evidence["operational_identity_conflict"].is_boolean()
+        && evidence["stats_saturated"].is_boolean();
+    if (!header_valid) {
+        abort_pipeline_proof_capture(
+            "Format-6 reader evidence has the wrong exact schema or types");
+    }
+
+    for (const auto key : kFormat6ReaderEvidenceKeys) {
+        if (key == "schema" || key == "version"
+            || key == "source_identity"
+            || key == "source_content_crc64"
+            || key == "compatibility_digest"
+            || key == "saturated"
+            || key == "operational_identity_conflict"
+            || key == "stats_saturated") {
+            continue;
+        }
+        (void)required_json_counter(evidence, key);
+    }
+    const std::string& source_identity =
+        required_json_text(evidence, "source_identity");
+    const std::string& source_content_crc64 =
+        required_json_text(evidence, "source_content_crc64");
+    const std::string& compatibility_digest =
+        required_json_text(evidence, "compatibility_digest");
+    if (!fixed_lower_hex(source_identity, 32)
+        || !fixed_lower_hex(source_content_crc64, 16)
+        || !fixed_lower_hex(compatibility_digest, 64)) {
+        abort_pipeline_proof_capture(
+            "Format-6 reader evidence identity is malformed");
+    }
+
+    const std::int64_t execution_id =
+        required_json_counter(evidence, "execution_id");
+    const std::int64_t backend_pid =
+        required_json_counter(evidence, "backend_pid");
+    const std::int64_t database_oid =
+        required_json_counter(evidence, "database_oid");
+    if (execution_id != out.alignment_execution_id
+        || backend_pid != out.alignment_backend_pid
+        || database_oid != out.alignment_database_oid
+        || evidence["operational_identity_conflict"].get<bool>()
+            != (out.operational_identity_conflict != 0)
+        || evidence["stats_saturated"].get<bool>()
+            != (out.stats_saturated != 0)
+        || required_json_counter(evidence, "backend_fallbacks")
+            != out.backend_fallbacks
+        || required_json_counter(evidence, "recompute_calls")
+            != out.recomputed_target_index_rows) {
+        abort_pipeline_proof_capture(
+            "Format-6 reader evidence identity/counters do not match v1");
+    }
+
+    out.format6_directory_rows =
+        required_json_counter(evidence, "directory_rows");
+    out.format6_directory_bytes =
+        required_json_counter(evidence, "directory_bytes");
+    out.format6_control_rows =
+        required_json_counter(evidence, "control_rows");
+    out.format6_control_bytes =
+        required_json_counter(evidence, "control_bytes");
+    out.format6_posting_rows =
+        required_json_counter(evidence, "posting_rows");
+    out.format6_posting_bytes =
+        required_json_counter(evidence, "posting_bytes");
+    out.format6_posting_ranges_delivered =
+        required_json_counter(evidence, "posting_ranges_delivered");
+    out.format6_selected_block_count =
+        required_json_counter(evidence, "selected_block_count");
+    out.format6_accepted_hash_count =
+        required_json_counter(evidence, "accepted_hash_count");
+    out.format6_retained_position_count =
+        required_json_counter(evidence, "retained_position_count");
+    out.format6_authorized_posting_bytes =
+        required_json_counter(evidence, "authorized_posting_bytes");
+    out.format6_peak_admitted_bytes =
+        required_json_counter(evidence, "peak_admitted_bytes");
+    out.format6_retained_owner_bytes =
+        required_json_counter(evidence, "retained_owner_bytes");
+    out.format6_admitted_bytes =
+        required_json_counter(evidence, "admitted_bytes");
+    out.format6_failures =
+        required_json_counter(evidence, "failures");
+    out.format6_saturated =
+        evidence["saturated"].get<bool>() ? 1 : 0;
+    out.format6_reader_evidence = evidence;
 }
 
 /// Validate and retain the immediate cache-qualified persisted-GPU ledger.
@@ -3450,6 +3661,7 @@ void capture_alignment_statement_stats(
     capture_persisted_gpu_operation_evidence(
         persisted_gpu_operation_row, out);
     capture_format5_reader_memory_evidence(connection, out);
+    capture_format6_reader_evidence(connection, out);
     out.query_sketch_host_wall_ns = required_i64(30);
     out.target_index_build_host_wall_ns = [&rows] {
         const auto parsed = parse_snapshot_i64(rows[2][30]);
@@ -3888,14 +4100,18 @@ inline void require_pipeline_execution_proof(
         return static_cast<__int128>(total)
             == static_cast<__int128>(count) * static_cast<__int128>(width);
     };
-    // Production just_index is Format 5 for every backend. A compatibility
-    // Format-4 read must never make an E2E SIMD/GPU performance sample pass.
+    const bool expect_format6 =
+        expect_persisted && e2e_expects_format6(in);
+    const bool expect_format5 =
+        expect_persisted && !expect_format6;
+    out.persisted_format_version = expect_format6
+        ? 6 : expect_format5 ? 5 : 0;
     const bool persisted_manifest_size_valid =
         scaled_equal(
             counter(56), counter(55),
             bioseq::indexing::MinimizerGenerationManifest::
                 format5_encoded_bytes);
-    out.persisted_format5_manifest_contract_valid = expect_persisted
+    out.persisted_format5_manifest_contract_valid = expect_format5
         && out.pre_restart_persisted_gpu_abi_version == 3
         && counter(55) == out.persisted_generation_read_sessions
         && persisted_manifest_size_valid
@@ -3960,7 +4176,7 @@ inline void require_pipeline_execution_proof(
         && out.extent_crc_combine_rows
             == out.cold_index_payload_rows_delivered
         && counter(80) == 1;
-    const bool persisted_read_gate = expect_persisted
+    const bool format5_persisted_read_gate = expect_format5
         ? out.cold_index_schema_valid == 1
             && one_cold_route
             && (selective_read_gate || full_read_gate)
@@ -4015,7 +4231,9 @@ inline void require_pipeline_execution_proof(
             && counter(82) == 0
             && counter(84) == 0
             && counter(85) == 0
-        : out.cold_index_schema_valid == 1
+        : true;
+    const bool no_persisted_read_gate = expect_persisted
+        || (out.cold_index_schema_valid == 1
             && out.cold_index_route_empty == 0
             && out.cold_index_route_selective == 0
             && out.cold_index_route_full == 0
@@ -4029,7 +4247,9 @@ inline void require_pipeline_execution_proof(
             && std::all_of(
                 out.alignment_snapshot_numeric_columns.begin() + 48,
                 out.alignment_snapshot_numeric_columns.begin() + 84,
-                [](const std::int64_t value) noexcept { return value == 0; });
+                [](const std::int64_t value) noexcept {
+                    return value == 0;
+                }));
     // Keep these diagnostic groups mathematically identical to the persisted
     // branch above.  They do not participate in acceptance; they only make a
     // failed cold-reader proof identify its exact class of disagreement
@@ -4121,6 +4341,179 @@ inline void require_pipeline_execution_proof(
         && out.format5_reader_retained_layout_checks == 0
         && out.format5_reader_retained_layout_failures == 0
         && out.format5_reader_memory_evidence_saturated == 0;
+    const bool no_format6_reader_evidence = [&out] {
+        const auto& evidence = out.format6_reader_evidence;
+        if (required_json_counter(evidence, "format_version") != 0
+            || required_json_counter(evidence, "sessions") != 0
+            || required_json_counter(evidence, "generation_id") != 0
+            || required_json_text(evidence, "source_identity")
+                != "00000000000000000000000000000000"
+            || required_json_text(evidence, "source_content_crc64")
+                != "0000000000000000"
+            || required_json_text(evidence, "compatibility_digest")
+                != std::string(64, '0')
+            || evidence["saturated"].get<bool>()
+            || evidence["operational_identity_conflict"].get<bool>()
+            || evidence["stats_saturated"].get<bool>()) {
+            return false;
+        }
+        constexpr auto zero_keys = std::to_array<std::string_view>({
+            "directory_rows", "directory_bytes", "control_rows",
+            "control_bytes", "posting_rows", "posting_bytes",
+            "directory_row_crc_receipts",
+            "directory_stream_crc_receipts", "control_row_crc_receipts",
+            "control_block_crc_receipts", "control_semantic_receipts",
+            "posting_row_crc_receipts", "posting_ranges_delivered",
+            "posting_range_crc_receipts", "posting_semantic_receipts",
+            "authorized_posting_bytes", "query_count",
+            "selected_block_count", "accepted_hash_count",
+            "retained_position_count", "directory_phase_peak_bytes",
+            "control_phase_peak_bytes", "posting_phase_peak_bytes",
+            "peak_admitted_bytes", "retained_owner_bytes",
+            "admitted_bytes", "legacy_assembly_calls",
+            "legacy_globalize_calls", "legacy_rebase_calls",
+            "generic_source_fallback_calls", "backend_fallbacks",
+            "failures",
+        });
+        return std::ranges::all_of(zero_keys, [&evidence](const auto key) {
+            return required_json_counter(evidence, key) == 0;
+        });
+    }();
+    const bool format6_persisted_read_gate = !expect_format6 || [&] {
+        const auto& evidence = out.format6_reader_evidence;
+        const auto& audit = out.post_restart_format6_ready_audit;
+        const auto& source = required_json_object(audit, "source");
+        const auto& head = required_json_object(audit, "head");
+        const auto& manifest = required_json_object(audit, "manifest");
+        const auto& compatibility =
+            required_json_object(manifest, "compatibility");
+        const auto& streams = required_json_array(audit, "streams");
+        const auto f6 = [&evidence](const std::string_view key) {
+            return required_json_counter(evidence, key);
+        };
+        const auto audit_counter = [](const nlohmann::json& object,
+                                      const std::string_view key) {
+            return required_json_counter(object, key);
+        };
+        const std::int64_t directory_rows =
+            audit_counter(streams[0], "row_count");
+        const std::int64_t directory_bytes =
+            audit_counter(streams[0], "logical_bytes");
+        const std::int64_t posting_width =
+            audit_counter(compatibility, "stored_posting_width_bytes");
+        const std::int64_t phase_peak = std::max({
+            f6("directory_phase_peak_bytes"),
+            f6("control_phase_peak_bytes"),
+            f6("posting_phase_peak_bytes"),
+        });
+        const bool physical_metadata =
+            out.persisted_generation_read_sessions == 1
+            && out.persisted_generation_read_sessions == out.target_rows
+            && out.persisted_relation_opens == out.target_rows
+            && counter(51) == 1
+            && counter(52) == 1
+            && counter(53)
+                == bioseq::indexing::kMinimizerFormat6HeadBytes
+            && counter(54) == 1
+            && counter(55) == 1
+            && counter(56)
+                == bioseq::indexing::kMinimizerFormat6ManifestBytes
+            && counter(142) == 1
+            && counter(143) == 1
+            && counter(144) == 1
+            && counter(145) == 0
+            && counter(146) == 0
+            && counter(147) == 0
+            && counter(148) == 0
+            && counter(82) == 0;
+        const bool runtime_identity =
+            f6("format_version") == 6
+            && f6("sessions") == 1
+            && f6("generation_id")
+                == audit_counter(head, "generation_id")
+            && f6("generation_id") == out.persisted_generation_id
+            && required_json_text(evidence, "source_identity")
+                == required_json_text(source, "source_identity")
+            && required_json_text(evidence, "source_content_crc64")
+                == required_json_text(source, "source_content_crc64")
+            && required_json_text(evidence, "compatibility_digest")
+                == required_json_text(head, "compatibility_digest");
+        const bool directory_receipts =
+            f6("directory_rows") == directory_rows
+            && f6("directory_bytes") == directory_bytes
+            && f6("directory_row_crc_receipts") == directory_rows
+            && f6("directory_stream_crc_receipts") == 1;
+        const bool control_receipts =
+            f6("control_rows") > 0
+            && f6("control_bytes") > 0
+            && f6("control_bytes") >= f6("control_rows")
+            && static_cast<__int128>(f6("control_bytes"))
+                <= static_cast<__int128>(f6("control_rows"))
+                    * static_cast<__int128>(
+                        bioseq::indexing::
+                            kMinimizerFormat6RowPayloadBytes)
+            && f6("control_row_crc_receipts") == f6("control_rows")
+            && f6("selected_block_count") > 0
+            && f6("control_block_crc_receipts")
+                == f6("selected_block_count")
+            && f6("control_semantic_receipts")
+                == f6("selected_block_count");
+        const bool posting_receipts =
+            f6("posting_rows") > 0
+            && f6("posting_bytes") > 0
+            && f6("posting_bytes") >= f6("posting_rows")
+            && static_cast<__int128>(f6("posting_bytes"))
+                <= static_cast<__int128>(f6("posting_rows"))
+                    * static_cast<__int128>(
+                        bioseq::indexing::
+                            kMinimizerFormat6RowPayloadBytes)
+            && f6("posting_row_crc_receipts") == f6("posting_rows")
+            && f6("posting_ranges_delivered") > 0
+            && f6("posting_semantic_receipts")
+                == f6("posting_ranges_delivered")
+            && f6("posting_range_crc_receipts")
+                <= f6("posting_ranges_delivered")
+            && f6("retained_position_count") > 0
+            && static_cast<__int128>(f6("authorized_posting_bytes"))
+                == static_cast<__int128>(
+                    f6("retained_position_count"))
+                    * static_cast<__int128>(posting_width);
+        const bool selective_work =
+            f6("query_count") > 0
+            && f6("accepted_hash_count") > 0
+            && f6("accepted_hash_count") <= f6("query_count")
+            && f6("selected_block_count")
+                <= audit_counter(manifest, "directory_entry_count");
+        const bool exact_memory =
+            f6("directory_phase_peak_bytes") > 0
+            && f6("control_phase_peak_bytes") > 0
+            && f6("posting_phase_peak_bytes") > 0
+            && f6("peak_admitted_bytes") == phase_peak
+            && f6("retained_owner_bytes") > 0
+            && f6("retained_owner_bytes") == f6("admitted_bytes");
+        const bool forbidden_routes =
+            f6("legacy_assembly_calls") == 0
+            && f6("legacy_globalize_calls") == 0
+            && f6("legacy_rebase_calls") == 0
+            && f6("recompute_calls") == 0
+            && f6("generic_source_fallback_calls") == 0
+            && f6("backend_fallbacks") == 0
+            && f6("failures") == 0
+            && !evidence["saturated"].get<bool>()
+            && !evidence["operational_identity_conflict"].get<bool>()
+            && !evidence["stats_saturated"].get<bool>();
+        return physical_metadata && runtime_identity
+            && directory_receipts && control_receipts
+            && posting_receipts && selective_work && exact_memory
+            && forbidden_routes;
+    }();
+    out.persisted_format6_contract_valid =
+        expect_format6 && format6_persisted_read_gate ? 1 : 0;
+    const bool persisted_read_gate = expect_format6
+        ? format6_persisted_read_gate
+        : expect_format5
+            ? format5_persisted_read_gate && no_format6_reader_evidence
+            : no_persisted_read_gate && no_format6_reader_evidence;
     const __int128 format5_reader_sessions =
         static_cast<__int128>(out.persisted_generation_read_sessions);
     const __int128 format5_reader_passes = static_cast<__int128>(
@@ -4146,7 +4539,7 @@ inline void require_pipeline_execution_proof(
             out.format5_reader_global_position_capacity_bytes)
         + static_cast<__int128>(
             out.format5_reader_control_payload_capacity_bytes);
-    const bool format5_reader_memory_gate = expect_persisted && !expect_gpu
+    const bool format5_reader_memory_gate = expect_format5 && !expect_gpu
         ? out.format5_reader_global_position_storage_preparations
                 == out.persisted_generation_read_sessions
             && out.format5_reader_global_position_storage_allocations
@@ -4340,7 +4733,7 @@ inline void require_pipeline_execution_proof(
                 == expectation.attempted_alignment_jobs
             && out.persisted_gpu_accepted_job_count
                 == out.persisted_gpu_job_count);
-    const bool cold_restart_gate = !expect_persisted
+    const bool cold_restart_process_gate = !expect_persisted
         || (out.just_index_restart_performed == 1
             && out.cold_restart_identity_changed == 1
             && !out.pre_restart_postmaster_start_time.empty()
@@ -4358,12 +4751,30 @@ inline void require_pipeline_execution_proof(
             && out.post_restart_database_oid == out.alignment_database_oid
             && out.pre_restart_persisted_generation_id > 0
             && out.pre_restart_persisted_generation_id
-                == out.persisted_generation_id
-            && fixed_lower_hex(out.pre_restart_persisted_source_identity, 16)
+                == out.persisted_generation_id);
+    const bool format5_cold_restart_identity_gate = !expect_format5
+        || (out.pre_restart_persisted_format_version == 5
+            && out.post_restart_persisted_format_version == 5
+            && fixed_lower_hex(
+                out.pre_restart_persisted_source_identity, 16)
             && out.pre_restart_persisted_source_identity
                 != "0000000000000000"
             && out.pre_restart_persisted_source_identity
                 == out.persisted_source_identity);
+    const bool format6_cold_restart_identity_gate = !expect_format6
+        || (out.pre_restart_persisted_format_version == 6
+            && out.post_restart_persisted_format_version == 6
+            && out.format6_restart_audit_accepted == 1
+            && out.pre_restart_format6_ready_audit
+                == out.post_restart_format6_ready_audit
+            && fixed_lower_hex(
+                out.pre_restart_persisted_source_identity, 32)
+            && required_json_text(
+                out.format6_reader_evidence, "source_identity")
+                == out.pre_restart_persisted_source_identity);
+    const bool cold_restart_gate = cold_restart_process_gate
+        && format5_cold_restart_identity_gate
+        && format6_cold_restart_identity_gate;
     const bool cold_no_index_gate = expect_persisted
         || out.cold_no_index_lifecycle_accepted == 1;
     const bool persisted_policy_gate = !expect_persisted
@@ -5931,6 +6342,15 @@ template <sequence_alphabet A>
                     "SELECT bioseq.update_index('{}'::regclass, '{}');",
                     table,
                     index_name));
+            if (indexed_sequences <= 0) {
+                bioseq_log<ERR>(
+                    "[bench_e2e] just_index setup published no generation "
+                    "for table={} index={}",
+                    table,
+                    index_name);
+                std::abort();
+            }
+            if (!e2e_expects_format6(in)) {
             const std::string audit_sql = fmt::format(
                 "SELECT current_setting('bioseq.aligner.minimizer_algorithm'), "
                 "current_setting('bioseq.aligner.vulkan_enabled'), "
@@ -6014,6 +6434,7 @@ template <sequence_alphabet A>
                     async_persist_disabled,
                     recompute_persist_disabled);
                 std::abort();
+            }
             }
             const bool inserted =
                 in.just_index_sequence_rowno_by_table.emplace(
@@ -6134,6 +6555,12 @@ struct ColdRestartProof {
     PostmasterIdentity after{};
 };
 
+[[nodiscard]] bool e2e_expects_format6(const E2eInput& in) noexcept {
+    return in.alphabet == "dna4"
+        && in.kmer_size == 15
+        && in.window_size == 10;
+}
+
 [[nodiscard]] PostmasterIdentity capture_postmaster_identity(
         const it::connection_test_context& connection) {
     const auto rows = it::query_rows(
@@ -6158,6 +6585,213 @@ struct ColdRestartProof {
         .backend_pid = *backend_pid,
         .database_oid = *database_oid,
     };
+}
+
+[[nodiscard]] nlohmann::json capture_format6_ready_audit(
+        const it::connection_test_context& connection,
+        const std::string& table,
+        const std::string_view minimizer_index,
+        const std::int64_t sequence_rowno,
+        const E2eInput& in) {
+    const it::row_t row = it::query_one(
+        connection,
+        fmt::format(
+            "SELECT bioseq.inspect_ready_minimizer_format6_generation("
+            "'{}'::regclass, '{}', {});",
+            table,
+            minimizer_index,
+            sequence_rowno));
+    if (row.size() != 1) {
+        abort_pipeline_proof_capture(
+            "Format-6 READY audit has an invalid scalar shape");
+    }
+    const nlohmann::json audit = parse_exact_json_cell(
+        row.front(), "Format-6 READY audit JSON failed to parse");
+    if (!json_has_exact_keys(audit, kFormat6ReadyAuditKeys)
+        || required_json_text(audit, "schema")
+            != "bioseq.ready_minimizer_format6_generation"
+        || required_json_counter(audit, "version") != 1
+        || required_json_counter(audit, "format_version") != 6) {
+        abort_pipeline_proof_capture(
+            "Format-6 READY audit has the wrong exact top-level schema");
+    }
+
+    const nlohmann::json& source =
+        required_json_object(audit, "source");
+    const nlohmann::json& head =
+        required_json_object(audit, "head");
+    const nlohmann::json& manifest =
+        required_json_object(audit, "manifest");
+    const nlohmann::json& metadata =
+        required_json_object(audit, "metadata");
+    const nlohmann::json& compatibility =
+        required_json_object(manifest, "compatibility");
+    const nlohmann::json& streams =
+        required_json_array(audit, "streams");
+    if (!json_has_exact_keys(source, kFormat6ReadySourceKeys)
+        || !json_has_exact_keys(head, kFormat6ReadyHeadKeys)
+        || !json_has_exact_keys(manifest, kFormat6ReadyManifestKeys)
+        || !json_has_exact_keys(
+            compatibility, kFormat6ReadyCompatibilityKeys)
+        || !json_has_exact_keys(metadata, kFormat6ReadyMetadataKeys)
+        || streams.size() != 3
+        || !head["dense_seal_present"].is_boolean()) {
+        abort_pipeline_proof_capture(
+            "Format-6 READY audit has the wrong exact nested schema");
+    }
+    for (const auto& stream : streams) {
+        if (!json_has_exact_keys(stream, kFormat6ReadyStreamKeys)) {
+            abort_pipeline_proof_capture(
+                "Format-6 READY audit stream has the wrong exact schema");
+        }
+    }
+
+    const auto counter = [](const nlohmann::json& object,
+                            const std::string_view key) {
+        return required_json_counter(object, key);
+    };
+    const auto exact_hex = [](const nlohmann::json& object,
+                              const std::string_view key,
+                              const std::size_t width) {
+        return fixed_lower_hex(required_json_text(object, key), width);
+    };
+    const std::int64_t generation = counter(head, "generation_id");
+    const std::int64_t target_length = counter(manifest, "target_length");
+    const std::int64_t stored_posting_width =
+        counter(compatibility, "stored_posting_width_bytes");
+    const bool identity_valid =
+        counter(audit, "database_oid") > 0
+        && counter(audit, "main_relfilenode") > 0
+        && counter(audit, "column_attno") > 0
+        && counter(audit, "query_key") == sequence_rowno
+        && !required_json_text(audit, "table_name").empty()
+        && std::string_view{required_json_text(audit, "index_name")}
+            == minimizer_index
+        && counter(source, "sequence_rowno") == sequence_rowno
+        && counter(source, "locator_version") > 0
+        && counter(source, "num_fragments") > 0
+        && counter(source, "total_bp_size") == in.target_bp
+        && counter(source, "source_epoch") > 0
+        && counter(source, "alphabet_code") == 0
+        && counter(source, "storage_unit_byte_width") > 0
+        && fixed_lower_hex(
+            required_json_text(source, "source_identity"), 32)
+        && exact_hex(source, "source_content_crc64", 16)
+        && generation > 0
+        && counter(head, "query_key") == sequence_rowno
+        && counter(head, "source_epoch")
+            == counter(source, "source_epoch")
+        && required_json_text(head, "source_identity")
+            == required_json_text(source, "source_identity")
+        && required_json_text(head, "source_content_crc64")
+            == required_json_text(source, "source_content_crc64")
+        && fixed_lower_hex(
+            required_json_text(head, "compatibility_digest"), 64)
+        && exact_hex(head, "manifest_address_bound_row_crc64", 16)
+        && exact_hex(head, "manifest_payload_crc64", 16)
+        && exact_hex(head, "head_crc64", 16)
+        && counter(manifest, "generation_id") == generation
+        && counter(manifest, "source_epoch")
+            == counter(source, "source_epoch")
+        && required_json_text(manifest, "source_identity")
+            == required_json_text(source, "source_identity")
+        && required_json_text(manifest, "source_content_crc64")
+            == required_json_text(source, "source_content_crc64")
+        && required_json_text(manifest, "compatibility_digest")
+            == required_json_text(head, "compatibility_digest")
+        && exact_hex(manifest, "authenticated_directory_crc64", 16)
+        && exact_hex(manifest, "generation_crc64", 16)
+        && target_length == in.target_bp
+        && counter(manifest, "unique_hash_count") > 0
+        && counter(manifest, "total_posting_count") > 0
+        && counter(manifest, "total_control_bytes") > 0
+        && counter(manifest, "total_posting_bytes") > 0
+        && counter(manifest, "directory_entry_count") > 0;
+    const bool compatibility_valid =
+        counter(compatibility, "alphabet_code") == 0
+        && counter(compatibility, "kmer_size") == in.kmer_size
+        && counter(compatibility, "window_size") == in.window_size
+        && counter(compatibility, "hash_width_bytes") == 4
+        && stored_posting_width
+            == (target_length <= (std::int64_t{1} << 31) ? 4 : 8)
+        && counter(compatibility, "position_encoding_version") == 1
+        && counter(compatibility, "hash_semantics_version") == 1
+        && counter(compatibility, "count_semantics_version") == 1
+        && counter(compatibility, "producer_backend_id") > 0
+        && counter(compatibility, "producer_backend_version") > 0
+        && counter(compatibility, "controls_per_block")
+            == bioseq::indexing::kMinimizerFormat6ControlsPerBlock
+        && counter(compatibility, "hash_seed") == 0;
+    const bool metadata_valid =
+        counter(metadata, "head_rows") == 1
+        && counter(metadata, "head_bytes")
+            == bioseq::indexing::kMinimizerFormat6HeadBytes
+        && counter(metadata, "manifest_rows") == 1
+        && counter(metadata, "manifest_bytes")
+            == bioseq::indexing::kMinimizerFormat6ManifestBytes;
+
+    const std::array<std::string_view, 3> expected_kinds{
+        "directory", "controls", "postings"};
+    bool streams_valid = true;
+    for (std::size_t index = 0; index < streams.size(); ++index) {
+        const auto& stream = streams[index];
+        const std::int64_t logical_bytes =
+            counter(stream, "logical_bytes");
+        const std::int64_t expected_rows =
+            logical_bytes
+                    / static_cast<std::int64_t>(
+                        bioseq::indexing::kMinimizerFormat6RowPayloadBytes)
+                + (logical_bytes
+                        % static_cast<std::int64_t>(
+                            bioseq::indexing::
+                                kMinimizerFormat6RowPayloadBytes)
+                    != 0
+                    ? 1 : 0);
+        streams_valid = streams_valid
+            && std::string_view{required_json_text(stream, "kind")}
+                == expected_kinds[index]
+            && logical_bytes > 0
+            && counter(stream, "row_count") == expected_rows
+            && counter(stream, "exact_catalog_rows")
+                == counter(stream, "row_count")
+            && counter(stream, "exact_catalog_bytes") == logical_bytes
+            && exact_hex(stream, "stream_crc64", 16)
+            && required_json_text(stream, "exact_catalog_stream_crc64")
+                == required_json_text(stream, "stream_crc64");
+    }
+    const auto& directory = streams[0];
+    const auto& controls = streams[1];
+    const auto& postings = streams[2];
+    const bool stream_equations =
+        static_cast<__int128>(counter(directory, "logical_bytes"))
+            == static_cast<__int128>(
+                counter(directory, "element_count"))
+                * static_cast<__int128>(
+                    bioseq::indexing::
+                        kMinimizerFormat6DirectoryEntryBytes)
+        && counter(directory, "element_count")
+            == counter(manifest, "directory_entry_count")
+        && required_json_text(directory, "stream_crc64")
+            == required_json_text(
+                manifest, "authenticated_directory_crc64")
+        && counter(controls, "element_count")
+            == counter(manifest, "unique_hash_count")
+        && counter(controls, "logical_bytes")
+            == counter(manifest, "total_control_bytes")
+        && counter(postings, "element_count")
+            == counter(manifest, "total_posting_count")
+        && counter(postings, "logical_bytes")
+            == counter(manifest, "total_posting_bytes")
+        && static_cast<__int128>(counter(postings, "logical_bytes"))
+            == static_cast<__int128>(
+                counter(postings, "element_count"))
+                * static_cast<__int128>(stored_posting_width);
+    if (!identity_valid || !compatibility_valid || !metadata_valid
+        || !streams_valid || !stream_equations) {
+        abort_pipeline_proof_capture(
+            "Format-6 READY audit identity/profile/stream equations disagree");
+    }
+    return audit;
 }
 
 void capture_pre_restart_persisted_identity(
@@ -6200,6 +6834,56 @@ void capture_pre_restart_persisted_identity(
     out.pre_restart_persisted_generation_id = *generation;
     out.pre_restart_persisted_gpu_abi_version = *gpu_abi_version;
     out.pre_restart_persisted_source_identity = *rows.front()[1];
+    out.pre_restart_persisted_format_version = 5;
+}
+
+void capture_pre_restart_persisted_audit(
+        const it::connection_test_context& connection,
+        const std::string& table,
+        const std::string_view minimizer_index,
+        const std::int64_t sequence_rowno,
+        const E2eInput& in,
+        E2eOutput& out) {
+    if (!e2e_expects_format6(in)) {
+        capture_pre_restart_persisted_identity(
+            connection, table, minimizer_index, sequence_rowno, out);
+        return;
+    }
+    out.pre_restart_format6_ready_audit = capture_format6_ready_audit(
+        connection, table, minimizer_index, sequence_rowno, in);
+    const nlohmann::json& head =
+        required_json_object(out.pre_restart_format6_ready_audit, "head");
+    const nlohmann::json& source =
+        required_json_object(out.pre_restart_format6_ready_audit, "source");
+    out.pre_restart_persisted_generation_id =
+        required_json_counter(head, "generation_id");
+    out.pre_restart_persisted_source_identity =
+        required_json_text(source, "source_identity");
+    out.pre_restart_persisted_format_version = 6;
+}
+
+void capture_post_restart_persisted_audit(
+        const it::connection_test_context& connection,
+        const std::string& table,
+        const std::string_view minimizer_index,
+        const std::int64_t sequence_rowno,
+        const E2eInput& in,
+        E2eOutput& out) {
+    if (!e2e_expects_format6(in)) {
+        out.post_restart_persisted_format_version = 5;
+        return;
+    }
+    out.post_restart_format6_ready_audit = capture_format6_ready_audit(
+        connection, table, minimizer_index, sequence_rowno, in);
+    out.post_restart_persisted_format_version = 6;
+    out.format6_restart_audit_accepted =
+        out.pre_restart_format6_ready_audit
+                == out.post_restart_format6_ready_audit
+            ? 1 : 0;
+    if (out.format6_restart_audit_accepted != 1) {
+        abort_pipeline_proof_capture(
+            "Format-6 READY identity/content/profile changed across restart");
+    }
 }
 
 // Return the exact before/after identity after a successful restart.  Both
@@ -6427,9 +7111,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
             in, minimizer_index, JustIndexSetupKind::Scalar);
         configure_bioseq_scalar_session(
             *in.conn, in.kmer_size, in.window_size);
-        capture_pre_restart_persisted_identity(
+        capture_pre_restart_persisted_audit(
             *in.conn, table, minimizer_index,
-            just_index_sequence_rowno_for(in, table), out);
+            just_index_sequence_rowno_for(in, table), in, out);
         out.just_index_restart_performed =
             restart_postgres_for_cold_just_index(in, out) ? 1 : 0;
         configure_bioseq_scheduler_session(*in.conn, pipeline_mode);
@@ -6454,6 +7138,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_post_restart_persisted_audit(
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), in, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
@@ -6471,9 +7158,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
             just_index_table_for(in, minimizer_index, JustIndexSetupKind::Simd);
         configure_bioseq_simd_session(
             *in.conn, in.kmer_size, in.window_size);
-        capture_pre_restart_persisted_identity(
+        capture_pre_restart_persisted_audit(
             *in.conn, table, minimizer_index,
-            just_index_sequence_rowno_for(in, table), out);
+            just_index_sequence_rowno_for(in, table), in, out);
         // Restart PostgreSQL first so the prebuilt index (built untimed in
         // on_input) is assembled cold from storage rather than served warm.
         out.just_index_restart_performed =
@@ -6496,6 +7183,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_post_restart_persisted_audit(
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), in, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
@@ -6515,9 +7205,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
             in.kmer_size,
             in.window_size,
             in.cigar_projection);
-        capture_pre_restart_persisted_identity(
+        capture_pre_restart_persisted_audit(
             *in.conn, table, minimizer_index,
-            just_index_sequence_rowno_for(in, table), out);
+            just_index_sequence_rowno_for(in, table), in, out);
         // DOC0310 Phase C resident two-submit Vulkan frontend applied to the
         // just_index e2e path: index is prebuilt (untimed), only the Vulkan-driven
         // alignment is timed. Same Vulkan settings as bench_v10's
@@ -6548,6 +7238,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());
         capture_alignment_statement_stats(
             *in.conn, prior_alignment, out);
+        capture_post_restart_persisted_audit(
+            *in.conn, table, minimizer_index,
+            just_index_sequence_rowno_for(in, table), in, out);
         capture_index_audit(*in.conn, table, minimizer_index, out);
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
@@ -6977,6 +7670,25 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"format5_reader_retained_layout_checks", static_cast<double>(o.format5_reader_retained_layout_checks)},
         {"format5_reader_retained_layout_failures", static_cast<double>(o.format5_reader_retained_layout_failures)},
         {"format5_reader_memory_evidence_saturated", static_cast<double>(o.format5_reader_memory_evidence_saturated)},
+        {"persisted_format_version", static_cast<double>(o.persisted_format_version)},
+        {"persisted_format6_contract_valid", static_cast<double>(o.persisted_format6_contract_valid)},
+        {"format6_restart_audit_accepted", static_cast<double>(o.format6_restart_audit_accepted)},
+        {"format6_directory_rows", static_cast<double>(o.format6_directory_rows)},
+        {"format6_directory_bytes", static_cast<double>(o.format6_directory_bytes)},
+        {"format6_control_rows", static_cast<double>(o.format6_control_rows)},
+        {"format6_control_bytes", static_cast<double>(o.format6_control_bytes)},
+        {"format6_posting_rows", static_cast<double>(o.format6_posting_rows)},
+        {"format6_posting_bytes", static_cast<double>(o.format6_posting_bytes)},
+        {"format6_posting_ranges_delivered", static_cast<double>(o.format6_posting_ranges_delivered)},
+        {"format6_selected_block_count", static_cast<double>(o.format6_selected_block_count)},
+        {"format6_accepted_hash_count", static_cast<double>(o.format6_accepted_hash_count)},
+        {"format6_retained_position_count", static_cast<double>(o.format6_retained_position_count)},
+        {"format6_authorized_posting_bytes", static_cast<double>(o.format6_authorized_posting_bytes)},
+        {"format6_peak_admitted_bytes", static_cast<double>(o.format6_peak_admitted_bytes)},
+        {"format6_retained_owner_bytes", static_cast<double>(o.format6_retained_owner_bytes)},
+        {"format6_admitted_bytes", static_cast<double>(o.format6_admitted_bytes)},
+        {"format6_failures", static_cast<double>(o.format6_failures)},
+        {"format6_saturated", static_cast<double>(o.format6_saturated)},
         {"gpu_seed_dispatches", static_cast<double>(o.gpu_seed_dispatches)},
         {"gpu_chain_dispatches", static_cast<double>(o.gpu_chain_dispatches)},
         {"gpu_chain_backtrack_dispatches", static_cast<double>(o.gpu_chain_backtrack_dispatches)},
@@ -7191,6 +7903,18 @@ void load_e2e_query_table(const it::connection_test_context& c,
         abort_raw_evidence_serialization(
             "PostgreSQL sample is missing exact Format-5 memory evidence v2");
     }
+    const bool format6_reader_v1_valid = json_has_exact_keys(
+            out.format6_reader_evidence,
+            kFormat6ReaderEvidenceKeys)
+        && out.format6_reader_evidence["schema"].is_string()
+        && out.format6_reader_evidence["schema"]
+            == "bioseq.format6_reader_evidence"
+        && out.format6_reader_evidence["version"].is_number_integer()
+        && out.format6_reader_evidence["version"] == 1;
+    if (postgres_sample && !format6_reader_v1_valid) {
+        abort_raw_evidence_serialization(
+            "PostgreSQL sample is missing exact Format-6 reader evidence v1");
+    }
     if (persisted_gpu_sample
         && out.persisted_gpu_operation_evidence_accepted != 1) {
         abort_raw_evidence_serialization(
@@ -7209,7 +7933,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
     nlohmann::json payload = nlohmann::json::object();
     payload["payload_schema"] = "bioseq.e2e.raw-sample";
-    payload["payload_schema_version"] = 5;
+    payload["payload_schema_version"] = 6;
     payload["index_and_map_ns"] = out.measured_region_ns;
     payload["cache_policy"] = "process-cold-os-cache-unspecified";
     payload["benchmark_shape"] = nlohmann::json{
@@ -7333,6 +8057,11 @@ void load_e2e_query_table(const it::connection_test_context& c,
             {"persisted_policy", persisted_policy},
             {"persisted_format", just_index
                 ? nlohmann::json{
+                    {"format_version", out.persisted_format_version},
+                    {"pre_restart_format_version",
+                        out.pre_restart_persisted_format_version},
+                    {"post_restart_format_version",
+                        out.post_restart_persisted_format_version},
                     {"ready_generation_gpu_abi_version",
                         out.pre_restart_persisted_gpu_abi_version},
                     {"manifest_rows_read",
@@ -7343,6 +8072,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
                         out.persisted_generation_read_sessions},
                     {"format5_manifest_contract_valid",
                         out.persisted_format5_manifest_contract_valid},
+                    {"format6_contract_valid",
+                        out.persisted_format6_contract_valid},
+                    {"format6_restart_audit_accepted",
+                        out.format6_restart_audit_accepted},
+                    {"format6_pre_restart_ready_audit",
+                        out.pre_restart_format6_ready_audit},
+                    {"format6_post_restart_ready_audit",
+                        out.post_restart_format6_ready_audit},
                 }
                 : nlohmann::json{nullptr}},
             {"restart_performed", just_index
@@ -7454,6 +8191,9 @@ void load_e2e_query_table(const it::connection_test_context& c,
                 : nlohmann::json{nullptr}},
         {"format5_reader_memory_evidence", postgres_sample
             ? out.format5_reader_memory_evidence
+            : nlohmann::json{nullptr}},
+        {"format6_reader_evidence", postgres_sample
+            ? out.format6_reader_evidence
             : nlohmann::json{nullptr}},
     };
     return payload.dump();

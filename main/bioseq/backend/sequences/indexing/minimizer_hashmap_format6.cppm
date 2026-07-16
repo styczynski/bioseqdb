@@ -39,9 +39,17 @@ constexpr void write_le(
         std::span<std::byte> output,
         std::size_t offset,
         UInt value) noexcept {
-    for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
-        output[offset + byte] = static_cast<std::byte>(value & UInt{0xff});
-        value >>= 8u;
+    if consteval {
+        for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
+            output[offset + byte] =
+                static_cast<std::byte>(value & UInt{0xff});
+            value >>= 8u;
+        }
+    } else {
+        if constexpr (std::endian::native == std::endian::big) {
+            value = std::byteswap(value);
+        }
+        std::memcpy(output.data() + offset, &value, sizeof(value));
     }
 }
 
@@ -50,13 +58,22 @@ requires std::is_unsigned_v<UInt>
 [[nodiscard]] constexpr UInt read_le(
         std::span<const std::byte> input,
         std::size_t offset) noexcept {
-    UInt value = 0;
-    for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
-        value |= static_cast<UInt>(
-            std::to_integer<std::uint8_t>(input[offset + byte]))
-            << (byte * 8u);
+    if consteval {
+        UInt value = 0;
+        for (std::size_t byte = 0; byte < sizeof(UInt); ++byte) {
+            value |= static_cast<UInt>(
+                std::to_integer<std::uint8_t>(input[offset + byte]))
+                << (byte * 8u);
+        }
+        return value;
+    } else {
+        UInt value = 0;
+        std::memcpy(&value, input.data() + offset, sizeof(value));
+        if constexpr (std::endian::native == std::endian::big) {
+            value = std::byteswap(value);
+        }
+        return value;
     }
-    return value;
 }
 
 template <std::size_t N>
@@ -472,54 +489,54 @@ struct MinimizerFormat6DecodedControlBlockView {
 };
 
 struct CanonicalQueryHashView {
-    std::variant<
-        std::span<const std::uint32_t>,
-        std::span<const std::uint64_t>> values{};
+    std::span<const std::uint32_t> values32{};
+    std::span<const std::uint64_t> values64{};
     std::uint8_t width_bytes = 0u;
+    std::uint8_t storage_width_bytes = 0u;
     std::array<std::byte, 32> compatibility_digest{};
 
     [[nodiscard]] std::size_t size() const noexcept {
-        return std::visit([](const auto value) { return value.size(); }, values);
+        return storage_width_bytes == sizeof(std::uint32_t)
+            ? values32.size() : values64.size();
     }
 
     [[nodiscard]] std::uint64_t at(std::size_t ordinal) const noexcept {
-        return std::visit(
-            [ordinal](const auto value) {
-                return static_cast<std::uint64_t>(value[ordinal]);
-            },
-            values);
+        return storage_width_bytes == sizeof(std::uint32_t)
+            ? static_cast<std::uint64_t>(values32[ordinal])
+            : values64[ordinal];
     }
 
     [[nodiscard]] bool storage_matches_width() const noexcept {
-        return std::visit(
-            [this](const auto value) {
-                using Value = typename decltype(value)::value_type;
-                return width_bytes == sizeof(Value);
-            },
-            values);
+        return width_bytes == storage_width_bytes
+            && ((storage_width_bytes == sizeof(std::uint32_t)
+                    && values64.empty())
+                || (storage_width_bytes == sizeof(std::uint64_t)
+                    && values32.empty()));
     }
 
     [[nodiscard]] std::size_t lower_bound(
             std::size_t first,
             std::size_t last,
             std::uint64_t hash) const noexcept {
-        return std::visit(
-            [first, last, hash](const auto value) {
-                const auto begin = value.begin()
-                    + static_cast<std::ptrdiff_t>(first);
-                const auto end = value.begin()
-                    + static_cast<std::ptrdiff_t>(last);
-                return static_cast<std::size_t>(
-                    std::lower_bound(
-                        begin,
-                        end,
-                        hash,
-                        [](const auto stored, std::uint64_t sought) {
-                            return static_cast<std::uint64_t>(stored) < sought;
-                        })
-                    - value.begin());
-            },
-            values);
+        if (storage_width_bytes == sizeof(std::uint32_t)) {
+            if (hash > (std::numeric_limits<std::uint32_t>::max)()) {
+                return last;
+            }
+            const auto begin = values32.begin()
+                + static_cast<std::ptrdiff_t>(first);
+            const auto end = values32.begin()
+                + static_cast<std::ptrdiff_t>(last);
+            return static_cast<std::size_t>(
+                std::lower_bound(
+                    begin, end, static_cast<std::uint32_t>(hash))
+                - values32.begin());
+        }
+        const auto begin = values64.begin()
+            + static_cast<std::ptrdiff_t>(first);
+        const auto end = values64.begin()
+            + static_cast<std::ptrdiff_t>(last);
+        return static_cast<std::size_t>(
+            std::lower_bound(begin, end, hash) - values64.begin());
     }
 };
 
@@ -539,20 +556,23 @@ struct CanonicalQueryHashImage {
         default;
 
     [[nodiscard]] CanonicalQueryHashView view() const noexcept {
-        return CanonicalQueryHashView{
-            .values = std::visit(
-                [](const auto& value)
-                    -> std::variant<
-                        std::span<const std::uint32_t>,
-                        std::span<const std::uint64_t>> {
-                    using Value = typename std::remove_cvref_t<
-                        decltype(value)>::value_type;
-                    return std::span<const Value>{value};
-                },
-                values),
-            .width_bytes = width_bytes,
-            .compatibility_digest = compatibility_digest,
-        };
+        return std::visit(
+            [this](const auto& value) {
+                using Value = typename std::remove_cvref_t<
+                    decltype(value)>::value_type;
+                CanonicalQueryHashView view{
+                    .width_bytes = width_bytes,
+                    .storage_width_bytes = sizeof(Value),
+                    .compatibility_digest = compatibility_digest,
+                };
+                if constexpr (std::is_same_v<Value, std::uint32_t>) {
+                    view.values32 = std::span<const Value>{value};
+                } else {
+                    view.values64 = std::span<const Value>{value};
+                }
+                return view;
+            },
+            values);
     }
 };
 
@@ -592,6 +612,14 @@ struct MinimizerFormat6MemoryEvidence {
     std::uint64_t directory_entry_count = 0u;
     std::uint64_t selected_block_count = 0u;
     std::uint64_t accepted_hash_count = 0u;
+    std::uint64_t directory_stream_crc_receipts = 0u;
+    std::uint64_t control_block_crc_receipts = 0u;
+    std::uint64_t control_semantic_receipts = 0u;
+    std::uint64_t posting_ranges_delivered = 0u;
+    std::uint64_t posting_range_crc_receipts = 0u;
+    std::uint64_t posting_semantic_receipts = 0u;
+    std::uint64_t authorized_posting_bytes = 0u;
+    std::uint64_t generic_source_fallback_calls = 0u;
 };
 
 using EncodedMinimizerFormat6Head =
@@ -1202,69 +1230,120 @@ private:
             context.error = MinimizerFormat6Error::posting;
             return false;
         }
-        for (std::size_t offset = 0u; offset < bytes.size(); offset += width) {
-            const std::uint64_t absolute = absolute_chunk + offset;
-            while (context.next_request < range_request_end) {
-                const PostingRequest& request =
-                    (*context.requests)[context.next_request];
-                std::uint64_t request_bytes = 0u;
-                std::uint64_t request_end = 0u;
-                if (!checked_multiply(
-                        request.exact_count, width, request_bytes)
-                    || !checked_add(
-                        request.posting_byte_offset,
-                        request_bytes,
-                        request_end)) {
-                    context.error = MinimizerFormat6Error::arithmetic_overflow;
-                    return false;
-                }
-                if (absolute < request_end) break;
-                ++context.next_request;
-            }
+        std::uint64_t absolute_chunk_end = 0u;
+        if (!checked_add(
+                absolute_chunk, bytes.size(), absolute_chunk_end)) {
+            context.error = MinimizerFormat6Error::arithmetic_overflow;
+            return false;
+        }
+        std::size_t chunk_byte_cursor = 0u;
+        while (chunk_byte_cursor < bytes.size()) {
             if (context.next_request >= range_request_end) {
                 context.error = MinimizerFormat6Error::posting;
                 return false;
             }
             const PostingRequest& request =
                 (*context.requests)[context.next_request];
-            if (absolute < request.posting_byte_offset) {
-                context.error = MinimizerFormat6Error::posting;
+            std::uint64_t request_bytes = 0u;
+            std::uint64_t request_end = 0u;
+            if (!checked_multiply(
+                    request.exact_count, width, request_bytes)
+                || !checked_add(
+                    request.posting_byte_offset,
+                    request_bytes,
+                    request_end)) {
+                context.error = MinimizerFormat6Error::arithmetic_overflow;
                 return false;
             }
-            const std::uint64_t posting_ordinal =
-                (absolute - request.posting_byte_offset) / width;
-            if (posting_ordinal >= request.exact_count
+            const std::uint64_t absolute =
+                absolute_chunk + chunk_byte_cursor;
+            if (request.exact_count == 0u
+                || absolute < request.posting_byte_offset
+                || absolute >= request_end
+                || (absolute - request.posting_byte_offset) % width != 0u
                 || request.query_ordinal
                     >= context.reader->query_offsets_.size()) {
                 context.error = MinimizerFormat6Error::posting;
                 return false;
             }
-            const std::uint64_t position = width == 4u
-                ? read_le<std::uint32_t>(bytes, offset)
-                : read_le<std::uint64_t>(bytes, offset);
-            const std::uint64_t output_offset =
-                context.reader->query_offsets_[request.query_ordinal];
-            const std::uint64_t destination =
-                output_offset + posting_ordinal;
-            if (destination >= context.reader->retained_position_count_) {
+            const std::uint64_t segment_end =
+                std::min(absolute_chunk_end, request_end);
+            const std::uint64_t segment_bytes = segment_end - absolute;
+            const std::uint64_t posting_ordinal =
+                (absolute - request.posting_byte_offset) / width;
+            const std::uint64_t segment_position_count =
+                segment_bytes / width;
+            if (segment_bytes == 0u || segment_bytes % width != 0u
+                || posting_ordinal >= request.exact_count
+                || segment_position_count
+                    > request.exact_count - posting_ordinal) {
                 context.error = MinimizerFormat6Error::posting;
                 return false;
             }
-            const bool have_previous = posting_ordinal != 0u;
-            const std::uint64_t previous_position = have_previous
+            const std::uint64_t output_offset =
+                context.reader->query_offsets_[request.query_ordinal];
+            std::uint64_t destination = 0u;
+            std::uint64_t destination_end = 0u;
+            if (output_offset >= kUnavailableQueryOffset
+                || !checked_add(
+                    output_offset, posting_ordinal, destination)
+                || !checked_add(
+                    destination,
+                    segment_position_count,
+                    destination_end)) {
+                context.error = MinimizerFormat6Error::arithmetic_overflow;
+                return false;
+            }
+            if (destination_end
+                    > context.reader->retained_position_count_) {
+                context.error = MinimizerFormat6Error::posting;
+                return false;
+            }
+            bool have_previous = posting_ordinal != 0u;
+            std::uint64_t previous_position = have_previous
                 ? context.reader->retained_positions_[
                     static_cast<std::size_t>(destination - 1u)]
                 : 0u;
-            if ((position >> 1u) >= context.manifest->target_length
-                || (have_previous && position <= previous_position)) {
-                context.error = (position >> 1u)
-                        >= context.manifest->target_length
-                    ? MinimizerFormat6Error::target_range
-                    : MinimizerFormat6Error::order;
+            const auto decode_segment =
+                [&]<class StoredPosition>() noexcept -> bool {
+                    std::size_t input_offset = chunk_byte_cursor;
+                    std::size_t output_index =
+                        static_cast<std::size_t>(destination);
+                    const std::size_t output_end =
+                        static_cast<std::size_t>(destination_end);
+                    for (; output_index < output_end;
+                         ++output_index,
+                         input_offset += sizeof(StoredPosition)) {
+                        const std::uint64_t position =
+                            read_le<StoredPosition>(bytes, input_offset);
+                        if ((position >> 1u)
+                                >= context.manifest->target_length
+                            || (have_previous
+                                && position <= previous_position)) {
+                            context.error = (position >> 1u)
+                                    >= context.manifest->target_length
+                                ? MinimizerFormat6Error::target_range
+                                : MinimizerFormat6Error::order;
+                            return false;
+                        }
+                        context.reader->retained_positions_[output_index] =
+                            position;
+                        previous_position = position;
+                        have_previous = true;
+                    }
+                    return true;
+                };
+            if (width == sizeof(std::uint32_t)) {
+                if (!decode_segment.template operator()<std::uint32_t>()) {
+                    return false;
+                }
+            } else if (!decode_segment.template operator()<std::uint64_t>()) {
                 return false;
             }
-            context.reader->retained_positions_[
-                static_cast<std::size_t>(destination)] = position;
+            chunk_byte_cursor += static_cast<std::size_t>(segment_bytes);
+            if (segment_end == request_end) {
+                ++context.next_request;
+            }
         }
         context.next_range_byte += bytes.size();
         if (context.next_range_byte == range.byte_count) {
@@ -1274,6 +1353,34 @@ private:
                 context.error = MinimizerFormat6Error::checksum;
                 return false;
             }
+            std::uint64_t ranges_delivered = 0u;
+            std::uint64_t semantic_receipts = 0u;
+            std::uint64_t crc_receipts =
+                context.reader->memory_evidence_.
+                    posting_range_crc_receipts;
+            if (!checked_add(
+                    context.reader->memory_evidence_.
+                        posting_ranges_delivered,
+                    1u,
+                    ranges_delivered)
+                || !checked_add(
+                    context.reader->memory_evidence_.
+                        posting_semantic_receipts,
+                    1u,
+                    semantic_receipts)
+                || ((range.flags & 1u) != 0u
+                    && !checked_add(
+                        crc_receipts, 1u, crc_receipts))) {
+                context.error =
+                    MinimizerFormat6Error::arithmetic_overflow;
+                return false;
+            }
+            context.reader->memory_evidence_.
+                posting_ranges_delivered = ranges_delivered;
+            context.reader->memory_evidence_.
+                posting_semantic_receipts = semantic_receipts;
+            context.reader->memory_evidence_.
+                posting_range_crc_receipts = crc_receipts;
             ++context.next_range;
             context.next_range_byte = 0u;
             context.next_request = context.next_range < context.ranges->size()
@@ -1528,6 +1635,7 @@ public:
             || directory_crc != manifest->streams[0].stream_crc64) {
             return std::unexpected(MinimizerFormat6Error::checksum);
         }
+        reader.memory_evidence_.directory_stream_crc_receipts = 1u;
         std::uint64_t expected_control_offset = 0u;
         std::uint64_t expected_posting_offset = 0u;
         std::uint64_t expected_posting_ordinal = 0u;
@@ -1747,6 +1855,8 @@ public:
                         &delivery,
                         &consume_control_block_);
                 } else {
+                    ++reader.memory_evidence_.
+                        generic_source_fallback_calls;
                     delivered = true;
                     for (std::size_t ordinal = 0u;
                          ordinal < control_ranges.size();
@@ -1772,6 +1882,25 @@ public:
                     return std::unexpected(delivery.error.value_or(
                         MinimizerFormat6Error::source_read));
                 }
+                std::uint64_t block_receipts = 0u;
+                std::uint64_t semantic_receipts = 0u;
+                if (!checked_add(
+                        reader.memory_evidence_.
+                            control_block_crc_receipts,
+                        control_ranges.size(),
+                        block_receipts)
+                    || !checked_add(
+                        reader.memory_evidence_.
+                            control_semantic_receipts,
+                        control_ranges.size(),
+                        semantic_receipts)) {
+                    return std::unexpected(
+                        MinimizerFormat6Error::arithmetic_overflow);
+                }
+                reader.memory_evidence_.control_block_crc_receipts =
+                    block_receipts;
+                reader.memory_evidence_.control_semantic_receipts =
+                    semantic_receipts;
                 control_ranges.clear();
                 return {};
             };
@@ -1807,6 +1936,12 @@ public:
                 return std::unexpected(MinimizerFormat6Error::source_read);
             }
             if (delivery.query_cursor > query_hashes.size()) {
+                return std::unexpected(MinimizerFormat6Error::state);
+            }
+            if (reader.memory_evidence_.control_block_crc_receipts
+                    != selected_block_count
+                || reader.memory_evidence_.control_semantic_receipts
+                    != selected_block_count) {
                 return std::unexpected(MinimizerFormat6Error::state);
             }
         }
@@ -2176,6 +2311,8 @@ public:
                     &delivery,
                     &consume_posting_bytes_);
             } else {
+                ++reader.memory_evidence_.
+                    generic_source_fallback_calls;
                 delivered = true;
                 for (std::size_t range_ordinal = 0u;
                      delivered && range_ordinal < ranges.size();
@@ -2212,6 +2349,25 @@ public:
                 return std::unexpected(delivery.error.value_or(
                     MinimizerFormat6Error::source_read));
             }
+            std::uint64_t delivered_range_bytes = 0u;
+            for (const auto& range : ranges) {
+                if (!checked_add(
+                        delivered_range_bytes,
+                        range.byte_count,
+                        delivered_range_bytes)) {
+                    return std::unexpected(
+                        MinimizerFormat6Error::arithmetic_overflow);
+                }
+            }
+            if (!checked_add(
+                    reader.memory_evidence_.authorized_posting_bytes,
+                    delivered_range_bytes,
+                    delivered_range_bytes)) {
+                return std::unexpected(
+                    MinimizerFormat6Error::arithmetic_overflow);
+            }
+            reader.memory_evidence_.authorized_posting_bytes =
+                delivered_range_bytes;
             if (accepted_delivered == wave_accepted_begin) {
                 return std::unexpected(MinimizerFormat6Error::state);
             }

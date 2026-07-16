@@ -2016,6 +2016,12 @@ LANGUAGE C VOLATILE PARALLEL UNSAFE
 AS 'MODULE_PATHNAME',
    'bioseq_last_alignment_format5_reader_memory_evidence_v2';
 
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format6_reader_evidence()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format6_reader_evidence';
+
 CREATE OR REPLACE FUNCTION bioseq.last_alignment_persisted_gpu_operation_evidence_v1()
 RETURNS jsonb
 LANGUAGE C VOLATILE PARALLEL RESTRICTED
@@ -2287,6 +2293,49 @@ COMMENT ON FUNCTION
     'DOC0371 administrative cold-benchmark proof: validate one source-bound '
     'READY revision-3 minimizer generation without reading payload extents or '
     'enabling the live ordinal-2 reader.';
+
+CREATE OR REPLACE FUNCTION bioseq.inspect_ready_minimizer_format6_generation(
+    rel regclass,
+    index_name text,
+    query_key bigint)
+RETURNS jsonb
+AS 'MODULE_PATHNAME',
+   'bioseq_inspect_ready_minimizer_format6_generation'
+LANGUAGE C STABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE EXECUTE ON FUNCTION
+    bioseq.inspect_ready_minimizer_format6_generation(
+        regclass, text, bigint)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq.inspect_ready_minimizer_format6_generation(
+        regclass, text, bigint) IS
+    'Administrative setup/restart audit of one source-bound READY Format-6 '
+    'generation, including exact metadata and directory/control/posting '
+    'catalog row, byte, and CRC receipts.';
+
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.format6_parallel_scan_probe(
+        source_table regclass,
+        index_name text,
+        sequence_rowno bigint,
+        requested_workers integer)
+RETURNS jsonb
+AS 'MODULE_PATHNAME',
+   'bioseq_internal_format6_parallel_scan_probe'
+LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE EXECUTE ON FUNCTION
+    bioseq_internal.format6_parallel_scan_probe(
+        regclass, text, bigint, integer)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.format6_parallel_scan_probe(
+        regclass, text, bigint, integer) IS
+    'Test-only Format-6 transport POC. requested_workers=0 runs the same '
+    'exact READY-generation row/PLAIN/address-CRC validation serially; a '
+    'positive value launches one core ParallelContext with a shared heap '
+    'ParallelTableScanDesc while the leader participates. This function '
+    'does not alter production dispatch.';
+
 CREATE OR REPLACE FUNCTION bioseq_internal.rev3_test_build_fixture(
     source_table regclass,
     index_name text,

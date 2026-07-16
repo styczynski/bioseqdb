@@ -21,7 +21,7 @@
  * reads it to prune split typed-dispatch translation units and automatically
  * reconfigures when this file changes.
  */
-#define BIOSEQ_OPTTIMIZATION_LEVEL 3
+#define BIOSEQ_OPTTIMIZATION_LEVEL 0
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL < 0 || BIOSEQ_OPTTIMIZATION_LEVEL > 5
 #error "BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range 0..5"
