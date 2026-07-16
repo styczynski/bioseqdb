@@ -33,13 +33,13 @@ CREATE TABLE landing_hero_sequences (
   seq bioseq.seq('dna4', 64)
 ) USING bioseq;
 INSERT INTO landing_hero_sequences VALUES
-  (1042, 'NR_046018.2', 'ACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64)),
-  (2087, 'NC_000913.3', 'ACGTACGTACGTTTTTAAAA'::bioseq.seq('dna4', 64)),
-  (3765, 'CP041828.1',  'GGGGCCCCTTTTAAAAGGGG'::bioseq.seq('dna4', 64));
+  (1042, 'NR_046018.2', 'CTAGTCACTGTAGCCTGATCGTAGCTAGCACG'::bioseq.seq('dna4', 64)),
+  (2087, 'NC_000913.3', 'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 64)),
+  (3765, 'CP041828.1',  'GGGGCCCCTTTTAAAAGGGGCCCCTTTTAAAA'::bioseq.seq('dna4', 64));
 -- bioseq:visible
 SELECT id, accession
 FROM landing_hero_sequences
-WHERE mmsearch(seq, 'ACGTACGTACGT'::bioseq.seq('dna4', 64))
+WHERE mmsearch(seq, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64))
 ORDER BY id;
 -- bioseq:teardown
 DROP TABLE landing_hero_sequences;
@@ -93,14 +93,14 @@ CREATE TABLE landing_similarity (
   seq0 bioseq.seq('dna4', 32)
 ) USING bioseq;
 INSERT INTO landing_similarity VALUES
-  (1, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32)),
-  (2, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32)),
-  (3, 'AAAAAAAAAAAAAAAA'::bioseq.seq('dna4', 32));
+  (1, 'CTAGTCACTGTAGCCTGATCGTAGCTAGC'::bioseq.seq('dna4', 32)),
+  (2, 'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32)),
+  (3, 'TGCATGCATGCATGCATGCATGCATGCATGCA'::bioseq.seq('dna4', 32));
 DO $$
 DECLARE
   plan_json jsonb;
 BEGIN
-  EXECUTE 'EXPLAIN (FORMAT JSON) SELECT pk, seq0 FROM landing_similarity WHERE mmsearch(seq0, ''AAAA''::bioseq.seq(''dna4'', 32))'
+  EXECUTE 'EXPLAIN (FORMAT JSON) SELECT pk, seq0 FROM landing_similarity WHERE mmsearch(seq0, ''CTAGTCACTGTAGCCTGATCGTAGCTAGT''::bioseq.seq(''dna4'', 32))'
     INTO plan_json;
   IF plan_json #>> '{0,Plan,"Node Type"}' IS DISTINCT FROM 'Custom Scan'
      OR plan_json #>> '{0,Plan,"Custom Plan Provider"}' IS DISTINCT FROM 'BioseqScan' THEN
@@ -111,7 +111,7 @@ END $$;
 SELECT pk,
        seq0::text AS sequence
 FROM landing_similarity
-WHERE mmsearch(seq0, 'AAAA'::bioseq.seq('dna4', 32))
+WHERE mmsearch(seq0, 'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 32))
 ORDER BY pk;
 -- bioseq:teardown
 DROP TABLE landing_similarity;
