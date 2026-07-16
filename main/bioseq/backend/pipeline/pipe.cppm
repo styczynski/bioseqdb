@@ -8434,20 +8434,12 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
     using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::SCALAR;
-#if defined(__APPLE__)
     using value_list = value_sequence<target_t,
         target_t::SCALAR,
         target_t::SIMD_MINIMAP2_SLOW,
         target_t::TWO_STACK_NTHASH,
         target_t::VULKAN_MINIMAP_INT,
         target_t::PAPER_NTHASH_SIMD>;
-#else
-    using value_list = value_sequence<target_t,
-        target_t::SCALAR,
-        target_t::SIMD_MINIMAP2_SLOW,
-        target_t::TWO_STACK_NTHASH,
-        target_t::PAPER_NTHASH_SIMD>;
-#endif
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(

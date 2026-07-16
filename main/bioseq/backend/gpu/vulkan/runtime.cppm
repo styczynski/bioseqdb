@@ -8293,9 +8293,9 @@ private:
 #endif
 
 void require_immutable_metal_policy_live(std::string_view phase) {
-#if defined(__APPLE__)
     runtime_metal_archive_configuration_slot().live_gate_calls.fetch_add(
         1u, std::memory_order_relaxed);
+#if defined(__APPLE__)
     if (!runtime_metal_archive_configuration_installed()) return;
     auto& archive_state = metal_pipeline_archive_interpose_state();
     auto& command_state = moltenvk_command_interpose_state();

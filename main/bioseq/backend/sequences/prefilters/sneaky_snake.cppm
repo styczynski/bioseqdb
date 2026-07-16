@@ -292,7 +292,18 @@ inline void longest_diagonal_runs_simd(
         best_runs[lane] = 0u;
     }
 
-    const auto scan_diagonal = [&](std::uint32_t shift, bool subtract_shift) {
+    const auto scan_diagonal = [
+        d,
+        query_ranks,
+        target_ranks,
+        jobs,
+        lane_count,
+        positions,
+        submaze_ends,
+        active,
+        best_runs,
+        max_lanes,
+        one](std::uint32_t shift, bool subtract_shift) {
         HWY_ALIGN std::uint32_t run_lanes[max_lanes]{};
         HWY_ALIGN std::uint32_t query_rank_lanes[max_lanes]{};
         HWY_ALIGN std::uint32_t target_rank_lanes[max_lanes]{};

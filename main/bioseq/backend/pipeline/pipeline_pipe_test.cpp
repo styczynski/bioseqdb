@@ -2879,7 +2879,11 @@ TEST_CASE("DOC0256 — enum_dispatch_pack routes to the matching template branch
     }
     SECTION("MinimizerAlgorithmType — every enum value routes correctly") {
         using Reg = algorithm_enum_values<MA>;
-        for (MA v : {MA::SCALAR, MA::SIMD_MINIMAP2_SLOW, MA::TWO_STACK_NTHASH}) {
+        for (MA v : {MA::SCALAR,
+                     MA::SIMD_MINIMAP2_SLOW,
+                     MA::TWO_STACK_NTHASH,
+                     MA::VULKAN_MINIMAP_INT,
+                     MA::PAPER_NTHASH_SIMD}) {
             MA captured = static_cast<MA>(0xFF);
             doc0256_test_helpers::value_capture_callable<MA> cb{&captured};
             const MA result = enum_dispatch_pack<MA, MA, Reg::default_value>(
