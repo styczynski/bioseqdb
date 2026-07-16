@@ -3486,8 +3486,9 @@ struct MatchResultCollection {
         return proof.executed_calls() > 0
             && proof.nonempty_calls > 0
             && proof.nonempty_calls_with_simd == proof.nonempty_calls
-            && proof.simd_dp_vector_batches > 0
-            && proof.simd_dp_cells > 0;
+            && ((proof.simd_dp_vector_batches > 0
+                    && proof.simd_dp_cells > 0)
+                || proof.simd_diagonal_certificate_calls > 0);
     }
 
     [[nodiscard]] size_t size() const { return results.size(); }

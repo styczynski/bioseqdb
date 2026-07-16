@@ -16,6 +16,8 @@ extern "C" {
 #include "access/table.h"
 #include "access/heapam.h"
 #include "access/nbtree.h"
+#include "access/transam.h"
+#include "access/xact.h"
 #include "catalog/indexing.h"
 #include "commands/sequence.h"
 #include "catalog/namespace.h"   // RelnameGetRelid
@@ -28,6 +30,7 @@ extern "C" {
 #include "commands/tablespace.h"
 #include "executor/instrument.h"
 #include "executor/tuptable.h"
+#include "storage/procarray.h"
 #include "utils/lsyscache.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
@@ -3279,6 +3282,103 @@ static_assert(std::is_trivially_destructible_v<Rev3ProjectedPgRow>);
     };
 }
 
+/// Bound simultaneous heap-buffer pins while amortizing PostgreSQL's
+/// PG_TRY/sigsetjmp bridge. At the measured 562,075-row production geometry,
+/// K=128 reduces the hot-path boundary count to at most 4,392 without copying
+/// or materializing the 4.46-GB payload image.
+inline constexpr std::size_t kRev3FullGenerationPinnedBatchRows = 128;
+
+struct Rev3PinnedProjectedPgRow {
+    Rev3ProjectedPgRow projected{};
+    ItemPointerData tid{};
+};
+
+static_assert(std::is_trivially_copyable_v<Rev3PinnedProjectedPgRow>);
+static_assert(std::is_trivially_destructible_v<Rev3PinnedProjectedPgRow>);
+
+/// Trivial output from one PostgreSQL boundary. Each projection borrows the
+/// independently pinned BufferHeapTuple slot at the same ordinal. Receipts,
+/// CRC work and arbitrary sinks are deliberately constructed only after the
+/// boundary has been left.
+struct Rev3PinnedProjectedPgRowBatch {
+    std::array<Rev3PinnedProjectedPgRow,
+        kRev3FullGenerationPinnedBatchRows> rows{};
+    std::size_t size = 0;
+    bool eof = false;
+};
+
+static_assert(std::is_trivially_copyable_v<Rev3PinnedProjectedPgRowBatch>);
+static_assert(std::is_trivially_destructible_v<
+    Rev3PinnedProjectedPgRowBatch>);
+
+/// Keep systable_getnext_ordered's concurrent-abort contract while using
+/// caller-owned slots. PostgreSQL keeps this helper private to genam.c, so the
+/// extension mirrors its PG17 implementation inside the same protected leaf.
+inline void handle_rev3_concurrent_abort_pg_leaf() {
+    if (TransactionIdIsValid(CheckXidAlive)
+        && !TransactionIdIsInProgress(CheckXidAlive)
+        && !TransactionIdDidCommit(CheckXidAlive)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_TRANSACTION_ROLLBACK),
+             errmsg("transaction aborted during system catalog scan")));
+    }
+}
+
+/// Fetch, deform and project up to K rows under one PostgreSQL error boundary.
+/// Every slot owns its buffer pin until the caller has consumed the complete
+/// batch. A semantic projection error stops the fill at that row so its error
+/// identity remains the first observable failure, exactly as in the old
+/// one-row reader.
+[[nodiscard]] inline Rev3PinnedProjectedPgRowBatch
+next_rev3_pinned_projected_pg_row_batch_or_error(
+        Relation relation,
+        SysScanDesc scan,
+        const std::array<TupleTableSlot*,
+            kRev3FullGenerationPinnedBatchRows>& slots) {
+    Rev3PinnedProjectedPgRowBatch batch{};
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&] {
+            Assert(scan != nullptr);
+            Assert(scan->irel != nullptr);
+
+            // All receipts and callbacks from the preceding batch are gone
+            // before this function is entered, so its buffer pins may now be
+            // released in bulk before the slots are reused.
+            for (TupleTableSlot* slot : slots) {
+                Assert(slot != nullptr);
+                ExecClearTuple(slot);
+            }
+
+            for (std::size_t ordinal = 0;
+                 ordinal < slots.size(); ++ordinal) {
+                TupleTableSlot* slot = slots[ordinal];
+                HeapTuple tuple = nullptr;
+                if (index_getnext_slot(
+                        scan->iscan, ForwardScanDirection, slot)) {
+                    tuple = ExecFetchSlotHeapTuple(slot, false, nullptr);
+                }
+                if (HeapTupleIsValid(tuple) && scan->iscan->xs_recheck) {
+                    elog(ERROR,
+                        "system catalog scans with lossy index conditions are not implemented");
+                }
+                handle_rev3_concurrent_abort_pg_leaf();
+                if (!HeapTupleIsValid(tuple)) {
+                    batch.eof = true;
+                    return;
+                }
+
+                Rev3PinnedProjectedPgRow& output =
+                    batch.rows[batch.size];
+                output.tid = tuple->t_self;
+                output.projected = project_rev3_deformed_pg_row(
+                    deform_rev3_pg_row_pg_leaf(relation, tuple));
+                ++batch.size;
+                if (output.projected.error != nullptr) return;
+            }
+        });
+    return batch;
+}
+
 /// Validate the address-bound row checksum only after PostgreSQL deformation
 /// has completed.  Callers outside a PG boundary may safely own the receipt
 /// and invoke arbitrary C++ sinks.
@@ -4781,6 +4881,9 @@ private:
     Relation heap_relation_ = nullptr;
     Relation primary_index_relation_ = nullptr;
     SysScanDesc active_scan_ = nullptr;
+    std::array<TupleTableSlot*, kRev3FullGenerationPinnedBatchRows>
+        full_generation_batch_slots_{};
+    std::size_t full_generation_batch_slot_count_ = 0;
     Snapshot snapshot_ = nullptr;
     bool snapshot_registered_by_session_ = false;
     std::uint64_t query_key_ = 0;
@@ -4827,9 +4930,9 @@ private:
     /// Classify one physical payload TID transition. Same-page and immediately
     /// next-page tuples are adjacent; larger forward jumps and all backward
     /// jumps remain separately visible.
-    void record_payload_tid_(const HeapTuple tuple) noexcept {
+    void record_payload_tid_(ItemPointerData tid) noexcept {
         const std::uint64_t block = static_cast<std::uint64_t>(
-            ItemPointerGetBlockNumber(&tuple->t_self));
+            ItemPointerGetBlockNumber(&tid));
         if (previous_payload_heap_block_) {
             const std::uint64_t previous = *previous_payload_heap_block_;
             if (block == previous || block == previous + 1u) {
@@ -4844,6 +4947,10 @@ private:
             }
         }
         previous_payload_heap_block_ = block;
+    }
+
+    void record_payload_tid_(const HeapTuple tuple) noexcept {
+        record_payload_tid_(tuple->t_self);
     }
 
     void start_payload_timing_() noexcept {
@@ -5010,7 +5117,51 @@ private:
             && phase.physical_bytes_read >= phase.read.delivered_bytes;
     }
 
+    /// Allocate every auxiliary BufferHeapTuple slot before the batch reader
+    /// starts. The count advances after each successful allocation so an ERROR
+    /// part-way through setup leaves an exact cleanup prefix.
+    void create_full_generation_batch_slots_checked_() {
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [this] {
+                while (full_generation_batch_slot_count_
+                       < full_generation_batch_slots_.size()) {
+                    TupleTableSlot* slot =
+                        table_slot_create(heap_relation_, nullptr);
+                    Assert(TTS_IS_BUFFERTUPLE(slot));
+                    full_generation_batch_slots_[
+                        full_generation_batch_slot_count_] = slot;
+                    ++full_generation_batch_slot_count_;
+                }
+            });
+    }
+
+    /// Drop pins and executor slots explicitly while PostgreSQL cleanup is
+    /// still legal. Retire each pointer before its PG call so ResourceOwner is
+    /// the single fallback if that call raises ERROR, with no later double-drop.
+    void drop_full_generation_batch_slots_checked_() {
+        if (full_generation_batch_slot_count_ == 0) return;
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [this] {
+                while (full_generation_batch_slot_count_ != 0) {
+                    const std::size_t ordinal =
+                        full_generation_batch_slot_count_ - 1u;
+                    TupleTableSlot* slot =
+                        full_generation_batch_slots_[ordinal];
+                    full_generation_batch_slots_[ordinal] = nullptr;
+                    full_generation_batch_slot_count_ = ordinal;
+                    if (slot != nullptr) {
+                        ExecDropSingleTupleTableSlot(slot);
+                    }
+                }
+            });
+    }
+
     void abandon_relations_noexcept_() noexcept {
+        // PostgreSQL cleanup is illegal from the noexcept destructor path.
+        // On an exceptional PG cleanup failure, ResourceOwner owns any pins;
+        // forget the C++ aliases so they cannot be used or dropped twice.
+        full_generation_batch_slots_.fill(nullptr);
+        full_generation_batch_slot_count_ = 0;
         active_scan_ = nullptr;
         primary_index_relation_ = nullptr;
         heap_relation_ = nullptr;
@@ -5023,6 +5174,7 @@ private:
         const std::uint64_t close_begin_ns = cold_index_now_ns();
         const BufferUsage close_buffer_begin = pgBufferUsage;
         try {
+            drop_full_generation_batch_slots_checked_();
             if (active_scan_ != nullptr) {
                 bioseq::pg_utils::invoke_pg_as_cpp(
                     [&] { systable_endscan_ordered(active_scan_); });
@@ -5358,6 +5510,10 @@ public:
           primary_index_relation_(std::exchange(
               other.primary_index_relation_, nullptr)),
           active_scan_(std::exchange(other.active_scan_, nullptr)),
+          full_generation_batch_slots_(
+              other.full_generation_batch_slots_),
+          full_generation_batch_slot_count_(std::exchange(
+              other.full_generation_batch_slot_count_, 0)),
           snapshot_(std::exchange(other.snapshot_, nullptr)),
           snapshot_registered_by_session_(std::exchange(
               other.snapshot_registered_by_session_, false)),
@@ -5385,6 +5541,7 @@ public:
           payload_stage_begin_ns_(other.payload_stage_begin_ns_),
           grouped32_cold_route_(other.grouped32_cold_route_),
           stats_(other.stats_) {
+        other.full_generation_batch_slots_.fill(nullptr);
         other.state_ = State::moved;
         other.grouped32_cold_route_.reset();
     }
@@ -6582,7 +6739,9 @@ public:
                 || (grouped32_cold_route_
                     && grouped32_cold_route_->route
                         != MinimizerGrouped32ColdLoadRoute::full)
-                || active_scan_ != nullptr || !planned_groups_.empty()
+                || active_scan_ != nullptr
+                || full_generation_batch_slot_count_ != 0
+                || !planned_groups_.empty()
                 || next_group_ != 0 || !runtime_requests_.empty()
                 || plan_permit_ || runtime_permit_
                 || control_authorization_permit_
@@ -6707,6 +6866,7 @@ public:
                     heap_relation_, primary_index_relation_, snapshot_, 3,
                     keys);
             });
+            create_full_generation_batch_slots_checked_();
             stats_.cold.add(stats_.cold.payload_range_scans, 1);
 
             std::size_t entry_index = 0;
@@ -6717,19 +6877,29 @@ public:
             Crc64Ecma182 extent_row_checksum{};
             Crc64Ecma182 payload_row_checksum{};
 
-            // One bridge now covers fetch plus all eight deformations. Row
-            // authority and arbitrary sinks execute only after PG_END_TRY, so
-            // neither a receipt nor sink-owned C++ state can be crossed by the
-            // storage layer's siglongjmp boundary.
+            // One bridge covers up to K fetch/deform/projection operations.
+            // Each projection borrows its own pinned slot; row authority, CRC
+            // and arbitrary sinks execute only after PG_END_TRY, so neither a
+            // receipt nor sink-owned C++ state crosses a siglongjmp boundary.
+            Rev3PinnedProjectedPgRowBatch batch{};
+            std::size_t batch_ordinal = 0;
             for (;;) {
-                const Rev3NextDeformedPgRow next =
-                    next_rev3_pg_row_or_error(
-                        heap_relation_, active_scan_);
-                if (!next.found) break;
-                HeapTuple tuple = next.row.tuple;
-                record_payload_tid_(tuple);
+                if (batch_ordinal == batch.size) {
+                    if (batch.eof) break;
+                    batch = next_rev3_pinned_projected_pg_row_batch_or_error(
+                        heap_relation_, active_scan_,
+                        full_generation_batch_slots_);
+                    batch_ordinal = 0;
+                    if (batch.size == 0) {
+                        if (batch.eof) break;
+                        fail_("full-generation batched payload scan made no progress");
+                    }
+                }
+                const Rev3PinnedProjectedPgRow& pinned =
+                    batch.rows[batch_ordinal++];
+                record_payload_tid_(pinned.tid);
                 LoadedRow row =
-                    load_rev3_deformed_pg_row_or_error(next.row);
+                    load_rev3_projected_pg_row_or_error(pinned.projected);
                 stats_.cold.add(
                     stats_.cold.row_crc_bytes, row.bytes.size());
                 stats_.cold.add(
@@ -6912,6 +7082,7 @@ public:
                     }
                 }
             }
+            drop_full_generation_batch_slots_checked_();
             bioseq::pg_utils::invoke_pg_as_cpp(
                 [this] { systable_endscan_ordered(active_scan_); });
             active_scan_ = nullptr;

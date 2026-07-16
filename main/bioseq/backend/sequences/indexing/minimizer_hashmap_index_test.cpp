@@ -8833,6 +8833,85 @@ TEST_CASE("DOC0373 Format-5 emits exact SoA and prepared reader rejects corrupti
     }
 }
 
+TEST_CASE("DOC0373 Format-5 compact counts remain exact across u16",
+          "[indexing][minimizer-hashmap][wire][v5][reader]"
+          "[compact-state][max-occ]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t segment_span = 8u * 1024u * 1024u;
+    constexpr std::uint64_t per_segment = 35'000u;
+    constexpr std::uint64_t exact_count = 2u * per_segment;
+    constexpr std::uint64_t persisted_cap = 100'000u;
+    constexpr std::uint64_t query_hash = 0x1555'5555u;
+
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> minimizers;
+    minimizers.reserve(exact_count);
+    for (std::uint64_t index = 0u; index < per_segment; ++index) {
+        minimizers.emplace_back(query_hash, (index + 1u) << 1u);
+    }
+    for (std::uint64_t index = 0u; index < per_segment; ++index) {
+        minimizers.emplace_back(
+            query_hash, (segment_span + index + 1u) << 1u);
+    }
+
+    VectorReplayMinimizerProducer producer{minimizers};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer, sink,
+        test_shape_v5_generation_options(
+            2u * segment_span, persisted_cap));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.position_count == exact_count);
+    const std::array<std::uint64_t, 1> queries{query_hash};
+
+    bioseq::parallelism::MemoryAdmissionController retained_admission;
+    bioseq::parallelism::MemoryAdmissionController pruned_admission;
+    const auto make_reader = [&](
+            bioseq::parallelism::MemoryAdmissionController& admission,
+            std::uint64_t max_occ) {
+        auto reader = PreparedShapeV5QueryReader::begin(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(persisted_cap),
+            generation->directory.encoded_bytes(),
+            queries,
+            max_occ);
+        REQUIRE(reader.has_value());
+        for (const auto& row : sink.rows) {
+            if (row.address.position_segment >= 0) {
+                REQUIRE(reader->accept(row_view(row)).has_value());
+            }
+        }
+        REQUIRE(reader->finish().has_value());
+        return reader;
+    };
+
+    auto retained_reader = make_reader(retained_admission, persisted_cap);
+    const auto retained = retained_reader->lookup(query_hash);
+    REQUIRE(retained.global_occurrence_count == exact_count);
+    REQUIRE(retained.positions_complete);
+    REQUIRE(retained.positions.size() == exact_count);
+    REQUIRE(retained.positions.front() == 2u);
+    REQUIRE(retained.positions[per_segment]
+        == (segment_span + 1u) << 1u);
+    REQUIRE(retained.positions.back()
+        == (segment_span + per_segment) << 1u);
+    const auto retained_evidence = retained_reader->memory_evidence();
+    REQUIRE(retained_evidence.query_record_size_bytes
+        == sizeof(std::uint32_t));
+    REQUIRE(retained_evidence.query_record_capacity_bytes
+        == sizeof(std::uint32_t) + sizeof(std::uint64_t));
+
+    auto pruned_reader = make_reader(
+        pruned_admission,
+        (std::numeric_limits<std::uint16_t>::max)());
+    const auto pruned = pruned_reader->lookup(query_hash);
+    REQUIRE(pruned.global_occurrence_count == exact_count);
+    REQUIRE_FALSE(pruned.positions_complete);
+    REQUIRE(pruned.positions.empty());
+    REQUIRE(pruned_reader->memory_evidence().retained_position_count == 0u);
+}
+
 TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
           "[indexing][minimizer-hashmap][wire][v5][reader][admission]"
           "[cold-load][memory-evidence]") {
@@ -8895,20 +8974,24 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.position_append_growth_reservations == 0u);
     REQUIRE(evidence.retained_position_count == query_count);
     REQUIRE(evidence.retained_position_capacity == query_count);
-    REQUIRE(evidence.query_record_size_bytes == 32u);
+    REQUIRE(evidence.query_record_size_bytes == sizeof(std::uint16_t));
     REQUIRE(evidence.query_record_count == query_count);
     REQUIRE(evidence.query_record_capacity >= query_count);
     REQUIRE(evidence.query_record_capacity_bytes
-        == evidence.query_record_capacity * evidence.query_record_size_bytes);
-    REQUIRE(evidence.query_route_radix_bits == 8u);
-    REQUIRE(evidence.query_route_radix_bucket_count == 256u);
-    REQUIRE(evidence.query_route_radix_nonempty_bucket_count == 256u);
-    REQUIRE(evidence.query_route_radix_max_bucket_size == 11u);
+        == query_count
+            * (sizeof(std::uint16_t) + sizeof(std::uint64_t)));
+    REQUIRE(evidence.query_route_radix_bits == 9u);
+    REQUIRE(evidence.query_route_radix_bucket_count == 512u);
+    REQUIRE(evidence.query_route_radix_nonempty_bucket_count > 0u);
+    REQUIRE(evidence.query_route_radix_nonempty_bucket_count
+        <= evidence.query_route_radix_bucket_count);
+    REQUIRE(evidence.query_route_radix_max_bucket_size <= 8u);
     REQUIRE(evidence.query_hash_capacity_bytes
-        >= query_count * sizeof(std::uint64_t)
+        == query_count * sizeof(std::uint32_t)
             + (evidence.query_route_radix_bucket_count + 1u)
                 * sizeof(std::uint32_t));
-    REQUIRE(evidence.released_query_hash_capacity_bytes == 0u);
+    REQUIRE(evidence.released_query_hash_capacity_bytes
+        >= query_count * sizeof(std::uint64_t));
     REQUIRE(evidence.decoded_control_records == query_count);
     REQUIRE(evidence.query_route_control_lookups
         == evidence.decoded_control_records);
@@ -8976,15 +9059,17 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.position_append_growth_reservations == 0u);
     REQUIRE(sparse_evidence.retained_position_count == 1u);
     REQUIRE(sparse_evidence.retained_position_capacity == 1u);
-    REQUIRE(sparse_evidence.query_record_size_bytes == 32u);
+    REQUIRE(sparse_evidence.query_record_size_bytes
+        == sizeof(std::uint16_t));
     REQUIRE(sparse_evidence.query_record_count == 1u);
     REQUIRE(sparse_evidence.query_route_radix_bits == 0u);
     REQUIRE(sparse_evidence.query_route_radix_bucket_count == 1u);
     REQUIRE(sparse_evidence.query_route_radix_nonempty_bucket_count == 1u);
     REQUIRE(sparse_evidence.query_route_radix_max_bucket_size == 1u);
     REQUIRE(sparse_evidence.query_hash_capacity_bytes
-        >= sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
-    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes == 0u);
+        == sizeof(std::uint32_t) + 2u * sizeof(std::uint32_t));
+    REQUIRE(sparse_evidence.released_query_hash_capacity_bytes
+        >= sizeof(std::uint64_t));
     REQUIRE(sparse_evidence.decoded_control_records > 1u);
     REQUIRE(sparse_evidence.query_route_control_lookups > 0u);
     REQUIRE(sparse_evidence.query_route_control_lookups
@@ -9166,9 +9251,13 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
                 REQUIRE(evidence.projected_bytes
                     == evidence.owned_capacity_bytes);
             } else {
+                const std::uint64_t compact_final_bytes =
+                    queries.size() * sizeof(std::uint64_t)
+                    + queries.size() * sizeof(std::uint8_t);
                 REQUIRE(evidence.projected_bytes
                     == evidence.owned_capacity_bytes
-                        + evidence.retained_position_bytes);
+                        + evidence.retained_position_bytes
+                        + compact_final_bytes);
             }
         }
         REQUIRE(made->failed());
@@ -9229,18 +9318,20 @@ TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",
         constexpr std::uint64_t prior_query_owned_bytes =
             adversarial_query_count * (64u + 2u * sizeof(std::uint64_t));
         constexpr std::uint64_t exact_query_state_and_hash_bytes =
-            adversarial_query_count * 40u;
-        // ceil(Q / 8) needs 24 high radix bits for this adversarial Q.
+            adversarial_query_count
+                * (sizeof(std::uint32_t) + sizeof(std::uint8_t));
+        // ceil(Q / 4) needs 25 high radix bits; the remaining five key bits
+        // fit exactly in one bucket-implied suffix byte.
         constexpr std::uint64_t exact_query_radix_bytes =
-            ((1ULL << 24u) + 1u) * sizeof(std::uint32_t);
+            ((1ULL << 25u) + 1u) * sizeof(std::uint32_t);
         constexpr std::uint64_t exact_query_owned_bytes =
             exact_query_state_and_hash_bytes + exact_query_radix_bytes;
         STATIC_REQUIRE(prior_query_owned_bytes == 8'000'000'000u);
-        STATIC_REQUIRE(exact_query_state_and_hash_bytes == 4'000'000'000u);
-        STATIC_REQUIRE(exact_query_radix_bytes == 67'108'868u);
-        STATIC_REQUIRE(exact_query_owned_bytes == 4'067'108'868u);
+        STATIC_REQUIRE(exact_query_state_and_hash_bytes == 500'000'000u);
+        STATIC_REQUIRE(exact_query_radix_bytes == 134'217'732u);
+        STATIC_REQUIRE(exact_query_owned_bytes == 634'217'732u);
         STATIC_REQUIRE(prior_query_owned_bytes - exact_query_owned_bytes
-            == 3'932'891'132u);
+            == 7'365'782'268u);
         require_wire_error(
             plan_prepared_shape_v5_position_image(
                 (std::numeric_limits<std::uint64_t>::max)(), 0u),

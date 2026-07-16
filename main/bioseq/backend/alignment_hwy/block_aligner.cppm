@@ -142,6 +142,13 @@ struct BlockAlignerExecutionProof {
     std::uint64_t simd_lane16_calls = 0;
     std::uint64_t simd_dp_vector_batches = 0;
     std::uint64_t simd_dp_cells = 0;
+    // Global equal-length calls may be discharged by a SIMD scan whose
+    // strict score bound proves that the coordinate diagonal is the unique
+    // optimum.  Keep that work separate from DP counters: simd_dp_cells is
+    // always the number of cells actually evaluated by ba_align_core.
+    std::uint64_t simd_diagonal_certificate_calls = 0;
+    std::uint64_t simd_diagonal_certificate_vector_batches = 0;
+    std::uint64_t simd_diagonal_certificate_symbols = 0;
     std::uint64_t adaptive_grow_events = 0;
     std::uint64_t adaptive_shrink_events = 0;
     std::uint64_t expected_reversed_compact_symbols = 0;
@@ -215,6 +222,12 @@ struct BlockAlignerExecutionProof {
         add(simd_lane16_calls, other.simd_lane16_calls);
         add(simd_dp_vector_batches, other.simd_dp_vector_batches);
         add(simd_dp_cells, other.simd_dp_cells);
+        add(simd_diagonal_certificate_calls,
+            other.simd_diagonal_certificate_calls);
+        add(simd_diagonal_certificate_vector_batches,
+            other.simd_diagonal_certificate_vector_batches);
+        add(simd_diagonal_certificate_symbols,
+            other.simd_diagonal_certificate_symbols);
         add(adaptive_grow_events, other.adaptive_grow_events);
         add(adaptive_shrink_events, other.adaptive_shrink_events);
         add(expected_reversed_compact_symbols,
@@ -287,6 +300,9 @@ struct BlockAlignerExecutionProof {
         executed_forward_total = gap_executed + right_executed;
         work_total = zero_work_calls + nonempty_calls;
         lane_total = simd_lane8_calls + simd_lane16_calls;
+        if (simd_diagonal_certificate_calls > nonempty_calls) return false;
+        const std::uint64_t dp_nonempty_calls = nonempty_calls
+            - simd_diagonal_certificate_calls;
         const bool exact_align_region_dispatch =
             serial_align_region_dispatches
                     + parallel_align_region_dispatches
@@ -314,13 +330,29 @@ struct BlockAlignerExecutionProof {
             && config_identity_calls == executed_config_identity_calls
             && config_identity_xor == executed_config_identity_xor
             && config_identity_sum == executed_config_identity_sum;
+        const bool truthful_dp_work =
+            (dp_nonempty_calls == 0
+                && simd_dp_vector_batches == 0 && simd_dp_cells == 0)
+            || (dp_nonempty_calls > 0
+                && simd_dp_vector_batches > 0 && simd_dp_cells > 0);
+        const bool truthful_certificate_work =
+            (simd_diagonal_certificate_calls == 0
+                && simd_diagonal_certificate_vector_batches == 0
+                && simd_diagonal_certificate_symbols == 0)
+            || (simd_diagonal_certificate_calls > 0
+                && simd_diagonal_certificate_vector_batches
+                    >= simd_diagonal_certificate_calls
+                && simd_diagonal_certificate_symbols
+                    >= simd_diagonal_certificate_calls
+                && simd_diagonal_certificate_vector_batches
+                    <= simd_diagonal_certificate_symbols
+                && simd_diagonal_certificate_calls
+                    <= executed_global_calls);
         const bool truthful_work = work_total == executed_total
             && nonempty_calls_with_simd == nonempty_calls
             && lane_total == executed_total
-            && ((nonempty_calls == 0
-                    && simd_dp_vector_batches == 0 && simd_dp_cells == 0)
-                || (nonempty_calls > 0
-                    && simd_dp_vector_batches > 0 && simd_dp_cells > 0));
+            && truthful_dp_work
+            && truthful_certificate_work;
         return exact_phase_coverage
             && exact_align_region_dispatch
             && exact_router_coverage
@@ -343,10 +375,13 @@ struct BlockAlignerExecutionProof {
 struct BlockCoreMetrics {
     std::uint64_t vector_batches = 0;
     std::uint64_t cells = 0;
+    std::uint64_t diagonal_certificate_vector_batches = 0;
+    std::uint64_t diagonal_certificate_symbols = 0;
     std::uint64_t grow_events = 0;
     std::uint64_t shrink_events = 0;
     bool saturated = false;
     bool xdrop_terminated = false;
+    bool diagonal_certified = false;
 
     void add(std::uint64_t& destination, std::uint64_t increment = 1) noexcept {
         BlockAlignerExecutionProof::add(destination, increment, saturated);
@@ -440,6 +475,13 @@ public:
 private:
     std::span<uint8_t> data_;
     size_t len_ = 0;
+};
+
+struct BlockDiagonalCertificate {
+    bool certified = false;
+    int32_t score = 0;
+    std::uint64_t vector_batches = 0;
+    std::uint64_t symbols = 0;
 };
 
 // BlockSIMDMatrix is replaced by ScoringMatrix from alignment_hwy_utils.
@@ -1718,6 +1760,110 @@ enum class BlockAlignerContractError : std::uint8_t {
     return BlockAlignerContractError::None;
 }
 
+/// Prove that an equal-length Global alignment's coordinate diagonal is its
+/// unique optimum.  This is deliberately a byte-and-score certificate, not a
+/// seed/hash shortcut: the scan consumes the exact encoded bytes that the DP
+/// would consume.
+///
+/// Let n be the common length, D the coordinate-diagonal score, M the largest
+/// matrix entry, and q/e the public positive affine penalties.  Any different
+/// global path must contain d >= 1 inserted and d deleted bases, hence at most
+/// n-d diagonal pairs and at least one gap run in each direction.  Its score
+/// is therefore bounded by
+///
+///   (n-d)M - 2q - 2ed <= (n-1)M - 2(q+e) = U.
+///
+/// Strict D > U proves both optimality and CIGAR uniqueness.  Equality is not
+/// enough because it leaves the old traceback tie policy observable.
+template<supports_compact_sequence_range QueryRange, size_t AlphabetDim>
+[[nodiscard]] HWY_INLINE BlockDiagonalCertificate
+ba_try_global_diagonal_certificate(
+        const BlockPaddedBytes& query,
+        const BlockPaddedBytes& reference,
+        const ScoringMatrix<QueryRange>& scoring_matrix,
+        const BlockAlignerParams& params) noexcept {
+    BlockDiagonalCertificate result;
+    const size_t n = query.len();
+    if (params.mode != BlockAlignmentMode::Global
+        || params.phase != BlockAlignerPhase::GapExtension
+        || params.input_order != BlockInputOrder::Forward
+        || params.gap_open <= 0 || params.gap_extend <= 0
+        || n == 0 || reference.len() != n
+        || n > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+        return result;
+    }
+    constexpr size_t packed_cigar_limit = static_cast<size_t>(
+        std::numeric_limits<std::uint32_t>::max() >> 4u);
+    if (params.trace && n > packed_cigar_limit) return result;
+
+    // The SIMD scan below has one fast classification (equal vs unequal
+    // biological ranks), so admit only the generated-matrix layout it can
+    // score exactly. Logical encoded bytes must be below biological_ranks;
+    // AlphabetDim-1 itself is the aligner's NULL/padding sentinel.
+    if constexpr (AlphabetDim < 3) return result;
+    constexpr size_t biological_ranks = AlphabetDim - 1;
+    const int8_t match_score = scoring_matrix.at(0, 0);
+    const int8_t mismatch_score = scoring_matrix.at(0, 1);
+    const int8_t ambiguity_score = scoring_matrix.at(
+        0, static_cast<int>(biological_ranks));
+    if (match_score < 0) return result;
+    for (size_t row = 0; row < AlphabetDim; ++row) {
+        for (size_t col = 0; col < AlphabetDim; ++col) {
+            const int8_t expected =
+                row == biological_ranks || col == biological_ranks
+                    ? ambiguity_score
+                    : row == col ? match_score : mismatch_score;
+            const int8_t observed = scoring_matrix.at(
+                static_cast<int>(row), static_cast<int>(col));
+            if (observed != expected || observed > match_score) return result;
+        }
+    }
+
+    const hn::Rebind<uint8_t, BlockAlignerSimdTag> d8;
+    const size_t lanes = hn::Lanes(d8);
+    const auto rank_limit = hn::Set(
+        d8, static_cast<uint8_t>(biological_ranks));
+    std::uint64_t equal_symbols = 0;
+    for (size_t offset = 0; offset < n; offset += lanes) {
+        const size_t active_lanes = std::min(lanes, n - offset);
+        const auto active = hn::FirstN(d8, active_lanes);
+        const auto query_bytes = hn::MaskedLoad(
+            active, d8, query.ptr_at(1 + offset));
+        const auto reference_bytes = hn::MaskedLoad(
+            active, d8, reference.ptr_at(1 + offset));
+        const auto valid_ranks = hn::And(
+            hn::Lt(query_bytes, rank_limit),
+            hn::Lt(reference_bytes, rank_limit));
+        if (hn::CountTrue(d8, hn::And(active, valid_ranks))
+            != active_lanes) {
+            return BlockDiagonalCertificate{};
+        }
+        equal_symbols += hn::CountTrue(
+            d8, hn::And(active, hn::Eq(query_bytes, reference_bytes)));
+        ++result.vector_batches;
+    }
+
+    const std::uint64_t unequal_symbols = static_cast<std::uint64_t>(n)
+        - equal_symbols;
+    const int64_t diagonal_score =
+        static_cast<int64_t>(equal_symbols) * match_score
+        + static_cast<int64_t>(unequal_symbols) * mismatch_score;
+    const int64_t alternative_upper_bound =
+        static_cast<int64_t>(n - 1) * match_score
+        - 2 * (static_cast<int64_t>(params.gap_open)
+            + static_cast<int64_t>(params.gap_extend));
+    if (diagonal_score <= alternative_upper_bound
+        || diagonal_score < std::numeric_limits<int32_t>::min()
+        || diagonal_score > std::numeric_limits<int32_t>::max()) {
+        return BlockDiagonalCertificate{};
+    }
+
+    result.certified = true;
+    result.score = static_cast<int32_t>(diagonal_score);
+    result.symbols = n;
+    return result;
+}
+
 [[nodiscard]] constexpr std::uint64_t block_aligner_config_identity(
         const BlockAlignerParams& params,
         std::uint64_t scoring_identity = 0,
@@ -1799,13 +1945,25 @@ inline void block_aligner_record_executed(
         proof.add(proof.zero_work_calls);
     } else {
         proof.add(proof.nonempty_calls);
-        if (metrics.vector_batches != 0 && metrics.cells != 0
+        const bool simd_dp_executed = metrics.vector_batches != 0
+            && metrics.cells != 0;
+        const bool simd_certificate_executed = metrics.diagonal_certified
+            && metrics.diagonal_certificate_vector_batches != 0
+            && metrics.diagonal_certificate_symbols != 0;
+        if ((simd_dp_executed || simd_certificate_executed)
             && !metrics.saturated) {
             proof.add(proof.nonempty_calls_with_simd);
         }
     }
     proof.add(proof.simd_dp_vector_batches, metrics.vector_batches);
     proof.add(proof.simd_dp_cells, metrics.cells);
+    if (metrics.diagonal_certified) {
+        proof.add(proof.simd_diagonal_certificate_calls);
+    }
+    proof.add(proof.simd_diagonal_certificate_vector_batches,
+        metrics.diagonal_certificate_vector_batches);
+    proof.add(proof.simd_diagonal_certificate_symbols,
+        metrics.diagonal_certificate_symbols);
     proof.add(proof.adaptive_grow_events, metrics.grow_events);
     proof.add(proof.adaptive_shrink_events, metrics.shrink_events);
     if (metrics.xdrop_terminated) {
@@ -1847,6 +2005,7 @@ public:
     ///   internal_extend = -gap_extend
     template<
         bool is_reversed,
+        bool enable_diagonal_certificate = true,
         supports_compact_sequence_range QueryRange,
         supports_compact_sequence_range TargetRange,
         size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n,
@@ -2004,6 +2163,39 @@ public:
                 target_seq, target_start, target_end, max_size);
         }
 
+        BlockCoreMetrics metrics;
+        if constexpr (enable_diagonal_certificate) {
+            const BlockDiagonalCertificate certificate =
+                ba_try_global_diagonal_certificate<QueryRange, AlphabetDim>(
+                    query_padded, ref_padded, scoring_matrix, params);
+            if (certificate.certified) {
+                result.score = certificate.score;
+                result.max = certificate.score;
+                result.max_q = static_cast<int32_t>(query_len) - 1;
+                result.max_t = static_cast<int32_t>(target_len) - 1;
+                result.mqe = certificate.score;
+                result.mqe_t = result.max_t;
+                result.mte = certificate.score;
+                result.mte_q = result.max_q;
+                result.reach_end = true;
+                if (params.trace) {
+                    result.cigar.push_back(
+                        (static_cast<std::uint32_t>(query_len) << 4u)
+                        | CIGAR_MATCH);
+                }
+                metrics.diagonal_certified = true;
+                metrics.diagonal_certificate_vector_batches =
+                    certificate.vector_batches;
+                metrics.diagonal_certificate_symbols = certificate.symbols;
+                if (execution_proof != nullptr) {
+                    block_aligner_record_executed(
+                        *execution_proof, params, L, false, metrics,
+                        config_identity);
+                }
+                return result;
+            }
+        }
+
         // Allocate scratch space
         const bool do_trace = params.trace;
         BlockAlignerScratch scratch(query_len, target_len, max_size, do_trace);
@@ -2014,8 +2206,6 @@ public:
         size_t out_qi = 0, out_ri = 0;
 
         const bool use_xdrop = params.mode == BlockAlignmentMode::XDrop;
-        BlockCoreMetrics metrics;
-
         // Dispatch based on TRACE and X_DROP combinations
         if (do_trace && use_xdrop) {
             if (execution_proof != nullptr) {

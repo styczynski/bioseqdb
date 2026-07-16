@@ -39,6 +39,7 @@ namespace {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
 using range_t = compact_sequence_range<dna4_u64>;
+using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 
 struct ReferenceRun {
     KswAlignResult result;
@@ -120,6 +121,65 @@ struct ReferenceRun {
         lazy_query, lazy_reference,
         0, query.size(), 0, reference.size(), scoring, params, &run.proof);
     return run;
+}
+
+template<bool strand_reversed, bool enable_diagonal_certificate, class Sequence>
+[[nodiscard]] ReferenceRun run_block_mode(
+        std::string_view query,
+        std::string_view reference,
+        const ScoringMatrix<Sequence>& scoring,
+        const BlockAlignerParams& params) {
+    using typed_range_t = compact_sequence_range<Sequence>;
+    using alphabet_t = typename typed_range_t::traits::alphabet_type;
+    std::vector<alphabet_t> query_data(query.size());
+    std::vector<alphabet_t> reference_data(reference.size());
+    for (std::size_t i = 0; i < query.size(); ++i) {
+        query_data[i].assign_char(query[i]);
+    }
+    for (std::size_t i = 0; i < reference.size(); ++i) {
+        reference_data[i].assign_char(reference[i]);
+    }
+    typed_range_t query_range(query_data);
+    typed_range_t reference_range(reference_data);
+    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
+    auto lazy_reference = bioseq::storage::make_lazy_in_memory(reference_range);
+
+    ReferenceRun run;
+    run.result = HwyBlockAligner::align<
+        strand_reversed, enable_diagonal_certificate>(
+            lazy_query, lazy_reference,
+            0, query.size(), 0, reference.size(), scoring, params, &run.proof);
+    return run;
+}
+
+void check_align_result_identical(
+        const KswAlignResult& optimized,
+        const KswAlignResult& forced_dp) {
+    CHECK(optimized.max == forced_dp.max);
+    CHECK(optimized.score == forced_dp.score);
+    CHECK(optimized.mqe == forced_dp.mqe);
+    CHECK(optimized.mte == forced_dp.mte);
+    CHECK(optimized.max_q == forced_dp.max_q);
+    CHECK(optimized.max_t == forced_dp.max_t);
+    CHECK(optimized.mqe_t == forced_dp.mqe_t);
+    CHECK(optimized.mte_q == forced_dp.mte_q);
+    CHECK(optimized.zdropped == forced_dp.zdropped);
+    CHECK(optimized.reach_end == forced_dp.reach_end);
+    CHECK(optimized.cigar == forced_dp.cigar);
+}
+
+[[nodiscard]] std::string reverse_complement_ascii(std::string_view source) {
+    std::string result(source.rbegin(), source.rend());
+    for (char& symbol : result) {
+        switch (symbol) {
+        case 'A': symbol = 'T'; break;
+        case 'C': symbol = 'G'; break;
+        case 'G': symbol = 'C'; break;
+        case 'T': symbol = 'A'; break;
+        default: break;
+        }
+    }
+    return result;
 }
 
 [[nodiscard]] ReferenceRun run_block_region(
@@ -221,6 +281,168 @@ TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
     CHECK(score_only.proof.accepted());
 }
 
+TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
+          "[block-aligner][global][diagonal-certificate][oracle]") {
+    context::context ctx;
+    context::installed_context_scope scope(ctx);
+    const auto scoring = ScoringMatrix<dna4_u64>::generate(2, 4, 1);
+    BlockAlignerParams params = global_params(16, 32);
+    params.gap_open = 4;
+    params.gap_extend = 2;
+
+    const auto compare_dna4 = [&](
+            std::string_view query,
+            std::string_view reference,
+            bool expect_certificate) {
+        const ReferenceRun optimized =
+            run_block_mode<false, true, dna4_u64>(
+                query, reference, scoring, params);
+        const ReferenceRun forced_dp =
+            run_block_mode<false, false, dna4_u64>(
+                query, reference, scoring, params);
+        check_align_result_identical(optimized.result, forced_dp.result);
+        CHECK(optimized.proof.accepted());
+        CHECK(forced_dp.proof.accepted());
+        CHECK(optimized.proof.simd_diagonal_certificate_calls
+              == static_cast<std::uint64_t>(expect_certificate));
+        CHECK(forced_dp.proof.simd_diagonal_certificate_calls == 0);
+        CHECK(forced_dp.proof.simd_dp_cells > 0);
+        if (expect_certificate) {
+            CHECK(optimized.proof.simd_dp_cells == 0);
+            CHECK(optimized.proof.simd_dp_vector_batches == 0);
+            CHECK(optimized.proof.simd_diagonal_certificate_vector_batches > 0);
+            CHECK(optimized.proof.simd_diagonal_certificate_symbols
+                  == query.size());
+        } else {
+            CHECK(optimized.proof.simd_dp_cells > 0);
+            CHECK(optimized.proof.simd_diagonal_certificate_symbols == 0);
+        }
+    };
+
+    const std::string exact =
+        "ACGTACGTTGCATGCAAAAACCCCGGGGTTTT"
+        "TGCATGCAACGTACGTCCCCAAAATTTTGGGG";
+    compare_dna4(exact, exact, true);
+
+    BlockAlignerParams score_only_params = params;
+    score_only_params.trace = false;
+    const ReferenceRun score_only_optimized =
+        run_block_mode<false, true, dna4_u64>(
+            exact, exact, scoring, score_only_params);
+    const ReferenceRun score_only_forced =
+        run_block_mode<false, false, dna4_u64>(
+            exact, exact, scoring, score_only_params);
+    check_align_result_identical(
+        score_only_optimized.result, score_only_forced.result);
+    CHECK(score_only_optimized.result.cigar.empty());
+    CHECK(score_only_optimized.proof.simd_diagonal_certificate_calls == 1);
+    CHECK(score_only_optimized.proof.simd_dp_cells == 0);
+
+    BlockAlignerExecutionProof tampered = score_only_optimized.proof;
+    tampered.simd_diagonal_certificate_vector_batches = 0;
+    CHECK_FALSE(tampered.accepted());
+    tampered = score_only_optimized.proof;
+    tampered.simd_diagonal_certificate_symbols = 0;
+    CHECK_FALSE(tampered.accepted());
+    tampered = score_only_optimized.proof;
+    tampered.simd_dp_cells = 1;
+    CHECK_FALSE(tampered.accepted());
+
+    std::string one_substitution = exact;
+    one_substitution[17] = one_substitution[17] == 'A' ? 'C' : 'A';
+    compare_dna4(exact, one_substitution, true);
+
+    std::string two_substitutions = one_substitution;
+    two_substitutions[46] = two_substitutions[46] == 'A' ? 'C' : 'A';
+    compare_dna4(exact, two_substitutions, true);
+
+    // Moving one distinct base inside a repeat resembles a compensating
+    // insertion/deletion but has only two coordinate mismatches.  The strict
+    // bound, not biological provenance, proves the diagonal is still unique.
+    std::string repeat_query(64, 'A');
+    repeat_query[31] = 'C';
+    std::string repeat_shifted = repeat_query;
+    repeat_shifted[31] = 'A';
+    repeat_shifted[32] = 'C';
+    compare_dna4(repeat_query, repeat_shifted, true);
+
+    // Three default-scoring substitutions fall below the strict certificate
+    // bound. Arbitrary seed/hash agreement cannot change that: actual bytes
+    // force the old DP path.
+    std::string three_substitutions = two_substitutions;
+    three_substitutions[55] = three_substitutions[55] == 'A' ? 'C' : 'A';
+    compare_dna4(exact, three_substitutions, false);
+
+    // Equal-length compensating-indel geometry with many displaced bytes and
+    // unequal-length single-indel geometry are both explicit fallbacks.
+    const std::string displaced = "T" + exact.substr(0, exact.size() - 1);
+    compare_dna4(exact, displaced, false);
+    compare_dna4(exact, exact + "A", false);
+
+    // D == U is deliberately not enough: retain old traceback tie policy.
+    BlockAlignerParams tie_params = params;
+    tie_params.gap_open = 1;
+    tie_params.gap_extend = 1;
+    const ReferenceRun tie_optimized =
+        run_block_mode<false, true, dna4_u64>(
+            exact, one_substitution, scoring, tie_params);
+    const ReferenceRun tie_forced =
+        run_block_mode<false, false, dna4_u64>(
+            exact, one_substitution, scoring, tie_params);
+    check_align_result_identical(tie_optimized.result, tie_forced.result);
+    CHECK(tie_optimized.proof.simd_diagonal_certificate_calls == 0);
+    CHECK(tie_optimized.proof.simd_dp_cells > 0);
+
+    // A valid but non-generated score layout is outside the SIMD scan's
+    // exact classification and therefore cannot be certified.
+    auto unsupported_scoring = scoring;
+    unsupported_scoring.at(0, 1) = 3;
+    unsupported_scoring.simd_scores[1] = 3;
+    REQUIRE(unsupported_scoring.block_layout_valid());
+    const ReferenceRun unsupported_optimized =
+        run_block_mode<false, true, dna4_u64>(
+            exact, exact, unsupported_scoring, params);
+    const ReferenceRun unsupported_forced =
+        run_block_mode<false, false, dna4_u64>(
+            exact, exact, unsupported_scoring, params);
+    check_align_result_identical(
+        unsupported_optimized.result, unsupported_forced.result);
+    CHECK(unsupported_optimized.proof.simd_diagonal_certificate_calls == 0);
+    CHECK(unsupported_optimized.proof.simd_dp_cells > 0);
+
+    const auto dna5_scoring = ScoringMatrix<dna5_u64>::generate(2, 4, 1);
+    const std::string dna5_sequence =
+        "ACGTNACGTACGTACGTACGTACGTACGTACG"
+        "TGCATGCATGCATGCATGCATGCATGCATGCA";
+    const ReferenceRun dna5_optimized =
+        run_block_mode<false, true, dna5_u64>(
+            dna5_sequence, dna5_sequence, dna5_scoring, params);
+    const ReferenceRun dna5_forced =
+        run_block_mode<false, false, dna5_u64>(
+            dna5_sequence, dna5_sequence, dna5_scoring, params);
+    check_align_result_identical(dna5_optimized.result, dna5_forced.result);
+    CHECK(dna5_optimized.proof.simd_diagonal_certificate_calls == 1);
+    CHECK(dna5_optimized.proof.simd_dp_cells == 0);
+
+    // Reverse-strand template coordinates are encoded to canonical reverse
+    // complement before the scan. Compare those exact consumed bytes too.
+    const std::string reverse_source =
+        "AACCGTACGTTTGGGCCCAAATTTACGTACGT"
+        "GGGGAAAACCCCTTTTACGTTGCATGCACGTA";
+    const std::string reverse_target =
+        reverse_complement_ascii(reverse_source);
+    const ReferenceRun reverse_optimized =
+        run_block_mode<true, true, dna4_u64>(
+            reverse_source, reverse_target, scoring, params);
+    const ReferenceRun reverse_forced =
+        run_block_mode<true, false, dna4_u64>(
+            reverse_source, reverse_target, scoring, params);
+    check_align_result_identical(
+        reverse_optimized.result, reverse_forced.result);
+    CHECK(reverse_optimized.proof.simd_diagonal_certificate_calls == 1);
+    CHECK(reverse_optimized.proof.simd_dp_cells == 0);
+}
+
 TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",
           "[block-aligner][reference-golden][empty]") {
     context::context ctx;
@@ -314,6 +536,8 @@ TEST_CASE("Block Aligner native XDrop matches scan_block.rs and reports terminat
     CHECK(packed_cigar_string(complete.result.cigar) == "6M");
     CHECK_FALSE(complete.result.zdropped);
     CHECK(complete.proof.native_xdrop_terminations == 0);
+    CHECK(complete.proof.simd_diagonal_certificate_calls == 0);
+    CHECK(complete.proof.simd_dp_cells > 0);
     CHECK(complete.proof.accepted());
 
     const std::string all_a(44, 'A');
@@ -840,7 +1064,7 @@ TEST_CASE("Block SIMD scoring covers ranks above one shuffle table",
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
     const auto scoring = ScoringMatrix<aa27_u64>::generate(2, 1, 1);
     BlockAlignerExecutionProof proof;
-    const KswAlignResult result = HwyBlockAligner::align<false>(
+    const KswAlignResult result = HwyBlockAligner::align<false, false>(
         lazy_query, lazy_target,
         0, query_data.size(), 0, target_data.size(),
         scoring, global_params(16, 32), &proof);
@@ -867,7 +1091,7 @@ TEST_CASE("Block native L16 path matches the cross-lane golden",
     const std::string sequence =
         "ACGTACGTACGTACGTTGCATGCATGCATGCA"
         "AAAACCCCGGGGTTTTACGTACGTACGTACGT";
-    const ReferenceRun run = run_block(
+    const ReferenceRun run = run_block_mode<false, false, dna4_u64>(
         sequence, sequence, scoring, global_params(16, 32));
     CHECK(run.result.score == 128);
     CHECK(run.result.max_q == 63);
