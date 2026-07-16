@@ -97,12 +97,32 @@ def _discover_tutorial_route(site: Path, base: str, version: str) -> str:
     return f"{base}/{version}/tutorials/"
 
 
+def _discover_entity_route(site: Path, base: str, version: str) -> str:
+    """Pick a real rendered entity page (SQL preferred) to exercise §12.3
+    enrichment; fall back to the reference index."""
+    reference = site / version / "reference"
+    for domain in ("sql", "cpp"):
+        domain_dir = reference / domain
+        if not domain_dir.is_dir():
+            continue
+        for kind_dir in sorted(domain_dir.iterdir()):
+            if not kind_dir.is_dir():
+                continue
+            for entity_dir in sorted(kind_dir.iterdir()):
+                if entity_dir.is_dir() and (entity_dir / "index.html").is_file():
+                    return (f"{base}/{version}/reference/{domain}/"
+                            f"{kind_dir.name}/{entity_dir.name}/")
+    return f"{base}/{version}/reference/"
+
+
 def _default_routes(site: Path, mount: str, version: str) -> dict[str, str]:
     base = mount if mount else ""
     return {
         "landing": f"{base}/",
         "tutorial": _discover_tutorial_route(site, base, version),
         "reference": f"{base}/{version}/reference/",
+        "entity": _discover_entity_route(site, base, version),
+        "error": f"{base}/error.html",
     }
 
 
@@ -315,6 +335,34 @@ def _exercise_version_selector(page) -> None:
            "version selector is missing its /versions/ fallback link")
 
 
+def _exercise_entity(page) -> None:
+    """Entity page enrichment (§12.3): kind badge and a copyable signature."""
+    if page.locator("article.entity").count() == 0:
+        return
+    _check(page.locator(".kind-badge").count() == 1, "entity page is missing its kind badge")
+    signature = page.locator("#entity-signature-code")
+    if signature.count() == 1:
+        button = page.locator("button.copy-button[data-copy-target='entity-signature-code']")
+        _check(button.count() == 1, "entity signature has no copy button")
+
+
+def _exercise_jsonld(page) -> None:
+    """SEO JSON-LD (§15.5): the doc page's inert ld+json is valid, types as
+    TechArticle, and carries a BreadcrumbList."""
+    block = page.locator("script[type='application/ld+json']").first
+    if block.count() == 0:
+        return
+    text = block.text_content() or "{}"
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise AssertionFail(f"JSON-LD is not valid JSON: {error}")
+    nodes = data.get("@graph", [data]) if isinstance(data, dict) else []
+    types = {node.get("@type") for node in nodes if isinstance(node, dict)}
+    _check("TechArticle" in types, f"JSON-LD primary type is not TechArticle (got {types})")
+    _check("BreadcrumbList" in types, "JSON-LD has no BreadcrumbList")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -367,6 +415,10 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_copy(page)
                 _exercise_annotations(page)
                 _exercise_code_entities(page)
+                _exercise_jsonld(page)
+            if label == "entity":
+                _exercise_entity(page)
+                _exercise_jsonld(page)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

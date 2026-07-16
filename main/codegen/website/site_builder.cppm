@@ -2609,17 +2609,53 @@ void decorate_code_entity_ranges(
 
     // Root marketing landing page: the executed runnable slots (§15.2) are bound as
     // the examples.<slot> collection; hidden setup/teardown never reaches the page.
+    // Shared breadcrumb serializer and tutorial-backlink reverse map (§12.3/§15.1).
+    // Each crumb is {label, href}; the last crumb is the current page.
+    const auto breadcrumb_json =
+        [&](const std::vector<std::pair<std::string, std::string>>& crumbs) {
+            std::string out = "[";
+            bool first = true;
+            for (const auto& [name, href] : crumbs) {
+                if (!first) {
+                    out += ",";
+                }
+                first = false;
+                out += "{\"name\":" + json_text(name) + ",\"url\":" + json_text(href) + "}";
+            }
+            out += "]";
+            return out;
+        };
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>, std::less<>>
+        backlinks_by_id;
+    for (const tutorial& item : model.tutorials) {
+        std::set<std::string> refs;
+        collect_referenced_entity_ids(item.content, refs);
+        const std::string tutorial_route =
+            url(version + "/tutorials/" + item.metadata.slug + "/");
+        for (const std::string& id : refs) {
+            backlinks_by_id[id].push_back({item.metadata.title, tutorial_route});
+        }
+    }
+
     const std::string landing_examples_json =
         serialize_landing_examples(model.landing_examples);
     render("index.html", "landing.html.j2",
            "{\"title\":" + json_text(config.title)
                + ",\"description\":" + json_text(config.short_description)
                + ",\"canonical\":" + json_text(canonical("index.html"))
+               + ",\"page_type\":" + json_text("landing")
                + ",\"eyebrow\":" + json_text("PostgreSQL-native")
                + ",\"headline\":" + json_text(config.title)
                + ",\"lede\":" + json_text(config.short_description)
                + ",\"install\":" + json_text("CREATE EXTENSION bioseq;") + "}",
            "examples", landing_examples_json);
+
+    // Host-served not-found page (§16 layout). Version-agnostic root artifact.
+    render("error.html", "error.html.j2",
+           "{\"title\":" + json_text("Page not found")
+               + ",\"description\":" + json_text("The requested page does not exist.")
+               + ",\"canonical\":" + json_text(canonical("error.html")) + "}",
+           "", "");
 
     // Version overview / documentation home, distinct from the landing page.
     render(version + "/index.html", "version_home.html.j2",
@@ -2662,6 +2698,12 @@ void decorate_code_entity_ranges(
         std::string page = "{\"title\":" + json_text(item.metadata.title)
             + ",\"description\":" + json_text(item.metadata.description)
             + ",\"canonical\":" + json_text(canonical(rel))
+            + ",\"page_type\":" + json_text("tutorial")
+            + ",\"breadcrumb\":" + breadcrumb_json({
+                  {"Home", url("")},
+                  {version, url(version + "/")},
+                  {"Tutorials", url(version + "/tutorials/")},
+                  {item.metadata.title, url(version + "/tutorials/" + item.metadata.slug + "/")}})
             + ",\"body_html\":" + json_quote(body);
         page += ",\"previous_url\":";
         page += item.previous_slug
@@ -2696,13 +2738,70 @@ void decorate_code_entity_ranges(
                "entities", serialize_entity_array(entities));
         for (const documented_entity& entity : entities) {
             const std::string rel = entity_rel(entity) + "index.html";
-            render(rel, "entity.html.j2",
-                   "{\"title\":" + json_text(entity.qualified_name)
-                       + ",\"description\":"
-                       + json_text(entity.summary_text.empty()
-                                        ? entity.qualified_name : entity.summary_text)
-                       + ",\"canonical\":" + json_text(canonical(rel)) + "}",
-                   "entity", serialize_single_entity(entity));
+            std::string page = "{\"title\":" + json_text(entity.qualified_name)
+                + ",\"description\":"
+                + json_text(entity.summary_text.empty()
+                                 ? entity.qualified_name : entity.summary_text)
+                + ",\"canonical\":" + json_text(canonical(rel))
+                + ",\"page_type\":" + json_text("entity")
+                + ",\"breadcrumb\":" + breadcrumb_json({
+                      {"Home", url("")},
+                      {version, url(version + "/")},
+                      {"Reference", url(version + "/reference/")},
+                      {std::string(label),
+                       url(version + "/reference/" + std::string(domain) + "/")},
+                      {entity.qualified_name, url(entity_rel(entity))}});
+            // Detailed documentation body (trusted HTML, §12.3).
+            page += ",\"detail_html\":";
+            page += entity.documentation.empty()
+                ? std::string("null")
+                : json_quote(render_document_html(entity.documentation));
+            // C++ source link: repository blob at the configured revision (§12.3).
+            if (entity.declaration) {
+                const std::string spath = entity.declaration->path.generic_string();
+                const auto marker = spath.rfind("/main/");
+                const std::string relpath = marker != std::string::npos
+                    ? spath.substr(marker + 1)
+                    : entity.declaration->path.filename().string();
+                const std::string blob = config.repository_url + "/blob/" + revision + "/"
+                    + relpath + "#L" + std::to_string(entity.declaration->first_line);
+                const std::string source_label =
+                    entity.module_name ? *entity.module_name : relpath;
+                page += ",\"source_url\":" + json_text(blob)
+                    + ",\"source_label\":" + json_text(source_label);
+            } else {
+                page += ",\"source_url\":null,\"source_label\":null";
+            }
+            // SQL provenance: extension version + actual schema + server version (§13.6).
+            if (entity.domain == entity_domain::sql) {
+                const auto dot = entity.qualified_name.find('.');
+                const std::string schema = dot == std::string::npos
+                    ? std::string("public") : entity.qualified_name.substr(0, dot);
+                std::string provenance =
+                    "Bioseq extension " + model.extension_version + " \xC2\xB7 schema " + schema;
+                if (!model.postgres_server_version.empty()) {
+                    provenance += " \xC2\xB7 PostgreSQL " + model.postgres_server_version;
+                }
+                page += ",\"provenance\":" + json_text(provenance);
+            } else {
+                page += ",\"provenance\":null";
+            }
+            // Tutorial backlinks (§12.3): tutorials that reference this entity.
+            page += ",\"backlinks\":[";
+            if (const auto found = backlinks_by_id.find(entity.canonical_id);
+                found != backlinks_by_id.end()) {
+                bool first = true;
+                for (const auto& [backlink_title, backlink_route] : found->second) {
+                    if (!first) {
+                        page += ",";
+                    }
+                    first = false;
+                    page += "{\"title\":" + json_text(backlink_title)
+                        + ",\"url\":" + json_text(backlink_route) + "}";
+                }
+            }
+            page += "]}";
+            render(rel, "entity.html.j2", page, "entity", serialize_single_entity(entity));
         }
     };
     render_domain("cpp", "C++", cpp_entities);

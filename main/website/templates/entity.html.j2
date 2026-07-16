@@ -1,10 +1,36 @@
 {% extends "base.html.j2" %}
 {% block main %}
 <article class="entity">
+  <p class="kind-badge">{{ entity.domain }} &#183; {{ entity.kind }}</p>
   <h1><code>{{ entity.qualified_name }}</code></h1>
-  <p class="kind">{{ entity.domain }} {{ entity.kind }}</p>
   {% if entity.summary %}<p class="summary">{{ entity.summary }}</p>{% endif %}
-  {% if entity.normalized_signature %}<pre class="signature"><code>{{ entity.normalized_signature }}</code></pre>{% endif %}
+  {% if entity.normalized_signature %}
+  <figure class="doc-code entity-signature">
+    <figcaption class="doc-code-bar">
+      <span class="doc-code-lang">Signature</span>
+      <button type="button" class="copy-button" data-copy-target="entity-signature-code" aria-label="Copy signature to clipboard">Copy</button>
+    </figcaption>
+    <pre><code id="entity-signature-code">{{ entity.normalized_signature }}</code></pre>
+  </figure>
+  {% endif %}
+  {% if page.detail_html %}<div class="entity-detail">{{ page.detail_html }}</div>{% endif %}
+  {% if entity.parameters %}
+  <h2>Parameters</h2>
+  <dl class="parameters">
+  {% for p in entity.parameters %}
+    <dt><code>{{ p.name }}</code> : <code>{{ p.type }}</code>{% if p.default %} = <code>{{ p.default }}</code>{% endif %}</dt>
+  {% endfor %}
+  </dl>
+  {% endif %}
+  {% if entity.return_type %}<p class="returns">Returns <code>{{ entity.return_type }}</code></p>{% endif %}
+  {% if entity.attributes %}
+  <h2>{% if entity.domain == "sql" %}Attributes{% else %}Qualifiers{% endif %}</h2>
+  <dl class="entity-attributes">
+  {% for a in entity.attributes %}
+    <dt><code>{{ a.name }}</code></dt><dd>{{ a.value }}</dd>
+  {% endfor %}
+  </dl>
+  {% endif %}
   {% if entity.overloads %}
   <h2>Overloads</h2>
   <ul class="overloads">
@@ -13,21 +39,22 @@
   {% endfor %}
   </ul>
   {% endif %}
-  {% if entity.parameters %}
-  <h2>Parameters</h2>
-  <dl class="parameters">
-  {% for p in entity.parameters %}
-    <dt><code>{{ p.name }}</code> : <code>{{ p.type }}</code></dt>
-  {% endfor %}
-  </dl>
-  {% endif %}
-  {% if entity.return_type %}<p class="returns">Returns <code>{{ entity.return_type }}</code></p>{% endif %}
-  {% if entity.implemented_by %}<p class="implemented-by">Implemented by <a href="{{ entity.implemented_by }}">source definition</a></p>{% endif %}
   {% if entity.members %}
   <h2>Members</h2>
   <ul class="members">
   {% for m in entity.members %}
     <li><a href="{{ m.url }}"><code>{{ m.name }}</code></a></li>
+  {% endfor %}
+  </ul>
+  {% endif %}
+  {% if entity.implemented_by %}<p class="implemented-by">Implemented by <a href="{{ entity.implemented_by }}">source definition</a></p>{% endif %}
+  {% if page.source_url %}<p class="source-link">Source: <a href="{{ page.source_url }}" rel="noreferrer">{{ page.source_label }}</a></p>{% endif %}
+  {% if page.provenance %}<p class="provenance">{{ page.provenance }}</p>{% endif %}
+  {% if page.backlinks %}
+  <h2>Referenced by</h2>
+  <ul class="backlinks">
+  {% for b in page.backlinks %}
+    <li><a href="{{ b.url }}">{{ b.title }}</a></li>
   {% endfor %}
   </ul>
   {% endif %}

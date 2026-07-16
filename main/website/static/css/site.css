@@ -481,3 +481,34 @@ img, video { max-width: 100%; height: auto; }
   .nav-actions { flex-direction: row; align-items: center; gap: 12px; }
   .version-menu { position: absolute; right: 0; z-index: 30; }
 }
+
+/* ---- Entity page enrichment (§12.3) ---- */
+.kind-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  color: var(--eyebrow);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin: 0 0 8px;
+}
+.entity h1 code { font-family: var(--font-mono); font-size: 0.7em; }
+.entity-signature { margin: 20px 0; }
+.entity-detail { margin: 20px 0; color: var(--text); }
+.entity-detail :is(h2, h3) { margin-top: 24px; }
+.parameters dt { margin: 6px 0; }
+.entity-attributes { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }
+.entity-attributes dt { color: var(--text-muted); }
+.entity-attributes dd { margin: 0; }
+.source-link, .provenance { color: var(--text-muted); font-size: 14px; margin: 8px 0; }
+.provenance { font-family: var(--font-mono); font-size: 13px; }
+.backlinks { padding-left: 20px; }
+.backlinks li { margin: 4px 0; }
+
+/* ---- Error / not-found page (§16) ---- */
+.error-page { max-width: 640px; }
+.error-links { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 16px; margin-top: 24px; }
+.error-links a { font-family: var(--font-mono); font-size: 14px; }

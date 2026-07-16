@@ -414,9 +414,23 @@ namespace {
         boost::json::object item;
         item["name"] = html_escape(parameter.name);
         item["type"] = html_escape(parameter.type);
+        item["default"] = parameter.default_value
+            ? boost::json::value(html_escape(*parameter.default_value))
+            : boost::json::value(nullptr);
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
+    // SQL attributes / C++ qualifiers (§12.3), sorted for deterministic output.
+    if (!entity.attributes.empty()) {
+        boost::json::array attributes;
+        for (const auto& [name, value] : entity.attributes) {
+            boost::json::object item;
+            item["name"] = html_escape(name);
+            item["value"] = html_escape(value);
+            attributes.push_back(std::move(item));
+        }
+        object["attributes"] = std::move(attributes);
+    }
     if (!entity.overload_members.empty()) {
         boost::json::array overloads;
         for (const auto& member : entity.overload_members) {
@@ -1152,22 +1166,65 @@ namespace {
     // Synthesize the inert SEO JSON-LD (§15.5) from the page's own title/
     // description/canonical. It is a serialized-JSON string bound as page.jsonld so
     // the single application/ld+json block emits data, never executable script; no
-    // datePublished/dateModified is included (no deterministic source metadata).
+    // datePublished/dateModified is included (no deterministic source metadata). The
+    // primary @type follows the page_type hint (WebSite/TechArticle/WebPage); a
+    // BreadcrumbList is added under @graph when the page carries a breadcrumb trail.
     boost::json::value page_value = parse_json(page_object);
     if (page_value.is_object()) {
         boost::json::object& page_object_ref = page_value.as_object();
+        std::string page_type = "WebPage";
+        if (page_object_ref.contains("page_type") && page_object_ref.at("page_type").is_string()) {
+            const std::string hint(page_object_ref.at("page_type").as_string().c_str());
+            if (hint == "landing") {
+                page_type = "WebSite";
+            } else if (hint == "tutorial" || hint == "entity") {
+                page_type = "TechArticle";
+            }
+        }
+        boost::json::object primary;
+        primary["@type"] = page_type;
+        primary["name"] = page_object_ref.contains("title")
+            ? page_object_ref.at("title") : boost::json::value("");
+        primary["description"] = page_object_ref.contains("description")
+            ? page_object_ref.at("description") : boost::json::value("");
+        primary["url"] = page_object_ref.contains("canonical")
+            ? page_object_ref.at("canonical") : boost::json::value("");
+        primary["isPartOf"] = site.title;
+        if (!site.social_image_url.empty()) {
+            primary["image"] = site.social_image_url;
+        }
         boost::json::object json_ld;
         json_ld["@context"] = "https://schema.org";
-        json_ld["@type"] = "WebPage";
-        json_ld["name"] = page_object_ref.contains("title")
-            ? page_object_ref.at("title") : boost::json::value("");
-        json_ld["description"] = page_object_ref.contains("description")
-            ? page_object_ref.at("description") : boost::json::value("");
-        json_ld["url"] = page_object_ref.contains("canonical")
-            ? page_object_ref.at("canonical") : boost::json::value("");
-        json_ld["isPartOf"] = site.title;
-        if (!site.social_image_url.empty()) {
-            json_ld["image"] = site.social_image_url;
+        if (page_object_ref.contains("breadcrumb") && page_object_ref.at("breadcrumb").is_array()
+            && !page_object_ref.at("breadcrumb").as_array().empty()) {
+            boost::json::array crumb_items;
+            std::int64_t position = 1;
+            for (const boost::json::value& crumb : page_object_ref.at("breadcrumb").as_array()) {
+                if (!crumb.is_object()) {
+                    continue;
+                }
+                boost::json::object list_item;
+                list_item["@type"] = "ListItem";
+                list_item["position"] = position++;
+                list_item["name"] = crumb.as_object().contains("name")
+                    ? crumb.as_object().at("name") : boost::json::value("");
+                if (crumb.as_object().contains("url")
+                    && crumb.as_object().at("url").is_string()) {
+                    list_item["item"] = crumb.as_object().at("url");
+                }
+                crumb_items.push_back(std::move(list_item));
+            }
+            boost::json::object breadcrumb_list;
+            breadcrumb_list["@type"] = "BreadcrumbList";
+            breadcrumb_list["itemListElement"] = std::move(crumb_items);
+            boost::json::array graph;
+            graph.push_back(std::move(primary));
+            graph.push_back(std::move(breadcrumb_list));
+            json_ld["@graph"] = std::move(graph);
+        } else {
+            for (const auto& field : primary) {
+                json_ld[field.key()] = field.value();
+            }
         }
         page_object_ref["jsonld"] = boost::json::serialize(json_ld);
     }
