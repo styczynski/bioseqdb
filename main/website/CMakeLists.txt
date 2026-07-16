@@ -195,6 +195,13 @@ add_custom_command(
   VERBATIM)
 
 # --- plan (§17.3 step 3) ------------------------------------------------------
+# An empty $<BOOL:...:--include-drafts> genex still expands to an empty positional
+# argument under VERBATIM, which the CLI rejects; use an (un)set list variable so the
+# flag is omitted entirely when drafts are off.
+set(_plan_drafts_flag)
+if(BIOSEQ_WEBSITE_INCLUDE_DRAFTS)
+  set(_plan_drafts_flag --include-drafts)
+endif()
 set(_plan_json "${_output_root}/site-plan.json")
 add_custom_command(
   OUTPUT "${_plan_json}"
@@ -206,7 +213,7 @@ add_custom_command(
           --static "${_static_dir}"
           --base-path "${_base_path}"
           --source-revision "${_revision}"
-          $<$<BOOL:${BIOSEQ_WEBSITE_INCLUDE_DRAFTS}>:--include-drafts>
+          ${_plan_drafts_flag}
           --output "${_plan_json}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_site_config}" "${_sql_api}"
           ${_tutorial_md} ${_template_files} ${_static_files}
