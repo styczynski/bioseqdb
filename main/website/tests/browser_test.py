@@ -85,11 +85,23 @@ def _load_playwright():
     return api
 
 
-def _default_routes(mount: str, version: str) -> dict[str, str]:
+def _discover_tutorial_route(site: Path, base: str, version: str) -> str:
+    """Pick a real rendered tutorial route so the acceptance test tracks the
+    actual v0.1 content instead of a hard-coded slug. Falls back to the tutorials
+    index when no individual tutorial page exists."""
+    tutorials_dir = site / version / "tutorials"
+    if tutorials_dir.is_dir():
+        for child in sorted(tutorials_dir.iterdir()):
+            if child.is_dir() and (child / "index.html").is_file():
+                return f"{base}/{version}/tutorials/{child.name}/"
+    return f"{base}/{version}/tutorials/"
+
+
+def _default_routes(site: Path, mount: str, version: str) -> dict[str, str]:
     base = mount if mount else ""
     return {
         "landing": f"{base}/",
-        "tutorial": f"{base}/{version}/tutorials/intro/",
+        "tutorial": _discover_tutorial_route(site, base, version),
         "reference": f"{base}/{version}/reference/",
     }
 
@@ -229,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
               "(exit 4)", file=sys.stderr)
         return EXIT_SKIP
 
-    routes = _default_routes(server.mount, args.version)
+    routes = _default_routes(args.site, server.mount, args.version)
     server.start()
     try:
         _run_one(api, server, routes, args.verbose)
