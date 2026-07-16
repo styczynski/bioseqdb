@@ -95,6 +95,23 @@ void run_website_smoke() {
 
     // markdown extensions.
     expect(admonition_class("WARNING") == "warning", "admonition class");
+    // MD4C reports the tag already lowercased (MD_ADMONITION_TAGS), so the
+    // mapping must accept that spelling too or every severity falls back to note.
+    expect(admonition_class("warning") == "warning", "admonition class (md4c tag)");
+    expect(admonition_class("nonsense").empty(), "admonition class (unknown)");
+    // Classifying in isolation is not enough: the driver must actually read
+    // MD_BLOCK_ADMONITION_DETAIL::type, so assert the severity survives the whole
+    // MD4C -> document_node -> HTML path for a non-default severity (§10.3).
+    for (const auto& [markup, expected] : {
+             std::pair{"> [!NOTE]\n> Body.\n", "admonition-note"},
+             std::pair{"> [!TIP]\n> Body.\n", "admonition-tip"},
+             std::pair{"> [!IMPORTANT]\n> Body.\n", "admonition-important"},
+             std::pair{"> [!WARNING]\n> Body.\n", "admonition-warning"},
+             std::pair{"> [!CAUTION]\n> Body.\n", "admonition-caution"}}) {
+        const document_node parsed = parse_markdown(markup);
+        expect(render_document_html(parsed.children).contains(expected),
+               "admonition severity survives render");
+    }
     const auto reference =
         parse_entity_reference("entity:sql:type:bioseq.seq", source_span{});
     expect(reference.has_value() && reference->domain == entity_query_domain::sql,

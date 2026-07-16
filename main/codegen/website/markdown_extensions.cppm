@@ -1,5 +1,6 @@
 module;
 
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <optional>
@@ -21,12 +22,26 @@ import bioseq.codegen.support;
 namespace bioseq::codegen::website {
 
 /// @brief Maps an admonition marker keyword to its rendered severity class.
+///
+/// Accepts the keyword in either spelling the two producers use: the marker as
+/// authored (`> [!WARNING]`) and the already-normalized lowercase tag MD4C
+/// reports in MD_BLOCK_ADMONITION_DETAIL::type ("warning"). Matching only one
+/// case silently classifies the other as unknown, which renders every severity
+/// as the "note" fallback, so the comparison is deliberately case-insensitive.
+/// @param keyword Marker keyword in any case.
+/// @return The severity class, or empty for a keyword outside the five known
+///         severities.
 [[nodiscard]] std::string admonition_class(std::string_view keyword) {
-    if (keyword == "NOTE") return "note";
-    if (keyword == "TIP") return "tip";
-    if (keyword == "IMPORTANT") return "important";
-    if (keyword == "WARNING") return "warning";
-    if (keyword == "CAUTION") return "caution";
+    std::string normalized(keyword);
+    for (char& character : normalized) {
+        character = static_cast<char>(
+            std::tolower(static_cast<unsigned char>(character)));
+    }
+    if (normalized == "note") return "note";
+    if (normalized == "tip") return "tip";
+    if (normalized == "important") return "important";
+    if (normalized == "warning") return "warning";
+    if (normalized == "caution") return "caution";
     return {};
 }
 

@@ -73,6 +73,11 @@ file(MAKE_DIRECTORY "${_report_dir}")
 # real mount. Deployers override with BIOSEQ_WEBSITE_BASE_PATH for another mount.
 set(_base_path "${BIOSEQ_WEBSITE_BASE_PATH}")
 if(_base_path STREQUAL "")
+  # file(READ) resolves at configure time but registers no dependency, so without
+  # this the generator keeps rendering at whatever base path the previous configure
+  # baked in and an edited default_base_path silently does nothing.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${_source_dir}/site.yaml")
   file(READ "${_source_dir}/site.yaml" _site_yaml_text)
   if(NOT _site_yaml_text MATCHES "(^|\n)default_base_path:[ \t]*([^\n]*)")
     message(FATAL_ERROR

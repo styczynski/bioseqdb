@@ -75,7 +75,20 @@ int on_enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
     case MD_BLOCK_TR: builder.push(document_node_kind::table_row); break;
     case MD_BLOCK_TH:
     case MD_BLOCK_TD: builder.push(document_node_kind::table_cell); break;
-    case MD_BLOCK_ADMONITION: builder.push(document_node_kind::admonition); break;
+    case MD_BLOCK_ADMONITION: {
+        document_node& node = builder.push(document_node_kind::admonition);
+        const auto* admonition = static_cast<MD_BLOCK_ADMONITION_DETAIL*>(detail);
+        // Carry the severity across as "class"; html_render falls back to "note"
+        // when it is absent, so dropping this detail silently renders every
+        // [!WARNING]/[!CAUTION]/[!TIP]/[!IMPORTANT] as a note. Classify through
+        // the shared mapping so an unrecognized tag takes that fallback rather
+        // than emitting an admonition-<tag> class with no stylesheet rule.
+        if (std::string severity = admonition_class(attribute_text(admonition->type));
+            !severity.empty()) {
+            node.attributes.emplace("class", std::move(severity));
+        }
+        break;
+    }
     default: builder.push(document_node_kind::paragraph); break;
     }
     return 0;

@@ -1,7 +1,10 @@
 title: Bioseq
 short_description: PostgreSQL-native biological sequence analysis.
-canonical_origin: https://styczynski.github.io
-default_base_path: /bioseqdb/
+# Production serves the published site/ tree at the domain root, so site/index.html
+# is https://bioseqdb.com/index.html. canonical_origin carries no trailing slash --
+# it is concatenated with default_base_path to form canonical/sitemap/og:image URLs.
+canonical_origin: https://bioseqdb.com
+default_base_path: /
 repository_url: https://github.com/styczynski/bioseqdb
 source_url_template: https://github.com/styczynski/bioseqdb/blob/{revision}/{path}#L{line}
 default_social_image: static/media/social_card.png
