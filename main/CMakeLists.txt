@@ -227,6 +227,14 @@ project(
   LANGUAGES CXX
 )
 
+# CMake's import-std support creates this static helper during project().  Its
+# objects are folded into static libraries that are subsequently linked into
+# the PostgreSQL shared modules, so they must be position-independent too.
+if(TARGET __cmake_cxx26)
+  set_property(TARGET __cmake_cxx26
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "22.1.6")
   message(FATAL_ERROR

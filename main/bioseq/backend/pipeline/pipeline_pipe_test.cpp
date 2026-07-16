@@ -13,6 +13,8 @@
 #include "common_tests.h"
 #include "common.h"
 
+#include <catch2/matchers/catch_matchers.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
