@@ -264,10 +264,47 @@ void run_website_smoke() {
 
     // Boost.JSON canonical + HTML-safe (reached through the json partition, not
     // by naming boost types here).
-    const std::string search_json = build_search_index(merged);
+    search_entry probe_entry = search_entry_from_entity(merged.front());
+    probe_entry.route = "/v0.1/reference/cpp/struct/seq/";
+    const std::string search_json = build_search_index({probe_entry});
     expect(search_json.ends_with("\n"), "search json newline");
+    expect(search_json.find("\"name_tokens\"") != std::string::npos,
+           "search record carries normalized name tokens");
     const std::string escaped = apply_html_safe_escapes("a<b>&c");
     expect(escaped.find("\\u003c") != std::string::npos, "json html-safe escape");
+
+    // §12.5 shared normalizer golden corpus (mirrors
+    // main/website/tests/fixtures/search_tokens_golden.json, also driven against the
+    // JS normalizer in browser_test.py). Byte-preserving, ASCII-only casing.
+    expect(normalize_search_text("Hello, World!") == "hello world",
+           "ascii lowercasing + punctuation split");
+    expect(normalize_search_text("bioseq.symbol_count") == "bioseq symbol count",
+           "dotted identifier splits into tokens");
+    // Split the string literals so a following ASCII hex digit ('e') does not get
+    // swallowed into the \x escape (\x9Fe would be one out-of-range escape).
+    expect(normalize_search_text("Stra\xC3\x9F" "e") == "stra\xC3\x9F" "e"
+               && normalize_search_text("STRASSE") == "strasse",
+           "eszett is preserved so Strasse != Strasse");
+    expect(normalize_search_text("I\xC4\xB1") == "i\xC4\xB1",
+           "ASCII I lowercases but dotless i is preserved");
+    expect(normalize_search_text("\xC3\xA9") != normalize_search_text("e\xCC\x81"),
+           "composed accent differs from decomposed");
+    expect(!is_valid_utf8("\xFF"), "invalid utf-8 rejected");
+
+    // Sort-by-route + duplicate-id rejection in the index builder.
+    const std::string ordered = build_search_index(
+        {search_entry{.id = "b", .route = "/z/"}, search_entry{.id = "a", .route = "/a/"}});
+    expect(ordered.find("\"/a/\"") < ordered.find("\"/z/\""),
+           "records sort by route");
+    bool duplicate_rejected = false;
+    try {
+        static_cast<void>(build_search_index(
+            {search_entry{.id = "dup", .route = "/a/"},
+             search_entry{.id = "dup", .route = "/b/"}}));
+    } catch (const std::exception&) {
+        duplicate_rejected = true;
+    }
+    expect(duplicate_rejected, "duplicate search id is fatal");
 
     // version ordering.
     expect((parse_version_parts("v0.1") == std::vector<std::uint32_t>{0, 1}),
@@ -2382,6 +2419,9 @@ void decorate_code_entity_ranges(
     site.documentation_url = url(version + "/");
     site.tutorials_url = url(version + "/tutorials/");
     site.reference_url = url(version + "/reference/");
+    site.search_index_url = url(version + "/search-index.json");
+    site.versions_url = url("versions.json");
+    site.versions_page_url = url("versions/");
     site.nav_documentation = config.navigation.at("documentation");
     site.nav_tutorials = config.navigation.at("tutorials");
     site.nav_reference = config.navigation.at("reference");
@@ -2724,8 +2764,55 @@ void decorate_code_entity_ranges(
            "versions",
            "[{\"route\":" + json_text(url(version + "/")) + ",\"label\":"
                + json_text(version) + "}]");
+    // Project the one canonical graph, the tutorial plan, and the versioned index
+    // pages into the deterministic per-version search index (§12.5).
+    std::vector<search_entry> search_entries;
+    search_entries.reserve(all_entities.size() + model.tutorials.size() + 5);
+    for (const documented_entity& entity : all_entities) {
+        search_entries.push_back(search_entry_from_entity(entity));
+    }
+    for (const tutorial& item : model.tutorials) {
+        search_entry entry;
+        entry.id = "tutorial:" + item.metadata.slug;
+        entry.group = "Tutorials";
+        entry.kind = "tutorial";
+        entry.title = item.metadata.title;
+        entry.route = url(version + "/tutorials/" + item.metadata.slug + "/");
+        entry.summary = item.metadata.description;
+        std::string names = item.metadata.title;
+        for (const std::string& keyword : item.metadata.keywords) {
+            names += ' ';
+            names += keyword;
+        }
+        entry.name_source = std::move(names);
+        entry.text_source = item.metadata.description + " " + collect_heading_text(item.content);
+        search_entries.push_back(std::move(entry));
+    }
+    const auto add_page_entry = [&](std::string id, std::string title, std::string_view rel,
+                                    std::string summary) {
+        search_entry entry;
+        entry.id = std::move(id);
+        entry.group = "Pages";
+        entry.kind = "page";
+        entry.title = std::move(title);
+        entry.route = url(rel);
+        entry.name_source = entry.title;
+        entry.text_source = summary;
+        entry.summary = std::move(summary);
+        search_entries.push_back(std::move(entry));
+    };
+    add_page_entry("page:" + version + ":home", config.title + " " + version, version + "/",
+                   config.short_description);
+    add_page_entry("page:" + version + ":tutorials", "Tutorials", version + "/tutorials/",
+                   "Bioseq tutorials for " + version);
+    add_page_entry("page:" + version + ":reference", "API Reference", version + "/reference/",
+                   "Bioseq C++ and SQL API reference");
+    add_page_entry("page:" + version + ":reference-cpp", "C++ Reference",
+                   version + "/reference/cpp/", "Bioseq C++ API reference");
+    add_page_entry("page:" + version + ":reference-sql", "SQL Reference",
+                   version + "/reference/sql/", "Bioseq SQL API reference");
     writer.emit(route(version + "/search-index.json"),
-                build_search_index(all_entities));
+                build_search_index(std::move(search_entries)));
     // Content-addressed per-version tooltip dataset (§12.4, §16): the same bytes the
     // resolved entity links point at, named by their own SHA-256 for long caching.
     writer.emit(route(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json)

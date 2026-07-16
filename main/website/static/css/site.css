@@ -96,11 +96,140 @@ a:hover { text-decoration: underline; }
   padding: 16px var(--gutter);
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 16px;
+  flex-wrap: wrap;
 }
-.brand { font-family: var(--font-head); font-weight: 600; font-size: 19px; color: var(--text); }
-.nav-links { list-style: none; display: flex; gap: 20px; margin: 0; padding: 0; flex: 1; }
+.brand { font-family: var(--font-head); font-weight: 600; font-size: 19px; color: var(--text); margin-right: auto; }
+
+/* Mobile-nav toggle: a real button, hidden on wide screens. */
+.nav-toggle {
+  display: inline-flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  width: 44px;
+  height: 44px;
+  padding: 0 10px;
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  cursor: pointer;
+}
+.nav-toggle-bar { display: block; height: 2px; background: var(--text); border-radius: 2px; }
+
+.nav-primary { display: none; flex-basis: 100%; flex-direction: column; gap: 16px; padding-top: 12px; }
+.nav-primary.is-open { display: flex; }
+.nav-links { list-style: none; display: flex; flex-direction: column; gap: 12px; margin: 0; padding: 0; }
+.nav-links a { color: var(--text); }
+.nav-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; }
 .repo-link { font-family: var(--font-mono); font-size: 13px; }
+
+.search-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+.search-button-kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid var(--surface-border);
+  border-radius: 5px;
+  padding: 2px 6px;
+  color: var(--text-muted);
+}
+
+.version-selector { position: relative; }
+.version-selector > summary {
+  list-style: none;
+  cursor: pointer;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.version-selector > summary::-webkit-details-marker { display: none; }
+.version-selector > summary::after { content: "\25BE"; color: var(--text-muted); }
+.version-menu {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  background: var(--bg);
+  min-width: 160px;
+}
+.version-selector .version-list { list-style: none; padding: 0; margin: 0 0 8px; display: flex; flex-direction: column; gap: 4px; }
+.version-selector .version-list a { color: var(--text); font-family: var(--font-mono); font-size: 13px; }
+.version-selector .version-list a[aria-current="true"] { color: var(--accent-cyan); }
+.version-all { font-size: 12px; color: var(--text-muted); }
+
+/* Search dialog (§12.5). Closed dialogs are display:none via the UA sheet. */
+.search-dialog {
+  width: min(640px, 92vw);
+  max-height: 80vh;
+  margin: 8vh auto auto;
+  padding: 0;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+.search-dialog::backdrop { background: rgba(4, 10, 18, 0.72); }
+.search-form { display: flex; align-items: center; gap: 12px; padding: 16px; border-bottom: 1px solid var(--surface-border); }
+.search-label { position: absolute; left: -9999px; }
+.search-input {
+  flex: 1;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 16px;
+}
+.search-close {
+  min-height: 40px;
+  padding: 8px 14px;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.search-results { max-height: 56vh; overflow-y: auto; padding: 8px 8px 4px; }
+.search-empty { color: var(--text-muted); padding: 16px; margin: 0; font-size: 14px; }
+.search-group { margin-bottom: 10px; }
+.search-group-title {
+  margin: 8px 8px 4px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 11px;
+  color: var(--eyebrow);
+}
+.search-group-list { list-style: none; margin: 0; padding: 0; }
+.search-result { display: block; padding: 10px 12px; border-radius: 10px; color: var(--text); }
+.search-result[aria-selected="true"], .search-result:hover { background: var(--surface); }
+.search-result-title { display: block; font-weight: 600; }
+.search-result-qualified { display: block; font-family: var(--font-mono); font-size: 12px; color: var(--text-muted); }
+.search-result-summary { display: block; font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+.search-result mark { background: rgba(242, 101, 34, 0.28); color: inherit; border-radius: 3px; }
+.search-status { position: absolute; left: -9999px; }
+.search-fallback { padding: 12px 16px; margin: 0; border-top: 1px solid var(--surface-border); font-size: 13px; }
 
 main { max-width: var(--content-width); margin: 0 auto; padding: 48px var(--gutter); }
 
@@ -334,3 +463,21 @@ img, video { max-width: 100%; height: auto; }
 .entity-tooltip .tt-title { display: block; font-weight: 600; }
 .entity-tooltip .tt-signature { display: block; margin: 4px 0; font-family: var(--font-mono, monospace); font-size: 0.8rem; color: var(--accent-cyan, #46b8de); white-space: pre-wrap; }
 .entity-tooltip .tt-summary { display: block; color: var(--text-muted, #9db1c2); }
+
+/* ---- Header layout at tablet/desktop widths (§15.1/§15.3): the mobile toggle
+   disappears and the primary nav lays out inline with the action cluster. ---- */
+@media (min-width: 768px) {
+  .nav-toggle { display: none; }
+  .nav-primary {
+    display: flex;
+    flex-basis: auto;
+    flex-direction: row;
+    align-items: center;
+    flex: 1;
+    padding-top: 0;
+    gap: 24px;
+  }
+  .nav-links { flex-direction: row; gap: 20px; flex: 1; }
+  .nav-actions { flex-direction: row; align-items: center; gap: 12px; }
+  .version-menu { position: absolute; right: 0; z-index: 30; }
+}

@@ -25,14 +25,46 @@
 <header class="site-header">
   <nav class="site-nav" aria-label="Primary">
     <a class="brand" href="{{ site.base_path }}">{{ site.title }}</a>
-    <ul class="nav-links">
-      <li><a href="{{ nav.documentation }}">{{ site.nav.documentation }}</a></li>
-      <li><a href="{{ nav.tutorials }}">{{ site.nav.tutorials }}</a></li>
-      <li><a href="{{ nav.reference }}">{{ site.nav.reference }}</a></li>
-    </ul>
-    <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-expanded="false" aria-controls="nav-primary" aria-label="Toggle navigation menu">
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+      <span class="nav-toggle-bar" aria-hidden="true"></span>
+    </button>
+    <div class="nav-primary" id="nav-primary">
+      <ul class="nav-links">
+        <li><a href="{{ nav.documentation }}">{{ site.nav.documentation }}</a></li>
+        <li><a href="{{ nav.tutorials }}">{{ site.nav.tutorials }}</a></li>
+        <li><a href="{{ nav.reference }}">{{ site.nav.reference }}</a></li>
+      </ul>
+      <div class="nav-actions">
+        <a class="search-button" id="search-button" href="{{ nav.reference }}" role="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="search-dialog">
+          <span class="search-button-label">Search</span>
+          <kbd class="search-button-kbd" aria-hidden="true">Ctrl K</kbd>
+        </a>
+        <details class="version-selector" id="version-selector">
+          <summary class="version-current">{{ site.version }}</summary>
+          <div class="version-menu">
+            <ul class="version-list" id="version-list" data-versions="{{ site.versions_url }}">
+              <li><a href="{{ nav.documentation }}" aria-current="true">{{ site.version }}</a></li>
+            </ul>
+            <a class="version-all" href="{{ site.versions_page_url }}">All versions</a>
+          </div>
+        </details>
+        <a class="repo-link" href="{{ site.repository_url }}" rel="noreferrer">GitHub</a>
+      </div>
+    </div>
   </nav>
 </header>
+<dialog class="search-dialog" id="search-dialog" data-search-index="{{ site.search_index_url }}" aria-label="Search documentation">
+  <form class="search-form" method="dialog" role="search">
+    <label class="search-label" for="search-input">Search documentation</label>
+    <input type="search" id="search-input" class="search-input" role="combobox" aria-expanded="true" aria-controls="search-results" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Search tutorials, SQL, and C++ reference">
+    <button type="submit" class="search-close" value="close">Close</button>
+  </form>
+  <div class="search-results" id="search-results" role="listbox" aria-label="Search results"></div>
+  <p class="search-status" id="search-status" role="status" aria-live="polite"></p>
+  <p class="search-fallback"><a href="{{ nav.reference }}">Browse the full reference index</a></p>
+</dialog>
 <main id="main">
 {% block main %}{% endblock %}
 </main>

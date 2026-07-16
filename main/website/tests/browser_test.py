@@ -216,6 +216,105 @@ def _exercise_code_entities(page) -> None:
            "decoration altered the code source text (must only wrap, never rewrite)")
 
 
+_GOLDEN_TOKENS = Path(_THIS_DIR) / "fixtures" / "search_tokens_golden.json"
+
+
+def _load_golden_cases() -> list[dict[str, str]]:
+    data = json.loads(_GOLDEN_TOKENS.read_text(encoding="utf-8"))
+    return list(data.get("cases", []))
+
+
+def _exercise_search_tokens(page) -> None:
+    """Drive static/js/search_tokens.mjs against the shared golden corpus (§12.5),
+    proving the JS normalizer agrees byte-for-byte with the C++ self-test."""
+    cases = _load_golden_cases()
+    if not cases:
+        return
+    module_url = page.evaluate(
+        "() => { const s = document.querySelector('script[type=module]');"
+        " return s ? new URL('./search_tokens.mjs', s.src).href : null; }")
+    _check(bool(module_url), "cannot locate search_tokens.mjs from the module script")
+    produced = page.evaluate(
+        """async ({url, inputs}) => {
+            const mod = await import(url);
+            return inputs.map((value) => mod.normalizeSearchText(value));
+        }""",
+        {"url": module_url, "inputs": [case["input"] for case in cases]})
+    for case, got in zip(cases, produced):
+        _check(got == case["expected"],
+               f"JS normalizer {case['input']!r} -> {got!r}, expected {case['expected']!r}")
+
+
+def _exercise_search(page) -> None:
+    """Search dialog (§12.5): Ctrl+K opens, results rank/group/highlight, arrow
+    keys select, Escape closes."""
+    button = page.locator("#search-button")
+    if button.count() == 0:
+        return
+    _check(page.locator("#search-button .search-button-kbd").count() == 1,
+           "search button does not expose its keyboard shortcut")
+    _check(page.locator("#search-dialog").count() == 1, "search dialog is missing")
+    page.keyboard.press("Control+k")
+    inp = page.locator("#search-input")
+    inp.wait_for(state="visible", timeout=4000)
+    _check(page.evaluate("() => document.getElementById('search-dialog').open === true"),
+           "Ctrl+K did not open the search dialog")
+    inp.fill("sequence")
+    first = page.locator("#search-results a.search-result").first
+    first.wait_for(state="visible", timeout=4000)
+    _check(page.locator("#search-results a.search-result").count() > 0,
+           "search returned no results for 'sequence'")
+    _check(page.locator("#search-results .search-group-title").count() > 0,
+           "search results are not grouped")
+    _check(page.locator("#search-results mark").count() > 0,
+           "search matches are not highlighted")
+    inp.press("ArrowDown")
+    _check(page.locator("#search-results a.search-result[aria-selected='true']").count() == 1,
+           "ArrowDown did not move the roving selection")
+    page.keyboard.press("Escape")
+    # Poll the dialog's open property directly via evaluate (CDP, not subject to
+    # the page CSP), instead of wait_for_function (needs unsafe-eval) or a
+    # visibility wait (flaky for a top-layer <dialog>).
+    closed = False
+    for _ in range(40):
+        if page.evaluate("() => !document.getElementById('search-dialog').open"):
+            closed = True
+            break
+        page.wait_for_timeout(100)
+    _check(closed, "Escape did not close the search dialog")
+
+
+def _exercise_nav(page) -> None:
+    """Mobile navigation (§15.1): a real button with aria-expanded/aria-controls,
+    toggle, and Escape close."""
+    toggle = page.locator("#nav-toggle")
+    if toggle.count() == 0:
+        return
+    _check(toggle.get_attribute("aria-controls") == "nav-primary",
+           "nav toggle is missing aria-controls")
+    _check(toggle.get_attribute("aria-expanded") == "false",
+           "nav toggle should start collapsed")
+    page.set_viewport_size({"width": 360, "height": 800})
+    toggle.click()
+    _check(toggle.get_attribute("aria-expanded") == "true",
+           "clicking the nav toggle did not expand it")
+    page.keyboard.press("Escape")
+    _check(toggle.get_attribute("aria-expanded") == "false",
+           "Escape did not collapse the mobile nav")
+    page.set_viewport_size({"width": 1280, "height": 900})
+
+
+def _exercise_version_selector(page) -> None:
+    """Version selector (§15.1): lists at least the current version and keeps an
+    ordinary /versions/ fallback link."""
+    if page.locator("#version-selector").count() == 0:
+        return
+    _check(page.locator("#version-list a").count() >= 1,
+           "version selector lists no versions")
+    _check(page.locator(".version-all").count() == 1,
+           "version selector is missing its /versions/ fallback link")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -259,6 +358,10 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
 
             if label == "landing":
                 _exercise_tabs(page)
+                _exercise_nav(page)
+                _exercise_version_selector(page)
+                _exercise_search_tokens(page)
+                _exercise_search(page)
             if label == "tutorial":
                 _exercise_tooltip(page)
                 _exercise_copy(page)

@@ -1,0 +1,42 @@
+{
+  "schema": "bioseq.website.search_tokens_golden/v1",
+  "comment": "Shared \u00a712.5 search-token corpus. Consumed by browser_test.py against static/js/search_tokens.mjs and mirrored by the C++ self-test in site_builder.cppm; both implementations must agree byte-for-byte.",
+  "cases": [
+    {
+      "input": "Hello, World!",
+      "expected": "hello world"
+    },
+    {
+      "input": "bioseq.symbol_count",
+      "expected": "bioseq symbol count"
+    },
+    {
+      "input": "  spaced\tout  ",
+      "expected": "spaced out"
+    },
+    {
+      "input": "MMseqs2 k=7 w=11",
+      "expected": "mmseqs2 k 7 w 11"
+    },
+    {
+      "input": "Stra\u00dfe",
+      "expected": "stra\u00dfe"
+    },
+    {
+      "input": "STRASSE",
+      "expected": "strasse"
+    },
+    {
+      "input": "I\u0131",
+      "expected": "i\u0131"
+    },
+    {
+      "input": "caf\u00e9",
+      "expected": "caf\u00e9"
+    },
+    {
+      "input": "cafe\u0301",
+      "expected": "cafe\u0301"
+    }
+  ]
+}

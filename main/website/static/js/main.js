@@ -6,6 +6,8 @@
 
 import { initTabs } from "./tabs.mjs";
 import { initTooltips } from "./tooltips.mjs";
+import { initSearch } from "./search.mjs";
+import { initNav } from "./nav.mjs";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -99,6 +101,8 @@ function initCopyButtons() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  initNav();
+  initSearch();
   initCopyButtons();
   initTabs();
   initCodeDecorator();

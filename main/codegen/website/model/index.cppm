@@ -324,6 +324,9 @@ struct site_view {
     std::string documentation_url;
     std::string tutorials_url;
     std::string reference_url;
+    std::string search_index_url;
+    std::string versions_url;
+    std::string versions_page_url;
     std::string nav_documentation;
     std::string nav_tutorials;
     std::string nav_reference;

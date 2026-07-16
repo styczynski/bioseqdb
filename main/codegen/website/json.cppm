@@ -1135,6 +1135,9 @@ namespace {
     site_object["prism_js_url"] = site.prism_js_url;
     site_object["prism_css_url"] = site.prism_css_url;
     site_object["social_image_url"] = site.social_image_url;
+    site_object["search_index_url"] = site.search_index_url;
+    site_object["versions_url"] = site.versions_url;
+    site_object["versions_page_url"] = site.versions_page_url;
     boost::json::object nav_labels;
     nav_labels["documentation"] = site.nav_documentation;
     nav_labels["tutorials"] = site.nav_tutorials;
