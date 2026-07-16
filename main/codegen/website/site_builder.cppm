@@ -156,17 +156,38 @@ void run_website_smoke() {
     documented.normalized_signature = "bioseq::io::seq";
     documented.summary_text = "sequence";
     const auto merged = merge_cpp_entities(structural, {documented});
-    expect(merged.size() == 1 && merged.front().canonical_id == "cpp:bioseq.io.seq"
+    expect(merged.size() == 1
+               && merged.front().canonical_id == "cpp:struct:bioseq::io::seq"
                && merged.front().summary_text == "sequence",
            "entity merge attaches docs by normalized signature");
+
+    // canonical IDs (§12.1): domain- and kind-tagged, `::`-preserving, and
+    // signature-keyed for functions so overloads (e.g. two constructors) stay
+    // distinct. Golden-locked here alongside the merge above.
+    documented_entity ctor_default;
+    ctor_default.domain = entity_domain::cpp;
+    ctor_default.kind = entity_kind::function;
+    ctor_default.qualified_name = "bioseq::io::view::view";
+    ctor_default.normalized_signature = "bioseq::io::view::view()";
+    documented_entity ctor_args;
+    ctor_args.domain = entity_domain::cpp;
+    ctor_args.kind = entity_kind::function;
+    ctor_args.qualified_name = "bioseq::io::view::view";
+    ctor_args.normalized_signature = "bioseq::io::view::view(const char *, std::size_t)";
+    expect(canonical_entity_id(ctor_default) == "cpp:function:bioseq::io::view::view()"
+               && canonical_entity_id(ctor_args)
+                      == "cpp:function:bioseq::io::view::view(const char *, std::size_t)"
+               && canonical_entity_id(ctor_default) != canonical_entity_id(ctor_args),
+           "canonical id keys function overloads by normalized signature");
 
     // coverage (§11.4): a required-but-undocumented entity is fatal-listed.
     documented_entity undocumented;
     undocumented.domain = entity_domain::cpp;
+    undocumented.kind = entity_kind::struct_;
     undocumented.qualified_name = "bioseq::io::internal";
-    undocumented.canonical_id = "cpp:bioseq.io.internal";
+    undocumented.canonical_id = "cpp:struct:bioseq::io::internal";
     const auto coverage = compute_coverage(
-        {merged.front(), undocumented}, {"cpp:bioseq.io.internal"}, {});
+        {merged.front(), undocumented}, {"cpp:struct:bioseq::io::internal"}, {});
     expect(coverage.public_total == 2 && coverage.documented_total == 1
                && coverage.fatal_missing.size() == 1,
            "coverage flags required undocumented entity");
@@ -1678,26 +1699,9 @@ void rewrite_entity_link_routes(
     // Assign each entity a readable, collision-checked route (§12.1). Routes are
     // recomputed here (not carried in the model) so a base-independent model renders
     // at any base path; the canonical ID and output path collision checks stay.
-    const auto kind_token = [](entity_kind kind) -> std::string {
-        switch (kind) {
-        case entity_kind::namespace_: return "namespace";
-        case entity_kind::module: return "module";
-        case entity_kind::class_: return "class";
-        case entity_kind::struct_: return "struct";
-        case entity_kind::union_: return "union";
-        case entity_kind::enum_: return "enum";
-        case entity_kind::enum_value: return "enumerator";
-        case entity_kind::concept_: return "concept";
-        case entity_kind::type_alias: return "type_alias";
-        case entity_kind::function: return "function";
-        case entity_kind::variable: return "variable";
-        case entity_kind::sql_schema: return "schema";
-        case entity_kind::sql_type: return "type";
-        case entity_kind::sql_function: return "function";
-        case entity_kind::overload_group: return "overload_group";
-        }
-        return "entity";
-    };
+    // Route segments reuse the centralized §12.1 canonical-ID kind token so the
+    // path kind and the canonical-ID kind can never drift apart.
+    const auto kind_token = [](entity_kind kind) { return entity_kind_token(kind); };
     const auto slugify = [](std::string_view qualified) -> std::string {
         const std::string_view name = qualified.substr(0, qualified.find('('));
         std::vector<std::string> parts;

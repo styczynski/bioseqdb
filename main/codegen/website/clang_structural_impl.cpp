@@ -167,9 +167,20 @@ struct structural_visitor : clang::RecursiveASTVisitor<structural_visitor> {
             record.parameters.push_back(std::move(info));
         }
         signature += ")";
-        if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function);
-            method != nullptr && method->isConst()) {
-            signature += " const";
+        // Preserve the cv- and ref-qualifiers that distinguish member-function
+        // overloads (§12.1), in declaration order `const volatile &`/`&&`.
+        if (const auto* method = llvm::dyn_cast<clang::CXXMethodDecl>(function)) {
+            if (method->isConst()) {
+                signature += " const";
+            }
+            if (method->isVolatile()) {
+                signature += " volatile";
+            }
+            if (method->getRefQualifier() == clang::RQ_LValue) {
+                signature += " &";
+            } else if (method->getRefQualifier() == clang::RQ_RValue) {
+                signature += " &&";
+            }
         }
         record.normalized_signature = std::move(signature);
         record.member_kind = member_kind_of(function);
