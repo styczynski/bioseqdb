@@ -1,0 +1,14 @@
+{% extends "base.html.j2" %}
+{% block main %}
+<article class="error-page">
+  <p class="eyebrow">Error 404</p>
+  <h1>Page not found</h1>
+  <p class="lede">The page you requested does not exist or has moved.</p>
+  <p>Return to the <a href="{{ site.base_path }}">Bioseq home page</a>, or press <kbd>Ctrl</kbd> <kbd>K</kbd> to search the documentation.</p>
+  <ul class="error-links">
+    <li><a href="{{ nav.documentation }}">Documentation</a></li>
+    <li><a href="{{ nav.tutorials }}">Tutorials</a></li>
+    <li><a href="{{ nav.reference }}">Reference</a></li>
+  </ul>
+</article>
+{% endblock %}

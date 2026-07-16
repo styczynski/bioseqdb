@@ -45,11 +45,16 @@ export namespace bioseq::codegen::website {
     std::vector<documented_entity> entities;
     bioseq::libpq::connection connection(conninfo);
     for (const std::string& schema : include_schemas) {
-        // Base/composite/domain/enum types, excluding the implicit array types
-        // (typcategory 'A') PostgreSQL auto-creates for each of them.
+        // Base/composite/domain/enum types that are pg_depend members of extension
+        // bioseq (deptype 'e') - §12.2 forbids inferring the public surface from
+        // schema/name alone - excluding the implicit array types (typcategory 'A')
+        // PostgreSQL auto-creates for each of them.
         const std::string query =
             "select t.typname, obj_description(t.oid, 'pg_type') "
             "from pg_type t join pg_namespace n on n.oid = t.typnamespace "
+            "join pg_depend d on d.classid = 'pg_type'::regclass and d.objid = t.oid "
+            "  and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' "
+            "join pg_extension e on e.oid = d.refobjid and e.extname = 'bioseq' "
             "where n.nspname = '" + schema + "' and t.typtype in ('b','c','d','e') "
             "and t.typcategory <> 'A' order by t.typname";
         const bioseq::libpq::result result = connection.exec(query);
@@ -78,11 +83,27 @@ export namespace bioseq::codegen::website {
     const std::vector<std::string>& include_schemas) {
     std::vector<documented_entity> entities;
     bioseq::libpq::connection connection(conninfo);
+    // format_type() qualifies every type that is not on the search path, so pinning
+    // the path to pg_catalog gives schema-qualified identity types for extension
+    // types (bioseq.seq, public.bioseq_aligner_options) while built-ins stay bare
+    // (text) - the parameter-name-free, canonically-spelled form §12.1 requires and
+    // that sql_api.yaml is authored in. pg_get_function_identity_arguments keeps the
+    // parameter names, so we rebuild the signature structurally instead.
+    connection.exec("set search_path = pg_catalog");
     for (const std::string& schema : include_schemas) {
+        // Only pg_depend members of extension bioseq (deptype 'e') are candidates
+        // (§12.2); their identity argument types are canonically spelled and joined
+        // without parameter names, defaults, or insignificant whitespace.
         const std::string query =
-            "select p.proname, pg_get_function_identity_arguments(p.oid), "
+            "select p.proname, "
+            "coalesce((select string_agg(format_type(t, null), ',' order by ord) "
+            "          from unnest(p.proargtypes) with ordinality as u(t, ord)), '') "
+            "  as identity_types, "
             "pg_get_function_result(p.oid), obj_description(p.oid, 'pg_proc') "
             "from pg_proc p join pg_namespace n on n.oid = p.pronamespace "
+            "join pg_depend d on d.classid = 'pg_proc'::regclass and d.objid = p.oid "
+            "  and d.refclassid = 'pg_extension'::regclass and d.deptype = 'e' "
+            "join pg_extension e on e.oid = d.refobjid and e.extname = 'bioseq' "
             "where n.nspname = '" + schema + "' order by p.proname, p.oid";
         const bioseq::libpq::result result = connection.exec(query);
         for (int row = 0; row < result.rows(); ++row) {

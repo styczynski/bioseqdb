@@ -73,11 +73,14 @@ struct notice {
 /// statement and stops accumulating, so the materialised result the caller
 /// receives already violates the caller's own limit check (which owns the
 /// author-facing message) while generator memory stays bounded (§13.4, §13.5).
+/// max_result_sets bounds a multi-statement phase the same way: the set that
+/// first crosses the cap is retained so the caller's own count check reports it.
 struct execution_limits {
     std::size_t max_rows{};
     std::size_t max_columns{};
     std::size_t max_cell_bytes{};
     std::size_t max_total_bytes{};
+    std::size_t max_result_sets{};
 };
 
 /// @brief Owned, fully materialised result set with typed accessors.
@@ -139,6 +142,20 @@ private:
     }
 };
 
+/// @brief Every result set a (possibly multi-statement) phase produced, in order.
+///
+/// A multi-statement visible phase such as `SELECT 1; SELECT 'a','b'` yields one
+/// entry per statement (§13.4, §13.6). When a statement raises, the fully
+/// completed results before it are retained and `error` carries the SQLSTATE and
+/// message so an expect=error example can render them followed by the failure
+/// (§10.7); a success example turns the same `error` into a build diagnostic.
+/// A client-side failure (deadline, lost connection, COPY, chunk-mode) still
+/// throws rather than landing here.
+struct multi_result {
+    std::vector<result> results;
+    std::optional<query_error> error;
+};
+
 /// @brief RAII PostgreSQL connection driven entirely by the nonblocking machine.
 ///
 /// Constructed from an explicit Unix-socket conninfo so callers never build the
@@ -186,6 +203,19 @@ public:
         return run_statement(sql, deadline, limits);
     }
 
+    /// @brief Runs a (possibly multi-statement) phase capturing every result set
+    /// in execution order under a client deadline and retention limits (§13.4).
+    ///
+    /// Unlike exec/exec_bounded a failed statement does not throw: the results
+    /// completed before PostgreSQL stopped are returned alongside the terminating
+    /// error so an expect=error phase can render them in order (§10.7). Client-side
+    /// failures (deadline, lost connection, COPY, chunk-mode) still throw.
+    [[nodiscard]] multi_result exec_bounded_multi(std::string_view sql,
+                                                  std::chrono::milliseconds deadline,
+                                                  const execution_limits& limits) {
+        return run_statement_multi(sql, deadline, limits);
+    }
+
     /// @brief Drains and clears notices captured since the last drain.
     [[nodiscard]] std::vector<notice> take_notices() {
         return std::exchange(notices_, {});
@@ -201,6 +231,30 @@ public:
         std::string result(escaped);
         PQfreemem(escaped);
         return result;
+    }
+
+    /// @brief Quotes an SQL string literal via libpq (quotes included) so a
+    /// generator-owned catalog value can be compared without string interpolation.
+    [[nodiscard]] std::string escape_literal(std::string_view value) const {
+        char* escaped = PQescapeLiteral(handle_, value.data(), value.size());
+        if (escaped == nullptr) {
+            throw query_error("PQescapeLiteral failed: " + current_error_message(),
+                              std::string{});
+        }
+        std::string result(escaped);
+        PQfreemem(escaped);
+        return result;
+    }
+
+    /// @brief True when the connection is open and idle (no in-flight transaction).
+    ///
+    /// The isolation teardown path uses this to decide whether the original
+    /// example connection can run teardown or the clone/role must be restored and
+    /// reconnected first (§13.5).
+    [[nodiscard]] bool is_idle() const noexcept {
+        return handle_ != nullptr
+            && PQstatus(handle_) == CONNECTION_OK
+            && PQtransactionStatus(handle_) == PQTRANS_IDLE;
     }
 
     [[nodiscard]] std::string server_version() const {
@@ -472,15 +526,34 @@ private:
         drain_results_bounded(deadline - clock::now());
     }
 
+    // Runs a single logical command and returns its final result set, throwing
+    // query_error on any server or client-side failure. A thin wrapper over the
+    // multi-result state machine: single-statement callers (session settings,
+    // setup/teardown, admin, catalog) keep the last result and see failures as
+    // exceptions exactly as before.
+    [[nodiscard]] result run_statement(std::string_view sql,
+                                       clock::duration budget,
+                                       const execution_limits& limits) {
+        multi_result outcome = run_statement_multi(sql, budget, limits);
+        if (outcome.error) {
+            throw *outcome.error;
+        }
+        return outcome.results.empty() ? result{} : std::move(outcome.results.back());
+    }
+
     // The single §13.5 send/flush/consume state machine. Sends `sql`, enables
     // 32-row chunked retrieval, then polls the socket under `budget` while
     // consuming results — committing chunked rows only on their zero-row
     // PGRES_TUPLES_OK terminator, discarding a failed statement's provisional
     // rows, rejecting COPY, bounding accumulation against `limits`, and requiring
-    // a PQTRANS_IDLE connection afterward.
-    [[nodiscard]] result run_statement(std::string_view sql,
-                                       clock::duration budget,
-                                       const execution_limits& limits) {
+    // a PQTRANS_IDLE connection afterward. Every fully completed result set is
+    // retained in execution order (§13.4, §13.6); when a statement fails, the
+    // earlier results are kept and the terminating error is returned in
+    // multi_result::error rather than thrown, so an expect=error phase can render
+    // the successful results before it (§10.7). Client-side failures still throw.
+    [[nodiscard]] multi_result run_statement_multi(std::string_view sql,
+                                                   clock::duration budget,
+                                                   const execution_limits& limits) {
         const auto deadline = clock::now() + budget;
         const std::string owned(sql);
         if (PQsendQuery(handle_, owned.c_str()) == 0) {
@@ -508,12 +581,21 @@ private:
             }
         }
 
-        result out;
+        multi_result outcome;
         std::optional<captured_error> error;
         std::size_t total_bytes = 0;
         bool have_chunk_columns = false;
         bool limited = false;
         result provisional;
+
+        // Appends a fully completed result set in execution order, reporting when
+        // it is the one that first crosses the result-set cap so accumulation
+        // stops (mirroring the per-row retention pattern in absorb).
+        auto commit = [&outcome, &limits](result&& completed) -> bool {
+            outcome.results.push_back(std::move(completed));
+            return limits.max_result_sets != 0
+                && outcome.results.size() > limits.max_result_sets;
+        };
 
         for (;;) {
             while (PQisBusy(handle_) != 0) {
@@ -533,30 +615,32 @@ private:
                 break;
             }
             const ExecStatusType st = PQresultStatus(res);
+            bool capped = false;
             if (st == PGRES_TUPLES_CHUNK) {
                 absorb(provisional, res, /*copy_rows=*/true, limits, total_bytes, limited);
                 have_chunk_columns = true;
             } else if (st == PGRES_TUPLES_OK) {
+                result current;
+                current.status_ = PGRES_TUPLES_OK;
                 if (PQntuples(res) == 0 && have_chunk_columns) {
                     // Zero-row terminator: commit the accumulated chunks.
-                    out.status_ = PGRES_TUPLES_OK;
-                    out.columns_ = std::move(provisional.columns_);
-                    out.rows_ = std::move(provisional.rows_);
+                    current.columns_ = std::move(provisional.columns_);
+                    current.rows_ = std::move(provisional.rows_);
                 } else {
                     // A whole (unchunked) tuple result — e.g. an empty SELECT.
-                    out.status_ = PGRES_TUPLES_OK;
-                    out.columns_.clear();
-                    out.rows_.clear();
-                    absorb(out, res, /*copy_rows=*/true, limits, total_bytes, limited);
+                    absorb(current, res, /*copy_rows=*/true, limits, total_bytes, limited);
                 }
-                out.command_tag_ = PQcmdStatus(res) ? PQcmdStatus(res) : std::string{};
+                current.command_tag_ = PQcmdStatus(res) ? PQcmdStatus(res) : std::string{};
                 provisional = result{};
                 have_chunk_columns = false;
+                capped = commit(std::move(current));
             } else if (st == PGRES_COMMAND_OK) {
-                out.status_ = PGRES_COMMAND_OK;
-                out.command_tag_ = PQcmdStatus(res) ? PQcmdStatus(res) : std::string{};
+                result current;
+                current.status_ = PGRES_COMMAND_OK;
+                current.command_tag_ = PQcmdStatus(res) ? PQcmdStatus(res) : std::string{};
                 provisional = result{};
                 have_chunk_columns = false;
+                capped = commit(std::move(current));
             } else if (st == PGRES_COPY_IN) {
                 PQputCopyEnd(handle_, "bioseq website: COPY FROM STDIN is unsupported");
                 PQclear(res);
@@ -572,23 +656,27 @@ private:
                 throw query_error("COPY TO STDOUT is not a supported tutorial protocol",
                                   "0A000");
             } else if (st == PGRES_FATAL_ERROR || st == PGRES_BAD_RESPONSE) {
-                // Discard the failed statement's provisional chunks (§13.5).
+                // Discard the failed statement's provisional chunks (§13.5); the
+                // earlier completed results are retained.
                 provisional = result{};
                 have_chunk_columns = false;
                 error = capture_error(res);
             }
             PQclear(res);
-            if (limited) {
-                // The result already violates the caller's limit; stop the server
-                // and materialise what we have so the caller's check reports it.
-                if (out.rows_.empty() && !provisional.rows_.empty()) {
-                    out.status_ = PGRES_TUPLES_OK;
-                    out.columns_ = std::move(provisional.columns_);
-                    out.rows_ = std::move(provisional.rows_);
+            if (limited || capped) {
+                // The retained results already cross a caller-owned bound; stop the
+                // server and return what we have so the caller's checks report it.
+                if (limited
+                    && (!provisional.columns_.empty() || !provisional.rows_.empty())) {
+                    result current;
+                    current.status_ = PGRES_TUPLES_OK;
+                    current.columns_ = std::move(provisional.columns_);
+                    current.rows_ = std::move(provisional.rows_);
+                    outcome.results.push_back(std::move(current));
                 }
                 cancel_bounded(std::chrono::seconds(2));
                 drain_results_bounded(std::chrono::seconds(2));
-                return out;
+                return outcome;
             }
         }
 
@@ -604,11 +692,10 @@ private:
             }
         }
         if (error) {
-            out.error_sqlstate_ = error->sqlstate;
-            throw query_error(error->primary, error->sqlstate, error->detail,
-                              error->hint, error->severity);
+            outcome.error = query_error(error->primary, error->sqlstate, error->detail,
+                                        error->hint, error->severity);
         }
-        return out;
+        return outcome;
     }
 
     static void receive_notice(void* self, const PGresult* raw) noexcept {

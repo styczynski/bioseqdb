@@ -608,15 +608,31 @@ MODES: Dict[str, ModeDefinition] = {
         label="Static documentation website",
         docs=(
             "Build the isolated website code generator (GCC 16.1 ExternalProject) "
-            "against the Clang-22 core tree. Later phases extend this mode with "
-            "postgresql_bioseq staging, the private-cluster runner test, and the "
-            "bioseq_website render/publish target."),
+            "against the Clang-22 core tree and stage the relocatable postgresql_bioseq "
+            "extension, then run the private-cluster runner test and the bioseq_website "
+            "target: Doxygen + Clang index, private-cluster runnable SQL, render, "
+            "independent html5lib/§20.7 validation, pinned-browser acceptance, and the "
+            "atomic publish. build_only stops at the generator for fast iteration."),
         is_verb_plular=False,
-        targets=["bioseq_codegen_project"],
+        # The generator plus the extension the site stages into its private cluster.
+        targets=["bioseq_codegen_project", "postgresql_bioseq"],
         commands=[],
+        # §17.3/§17.5: on a full (non-build_only) run, drive the private-cluster
+        # runner test and then the whole render/validate/browser/publish pipeline.
+        # bioseq_website self-stages its own private PostgreSQL, so no external
+        # cluster is provisioned here; uses_private_cluster is the reporting label.
+        post_build_targets=("bioseq_private_postgres_tests", "bioseq_website"),
+        uses_private_cluster=True,
         preset_family="website",
         binary_subdir="website",
-        required_cache_variables={"BIOSEQ_BUILD_WEBSITE": "ON"},
+        # §726/§17.5: the website MCP mode forces the pinned-browser acceptance layer
+        # ON. It runs only when the full bioseq_website target is built (the browser
+        # step degrades to a clean SKIP when Chromium is unprovisioned), so enabling it
+        # here never affects the generator-only build_only iteration path.
+        required_cache_variables={
+            "BIOSEQ_BUILD_WEBSITE": "ON",
+            "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
+        },
     ),
     "unit+integration": ModeDefinition(
         lock_group="tests",
@@ -782,6 +798,11 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
+# §17.5: the website pipeline is a local, build-tree-only target (Doxygen + a
+# private PostgreSQL cluster + pinned-browser acceptance) that never runs on the
+# remote build runner. remote-run must reject it explicitly rather than dispatch a
+# build that cannot succeed there.
+REMOTE_RUN_REJECTED_MODES: Set[str] = {"website"}
 BENCH_CLI_MODES: tuple[str, ...] = tuple(sorted(
     mode for mode, details in MODES.items()
     if details.is_bench_mode and details.commands
@@ -3859,6 +3880,11 @@ def tool_remote_run(arguments: dict) -> str:
         if mode not in VALID_MODES:
             return (f"Invalid mode '{mode}'. remote-run build modes: "
                     f"{', '.join(sorted(VALID_MODES))}.")
+        if mode in REMOTE_RUN_REJECTED_MODES:
+            return (f"Mode '{mode}' is not supported by remote-run: the website "
+                    "pipeline is a local build-tree-only target (Doxygen + a private "
+                    "PostgreSQL cluster + pinned-browser acceptance). Build it locally "
+                    "with start_build mode=website.")
         build_only = parse_bool("build_only", arguments.get("build_only", False))
         debug = parse_bool("debug", arguments.get("debug", False))
         bench_filter = arguments.get("filter")

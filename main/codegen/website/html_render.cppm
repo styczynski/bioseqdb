@@ -1,6 +1,8 @@
 module;
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <string_view>
@@ -56,6 +58,60 @@ void append_escaped_attribute(std::string& out, std::string_view text) {
     return lowered;
 }
 
+// A fenced language token normalized to its Prism grammar class and a visible
+// label (§10.5). Aliases collapse to one grammar; an unrecognized token carries an
+// empty class so the block renders as plain, unhighlighted text.
+struct code_language_view {
+    std::string_view prism_class;
+    std::string_view label;
+};
+
+[[nodiscard]] code_language_view classify_code_language(std::string_view raw) {
+    const std::string lowered = to_ascii_lower(raw);
+    if (lowered == "bash" || lowered == "shell" || lowered == "sh") return {"bash", "Bash"};
+    if (lowered == "sql") return {"sql", "SQL"};
+    if (lowered == "cpp" || lowered == "c++" || lowered == "cppm" || lowered == "cxx") {
+        return {"cpp", "C++"};
+    }
+    if (lowered == "cmake") return {"cmake", "CMake"};
+    if (lowered == "json") return {"json", "JSON"};
+    if (lowered == "yaml" || lowered == "yml") return {"yaml", "YAML"};
+    return {"", "Text"};
+}
+
+// A stable, page-unique DOM id for one code block, derived from its exact source
+// text plus its ordinal on the page: the Copy button targets it and it must never
+// collide (the html5lib validator rejects duplicate ids, §20.7). Identical blocks
+// on one page differ by ordinal.
+[[nodiscard]] std::string code_block_id(std::string_view text, std::size_t ordinal) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const char character : text) {
+        hash ^= static_cast<unsigned char>(character);
+        hash *= 1099511628211ULL;
+    }
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string id = "code-";
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        id.push_back(digits[(hash >> shift) & 0xF]);
+    }
+    id.push_back('-');
+    id += std::to_string(ordinal);
+    return id;
+}
+
+// Parses a small non-negative decimal from a node attribute (annotation range /
+// number). Stops at the first non-digit; absent/garbage yields 0.
+[[nodiscard]] std::size_t parse_index(std::string_view text) {
+    std::size_t value = 0;
+    for (const char character : text) {
+        if (character < '0' || character > '9') {
+            break;
+        }
+        value = value * 10 + static_cast<std::size_t>(character - '0');
+    }
+    return value;
+}
+
 // Accepts only inert href schemes: relative/fragment/absolute-path links and the
 // http(s)/mailto schemes. Anything else (javascript:, data:, vbscript:, unknown
 // scheme) collapses to a harmless fragment so a hostile link cannot execute.
@@ -79,6 +135,7 @@ void append_escaped_attribute(std::string& out, std::string_view text) {
 
 struct html_writer {
     std::string out;
+    std::size_t code_ordinal{0};
 
     void render_children(const std::vector<document_node>& children) {
         for (const document_node& child : children) {
@@ -124,7 +181,22 @@ struct html_writer {
                 level = 6;
             }
             const std::string tag = "h" + std::to_string(level);
-            wrap(tag, node);
+            // An on-this-page anchor (a generated [a-z0-9-] slug) becomes an id so
+            // the table of contents can link to the heading (§15.1).
+            const auto anchor = node.attributes.find("anchor");
+            if (anchor != node.attributes.end() && !anchor->second.empty()) {
+                out.push_back('<');
+                out += tag;
+                out += " id=\"";
+                out += anchor->second;
+                out += "\">";
+                render_children(node.children);
+                out += "</";
+                out += tag;
+                out.push_back('>');
+            } else {
+                wrap(tag, node);
+            }
             break;
         }
         case document_node_kind::emphasis: wrap("em", node); break;
@@ -138,16 +210,97 @@ struct html_writer {
             out += "</code>";
             break;
         case document_node_kind::code_block: {
-            const std::string_view language = attribute_or(node, "language", "");
-            out += "<pre><code";
-            if (!language.empty()) {
+            // Every fenced block carries a visible language label, a keyboard-focusable
+            // Copy button bound by id to the exact source (no inline handler; main.js
+            // wires the click and the polite live region), and a Prism grammar class so
+            // the vendored highlighter can decorate it client-side (§10.5).
+            const code_language_view language =
+                classify_code_language(attribute_or(node, "language", ""));
+            const std::string id = code_block_id(node.text, code_ordinal++);
+            // §10.6: an annotation directive was folded into a code_annotation child
+            // carrying a source range + number. Collect the ranges to underline the
+            // matched spans and the cards to render below. An annotated block skips the
+            // Prism class so the server-rendered <mark> spans survive (Prism rewrites
+            // <code> innerHTML). Copy still returns the exact source: <mark> holds the
+            // original substring, so textContent equals the source.
+            struct anno_span { std::size_t start; std::size_t len; std::size_t number; };
+            std::vector<anno_span> spans;
+            std::vector<const document_node*> cards;
+            for (const document_node& child : node.children) {
+                if (child.kind == document_node_kind::code_annotation) {
+                    spans.push_back({parse_index(attribute_or(child, "start", "0")),
+                                     parse_index(attribute_or(child, "len", "0")),
+                                     parse_index(attribute_or(child, "number", "0"))});
+                    cards.push_back(&child);
+                }
+            }
+            std::ranges::sort(spans, [](const anno_span& lhs, const anno_span& rhs) {
+                return lhs.start < rhs.start;
+            });
+            const bool annotated = !spans.empty();
+            out += "<figure class=\"doc-code\"><figcaption class=\"doc-code-bar\">"
+                   "<span class=\"doc-code-lang\">";
+            append_escaped_text(out, language.label);
+            out += "</span><button type=\"button\" class=\"copy-button\" data-copy-target=\"";
+            append_escaped_attribute(out, id);
+            out += "\" aria-label=\"Copy code to clipboard\">Copy</button></figcaption>"
+                   "<pre><code id=\"";
+            append_escaped_attribute(out, id);
+            out.push_back('"');
+            if (!language.prism_class.empty() && !annotated) {
                 out += " class=\"language-";
-                append_escaped_attribute(out, language);
+                append_escaped_attribute(out, language.prism_class);
+                out.push_back('"');
+            }
+            // §12.6: generator-resolved non-overlapping source ranges the client
+            // decorator wraps in entity links after Prism completes.
+            const std::string_view entity_ranges = attribute_or(node, "entity_ranges", "");
+            if (!entity_ranges.empty()) {
+                out += " data-entity-ranges=\"";
+                append_escaped_attribute(out, entity_ranges);
                 out.push_back('"');
             }
             out.push_back('>');
-            append_escaped_text(out, node.text);
+            if (spans.empty()) {
+                append_escaped_text(out, node.text);
+            } else {
+                const std::string_view text = node.text;
+                std::size_t cursor = 0;
+                for (const anno_span& span : spans) {
+                    if (span.start < cursor || span.start + span.len > text.size()) {
+                        continue;  // defensive: never emit an overlapping/out-of-range mark
+                    }
+                    append_escaped_text(out, text.substr(cursor, span.start - cursor));
+                    out += "<mark class=\"anno\" data-anno=\"";
+                    out += std::to_string(span.number);
+                    out += "\">";
+                    append_escaped_text(out, text.substr(span.start, span.len));
+                    out += "</mark>";
+                    cursor = span.start + span.len;
+                }
+                append_escaped_text(out, text.substr(cursor));
+            }
             out += "</code></pre>";
+            if (annotated) {
+                std::ranges::sort(cards, [this](const document_node* lhs,
+                                                const document_node* rhs) {
+                    return parse_index(attribute_or(*lhs, "number", "0"))
+                        < parse_index(attribute_or(*rhs, "number", "0"));
+                });
+                out += "<ol class=\"anno-cards\">";
+                for (const document_node* card : cards) {
+                    out += "<li class=\"anno-card\"><span class=\"anno-card-num\" "
+                           "aria-hidden=\"true\">";
+                    out += std::to_string(parse_index(attribute_or(*card, "number", "0")));
+                    out += "</span><div class=\"anno-card-body\"><p class=\"anno-card-title\">";
+                    append_escaped_text(out, attribute_or(*card, "title", ""));
+                    out += "</p>";
+                    render_children(card->children);
+                    out += "</div></li>";
+                }
+                out += "</ol>";
+            }
+            out += "</figure>";
             break;
         }
         case document_node_kind::link: {
@@ -172,19 +325,47 @@ struct html_writer {
             out += "\">";
             break;
         }
-        case document_node_kind::entity_link:
-            // Resolution to a real entity route arrives with the link resolver;
-            // until then the reference renders as inert code showing its label
-            // (the child text / target), never a live link and never doubled.
-            out += "<code class=\"entity-ref\">";
-            if (node.children.empty() && node.text.empty()) {
-                append_escaped_text(out, node.target);
+        case document_node_kind::entity_link: {
+            // A resolved reference (the link resolver set entity_id + a base-aware
+            // route in target, §12.1/§12.4) renders as a live cross-link carrying the
+            // tooltip data attributes; an unresolved one renders as inert code (the
+            // build fails before this in normal operation, §10.4).
+            const std::string_view entity_id = attribute_or(node, "entity_id", "");
+            const std::string_view label = attribute_or(node, "entity_label", "");
+            if (!entity_id.empty() && !node.target.empty() && is_safe_href(node.target)) {
+                out += "<a class=\"entity-ref\" href=\"";
+                append_escaped_attribute(out, node.target);
+                out += "\" data-entity-id=\"";
+                append_escaped_attribute(out, entity_id);
+                const std::string_view tooltip = attribute_or(node, "tooltip_url", "");
+                if (!tooltip.empty()) {
+                    out += "\" data-entity-data-url=\"";
+                    append_escaped_attribute(out, tooltip);
+                }
+                out += "\">";
+                if (!label.empty()) {
+                    append_escaped_text(out, label);
+                } else if (node.children.empty() && node.text.empty()) {
+                    append_escaped_text(out, node.target);
+                } else {
+                    append_escaped_text(out, node.text);
+                    render_children(node.children);
+                }
+                out += "</a>";
             } else {
-                append_escaped_text(out, node.text);
-                render_children(node.children);
+                out += "<code class=\"entity-ref\">";
+                if (!label.empty()) {
+                    append_escaped_text(out, label);
+                } else if (node.children.empty() && node.text.empty()) {
+                    append_escaped_text(out, node.target);
+                } else {
+                    append_escaped_text(out, node.text);
+                    render_children(node.children);
+                }
+                out += "</code>";
             }
-            out += "</code>";
             break;
+        }
         case document_node_kind::block_quote: wrap("blockquote", node); break;
         case document_node_kind::admonition: {
             const std::string_view kind = attribute_or(node, "class", "note");
@@ -200,13 +381,35 @@ struct html_writer {
         case document_node_kind::ordered_list: wrap("ol", node); break;
         case document_node_kind::unordered_list: wrap("ul", node); break;
         case document_node_kind::list_item: wrap("li", node); break;
-        case document_node_kind::table:
-            out += "<table>";
+        case document_node_kind::table: {
+            const std::string_view table_class = attribute_or(node, "class", "");
+            out += "<table";
+            if (!table_class.empty()) {
+                out += " class=\"";
+                append_escaped_attribute(out, table_class);
+                out.push_back('"');
+            }
+            out.push_back('>');
             render_children(node.children);
             out += "</table>";
             break;
+        }
         case document_node_kind::table_row: wrap("tr", node); break;
-        case document_node_kind::table_cell: wrap("td", node); break;
+        case document_node_kind::table_cell: {
+            // A cell with a scope attribute is a header cell (§15.4 accessible data
+            // tables); otherwise it is a plain data cell.
+            const std::string_view scope = attribute_or(node, "scope", "");
+            if (scope.empty()) {
+                wrap("td", node);
+            } else {
+                out += "<th scope=\"";
+                append_escaped_attribute(out, scope);
+                out += "\">";
+                render_children(node.children);
+                out += "</th>";
+            }
+            break;
+        }
         case document_node_kind::footnote: wrap("span", node); break;
         case document_node_kind::line_break: out += "<br>"; break;
         case document_node_kind::code_annotation:

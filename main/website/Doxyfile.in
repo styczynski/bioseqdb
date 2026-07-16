@@ -51,4 +51,9 @@ PREDEFINED             = "CXX_PG_FUNCTION_INFO_V1(funcname)=" \
                          "POSTGRES_FN(name)=" \
                          "E_POSTGRES_FN(name)="
 
-INPUT                  = @BIOSEQ_WEBSITE_DOXYGEN_INPUT@
+# INPUT is set exclusively by the build-time fragment below, which the website
+# source_graph stage generates from the validated reachable interface-unit closure
+# (§11.1) — never a recursive directory glob. The @INCLUDE fragment overrides this
+# empty default with exactly the closure files before Doxygen runs.
+INPUT                  =
+@INCLUDE               = @BIOSEQ_WEBSITE_DOXYGEN_INPUT_INCLUDE@

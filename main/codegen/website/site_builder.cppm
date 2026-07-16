@@ -78,6 +78,9 @@ void expect(bool condition, std::string_view detail) {
 
 }  // namespace
 
+// Defined after the reference index it exercises; driven by run_website_smoke.
+void run_website_reference_smoke();
+
 /// @brief Exercises every integrated parser/renderer/serializer once.
 ///
 /// This is the functional half of the website self-test: it links and runs
@@ -156,20 +159,75 @@ void run_website_smoke() {
     documented.normalized_signature = "bioseq::io::seq";
     documented.summary_text = "sequence";
     const auto merged = merge_cpp_entities(structural, {documented});
-    expect(merged.size() == 1 && merged.front().canonical_id == "cpp:bioseq.io.seq"
+    expect(merged.size() == 1
+               && merged.front().canonical_id == "cpp:struct:bioseq::io::seq"
                && merged.front().summary_text == "sequence",
            "entity merge attaches docs by normalized signature");
+
+    // canonical IDs (§12.1): domain- and kind-tagged, `::`-preserving, and
+    // signature-keyed for functions so overloads (e.g. two constructors) stay
+    // distinct. Golden-locked here alongside the merge above.
+    documented_entity ctor_default;
+    ctor_default.domain = entity_domain::cpp;
+    ctor_default.kind = entity_kind::function;
+    ctor_default.qualified_name = "bioseq::io::view::view";
+    ctor_default.normalized_signature = "bioseq::io::view::view()";
+    documented_entity ctor_args;
+    ctor_args.domain = entity_domain::cpp;
+    ctor_args.kind = entity_kind::function;
+    ctor_args.qualified_name = "bioseq::io::view::view";
+    ctor_args.normalized_signature = "bioseq::io::view::view(const char *, std::size_t)";
+    expect(canonical_entity_id(ctor_default) == "cpp:function:bioseq::io::view::view()"
+               && canonical_entity_id(ctor_args)
+                      == "cpp:function:bioseq::io::view::view(const char *, std::size_t)"
+               && canonical_entity_id(ctor_default) != canonical_entity_id(ctor_args),
+           "canonical id keys function overloads by normalized signature");
 
     // coverage (§11.4): a required-but-undocumented entity is fatal-listed.
     documented_entity undocumented;
     undocumented.domain = entity_domain::cpp;
+    undocumented.kind = entity_kind::struct_;
     undocumented.qualified_name = "bioseq::io::internal";
-    undocumented.canonical_id = "cpp:bioseq.io.internal";
+    undocumented.canonical_id = "cpp:struct:bioseq::io::internal";
     const auto coverage = compute_coverage(
-        {merged.front(), undocumented}, {"cpp:bioseq.io.internal"}, {});
+        {merged.front(), undocumented}, {"cpp:struct:bioseq::io::internal"}, {});
     expect(coverage.public_total == 2 && coverage.documented_total == 1
                && coverage.fatal_missing.size() == 1,
            "coverage flags required undocumented entity");
+
+    // sql_api.yaml allowlist parsing (§9/§12.2): a closed schema of unique nonempty
+    // sequences - unquoted identifiers and exact canonical IDs.
+    const sql_api_configuration api = parse_sql_api(
+        "schema: bioseq.website.sql_api/v1\n"
+        "include_schemas: [bioseq, public]\n"
+        "public_entities:\n"
+        "  - sql:type:bioseq.seq\n"
+        "  - sql:function:bioseq.len(bioseq.seq)\n",
+        "sql_api.yaml");
+    expect(api.include_schemas.size() == 2 && api.public_entities.size() == 2
+               && api.include_schemas.front() == "bioseq"
+               && api.public_entities.back() == "sql:function:bioseq.len(bioseq.seq)",
+           "sql_api.yaml parses include schemas and public entities");
+    const auto sql_api_rejects = [](std::string_view yaml) {
+        try {
+            (void)parse_sql_api(yaml, "sql_api.yaml");
+            return false;
+        } catch (const std::exception&) {
+            return true;
+        }
+    };
+    expect(sql_api_rejects("schema: s\ninclude_schemas: [bioseq]\n"
+                           "public_entities: [sql:type:bioseq.seq]\nsurprise: 1\n")
+               && sql_api_rejects("schema: s\ninclude_schemas: [bioseq]\n"
+                                  "public_entities: [sql:type:bioseq.seq, "
+                                  "sql:type:bioseq.seq]\n")
+               && sql_api_rejects("schema: s\ninclude_schemas: []\n"
+                                  "public_entities: [sql:type:bioseq.seq]\n"),
+           "sql_api.yaml rejects unknown keys, duplicates, and empty sequences");
+
+    // Overload-group routing/rendering is checked in run_website_reference_smoke,
+    // defined after the reference index it exercises.
+    run_website_reference_smoke();
 
     // Clang 22 structural/export pass (§11.3): exported module members are
     // recorded with kind/signature; a non-exported namespace is excluded.
@@ -206,10 +264,47 @@ void run_website_smoke() {
 
     // Boost.JSON canonical + HTML-safe (reached through the json partition, not
     // by naming boost types here).
-    const std::string search_json = build_search_index(merged);
+    search_entry probe_entry = search_entry_from_entity(merged.front());
+    probe_entry.route = "/v0.1/reference/cpp/struct/seq/";
+    const std::string search_json = build_search_index({probe_entry});
     expect(search_json.ends_with("\n"), "search json newline");
+    expect(search_json.find("\"name_tokens\"") != std::string::npos,
+           "search record carries normalized name tokens");
     const std::string escaped = apply_html_safe_escapes("a<b>&c");
     expect(escaped.find("\\u003c") != std::string::npos, "json html-safe escape");
+
+    // §12.5 shared normalizer golden corpus (mirrors
+    // main/website/tests/fixtures/search_tokens_golden.json, also driven against the
+    // JS normalizer in browser_test.py). Byte-preserving, ASCII-only casing.
+    expect(normalize_search_text("Hello, World!") == "hello world",
+           "ascii lowercasing + punctuation split");
+    expect(normalize_search_text("bioseq.symbol_count") == "bioseq symbol count",
+           "dotted identifier splits into tokens");
+    // Split the string literals so a following ASCII hex digit ('e') does not get
+    // swallowed into the \x escape (\x9Fe would be one out-of-range escape).
+    expect(normalize_search_text("Stra\xC3\x9F" "e") == "stra\xC3\x9F" "e"
+               && normalize_search_text("STRASSE") == "strasse",
+           "eszett is preserved so Strasse != Strasse");
+    expect(normalize_search_text("I\xC4\xB1") == "i\xC4\xB1",
+           "ASCII I lowercases but dotless i is preserved");
+    expect(normalize_search_text("\xC3\xA9") != normalize_search_text("e\xCC\x81"),
+           "composed accent differs from decomposed");
+    expect(!is_valid_utf8("\xFF"), "invalid utf-8 rejected");
+
+    // Sort-by-route + duplicate-id rejection in the index builder.
+    const std::string ordered = build_search_index(
+        {search_entry{.id = "b", .route = "/z/"}, search_entry{.id = "a", .route = "/a/"}});
+    expect(ordered.find("\"/a/\"") < ordered.find("\"/z/\""),
+           "records sort by route");
+    bool duplicate_rejected = false;
+    try {
+        static_cast<void>(build_search_index(
+            {search_entry{.id = "dup", .route = "/a/"},
+             search_entry{.id = "dup", .route = "/b/"}}));
+    } catch (const std::exception&) {
+        duplicate_rejected = true;
+    }
+    expect(duplicate_rejected, "duplicate search id is fatal");
 
     // version ordering.
     expect((parse_version_parts("v0.1") == std::vector<std::uint32_t>{0, 1}),
@@ -408,6 +503,395 @@ void collect_examples_and_queries(
     }
 }
 
+// Rewrites each runnable SQL code block so only its visible phase is rendered.
+// A runnable fence's body carries the hidden setup/teardown SQL that the executor
+// needs but that must never reach the published page (§5.1); this runs after the
+// example has been collected, on the render-only copy of the document.
+void strip_runnable_fence_hidden_sql(std::vector<document_node>& nodes) {
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::code_block) {
+            const auto language = node.attributes.find("language");
+            const auto info = node.attributes.find("info");
+            if (language != node.attributes.end() && language->second == "sql"
+                && info != node.attributes.end()
+                && parse_runnable_fence(info->second)) {
+                node.text = split_sql_phases(node.text).visible;
+            }
+        }
+        strip_runnable_fence_hidden_sql(node.children);
+    }
+}
+
+// Processes §10.6 annotation directives over a tutorial's top-level blocks (fences
+// are top-level only, §10.5). Each `annotation target=... match=... title=...`
+// directive is matched against a PRIOR displayed block's decoded source and folded
+// into that block as a numbered code_annotation child (source range + parsed
+// commentary); the directive node is then removed from the render tree. A block
+// flagged `annotated` must gain at least one annotation, and a target's ranges may
+// not overlap - all fatal.
+void process_annotations(std::vector<document_node>& nodes, const std::string& where) {
+    struct block_ref {
+        std::string id;
+        std::size_t node_index;
+        std::string text;   // decoded, displayed source (visible phase for runnable)
+        bool annotated;
+        std::vector<std::pair<std::size_t, std::size_t>> ranges;  // start,len
+        std::size_t count;  // annotations attached so far
+    };
+    std::vector<block_ref> blocks;
+    const auto find_block = [&](const std::string& id) -> block_ref* {
+        for (block_ref& block : blocks) {
+            if (block.id == id) {
+                return &block;
+            }
+        }
+        return nullptr;
+    };
+    // Pass 1: index every displayed block (ordinary/runnable) in document order.
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const document_node& node = nodes[index];
+        if (node.kind != document_node_kind::code_block) {
+            continue;
+        }
+        const auto info = node.attributes.find("info");
+        if (info == node.attributes.end() || info->second.empty()) {
+            continue;
+        }
+        const fence_descriptor fence = parse_fence_info(info->second);
+        if (fence.kind == fence_kind::annotation) {
+            continue;
+        }
+        std::string text = fence.kind == fence_kind::runnable
+            ? split_sql_phases(node.text).visible : node.text;
+        blocks.push_back(block_ref{.id = fence.id, .node_index = index,
+                                   .text = std::move(text), .annotated = fence.annotated,
+                                   .ranges = {}, .count = 0});
+    }
+    // Pass 2: fold each annotation directive into its (prior) target block.
+    std::vector<std::size_t> directive_nodes;
+    for (std::size_t index = 0; index < nodes.size(); ++index) {
+        const document_node& node = nodes[index];
+        if (node.kind != document_node_kind::code_block) {
+            continue;
+        }
+        const auto info = node.attributes.find("info");
+        if (info == node.attributes.end() || info->second.empty()) {
+            continue;
+        }
+        const fence_descriptor fence = parse_fence_info(info->second);
+        if (fence.kind != fence_kind::annotation) {
+            continue;
+        }
+        block_ref* target = find_block(fence.target);
+        if (target == nullptr) {
+            throw std::runtime_error("annotation target '" + fence.target
+                + "' names no displayed block in " + where);
+        }
+        if (target->node_index >= index) {
+            throw std::runtime_error("annotation target '" + fence.target
+                + "' must be a prior displayed block in " + where);
+        }
+        std::vector<std::size_t> positions;
+        for (std::size_t pos = target->text.find(fence.match); pos != std::string::npos;
+             pos = target->text.find(fence.match, pos + 1)) {
+            positions.push_back(pos);
+        }
+        if (positions.empty()) {
+            throw std::runtime_error("annotation match '" + fence.match
+                + "' not found in block '" + fence.target + "' in " + where);
+        }
+        std::size_t start = 0;
+        if (fence.occurrence) {
+            if (*fence.occurrence > positions.size()) {
+                throw std::runtime_error("annotation occurrence "
+                    + std::to_string(*fence.occurrence) + " is out of range in " + where);
+            }
+            start = positions[*fence.occurrence - 1];
+        } else {
+            if (positions.size() != 1) {
+                throw std::runtime_error("annotation match '" + fence.match
+                    + "' appears " + std::to_string(positions.size())
+                    + " times; add occurrence=N in " + where);
+            }
+            start = positions.front();
+        }
+        const std::size_t len = fence.match.size();
+        for (const auto& [existing_start, existing_len] : target->ranges) {
+            if (start < existing_start + existing_len && existing_start < start + len) {
+                throw std::runtime_error("annotation ranges overlap in block '"
+                    + fence.target + "' in " + where);
+            }
+        }
+        target->ranges.emplace_back(start, len);
+        const std::size_t number = ++target->count;
+        document_node commentary = parse_markdown(node.text);
+        for (const document_node& child : commentary.children) {
+            if (child.kind != document_node_kind::code_block) {
+                continue;
+            }
+            const auto child_info = child.attributes.find("info");
+            if (child_info != child.attributes.end() && !child_info->second.empty()
+                && parse_fence_info(child_info->second).kind != fence_kind::ordinary) {
+                throw std::runtime_error("annotation commentary may not contain runnable "
+                    "SQL or another annotation in " + where);
+            }
+        }
+        document_node annotation;
+        annotation.kind = document_node_kind::code_annotation;
+        annotation.attributes["number"] = std::to_string(number);
+        annotation.attributes["start"] = std::to_string(start);
+        annotation.attributes["len"] = std::to_string(len);
+        annotation.attributes["title"] = fence.title;
+        annotation.attributes["match"] = fence.match;
+        annotation.children = std::move(commentary.children);
+        nodes[target->node_index].children.push_back(std::move(annotation));
+        directive_nodes.push_back(index);
+    }
+    for (const block_ref& block : blocks) {
+        if (block.annotated && block.count == 0) {
+            throw std::runtime_error("block '" + block.id
+                + "' is marked annotated but has no annotation in " + where);
+        }
+    }
+    for (auto directive = directive_nodes.rbegin(); directive != directive_nodes.rend();
+         ++directive) {
+        nodes.erase(nodes.begin() + static_cast<std::ptrdiff_t>(*directive));
+    }
+}
+
+// Parses the landing frontmatter `slots:` mapping (§15.2): each entry maps a
+// template slot name to the landing-page-local id of a runnable block. Returns the
+// mapping in declared order. The YAML here is a flat two-space-indented block of
+// `slot_name: block_id` lines directly under a `slots:` key.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> parse_landing_slots(
+    std::string_view yaml) {
+    std::vector<std::pair<std::string, std::string>> slots;
+    bool in_slots = false;
+    std::size_t begin = 0;
+    while (begin <= yaml.size()) {
+        const std::size_t end = yaml.find('\n', begin);
+        const std::size_t stop = end == std::string_view::npos ? yaml.size() : end;
+        std::string_view line = yaml.substr(begin, stop - begin);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        const bool indented = !line.empty() && (line.front() == ' ' || line.front() == '\t');
+        const std::string trimmed = trim(std::string(line));
+        if (!in_slots) {
+            if (trimmed == "slots:") {
+                in_slots = true;
+            }
+        } else if (trimmed.empty()) {
+            // blank line inside the block is ignored
+        } else if (!indented) {
+            break;  // a new top-level key ends the slots block
+        } else {
+            const std::size_t colon = trimmed.find(':');
+            if (colon == std::string::npos) {
+                throw std::runtime_error("landing slots: malformed mapping line '"
+                                         + trimmed + "'");
+            }
+            std::string slot = trim(trimmed.substr(0, colon));
+            std::string block = trim(trimmed.substr(colon + 1));
+            if (slot.empty() || block.empty()) {
+                throw std::runtime_error("landing slots: empty slot or block id in '"
+                                         + trimmed + "'");
+            }
+            slots.emplace_back(std::move(slot), std::move(block));
+        }
+        if (end == std::string_view::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return slots;
+}
+
+// Build-report-only per-example telemetry (§18.3). Populated at each execution
+// point and read once by run_execute for the diagnostic build report; it is never
+// serialized into the site_model, its signature, or any published input hash
+// (§18.3, §180) — those all flow through serialize_site_model, which never touches
+// this accumulator. The generator runs one phase per process, single-threaded.
+struct example_run_telemetry {
+    std::vector<sql_example_measurement> measurements;
+    std::uint64_t peak_rows = 0;
+    std::uint64_t peak_cells = 0;
+    std::uint64_t peak_payload_bytes = 0;
+    std::uint64_t catalog_ms = 0;
+};
+
+[[nodiscard]] example_run_telemetry& example_telemetry() {
+    static example_run_telemetry instance;
+    return instance;
+}
+
+// Records one executed example's wall time and updates the running peak
+// rows/cells/payload observed across every result set it produced (§18.3).
+void record_example_run(std::string_view example_id, std::chrono::milliseconds elapsed,
+                        const sql_example_result& outcome) {
+    example_run_telemetry& telemetry = example_telemetry();
+    telemetry.measurements.push_back(
+        sql_example_measurement{std::string(example_id), elapsed});
+    for (const sql_result_set& set : outcome.visible_results) {
+        const std::uint64_t rows = set.rows.size();
+        const std::uint64_t cols = set.columns.size();
+        std::uint64_t payload = 0;
+        for (const std::vector<sql_cell>& row : set.rows) {
+            for (const sql_cell& cell : row) {
+                payload += cell.text.size();
+            }
+        }
+        telemetry.peak_rows = std::max(telemetry.peak_rows, rows);
+        telemetry.peak_cells = std::max(telemetry.peak_cells, rows * cols);
+        telemetry.peak_payload_bytes = std::max(telemetry.peak_payload_bytes, payload);
+    }
+}
+
+// Minimal JSON string escape for the diagnostic build report (§18.3); the report
+// is not routed through the model serializer, so it carries its own escaping.
+[[nodiscard]] std::string report_json_string(std::string_view value) {
+    std::string out = "\"";
+    for (const char raw : value) {
+        const unsigned char byte = static_cast<unsigned char>(raw);
+        switch (raw) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (byte < 0x20) {
+                static constexpr char hex[] = "0123456789abcdef";
+                out += "\\u00";
+                out.push_back(hex[byte >> 4]);
+                out.push_back(hex[byte & 0x0F]);
+            } else {
+                out.push_back(raw);
+            }
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+// Writes one phase's build-report fragment when --report-dir is configured (§18.3).
+// The report tree lives in the build directory, outside the published <site-root>,
+// and is never a site-manifest entry; a no-op when the option is absent so the phase
+// is unaffected in contexts that do not request a report.
+void write_report_fragment(
+    const std::map<std::string, std::string, std::less<>>& options,
+    std::string_view phase, const std::string& json_body) {
+    const auto found = options.find("report-dir");
+    if (found == options.end() || found->second.empty()) {
+        return;
+    }
+    std::error_code error;
+    fs::create_directories(fs::path(found->second), error);
+    write_if_different(fs::path(found->second) / (std::string(phase) + ".json"), json_body);
+}
+
+// Executes the landing page's runnable slots (§15.2) into database-independent
+// views. The template slot name comes from the authoritative frontmatter `slots:`
+// mapping, and every §15.2 binding error is fatal: a slot referencing an unknown
+// block id, a block referenced by no slot, or a duplicate slot/block. When no
+// connection is configured, each slot renders its visible SQL with no result table;
+// when a connection is given, a failing example fails the build. Hidden
+// setup/teardown never leaves the returned model.
+[[nodiscard]] std::vector<landing_example_view> collect_landing_views(
+    const fs::path& source, const std::string& version_string,
+    const std::map<std::string, std::string, std::less<>>& options) {
+    const fs::path landing_md = source / version_string / "landing_examples.md";
+    std::error_code probe;
+    if (!fs::exists(landing_md, probe) || probe) {
+        return {};
+    }
+    const front_matter_split split = split_front_matter(read_file(landing_md));
+    const document_node document = parse_markdown(split.body);
+    std::vector<sql_example> examples;
+    std::vector<unresolved_entity_query> queries;
+    collect_examples_and_queries(document, "landing", version_string, examples, queries);
+
+    // Map block id -> example, rejecting duplicate block ids (§15.2).
+    std::map<std::string, const sql_example*, std::less<>> by_block;
+    for (const sql_example& example : examples) {
+        if (!by_block.emplace(example.local_id, &example).second) {
+            throw std::runtime_error("landing slots: duplicate runnable block id '"
+                                     + example.local_id + "'");
+        }
+    }
+    const std::vector<std::pair<std::string, std::string>> slots =
+        parse_landing_slots(split.yaml);
+    std::map<std::string, int, std::less<>> slot_names;
+    std::set<std::string> referenced_blocks;
+    for (const auto& [slot, block] : slots) {
+        if (++slot_names[slot] > 1) {
+            throw std::runtime_error("landing slots: duplicate slot '" + slot + "'");
+        }
+        if (!by_block.contains(block)) {
+            throw std::runtime_error("landing slots: slot '" + slot
+                + "' references unknown block id '" + block + "'");
+        }
+        if (!referenced_blocks.insert(block).second) {
+            throw std::runtime_error("landing slots: block id '" + block
+                + "' is bound to more than one slot");
+        }
+    }
+    for (const sql_example& example : examples) {
+        if (!referenced_blocks.contains(example.local_id)) {
+            throw std::runtime_error("landing slots: runnable block '"
+                + example.local_id + "' is not bound to any slot");
+        }
+    }
+
+    const bool have_connection =
+        options.contains("conninfo") || options.contains("isolated");
+    std::optional<isolation_settings> isolation;
+    std::string conninfo;
+    if (options.contains("isolated")) {
+        isolation_settings settings;
+        settings.admin_conninfo = require_option(options, "admin-conninfo");
+        settings.socket_directory = require_option(options, "socket-dir");
+        settings.port = std::stoi(require_option(options, "port"));
+        settings.template_database = require_option(options, "template-db");
+        isolation = std::move(settings);
+    } else if (const auto found = options.find("conninfo"); found != options.end()) {
+        conninfo = found->second;
+    }
+
+    std::vector<landing_example_view> views;
+    for (const auto& [slot, block] : slots) {
+        const sql_example& example = *by_block.at(block);
+        landing_example_view view;
+        view.slot = slot;
+        view.visible_sql = example.visible_sql;
+        if (have_connection) {
+            std::expected<sql_example_result, diagnostic> outcome =
+                std::unexpected(diagnostic{});
+            const auto started = std::chrono::steady_clock::now();
+            if (isolation) {
+                private_cluster_executor executor("");
+                outcome = executor.execute_isolated(example, *isolation);
+            } else {
+                private_cluster_executor executor(conninfo);
+                outcome = executor.execute(example);
+            }
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started);
+            if (!outcome) {
+                throw std::runtime_error("landing example '" + view.slot + "': ["
+                    + outcome.error().code + "] " + outcome.error().message);
+            }
+            record_example_run("landing:" + example.canonical_id, elapsed, *outcome);
+            if (!outcome->visible_results.empty()) {
+                view.result = outcome->visible_results.front();
+                view.has_result = true;
+            }
+        }
+        views.push_back(std::move(view));
+    }
+    return views;
+}
+
 /// @brief Builds the deterministic website plan from validated source (§10).
 ///
 /// Parses every tutorial's frontmatter/Markdown under <source>/<version>/tutorials,
@@ -457,6 +941,11 @@ void collect_examples_and_queries(
         collect_examples_and_queries(document, item.metadata.slug,
                                      version.path_component, item.sql_examples,
                                      item.entity_queries);
+        // Fold §10.6 annotation directives into their target blocks before the render
+        // copy is finalized (this also validates every fence's info string, §10.5).
+        process_annotations(item.content, item.source_path);
+        // The render copy must not leak hidden setup/teardown SQL (§5.1).
+        strip_runnable_fence_hidden_sql(item.content);
         std::map<std::string, int, std::less<>> local_ids;
         for (const sql_example& example : item.sql_examples) {
             if (++local_ids[example.local_id] > 1) {
@@ -515,7 +1004,806 @@ void collect_examples_and_queries(
     return plan;
 }
 
+// Small owned-node constructors for the executed-result document subtree (§13.6).
+[[nodiscard]] document_node make_text_node(std::string value) {
+    document_node node;
+    node.kind = document_node_kind::text;
+    node.text = std::move(value);
+    return node;
+}
+
+[[nodiscard]] document_node make_emphasis_node(std::string value) {
+    document_node node;
+    node.kind = document_node_kind::emphasis;
+    node.children.push_back(make_text_node(std::move(value)));
+    return node;
+}
+
+[[nodiscard]] document_node make_paragraph_node(std::vector<document_node> children) {
+    document_node node;
+    node.kind = document_node_kind::paragraph;
+    node.children = std::move(children);
+    return node;
+}
+
+[[nodiscard]] document_node make_cell_node(bool header, document_node child) {
+    document_node node;
+    node.kind = document_node_kind::table_cell;
+    if (header) {
+        node.attributes.emplace("scope", "col");
+    }
+    node.children.push_back(std::move(child));
+    return node;
+}
+
+[[nodiscard]] document_node make_row_node(std::vector<document_node> cells) {
+    document_node node;
+    node.kind = document_node_kind::table_row;
+    node.children = std::move(cells);
+    return node;
+}
+
+// Renders one executed example's visible result model (§13.4) to owned document
+// nodes so the render stage emits result tables/notices/error admonitions without a
+// database (§13.6). Multiple row result sets are labelled Result 1..N in order, a
+// §13.6 provenance caption names the extension/server versions when known, and hidden
+// SQL never enters this subtree — only the visible-phase result model does.
+[[nodiscard]] std::vector<document_node> make_result_nodes(
+    const sql_example_result& result, const std::string& extension_version,
+    const std::string& server_version) {
+    std::vector<document_node> nodes;
+    std::size_t rows_total = 0;
+    for (const sql_result_set& set : result.visible_results) {
+        if (set.kind == sql_result_kind::rows) {
+            ++rows_total;
+        }
+    }
+    std::size_t rows_index = 0;
+    for (const sql_result_set& set : result.visible_results) {
+        if (set.kind == sql_result_kind::rows) {
+            ++rows_index;
+            if (rows_total > 1) {
+                nodes.push_back(make_paragraph_node(
+                    {make_emphasis_node("Result " + std::to_string(rows_index))}));
+            }
+            document_node table;
+            table.kind = document_node_kind::table;
+            table.attributes.emplace("class", "result-table");
+            std::vector<document_node> header_cells;
+            for (const sql_column& column : set.columns) {
+                header_cells.push_back(make_cell_node(true, make_text_node(column.name)));
+            }
+            table.children.push_back(make_row_node(std::move(header_cells)));
+            for (const std::vector<sql_cell>& row : set.rows) {
+                std::vector<document_node> cells;
+                for (const sql_cell& cell : row) {
+                    cells.push_back(cell.is_null
+                        ? make_cell_node(false, make_emphasis_node("NULL"))
+                        : make_cell_node(false, make_text_node(cell.text)));
+                }
+                table.children.push_back(make_row_node(std::move(cells)));
+            }
+            nodes.push_back(std::move(table));
+        } else if (set.kind == sql_result_kind::command) {
+            nodes.push_back(make_paragraph_node({make_emphasis_node(set.command_tag)}));
+        } else {
+            document_node admonition;
+            admonition.kind = document_node_kind::admonition;
+            admonition.attributes.emplace("class", "warning");
+            admonition.children.push_back(make_paragraph_node({make_text_node(
+                "SQLSTATE " + set.sqlstate.value_or("") + ": " + set.primary_message)}));
+            nodes.push_back(std::move(admonition));
+        }
+    }
+    if (!result.notices.empty()) {
+        document_node admonition;
+        admonition.kind = document_node_kind::admonition;
+        admonition.attributes.emplace("class", "note");
+        for (const sql_notice& notice : result.notices) {
+            admonition.children.push_back(make_paragraph_node(
+                {make_text_node(notice.severity + ": " + notice.message)}));
+        }
+        nodes.push_back(std::move(admonition));
+    }
+    if (!extension_version.empty() || !server_version.empty()) {
+        nodes.push_back(make_paragraph_node({make_emphasis_node(
+            "Executed against Bioseq extension "
+            + (extension_version.empty() ? std::string("(unknown)") : extension_version)
+            + " on PostgreSQL "
+            + (server_version.empty() ? std::string("(unknown)") : server_version))}));
+    }
+    return nodes;
+}
+
+// Walks the resolved tutorial content and inserts each runnable block's executed
+// result nodes immediately after it (§13.6). Recurses so runnable blocks nested in
+// admonitions/lists are covered; a block with no captured result (no cluster) is
+// left as its visible SQL only.
+void inject_tutorial_results(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, sql_example_result, std::less<>>& results,
+    const std::string& extension_version, const std::string& server_version) {
+    std::vector<document_node> rebuilt;
+    rebuilt.reserve(nodes.size());
+    for (document_node& node : nodes) {
+        inject_tutorial_results(node.children, results, extension_version, server_version);
+        std::optional<std::string> runnable_id;
+        if (node.kind == document_node_kind::code_block) {
+            const auto language = node.attributes.find("language");
+            const auto info = node.attributes.find("info");
+            if (language != node.attributes.end() && language->second == "sql"
+                && info != node.attributes.end()) {
+                if (const auto fence = parse_runnable_fence(info->second)) {
+                    runnable_id = fence->local_id;
+                }
+            }
+        }
+        rebuilt.push_back(std::move(node));
+        if (runnable_id) {
+            if (const auto found = results.find(*runnable_id); found != results.end()) {
+                for (document_node& result_node :
+                     make_result_nodes(found->second, extension_version, server_version)) {
+                    rebuilt.push_back(std::move(result_node));
+                }
+            }
+        }
+    }
+    nodes = std::move(rebuilt);
+}
+
+// Resolves the private-cluster execution target from the shared CLI options: either
+// a per-example isolated clone (§13.3) or a direct conninfo, or neither (no cluster,
+// examples render visible SQL only).
+struct execution_target {
+    bool have_connection{};
+    std::optional<isolation_settings> isolation;
+    std::string conninfo;
+    std::string probe_conninfo;  // a plain connection usable for catalog provenance
+};
+
+[[nodiscard]] execution_target resolve_execution_target(
+    const std::map<std::string, std::string, std::less<>>& options) {
+    execution_target target;
+    target.have_connection = options.contains("conninfo") || options.contains("isolated");
+    if (options.contains("isolated")) {
+        isolation_settings settings;
+        settings.admin_conninfo = require_option(options, "admin-conninfo");
+        settings.socket_directory = require_option(options, "socket-dir");
+        settings.port = std::stoi(require_option(options, "port"));
+        settings.template_database = require_option(options, "template-db");
+        target.probe_conninfo = settings.admin_conninfo;
+        target.isolation = std::move(settings);
+    } else if (const auto found = options.find("conninfo"); found != options.end()) {
+        target.conninfo = found->second;
+        target.probe_conninfo = found->second;
+    }
+    return target;
+}
+
+[[nodiscard]] std::expected<sql_example_result, diagnostic> run_one_example(
+    const execution_target& target, const sql_example& example) {
+    if (target.isolation) {
+        private_cluster_executor executor("");
+        return executor.execute_isolated(example, *target.isolation);
+    }
+    private_cluster_executor executor(target.conninfo);
+    return executor.execute(example);
+}
+
+// Domain-scoped index from an entity reference spelling to its canonical id (§12.1).
+// Each entity is indexed by qualified name, canonical id, and display name; a key
+// that maps to two different entities is marked ambiguous (empty) so resolution
+// rejects it (§10.4). The `id:` domain matches any entity by canonical id.
+struct entity_reference_index {
+    std::map<std::string, std::string, std::less<>> by_key;
+
+    static std::string domain_key(entity_query_domain domain) {
+        switch (domain) {
+        case entity_query_domain::sql: return "sql\x1f";
+        case entity_query_domain::cpp: return "cpp\x1f";
+        case entity_query_domain::canonical_id: return "id\x1f";
+        default: return "any\x1f";
+        }
+    }
+
+    void add(entity_query_domain domain, std::string_view spelling,
+             const std::string& canonical_id) {
+        if (spelling.empty()) {
+            return;
+        }
+        std::string key = domain_key(domain) + std::string(spelling);
+        const auto [iterator, inserted] = by_key.try_emplace(key, canonical_id);
+        if (!inserted && iterator->second != canonical_id) {
+            iterator->second.clear();  // two entities share this spelling: ambiguous
+        }
+    }
+};
+
+[[nodiscard]] entity_reference_index build_entity_reference_index(
+    const std::vector<documented_entity>& cpp_entities,
+    const std::vector<documented_entity>& sql_entities) {
+    entity_reference_index index;
+    // A name an overload_group owns must resolve to the GROUP page, not to any one
+    // member overload (§12.3): collect grouped names so each member skips indexing
+    // its shared qualified/display name and only the group claims the bare name.
+    std::set<std::string, std::less<>> grouped_names;
+    std::set<std::string, std::less<>> real_spellings;
+    for (const documented_entity& entity : sql_entities) {
+        if (entity.kind == entity_kind::overload_group) {
+            grouped_names.insert(entity.qualified_name);
+        }
+    }
+    for (const documented_entity& entity : cpp_entities) {
+        real_spellings.insert(entity.qualified_name);
+    }
+    for (const documented_entity& entity : sql_entities) {
+        real_spellings.insert(entity.qualified_name);
+    }
+    const auto add_entity = [&](const documented_entity& entity) {
+        const entity_query_domain domain = entity.domain == entity_domain::sql
+            ? entity_query_domain::sql : entity_query_domain::cpp;
+        index.add(domain, entity.canonical_id, entity.canonical_id);
+        index.add(entity_query_domain::canonical_id, entity.canonical_id,
+                  entity.canonical_id);
+        const bool name_owned_by_group = entity.kind != entity_kind::overload_group
+            && entity.domain == entity_domain::sql
+            && grouped_names.contains(entity.qualified_name);
+        if (!name_owned_by_group) {
+            index.add(domain, entity.qualified_name, entity.canonical_id);
+            index.add(domain, entity.display_name, entity.canonical_id);
+            // The `any` domain backs the `#name` prose shorthand (§10.5): a name that
+            // exists in both C++ and SQL collides here and is reported as ambiguous.
+            index.add(entity_query_domain::any, entity.qualified_name,
+                      entity.canonical_id);
+            index.add(entity_query_domain::any, entity.display_name,
+                      entity.canonical_id);
+        }
+    };
+    for (const documented_entity& entity : cpp_entities) {
+        add_entity(entity);
+    }
+    for (const documented_entity& entity : sql_entities) {
+        add_entity(entity);
+    }
+    // Extension-qualified authoring alias `bioseq.<name>` for public-schema SQL
+    // entities owned by the extension, when no real entity has that spelling (§10.4):
+    // `#bioseq.mmsearch` resolves to the public.mmsearch overload group.
+    for (const documented_entity& entity : sql_entities) {
+        const std::size_t dot = entity.qualified_name.find('.');
+        const std::string schema =
+            dot == std::string::npos ? std::string() : entity.qualified_name.substr(0, dot);
+        const std::string bare = dot == std::string::npos
+            ? entity.qualified_name : entity.qualified_name.substr(dot + 1);
+        const bool member_of_group = entity.kind != entity_kind::overload_group
+            && grouped_names.contains(entity.qualified_name);
+        if (schema == "bioseq" || member_of_group) {
+            continue;  // already bioseq-qualified, or the group owns the alias
+        }
+        const std::string alias = "bioseq." + bare;
+        if (real_spellings.contains(alias)) {
+            continue;  // a real entity already owns this spelling
+        }
+        index.add(entity_query_domain::sql, alias, entity.canonical_id);
+        index.add(entity_query_domain::any, alias, entity.canonical_id);
+    }
+    return index;
+}
+
+// Splits one prose text run into text + shorthand entity_link nodes (§10.5). A
+// shorthand is `#` at a text-start/whitespace boundary, followed by an ASCII
+// identifier whose components join with `.` or `::`; anything else stays literal.
+void split_shorthand_text(const std::string& text,
+                          std::vector<document_node>& out) {
+    const auto is_start = [](char character) {
+        return (character >= 'a' && character <= 'z')
+            || (character >= 'A' && character <= 'Z') || character == '_';
+    };
+    const auto is_part = [&](char character) {
+        return is_start(character) || (character >= '0' && character <= '9');
+    };
+    std::string pending;
+    const auto flush = [&]() {
+        if (pending.empty()) {
+            return;
+        }
+        if (!out.empty() && out.back().kind == document_node_kind::text) {
+            out.back().text += pending;
+        } else {
+            out.push_back(document_node{.kind = document_node_kind::text, .text = pending});
+        }
+        pending.clear();
+    };
+    std::size_t index = 0;
+    while (index < text.size()) {
+        const bool boundary = index == 0
+            || static_cast<unsigned char>(text[index - 1]) <= ' ';
+        if (text[index] == '#' && boundary && index + 1 < text.size()
+            && is_start(text[index + 1])) {
+            std::size_t cursor = index + 1;
+            std::string name;
+            while (cursor < text.size()) {
+                if (is_part(text[cursor])) {
+                    name.push_back(text[cursor]);
+                    ++cursor;
+                } else if (text[cursor] == '.' && cursor + 1 < text.size()
+                           && is_start(text[cursor + 1])) {
+                    name.push_back('.');
+                    ++cursor;
+                } else if (text[cursor] == ':' && cursor + 2 < text.size()
+                           && text[cursor + 1] == ':' && is_start(text[cursor + 2])) {
+                    name += "::";
+                    cursor += 2;
+                } else {
+                    break;
+                }
+            }
+            if (!name.empty()) {
+                flush();
+                document_node node;
+                node.kind = document_node_kind::entity_link;
+                node.target = name;
+                node.attributes.emplace("shorthand", "1");
+                out.push_back(std::move(node));
+                index = cursor;
+                continue;
+            }
+        }
+        pending.push_back(text[index]);
+        ++index;
+    }
+    flush();
+}
+
+// Rewrites `#name` prose shorthands into entity_link nodes (§10.5), only inside
+// prose: headings, code, links, and existing entity links are left untouched.
+void apply_entity_shorthand(std::vector<document_node>& nodes, bool in_prose) {
+    std::vector<document_node> rebuilt;
+    for (document_node& node : nodes) {
+        if (in_prose && node.kind == document_node_kind::text) {
+            split_shorthand_text(node.text, rebuilt);
+            continue;
+        }
+        const bool child_prose = in_prose
+            && node.kind != document_node_kind::heading
+            && node.kind != document_node_kind::code_span
+            && node.kind != document_node_kind::code_block
+            && node.kind != document_node_kind::link
+            && node.kind != document_node_kind::entity_link;
+        apply_entity_shorthand(node.children, child_prose);
+        rebuilt.push_back(std::move(node));
+    }
+    nodes = std::move(rebuilt);
+}
+
+// Resolves every entity_link in a tutorial's content against the entity graph and
+// records the target entity's canonical id on the node (§10.4, §12.1). An
+// unresolved or ambiguous reference is fatal so a typo can never ship as inert
+// text. Routes stay base-independent: render binds the base-aware URL later.
+void resolve_entity_links(std::vector<document_node>& nodes,
+                          const entity_reference_index& index,
+                          const std::string& where) {
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::entity_link) {
+            // A `#name` prose shorthand (§10.5) resolves name-only against every
+            // domain; the explicit `[[domain:...]]` wiki form names its own domain.
+            const bool shorthand = node.attributes.contains("shorthand");
+            const std::string display = shorthand ? "#" + node.target
+                                                  : "[[" + node.target + "]]";
+            unresolved_entity_query query;
+            if (shorthand) {
+                query.domain = entity_query_domain::any;
+                query.spelling = node.target;
+            } else if (std::optional<unresolved_entity_query> parsed =
+                           parse_entity_reference(
+                               node.target, node.source ? *node.source : source_span{})) {
+                query = std::move(*parsed);
+            } else {
+                throw std::runtime_error(
+                    "malformed entity reference " + display + " in " + where);
+            }
+            const std::string key =
+                entity_reference_index::domain_key(query.domain) + query.spelling;
+            const auto found = index.by_key.find(key);
+            if (found == index.by_key.end()) {
+                throw std::runtime_error(
+                    "unresolved entity reference " + display + " in " + where);
+            }
+            if (found->second.empty()) {
+                throw std::runtime_error(
+                    "ambiguous entity reference " + display + " in " + where
+                    + " (use an explicit sql:/cpp: form)");
+            }
+            node.attributes["entity_id"] = found->second;
+            // A `spelling|label` reference names its own display text; otherwise the
+            // node's Markdown link text is the label. Only when neither exists does the
+            // spelling become the label (so a resolved route never shows as raw text).
+            if (query.label) {
+                node.attributes["entity_label"] = *query.label;
+            } else if (node.text.empty() && node.children.empty()) {
+                node.attributes["entity_label"] = query.spelling;
+            }
+        }
+        resolve_entity_links(node.children, index, where);
+    }
+}
+
+// Collects the canonical IDs that resolved entity links target across a document
+// tree (§10.4). These "referenced" entities join the required set for coverage:
+// a public entity a tutorial links to must be documented or the build fails.
+void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
+                                   std::set<std::string>& referenced) {
+    for (const document_node& node : nodes) {
+        if (const auto found = node.attributes.find("entity_id");
+            found != node.attributes.end()) {
+            referenced.insert(found->second);
+        }
+        collect_referenced_entity_ids(node.children, referenced);
+    }
+}
+
+/// @brief Builds the resolved, database-independent site model (§5, §180).
+///
+/// Rebuilds the deterministic plan from source, reads the merged C++/SQL entity
+/// graphs, executes the landing and tutorial runnable examples on the private
+/// cluster (when one is configured), injects each tutorial result inline (§13.6),
+/// captures server/extension provenance, and computes documentation coverage. The
+/// returned model carries only normalized projections — never hidden setup/teardown
+/// SQL, credentials, OIDs, timings, or machine paths — so `render` can emit staging
+/// without a cluster and at more than one base path.
+[[nodiscard]] site_model build_site_model(
+    const fs::path& source, const std::string& version_string,
+    const site_configuration& config, const std::string& site_yaml,
+    const std::string& site_config_relpath, std::string base_path,
+    std::string revision, bool include_drafts,
+    const std::map<std::string, std::string, std::less<>>& options) {
+    website_plan plan = build_plan_from_source(
+        source, version_string, config, site_yaml, site_config_relpath,
+        std::move(base_path), std::move(revision), include_drafts);
+
+    site_model model;
+    model.schema_version = "bioseq.website.site_model/v1";
+    model.parser_version = plan.parser_version;
+    model.binding_schema_version = plan.binding_schema_version;
+    model.version = plan.version;
+    model.site_title = plan.site_title;
+    model.source_revision = plan.source_revision;
+    model.inputs = plan.inputs;
+    model.plan_signature = plan.signature;
+
+    if (const auto found = options.find("cpp-entities"); found != options.end()) {
+        model.cpp_entities = deserialize_entities(read_file(found->second));
+    }
+    if (const auto found = options.find("sql-entities"); found != options.end()) {
+        model.sql_entities = deserialize_entities(read_file(found->second));
+    }
+    if (const auto found = options.find("cpp-signature"); found != options.end()) {
+        model.cpp_signature = found->second;
+    }
+    if (const auto found = options.find("staged-extension-sha256"); found != options.end()) {
+        model.staged_extension_sha256 = found->second;
+    }
+
+    // Apply the sql_api.yaml public-API allowlist (§11.4/§12.2): only the exact
+    // allowlisted canonical IDs that live in an included schema become SQL pages;
+    // every other captured extension member is recorded inventory-only. A listed ID
+    // that is unknown, in a non-included schema, or otherwise unmatched is fatal - the
+    // generator never rewrites canonical IDs to match an unexpected catalog (§13.2).
+    if (const auto found = options.find("sql-api"); found != options.end()) {
+        const std::string sql_api_yaml = read_file(found->second);
+        const sql_api_configuration api = parse_sql_api(sql_api_yaml, found->second);
+        const std::set<std::string, std::less<>> included_schemas(
+            api.include_schemas.begin(), api.include_schemas.end());
+        const std::set<std::string, std::less<>> allowlist(
+            api.public_entities.begin(), api.public_entities.end());
+        const auto schema_of = [](const documented_entity& entity) {
+            const std::size_t dot = entity.qualified_name.find('.');
+            return dot == std::string::npos
+                ? std::string() : entity.qualified_name.substr(0, dot);
+        };
+        std::vector<documented_entity> kept;
+        std::vector<documented_entity> omitted;
+        std::set<std::string, std::less<>> matched;
+        for (documented_entity& entity : model.sql_entities) {
+            if (allowlist.contains(entity.canonical_id)
+                && included_schemas.contains(schema_of(entity))) {
+                matched.insert(entity.canonical_id);
+                kept.push_back(std::move(entity));
+            } else {
+                omitted.push_back(std::move(entity));
+            }
+        }
+        for (const std::string& id : api.public_entities) {
+            if (!matched.contains(id)) {
+                throw std::runtime_error("sql_api.yaml public_entities lists '" + id
+                    + "', which is not a pg_depend member of extension bioseq in an "
+                    "included schema");
+            }
+        }
+        model.sql_entities = std::move(kept);
+        model.omitted_sql_entities = std::move(omitted);
+    }
+
+    // Synthesize an overload-group page for every allowlisted SQL function name that
+    // carries more than one signature (§12.1/§12.3): the group owns the bare-name
+    // reference and lists each member's identity signature. Grouping runs on the
+    // post-allowlist kept set, so an inventory-only overload never creates a page.
+    {
+        std::map<std::string, std::vector<const documented_entity*>, std::less<>> by_name;
+        for (const documented_entity& entity : model.sql_entities) {
+            if (entity.kind == entity_kind::sql_function) {
+                by_name[entity.qualified_name].push_back(&entity);
+            }
+        }
+        std::vector<documented_entity> groups;
+        for (const auto& [name, members] : by_name) {
+            if (members.size() < 2) {
+                continue;
+            }
+            documented_entity group;
+            group.domain = entity_domain::sql;
+            group.kind = entity_kind::overload_group;
+            group.qualified_name = name;
+            const std::size_t dot = name.rfind('.');
+            group.display_name = dot == std::string::npos ? name : name.substr(dot + 1);
+            group.canonical_id = "sql:overload_group:" + name;
+            group.summary_text = "Overloaded SQL function with "
+                + std::to_string(members.size()) + " signatures.";
+            for (const documented_entity* member : members) {
+                group.overload_ids.push_back(member->canonical_id);
+            }
+            groups.push_back(std::move(group));
+        }
+        model.sql_entities.insert(model.sql_entities.end(),
+                                  std::make_move_iterator(groups.begin()),
+                                  std::make_move_iterator(groups.end()));
+    }
+
+    const execution_target target = resolve_execution_target(options);
+    if (target.have_connection && !target.probe_conninfo.empty()) {
+        private_cluster_executor probe(target.probe_conninfo);
+        const auto catalog_started = std::chrono::steady_clock::now();
+        const std::expected<sql_catalog_snapshot, diagnostic> snapshot = probe.read_catalog();
+        example_telemetry().catalog_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - catalog_started).count());
+        if (snapshot) {
+            model.postgres_server_version = snapshot->server_version;
+            model.extension_version = snapshot->extension_version;
+            if (model.staged_extension_sha256.empty()) {
+                model.staged_extension_sha256 = snapshot->staged_artifact_sha256;
+            }
+        }
+    }
+
+    model.landing_examples = collect_landing_views(source, version_string, options);
+
+    // Resolve every tutorial's typed entity references against the merged graph
+    // (§10.4/§12.1); an unresolved reference fails the build here, before render.
+    const entity_reference_index reference_index =
+        build_entity_reference_index(model.cpp_entities, model.sql_entities);
+
+    for (tutorial& item : plan.tutorials) {
+        apply_entity_shorthand(item.content, true);
+        resolve_entity_links(item.content, reference_index, item.source_path);
+        std::map<std::string, sql_example_result, std::less<>> results;
+        if (target.have_connection) {
+            for (const sql_example& example : item.sql_examples) {
+                const auto started = std::chrono::steady_clock::now();
+                std::expected<sql_example_result, diagnostic> outcome =
+                    run_one_example(target, example);
+                const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - started);
+                if (!outcome) {
+                    throw std::runtime_error("tutorial '" + item.metadata.slug
+                        + "' example '" + example.local_id + "': ["
+                        + outcome.error().code + "] " + outcome.error().message);
+                }
+                record_example_run(item.metadata.slug + ":" + example.local_id, elapsed,
+                                   *outcome);
+                results.emplace(example.local_id, std::move(*outcome));
+            }
+        }
+        inject_tutorial_results(item.content, results, model.extension_version,
+                                model.postgres_server_version);
+        // The site_model is a published-adjacent artifact: it must never carry hidden
+        // setup/teardown SQL (§180). Those phases were consumed by execution above;
+        // strip them so only the visible projection survives into the model.
+        for (sql_example& example : item.sql_examples) {
+            example.setup_sql.clear();
+            example.teardown_sql.clear();
+        }
+    }
+    model.tutorials = std::move(plan.tutorials);
+
+    // Coverage spans both the configured public C++ modules and the allowlisted SQL
+    // domain (§11.4); synthetic overload-group aggregates are routing pages, not
+    // documentable entities, so they are excluded from the totals.
+    std::vector<documented_entity> coverage_entities = model.cpp_entities;
+    for (const documented_entity& entity : model.sql_entities) {
+        if (entity.kind != entity_kind::overload_group) {
+            coverage_entities.push_back(entity);
+        }
+    }
+    // Every entity a tutorial links to must be documented (§11.4/§11.6): collect the
+    // resolved references so an undocumented referenced entity is fatal, not a warning.
+    std::set<std::string> referenced;
+    for (const tutorial& item : model.tutorials) {
+        collect_referenced_entity_ids(item.content, referenced);
+    }
+    const std::vector<std::string> referenced_ids(referenced.begin(), referenced.end());
+    const coverage_report coverage = compute_coverage(
+        coverage_entities, config.required_documentation_entities, referenced_ids);
+    model.coverage_public_total = static_cast<std::uint32_t>(coverage.public_total);
+    model.coverage_documented_total =
+        static_cast<std::uint32_t>(coverage.documented_total);
+    model.coverage_missing = coverage.missing_summary;
+    model.coverage_missing_parameters = coverage.missing_parameters;
+    model.coverage_missing_returns = coverage.missing_returns;
+    model.coverage_fatal_missing = coverage.fatal_missing;
+    for (const coverage_group_report& group : coverage.groups) {
+        model.coverage_groups.push_back(coverage_group_view{
+            group.group, static_cast<std::uint32_t>(group.public_total),
+            static_cast<std::uint32_t>(group.documented_total)});
+    }
+    // §11.4: the build fails when a required or tutorial-referenced public entity is
+    // undocumented. C++ required coverage is also gated at cpp_index; this is the
+    // single point that enforces the same policy over the live allowlisted SQL domain.
+    if (!coverage.fatal_missing.empty()) {
+        std::string joined;
+        for (const std::string& id : coverage.fatal_missing) {
+            joined += (joined.empty() ? "" : ", ") + id;
+        }
+        throw std::runtime_error(
+            "required/referenced documentation missing for: " + joined);
+    }
+    return model;
+}
+
 }  // namespace
+
+/// @brief Self-tests overload-group routing and group-page rendering (§12.3).
+///
+/// A name carrying several allowlisted signatures gets a synthetic overload_group
+/// that owns the bare-name reference (so a name-only link resolves to the group
+/// page instead of being rejected as ambiguous), while every concrete overload
+/// stays addressable by its canonical id; the group page view lists each member's
+/// identity signature with its route.
+void run_website_reference_smoke() {
+    documented_entity overload_a;
+    overload_a.domain = entity_domain::sql;
+    overload_a.kind = entity_kind::sql_function;
+    overload_a.qualified_name = "public.mmsearch";
+    overload_a.display_name = "mmsearch";
+    overload_a.canonical_id = "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)";
+    documented_entity overload_b = overload_a;
+    overload_b.canonical_id =
+        "sql:function:public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)";
+    documented_entity mmsearch_group;
+    mmsearch_group.domain = entity_domain::sql;
+    mmsearch_group.kind = entity_kind::overload_group;
+    mmsearch_group.qualified_name = "public.mmsearch";
+    mmsearch_group.display_name = "mmsearch";
+    mmsearch_group.canonical_id = "sql:overload_group:public.mmsearch";
+    const entity_reference_index grouped_index = build_entity_reference_index(
+        {}, {overload_a, overload_b, mmsearch_group});
+    const auto lookup = [&](entity_query_domain domain, std::string_view spelling) {
+        const auto found = grouped_index.by_key.find(
+            entity_reference_index::domain_key(domain) + std::string(spelling));
+        return found == grouped_index.by_key.end() ? std::string() : found->second;
+    };
+    expect(lookup(entity_query_domain::sql, "public.mmsearch")
+               == "sql:overload_group:public.mmsearch"
+           && lookup(entity_query_domain::sql, "mmsearch")
+               == "sql:overload_group:public.mmsearch"
+           && lookup(entity_query_domain::canonical_id,
+                     "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)")
+               == "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+           "overload-group name resolves to the group; members keep canonical ids");
+
+    // §10.5 shorthand resolves name-only against the `any` domain, and the
+    // extension-qualified `bioseq.<name>` alias resolves to the same target.
+    expect(lookup(entity_query_domain::any, "mmsearch")
+               == "sql:overload_group:public.mmsearch"
+           && lookup(entity_query_domain::any, "bioseq.mmsearch")
+               == "sql:overload_group:public.mmsearch",
+           "#mmsearch shorthand and the bioseq.mmsearch alias resolve to the group");
+    std::vector<document_node> shorthand_split;
+    split_shorthand_text("see #bioseq.mmsearch and ##notshorthand", shorthand_split);
+    int shorthand_links = 0;
+    std::string shorthand_target;
+    for (const document_node& node : shorthand_split) {
+        if (node.kind == document_node_kind::entity_link) {
+            ++shorthand_links;
+            shorthand_target = node.target;
+        }
+    }
+    expect(shorthand_links == 1 && shorthand_target == "bioseq.mmsearch",
+           "shorthand splitter extracts a single #name entity reference");
+
+    documented_entity group_view = mmsearch_group;
+    group_view.overload_members = {
+        {"public.mmsearch(bioseq.seq,bioseq.seq)", "/v0.1/reference/sql/function/a/"},
+        {"public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)",
+         "/v0.1/reference/sql/function/b/"}};
+    const std::string group_json = serialize_single_entity(group_view);
+    expect(group_json.find("\"overloads\"") != std::string::npos
+               && group_json.find("bioseq_aligner_options") != std::string::npos,
+           "overload-group page view serializes member signatures");
+
+    // Container pages (§12.3) carry a child index; an implementation cross-link
+    // (§12.2) resolves to the implementing entity's route.
+    documented_entity container;
+    container.domain = entity_domain::cpp;
+    container.kind = entity_kind::struct_;
+    container.qualified_name = "bioseq::io::seq";
+    container.child_members = {{"read", "/v0.1/reference/cpp/function/read-abc/"},
+                               {"size", "/v0.1/reference/cpp/function/size-def/"}};
+    container.implemented_by_route = "/v0.1/reference/cpp/function/impl-ghi/";
+    const std::string container_json = serialize_single_entity(container);
+    expect(container_json.find("\"members\"") != std::string::npos
+               && container_json.find("read-abc") != std::string::npos
+               && container_json.find("\"implemented_by\"") != std::string::npos,
+           "container page view serializes child index and implemented-by link");
+
+    // §10.5 fence info grammar: quoted values carry commas/spaces/parens verbatim;
+    // duplicate scalar and unknown attributes are fatal.
+    const fence_descriptor ordinary_fence = parse_fence_info("sql id=demo annotated");
+    expect(ordinary_fence.kind == fence_kind::ordinary && ordinary_fence.id == "demo"
+               && ordinary_fence.annotated,
+           "ordinary fence parses id + annotated");
+    const fence_descriptor directive_fence = parse_fence_info(
+        "annotation target=demo match=\"bioseq.seq('dna4', 64)\" title=\"The type\"");
+    expect(directive_fence.kind == fence_kind::annotation
+               && directive_fence.target == "demo"
+               && directive_fence.match == "bioseq.seq('dna4', 64)"
+               && directive_fence.title == "The type",
+           "annotation directive keeps a spaced/parenthesized match verbatim");
+    const fence_descriptor entity_fence =
+        parse_fence_info("cpp entity=\"cpp:function:bioseq::io::seq::read(int, char)\"");
+    expect(entity_fence.entities.size() == 1
+               && entity_fence.entities.front().find(',') != std::string::npos,
+           "entity= carries a signature containing a comma as one value");
+    const auto is_fatal = [](std::string_view info) {
+        try {
+            static_cast<void>(parse_fence_info(info));
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    expect(is_fatal("sql id=a id=b"), "duplicate scalar attribute is fatal");
+    expect(is_fatal("sql bogus=1"), "unknown attribute is fatal");
+    expect(is_fatal("text runnable"), "runnable is only valid on sql");
+
+    // §10.6 folding: the directive attaches to a PRIOR target as a numbered
+    // code_annotation child pointing at the matched source range, and is removed.
+    std::vector<document_node> annotated_doc;
+    document_node display_block;
+    display_block.kind = document_node_kind::code_block;
+    display_block.attributes["language"] = "sql";
+    display_block.attributes["info"] = "sql id=demo annotated";
+    display_block.text = "CREATE TABLE t (s bioseq.seq('dna4', 64));";
+    annotated_doc.push_back(std::move(display_block));
+    document_node directive_block;
+    directive_block.kind = document_node_kind::code_block;
+    directive_block.attributes["language"] = "annotation";
+    directive_block.attributes["info"] =
+        "annotation target=demo match=\"bioseq.seq('dna4', 64)\" title=\"The type\"";
+    directive_block.text = "The alphabet and length live in the type modifier.";
+    annotated_doc.push_back(std::move(directive_block));
+    process_annotations(annotated_doc, "self-test");
+    expect(annotated_doc.size() == 1 && !annotated_doc[0].children.empty()
+               && annotated_doc[0].children[0].kind == document_node_kind::code_annotation,
+           "annotation directive folds onto its target and the directive node is removed");
+    const document_node& folded = annotated_doc[0].children[0];
+    const std::size_t folded_start = std::stoul(folded.attributes.at("start"));
+    const std::size_t folded_len = std::stoul(folded.attributes.at("len"));
+    expect(folded.attributes.at("number") == "1"
+               && folded.attributes.at("title") == "The type"
+               && annotated_doc[0].text.substr(folded_start, folded_len)
+                      == "bioseq.seq('dna4', 64)",
+           "folded annotation carries number/title and a range over the matched source");
+}
 
 /// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
 ///
@@ -528,9 +1816,10 @@ void collect_examples_and_queries(
 [[nodiscard]] int run_plan(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "source", "version", "site-config", "templates", "static",
-        "base-path", "source-revision", "output"};
+        "base-path", "source-revision", "output", "report-dir"};
     static constexpr std::string_view flag_keys[] = {"include-drafts"};
     const auto options = parse_options(args, value_keys, flag_keys);
+    const auto phase_started = std::chrono::steady_clock::now();
     const fs::path source = require_option(options, "source");
     const std::string version_string = require_option(options, "version");
     const fs::path site_config_path = require_option(options, "site-config");
@@ -555,6 +1844,16 @@ void collect_examples_and_queries(
         std::move(base_path), std::move(revision), include_drafts);
     const std::string serialized = serialize_plan(plan);
     write_private_artifact(output, serialized);
+    std::uint64_t example_count = 0;
+    for (const tutorial& item : plan.tutorials) {
+        example_count += item.sql_examples.size();
+    }
+    const auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - phase_started).count();
+    write_report_fragment(options, "plan",
+        "{\"phase\":\"plan\",\"wall_ms\":" + std::to_string(phase_ms)
+            + ",\"tutorial_count\":" + std::to_string(plan.tutorials.size())
+            + ",\"example_count\":" + std::to_string(example_count) + "}\n");
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website plan: {}", error.what());
@@ -607,7 +1906,7 @@ namespace {
 [[nodiscard]] int run_cpp_index(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "doxygen-xml", "compile-db", "reachable-units", "site-config",
-        "output", "coverage-output"};
+        "output", "coverage-output", "report-dir"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path doxygen_xml = require_option(options, "doxygen-xml");
     const fs::path compile_db = require_option(options, "compile-db");
@@ -619,6 +1918,16 @@ namespace {
     const site_configuration config =
         parse_site_config(read_file(site_config_path), site_config_path.generic_string());
 
+    // Doxygen XML wall time, byte volume, and page-compound count (§18.3).
+    const auto doxygen_started = std::chrono::steady_clock::now();
+    std::uint64_t doxygen_xml_bytes = 0;
+    std::error_code walk_error;
+    for (const auto& entry : fs::recursive_directory_iterator(doxygen_xml, walk_error)) {
+        if (entry.is_regular_file()) {
+            doxygen_xml_bytes += entry.file_size();
+        }
+    }
+    std::uint64_t doxygen_compound_count = 0;
     std::vector<documented_entity> documented;
     const std::string index_xml = read_file(doxygen_xml / "index.xml");
     for (const doxygen_compound_ref& compound : parse_doxygen_index(index_xml)) {
@@ -630,28 +1939,49 @@ namespace {
         if (!fs::exists(compound_path, error)) {
             continue;
         }
+        ++doxygen_compound_count;
         for (documented_entity& entity :
              parse_doxygen_compound(read_file(compound_path))) {
             documented.push_back(std::move(entity));
         }
     }
+    const auto doxygen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - doxygen_started).count();
 
+    const auto clang_started = std::chrono::steady_clock::now();
     std::vector<fs::path> units;
     for (const std::string& line : read_lines(reachable_units)) {
         units.emplace_back(line);
     }
     const clang_structural_index structural =
         parse_clang_structural_index(units, compile_db);
+    const auto clang_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - clang_started).count();
 
     const std::vector<documented_entity> merged =
         merge_cpp_entities(structural, documented);
     const coverage_report coverage = compute_coverage(
         merged, config.required_documentation_entities, {});
 
+    write_report_fragment(options, "cpp_index",
+        "{\"phase\":\"cpp_index\",\"doxygen_wall_ms\":" + std::to_string(doxygen_ms)
+            + ",\"doxygen_xml_bytes\":" + std::to_string(doxygen_xml_bytes)
+            + ",\"doxygen_compound_count\":" + std::to_string(doxygen_compound_count)
+            + ",\"clang_wall_ms\":" + std::to_string(clang_ms)
+            + ",\"entity_count\":" + std::to_string(merged.size()) + "}\n");
+
     write_if_different(output, serialize_cpp_entities(merged, structural.clang_version));
+    std::vector<coverage_group_view> coverage_groups;
+    for (const coverage_group_report& group : coverage.groups) {
+        coverage_groups.push_back(coverage_group_view{
+            group.group, static_cast<std::uint32_t>(group.public_total),
+            static_cast<std::uint32_t>(group.documented_total)});
+    }
     write_if_different(coverage_output,
                        serialize_coverage(coverage.public_total, coverage.documented_total,
-                                          coverage.missing_summary, coverage.fatal_missing));
+                                          coverage.missing_summary, coverage.missing_parameters,
+                                          coverage.missing_returns, coverage.fatal_missing,
+                                          coverage_groups));
     if (!coverage.fatal_missing.empty()) {
         std::string joined;
         for (const std::string& id : coverage.fatal_missing) {
@@ -668,15 +1998,15 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website execute`: runs one SQL example against a live cluster.
+/// @brief Runs `website execute-sql`: runs one ad-hoc SQL example on a live cluster.
 ///
 /// Connects to the private Unix-socket cluster, runs the setup/visible/teardown
 /// SQL through private_cluster_executor, and renders the visible result model to
-/// stdout (§13.5-13.6). A focused live-execution entrypoint; database-per-example
-/// isolation and the plan-driven batch runner are layered on top of this.
-/// @param args Options after the `execute` token.
+/// stdout (§13.5-13.6). A focused live-execution entrypoint used by the acceptance
+/// harness; the model-producing `execute` and the batch runner sit on top of this.
+/// @param args Options after the `execute-sql` token.
 /// @return Zero on success; two on usage errors; three on execution failure.
-[[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
+[[nodiscard]] int run_execute_sql(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
         "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms"};
@@ -719,7 +2049,7 @@ namespace {
         outcome = executor.execute(example);
     }
     if (!outcome) {
-        std::println(stderr, "website execute: [{}] {}",
+        std::println(stderr, "website execute-sql: [{}] {}",
                      outcome.error().code, outcome.error().message);
         return 3;
     }
@@ -751,10 +2081,10 @@ namespace {
     }
     return 0;
 } catch (const cli_usage_error& error) {
-    std::println(stderr, "website execute: {}", error.what());
+    std::println(stderr, "website execute-sql: {}", error.what());
     return 2;
 } catch (const std::exception& error) {
-    std::println(stderr, "website execute: {}", error.what());
+    std::println(stderr, "website execute-sql: {}", error.what());
     return 3;
 }
 
@@ -808,14 +2138,14 @@ namespace {
     return 3;
 }
 
-/// @brief Runs `website render`: renders a template against a JSON context.
+/// @brief Runs `website render-fragment`: renders a template against a JSON context.
 ///
-/// Reads a Jinja template and a JSON page-data context (for example the
-/// cpp_entities/plan artifact) and writes the rendered document (§14). The
-/// structured render primitive entity/tutorial/landing pages are produced with.
-/// @param args Options after the `render` token.
+/// Reads a Jinja template and a JSON page-data context and writes the rendered
+/// document (§14). The low-level render primitive; the full model-driven `render`
+/// stage is separate.
+/// @param args Options after the `render-fragment` token.
 /// @return Zero on success; two on usage errors; three on render failure.
-[[nodiscard]] int run_render(std::span<std::string_view const> args) try {
+[[nodiscard]] int run_render_fragment(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {"template", "context", "output"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path template_path = require_option(options, "template");
@@ -826,10 +2156,10 @@ namespace {
     write_if_different(output, document);
     return 0;
 } catch (const cli_usage_error& error) {
-    std::println(stderr, "website render: {}", error.what());
+    std::println(stderr, "website render-fragment: {}", error.what());
     return 2;
 } catch (const std::exception& error) {
-    std::println(stderr, "website render: {}", error.what());
+    std::println(stderr, "website render-fragment: {}", error.what());
     return 3;
 }
 
@@ -970,6 +2300,13 @@ void validate_generated_html(std::string_view route, std::string_view html) {
     if (html.find("javascript:") != std::string_view::npos) {
         fail("contains a javascript: URL");
     }
+    // Hidden runnable-example phases must never reach a published page (§5.1).
+    for (const std::string_view marker :
+         {"bioseq:setup", "bioseq:visible", "bioseq:teardown"}) {
+        if (html.find(marker) != std::string_view::npos) {
+            fail("leaks a hidden runnable-example SQL phase marker");
+        }
+    }
     for (const std::string_view handler :
          {" onclick=", " onload=", " onerror=", " onmouseover=", " onfocus=",
           " onsubmit=", " onchange="}) {
@@ -1029,105 +2366,140 @@ struct staging_writer {
     }
 };
 
-}  // namespace
+// Emits a JSON string value, or null when empty, for the site manifest provenance.
+[[nodiscard]] std::string manifest_optional(std::string_view value) {
+    return value.empty() ? std::string("null")
+                         : "\"" + std::string(value) + "\"";
+}
 
-/// @brief Runs `website publish`: renders the full content-addressed site tree.
-///
-/// Rebuilds the plan from source, reads the C++/SQL entity artifacts, content-
-/// addresses main/website/static into one immutable /assets/<sha256>/ bundle,
-/// renders every §16 route through the shared template frame, writes the site
-/// manifest (SHA-256 of every output but itself), validates exact set equality
-/// between the manifest and the staged tree, and atomically swaps staging over
-/// the output root (§14, §16).
-/// @param args Options after the `publish` token.
-/// @return Zero on success; two on usage errors; three on parse/validation.
-[[nodiscard]] int run_publish(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {
-        "source", "version", "site-config", "cpp-entities", "sql-entities",
-        "templates", "static", "output", "base-path", "source-revision"};
-    static constexpr std::string_view flag_keys[] = {"include-drafts"};
-    const auto options = parse_options(args, value_keys, flag_keys);
-    const fs::path source = require_option(options, "source");
-    const std::string version_string = require_option(options, "version");
-    const fs::path site_config_path = require_option(options, "site-config");
-    const fs::path templates_dir = require_option(options, "templates");
-    const fs::path static_dir = require_option(options, "static");
-    const fs::path output = require_option(options, "output");
-    const bool include_drafts = options.contains("include-drafts");
-
-    // Crash recovery (§14): a prepublish descriptor beside output means a prior
-    // publish was interrupted after the write-ahead stamp. If output already matches
-    // the descriptor's manifest (hash + exact set), complete the publish by writing
-    // the success marker and dropping the descriptor; otherwise clear only the
-    // nonce-owned transient state and fail so the build DAG recreates staging.
-    {
-        const fs::path prepublish = output.string() + ".prepublish.json";
-        std::error_code probe;
-        if (fs::exists(prepublish, probe) && !probe) {
-            const std::string descriptor = read_file(prepublish);
-            const std::string expected =
-                manifest_string_field(descriptor, "new_manifest_sha256");
-            const fs::path site_manifest = output / "site-manifest.json";
-            bool output_valid = false;
-            if (!expected.empty() && fs::exists(site_manifest, probe) && !probe) {
-                const std::string manifest_text = read_file(site_manifest);
-                if (bioseq::codegen::sha256_hex(manifest_text) == expected) {
-                    std::set<std::string> present;
-                    collect_site_files(output, present);
-                    present.erase("/site-manifest.json");
-                    std::set<std::string> declared;
-                    for (const std::string& declared_route :
-                         manifest_output_routes(manifest_text)) {
-                        declared.insert(declared_route);
-                    }
-                    output_valid = (present == declared);
+// Binds each resolved entity_link to its base-aware route and tooltip data URL
+// (§12.1/§12.4). The resolver (execute) recorded the canonical id on the node; here
+// the render stage maps it to the route it assigned at this base path, so the same
+// model links correctly at more than one base path.
+void rewrite_entity_link_routes(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& route_by_id,
+    const std::string& tooltip_url) {
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::entity_link) {
+            const auto identity = node.attributes.find("entity_id");
+            if (identity != node.attributes.end()) {
+                const auto route = route_by_id.find(identity->second);
+                if (route != route_by_id.end()) {
+                    node.target = route->second;
+                    node.attributes["tooltip_url"] = tooltip_url;
                 }
             }
-            std::error_code cleanup;
-            const fs::path leftover_staging = output.string() + ".staging";
-            fs::remove_all(leftover_staging, cleanup);
-            fs::remove(leftover_staging.string() + ".owner.json", cleanup);
-            if (output_valid) {
-                write_if_different(output.string() + ".success", expected + "\n");
-                fsync_file(output.string() + ".success");
-                fs::remove(prepublish, cleanup);
-                fsync_directory(parent_or_dot(output));
-                std::println("recovered interrupted publish for {}", output.string());
-                return 0;
-            }
-            fs::remove(prepublish, cleanup);
-            fsync_directory(parent_or_dot(output));
-            throw std::runtime_error("crash recovery: output does not match the "
-                "prepublish descriptor; cleared transient state, rebuild required");
+        }
+        rewrite_entity_link_routes(node.children, route_by_id, tooltip_url);
+    }
+}
+
+// Minimal JSON string-body escaper for the entity-ranges data attribute payload.
+[[nodiscard]] std::string json_escape(std::string_view text) {
+    std::string out;
+    for (const char character : text) {
+        switch (character) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out.push_back(character); break;
         }
     }
+    return out;
+}
 
-    const std::string site_yaml = read_file(site_config_path);
-    const site_configuration config =
-        parse_site_config(site_yaml, site_config_path.generic_string());
-    std::string base_path = config.default_base_path;
-    if (const auto found = options.find("base-path"); found != options.end()) {
-        base_path = found->second;
+// Resolves each displayed block's `entity="<canonical-id>"` fence attributes into
+// non-overlapping source-text ranges (§12.6). A listed id must exist and its
+// qualified spelling must occur exactly once in the block source (absent or
+// ambiguous is fatal); overlapping ranges are fatal. The ranges are emitted as a
+// data attribute the client decorator wraps in entity links after Prism, so copied
+// source and textContent are unchanged.
+void decorate_code_entity_ranges(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& route_by_id,
+    const std::map<std::string, std::string, std::less<>>& qualified_by_id,
+    const std::string& tooltip_url,
+    const std::string& where) {
+    struct code_range {
+        std::size_t start;
+        std::size_t len;
+        std::string id;
+        std::string route;
+    };
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::code_block) {
+            const auto info = node.attributes.find("info");
+            if (info != node.attributes.end() && !info->second.empty()) {
+                const fence_descriptor fence = parse_fence_info(info->second);
+                std::vector<code_range> ranges;
+                for (const std::string& id : fence.entities) {
+                    const auto qualified = qualified_by_id.find(id);
+                    if (qualified == qualified_by_id.end()) {
+                        throw std::runtime_error("code entity '" + id
+                            + "' does not exist in " + where);
+                    }
+                    const std::string& spelling = qualified->second;
+                    const std::size_t first = node.text.find(spelling);
+                    if (spelling.empty() || first == std::string::npos) {
+                        throw std::runtime_error("code entity spelling '" + spelling
+                            + "' is not present in the block in " + where);
+                    }
+                    if (node.text.find(spelling, first + 1) != std::string::npos) {
+                        throw std::runtime_error("code entity spelling '" + spelling
+                            + "' is ambiguous (appears more than once) in " + where);
+                    }
+                    const auto route = route_by_id.find(id);
+                    ranges.push_back(code_range{first, spelling.size(), id,
+                        route != route_by_id.end() ? route->second : std::string()});
+                }
+                if (!ranges.empty()) {
+                    std::ranges::sort(ranges, [](const code_range& lhs,
+                                                 const code_range& rhs) {
+                        return lhs.start < rhs.start;
+                    });
+                    for (std::size_t index = 1; index < ranges.size(); ++index) {
+                        if (ranges[index].start
+                            < ranges[index - 1].start + ranges[index - 1].len) {
+                            throw std::runtime_error("code entity ranges overlap in " + where);
+                        }
+                    }
+                    std::string json = "[";
+                    for (std::size_t index = 0; index < ranges.size(); ++index) {
+                        if (index != 0) {
+                            json += ",";
+                        }
+                        json += "{\"start\":" + std::to_string(ranges[index].start)
+                            + ",\"len\":" + std::to_string(ranges[index].len)
+                            + ",\"id\":\"" + json_escape(ranges[index].id) + "\""
+                            + ",\"route\":\"" + json_escape(ranges[index].route) + "\""
+                            + ",\"tooltip\":\"" + json_escape(tooltip_url) + "\"}";
+                    }
+                    json += "]";
+                    node.attributes["entity_ranges"] = std::move(json);
+                }
+            }
+        }
+        decorate_code_entity_ranges(node.children, route_by_id, qualified_by_id,
+                                    tooltip_url, where);
     }
-    std::string revision;
-    if (const auto found = options.find("source-revision"); found != options.end()) {
-        revision = found->second;
-    }
+}
 
-    const website_plan plan = build_plan_from_source(
-        source, version_string, config, site_yaml,
-        plan_relative(site_config_path, source), base_path, revision, include_drafts);
-
-    std::vector<documented_entity> cpp_entities;
-    if (const auto found = options.find("cpp-entities"); found != options.end()) {
-        cpp_entities = deserialize_entities(read_file(found->second));
-    }
-    std::vector<documented_entity> sql_entities;
-    if (const auto found = options.find("sql-entities"); found != options.end()) {
-        sql_entities = deserialize_entities(read_file(found->second));
-    }
-
-    const std::string version = version_string;
+/// @brief Renders a resolved site model into an owner-marked staging tree (§14, §16).
+///
+/// Consumes only the database-independent `site_model` plus the site config, the
+/// requested base path, and the template/static roots — never a cluster — so the
+/// same model can be rendered at more than one base path (§180). It content-
+/// addresses the static bundle, renders every §16 route through the shared frame,
+/// records server/extension provenance in the manifest (§16), and enforces exact
+/// manifest/tree set equality. Returns the site-manifest SHA-256; performs no swap.
+[[nodiscard]] std::string render_model_to_staging(
+    const site_model& model, const site_configuration& config,
+    const std::string& base_path, const std::string& revision,
+    const fs::path& templates_dir, const fs::path& static_dir, const fs::path& staging) {
+    const std::string version = model.version.path_component;
     const auto url = [&](std::string_view rel) { return base_path + std::string(rel); };
     const auto route = [&](std::string_view rel) { return "/" + std::string(rel); };
     const auto canonical = [&](std::string_view rel) {
@@ -1144,7 +2516,6 @@ struct staging_writer {
         collect_static_assets(static_dir, bundle_sha256);
     const std::string bundle_prefix = "assets/" + bundle_sha256 + "/";
 
-    const fs::path staging = output.string() + ".staging";
     std::error_code staging_error;
     fs::remove_all(staging, staging_error);
     fs::create_directories(staging);
@@ -1162,12 +2533,26 @@ struct staging_writer {
     site.copyright_year = config.copyright_year;
     site.status_label = config.status_label;
     site.version = version;
+    site.assets_base_url = url(bundle_prefix);
     site.css_url = url(bundle_prefix + "css/site.css");
     site.js_url = url(bundle_prefix + "js/main.js");
     site.favicon_url = url(bundle_prefix + "favicon.svg");
+    site.prism_js_url = url(bundle_prefix + "vendor/prism/prism.min.js");
+    site.prism_css_url = url(bundle_prefix + "vendor/prism/prism.min.css");
+    // The configured default social image lives in the immutable bundle under
+    // media/; drop the authoring "static/" prefix to get its bundle-relative path
+    // and bind it as an absolute OpenGraph/Twitter image URL (§15.5).
+    std::string social_relative = config.default_social_image;
+    if (social_relative.starts_with("static/")) {
+        social_relative.erase(0, std::string_view("static/").size());
+    }
+    site.social_image_url = config.canonical_origin + url(bundle_prefix + social_relative);
     site.documentation_url = url(version + "/");
     site.tutorials_url = url(version + "/tutorials/");
     site.reference_url = url(version + "/reference/");
+    site.search_index_url = url(version + "/search-index.json");
+    site.versions_url = url("versions.json");
+    site.versions_page_url = url("versions/");
     site.nav_documentation = config.navigation.at("documentation");
     site.nav_tutorials = config.navigation.at("tutorials");
     site.nav_reference = config.navigation.at("reference");
@@ -1182,30 +2567,12 @@ struct staging_writer {
         writer.emit(route(rel), html);
     };
 
-    // Assign each entity a readable, collision-checked route (§12.1): a domain and
-    // kind path plus a slug and the 16-hex fnv1a_64 of the (Doxygen/OID-independent)
-    // canonical ID. Both the canonical ID and the output path are checked for
-    // collisions before any page is rendered, per §12.1.
-    const auto kind_token = [](entity_kind kind) -> std::string {
-        switch (kind) {
-        case entity_kind::namespace_: return "namespace";
-        case entity_kind::module: return "module";
-        case entity_kind::class_: return "class";
-        case entity_kind::struct_: return "struct";
-        case entity_kind::union_: return "union";
-        case entity_kind::enum_: return "enum";
-        case entity_kind::enum_value: return "enumerator";
-        case entity_kind::concept_: return "concept";
-        case entity_kind::type_alias: return "type_alias";
-        case entity_kind::function: return "function";
-        case entity_kind::variable: return "variable";
-        case entity_kind::sql_schema: return "schema";
-        case entity_kind::sql_type: return "type";
-        case entity_kind::sql_function: return "function";
-        case entity_kind::overload_group: return "overload_group";
-        }
-        return "entity";
-    };
+    // Assign each entity a readable, collision-checked route (§12.1). Routes are
+    // recomputed here (not carried in the model) so a base-independent model renders
+    // at any base path; the canonical ID and output path collision checks stay.
+    // Route segments reuse the centralized §12.1 canonical-ID kind token so the
+    // path kind and the canonical-ID kind can never drift apart.
+    const auto kind_token = [](entity_kind kind) { return entity_kind_token(kind); };
     const auto slugify = [](std::string_view qualified) -> std::string {
         const std::string_view name = qualified.substr(0, qualified.find('('));
         std::vector<std::string> parts;
@@ -1262,6 +2629,8 @@ struct staging_writer {
             + slugify(entity.qualified_name) + "-"
             + hex64(bioseq::common::fnv1a_64(entity.canonical_id)) + "/";
     };
+    std::vector<documented_entity> cpp_entities = model.cpp_entities;
+    std::vector<documented_entity> sql_entities = model.sql_entities;
     std::set<std::string> seen_routes;
     std::set<std::string> seen_ids;
     const auto assign_routes = [&](std::vector<documented_entity>& list) {
@@ -1279,15 +2648,240 @@ struct staging_writer {
     assign_routes(cpp_entities);
     assign_routes(sql_entities);
 
-    // Root marketing landing page for the primary version (§16).
+    // The merged entity graph, its canonical-id -> base-aware route map, and the
+    // content-addressed tooltip dataset URL (§12.4) are computed once here: tutorials
+    // bind their resolved entity links to these routes, and the search index and
+    // tooltip artifact below reuse the same values.
+    std::vector<documented_entity> all_entities = cpp_entities;
+    all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
+    std::map<std::string, std::string, std::less<>> route_by_id;
+    std::map<std::string, std::string, std::less<>> qualified_by_id;
+    for (const documented_entity& entity : all_entities) {
+        route_by_id.emplace(entity.canonical_id, entity.route_path);
+        qualified_by_id.emplace(entity.canonical_id, entity.qualified_name);
+    }
+
+    // Bind each overload-group's members to their identity signature + base-aware
+    // route so the group page can link to every concrete overload (§12.3).
+    for (documented_entity& group : sql_entities) {
+        if (group.kind != entity_kind::overload_group) {
+            continue;
+        }
+        for (const std::string& member_id : group.overload_ids) {
+            const auto member = std::ranges::find_if(
+                sql_entities, [&](const documented_entity& candidate) {
+                    return candidate.canonical_id == member_id;
+                });
+            if (member == sql_entities.end()) {
+                continue;
+            }
+            const auto route = route_by_id.find(member_id);
+            group.overload_members.emplace_back(
+                member->normalized_signature,
+                route != route_by_id.end() ? route->second : std::string());
+        }
+    }
+
+    // Container child index (§12.3): group every entity under its parent's qualified
+    // name so class/struct pages list their members and module/namespace pages list
+    // their children. The parent is the qualified name minus its last top-level
+    // `::` component (template/parameter `::` are skipped via depth tracking).
+    const auto parent_of = [](std::string_view name) -> std::string {
+        int depth = 0;
+        std::size_t last = std::string::npos;
+        for (std::size_t index = 0; index + 1 < name.size(); ++index) {
+            const char character = name[index];
+            if (character == '<' || character == '(') {
+                ++depth;
+            } else if ((character == '>' || character == ')') && depth > 0) {
+                --depth;
+            } else if (depth == 0 && character == ':' && name[index + 1] == ':') {
+                last = index;
+            }
+        }
+        return last == std::string::npos ? std::string()
+                                         : std::string(name.substr(0, last));
+    };
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>, std::less<>>
+        children_by_parent;
+    for (const documented_entity& entity : all_entities) {
+        if (entity.kind == entity_kind::overload_group) {
+            continue;  // routing aggregate, not a structural child
+        }
+        const std::string parent = parent_of(entity.qualified_name);
+        if (!parent.empty()) {
+            children_by_parent[parent].emplace_back(entity.display_name,
+                                                    entity.route_path);
+        }
+    }
+    for (auto& [parent, children] : children_by_parent) {
+        std::ranges::sort(children);
+    }
+    const auto attach_relations = [&](std::vector<documented_entity>& list) {
+        for (documented_entity& entity : list) {
+            if (const auto found = children_by_parent.find(entity.qualified_name);
+                found != children_by_parent.end()) {
+                entity.child_members = found->second;
+            }
+            if (entity.implementation_entity_id) {
+                if (const auto route = route_by_id.find(*entity.implementation_entity_id);
+                    route != route_by_id.end()) {
+                    entity.implemented_by_route = route->second;
+                }
+            }
+        }
+    };
+    attach_relations(cpp_entities);
+    attach_relations(sql_entities);
+
+    const std::string tooltip_json = serialize_entity_tooltips(all_entities);
+    const std::string tooltip_url =
+        url(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json) + ".json");
+
+    // Root marketing landing page: the executed runnable slots (§15.2) are bound as
+    // the examples.<slot> collection; hidden setup/teardown never reaches the page.
+    // Shared breadcrumb serializer and tutorial-backlink reverse map (§12.3/§15.1).
+    // Each crumb is {label, href}; the last crumb is the current page.
+    const auto breadcrumb_json =
+        [&](const std::vector<std::pair<std::string, std::string>>& crumbs) {
+            std::string out = "[";
+            bool first = true;
+            for (const auto& [name, href] : crumbs) {
+                if (!first) {
+                    out += ",";
+                }
+                first = false;
+                out += "{\"name\":" + json_text(name) + ",\"url\":" + json_text(href) + "}";
+            }
+            out += "]";
+            return out;
+        };
+    std::map<std::string, std::vector<std::pair<std::string, std::string>>, std::less<>>
+        backlinks_by_id;
+    for (const tutorial& item : model.tutorials) {
+        std::set<std::string> refs;
+        collect_referenced_entity_ids(item.content, refs);
+        const std::string tutorial_route =
+            url(version + "/tutorials/" + item.metadata.slug + "/");
+        for (const std::string& id : refs) {
+            backlinks_by_id[id].push_back({item.metadata.title, tutorial_route});
+        }
+    }
+
+    // Version-global left navigation (§15.1): every tutorial plus the two reference
+    // indexes. Bound as page.doc_nav on documentation pages so the frame is uniform.
+    std::string doc_nav = "[{\"label\":\"Tutorials\",\"items\":[";
+    {
+        bool first_nav = true;
+        for (const tutorial& item : model.tutorials) {
+            if (!first_nav) {
+                doc_nav += ",";
+            }
+            first_nav = false;
+            doc_nav += "{\"label\":" + json_text(item.metadata.title) + ",\"url\":"
+                + json_text(url(version + "/tutorials/" + item.metadata.slug + "/")) + "}";
+        }
+    }
+    doc_nav += "]},{\"label\":\"Reference\",\"items\":[";
+    doc_nav += "{\"label\":" + json_text("C++") + ",\"url\":"
+        + json_text(url(version + "/reference/cpp/")) + "},";
+    doc_nav += "{\"label\":" + json_text("SQL") + ",\"url\":"
+        + json_text(url(version + "/reference/sql/")) + "}]}]";
+
+    // On-this-page: assign a stable [a-z0-9-] anchor to every body heading and
+    // return its table-of-contents JSON. Dedupes collisions with a numeric suffix.
+    const auto heading_slug = [](std::string_view text) {
+        std::string slug;
+        bool previous_dash = false;
+        for (const char raw : text) {
+            const char lowered =
+                (raw >= 'A' && raw <= 'Z') ? static_cast<char>(raw - 'A' + 'a') : raw;
+            const bool ok = (lowered >= 'a' && lowered <= 'z')
+                || (lowered >= '0' && lowered <= '9');
+            if (ok) {
+                slug.push_back(lowered);
+                previous_dash = false;
+            } else if (!previous_dash) {
+                slug.push_back('-');
+                previous_dash = true;
+            }
+        }
+        while (!slug.empty() && slug.back() == '-') {
+            slug.pop_back();
+        }
+        std::size_t lead = 0;
+        while (lead < slug.size() && slug[lead] == '-') {
+            ++lead;
+        }
+        slug.erase(0, lead);
+        return slug.empty() ? std::string("section") : slug;
+    };
+    const auto node_plain_text = [](const document_node& node, auto&& self) -> std::string {
+        std::string text = node.text;
+        for (const document_node& child : node.children) {
+            text += self(child, self);
+        }
+        return text;
+    };
+    const auto build_on_this_page = [&](std::vector<document_node>& nodes) {
+        std::set<std::string> used;
+        std::string toc = "[";
+        bool first = true;
+        const auto walk = [&](std::vector<document_node>& list, auto&& self_walk) -> void {
+            for (document_node& node : list) {
+                if (node.kind == document_node_kind::heading) {
+                    const std::string text = node_plain_text(node, node_plain_text);
+                    const std::string base = heading_slug(text);
+                    std::string candidate = base;
+                    int suffix = 2;
+                    while (!used.insert(candidate).second) {
+                        candidate = base + "-" + std::to_string(suffix++);
+                    }
+                    node.attributes["anchor"] = candidate;
+                    int level = 2;
+                    const auto level_attr = node.attributes.find("level");
+                    if (level_attr != node.attributes.end()) {
+                        level = std::atoi(level_attr->second.c_str());
+                    }
+                    if (level < 2) {
+                        level = 2;
+                    }
+                    if (level > 3) {
+                        level = 3;
+                    }
+                    if (!first) {
+                        toc += ",";
+                    }
+                    first = false;
+                    toc += "{\"level\":" + std::to_string(level) + ",\"text\":" + json_text(text)
+                        + ",\"anchor\":" + json_text(candidate) + "}";
+                }
+                self_walk(node.children, self_walk);
+            }
+        };
+        walk(nodes, walk);
+        toc += "]";
+        return toc;
+    };
+
+    const std::string landing_examples_json =
+        serialize_landing_examples(model.landing_examples);
     render("index.html", "landing.html.j2",
            "{\"title\":" + json_text(config.title)
                + ",\"description\":" + json_text(config.short_description)
                + ",\"canonical\":" + json_text(canonical("index.html"))
+               + ",\"page_type\":" + json_text("landing")
                + ",\"eyebrow\":" + json_text("PostgreSQL-native")
                + ",\"headline\":" + json_text(config.title)
                + ",\"lede\":" + json_text(config.short_description)
                + ",\"install\":" + json_text("CREATE EXTENSION bioseq;") + "}",
+           "examples", landing_examples_json);
+
+    // Host-served not-found page (§16 layout). Version-agnostic root artifact.
+    render("error.html", "error.html.j2",
+           "{\"title\":" + json_text("Page not found")
+               + ",\"description\":" + json_text("The requested page does not exist.")
+               + ",\"canonical\":" + json_text(canonical("error.html")) + "}",
            "", "");
 
     // Version overview / documentation home, distinct from the landing page.
@@ -1296,13 +2890,18 @@ struct staging_writer {
                + ",\"description\":" + json_text(config.short_description)
                + ",\"canonical\":" + json_text(canonical(version + "/index.html"))
                + ",\"coverage_url\":"
-               + json_text(url(version + "/documentation-coverage/")) + "}",
+               + json_text(url(version + "/documentation-coverage/"))
+               + ",\"breadcrumb\":"
+               + breadcrumb_json({{"Home", url("")}, {version, url(version + "/")}})
+               + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
-    // Tutorials index and one page per published tutorial (§10, §16).
+    // Tutorials index and one page per published tutorial (§10, §16). Each tutorial's
+    // content already carries its executed result subtrees (§13.6), injected by
+    // execute, so rendering here is database-free.
     std::string tutorial_cards = "[";
-    for (std::size_t index = 0; index < plan.tutorials.size(); ++index) {
-        const tutorial& item = plan.tutorials[index];
+    for (std::size_t index = 0; index < model.tutorials.size(); ++index) {
+        const tutorial& item = model.tutorials[index];
         if (index > 0) {
             tutorial_cards.push_back(',');
         }
@@ -1316,15 +2915,31 @@ struct staging_writer {
            "{\"title\":" + json_text("Tutorials")
                + ",\"description\":" + json_text("Bioseq tutorials for " + version)
                + ",\"canonical\":"
-               + json_text(canonical(version + "/tutorials/index.html")) + "}",
+               + json_text(canonical(version + "/tutorials/index.html"))
+               + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
+                     {version, url(version + "/")}, {"Tutorials", url(version + "/tutorials/")}})
+               + ",\"doc_nav\":" + doc_nav + "}",
            "tutorials", tutorial_cards);
-    for (const tutorial& item : plan.tutorials) {
+    for (const tutorial& item : model.tutorials) {
         const std::string rel =
             version + "/tutorials/" + item.metadata.slug + "/index.html";
-        const std::string body = render_document_html(item.content);
+        std::vector<document_node> body_nodes = item.content;
+        rewrite_entity_link_routes(body_nodes, route_by_id, tooltip_url);
+        decorate_code_entity_ranges(body_nodes, route_by_id, qualified_by_id,
+                                    tooltip_url, item.metadata.slug);
+        const std::string on_this_page = build_on_this_page(body_nodes);
+        const std::string body = render_document_html(body_nodes);
         std::string page = "{\"title\":" + json_text(item.metadata.title)
             + ",\"description\":" + json_text(item.metadata.description)
             + ",\"canonical\":" + json_text(canonical(rel))
+            + ",\"page_type\":" + json_text("tutorial")
+            + ",\"breadcrumb\":" + breadcrumb_json({
+                  {"Home", url("")},
+                  {version, url(version + "/")},
+                  {"Tutorials", url(version + "/tutorials/")},
+                  {item.metadata.title, url(version + "/tutorials/" + item.metadata.slug + "/")}})
+            + ",\"doc_nav\":" + doc_nav
+            + ",\"on_this_page\":" + on_this_page
             + ",\"body_html\":" + json_quote(body);
         page += ",\"previous_url\":";
         page += item.previous_slug
@@ -1345,7 +2960,10 @@ struct staging_writer {
                + ",\"canonical\":"
                + json_text(canonical(version + "/reference/index.html"))
                + ",\"cpp_url\":" + json_text(url(version + "/reference/cpp/"))
-               + ",\"sql_url\":" + json_text(url(version + "/reference/sql/")) + "}",
+               + ",\"sql_url\":" + json_text(url(version + "/reference/sql/"))
+               + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
+                     {version, url(version + "/")}, {"Reference", url(version + "/reference/")}})
+               + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
     const auto render_domain = [&](std::string_view domain, std::string_view label,
                                    const std::vector<documented_entity>& entities) {
@@ -1355,45 +2973,161 @@ struct staging_writer {
                "{\"title\":" + json_text(std::string(label) + " API")
                    + ",\"description\":"
                    + json_text(std::string(label) + " API reference")
-                   + ",\"canonical\":" + json_text(canonical(index_rel)) + "}",
+                   + ",\"canonical\":" + json_text(canonical(index_rel))
+                   + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
+                         {version, url(version + "/")}, {"Reference", url(version + "/reference/")},
+                         {std::string(label) + " API",
+                          url(version + "/reference/" + std::string(domain) + "/")}})
+                   + ",\"doc_nav\":" + doc_nav + "}",
                "entities", serialize_entity_array(entities));
         for (const documented_entity& entity : entities) {
             const std::string rel = entity_rel(entity) + "index.html";
-            render(rel, "entity.html.j2",
-                   "{\"title\":" + json_text(entity.qualified_name)
-                       + ",\"description\":"
-                       + json_text(entity.summary_text.empty()
-                                        ? entity.qualified_name : entity.summary_text)
-                       + ",\"canonical\":" + json_text(canonical(rel)) + "}",
-                   "entity", serialize_single_entity(entity));
+            std::string page = "{\"title\":" + json_text(entity.qualified_name)
+                + ",\"description\":"
+                + json_text(entity.summary_text.empty()
+                                 ? entity.qualified_name : entity.summary_text)
+                + ",\"canonical\":" + json_text(canonical(rel))
+                + ",\"page_type\":" + json_text("entity")
+                + ",\"breadcrumb\":" + breadcrumb_json({
+                      {"Home", url("")},
+                      {version, url(version + "/")},
+                      {"Reference", url(version + "/reference/")},
+                      {std::string(label),
+                       url(version + "/reference/" + std::string(domain) + "/")},
+                      {entity.qualified_name, url(entity_rel(entity))}});
+            page += ",\"doc_nav\":" + doc_nav;
+            // Section table of contents (§15.1): fixed entity sections that are
+            // present, matched to the h2 anchors in entity.html.j2.
+            const bool has_backlinks =
+                backlinks_by_id.find(entity.canonical_id) != backlinks_by_id.end();
+            std::string entity_toc = "[";
+            bool toc_first = true;
+            const auto add_toc = [&](std::string_view text, std::string_view anchor) {
+                if (!toc_first) {
+                    entity_toc.push_back(',');
+                }
+                toc_first = false;
+                entity_toc += "{\"level\":2,\"text\":" + json_text(std::string(text))
+                    + ",\"anchor\":" + json_text(std::string(anchor)) + "}";
+            };
+            if (!entity.parameters.empty()) {
+                add_toc("Parameters", "parameters");
+            }
+            if (!entity.attributes.empty()) {
+                add_toc(entity.domain == entity_domain::sql ? "Attributes" : "Qualifiers",
+                        "attributes");
+            }
+            if (!entity.overload_members.empty()) {
+                add_toc("Overloads", "overloads");
+            }
+            if (!entity.child_members.empty()) {
+                add_toc("Members", "members");
+            }
+            if (has_backlinks) {
+                add_toc("Referenced by", "referenced-by");
+            }
+            entity_toc.push_back(']');
+            page += ",\"on_this_page\":" + entity_toc;
+            // Detailed documentation body (trusted HTML, §12.3).
+            page += ",\"detail_html\":";
+            page += entity.documentation.empty()
+                ? std::string("null")
+                : json_quote(render_document_html(entity.documentation));
+            // C++ source link: repository blob at the configured revision (§12.3).
+            if (entity.declaration) {
+                const std::string spath = entity.declaration->path.generic_string();
+                const auto marker = spath.rfind("/main/");
+                const std::string relpath = marker != std::string::npos
+                    ? spath.substr(marker + 1)
+                    : entity.declaration->path.filename().string();
+                const std::string blob = config.repository_url + "/blob/" + revision + "/"
+                    + relpath + "#L" + std::to_string(entity.declaration->first_line);
+                const std::string source_label =
+                    entity.module_name ? *entity.module_name : relpath;
+                page += ",\"source_url\":" + json_text(blob)
+                    + ",\"source_label\":" + json_text(source_label);
+            } else {
+                page += ",\"source_url\":null,\"source_label\":null";
+            }
+            // SQL provenance: extension version + actual schema + server version (§13.6).
+            if (entity.domain == entity_domain::sql) {
+                const auto dot = entity.qualified_name.find('.');
+                const std::string schema = dot == std::string::npos
+                    ? std::string("public") : entity.qualified_name.substr(0, dot);
+                std::string provenance =
+                    "Bioseq extension " + model.extension_version + " \xC2\xB7 schema " + schema;
+                if (!model.postgres_server_version.empty()) {
+                    provenance += " \xC2\xB7 PostgreSQL " + model.postgres_server_version;
+                }
+                page += ",\"provenance\":" + json_text(provenance);
+            } else {
+                page += ",\"provenance\":null";
+            }
+            // Tutorial backlinks (§12.3): tutorials that reference this entity.
+            page += ",\"backlinks\":[";
+            if (const auto found = backlinks_by_id.find(entity.canonical_id);
+                found != backlinks_by_id.end()) {
+                bool first = true;
+                for (const auto& [backlink_title, backlink_route] : found->second) {
+                    if (!first) {
+                        page += ",";
+                    }
+                    first = false;
+                    page += "{\"title\":" + json_text(backlink_title)
+                        + ",\"url\":" + json_text(backlink_route) + "}";
+                }
+            }
+            page += "]}";
+            render(rel, "entity.html.j2", page, "entity", serialize_single_entity(entity));
         }
     };
     render_domain("cpp", "C++", cpp_entities);
     render_domain("sql", "SQL", sql_entities);
 
-    // Documentation-coverage page and machine-readable report (§11.4).
-    const coverage_report coverage = compute_coverage(
-        cpp_entities, config.required_documentation_entities, {});
-    std::string missing_json = "[";
-    for (std::size_t index = 0; index < coverage.missing_summary.size(); ++index) {
-        if (index > 0) {
-            missing_json.push_back(',');
+    // Documentation-coverage page and machine-readable report (§11.4), taken from
+    // the resolved model so execute and render agree exactly. Missing docs are broken
+    // out into summary/parameter/return dimensions and totalled per module/SQL domain.
+    const auto id_array = [&](const std::vector<std::string>& ids) {
+        std::string out = "[";
+        for (std::size_t index = 0; index < ids.size(); ++index) {
+            if (index > 0) {
+                out.push_back(',');
+            }
+            out += json_text(ids[index]);
         }
-        missing_json += json_text(coverage.missing_summary[index]);
+        out.push_back(']');
+        return out;
+    };
+    std::string groups_json = "[";
+    for (std::size_t index = 0; index < model.coverage_groups.size(); ++index) {
+        const coverage_group_view& group = model.coverage_groups[index];
+        if (index > 0) {
+            groups_json.push_back(',');
+        }
+        groups_json += "{\"group\":" + json_text(group.group)
+            + ",\"public_total\":" + std::to_string(group.public_total)
+            + ",\"documented_total\":" + std::to_string(group.documented_total) + "}";
     }
-    missing_json.push_back(']');
+    groups_json.push_back(']');
     render(version + "/documentation-coverage/index.html", "coverage.html.j2",
            "{\"title\":" + json_text("Documentation coverage")
                + ",\"description\":" + json_text("Public API documentation coverage")
                + ",\"canonical\":"
                + json_text(canonical(version + "/documentation-coverage/index.html"))
-               + ",\"public_total\":" + std::to_string(coverage.public_total)
-               + ",\"documented_total\":" + std::to_string(coverage.documented_total)
-               + ",\"missing\":" + missing_json + "}",
+               + ",\"public_total\":" + std::to_string(model.coverage_public_total)
+               + ",\"documented_total\":" + std::to_string(model.coverage_documented_total)
+               + ",\"groups\":" + groups_json
+               + ",\"missing\":" + id_array(model.coverage_missing)
+               + ",\"missing_parameters\":" + id_array(model.coverage_missing_parameters)
+               + ",\"missing_returns\":" + id_array(model.coverage_missing_returns)
+               + ",\"fatal_missing\":" + id_array(model.coverage_fatal_missing) + "}",
            "", "");
     writer.emit(route(version + "/documentation-coverage.json"),
-                serialize_coverage(coverage.public_total, coverage.documented_total,
-                                   coverage.missing_summary, coverage.fatal_missing));
+                serialize_coverage(model.coverage_public_total,
+                                   model.coverage_documented_total,
+                                   model.coverage_missing, model.coverage_missing_parameters,
+                                   model.coverage_missing_returns, model.coverage_fatal_missing,
+                                   model.coverage_groups));
 
     // Versions manifest, versions page, and per-version search index (§15.1, §12.5).
     const std::vector<std::string> version_labels{version};
@@ -1406,19 +3140,66 @@ struct staging_writer {
            "versions",
            "[{\"route\":" + json_text(url(version + "/")) + ",\"label\":"
                + json_text(version) + "}]");
-    std::vector<documented_entity> all_entities = cpp_entities;
-    all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
+    // Project the one canonical graph, the tutorial plan, and the versioned index
+    // pages into the deterministic per-version search index (§12.5).
+    std::vector<search_entry> search_entries;
+    search_entries.reserve(all_entities.size() + model.tutorials.size() + 5);
+    for (const documented_entity& entity : all_entities) {
+        search_entries.push_back(search_entry_from_entity(entity));
+    }
+    for (const tutorial& item : model.tutorials) {
+        search_entry entry;
+        entry.id = "tutorial:" + item.metadata.slug;
+        entry.group = "Tutorials";
+        entry.kind = "tutorial";
+        entry.title = item.metadata.title;
+        entry.route = url(version + "/tutorials/" + item.metadata.slug + "/");
+        entry.summary = item.metadata.description;
+        std::string names = item.metadata.title;
+        for (const std::string& keyword : item.metadata.keywords) {
+            names += ' ';
+            names += keyword;
+        }
+        entry.name_source = std::move(names);
+        entry.text_source = item.metadata.description + " " + collect_heading_text(item.content);
+        search_entries.push_back(std::move(entry));
+    }
+    const auto add_page_entry = [&](std::string id, std::string title, std::string_view rel,
+                                    std::string summary) {
+        search_entry entry;
+        entry.id = std::move(id);
+        entry.group = "Pages";
+        entry.kind = "page";
+        entry.title = std::move(title);
+        entry.route = url(rel);
+        entry.name_source = entry.title;
+        entry.text_source = summary;
+        entry.summary = std::move(summary);
+        search_entries.push_back(std::move(entry));
+    };
+    add_page_entry("page:" + version + ":home", config.title + " " + version, version + "/",
+                   config.short_description);
+    add_page_entry("page:" + version + ":tutorials", "Tutorials", version + "/tutorials/",
+                   "Bioseq tutorials for " + version);
+    add_page_entry("page:" + version + ":reference", "API Reference", version + "/reference/",
+                   "Bioseq C++ and SQL API reference");
+    add_page_entry("page:" + version + ":reference-cpp", "C++ Reference",
+                   version + "/reference/cpp/", "Bioseq C++ API reference");
+    add_page_entry("page:" + version + ":reference-sql", "SQL Reference",
+                   version + "/reference/sql/", "Bioseq SQL API reference");
     writer.emit(route(version + "/search-index.json"),
-                build_search_index(all_entities));
-    // Content-addressed per-version tooltip dataset (§12.4, §16): named by its own
-    // SHA-256 so its immutable bytes are long-cacheable.
-    const std::string tooltip_json = serialize_entity_tooltips(all_entities);
+                build_search_index(std::move(search_entries)));
+    // Content-addressed per-version tooltip dataset (§12.4, §16): the same bytes the
+    // resolved entity links point at, named by their own SHA-256 for long caching.
     writer.emit(route(version + "/entities." + bioseq::codegen::sha256_hex(tooltip_json)
                           + ".json"),
                 tooltip_json);
-    if (!sql_entities.empty()) {
+    // catalog-inventory.json records the extension-owned candidates that the
+    // sql_api.yaml allowlist did NOT promote to pages (§11.4) - the inverse of the
+    // published SQL surface - so a reviewer can audit what stays inventory-only.
+    if (!model.omitted_sql_entities.empty()) {
         writer.emit(route(version + "/catalog-inventory.json"),
-                    serialize_sql_entities(sql_entities));
+                    serialize_sql_entities(model.omitted_sql_entities));
     }
 
     // Host-agnostic SEO / security deployment artifacts (§15.5).
@@ -1444,11 +3225,10 @@ struct staging_writer {
         sitemap += "  <url><loc>" + canonical(rel) + "</loc></url>\n";
     }
     sitemap += "</urlset>\n";
-    // The sitemap enumerates the pages produced above; it lists itself as a file
-    // but not as a <url>, matching the canonical page set.
     writer.emit(route("sitemap.xml"), sitemap);
 
-    // Serialize the manifest last, then require exact set equality (§16).
+    // Serialize the manifest last, then require exact set equality (§16). The live
+    // PostgreSQL server/extension provenance (§16) comes from the resolved model.
     {
         std::string manifest_json;
         manifest_json += "{\n  \"schema\": \"bioseq.website.site_manifest/v1\",\n";
@@ -1456,21 +3236,21 @@ struct staging_writer {
         manifest_json += "  \"version\": \"" + version + "\",\n";
         manifest_json += "  \"source_revision\": \"" + revision + "\",\n";
         manifest_json += "  \"base_path\": \"" + base_path + "\",\n";
-        manifest_json += "  \"generator_signature\": \"" + plan.signature + "\",\n";
-        manifest_json += "  \"parser_version\": \"" + plan.parser_version + "\",\n";
-        manifest_json += "  \"binding_schema\": \"" + plan.binding_schema_version + "\",\n";
+        manifest_json += "  \"generator_signature\": \"" + model.plan_signature + "\",\n";
+        manifest_json += "  \"parser_version\": \"" + model.parser_version + "\",\n";
+        manifest_json += "  \"binding_schema\": \"" + model.binding_schema_version + "\",\n";
         manifest_json += "  \"asset_bundle_sha256\": \"" + bundle_sha256 + "\",\n";
-        // The live PostgreSQL server/extension identity is captured by the catalog
-        // stage; publish does not open a cluster, so it records null placeholders
-        // that the assembled/full-pipeline manifest fills from that artifact.
-        manifest_json += "  \"postgres_server_version\": null,\n";
-        manifest_json += "  \"extension_version\": null,\n";
-        manifest_json += "  \"staged_extension_sha256\": null,\n";
+        manifest_json += "  \"postgres_server_version\": "
+            + manifest_optional(model.postgres_server_version) + ",\n";
+        manifest_json += "  \"extension_version\": "
+            + manifest_optional(model.extension_version) + ",\n";
+        manifest_json += "  \"staged_extension_sha256\": "
+            + manifest_optional(model.staged_extension_sha256) + ",\n";
         manifest_json += "  \"inputs\": [\n";
-        for (std::size_t index = 0; index < plan.inputs.size(); ++index) {
-            manifest_json += "    {\"path\": \"" + plan.inputs[index].path
-                + "\", \"content_hash\": \"" + plan.inputs[index].content_hash + "\"}";
-            manifest_json += (index + 1 == plan.inputs.size()) ? "\n" : ",\n";
+        for (std::size_t index = 0; index < model.inputs.size(); ++index) {
+            manifest_json += "    {\"path\": \"" + model.inputs[index].path
+                + "\", \"content_hash\": \"" + model.inputs[index].content_hash + "\"}";
+            manifest_json += (index + 1 == model.inputs.size()) ? "\n" : ",\n";
         }
         manifest_json += "  ],\n";
         manifest_json += "  \"outputs\": {\n";
@@ -1501,26 +3281,174 @@ struct staging_writer {
             "site manifest set mismatch: manifest declares " + std::to_string(declared.size())
             + " outputs but the staged tree has " + std::to_string(present.size()));
     }
+    return bioseq::codegen::sha256_hex(read_file(staging / "site-manifest.json"));
+}
 
-    // Durable write-ahead publish (§14): stamp an fsynced 0600 prepublish
-    // descriptor plus an owner marker adjacent to staging, then swap atomically,
-    // then record the success marker and drop the descriptor/owner. A crash between
-    // any two steps is resolved by the crash-recovery pass on the next run.
-    const std::string manifest_hash =
-        bioseq::codegen::sha256_hex(read_file(staging / "site-manifest.json"));
+}  // namespace
+
+/// @brief Runs `website publish`: renders the full content-addressed site tree.
+///
+/// Rebuilds the plan from source, reads the C++/SQL entity artifacts, content-
+/// addresses main/website/static into one immutable /assets/<sha256>/ bundle,
+/// renders every §16 route through the shared template frame, writes the site
+/// manifest (SHA-256 of every output but itself), validates exact set equality
+/// between the manifest and the staged tree, and atomically swaps staging over
+/// the output root (§14, §16).
+/// @param args Options after the `publish` token.
+/// @return Zero on success; two on usage errors; three on parse/validation.
+[[nodiscard]] int run_publish(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "cpp-entities", "sql-entities",
+        "templates", "static", "output", "base-path", "source-revision",
+        "conninfo", "admin-conninfo", "socket-dir", "port", "template-db",
+        "staged-extension-sha256", "cpp-signature",
+        "staging", "model-validation-stamp", "html-validation-stamp", "report-dir"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
+    const auto options = parse_options(args, value_keys, flag_keys);
+    const fs::path output = require_option(options, "output");
+    const bool swap_only = options.contains("staging");
+    const fs::path staging = swap_only
+        ? fs::path(require_option(options, "staging"))
+        : fs::path(output.string() + ".staging");
+
+    // Crash recovery (§14): a prepublish descriptor beside output means a prior
+    // publish was interrupted after the write-ahead stamp. If output already matches
+    // the descriptor's manifest (hash + exact set), complete the publish by writing
+    // the success marker and dropping the descriptor; otherwise clear only the
+    // nonce-owned transient state and fail so the build DAG recreates staging.
+    {
+        const fs::path prepublish = output.string() + ".prepublish.json";
+        std::error_code probe;
+        if (fs::exists(prepublish, probe) && !probe) {
+            const std::string descriptor = read_file(prepublish);
+            const std::string expected =
+                manifest_string_field(descriptor, "new_manifest_sha256");
+            const fs::path site_manifest = output / "site-manifest.json";
+            bool output_valid = false;
+            if (!expected.empty() && fs::exists(site_manifest, probe) && !probe) {
+                const std::string manifest_text = read_file(site_manifest);
+                if (bioseq::codegen::sha256_hex(manifest_text) == expected) {
+                    std::set<std::string> present;
+                    collect_site_files(output, present);
+                    present.erase("/site-manifest.json");
+                    std::set<std::string> declared;
+                    for (const std::string& declared_route :
+                         manifest_output_routes(manifest_text)) {
+                        declared.insert(declared_route);
+                    }
+                    output_valid = (present == declared);
+                }
+            }
+            std::error_code cleanup;
+            if (output_valid) {
+                write_if_different(output.string() + ".success", expected + "\n");
+                fsync_file(output.string() + ".success");
+                fs::remove(prepublish, cleanup);
+                fsync_directory(parent_or_dot(output));
+                std::println("recovered interrupted publish for {}", output.string());
+                return 0;
+            }
+            fs::remove(prepublish, cleanup);
+            fsync_directory(parent_or_dot(output));
+            throw std::runtime_error("crash recovery: output does not match the "
+                "prepublish descriptor; cleared transient state, rebuild required");
+        }
+    }
+
+    // Every validator stamp publish must confirm before the exchange (§14, §17.3):
+    // render binds them to staging; publish rechecks their presence (fail-closed).
+    std::vector<std::string> validation_stamps;
+    if (const auto found = options.find("model-validation-stamp"); found != options.end()) {
+        validation_stamps.push_back(found->second);
+    }
+    if (const auto found = options.find("html-validation-stamp"); found != options.end()) {
+        validation_stamps.push_back(found->second);
+    }
+
+    std::string manifest_hash;
+    if (swap_only) {
+        // Spec publish (§168): verify the owner-marked staging, the validator stamps,
+        // and the full staged manifest, then atomically exchange. No rendering, no
+        // cluster, so a validator that rejected staging blocks the swap entirely.
+        const fs::path staging_manifest = staging / "site-manifest.json";
+        if (!fs::exists(staging_manifest)) {
+            throw std::runtime_error("publish: staging has no site-manifest.json: "
+                                     + staging.string());
+        }
+        const std::string manifest_text = read_file(staging_manifest);
+        manifest_hash = bioseq::codegen::sha256_hex(manifest_text);
+        if (!fs::exists(staging.string() + ".owner.json")) {
+            throw std::runtime_error("publish: staging is not owner-marked: "
+                                     + staging.string() + ".owner.json");
+        }
+        for (const std::string& stamp : validation_stamps) {
+            if (!fs::exists(fs::path(stamp))) {
+                throw std::runtime_error(
+                    "publish: required validation stamp missing (validator failed "
+                    "or did not run before publish): " + stamp);
+            }
+        }
+        std::set<std::string> present;
+        collect_site_files(staging, present);
+        present.erase("/site-manifest.json");
+        std::set<std::string> declared;
+        for (const std::string& declared_route : manifest_output_routes(manifest_text)) {
+            declared.insert(declared_route);
+        }
+        if (present != declared) {
+            throw std::runtime_error("publish: staging manifest set mismatch (declares "
+                + std::to_string(declared.size()) + ", tree has "
+                + std::to_string(present.size()) + ")");
+        }
+    } else {
+        // Convenience all-in-one path (dev / MCP): build the resolved model and render
+        // staging in one process, then swap. The spec CMake pipeline instead uses
+        // execute -> render -> publish --staging so validators gate the exchange.
+        const std::string site_yaml = read_file(require_option(options, "site-config"));
+        const site_configuration config =
+            parse_site_config(site_yaml, require_option(options, "site-config"));
+        std::string base_path = config.default_base_path;
+        if (const auto found = options.find("base-path"); found != options.end()) {
+            base_path = found->second;
+        }
+        std::string revision;
+        if (const auto found = options.find("source-revision"); found != options.end()) {
+            revision = found->second;
+        }
+        const fs::path source = require_option(options, "source");
+        const std::string version_string = require_option(options, "version");
+        const fs::path site_config_path = require_option(options, "site-config");
+        const site_model model = build_site_model(
+            source, version_string, config, site_yaml,
+            plan_relative(site_config_path, source), base_path, revision,
+            options.contains("include-drafts"), options);
+        manifest_hash = render_model_to_staging(model, config, base_path, revision,
+            fs::path(require_option(options, "templates")),
+            fs::path(require_option(options, "static")), staging);
+    }
+
+    // Durable write-ahead publish (§14): stamp an fsynced 0600 prepublish descriptor
+    // plus an owner marker adjacent to staging, then swap atomically, then record the
+    // success marker and drop the descriptor/owner. A crash between any two steps is
+    // resolved by the crash-recovery pass on the next run.
     const std::string nonce =
         std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
     const fs::path owner_marker = staging.string() + ".owner.json";
     write_private_artifact(owner_marker,
         "{\"schema\":\"bioseq.website.owner/v1\",\"nonce\":\"" + nonce
         + "\",\"staging\":\"" + staging.filename().string() + "\"}\n");
+    std::string stamps_json = "[";
+    for (std::size_t index = 0; index < validation_stamps.size(); ++index) {
+        stamps_json += (index > 0 ? ", " : "") + json_quote(validation_stamps[index]);
+    }
+    stamps_json.push_back(']');
     const fs::path prepublish = output.string() + ".prepublish.json";
     write_private_artifact(prepublish,
         "{\n  \"schema\": \"bioseq.website.prepublish/v1\",\n"
         "  \"operation\": \"publish\",\n  \"nonce\": \"" + nonce + "\",\n"
         "  \"staging\": \"" + staging.filename().string() + "\",\n"
         "  \"new_manifest_sha256\": \"" + manifest_hash + "\",\n"
-        "  \"validation_stamps\": []\n}\n");
+        "  \"validation_stamps\": " + stamps_json + "\n}\n");
     fsync_file(prepublish);
     fsync_directory(parent_or_dot(output));
 
@@ -1533,14 +3461,205 @@ struct staging_writer {
     fs::remove(prepublish, cleanup);
     fs::remove(owner_marker, cleanup);
     fsync_directory(parent_or_dot(output));
-    std::println("published {} outputs to {} (bundle {})",
-                 writer.manifest.size(), output.string(), bundle_sha256);
+    std::println("published site to {}", output.string());
+
+    // Aggregate the per-phase build-report fragments into a single diagnostic
+    // report beside the report tree, outside the published site and never a
+    // manifest entry (§18.3). Output/search-index byte volumes are measured from
+    // the just-published tree; every phase fragment is embedded verbatim (or null
+    // when a cached phase produced none this run).
+    if (const auto found = options.find("report-dir");
+        found != options.end() && !found->second.empty()) {
+        const fs::path report_dir(found->second);
+        const auto fragment = [&](std::string_view name) -> std::string {
+            std::error_code exists_error;
+            const fs::path path = report_dir / (std::string(name) + ".json");
+            if (!fs::exists(path, exists_error)) {
+                return "null";
+            }
+            std::string body = read_file(path);
+            while (!body.empty() && (body.back() == '\n' || body.back() == '\r')) {
+                body.pop_back();
+            }
+            return body.empty() ? "null" : body;
+        };
+        std::uint64_t output_bytes = 0;
+        std::uint64_t search_index_bytes = 0;
+        std::error_code walk;
+        for (const auto& entry : fs::recursive_directory_iterator(output, walk)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            const std::uint64_t size = entry.file_size();
+            output_bytes += size;
+            if (entry.path().filename() == "search-index.json") {
+                search_index_bytes += size;
+            }
+        }
+        const std::string report =
+            "{\n  \"schema\": \"bioseq.website.build_report/v1\",\n"
+            "  \"plan\": " + fragment("plan") + ",\n"
+            "  \"cpp_index\": " + fragment("cpp_index") + ",\n"
+            "  \"execute\": " + fragment("execute") + ",\n"
+            "  \"render\": " + fragment("render") + ",\n"
+            "  \"output_bytes\": " + std::to_string(output_bytes) + ",\n"
+            "  \"search_index_bytes\": " + std::to_string(search_index_bytes) + ",\n"
+            "  \"warnings\": []\n}\n";
+        write_if_different(report_dir / "build-report.json", report);
+        std::println("wrote build report to {}",
+                     (report_dir / "build-report.json").string());
+    }
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website publish: {}", error.what());
     return 2;
 } catch (const std::exception& error) {
     std::println(stderr, "website publish: {}", error.what());
+    return 3;
+}
+
+/// @brief Runs `website execute`: resolves + executes the site into a site_model (§180).
+///
+/// Rebuilds the plan from source, reads the merged C++/SQL entity artifacts, opens
+/// the private cluster (when configured) to execute the landing and tutorial runnable
+/// examples and capture server/extension provenance, and writes the resolved
+/// database-independent site model (schema site_model/v1, mode 0600). Setup/teardown
+/// SQL, credentials, OIDs, timings, and machine paths never enter the artifact, so
+/// `render` can consume it without a database and at more than one base path.
+/// @param args Options after the `execute` token.
+/// @return Zero on success; two on usage errors; three on parse/execution failure.
+[[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "source", "version", "site-config", "cpp-entities", "sql-entities",
+        "sql-api", "base-path", "source-revision", "output-model", "cpp-signature",
+        "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
+        "port", "template-db", "report-dir"};
+    static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
+    const auto options = parse_options(args, value_keys, flag_keys);
+    const fs::path source = require_option(options, "source");
+    const std::string version_string = require_option(options, "version");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path output_model = require_option(options, "output-model");
+
+    const std::string site_yaml = read_file(site_config_path);
+    const site_configuration config =
+        parse_site_config(site_yaml, site_config_path.generic_string());
+    std::string base_path = config.default_base_path;
+    if (const auto found = options.find("base-path"); found != options.end()) {
+        base_path = found->second;
+    }
+    std::string revision;
+    if (const auto found = options.find("source-revision"); found != options.end()) {
+        revision = found->second;
+    }
+    // Reset the build-report telemetry so this process's execution stands alone,
+    // then run the executor-driven model build (which populates it, §18.3).
+    example_telemetry() = example_run_telemetry{};
+    const auto phase_started = std::chrono::steady_clock::now();
+    const site_model model = build_site_model(
+        source, version_string, config, site_yaml,
+        plan_relative(site_config_path, source), std::move(base_path),
+        std::move(revision), options.contains("include-drafts"), options);
+    write_private_artifact(output_model, serialize_site_model(model));
+    const auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - phase_started).count();
+    const example_run_telemetry& telemetry = example_telemetry();
+    std::string examples_json = "[";
+    for (std::size_t index = 0; index < telemetry.measurements.size(); ++index) {
+        const sql_example_measurement& measurement = telemetry.measurements[index];
+        if (index > 0) {
+            examples_json.push_back(',');
+        }
+        examples_json += "{\"id\":" + report_json_string(measurement.example_id)
+            + ",\"elapsed_ms\":" + std::to_string(measurement.elapsed.count()) + "}";
+    }
+    examples_json.push_back(']');
+    write_report_fragment(options, "execute",
+        "{\"phase\":\"execute\",\"wall_ms\":" + std::to_string(phase_ms)
+            + ",\"catalog_wall_ms\":" + std::to_string(telemetry.catalog_ms)
+            + ",\"cpp_entity_count\":" + std::to_string(model.cpp_entities.size())
+            + ",\"sql_entity_count\":" + std::to_string(model.sql_entities.size())
+            + ",\"example_count\":" + std::to_string(telemetry.measurements.size())
+            + ",\"peak_rows\":" + std::to_string(telemetry.peak_rows)
+            + ",\"peak_cells\":" + std::to_string(telemetry.peak_cells)
+            + ",\"peak_payload_bytes\":" + std::to_string(telemetry.peak_payload_bytes)
+            + ",\"examples\":" + examples_json + "}\n");
+    std::println("executed site model for {} -> {}", version_string, output_model.string());
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website execute: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website execute: {}", error.what());
+    return 3;
+}
+
+/// @brief Runs `website render`: renders a resolved model into staging without a DB.
+///
+/// Reads the site_model/v1 artifact (verifying its schema), renders every §16 route
+/// into an owner-marked staging directory at the requested base path, and writes the
+/// built-in model-validation stamp bound to the staged manifest hash (§14, §17.3
+/// step 8). It never opens a cluster, so the same executed model can be rendered at
+/// more than one base path; only `publish` may exchange staging with the live site.
+/// @param args Options after the `render` token.
+/// @return Zero on success; two on usage errors; three on parse/render failure.
+[[nodiscard]] int run_render(std::span<std::string_view const> args) try {
+    static constexpr std::string_view value_keys[] = {
+        "model", "site-config", "templates", "static", "output", "base-path",
+        "source-revision", "model-validation-stamp", "report-dir"};
+    const auto options = parse_options(args, value_keys, {});
+    const fs::path model_path = require_option(options, "model");
+    const fs::path site_config_path = require_option(options, "site-config");
+    const fs::path templates_dir = require_option(options, "templates");
+    const fs::path static_dir = require_option(options, "static");
+    const fs::path staging = require_option(options, "output");
+
+    const std::string site_yaml = read_file(site_config_path);
+    const site_configuration config =
+        parse_site_config(site_yaml, site_config_path.generic_string());
+    std::string base_path = config.default_base_path;
+    if (const auto found = options.find("base-path"); found != options.end()) {
+        base_path = found->second;
+    }
+    std::string revision;
+    if (const auto found = options.find("source-revision"); found != options.end()) {
+        revision = found->second;
+    }
+    const auto phase_started = std::chrono::steady_clock::now();
+    const site_model model = deserialize_site_model(read_file(model_path));
+    const std::string manifest_hash = render_model_to_staging(
+        model, config, base_path, revision, templates_dir, static_dir, staging);
+    const auto phase_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - phase_started).count();
+    std::uint64_t staged_html = 0;
+    std::error_code render_walk;
+    for (const auto& entry : fs::recursive_directory_iterator(staging, render_walk)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".html") {
+            ++staged_html;
+        }
+    }
+    write_report_fragment(options, "render",
+        "{\"phase\":\"render\",\"render_wall_ms\":" + std::to_string(phase_ms)
+            + ",\"page_count\":" + std::to_string(staged_html) + "}\n");
+
+    // Owner-mark staging (§168) so only publish may exchange it, and write the
+    // built-in model-validation stamp bound to the staged manifest hash.
+    const std::string nonce =
+        std::to_string(::getpid()) + "-" + manifest_hash.substr(0, 16);
+    write_private_artifact(staging.string() + ".owner.json",
+        "{\"schema\":\"bioseq.website.owner/v1\",\"nonce\":\"" + nonce
+        + "\",\"staging\":\"" + staging.filename().string() + "\"}\n");
+    if (const auto found = options.find("model-validation-stamp"); found != options.end()) {
+        write_if_different(fs::path(found->second), manifest_hash + "\n");
+    }
+    std::println("rendered {} -> {} (base {})",
+                 model_path.string(), staging.string(), base_path);
+    return 0;
+} catch (const cli_usage_error& error) {
+    std::println(stderr, "website render: {}", error.what());
+    return 2;
+} catch (const std::exception& error) {
+    std::println(stderr, "website render: {}", error.what());
     return 3;
 }
 
@@ -1712,7 +3831,8 @@ struct staging_writer {
 /// @return Zero on success; two on usage errors; three on validation failure.
 [[nodiscard]] int run_source_graph(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
-        "reachable-units", "compile-db", "site-config", "output"};
+        "reachable-units", "compile-db", "site-config", "output",
+        "reachable-output"};
     const auto options = parse_options(args, value_keys, {});
     const fs::path reachable_units = require_option(options, "reachable-units");
     const fs::path compile_db = require_option(options, "compile-db");
@@ -1789,6 +3909,18 @@ struct staging_writer {
 
     write_if_different(output,
                        serialize_source_graph(clang_api_version(), roots, closure));
+
+    // The reachable interface-unit closure is the sole Doxygen INPUT inventory and
+    // the exact unit list cpp_index parses (§11.1): emit it as a newline-delimited
+    // file so those stages consume the closure instead of a recursive directory glob.
+    if (const auto found = options.find("reachable-output"); found != options.end()) {
+        std::string reachable_text;
+        for (const module_graph_unit& unit : closure) {
+            reachable_text += unit.source_path;
+            reachable_text.push_back('\n');
+        }
+        write_if_different(fs::path(found->second), reachable_text);
+    }
     return 0;
 } catch (const cli_usage_error& error) {
     std::println(stderr, "website source_graph: {}", error.what());
@@ -1817,8 +3949,14 @@ struct staging_writer {
     if (command == "execute") {
         return run_execute(rest);
     }
+    if (command == "execute-sql") {
+        return run_execute_sql(rest);
+    }
     if (command == "render") {
         return run_render(rest);
+    }
+    if (command == "render-fragment") {
+        return run_render_fragment(rest);
     }
     if (command == "catalog") {
         return run_catalog(rest);

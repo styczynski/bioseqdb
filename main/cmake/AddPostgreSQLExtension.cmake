@@ -33,7 +33,7 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
   # produced visible without rebuilding the module sources for every target —
   # see main/DOCS/IMPL_PLANS/BUILD_TIME_REDUCTION_..._DOC0269.md §5.
-  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS)
+  set(multiValueArgs REQUIRES BOOST SOURCES INSTALLS UPDATES CXX_MOD_BASE_DIRS CXX_MOD_FILES INCLUDE_DIRS LINKS TESTS_MAIN TESTS INTEGRATION_TESTS INTEGRATION_TESTS_LINKS INTEGRATION_TESTS_MODULES SHARED_MODULE_LIBS PG_ENTRYPOINT_SOURCES)
   cmake_parse_arguments(EXTENSION "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
   message("%%%% POSTPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}> <${EXTENSION_TESTS}> <${EXTENSION_INTEGRATION_TESTS}>")
 
@@ -337,6 +337,23 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       DESTINATION "${PostgreSQL_SHARE_DIR}/extension"
       COMPONENT ${EXTENSION_COMPONENT}
     )
+
+    # Publish the generated control/install-SQL/DSO artifacts as generic
+    # read-only target properties (§13.2) so the website relocatable-extension
+    # stage copies the *current build target's* files rather than reading a
+    # globally installed Bioseq. The library filename stays a genex so consumers
+    # resolve the real DSO name (bioseq.so) when they expand $<TARGET_PROPERTY>.
+    if(HAS_SOURCES)
+      set_target_properties(${LIBRARY_NAME} PROPERTIES
+        BIOSEQ_EXTENSION_CONTROL_FILE
+          "${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}.control"
+        BIOSEQ_EXTENSION_INSTALL_SQL
+          "${EXTENSION_INSTALL}"
+        BIOSEQ_EXTENSION_LIBRARY_FILENAME
+          "$<TARGET_FILE_NAME:${LIBRARY_NAME}>"
+        BIOSEQ_EXTENSION_PG_ENTRYPOINT_SOURCES
+          "${EXTENSION_PG_ENTRYPOINT_SOURCES}")
+    endif()
 
     # Formatting is intentionally opt-in. pgindent may need local typedefs
     # configuration, and build targets must not mutate or reformat sources.

@@ -80,26 +80,6 @@ struct runnable_fence_attributes {
 
 namespace {
 
-[[nodiscard]] std::vector<std::string_view> split_whitespace(std::string_view text) {
-    std::vector<std::string_view> tokens;
-    std::size_t index = 0;
-    while (index < text.size()) {
-        while (index < text.size()
-               && (text[index] == ' ' || text[index] == '\t')) {
-            ++index;
-        }
-        const std::size_t begin = index;
-        while (index < text.size()
-               && text[index] != ' ' && text[index] != '\t') {
-            ++index;
-        }
-        if (index > begin) {
-            tokens.push_back(text.substr(begin, index - begin));
-        }
-    }
-    return tokens;
-}
-
 [[nodiscard]] std::chrono::milliseconds parse_timeout(std::string_view value) {
     // Unsigned decimal integer followed by ms or s; 100ms-60s (§10.7).
     std::size_t digits = 0;
@@ -145,68 +125,267 @@ namespace {
     return true;
 }
 
+// One token of a fenced info string: the head language/kind word, a `key=value`
+// attribute, or a bare boolean flag (§10.5).
+struct info_token {
+    std::string key;                   // head word, attribute key, or flag name
+    std::optional<std::string> value;  // present only for key=value
+    bool head = false;                 // true for the first (language/kind) token
+};
+
+// Tokenizes a fenced info string honoring double-quoted values with \\ \" \t \n
+// escapes (§10.5); bare values end at ASCII whitespace. A quote may only open a
+// value (immediately after `=`); a stray or unterminated quote is fatal, so a
+// signature containing commas/spaces can be carried verbatim as one value.
+[[nodiscard]] std::vector<info_token> tokenize_info(std::string_view info) {
+    std::vector<info_token> tokens;
+    std::size_t index = 0;
+    const auto skip_ws = [&] {
+        while (index < info.size() && (info[index] == ' ' || info[index] == '\t')) {
+            ++index;
+        }
+    };
+    skip_ws();
+    bool first = true;
+    while (index < info.size()) {
+        std::string key;
+        while (index < info.size() && info[index] != ' ' && info[index] != '\t'
+               && info[index] != '=' && info[index] != '"') {
+            key.push_back(info[index]);
+            ++index;
+        }
+        if (index < info.size() && info[index] == '"') {
+            throw std::runtime_error(
+                "fence info: a '\"' may only follow an attribute '='");
+        }
+        info_token token;
+        token.head = first;
+        token.key = std::move(key);
+        if (index < info.size() && info[index] == '=') {
+            ++index;  // consume '='
+            std::string value;
+            if (index < info.size() && info[index] == '"') {
+                ++index;  // opening quote
+                bool closed = false;
+                while (index < info.size()) {
+                    const char character = info[index++];
+                    if (character == '"') {
+                        closed = true;
+                        break;
+                    }
+                    if (character == '\\') {
+                        if (index >= info.size()) {
+                            break;
+                        }
+                        const char escaped = info[index++];
+                        switch (escaped) {
+                        case '\\': value.push_back('\\'); break;
+                        case '"': value.push_back('"'); break;
+                        case 't': value.push_back('\t'); break;
+                        case 'n': value.push_back('\n'); break;
+                        default:
+                            throw std::runtime_error("fence info: invalid escape \\"
+                                                     + std::string(1, escaped));
+                        }
+                    } else {
+                        value.push_back(character);
+                    }
+                }
+                if (!closed) {
+                    throw std::runtime_error("fence info: unterminated quoted value");
+                }
+            } else {
+                while (index < info.size() && info[index] != ' ' && info[index] != '\t') {
+                    value.push_back(info[index]);
+                    ++index;
+                }
+            }
+            token.value = std::move(value);
+        }
+        tokens.push_back(std::move(token));
+        first = false;
+        skip_ws();
+    }
+    return tokens;
+}
+
 }  // namespace
+
+/// @brief Closed classification of a fenced code block (§10.5).
+enum class fence_kind { ordinary, annotation, runnable };
+
+/// @brief Parsed, validated attributes of any fenced block's info string (§10.5).
+struct fence_descriptor {
+    fence_kind kind{fence_kind::ordinary};
+    std::string language;               // head word (ordinary/runnable)
+    std::string id;                     // optional id (ordinary/runnable)
+    bool annotated{false};
+    std::vector<std::string> entities;  // repeatable entity="<canonical-id>"
+    std::chrono::milliseconds timeout{15'000};
+    sql_expectation expectation{sql_expectation::success};
+    std::optional<std::string> expected_sqlstate;
+    std::string target;                 // annotation directive
+    std::string match;
+    std::string title;
+    std::optional<std::size_t> occurrence;
+};
+
+/// @brief Parses any fenced info string against the closed §10.5 attribute table.
+///
+/// Duplicate scalar attributes and unknown attributes/flags are fatal; `entity=` is
+/// the one repeatable attribute; quoted values may carry commas/spaces (an overload
+/// id or a C++ signature) verbatim. `runnable` is legal only on `sql`; `sqlstate`
+/// only with `expect=error`. The head word selects the branch: `annotation` is the
+/// directive, any other word is a display language (runnable when a `runnable` flag
+/// is present).
+[[nodiscard]] fence_descriptor parse_fence_info(std::string_view info) {
+    const std::vector<info_token> tokens = tokenize_info(info);
+    if (tokens.empty() || tokens.front().value || tokens.front().key.empty()) {
+        throw std::runtime_error("fenced block requires a leading language or directive");
+    }
+    fence_descriptor descriptor;
+    std::vector<std::string_view> seen;
+    const auto once = [&](std::string_view key) {
+        for (const std::string_view existing : seen) {
+            if (existing == key) {
+                throw std::runtime_error("duplicate fence attribute '"
+                                         + std::string(key) + "'");
+            }
+        }
+        seen.push_back(key);
+    };
+    const std::string& head = tokens.front().key;
+
+    if (head == "annotation") {
+        descriptor.kind = fence_kind::annotation;
+        for (std::size_t index = 1; index < tokens.size(); ++index) {
+            const info_token& token = tokens[index];
+            if (!token.value) {
+                throw std::runtime_error("annotation directive takes no flag '"
+                                         + token.key + "'");
+            }
+            once(token.key);
+            if (token.key == "target") {
+                descriptor.target = *token.value;
+            } else if (token.key == "match") {
+                descriptor.match = *token.value;
+            } else if (token.key == "title") {
+                descriptor.title = *token.value;
+            } else if (token.key == "occurrence") {
+                const std::string& text = *token.value;
+                std::size_t value = 0;
+                if (text.empty() || text.size() > 6) {
+                    throw std::runtime_error("annotation occurrence must be a positive integer");
+                }
+                for (const char character : text) {
+                    if (character < '0' || character > '9') {
+                        throw std::runtime_error("annotation occurrence must be a positive integer");
+                    }
+                    value = value * 10 + static_cast<std::size_t>(character - '0');
+                }
+                if (value == 0) {
+                    throw std::runtime_error("annotation occurrence is 1-based (>= 1)");
+                }
+                descriptor.occurrence = value;
+            } else {
+                throw std::runtime_error("annotation directive: unknown attribute '"
+                                         + token.key + "'");
+            }
+        }
+        if (descriptor.target.empty() || descriptor.match.empty()
+            || descriptor.title.empty()) {
+            throw std::runtime_error("annotation directive requires target, match, and title");
+        }
+        return descriptor;
+    }
+
+    descriptor.language = head;
+    bool runnable = false;
+    for (std::size_t index = 1; index < tokens.size(); ++index) {
+        if (!tokens[index].value && tokens[index].key == "runnable") {
+            runnable = true;
+        }
+    }
+    bool has_expect = false;
+    bool has_sqlstate = false;
+    for (std::size_t index = 1; index < tokens.size(); ++index) {
+        const info_token& token = tokens[index];
+        if (token.key == "entity") {  // the one repeatable attribute
+            if (!token.value || token.value->empty()) {
+                throw std::runtime_error("entity=\"<canonical-id>\" requires a quoted id");
+            }
+            descriptor.entities.push_back(*token.value);
+            continue;
+        }
+        once(token.key);
+        if (token.value) {
+            if (token.key == "id") {
+                descriptor.id = *token.value;
+            } else if (runnable && token.key == "timeout") {
+                descriptor.timeout = parse_timeout(*token.value);
+            } else if (runnable && token.key == "expect") {
+                if (*token.value == "success") {
+                    descriptor.expectation = sql_expectation::success;
+                } else if (*token.value == "error") {
+                    descriptor.expectation = sql_expectation::error;
+                } else {
+                    throw std::runtime_error("runnable expect must be success or error");
+                }
+                has_expect = true;
+            } else if (runnable && token.key == "sqlstate") {
+                if (!is_valid_sqlstate(*token.value)) {
+                    throw std::runtime_error("runnable sqlstate must be 5 uppercase "
+                                             "alphanumerics other than 00000");
+                }
+                descriptor.expected_sqlstate = *token.value;
+                has_sqlstate = true;
+            } else {
+                throw std::runtime_error("unknown fence attribute '" + token.key + "'");
+            }
+        } else {
+            if (token.key == "runnable") {
+                descriptor.kind = fence_kind::runnable;
+            } else if (token.key == "annotated") {
+                descriptor.annotated = true;
+            } else {
+                throw std::runtime_error("unknown fence flag '" + token.key + "'");
+            }
+        }
+    }
+    if (runnable) {
+        descriptor.kind = fence_kind::runnable;
+        if (descriptor.language != "sql") {
+            throw std::runtime_error("runnable is only valid on a sql block");
+        }
+        if (descriptor.id.empty()) {
+            throw std::runtime_error("runnable fence requires a non-empty id");
+        }
+        const bool expects_error =
+            has_expect && descriptor.expectation == sql_expectation::error;
+        if (expects_error && !has_sqlstate) {
+            throw std::runtime_error("expect=error requires a sqlstate attribute");
+        }
+        if (!expects_error && has_sqlstate) {
+            throw std::runtime_error("sqlstate is only valid with expect=error");
+        }
+    }
+    return descriptor;
+}
 
 /// @brief Parses a runnable-SQL fence info string, or nullopt when not runnable.
 /// @param info Full fence info such as `sql runnable id=x timeout=10s`.
 /// @return Validated attributes, or nullopt for a non-runnable code fence.
 [[nodiscard]] std::optional<runnable_fence_attributes> parse_runnable_fence(
     std::string_view info) {
-    const std::vector<std::string_view> tokens = split_whitespace(info);
-    if (tokens.size() < 2 || tokens[0] != "sql" || tokens[1] != "runnable") {
+    const fence_descriptor descriptor = parse_fence_info(info);
+    if (descriptor.kind != fence_kind::runnable) {
         return std::nullopt;
     }
-    runnable_fence_attributes attributes;
-    bool has_id = false;
-    bool has_expect = false;
-    bool has_sqlstate = false;
-    for (std::size_t index = 2; index < tokens.size(); ++index) {
-        const std::string_view token = tokens[index];
-        const std::size_t equals = token.find('=');
-        if (equals == std::string_view::npos) {
-            throw std::runtime_error("runnable fence attribute must be key=value: "
-                                     + std::string(token));
-        }
-        const std::string_view key = token.substr(0, equals);
-        const std::string_view value = token.substr(equals + 1);
-        if (key == "id") {
-            attributes.local_id = std::string(value);
-            has_id = true;
-        } else if (key == "timeout") {
-            attributes.timeout = parse_timeout(value);
-        } else if (key == "expect") {
-            if (value == "success") {
-                attributes.expectation = sql_expectation::success;
-            } else if (value == "error") {
-                attributes.expectation = sql_expectation::error;
-            } else {
-                throw std::runtime_error("runnable expect must be success or error");
-            }
-            has_expect = true;
-        } else if (key == "sqlstate") {
-            if (!is_valid_sqlstate(value)) {
-                throw std::runtime_error("runnable sqlstate must be 5 uppercase "
-                                         "alphanumerics other than 00000");
-            }
-            attributes.expected_sqlstate = std::string(value);
-            has_sqlstate = true;
-        } else {
-            throw std::runtime_error("unknown runnable fence attribute: "
-                                     + std::string(key));
-        }
-    }
-    if (!has_id || attributes.local_id.empty()) {
-        throw std::runtime_error("runnable fence requires a non-empty id");
-    }
-    const bool expects_error =
-        has_expect && attributes.expectation == sql_expectation::error;
-    if (expects_error && !has_sqlstate) {
-        throw std::runtime_error("expect=error requires a sqlstate attribute");
-    }
-    if (!expects_error && has_sqlstate) {
-        throw std::runtime_error("sqlstate is only valid with expect=error");
-    }
-    return attributes;
+    return runnable_fence_attributes{
+        .local_id = descriptor.id,
+        .timeout = descriptor.timeout,
+        .expectation = descriptor.expectation,
+        .expected_sqlstate = descriptor.expected_sqlstate};
 }
 
 /// @brief The setup/visible/teardown text of a runnable example (§10.7).

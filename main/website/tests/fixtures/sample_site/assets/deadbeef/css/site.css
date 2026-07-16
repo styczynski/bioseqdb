@@ -1,0 +1,8 @@
+/* Minimal placeholder stylesheet for the browser-test fixture. The real site
+   ships the audited design system under static/css/site.css; the browser test
+   only needs a same-origin stylesheet to load without a console error, so this
+   file is intentionally tiny. */
+:root { color-scheme: dark; }
+body { font-family: system-ui, sans-serif; margin: 0; }
+[role="tabpanel"][hidden] { display: none; }
+.skip-link { position: absolute; left: -999px; }

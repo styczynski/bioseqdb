@@ -1,0 +1,16 @@
+# Top-level Python pins for the generated-site validation/browser-test
+# workstream (§4.4, §20.7). These are build-and-test-only dependencies: no
+# production page or runtime depends on Python or Playwright.
+#
+# Compile the fully transitive, hash-locked requirements.lock from this file:
+#
+#     pip-compile --generate-hashes --output-file=requirements.lock requirements.in
+#
+# and install it into <build>/website/venv with:
+#
+#     pip install --require-hashes -r requirements.lock
+#
+# Playwright's locked Chromium build is provisioned separately into
+# <build>/website/playwright-browsers via `playwright install chromium`.
+html5lib==1.1
+playwright==1.52.0
