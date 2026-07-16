@@ -237,6 +237,14 @@ struct html_writer {
                 append_escaped_attribute(out, language.prism_class);
                 out.push_back('"');
             }
+            // §12.6: generator-resolved non-overlapping source ranges the client
+            // decorator wraps in entity links after Prism completes.
+            const std::string_view entity_ranges = attribute_or(node, "entity_ranges", "");
+            if (!entity_ranges.empty()) {
+                out += " data-entity-ranges=\"";
+                append_escaped_attribute(out, entity_ranges);
+                out.push_back('"');
+            }
             out.push_back('>');
             if (spans.empty()) {
                 append_escaped_text(out, node.text);

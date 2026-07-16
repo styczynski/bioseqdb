@@ -201,6 +201,21 @@ def _exercise_annotations(page) -> None:
     _check(nums.count() == count, "each callout card must carry a number badge")
 
 
+def _exercise_code_entities(page) -> None:
+    """If a code block carries entity-range metadata (§12.6), verify the client
+    decorator wrapped in-code entity links without altering the source text."""
+    code = page.locator("pre code[data-entity-ranges]").first
+    if code.count() == 0:
+        return
+    refs = code.locator("a.entity-ref[data-entity-id]")
+    _check(refs.count() > 0,
+           "code has entity-range metadata but the decorator added no entity link")
+    _check(bool(refs.first.get_attribute("href")), "code entity-ref missing href")
+    text = code.text_content() or ""
+    _check("bioseq.len" in text,
+           "decoration altered the code source text (must only wrap, never rewrite)")
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -248,6 +263,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_tooltip(page)
                 _exercise_copy(page)
                 _exercise_annotations(page)
+                _exercise_code_entities(page)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

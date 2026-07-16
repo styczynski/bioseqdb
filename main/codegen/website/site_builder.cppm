@@ -1632,7 +1632,7 @@ void run_website_reference_smoke() {
            "entity= carries a signature containing a comma as one value");
     const auto is_fatal = [](std::string_view info) {
         try {
-            parse_fence_info(info);
+            static_cast<void>(parse_fence_info(info));
         } catch (const std::exception&) {
             return true;
         }
@@ -2228,6 +2228,98 @@ void rewrite_entity_link_routes(
     }
 }
 
+// Minimal JSON string-body escaper for the entity-ranges data attribute payload.
+[[nodiscard]] std::string json_escape(std::string_view text) {
+    std::string out;
+    for (const char character : text) {
+        switch (character) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default: out.push_back(character); break;
+        }
+    }
+    return out;
+}
+
+// Resolves each displayed block's `entity="<canonical-id>"` fence attributes into
+// non-overlapping source-text ranges (§12.6). A listed id must exist and its
+// qualified spelling must occur exactly once in the block source (absent or
+// ambiguous is fatal); overlapping ranges are fatal. The ranges are emitted as a
+// data attribute the client decorator wraps in entity links after Prism, so copied
+// source and textContent are unchanged.
+void decorate_code_entity_ranges(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& route_by_id,
+    const std::map<std::string, std::string, std::less<>>& qualified_by_id,
+    const std::string& tooltip_url,
+    const std::string& where) {
+    struct code_range {
+        std::size_t start;
+        std::size_t len;
+        std::string id;
+        std::string route;
+    };
+    for (document_node& node : nodes) {
+        if (node.kind == document_node_kind::code_block) {
+            const auto info = node.attributes.find("info");
+            if (info != node.attributes.end() && !info->second.empty()) {
+                const fence_descriptor fence = parse_fence_info(info->second);
+                std::vector<code_range> ranges;
+                for (const std::string& id : fence.entities) {
+                    const auto qualified = qualified_by_id.find(id);
+                    if (qualified == qualified_by_id.end()) {
+                        throw std::runtime_error("code entity '" + id
+                            + "' does not exist in " + where);
+                    }
+                    const std::string& spelling = qualified->second;
+                    const std::size_t first = node.text.find(spelling);
+                    if (spelling.empty() || first == std::string::npos) {
+                        throw std::runtime_error("code entity spelling '" + spelling
+                            + "' is not present in the block in " + where);
+                    }
+                    if (node.text.find(spelling, first + 1) != std::string::npos) {
+                        throw std::runtime_error("code entity spelling '" + spelling
+                            + "' is ambiguous (appears more than once) in " + where);
+                    }
+                    const auto route = route_by_id.find(id);
+                    ranges.push_back(code_range{first, spelling.size(), id,
+                        route != route_by_id.end() ? route->second : std::string()});
+                }
+                if (!ranges.empty()) {
+                    std::ranges::sort(ranges, [](const code_range& lhs,
+                                                 const code_range& rhs) {
+                        return lhs.start < rhs.start;
+                    });
+                    for (std::size_t index = 1; index < ranges.size(); ++index) {
+                        if (ranges[index].start
+                            < ranges[index - 1].start + ranges[index - 1].len) {
+                            throw std::runtime_error("code entity ranges overlap in " + where);
+                        }
+                    }
+                    std::string json = "[";
+                    for (std::size_t index = 0; index < ranges.size(); ++index) {
+                        if (index != 0) {
+                            json += ",";
+                        }
+                        json += "{\"start\":" + std::to_string(ranges[index].start)
+                            + ",\"len\":" + std::to_string(ranges[index].len)
+                            + ",\"id\":\"" + json_escape(ranges[index].id) + "\""
+                            + ",\"route\":\"" + json_escape(ranges[index].route) + "\""
+                            + ",\"tooltip\":\"" + json_escape(tooltip_url) + "\"}";
+                    }
+                    json += "]";
+                    node.attributes["entity_ranges"] = std::move(json);
+                }
+            }
+        }
+        decorate_code_entity_ranges(node.children, route_by_id, qualified_by_id,
+                                    tooltip_url, where);
+    }
+}
+
 /// @brief Renders a resolved site model into an owner-marked staging tree (§14, §16).
 ///
 /// Consumes only the database-independent `site_model` plus the site config, the
@@ -2392,8 +2484,10 @@ void rewrite_entity_link_routes(
     std::vector<documented_entity> all_entities = cpp_entities;
     all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
     std::map<std::string, std::string, std::less<>> route_by_id;
+    std::map<std::string, std::string, std::less<>> qualified_by_id;
     for (const documented_entity& entity : all_entities) {
         route_by_id.emplace(entity.canonical_id, entity.route_path);
+        qualified_by_id.emplace(entity.canonical_id, entity.qualified_name);
     }
 
     // Bind each overload-group's members to their identity signature + base-aware
@@ -2522,6 +2616,8 @@ void rewrite_entity_link_routes(
             version + "/tutorials/" + item.metadata.slug + "/index.html";
         std::vector<document_node> body_nodes = item.content;
         rewrite_entity_link_routes(body_nodes, route_by_id, tooltip_url);
+        decorate_code_entity_ranges(body_nodes, route_by_id, qualified_by_id,
+                                    tooltip_url, item.metadata.slug);
         const std::string body = render_document_html(body_nodes);
         std::string page = "{\"title\":" + json_text(item.metadata.title)
             + ",\"description\":" + json_text(item.metadata.description)

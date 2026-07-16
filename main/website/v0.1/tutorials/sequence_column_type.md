@@ -38,7 +38,7 @@ with their length and a per-symbol count. Use [[sql:bioseq.len]] for
 the length in symbol units and [[sql:bioseq.symbol_count]] to
 count occurrences of one symbol.
 
-```sql runnable id=sequence_roundtrip timeout=10s
+```sql runnable id=sequence_roundtrip timeout=10s entity="sql:function:bioseq.len(bioseq.seq)" entity="sql:function:bioseq.symbol_count(bioseq.seq,text)"
 -- bioseq:setup
 CREATE TABLE tutorial_reads (
     id integer PRIMARY KEY,
