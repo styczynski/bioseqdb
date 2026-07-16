@@ -54,10 +54,66 @@ namespace {
     return constraints;
 }
 
+[[nodiscard]] nlohmann::json zero_format6_reader_evidence(
+        const std::int64_t execution_id,
+        const std::int64_t backend_pid,
+        const std::int64_t database_oid,
+        const std::int64_t recompute_calls = 0) {
+    return nlohmann::json{
+        {"schema", "bioseq.format6_reader_evidence"},
+        {"version", 1},
+        {"execution_id", execution_id},
+        {"backend_pid", backend_pid},
+        {"database_oid", database_oid},
+        {"format_version", 0},
+        {"sessions", 0},
+        {"generation_id", 0},
+        {"source_identity", "00000000000000000000000000000000"},
+        {"source_content_crc64", "0000000000000000"},
+        {"compatibility_digest", std::string(64, '0')},
+        {"directory_rows", 0},
+        {"directory_bytes", 0},
+        {"control_rows", 0},
+        {"control_bytes", 0},
+        {"posting_rows", 0},
+        {"posting_bytes", 0},
+        {"directory_row_crc_receipts", 0},
+        {"directory_stream_crc_receipts", 0},
+        {"control_row_crc_receipts", 0},
+        {"control_block_crc_receipts", 0},
+        {"control_semantic_receipts", 0},
+        {"posting_row_crc_receipts", 0},
+        {"posting_ranges_delivered", 0},
+        {"posting_range_crc_receipts", 0},
+        {"posting_semantic_receipts", 0},
+        {"authorized_posting_bytes", 0},
+        {"query_count", 0},
+        {"selected_block_count", 0},
+        {"accepted_hash_count", 0},
+        {"retained_position_count", 0},
+        {"directory_phase_peak_bytes", 0},
+        {"control_phase_peak_bytes", 0},
+        {"posting_phase_peak_bytes", 0},
+        {"peak_admitted_bytes", 0},
+        {"retained_owner_bytes", 0},
+        {"admitted_bytes", 0},
+        {"legacy_assembly_calls", 0},
+        {"legacy_globalize_calls", 0},
+        {"legacy_rebase_calls", 0},
+        {"recompute_calls", recompute_calls},
+        {"generic_source_fallback_calls", 0},
+        {"backend_fallbacks", 0},
+        {"failures", 0},
+        {"saturated", false},
+        {"operational_identity_conflict", false},
+        {"stats_saturated", false},
+    };
+}
+
 }  // namespace
 
-TEST_CASE("E2E raw samples pin Format-5 memory evidence v2",
-          "[bench_e2e][raw-samples][format5][memory-evidence]") {
+TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
+          "[bench_e2e][raw-samples][format5][format6]") {
     const nlohmann::json memory_evidence{
         {"schema", "bioseq.format5_reader_memory_evidence"},
         {"version", 2},
@@ -94,6 +150,9 @@ TEST_CASE("E2E raw samples pin Format-5 memory evidence v2",
     output.persisted_gpu_operation_evidence_schema_valid = 1;
     output.persisted_gpu_operation_evidence = nlohmann::json::object();
     output.format5_reader_memory_evidence = memory_evidence;
+    const nlohmann::json format6_evidence =
+        zero_format6_reader_evidence(41, 42, 43);
+    output.format6_reader_evidence = format6_evidence;
     output.alignment_snapshot_rows.resize(
         E2eOutput::kAlignmentSnapshotRowCount);
     for (auto& row : output.alignment_snapshot_rows) {
@@ -106,7 +165,7 @@ TEST_CASE("E2E raw samples pin Format-5 memory evidence v2",
         serialized, nullptr, /*allow_exceptions=*/false);
     REQUIRE_FALSE(payload.is_discarded());
     REQUIRE(payload.at("payload_schema") == "bioseq.e2e.raw-sample");
-    REQUIRE(payload.at("payload_schema_version") == 5);
+    REQUIRE(payload.at("payload_schema_version") == 6);
 
     const auto& nested = payload.at("attestation").at(
         "format5_reader_memory_evidence");
@@ -151,10 +210,44 @@ TEST_CASE("E2E raw samples pin Format-5 memory evidence v2",
             == "bioseq.format5_reader_memory_evidence");
     REQUIRE(nested.at("version") == 2);
     REQUIRE(nested == memory_evidence);
+    const auto& format6_nested = payload.at("attestation").at(
+        "format6_reader_evidence");
+    REQUIRE(format6_nested.size() == 47);
+    REQUIRE(format6_nested.at("schema")
+            == "bioseq.format6_reader_evidence");
+    REQUIRE(format6_nested.at("version") == 1);
+    REQUIRE(format6_nested == format6_evidence);
 }
 
 TEST_CASE("E2E input setup follows exact expanded execution tuples",
-          "[bench_e2e][input][selection][just-index][format5]") {
+          "[bench_e2e][input][selection][just-index][format6]") {
+    const auto format6_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "bench_e2e_format6_simd_minimap2_just_index_focus.json";
+    const auto format6_config = load_e2e_contract_config(format6_path);
+    const auto format6_constraints = exact_e2e_execution_constraints(
+        format6_config, "bench_e2e");
+    REQUIRE(format6_constraints.execution_tuples.size() == 3);
+    REQUIRE(format6_config.at("test_cases")
+                .at("E2E_2GBP_DNA4").at("data")
+                .at("alphabet") == "dna4");
+    REQUIRE(format6_config.at("test_cases")
+                .at("E2E_2GBP_DNA4").at("data")
+                .at("kmer_size") == 15);
+    REQUIRE(format6_config.at("test_cases")
+                .at("E2E_2GBP_DNA4").at("data")
+                .at("window_size") == 10);
+    REQUIRE(format6_config.at("bench_e2e").at("matrix").at("for")
+                .at("E2E_2GBP_DNA4") == 6);
+    const auto format6 =
+        e2e_just_index_setup_requirements(format6_constraints);
+    REQUIRE(format6.simd_per_fragment);
+    REQUIRE(format6.minimap2);
+    REQUIRE_FALSE(format6.scalar_per_fragment);
+    REQUIRE_FALSE(format6.scalar_per_sequence);
+    REQUIRE_FALSE(format6.simd_per_sequence);
+    REQUIRE_FALSE(format6.gpu_per_fragment);
+    REQUIRE_FALSE(format6.gpu_per_sequence);
+
     const auto focus_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
         / "bench_e2e_format5_simd_minimap2_just_index_focus.json";
     const auto focus_config = load_e2e_contract_config(focus_path);

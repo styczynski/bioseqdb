@@ -514,6 +514,160 @@ inline void merge_report_once_identity(
     identity_conflict = true;
 }
 
+/// Exact Format-6 cold-reader receipt kept out of the frozen alignment-stats
+/// column ABI. Identity fields are merged only when identical; counters use
+/// the same saturating arithmetic as the rest of the operational snapshot.
+struct Format6ReaderOperationalEvidence {
+    std::uint64_t format_version = 0;
+    std::uint64_t sessions = 0;
+    bool identity_present = false;
+    std::uint64_t generation_id = 0;
+    std::array<std::byte, 16> source_identity{};
+    std::uint64_t source_content_crc64 = 0;
+    std::array<std::byte, 32> compatibility_digest{};
+    std::uint64_t directory_rows = 0;
+    std::uint64_t directory_bytes = 0;
+    std::uint64_t control_rows = 0;
+    std::uint64_t control_bytes = 0;
+    std::uint64_t posting_rows = 0;
+    std::uint64_t posting_bytes = 0;
+    std::uint64_t directory_row_crc_receipts = 0;
+    std::uint64_t directory_stream_crc_receipts = 0;
+    std::uint64_t control_row_crc_receipts = 0;
+    std::uint64_t control_block_crc_receipts = 0;
+    std::uint64_t control_semantic_receipts = 0;
+    std::uint64_t posting_row_crc_receipts = 0;
+    std::uint64_t posting_ranges_delivered = 0;
+    std::uint64_t posting_range_crc_receipts = 0;
+    std::uint64_t posting_semantic_receipts = 0;
+    std::uint64_t authorized_posting_bytes = 0;
+    std::uint64_t query_count = 0;
+    std::uint64_t selected_block_count = 0;
+    std::uint64_t accepted_hash_count = 0;
+    std::uint64_t retained_position_count = 0;
+    std::uint64_t directory_phase_peak_bytes = 0;
+    std::uint64_t control_phase_peak_bytes = 0;
+    std::uint64_t posting_phase_peak_bytes = 0;
+    std::uint64_t peak_admitted_bytes = 0;
+    bool owner_bytes_present = false;
+    std::uint64_t retained_owner_bytes = 0;
+    std::uint64_t admitted_bytes = 0;
+    std::uint64_t generic_source_fallback_calls = 0;
+    std::uint64_t failures = 0;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool operator==(
+        const Format6ReaderOperationalEvidence&) const noexcept = default;
+
+    [[nodiscard]] bool merge(
+            const Format6ReaderOperationalEvidence& rhs,
+            bool& identity_conflict) noexcept {
+        bool overflow = saturated || rhs.saturated;
+        const auto add = [&overflow](
+                std::uint64_t& destination,
+                const std::uint64_t increment) noexcept {
+            overflow = merge_counter(destination, increment) || overflow;
+        };
+        if (rhs.format_version != 0u) {
+            if (format_version == 0u) {
+                format_version = rhs.format_version;
+            } else if (format_version != rhs.format_version) {
+                identity_conflict = true;
+            }
+        }
+        const bool destination_identity_payload =
+            generation_id != 0u
+            || source_identity != std::array<std::byte, 16>{}
+            || source_content_crc64 != 0u
+            || compatibility_digest != std::array<std::byte, 32>{};
+        const bool incoming_identity_payload =
+            rhs.generation_id != 0u
+            || rhs.source_identity != std::array<std::byte, 16>{}
+            || rhs.source_content_crc64 != 0u
+            || rhs.compatibility_digest != std::array<std::byte, 32>{};
+        if ((!identity_present && destination_identity_payload)
+            || (!rhs.identity_present && incoming_identity_payload)) {
+            identity_conflict = true;
+        }
+        if (rhs.identity_present) {
+            if (!identity_present) {
+                identity_present = true;
+                generation_id = rhs.generation_id;
+                source_identity = rhs.source_identity;
+                source_content_crc64 = rhs.source_content_crc64;
+                compatibility_digest = rhs.compatibility_digest;
+            } else if (generation_id != rhs.generation_id
+                || source_identity != rhs.source_identity
+                || source_content_crc64 != rhs.source_content_crc64
+                || compatibility_digest != rhs.compatibility_digest) {
+                identity_conflict = true;
+            }
+        }
+        const bool destination_owner_payload =
+            retained_owner_bytes != 0u || admitted_bytes != 0u;
+        const bool incoming_owner_payload =
+            rhs.retained_owner_bytes != 0u || rhs.admitted_bytes != 0u;
+        if ((!owner_bytes_present && destination_owner_payload)
+            || (!rhs.owner_bytes_present && incoming_owner_payload)) {
+            identity_conflict = true;
+        }
+        if (rhs.owner_bytes_present) {
+            if (!owner_bytes_present) {
+                owner_bytes_present = true;
+                retained_owner_bytes = rhs.retained_owner_bytes;
+                admitted_bytes = rhs.admitted_bytes;
+            } else if (retained_owner_bytes != rhs.retained_owner_bytes
+                || admitted_bytes != rhs.admitted_bytes) {
+                identity_conflict = true;
+            }
+        }
+        add(sessions, rhs.sessions);
+        add(directory_rows, rhs.directory_rows);
+        add(directory_bytes, rhs.directory_bytes);
+        add(control_rows, rhs.control_rows);
+        add(control_bytes, rhs.control_bytes);
+        add(posting_rows, rhs.posting_rows);
+        add(posting_bytes, rhs.posting_bytes);
+        add(directory_row_crc_receipts,
+            rhs.directory_row_crc_receipts);
+        add(directory_stream_crc_receipts,
+            rhs.directory_stream_crc_receipts);
+        add(control_row_crc_receipts, rhs.control_row_crc_receipts);
+        add(control_block_crc_receipts,
+            rhs.control_block_crc_receipts);
+        add(control_semantic_receipts,
+            rhs.control_semantic_receipts);
+        add(posting_row_crc_receipts, rhs.posting_row_crc_receipts);
+        add(posting_ranges_delivered, rhs.posting_ranges_delivered);
+        add(posting_range_crc_receipts,
+            rhs.posting_range_crc_receipts);
+        add(posting_semantic_receipts,
+            rhs.posting_semantic_receipts);
+        add(authorized_posting_bytes, rhs.authorized_posting_bytes);
+        add(query_count, rhs.query_count);
+        add(selected_block_count, rhs.selected_block_count);
+        add(accepted_hash_count, rhs.accepted_hash_count);
+        add(retained_position_count, rhs.retained_position_count);
+        directory_phase_peak_bytes = std::max(
+            directory_phase_peak_bytes,
+            rhs.directory_phase_peak_bytes);
+        control_phase_peak_bytes = std::max(
+            control_phase_peak_bytes,
+            rhs.control_phase_peak_bytes);
+        posting_phase_peak_bytes = std::max(
+            posting_phase_peak_bytes,
+            rhs.posting_phase_peak_bytes);
+        peak_admitted_bytes = std::max(
+            peak_admitted_bytes,
+            rhs.peak_admitted_bytes);
+        add(generic_source_fallback_calls,
+            rhs.generic_source_fallback_calls);
+        add(failures, rhs.failures);
+        saturated = overflow;
+        return overflow;
+    }
+};
+
 /// Once-per-buffer operational counters and report-once identities.
 struct PipelineOperationalStats {
     std::array<PipelineStageTiming, pipeline_stage_count> timing{};
@@ -600,6 +754,7 @@ struct PipelineOperationalStats {
     std::uint64_t format5_reader_retained_layout_checks = 0;
     std::uint64_t format5_reader_retained_layout_failures = 0;
     bool format5_reader_memory_evidence_saturated = false;
+    Format6ReaderOperationalEvidence format6_reader_evidence{};
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
     // authenticity witness use has_nthash_vector_activity() instead of
@@ -884,6 +1039,9 @@ struct PipelineOperationalStats {
         format5_reader_memory_evidence_saturated =
             format5_reader_memory_evidence_saturated
             || rhs.format5_reader_memory_evidence_saturated;
+        saturated = format6_reader_evidence.merge(
+            rhs.format6_reader_evidence,
+            operational_identity_conflict) || saturated;
         add(nthash_vector_batches, rhs.nthash_vector_batches);
         add(nthash_resident_vector_stream_kernel_calls,
             rhs.nthash_resident_vector_stream_kernel_calls);
@@ -9021,11 +9179,15 @@ template <class MinimizerT,
         target_minimizers = std::move(target_collector).extract_sketches_data();
     }
 
+    const std::uint64_t query_sketch_started_ns =
+        pipe::host_stage_now_ns();
     sketch_collector_t<MinimizerT> query_collector;
     const MinimizerSketchExecutionProof query_sketch_proof =
         sketch_into_collector<MinimizerT>(
         query_collector, query_seq, window_len, kmer_len, params);
     const auto query_minimizers = std::move(query_collector).extract_sketches_data();
+    const std::uint64_t query_sketch_host_wall_ns =
+        pipe::elapsed_host_stage_ns(query_sketch_started_ns);
     const bool query_route_valid =
         minimizer_sketch_proof_matches_selected_route(
             params.minimizer_algorithm, query_sketch_proof);
@@ -9055,6 +9217,7 @@ template <class MinimizerT,
         minimap2_port<MinimizerT, QueryRange, TargetRange, Scanner>(
         query_seq, target_seq, query_minimizers,
         std::move(owned_target_minimizers), params);
+    result.record_query_sketch_host_time(query_sketch_host_wall_ns);
     record_minimizer_sketch_execution_proof(
         result, query_sketch_proof, MinimizerSketchRole::query);
     if (!phase_c_gpu_index) {

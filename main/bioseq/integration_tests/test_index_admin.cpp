@@ -82,6 +82,158 @@ constexpr std::string_view kTable = "test_index_admin_t";
         table, table));
 }
 
+[[nodiscard]] long long require_ready_format6_generation(
+        const connection_test_context& ctx,
+        std::string_view table,
+        std::string_view index_name,
+        long long sequence_rowno,
+        long long target_bp,
+        long long expected_scheme_id,
+        long long expected_scheme_version,
+        long long expected_producer_id) {
+    const row_t inspected = query_one(ctx, fmt::format(
+        "WITH inspected AS ("
+        " SELECT bioseq.inspect_ready_minimizer_format6_generation("
+        "  '{}'::regclass, '{}', {}) AS j"
+        ") "
+        "SELECT "
+        " j->>'format_version',"
+        " j->'head'->>'generation_id',"
+        " j->'source'->>'sequence_rowno',"
+        " j->'source'->>'total_bp_size',"
+        " j->'manifest'->'compatibility'->>'hash_scheme_id',"
+        " j->'manifest'->'compatibility'->>'hash_scheme_version',"
+        " j->'manifest'->'compatibility'->>'producer_backend_id',"
+        " j->'manifest'->'compatibility'->>'producer_backend_version',"
+        " CASE WHEN "
+        "  j->>'schema'='bioseq.ready_minimizer_format6_generation' "
+        "  AND j->>'version'='1' "
+        "  AND (j->>'database_oid')::bigint>0 "
+        "  AND (j->>'main_relfilenode')::bigint>0 "
+        "  AND (j->>'column_attno')::bigint>0 "
+        "  AND j->>'index_name'='{}' "
+        "  AND j->>'query_key'=j->'source'->>'sequence_rowno' "
+        "  AND (j->'source'->>'locator_version')::bigint=3 "
+        "  AND (j->'source'->>'num_fragments')::bigint>0 "
+        "  AND (j->'source'->>'source_epoch')::bigint>0 "
+        "  AND (j->'source'->>'alphabet_code')::bigint=0 "
+        "  AND (j->'source'->>'storage_unit_byte_width')::bigint=8 "
+        "  AND j->'head'->>'query_key'=j->>'query_key' "
+        "  AND j->'head'->>'source_epoch'="
+        "      j->'source'->>'source_epoch' "
+        "  AND j->'manifest'->>'source_epoch'="
+        "      j->'source'->>'source_epoch' "
+        "  AND (j->'head'->>'generation_id')::bigint>0 "
+        "  AND j->'head'->>'generation_id'="
+        "      j->'manifest'->>'generation_id' "
+        "  AND j->'source'->>'source_identity'="
+        "      j->'head'->>'source_identity' "
+        "  AND j->'head'->>'source_identity'="
+        "      j->'manifest'->>'source_identity' "
+        "  AND length(j->'source'->>'source_identity')=32 "
+        "  AND j->'source'->>'source_identity'~'^[0-9a-f]+$' "
+        "  AND j->'source'->>'source_content_crc64'="
+        "      j->'head'->>'source_content_crc64' "
+        "  AND j->'head'->>'source_content_crc64'="
+        "      j->'manifest'->>'source_content_crc64' "
+        "  AND length(j->'source'->>'source_content_crc64')=16 "
+        "  AND j->'source'->>'source_content_crc64'~'^[0-9a-f]+$' "
+        "  AND j->'head'->>'compatibility_digest'="
+        "      j->'manifest'->>'compatibility_digest' "
+        "  AND length(j->'head'->>'compatibility_digest')=64 "
+        "  AND j->'head'->>'compatibility_digest'~'^[0-9a-f]+$' "
+        "  AND length(j->'head'->>'manifest_address_bound_row_crc64')=16 "
+        "  AND length(j->'head'->>'manifest_payload_crc64')=16 "
+        "  AND length(j->'head'->>'head_crc64')=16 "
+        "  AND length(j->'manifest'->>'authenticated_directory_crc64')=16 "
+        "  AND length(j->'manifest'->>'generation_crc64')=16 "
+        "  AND (j->'head'->>'dense_seal_present')::boolean=false "
+        "  AND j->'manifest'->>'target_length'="
+        "      j->'source'->>'total_bp_size' "
+        "  AND (j->'manifest'->>'unique_hash_count')::bigint>0 "
+        "  AND (j->'manifest'->>'total_posting_count')::bigint>0 "
+        "  AND (j->'manifest'->>'total_control_bytes')::bigint>0 "
+        "  AND (j->'manifest'->>'total_posting_bytes')::bigint>0 "
+        "  AND (j->'manifest'->>'directory_entry_count')::bigint>0 "
+        "  AND (j->'manifest'->'compatibility'->>'alphabet_code')::bigint=0 "
+        "  AND (j->'manifest'->'compatibility'->>'kmer_size')::bigint=15 "
+        "  AND (j->'manifest'->'compatibility'->>'window_size')::bigint=10 "
+        "  AND (j->'manifest'->'compatibility'->>'hash_width_bytes')::bigint=4 "
+        "  AND (j->'manifest'->'compatibility'->>"
+        "       'stored_posting_width_bytes')::bigint=4 "
+        "  AND (j->'manifest'->'compatibility'->>"
+        "       'position_encoding_version')::bigint=1 "
+        "  AND (j->'manifest'->'compatibility'->>"
+        "       'hash_semantics_version')::bigint=1 "
+        "  AND (j->'manifest'->'compatibility'->>"
+        "       'count_semantics_version')::bigint=1 "
+        "  AND (j->'manifest'->'compatibility'->>"
+        "       'producer_backend_version')::bigint=1 "
+        "  AND (j->'manifest'->'compatibility'->>"
+        "       'controls_per_block')::bigint=4096 "
+        "  AND (j->'manifest'->'compatibility'->>'hash_seed')::bigint=0 "
+        "  AND (j->'metadata'->>'head_rows')::bigint=1 "
+        "  AND (j->'metadata'->>'head_bytes')::bigint=224 "
+        "  AND (j->'metadata'->>'manifest_rows')::bigint=1 "
+        "  AND (j->'metadata'->>'manifest_bytes')::bigint=336 "
+        "  AND jsonb_array_length(j->'streams')=3 "
+        "  AND j->'streams'->0->>'kind'='directory' "
+        "  AND j->'streams'->1->>'kind'='controls' "
+        "  AND j->'streams'->2->>'kind'='postings' "
+        "  AND NOT EXISTS ("
+        "   SELECT 1 FROM jsonb_array_elements(j->'streams') AS s(value) "
+        "   WHERE (s.value->>'element_count')::bigint<=0 "
+        "      OR (s.value->>'logical_bytes')::bigint<=0 "
+        "      OR (s.value->>'row_count')::bigint"
+        "       <>((s.value->>'logical_bytes')::bigint+8063)/8064 "
+        "      OR (s.value->>'row_count')::bigint"
+        "       <>(s.value->>'exact_catalog_rows')::bigint "
+        "      OR (s.value->>'logical_bytes')::bigint"
+        "       <>(s.value->>'exact_catalog_bytes')::bigint "
+        "      OR s.value->>'stream_crc64'"
+        "       <>s.value->>'exact_catalog_stream_crc64' "
+        "      OR length(s.value->>'stream_crc64')<>16 "
+        "      OR s.value->>'stream_crc64'!~'^[0-9a-f]+$'"
+        "  ) "
+        "  AND (j->'streams'->0->>'logical_bytes')::bigint="
+        "      (j->'streams'->0->>'element_count')::bigint*80 "
+        "  AND j->'streams'->0->>'element_count'="
+        "      j->'manifest'->>'directory_entry_count' "
+        "  AND j->'streams'->0->>'stream_crc64'="
+        "      j->'manifest'->>'authenticated_directory_crc64' "
+        "  AND j->'streams'->1->>'element_count'="
+        "      j->'manifest'->>'unique_hash_count' "
+        "  AND j->'streams'->1->>'logical_bytes'="
+        "      j->'manifest'->>'total_control_bytes' "
+        "  AND j->'streams'->2->>'element_count'="
+        "      j->'manifest'->>'total_posting_count' "
+        "  AND j->'streams'->2->>'logical_bytes'="
+        "      j->'manifest'->>'total_posting_bytes' "
+        "  AND (j->'streams'->2->>'logical_bytes')::bigint="
+        "      (j->'streams'->2->>'element_count')::bigint*"
+        "      (j->'manifest'->'compatibility'->>"
+        "       'stored_posting_width_bytes')::bigint "
+        " THEN '1' ELSE '0' END "
+        "FROM inspected;",
+        table, index_name, sequence_rowno, index_name));
+    REQUIRE(inspected.size() == 9);
+    for (const auto& field : inspected) {
+        REQUIRE(field.has_value());
+    }
+    REQUIRE(inspected[0].value() == "6");
+    const long long generation_id = std::stoll(inspected[1].value());
+    REQUIRE(generation_id > 0);
+    REQUIRE(inspected[2].value() == std::to_string(sequence_rowno));
+    REQUIRE(inspected[3].value() == std::to_string(target_bp));
+    REQUIRE(inspected[4].value() == std::to_string(expected_scheme_id));
+    REQUIRE(inspected[5].value()
+            == std::to_string(expected_scheme_version));
+    REQUIRE(inspected[6].value() == std::to_string(expected_producer_id));
+    REQUIRE(inspected[7].value() == "1");
+    REQUIRE(inspected[8].value() == "1");
+    return generation_id;
+}
+
 void require_bioseq_shared_preload(const connection_test_context& ctx) {
     const auto proof = query_one(ctx,
         "SELECT EXISTS ("
@@ -2922,8 +3074,8 @@ TEST_CASE("DOC0371 revision-3 read session fails closed and restores backend res
     exec_sqlf(ctx, "DROP TABLE bioseq_internal.{};", sidecar);
 }
 
-TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopenable Format 5",
-		  "[index_admin][update][format5][locator][reopen]"
+TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopenable Format 6",
+		  "[index_admin][update][format6][locator][reopen]"
 		  "[generation-publication]") {
     constexpr std::array<std::pair<std::string_view, std::string_view>, 2>
         cases{{
@@ -2958,34 +3110,22 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
             table, index_name)) == 1);
 
         // A distinct backend reopens the generation from PostgreSQL and
-        // validates the READY head, Format-5 manifest, source binding and
-        // complete directory without inheriting writer memory.
+        // validates the exact Format-6 identity, metadata and three stream
+        // equations without inheriting writer memory.
         connection_test_context reopened;
-        const row_t inspected = query_one(reopened, fmt::format(
-            "SELECT generation_id::text, source_identity, "
-            "source_content_checksum, compatibility_checksum, "
-            "kmer_size::text, window_size::text, "
-            "gpu_abi_version::text, total_bp_size::text "
-            "FROM bioseq.inspect_ready_minimizer_generation("
-            "'{}'::regclass, '{}', {});",
-            table, index_name, rowno));
-        REQUIRE(inspected.size() == 8);
-        REQUIRE(std::stoll(inspected[0].value()) > 0);
-        REQUIRE(inspected[1]->size() == 16);
-        REQUIRE(inspected[2]->size() == 16);
-        REQUIRE(inspected[3]->size() == 16);
-        REQUIRE(inspected[4].value() == "15");
-        REQUIRE(inspected[5].value() == "10");
-        REQUIRE(inspected[6].value() == "3");
-        REQUIRE(inspected[7].value() == "65565");
+        REQUIRE(require_ready_format6_generation(
+            reopened, table, index_name, rowno, 65'565,
+            /*expected_scheme_id=*/0,
+            /*expected_scheme_version=*/0,
+            /*expected_producer_id=*/1) > 0);
         REQUIRE(index_table_row_count(reopened, index_name, table) > 1);
     }
 }
 
-TEST_CASE("Format-5 replacement reuses its sidecar and retains the replaced generation",
+TEST_CASE("Format-6 replacement reuses its sidecar and retains the replaced generation",
           "[index_admin][generation-publication][replacement][oid][mvcc]"
-          "[format5]") {
-    constexpr std::string_view table = "format5_generation_replacement";
+          "[format6]") {
+    constexpr std::string_view table = "format6_generation_replacement";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
     exec_sql(ctx, "SET bioseq.index_async_persist = off;");
@@ -3007,11 +3147,11 @@ TEST_CASE("Format-5 replacement reuses its sidecar and retains the replaced gene
             "SELECT bioseq.update_index('{}'::regclass, "
             "'minimizers_per_fragment');",
             table)) == 1);
-        return query_scalar_int(ctx, fmt::format(
-            "SELECT generation_id FROM "
-            "bioseq.inspect_ready_minimizer_generation("
-            "'{}'::regclass,'minimizers_per_fragment',{});",
-            table, rowno));
+        return require_ready_format6_generation(
+            ctx, table, "minimizers_per_fragment", rowno, 65'565,
+            /*expected_scheme_id=*/0,
+            /*expected_scheme_version=*/0,
+            /*expected_producer_id=*/1);
     };
     const auto first_generation = rebuild();
     REQUIRE(first_generation > 0);
@@ -3058,8 +3198,8 @@ TEST_CASE("Format-5 replacement reuses its sidecar and retains the replaced gene
     REQUIRE(generations[3].value() == "1");
 }
 
-TEST_CASE("ordinary locator-backed Paper update publishes proof-bound Format 5 without fallback",
-		  "[index_admin][update][format5][locator][paper][route-proof]") {
+TEST_CASE("ordinary locator-backed Paper update publishes proof-bound Format 6 without fallback",
+		  "[index_admin][update][format6][locator][paper][route-proof]") {
     constexpr std::string_view table = "doc0371_update_ready_paper";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -3087,29 +3227,24 @@ TEST_CASE("ordinary locator-backed Paper update publishes proof-bound Format 5 w
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_fragment');",
         table)) == 1);
-    const row_t inspected = query_one(ctx, fmt::format(
-        "SELECT generation_id::text,gpu_abi_version::text,kmer_size::text,"
-        "window_size::text FROM bioseq.inspect_ready_minimizer_generation("
-        "'{}'::regclass,'minimizers_per_fragment',{});",
-        table, rowno));
-    REQUIRE(inspected.size() == 4);
-    REQUIRE(std::stoll(inspected[0].value()) > 0);
-	REQUIRE(inspected[1].value() == "3");
-	REQUIRE(inspected[2].value() == "15");
-	REQUIRE(inspected[3].value() == "10");
+    REQUIRE(require_ready_format6_generation(
+        ctx, table, "minimizers_per_fragment", rowno, 65'565,
+        /*expected_scheme_id=*/1,
+        /*expected_scheme_version=*/1,
+        /*expected_producer_id=*/3) > 0);
 	exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
 	const auto wrong_backend = sql_error(ctx, fmt::format(
-		"SELECT * FROM bioseq.inspect_ready_minimizer_generation("
+		"SELECT bioseq.inspect_ready_minimizer_format6_generation("
 		"'{}'::regclass,'minimizers_per_fragment',{});",
 		table, rowno));
 	REQUIRE(wrong_backend.contains(
-		"READY generation minimizer compatibility disagrees"));
+		"bioseq Format-6 inspection source/profile identity disagrees"));
 	REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 	exec_sql(ctx,
 		"SET bioseq.aligner.minimizer_algorithm = 'paper_nthash_simd';");
 	REQUIRE(query_scalar_int(ctx, fmt::format(
-		"SELECT count(*) FROM bioseq.inspect_ready_minimizer_generation("
-		"'{}'::regclass,'minimizers_per_fragment',{});",
+		"SELECT count(bioseq.inspect_ready_minimizer_format6_generation("
+		"'{}'::regclass,'minimizers_per_fragment',{}));",
 		table, rowno)) == 1);
 }
 
@@ -3166,8 +3301,8 @@ TEST_CASE("grouped32 persistence rejects asynchronous and INSERT-time legacy wri
     }
 }
 
-TEST_CASE("ordinary Format-5 replacement preserves its active generation when a locator source is corrupt",
-		  "[index_admin][update][format5][source-corruption][rollback]") {
+TEST_CASE("ordinary Format-6 replacement preserves its active generation when a locator source is corrupt",
+		  "[index_admin][update][format6][source-corruption][rollback]") {
     constexpr std::string_view table = "doc0371_update_source_rollback";
     auto ctx = fresh_context({table});
     exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -3189,6 +3324,11 @@ TEST_CASE("ordinary Format-5 replacement preserves its active generation when a 
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_fragment');",
         table)) == 1);
+    REQUIRE(require_ready_format6_generation(
+        ctx, table, "minimizers_per_fragment", rowno, 65'565,
+        /*expected_scheme_id=*/0,
+        /*expected_scheme_version=*/0,
+        /*expected_producer_id=*/1) > 0);
     const rowset_t sidecars = query_rows(ctx,
         "SELECT c.relname, c.oid::text FROM pg_class c "
         "JOIN pg_namespace n ON n.oid=c.relnamespace "

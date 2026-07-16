@@ -137,6 +137,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include <unistd.h>
@@ -566,15 +567,18 @@ Minimap2Params BatchProcessor::effective_params_for_pair(
 
 namespace {
 
-template <class Alphabet, std::size_t Width>
+template <class Alphabet, std::size_t Width, class DestinationValue>
 void append_cpu_prepared_query_sketch(
 		const pgseq_t& header,
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
-		std::vector<MinimapSketchData>& destination,
+		std::vector<DestinationValue>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes) {
+	static_assert(
+		std::is_same_v<DestinationValue, MinimapSketchData>
+		|| std::is_same_v<DestinationValue, std::uint32_t>);
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
@@ -637,11 +641,11 @@ void append_cpu_prepared_query_sketch(
 	if (required > destination.capacity()) {
 		const std::uint64_t old_destination_bytes =
 			bioseq::parallelism::saturating_mul(
-				destination.capacity(), sizeof(MinimapSketchData));
+				destination.capacity(), sizeof(DestinationValue));
 		const std::uint64_t allocation_headroom =
 			bioseq::parallelism::saturating_mul(
 				bioseq::parallelism::saturating_mul(
-					required, sizeof(MinimapSketchData)),
+					required, sizeof(DestinationValue)),
 				bioseq::parallelism::kVectorPreallocationHeadroomFactor);
 		const std::uint64_t peak = bioseq::parallelism::saturating_add(
 			retained_destination_bytes, allocation_headroom);
@@ -657,7 +661,7 @@ void append_cpu_prepared_query_sketch(
 		destination.reserve(required);
 		const std::uint64_t measured_destination_bytes =
 			bioseq::parallelism::saturating_mul(
-				destination.capacity(), sizeof(MinimapSketchData));
+				destination.capacity(), sizeof(DestinationValue));
 		if (measured_destination_bytes
 				== (std::numeric_limits<std::uint64_t>::max)()
 			|| measured_destination_bytes > allocation_headroom) {
@@ -672,11 +676,28 @@ void append_cpu_prepared_query_sketch(
 		}
 		destination_permit.shrink_to(retained_destination_bytes);
 	}
-	destination.insert(
-		destination.end(),
-		sketches.begin(), sketches.end());
+	if constexpr (std::is_same_v<DestinationValue, MinimapSketchData>) {
+		destination.insert(
+			destination.end(),
+			sketches.begin(), sketches.end());
+	} else {
+		for (const MinimapSketchData& minimizer : sketches) {
+			if (minimizer.kmer()
+					> (std::numeric_limits<std::uint32_t>::max)()) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Format-6 canonical query hash exceeds its authenticated u32 profile")));
+				});
+				pg_unreachable();
+			}
+			destination.push_back(
+				static_cast<std::uint32_t>(minimizer.kmer()));
+		}
+	}
 }
 
+template <class DestinationValue>
 void dispatch_append_cpu_prepared_query_sketch(
 		const std::uint8_t alphabet_code,
 		const std::uint8_t storage_unit_byte_width,
@@ -684,7 +705,7 @@ void dispatch_append_cpu_prepared_query_sketch(
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
-		std::vector<MinimapSketchData>& destination,
+		std::vector<DestinationValue>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes) {
 	static_assert(pgseq_supported_alphabets::alphabet_count == 2);
@@ -693,7 +714,7 @@ void dispatch_append_cpu_prepared_query_sketch(
 	constexpr std::uint8_t dna5_code = static_cast<std::uint8_t>(
 		pgseq_supported_alphabets::index_of<seq::dna5>());
 #define BIOSEQ_APPEND_PREPARED(ALPHABET, WIDTH) \
-	append_cpu_prepared_query_sketch<ALPHABET, WIDTH>( \
+	append_cpu_prepared_query_sketch<ALPHABET, WIDTH, DestinationValue>( \
 		header, kmer_size, window_size, sketch_backend, destination, \
 		destination_permit, retained_destination_bytes)
 	if (alphabet_code == dna4_code) {
@@ -857,6 +878,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		const std::span<const pgseq_t* const> query_headers,
 		const Minimap2Params& base_params,
 		const bool include_persisted_parameter_group,
+		const CpuQueryUnionStorage union_storage,
 		CpuPreparedTarget& prepared_target) {
 	const std::uint64_t query_union_prepare_started_ns =
 		static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
@@ -990,16 +1012,30 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		const MinimizerSketchBackend sketch_backend =
 			pipe::target_index_sketch_backend_from_params(effective);
 		auto append_to = [&](CpuPreparedIndexGroup& group) {
-			dispatch_append_cpu_prepared_query_sketch(
-				alphabet_code,
-				storage_unit_byte_width,
-				*query_header,
-				group.kmer_size,
-				group.window_size,
-				group.sketch_backend,
-				group.query_hash_union,
-				*prepared_target.query_union_permit,
-				prepared_target.query_union_admission_bytes);
+			if (union_storage
+					== CpuQueryUnionStorage::canonical_u32) {
+				dispatch_append_cpu_prepared_query_sketch(
+					alphabet_code,
+					storage_unit_byte_width,
+					*query_header,
+					group.kmer_size,
+					group.window_size,
+					group.sketch_backend,
+					group.canonical_query_hash_union_u32,
+					*prepared_target.query_union_permit,
+					prepared_target.query_union_admission_bytes);
+			} else {
+				dispatch_append_cpu_prepared_query_sketch(
+					alphabet_code,
+					storage_unit_byte_width,
+					*query_header,
+					group.kmer_size,
+					group.window_size,
+					group.sketch_backend,
+					group.query_hash_union,
+					*prepared_target.query_union_permit,
+					prepared_target.query_union_admission_bytes);
+			}
 		};
 		if (include_persisted_parameter_group) {
 			append_to(ensure_group(
@@ -1013,6 +1049,74 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		}
 	}
 	for (CpuPreparedIndexGroup& group : prepared_target.groups) {
+		if (union_storage == CpuQueryUnionStorage::canonical_u32) {
+			if (!group.query_hash_union.empty()
+				|| group.query_hash_union.capacity() != 0u) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Format-6 canonical query preparation retained a duplicate sketch owner")));
+				});
+				pg_unreachable();
+			}
+			auto& canonical = group.canonical_query_hash_union_u32;
+			if (canonical.size() > 1u) {
+				bioseq::sorting::radix_sort(
+					canonical.data(), canonical.data() + canonical.size(),
+					[](const std::uint32_t hash) noexcept {
+						return hash;
+					});
+			}
+			canonical.erase(
+				std::unique(canonical.begin(), canonical.end()),
+				canonical.end());
+			const auto fnv_mix_u64 = [](
+					std::uint64_t hash,
+					std::uint64_t value) noexcept {
+				for (int byte_index = 0; byte_index < 8; ++byte_index) {
+					hash ^= value & 0xffu;
+					hash *= 1099511628211ull;
+					value >>= 8u;
+				}
+				return hash;
+			};
+			std::uint64_t signature = 1469598103934665603ull;
+			signature = fnv_mix_u64(
+				signature, static_cast<std::uint32_t>(group.kmer_size));
+			signature = fnv_mix_u64(
+				signature, static_cast<std::uint32_t>(group.window_size));
+			signature = fnv_mix_u64(
+				signature, static_cast<std::uint32_t>(group.max_occ));
+			for (const std::uint32_t hash : canonical) {
+				signature = fnv_mix_u64(signature, hash);
+			}
+			group.key_set_checksum = signature;
+			prepared_target.total_unique_keys =
+				bioseq::parallelism::saturating_add(
+					prepared_target.total_unique_keys,
+					static_cast<std::uint64_t>(canonical.size()));
+			auto mix = [&prepared_target](
+					const std::uint64_t value) noexcept {
+				prepared_target.key_set_checksum ^= value;
+				prepared_target.key_set_checksum *= 1099511628211ull;
+			};
+			mix(static_cast<std::uint64_t>(group.kmer_size));
+			mix(static_cast<std::uint64_t>(group.window_size));
+			mix(static_cast<std::uint64_t>(group.max_occ));
+			mix(static_cast<std::uint64_t>(group.sketch_backend));
+			mix(static_cast<std::uint64_t>(canonical.size()));
+			mix(group.key_set_checksum);
+			continue;
+		}
+		if (!group.canonical_query_hash_union_u32.empty()
+			|| group.canonical_query_hash_union_u32.capacity() != 0u) {
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("legacy/F5 query preparation retained a duplicate canonical u32 owner")));
+			});
+			pg_unreachable();
+		}
 		/* The target-wide union has tens of millions of trivially-copyable
 		 * sketches on the production workload.  The existing in-place radix
 		 * implementation avoids comparison-sort's O(Q log Q) key extraction
@@ -1092,6 +1196,13 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 					group.query_hash_union.capacity(),
 					static_cast<std::uint64_t>(
 						sizeof(MinimapSketchData))));
+		measured_query_union_bytes =
+			bioseq::parallelism::saturating_add(
+				measured_query_union_bytes,
+				bioseq::parallelism::saturating_mul(
+					group.canonical_query_hash_union_u32.capacity(),
+					static_cast<std::uint64_t>(
+						sizeof(std::uint32_t))));
 	}
 	if (measured_query_union_bytes
 			== (std::numeric_limits<std::uint64_t>::max)()
@@ -1127,7 +1238,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	prepared_target.unions_ready = true;
 }
 
-void BatchProcessor::prepare_cpu_persisted_grouped32_target(
+void BatchProcessor::prepare_cpu_persisted_native_target(
 		const Oid database_oid,
 		const Oid tablespace_oid,
 		const Oid main_relfilenode,
@@ -1135,6 +1246,11 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		const std::int16_t column_attno,
 		const std::string_view index_name,
 		const std::uint64_t sequence_rowno,
+		const std::uint64_t target_bp_size,
+		const std::uint8_t alphabet_code,
+		const std::uint8_t storage_unit_byte_width,
+		const std::span<const pgseq_t* const> query_headers,
+		const Minimap2Params& base_params,
 		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
 			executor_read,
 		CpuPreparedTarget& prepared_target) {
@@ -1161,11 +1277,15 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 					"ordinal 2 has no legacy, recompute, or cache fallback.")));
 		});
 	};
-	if (!prepared_target.unions_ready
+	if (prepared_target.unions_ready
 		|| prepared_target.target_rowno < 0
 		|| static_cast<std::uint64_t>(prepared_target.target_rowno)
 			!= sequence_rowno
-		|| prepared_target.groups.size() != 1
+		|| !prepared_target.groups.empty()
+		|| prepared_target.query_union_permit.has_value()
+		|| prepared_target.query_union_admission_bytes != 0u
+		|| target_bp_size == 0u
+		|| query_headers.empty()
 		|| database_oid != MyDatabaseId
 		|| !OidIsValid(user_relid)
 		|| !OidIsValid(tablespace_oid)
@@ -1173,18 +1293,11 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		|| column_attno <= 0
 		|| !executor_read.matches(
 			database_oid, tablespace_oid, main_relfilenode, user_relid)) {
-		fail("CPU grouped32 prepared-target identity/lifecycle is invalid");
+		fail("CPU native persisted prepared-target identity/lifecycle is invalid");
 		return;
 	}
-	CpuPreparedIndexGroup& group = prepared_target.groups.front();
-	if (group.kmer_size != 15 || group.window_size != 10
-		|| group.max_occ < 0
-		|| group.persisted_grouped32_reader
-		|| group.persisted_shape_v5_reader
-		|| group.target_index) {
-		fail("CPU grouped32 parameter group is not the pinned cold-read shape");
-		return;
-	}
+	const MinimizerSketchBackend sketch_backend =
+		pipe::target_index_sketch_backend_from_params(base_params);
 
 	Rev3IndexAdministrationIdentity identity{
 		.database_oid = database_oid,
@@ -1200,18 +1313,316 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		source_proof.source_for_diagnostics();
 	const Rev3CatalogSourceProofCounters source_counters =
 		source_proof.counters_for_diagnostics();
+	const std::uint64_t source_content_checksum =
+		source_proof.source_content_checksum_for_diagnostics();
+	if (source.sequence_rowno != sequence_rowno
+		|| source.locator.total_bp_size != target_bp_size
+		|| source.alphabet_code != alphabet_code
+		|| source.storage_unit_byte_width != storage_unit_byte_width) {
+		fail("authoritative source identity disagrees with the prepared target");
+		return;
+	}
 	identity.table_name = format_seqidx_name(
 		index_name, database_oid, tablespace_oid, main_relfilenode,
 		column_attno, source.locator.bucket_idx, source.locator.shard_idx);
+
+	auto opened_format6 = open_exact_minimizer_format6_read_session_pg(
+		identity.table_name, index_name, sequence_rowno, executor_read);
+	if (!opened_format6.session && !opened_format6.head_absent) {
+		switch (opened_format6.relation_failure.kind) {
+			case MinimizerGenerationRelationKind::missing:
+				unavailable(fmt::format(
+					"revision-3 generation relation {} is absent",
+					identity.table_name));
+				return;
+			case MinimizerGenerationRelationKind::legacy_exact:
+				unavailable(fmt::format(
+					"relation {} is the exact legacy {} schema and has no "
+					"revision-3 READY generation",
+					identity.table_name, index_name));
+				return;
+			case MinimizerGenerationRelationKind::malformed:
+				fail(fmt::format(
+					"generation relation {} is neither the canonical revision-3 "
+					"schema nor the exact legacy {} schema; revision3_schema_error={}",
+					identity.table_name, index_name,
+					rev3_index_schema_error_name(
+						opened_format6.relation_failure.revision3_error)));
+				return;
+			case MinimizerGenerationRelationKind::revision3_exact:
+				fail("Format-6 relation binder returned an invalid success classification");
+				return;
+			}
+	}
+	if (opened_format6.session && opened_format6.head_absent) {
+		fail("Format-6 binder returned both a session and an absence proof");
+		return;
+	}
+	bool format6_profile_applicable = false;
+	if (opened_format6.session) {
+		IndexStorageMinimizerFormat6ReadSessionPg& format6_session =
+			*opened_format6.session;
+		const auto scheme =
+			bioseq::indexing::minimizer_scheme_identity_for_backend(
+				sketch_backend);
+		const auto producer =
+			bioseq::indexing::
+				minimizer_producer_backend_identity_for_backend(
+					sketch_backend);
+		const auto format6_candidate_manifest =
+			format6_session.manifest();
+		const auto compatibility =
+			format6_candidate_manifest.compatibility;
+		if (!bioseq::indexing::valid_minimizer_format6_compatibility(
+				compatibility, format6_candidate_manifest.target_length)) {
+			fail("Format-6 READY head names an invalid compatibility profile");
+			return;
+		}
+		format6_profile_applicable =
+			compatibility.hash_scheme_id == scheme.id
+			&& compatibility.hash_scheme_version == scheme.version
+			&& compatibility.alphabet_code == alphabet_code
+			&& compatibility.kmer_size == 15u
+			&& compatibility.window_size == 10u
+			&& compatibility.hash_width_bytes == sizeof(std::uint32_t)
+			&& compatibility.producer_backend_id
+				== static_cast<std::uint16_t>(producer.id)
+			&& compatibility.producer_backend_version == producer.version;
+		if (!format6_profile_applicable) {
+			/* A self-authenticated but route-inapplicable Format-6 profile is
+			 * the only present-head fallback case.  No source proof has been
+			 * consumed and no directory/control/posting callback has run, so
+			 * the independent READY Format-5 sentinel may still be opened. */
+			format6_session.close_metadata_read();
+			opened_format6.session.reset();
+		} else {
+			const bioseq::indexing::MinimizerFormat6ExpectedGeneration
+				format6_expected =
+					format6_session.validate_source_attestation(
+						std::move(source_proof));
+			if (format6_expected.generation_id == 0u
+			|| format6_expected.query_key != sequence_rowno
+			|| format6_expected.source_epoch != source.locator.source_epoch
+			|| format6_expected.source_content_crc64
+				!= source_content_checksum
+			|| format6_expected.target_length != target_bp_size
+			|| format6_expected.compatibility != compatibility) {
+				fail("Format-6 authenticated source binding disagrees with the active CPU route");
+				return;
+			}
+		prepare_cpu_shared_query_unions(
+			alphabet_code,
+			storage_unit_byte_width,
+			target_bp_size,
+			query_headers,
+			base_params,
+			/*include_persisted_parameter_group=*/true,
+			CpuQueryUnionStorage::canonical_u32,
+			prepared_target);
+		if (!prepared_target.unions_ready
+			|| prepared_target.groups.size() != 1u) {
+			fail("Format-6 canonical query preparation did not yield one group");
+			return;
+		}
+		CpuPreparedIndexGroup& format6_group =
+			prepared_target.groups.front();
+		if (format6_group.kmer_size != 15
+			|| format6_group.window_size != 10
+			|| format6_group.max_occ < 0
+			|| format6_group.sketch_backend != sketch_backend
+			|| !format6_group.query_hash_union.empty()
+			|| format6_group.query_hash_union.capacity() != 0u
+			|| format6_group.persisted_grouped32_reader
+			|| format6_group.persisted_shape_v5_reader
+			|| format6_group.persisted_format6_reader
+			|| format6_group.target_index) {
+			fail("Format-6 canonical query group violates exclusive ownership");
+			return;
+		}
+		const bioseq::indexing::CanonicalQueryHashView canonical_view{
+			.values = std::span<const std::uint32_t>{
+				format6_group.canonical_query_hash_union_u32},
+			.width_bytes = sizeof(std::uint32_t),
+			.compatibility_digest =
+				bioseq::indexing::
+					minimizer_format6_compatibility_digest(
+						compatibility),
+		};
+		auto format6_reader =
+			bioseq::indexing::MinimizerFormat6SelectiveReader::open(
+				bioseq::parallelism::MemoryAdmissionController::instance(),
+				format6_session.encoded_head(),
+				format6_session.encoded_manifest(),
+				format6_expected,
+				format6_session.source_ref(),
+				canonical_view,
+				static_cast<std::uint64_t>(format6_group.max_occ));
+		if (!format6_reader) {
+			fail(fmt::format(
+				"Format-6 selective reader rejected authenticated storage error={}",
+				static_cast<unsigned>(format6_reader.error())));
+			return;
+		}
+		const auto format6_head = format6_session.head();
+		const auto format6_manifest = format6_session.manifest();
+		MinimizerGenerationReadStats read_stats =
+			format6_session.finish();
+		const auto& memory_evidence =
+			format6_reader->memory_evidence();
+		const std::uint64_t peak_admitted_bytes = std::max({
+			memory_evidence.directory_phase_peak_admitted_bytes,
+			memory_evidence.control_phase_peak_admitted_bytes,
+			memory_evidence.posting_phase_peak_admitted_bytes,
+		});
+		const std::uint64_t admitted_bytes =
+			format6_reader->admitted_bytes();
+		const std::uint64_t authorized_posting_bytes =
+			bioseq::parallelism::saturating_mul(
+				memory_evidence.retained_position_count,
+				format6_manifest.compatibility
+					.stored_posting_width_bytes);
+		if (format6_reader->target_length() != target_bp_size
+			|| format6_head.generation_id != format6_expected.generation_id
+			|| format6_head.source_identity
+				!= format6_manifest.source_identity
+			|| format6_manifest.compatibility != compatibility
+			|| read_stats.relation_opens != 1u
+			|| read_stats.head_scans != 1u
+			|| read_stats.source_parent_rows_read != 1u
+			|| read_stats.source_catalog_rows_read != 1u
+			|| read_stats.source_catalog_index_scans != 1u
+			|| read_stats.source_fragment_rows_read != 0u
+			|| read_stats.source_decoded_bp != 0u
+			|| read_stats.format6.format_version
+				!= bioseq::indexing::kMinimizerFormat6Version
+			|| read_stats.format6.sessions != 1u
+			|| read_stats.format6.generation_id
+				!= format6_head.generation_id
+			|| read_stats.format6.source_identity
+				!= format6_head.source_identity
+			|| read_stats.format6.source_content_crc64
+				!= format6_head.source_content_crc64
+			|| read_stats.format6.compatibility_digest
+				!= format6_head.compatibility_digest
+			|| memory_evidence.directory_stream_crc_receipts != 1u
+			|| memory_evidence.control_block_crc_receipts
+				!= memory_evidence.selected_block_count
+			|| memory_evidence.control_semantic_receipts
+				!= memory_evidence.selected_block_count
+			|| memory_evidence.authorized_posting_bytes
+				!= authorized_posting_bytes
+			|| memory_evidence.generic_source_fallback_calls != 0u
+			|| memory_evidence.peak_admitted_bytes
+				!= peak_admitted_bytes
+			|| memory_evidence.retained_owner_bytes != admitted_bytes
+			|| read_stats.format6.directory_row_crc_receipts
+				!= read_stats.format6.directory_rows
+			|| read_stats.format6.control_row_crc_receipts
+				!= read_stats.format6.control_rows
+			|| read_stats.format6.posting_row_crc_receipts
+				!= read_stats.format6.posting_rows
+			|| read_stats.format6.posting_ranges_delivered
+				!= memory_evidence.posting_ranges_delivered
+			|| read_stats.format6.authorized_posting_bytes
+				!= memory_evidence.authorized_posting_bytes
+			|| memory_evidence.posting_semantic_receipts
+				!= memory_evidence.posting_ranges_delivered
+			|| memory_evidence.posting_range_crc_receipts
+				> memory_evidence.posting_ranges_delivered
+			|| !source_counters.timed_equation_holds()) {
+			fail("Format-6 READY identity/profile/read-work proof disagrees");
+			return;
+		}
+		auto& format6_evidence = read_stats.format6;
+		format6_evidence.format_version =
+			bioseq::indexing::kMinimizerFormat6Version;
+		format6_evidence.sessions = 1u;
+		format6_evidence.generation_id = format6_head.generation_id;
+		format6_evidence.source_identity =
+			format6_head.source_identity;
+		format6_evidence.source_content_crc64 =
+			format6_head.source_content_crc64;
+		format6_evidence.compatibility_digest =
+			format6_head.compatibility_digest;
+		format6_evidence.directory_stream_crc_receipts =
+			memory_evidence.directory_stream_crc_receipts;
+		format6_evidence.control_block_crc_receipts =
+			memory_evidence.control_block_crc_receipts;
+		format6_evidence.control_semantic_receipts =
+			memory_evidence.control_semantic_receipts;
+		format6_evidence.posting_range_crc_receipts =
+			memory_evidence.posting_range_crc_receipts;
+		format6_evidence.posting_semantic_receipts =
+			memory_evidence.posting_semantic_receipts;
+		format6_evidence.query_count =
+			memory_evidence.query_count;
+		format6_evidence.selected_block_count =
+			memory_evidence.selected_block_count;
+		format6_evidence.accepted_hash_count =
+			memory_evidence.accepted_hash_count;
+		format6_evidence.retained_position_count =
+			memory_evidence.retained_position_count;
+		format6_evidence.directory_phase_peak_bytes =
+			memory_evidence.directory_phase_peak_admitted_bytes;
+		format6_evidence.control_phase_peak_bytes =
+			memory_evidence.control_phase_peak_admitted_bytes;
+		format6_evidence.posting_phase_peak_bytes =
+			memory_evidence.posting_phase_peak_admitted_bytes;
+		format6_evidence.peak_admitted_bytes =
+			memory_evidence.peak_admitted_bytes;
+		format6_evidence.retained_owner_bytes =
+			memory_evidence.retained_owner_bytes;
+		format6_evidence.admitted_bytes = admitted_bytes;
+		format6_evidence.generic_source_fallback_calls =
+			memory_evidence.generic_source_fallback_calls;
+		format6_evidence.failures = 0u;
+		format6_evidence.saturated = false;
+		format6_group.persisted_format6_reader.emplace(
+			std::move(*format6_reader));
+		format6_group.target_index_source =
+			::bioseq::pipeline_stats::TargetIndexSource::persisted;
+		format6_group.persisted_generation_id =
+			format6_head.generation_id;
+		format6_group.persisted_format6_source_identity =
+			format6_head.source_identity;
+		format6_group.persisted_format6_source_identity_present = true;
+		/* The legacy u64 pipeline correlation value is deliberately not used
+		 * to authenticate Format-6; correctness above is bound to all 128
+		 * source-identity bits. */
+		format6_group.persisted_source_identity =
+			format6_source_diagnostic_token(
+				format6_head.source_identity);
+		format6_group.persisted_read_stats = read_stats;
+		format6_group.persisted_reader_loads = 1u;
+		format6_group.build_set_checksum_present = true;
+		format6_group.build_set_checksum =
+			format6_group.key_set_checksum;
+		++prepared_target.physical_target_index_reads;
+		return;
+		}
+	}
+	/* The binder's head_absent result is an authenticated absence of the
+	 * distinct Format-6 sentinel.  Together with the inapplicable-profile case
+	 * above, this is before every F6 stream payload callback and therefore the
+	 * only clean boundary at which Format-5 may be tried. */
+	if (!format6_f5_fallback_allowed(
+			opened_format6.head_absent,
+			format6_profile_applicable,
+			/*stream_io_started=*/false)) {
+		fail("Format-6 dispatch crossed the fail-closed fallback boundary");
+		return;
+	}
+	opened_format6.session.reset();
+
 	const auto expected =
 		bioseq::indexing::expected_minimizer_compatibility_for_backend(
 			MinimizerGenerationWireFormat::
 				grouped_shape_soa_segment_local,
-			group.sketch_backend,
+			sketch_backend,
 			source.alphabet_code,
 			source.storage_unit_byte_width,
-			static_cast<std::uint16_t>(group.kmer_size),
-			static_cast<std::uint16_t>(group.window_size),
+			15u,
+			10u,
 			bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap);
 	if (!expected) {
 		fail(fmt::format("grouped32 compatibility rejected wire_error={}",
@@ -1221,11 +1632,11 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 	const auto format4_expected =
 		bioseq::indexing::expected_minimizer_compatibility_for_backend(
 			MinimizerGenerationWireFormat::grouped_hash32_segment_local32,
-			group.sketch_backend,
+			sketch_backend,
 			source.alphabet_code,
 			source.storage_unit_byte_width,
-			static_cast<std::uint16_t>(group.kmer_size),
-			static_cast<std::uint16_t>(group.window_size));
+			15u,
+			10u);
 	if (!format4_expected) {
 		fail(fmt::format(
 			"Format-4 compatibility rejected wire_error={}",
@@ -1272,6 +1683,33 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 				grouped_shape_soa_segment_local
 		? *expected : *format4_expected;
 	session.validate_source_attestation(std::move(source_proof));
+	prepare_cpu_shared_query_unions(
+		alphabet_code,
+		storage_unit_byte_width,
+		target_bp_size,
+		query_headers,
+		base_params,
+		/*include_persisted_parameter_group=*/true,
+		CpuQueryUnionStorage::minimizer_sketch,
+		prepared_target);
+	if (!prepared_target.unions_ready
+		|| prepared_target.groups.size() != 1u) {
+		fail("legacy/F5 query preparation did not yield one group");
+		return;
+	}
+	CpuPreparedIndexGroup& group = prepared_target.groups.front();
+	if (group.kmer_size != 15 || group.window_size != 10
+		|| group.max_occ < 0
+		|| group.sketch_backend != sketch_backend
+		|| !group.canonical_query_hash_union_u32.empty()
+		|| group.canonical_query_hash_union_u32.capacity() != 0u
+		|| group.persisted_grouped32_reader
+		|| group.persisted_shape_v5_reader
+		|| group.persisted_format6_reader
+		|| group.target_index) {
+		fail("legacy/F5 parameter group is not the pinned exclusive cold-read shape");
+		return;
+	}
 	const auto format_shape_v5_failure =
 		[](
 				const std::string_view phase,

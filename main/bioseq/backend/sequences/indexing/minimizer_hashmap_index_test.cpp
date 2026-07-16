@@ -10937,6 +10937,9 @@ TEST_CASE("Format-6 selective reader requests only authorized postings and match
         REQUIRE(scalar_reader.has_value());
         REQUIRE(scalar_fixture.image.control_waves.empty());
         REQUIRE(scalar_fixture.image.posting_waves.empty());
+        REQUIRE(
+            scalar_reader->memory_evidence().
+                generic_source_fallback_calls > 0u);
         REQUIRE(std::ranges::equal(
             scalar_reader->lookup_spans(10u).contiguous_positions(),
             std::array<std::uint64_t, 2>{2u, 4u}));
@@ -11003,7 +11006,22 @@ TEST_CASE("Format-6 admission is exact at every pre-I/O phase barrier",
         REQUIRE(evidence.directory_phase_peak_admitted_bytes != 0u);
         REQUIRE(evidence.control_phase_peak_admitted_bytes != 0u);
         REQUIRE(evidence.posting_phase_peak_admitted_bytes != 0u);
+        REQUIRE(evidence.peak_admitted_bytes == std::max({
+            evidence.directory_phase_peak_admitted_bytes,
+            evidence.control_phase_peak_admitted_bytes,
+            evidence.posting_phase_peak_admitted_bytes,
+        }));
         REQUIRE(evidence.retained_owner_bytes == reader->admitted_bytes());
+        REQUIRE(evidence.directory_stream_crc_receipts == 1u);
+        REQUIRE(evidence.control_block_crc_receipts
+                == evidence.selected_block_count);
+        REQUIRE(evidence.control_semantic_receipts
+                == evidence.selected_block_count);
+        REQUIRE(evidence.posting_ranges_delivered
+                == evidence.posting_semantic_receipts);
+        REQUIRE(evidence.posting_range_crc_receipts
+                <= evidence.posting_ranges_delivered);
+        REQUIRE(evidence.generic_source_fallback_calls == 0u);
         REQUIRE(admission.reserved_bytes() == reader->admitted_bytes());
     }
 

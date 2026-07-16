@@ -592,6 +592,14 @@ struct MinimizerFormat6MemoryEvidence {
     std::uint64_t directory_entry_count = 0u;
     std::uint64_t selected_block_count = 0u;
     std::uint64_t accepted_hash_count = 0u;
+    std::uint64_t directory_stream_crc_receipts = 0u;
+    std::uint64_t control_block_crc_receipts = 0u;
+    std::uint64_t control_semantic_receipts = 0u;
+    std::uint64_t posting_ranges_delivered = 0u;
+    std::uint64_t posting_range_crc_receipts = 0u;
+    std::uint64_t posting_semantic_receipts = 0u;
+    std::uint64_t authorized_posting_bytes = 0u;
+    std::uint64_t generic_source_fallback_calls = 0u;
 };
 
 using EncodedMinimizerFormat6Head =
@@ -1274,6 +1282,34 @@ private:
                 context.error = MinimizerFormat6Error::checksum;
                 return false;
             }
+            std::uint64_t ranges_delivered = 0u;
+            std::uint64_t semantic_receipts = 0u;
+            std::uint64_t crc_receipts =
+                context.reader->memory_evidence_.
+                    posting_range_crc_receipts;
+            if (!checked_add(
+                    context.reader->memory_evidence_.
+                        posting_ranges_delivered,
+                    1u,
+                    ranges_delivered)
+                || !checked_add(
+                    context.reader->memory_evidence_.
+                        posting_semantic_receipts,
+                    1u,
+                    semantic_receipts)
+                || ((range.flags & 1u) != 0u
+                    && !checked_add(
+                        crc_receipts, 1u, crc_receipts))) {
+                context.error =
+                    MinimizerFormat6Error::arithmetic_overflow;
+                return false;
+            }
+            context.reader->memory_evidence_.
+                posting_ranges_delivered = ranges_delivered;
+            context.reader->memory_evidence_.
+                posting_semantic_receipts = semantic_receipts;
+            context.reader->memory_evidence_.
+                posting_range_crc_receipts = crc_receipts;
             ++context.next_range;
             context.next_range_byte = 0u;
             context.next_request = context.next_range < context.ranges->size()
@@ -1528,6 +1564,7 @@ public:
             || directory_crc != manifest->streams[0].stream_crc64) {
             return std::unexpected(MinimizerFormat6Error::checksum);
         }
+        reader.memory_evidence_.directory_stream_crc_receipts = 1u;
         std::uint64_t expected_control_offset = 0u;
         std::uint64_t expected_posting_offset = 0u;
         std::uint64_t expected_posting_ordinal = 0u;
@@ -1747,6 +1784,8 @@ public:
                         &delivery,
                         &consume_control_block_);
                 } else {
+                    ++reader.memory_evidence_.
+                        generic_source_fallback_calls;
                     delivered = true;
                     for (std::size_t ordinal = 0u;
                          ordinal < control_ranges.size();
@@ -1772,6 +1811,25 @@ public:
                     return std::unexpected(delivery.error.value_or(
                         MinimizerFormat6Error::source_read));
                 }
+                std::uint64_t block_receipts = 0u;
+                std::uint64_t semantic_receipts = 0u;
+                if (!checked_add(
+                        reader.memory_evidence_.
+                            control_block_crc_receipts,
+                        control_ranges.size(),
+                        block_receipts)
+                    || !checked_add(
+                        reader.memory_evidence_.
+                            control_semantic_receipts,
+                        control_ranges.size(),
+                        semantic_receipts)) {
+                    return std::unexpected(
+                        MinimizerFormat6Error::arithmetic_overflow);
+                }
+                reader.memory_evidence_.control_block_crc_receipts =
+                    block_receipts;
+                reader.memory_evidence_.control_semantic_receipts =
+                    semantic_receipts;
                 control_ranges.clear();
                 return {};
             };
@@ -1807,6 +1865,12 @@ public:
                 return std::unexpected(MinimizerFormat6Error::source_read);
             }
             if (delivery.query_cursor > query_hashes.size()) {
+                return std::unexpected(MinimizerFormat6Error::state);
+            }
+            if (reader.memory_evidence_.control_block_crc_receipts
+                    != selected_block_count
+                || reader.memory_evidence_.control_semantic_receipts
+                    != selected_block_count) {
                 return std::unexpected(MinimizerFormat6Error::state);
             }
         }
@@ -2176,6 +2240,8 @@ public:
                     &delivery,
                     &consume_posting_bytes_);
             } else {
+                ++reader.memory_evidence_.
+                    generic_source_fallback_calls;
                 delivered = true;
                 for (std::size_t range_ordinal = 0u;
                      delivered && range_ordinal < ranges.size();
@@ -2212,6 +2278,25 @@ public:
                 return std::unexpected(delivery.error.value_or(
                     MinimizerFormat6Error::source_read));
             }
+            std::uint64_t delivered_range_bytes = 0u;
+            for (const auto& range : ranges) {
+                if (!checked_add(
+                        delivered_range_bytes,
+                        range.byte_count,
+                        delivered_range_bytes)) {
+                    return std::unexpected(
+                        MinimizerFormat6Error::arithmetic_overflow);
+                }
+            }
+            if (!checked_add(
+                    reader.memory_evidence_.authorized_posting_bytes,
+                    delivered_range_bytes,
+                    delivered_range_bytes)) {
+                return std::unexpected(
+                    MinimizerFormat6Error::arithmetic_overflow);
+            }
+            reader.memory_evidence_.authorized_posting_bytes =
+                delivered_range_bytes;
             if (accepted_delivered == wave_accepted_begin) {
                 return std::unexpected(MinimizerFormat6Error::state);
             }

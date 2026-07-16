@@ -229,9 +229,9 @@ export bool bioseq_update_index_on_insert = true;
  * without a stored index still recompute — surfaced in EXPLAIN.
  */
 export bool bioseq_read_sequence_index = true;
-// Format-4 READY persistence remains opt-in until the live grouped32 reader is
-// activated. Ordinary behavior therefore continues to publish the legacy
-// minimizer layout unless a controlled POC explicitly enables this cutover.
+// Native READY-generation persistence remains an explicit rebuild policy.
+// Registered DNA4 profiles publish selective Format 6; unsupported profiles
+// retain the independently authenticated Format-5 route.
 export bool bioseq_aligner_grouped32_persisted_generation_enabled = false;
 
 /* DOC0279 §13 — test-only knob: forces the minimizers_per_sequence external

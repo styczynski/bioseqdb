@@ -3334,8 +3334,86 @@ template <class S>
 					&& prepared_group->persisted_grouped32_reader.has_value();
 				const bool has_shape_v5_reader = prepared_group != nullptr
 					&& prepared_group->persisted_shape_v5_reader.has_value();
+				const bool has_format6_reader = prepared_group != nullptr
+					&& prepared_group->persisted_format6_reader.has_value();
+				const bool has_full_format6_source_identity =
+					prepared_group != nullptr
+					&& prepared_group->
+						persisted_format6_source_identity_present;
+				const bool format6_identity_valid =
+					prepared_group == nullptr
+					|| (!has_format6_reader
+						? !has_full_format6_source_identity
+							&& prepared_group->
+								persisted_format6_source_identity
+									== std::array<std::byte, 16>{}
+						: has_full_format6_source_identity
+							&& prepared_group->persisted_source_identity
+								== format6_source_diagnostic_token(
+									prepared_group->
+										persisted_format6_source_identity));
+				const bool canonical_owner_exclusive =
+					prepared_group == nullptr
+					|| (has_format6_reader
+						? prepared_group->query_hash_union.capacity() == 0u
+						: prepared_group->
+							canonical_query_hash_union_u32.capacity() == 0u);
+				bool format6_read_receipt_valid = !has_format6_reader;
+				if (has_format6_reader) {
+					const auto& receipt =
+						prepared_group->persisted_read_stats.format6;
+					const auto& memory =
+						prepared_group->persisted_format6_reader->
+							memory_evidence();
+					const std::uint64_t phase_peak = std::max({
+						receipt.directory_phase_peak_bytes,
+						receipt.control_phase_peak_bytes,
+						receipt.posting_phase_peak_bytes,
+					});
+					format6_read_receipt_valid =
+						receipt.format_version
+							== bioseq::indexing::kMinimizerFormat6Version
+						&& receipt.sessions == 1u
+						&& receipt.generation_id
+							== prepared_group->persisted_generation_id
+						&& receipt.source_identity
+							== prepared_group->
+								persisted_format6_source_identity
+						&& receipt.directory_row_crc_receipts
+							== receipt.directory_rows
+						&& receipt.control_row_crc_receipts
+							== receipt.control_rows
+						&& receipt.posting_row_crc_receipts
+							== receipt.posting_rows
+						&& receipt.control_block_crc_receipts
+							== receipt.selected_block_count
+						&& receipt.control_semantic_receipts
+							== receipt.selected_block_count
+						&& receipt.posting_ranges_delivered
+							== receipt.posting_semantic_receipts
+						&& receipt.posting_range_crc_receipts
+							<= receipt.posting_ranges_delivered
+						&& receipt.query_count == memory.query_count
+						&& receipt.accepted_hash_count
+							== memory.accepted_hash_count
+						&& receipt.retained_position_count
+							== memory.retained_position_count
+						&& receipt.peak_admitted_bytes == phase_peak
+						&& receipt.retained_owner_bytes
+							== receipt.admitted_bytes
+						&& receipt.admitted_bytes
+							== prepared_group->
+								persisted_format6_reader->
+									admitted_bytes()
+						&& receipt.generic_source_fallback_calls == 0u
+						&& receipt.failures == 0u
+						&& !receipt.saturated;
+				}
 				if (prepared_group == nullptr
-					|| has_grouped32_reader == has_shape_v5_reader
+					|| !BatchProcessor::exactly_one_native_persisted_reader(
+						has_grouped32_reader,
+						has_shape_v5_reader,
+						has_format6_reader)
 					|| (has_grouped32_reader
 						&& !prepared_group->persisted_grouped32_reader->ready())
 					|| (has_shape_v5_reader
@@ -3344,7 +3422,10 @@ template <class S>
 					|| prepared_group->target_index_source
 						!= ::bioseq::pipeline_stats::TargetIndexSource::persisted
 					|| prepared_group->persisted_generation_id == 0
-					|| prepared_group->persisted_source_identity == 0) {
+					|| prepared_group->persisted_source_identity == 0
+					|| !format6_identity_valid
+					|| !canonical_owner_exclusive
+					|| !format6_read_receipt_valid) {
 					raise_required_persisted_index_error(
 						scanner_pg_ctx,
 						scanner_pg_ctx->target_rownos[i],
@@ -3352,7 +3433,16 @@ template <class S>
 						"mixed with a legacy assembled index");
 				}
 				ensure_q();
-				if (has_shape_v5_reader) {
+				if (has_format6_reader) {
+					collection = minimap2_port_with_index_pg_checked(
+						fq_pg,
+						ft_pg,
+						*query_minimizers,
+						*prepared_group->persisted_format6_reader,
+						idx_params,
+						/*gpu_index_cache=*/nullptr,
+						bioseq::indexing::GpuIndexCacheIdentity{});
+				} else if (has_shape_v5_reader) {
 					collection = minimap2_port_with_index_pg_checked(
 						fq_pg,
 						ft_pg,

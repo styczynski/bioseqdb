@@ -2320,6 +2320,56 @@ decode_tagged_minimizer_generation_manifest(
     return std::unexpected(TaggedMinimizerGenerationWireError::encoded_size);
 }
 
+/// Translate the frozen runtime producer identity into the exact registered
+/// Format-6 compatibility profile.  Keeping this bridge beside the existing
+/// Format-5 producer/scheme registry prevents PostgreSQL publication and
+/// reopen code from independently reconstructing (or silently defaulting)
+/// persisted biological semantics.
+[[nodiscard]] constexpr std::expected<
+    MinimizerFormat6Compatibility, MinimizerFormat6Error>
+minimizer_format6_compatibility_for_backend(
+        MinimizerSketchBackend backend,
+        std::uint16_t alphabet_code,
+        std::uint16_t kmer_size,
+        std::uint16_t window_size,
+        std::uint64_t target_length) noexcept {
+    const MinimizerSchemeIdentity scheme =
+        minimizer_scheme_identity_for_backend(backend);
+    const MinimizerProducerBackendIdentity producer =
+        minimizer_producer_backend_identity_for_backend(backend);
+    if (!is_supported_minimizer_scheme_identity(
+            scheme.id, scheme.version)
+        || !is_supported_minimizer_producer_backend_identity(producer)
+        || alphabet_code != 0u
+        || kmer_size != 15u
+        || window_size != 10u) {
+        return std::unexpected(MinimizerFormat6Error::compatibility);
+    }
+    const MinimizerFormat6Compatibility compatibility{
+        .hash_scheme_id = scheme.id,
+        .hash_scheme_version = scheme.version,
+        .alphabet_code = alphabet_code,
+        .kmer_size = kmer_size,
+        .window_size = window_size,
+        .hash_width_bytes = 4u,
+        .stored_posting_width_bytes =
+            minimizer_format6_uses_u32_postings(target_length) ? 4u : 8u,
+        .position_encoding_version = 1u,
+        .hash_semantics_version = 1u,
+        .count_semantics_version = 1u,
+        .producer_backend_id =
+            static_cast<std::uint16_t>(producer.id),
+        .producer_backend_version = producer.version,
+        .controls_per_block = kMinimizerFormat6ControlsPerBlock,
+        .hash_seed = 0u,
+    };
+    if (!valid_minimizer_format6_compatibility(
+            compatibility, target_length)) {
+        return std::unexpected(MinimizerFormat6Error::compatibility);
+    }
+    return compatibility;
+}
+
 /// Validate invariants intrinsic to one decoded revision-3 directory entry.
 [[nodiscard]] constexpr std::optional<MinimizerGenerationWireError>
 validate_minimizer_bucket_dir_entry(

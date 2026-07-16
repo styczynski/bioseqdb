@@ -227,14 +227,104 @@ TEST_CASE(
         "'minimizers_per_fragment');",
         table)) == 1);
     const auto inspected = it::query_one(ctx, fmt::format(
-        "SELECT sequence_rowno::text, gpu_abi_version::text, "
-        "total_bp_size::text "
-        "FROM bioseq.inspect_ready_minimizer_generation("
-        "'{}'::regclass, 'minimizers_per_fragment', {});",
+        "WITH inspected AS ("
+        " SELECT bioseq.inspect_ready_minimizer_format6_generation("
+        "  '{}'::regclass,'minimizers_per_fragment',{}) AS j"
+        ") "
+        "SELECT "
+        " j->>'format_version',"
+        " j->'head'->>'generation_id',"
+        " j->'source'->>'sequence_rowno',"
+        " j->'source'->>'total_bp_size',"
+        " j->'manifest'->'compatibility'->>'kmer_size',"
+        " j->'manifest'->'compatibility'->>'window_size',"
+        " j->'manifest'->'compatibility'->>'stored_posting_width_bytes',"
+        " j->'manifest'->'compatibility'->>'producer_backend_id',"
+        " CASE WHEN "
+        "  j->>'query_key'=j->'source'->>'sequence_rowno' "
+        "  AND j->'head'->>'query_key'=j->>'query_key' "
+        "  AND j->'head'->>'generation_id'="
+        "      j->'manifest'->>'generation_id' "
+        "  AND (j->'head'->>'generation_id')::bigint>0 "
+        "  AND j->'head'->>'source_epoch'="
+        "      j->'source'->>'source_epoch' "
+        "  AND j->'manifest'->>'source_epoch'="
+        "      j->'source'->>'source_epoch' "
+        "  AND j->'source'->>'source_identity'="
+        "      j->'head'->>'source_identity' "
+        "  AND j->'head'->>'source_identity'="
+        "      j->'manifest'->>'source_identity' "
+        "  AND length(j->'source'->>'source_identity')=32 "
+        "  AND j->'source'->>'source_identity'~'^[0-9a-f]+$' "
+        "  AND j->'source'->>'source_content_crc64'="
+        "      j->'head'->>'source_content_crc64' "
+        "  AND j->'head'->>'source_content_crc64'="
+        "      j->'manifest'->>'source_content_crc64' "
+        "  AND length(j->'source'->>'source_content_crc64')=16 "
+        "  AND j->'head'->>'compatibility_digest'="
+        "      j->'manifest'->>'compatibility_digest' "
+        "  AND length(j->'head'->>'compatibility_digest')=64 "
+        "  AND j->'manifest'->>'target_length'="
+        "      j->'source'->>'total_bp_size' "
+        "  AND (j->'head'->>'dense_seal_present')::boolean=false "
+        " THEN '1' ELSE '0' END,"
+        " CASE WHEN "
+        "  (j->'metadata'->>'head_rows')::bigint=1 "
+        "  AND (j->'metadata'->>'head_bytes')::bigint=224 "
+        "  AND (j->'metadata'->>'manifest_rows')::bigint=1 "
+        "  AND (j->'metadata'->>'manifest_bytes')::bigint=336 "
+        " THEN '1' ELSE '0' END,"
+        " CASE WHEN "
+        "  jsonb_array_length(j->'streams')=3 "
+        "  AND j->'streams'->0->>'kind'='directory' "
+        "  AND j->'streams'->1->>'kind'='controls' "
+        "  AND j->'streams'->2->>'kind'='postings' "
+        "  AND NOT EXISTS ("
+        "   SELECT 1 FROM jsonb_array_elements(j->'streams') AS s(value) "
+        "   WHERE (s.value->>'row_count')::bigint"
+        "       <>((s.value->>'logical_bytes')::bigint+8063)/8064 "
+        "      OR (s.value->>'row_count')::bigint"
+        "       <>(s.value->>'exact_catalog_rows')::bigint "
+        "      OR (s.value->>'logical_bytes')::bigint"
+        "       <>(s.value->>'exact_catalog_bytes')::bigint "
+        "      OR s.value->>'stream_crc64'"
+        "       <>s.value->>'exact_catalog_stream_crc64'"
+        "  ) "
+        "  AND (j->'streams'->0->>'logical_bytes')::bigint="
+        "      (j->'streams'->0->>'element_count')::bigint*80 "
+        "  AND j->'streams'->0->>'element_count'="
+        "      j->'manifest'->>'directory_entry_count' "
+        "  AND j->'streams'->0->>'stream_crc64'="
+        "      j->'manifest'->>'authenticated_directory_crc64' "
+        "  AND j->'streams'->1->>'element_count'="
+        "      j->'manifest'->>'unique_hash_count' "
+        "  AND j->'streams'->1->>'logical_bytes'="
+        "      j->'manifest'->>'total_control_bytes' "
+        "  AND j->'streams'->2->>'element_count'="
+        "      j->'manifest'->>'total_posting_count' "
+        "  AND j->'streams'->2->>'logical_bytes'="
+        "      j->'manifest'->>'total_posting_bytes' "
+        "  AND (j->'streams'->2->>'logical_bytes')::bigint="
+        "      (j->'streams'->2->>'element_count')::bigint*"
+        "      (j->'manifest'->'compatibility'->>"
+        "       'stored_posting_width_bytes')::bigint "
+        " THEN '1' ELSE '0' END "
+        "FROM inspected;",
         table,
         source_rowno));
-    REQUIRE(inspected.size() == 3);
-    REQUIRE(inspected[0].value() == std::to_string(source_rowno));
-    REQUIRE(inspected[1].value() == "3");
-    REQUIRE(inspected[2].value() == std::to_string(target.size()));
+    REQUIRE(inspected.size() == 11);
+    for (const auto& field : inspected) {
+        REQUIRE(field.has_value());
+    }
+    REQUIRE(inspected[0].value() == "6");
+    REQUIRE(std::stoll(inspected[1].value()) > 0);
+    REQUIRE(inspected[2].value() == std::to_string(source_rowno));
+    REQUIRE(inspected[3].value() == std::to_string(target.size()));
+    REQUIRE(inspected[4].value() == "15");
+    REQUIRE(inspected[5].value() == "10");
+    REQUIRE(inspected[6].value() == "4");
+    REQUIRE(inspected[7].value() == "1");
+    REQUIRE(inspected[8].value() == "1");
+    REQUIRE(inspected[9].value() == "1");
+    REQUIRE(inspected[10].value() == "1");
 }
