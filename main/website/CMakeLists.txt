@@ -62,13 +62,31 @@ file(MAKE_DIRECTORY "${_output_root}")
 set(_report_dir "${_output_root}/report")
 file(MAKE_DIRECTORY "${_report_dir}")
 
-# The base path must be a validated mount ("/" or "/seg/.../"); an empty value
-# would render root-relative asset URLs that 404 on nested pages (tutorials,
-# reference), so default an unset deployment base to the site root. Deployers set
-# BIOSEQ_WEBSITE_BASE_PATH (e.g. /bioseqdb/) for a subpath mount.
+# The base path must be a validated mount ("/" or "/seg/.../"). Per the cache
+# variable's contract ("empty uses site.yaml"), an unset deployment base resolves
+# from site.yaml's default_base_path -- the authored mount the site is deployed at
+# (/bioseqdb/ for the GitHub Pages project site). Substituting "/" here instead
+# would render every asset URL at the origin root, so the deployed pages would
+# fetch /assets/... from /bioseqdb/... and load unstyled. Every downstream
+# validator reads the base path back out of the rendered tree, so such a mismatch
+# is internally consistent and passes: site.yaml is the only source that pins the
+# real mount. Deployers override with BIOSEQ_WEBSITE_BASE_PATH for another mount.
 set(_base_path "${BIOSEQ_WEBSITE_BASE_PATH}")
 if(_base_path STREQUAL "")
-  set(_base_path "/")
+  file(READ "${_source_dir}/site.yaml" _site_yaml_text)
+  if(NOT _site_yaml_text MATCHES "(^|\n)default_base_path:[ \t]*([^\n]*)")
+    message(FATAL_ERROR
+      "website: site.yaml declares no default_base_path and "
+      "BIOSEQ_WEBSITE_BASE_PATH is unset; refusing to guess the deploy mount")
+  endif()
+  set(_base_path "${CMAKE_MATCH_2}")
+  string(REGEX REPLACE "[ \t]+#.*$" "" _base_path "${_base_path}")
+  string(REGEX REPLACE "[ \t\r]+$" "" _base_path "${_base_path}")
+  string(REGEX REPLACE "^[\"']" "" _base_path "${_base_path}")
+  string(REGEX REPLACE "[\"']$" "" _base_path "${_base_path}")
+  if(_base_path STREQUAL "")
+    message(FATAL_ERROR "website: site.yaml default_base_path is empty")
+  endif()
 endif()
 set(_revision "${BIOSEQ_WEBSITE_SOURCE_REVISION}")
 if(_revision STREQUAL "")
@@ -486,4 +504,5 @@ if(NOT BIOSEQ_WEBSITE_VERSION_ARTIFACTS STREQUAL "")
   add_custom_target(bioseq_website_assemble DEPENDS "${_assembled_success}")
 endif()
 
-message(STATUS "website: configured bioseq_website for ${_version} -> ${_output_root}/site")
+message(STATUS "website: configured bioseq_website for ${_version} "
+               "at base path ${_base_path} -> ${_output_root}/site")

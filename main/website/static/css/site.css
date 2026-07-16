@@ -52,6 +52,11 @@
   --accent-cyan: #46b8de;
   --accent-orange: #f26522;
   --accent-bioseq: #74c8a8;
+  /* Admonition severities beyond the brand accents (§10.3). Both are tuned for
+     >=4.5:1 against --bg so a caution/warning label stays legible on the navy
+     surface, and both are only ever paired with a text label, never hue alone. */
+  --accent-warning: #e8b339;
+  --accent-danger: #f2685f;
   --content-width: 1160px;
   --gutter: 32px;
   --radius: 14px;
@@ -394,6 +399,29 @@ img, video { max-width: 100%; height: auto; }
 .doc-code pre { margin: 0; padding: 14px 16px; overflow-x: auto; }
 .doc-code code { font-family: var(--font-mono); font-size: 0.86rem; background: none; color: var(--text); }
 @media (max-width: 640px) { .doc-code pre { white-space: pre-wrap; word-break: break-word; } }
+
+/* Documentation admonitions (§10.3): the five severities admonition_class()
+   emits — note/tip/important/warning/caution — as an accented aside. Severity is
+   carried by the accent rule, the dot AND the always-present text label, so it
+   survives both a monochrome render and colour-blind reading; hue alone never
+   encodes it. The accent is one custom property per severity so the shared block
+   stays single-sourced; the defaults here make a severity-less .admonition a
+   neutral aside, and each severity class overrides them at equal specificity
+   (later rule wins), never !important. */
+.admonition { --admonition-accent: var(--accent-cyan); --admonition-tint: var(--surface); margin: 1.6rem 0; padding: 14px 18px; border: 1px solid var(--surface-border); border-left: 3px solid var(--admonition-accent); border-radius: var(--radius); background: var(--admonition-tint); }
+.admonition p { margin: 8px 0 0; color: var(--text-muted); font-size: 0.95rem; }
+.admonition > :last-child { margin-bottom: 0; }
+/* Outranks `.admonition p` (0,1,1) so the label keeps its accent + mono casing. */
+.admonition p.admonition-label { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; color: var(--admonition-accent); }
+.admonition p.admonition-label::before { content: ""; flex: none; width: 9px; height: 9px; border-radius: 50%; background: currentColor; }
+.admonition code { font-family: var(--font-mono); font-size: 0.86rem; }
+.admonition a { color: var(--admonition-accent); }
+
+.admonition-note { --admonition-accent: var(--accent-cyan); --admonition-tint: rgba(70, 184, 222, 0.06); }
+.admonition-tip { --admonition-accent: var(--accent-bioseq); --admonition-tint: rgba(116, 200, 168, 0.06); }
+.admonition-important { --admonition-accent: var(--accent-orange); --admonition-tint: rgba(242, 101, 34, 0.06); }
+.admonition-warning { --admonition-accent: var(--accent-warning); --admonition-tint: rgba(232, 179, 57, 0.07); }
+.admonition-caution { --admonition-accent: var(--accent-danger); --admonition-tint: rgba(242, 104, 95, 0.07); }
 
 /* Annotated code (§10.6): underlined match spans + numbered callout cards. The
    orange/cyan alternation echoes the design; below 820px cards simply stack. */
