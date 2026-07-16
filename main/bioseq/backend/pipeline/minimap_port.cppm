@@ -3029,6 +3029,23 @@ struct MatchResultCollection {
     bool block_aligner_execution_proof_present = false;
     bool scalar_pipeline_execution_proof_present = false;
     bool ksw2_batched_execution_proof_present = false;
+    // Operation-local CPU/SIMD wall clocks. These travel with the result so
+    // parallel rows never update shared statement statistics. The PostgreSQL
+    // dispatch boundary consumes them exactly once into the existing stable
+    // PipelineStage timing slots.
+    std::uint64_t query_sketch_host_wall_ns = 0;
+    std::uint64_t seed_lookup_host_wall_ns = 0;
+    std::uint64_t chain_score_host_wall_ns = 0;
+    std::uint64_t region_generation_host_wall_ns = 0;
+    std::uint64_t alignment_result_host_wall_ns = 0;
+    bool host_stage_timing_saturated = false;
+    // Coarse clocks cross stage objects but never escape a live pipeline.
+    // The boundary methods below turn them into completed, mergeable deltas
+    // before the collection is returned to its caller.
+    std::uint64_t region_host_phase_started_ns = 0;
+    std::uint64_t alignment_result_host_phase_started_ns = 0;
+    bool region_host_phase_active = false;
+    bool alignment_result_host_phase_active = false;
 
     MatchResultCollection() = default;
     explicit MatchResultCollection(std::vector<MatchResult>&& results_vec)
@@ -3101,6 +3118,90 @@ struct MatchResultCollection {
         partial_vulkan_execution_proof.combine(proof);
     }
 
+    void record_host_stage_time(
+            std::uint64_t& destination,
+            const std::uint64_t elapsed_ns) noexcept {
+        if (elapsed_ns
+                > (std::numeric_limits<std::uint64_t>::max)() - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            host_stage_timing_saturated = true;
+            return;
+        }
+        destination += elapsed_ns;
+    }
+
+    void record_query_sketch_host_time(
+            const std::uint64_t elapsed_ns) noexcept {
+        record_host_stage_time(query_sketch_host_wall_ns, elapsed_ns);
+    }
+
+    void record_seed_lookup_host_time(const std::uint64_t elapsed_ns) noexcept {
+        record_host_stage_time(seed_lookup_host_wall_ns, elapsed_ns);
+    }
+
+    void record_chain_score_host_time(const std::uint64_t elapsed_ns) noexcept {
+        record_host_stage_time(chain_score_host_wall_ns, elapsed_ns);
+    }
+
+    void record_region_generation_host_time(
+            const std::uint64_t elapsed_ns) noexcept {
+        record_host_stage_time(region_generation_host_wall_ns, elapsed_ns);
+    }
+
+    void record_alignment_result_host_time(
+            const std::uint64_t elapsed_ns) noexcept {
+        record_host_stage_time(alignment_result_host_wall_ns, elapsed_ns);
+    }
+
+    /// Start the region-generation/selection owner after chaining completes.
+    void begin_region_host_phase(const std::uint64_t started_ns) noexcept {
+        if (region_host_phase_active || alignment_result_host_phase_active) {
+            host_stage_timing_saturated = true;
+        }
+        region_host_phase_started_ns = started_ns;
+        region_host_phase_active = true;
+    }
+
+    /// Close regions and, when alignment is enabled, reuse the exact same
+    /// boundary as the start of the inclusive alignment/result owner.
+    void transition_region_to_alignment_result_host_phase(
+            const std::uint64_t boundary_ns,
+            const bool alignment_enabled) noexcept {
+        if (!region_host_phase_active
+            || boundary_ns < region_host_phase_started_ns
+            || alignment_result_host_phase_active) {
+            host_stage_timing_saturated = true;
+            region_host_phase_active = false;
+            alignment_result_host_phase_active = false;
+            return;
+        }
+        record_region_generation_host_time(
+            std::max<std::uint64_t>(
+                1u, boundary_ns - region_host_phase_started_ns));
+        region_host_phase_active = false;
+        if (alignment_enabled) {
+            alignment_result_host_phase_started_ns = boundary_ns;
+            alignment_result_host_phase_active = true;
+        }
+    }
+
+    /// Close the inclusive alignment, post-alignment filters, MAPQ and result
+    /// materialisation owner at the terminal sink.
+    void finish_alignment_result_host_phase(
+            const std::uint64_t finished_ns) noexcept {
+        if (!alignment_result_host_phase_active) return;
+        if (finished_ns < alignment_result_host_phase_started_ns) {
+            host_stage_timing_saturated = true;
+            alignment_result_host_phase_active = false;
+            return;
+        }
+        record_alignment_result_host_time(
+            std::max<std::uint64_t>(
+                1u,
+                finished_ns - alignment_result_host_phase_started_ns));
+        alignment_result_host_phase_active = false;
+    }
+
     void combine_execution_proof(
             const MatchResultCollection& other) noexcept {
         if (other.exact_simd_query_execution_proof_present) {
@@ -3137,6 +3238,19 @@ struct MatchResultCollection {
         }
         partial_vulkan_execution_proof.combine(
             other.partial_vulkan_execution_proof);
+        record_query_sketch_host_time(other.query_sketch_host_wall_ns);
+        record_seed_lookup_host_time(other.seed_lookup_host_wall_ns);
+        record_chain_score_host_time(other.chain_score_host_wall_ns);
+        record_region_generation_host_time(
+            other.region_generation_host_wall_ns);
+        record_alignment_result_host_time(
+            other.alignment_result_host_wall_ns);
+        host_stage_timing_saturated = host_stage_timing_saturated
+            || other.host_stage_timing_saturated
+            || region_host_phase_active
+            || alignment_result_host_phase_active
+            || other.region_host_phase_active
+            || other.alignment_result_host_phase_active;
     }
 
     [[nodiscard]] bool exact_simd_query_execution_accepted(

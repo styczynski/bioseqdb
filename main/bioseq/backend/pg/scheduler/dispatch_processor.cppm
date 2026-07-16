@@ -255,7 +255,9 @@ public:
 		std::uint64_t physical_target_index_reads = 0;
 		std::uint64_t total_unique_keys = 0;
 		std::uint64_t key_set_checksum = 0;
+		std::uint64_t query_union_prepare_host_wall_ns = 0;
 		bool unions_ready = false;
+		bool query_union_prepare_host_wall_published = false;
 		bool persisted_read_stats_published = false;
 		/* The aggregate permit belongs to the target-wide object, not to an
 		 * individual parameter group.  It is deliberately declared after
@@ -274,6 +276,27 @@ public:
 			std::vector<CpuPreparedIndexGroup>{}.swap(groups);
 			query_union_admission_bytes = 0;
 			query_union_permit.reset();
+		}
+		[[nodiscard]] bool release_group_query_hash_union_noexcept(
+				CpuPreparedIndexGroup& group) noexcept {
+			const std::uint64_t released_bytes =
+				bioseq::parallelism::saturating_mul(
+					group.query_hash_union.capacity(),
+					static_cast<std::uint64_t>(
+						sizeof(MinimapSketchData)));
+			if (released_bytes
+					== (std::numeric_limits<std::uint64_t>::max)()
+				|| !query_union_permit.has_value()
+				|| query_union_admission_bytes < released_bytes) {
+				return false;
+			}
+			// The native persisted reader owns its canonical hash image now.
+			// Deallocate the target-wide sketch union before shrinking the
+			// aggregate permit so memory authority never trails ownership.
+			std::vector<MinimapSketchData>{}.swap(group.query_hash_union);
+			query_union_admission_bytes -= released_bytes;
+			query_union_permit->shrink_to(query_union_admission_bytes);
+			return true;
 		}
 		~CpuPreparedTarget() noexcept {
 			release_query_union_state_noexcept();
@@ -411,6 +434,20 @@ public:
 		if (!populate(8193u)) return false;
 		const std::size_t oversized_capacity =
 			target.groups.front().query_hash_union.capacity();
+		const std::uint64_t retained_outer_bytes =
+			bioseq::parallelism::saturating_mul(
+				target.groups.capacity(),
+				static_cast<std::uint64_t>(
+					sizeof(CpuPreparedIndexGroup)));
+		if (!target.release_group_query_hash_union_noexcept(
+				target.groups.front())
+			|| !target.groups.front().query_hash_union.empty()
+			|| target.groups.front().query_hash_union.capacity() != 0u
+			|| target.query_union_admission_bytes != retained_outer_bytes
+			|| target.query_union_permit->bytes() != retained_outer_bytes
+			|| admission.reserved_bytes() != retained_outer_bytes) {
+			return false;
+		}
 		target.release_query_union_state_noexcept();
 		if (!target.groups.empty() || target.groups.capacity() != 0u
 			|| target.query_union_permit.has_value()

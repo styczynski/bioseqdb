@@ -4067,6 +4067,102 @@ struct PreparedShapeV5PositionImagePlan {
     std::uint64_t projected_bytes = 0;
 };
 
+/// Exact cached ownership ledger for the trait-driven prepared-reader
+/// protocol. This is accounting state for the existing MemoryPermit, not a
+/// second admission system. Every field names one live allocation owner and
+/// `total_bytes` is updated in O(1) whenever that owner changes.
+struct ProtocolOwnedBytesLedger {
+    std::uint64_t directory_bytes = 0;
+    std::uint64_t query_hash_bytes = 0;
+    std::uint64_t query_record_bytes = 0;
+    std::uint64_t radix_offset_bytes = 0;
+    std::uint64_t global_position_bytes = 0;
+    std::uint64_t ordinal_map_bytes = 0;
+    std::uint64_t selected_extent_vector_bytes = 0;
+    std::uint64_t selected_extent_owner_bytes = 0;
+    std::uint64_t query_record_position_bytes = 0;
+    std::uint64_t control_scratch_bytes = 0;
+    std::uint64_t active_session_bytes = 0;
+    std::uint64_t total_bytes = 0;
+
+    ProtocolOwnedBytesLedger() = default;
+    ProtocolOwnedBytesLedger(const ProtocolOwnedBytesLedger&) = default;
+    ProtocolOwnedBytesLedger& operator=(
+        const ProtocolOwnedBytesLedger&) = default;
+
+    ProtocolOwnedBytesLedger(
+            ProtocolOwnedBytesLedger&& other) noexcept
+        : ProtocolOwnedBytesLedger(
+            static_cast<const ProtocolOwnedBytesLedger&>(other)) {
+        other.reset();
+    }
+
+    ProtocolOwnedBytesLedger& operator=(
+            ProtocolOwnedBytesLedger&& other) noexcept {
+        if (this != &other) {
+            *this = static_cast<const ProtocolOwnedBytesLedger&>(other);
+            other.reset();
+        }
+        return *this;
+    }
+
+    /// Replace one already-accounted owner. The caller publishes its named
+    /// field only after this checked total update succeeds.
+    [[nodiscard]] bool replace_checked(
+            std::uint64_t old_bytes,
+            std::uint64_t new_bytes) noexcept {
+        if (old_bytes > total_bytes) return false;
+        const std::uint64_t without_old = total_bytes - old_bytes;
+        if (new_bytes
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - without_old) {
+            return false;
+        }
+        total_bytes = without_old + new_bytes;
+        return true;
+    }
+
+    /// Check a temporary coexistence peak before asking the existing permit
+    /// to grow. No ownership is published by this helper.
+    [[nodiscard]] bool add_temporary_peak_checked(
+            std::uint64_t peak_bytes) const noexcept {
+        return peak_bytes
+            <= (std::numeric_limits<std::uint64_t>::max)() - total_bytes;
+    }
+
+    [[nodiscard]] bool field_sum_holds() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        std::uint64_t sum = directory_bytes;
+        sum = saturating_add(sum, query_hash_bytes);
+        sum = saturating_add(sum, query_record_bytes);
+        sum = saturating_add(sum, radix_offset_bytes);
+        sum = saturating_add(sum, global_position_bytes);
+        sum = saturating_add(sum, ordinal_map_bytes);
+        sum = saturating_add(sum, selected_extent_vector_bytes);
+        sum = saturating_add(sum, selected_extent_owner_bytes);
+        sum = saturating_add(sum, query_record_position_bytes);
+        sum = saturating_add(sum, control_scratch_bytes);
+        sum = saturating_add(sum, active_session_bytes);
+        return sum != (std::numeric_limits<std::uint64_t>::max)()
+            && sum == total_bytes;
+    }
+
+    void reset() noexcept {
+        directory_bytes = 0;
+        query_hash_bytes = 0;
+        query_record_bytes = 0;
+        radix_offset_bytes = 0;
+        global_position_bytes = 0;
+        ordinal_map_bytes = 0;
+        selected_extent_vector_bytes = 0;
+        selected_extent_owner_bytes = 0;
+        query_record_position_bytes = 0;
+        control_scratch_bytes = 0;
+        active_session_bytes = 0;
+        total_bytes = 0;
+    }
+};
+
 /// Pure checked byte plan used before any position-image reservation or
 /// allocation.  Tests can exercise adversarial counts without relying on
 /// virtual-memory overcommit or constructing a correspondingly huge payload.
@@ -4862,6 +4958,10 @@ protected:
         bool previous_position_valid = false;
         bool controls_complete = false;
         bool positions_complete = false;
+        // Exact heap owners nested below this extent. The outer extent vector
+        // is accounted separately, so replacing/releasing one extent remains
+        // O(1) without rescanning all selected extents.
+        std::uint64_t owned_capacity_bytes = 0;
     };
 
     struct ExtentSession {
@@ -4869,7 +4969,6 @@ protected:
         bool positions = false;
         std::uint32_t next_chunk = 0;
         Crc64Ecma182 crc{};
-        std::vector<std::byte> control_bytes;
     };
 
     std::vector<hash_type> protocol_query_hashes_;
@@ -4889,7 +4988,10 @@ protected:
     std::size_t protocol_global_position_count_ = 0u;
     std::vector<std::size_t> protocol_ordinal_to_selected_;
     std::vector<SelectedExtent> protocol_selected_extents_;
+    std::vector<std::byte> protocol_control_scratch_;
     std::optional<ExtentSession> protocol_session_{};
+    ProtocolOwnedBytesLedger protocol_owned_bytes_{};
+    std::uint64_t protocol_max_selected_control_bytes_ = 0u;
     std::uint64_t protocol_max_occ_ = 0;
     std::size_t protocol_entry_index_ = 0;
     std::size_t protocol_segment_begin_ = 0;
@@ -4986,7 +5088,10 @@ protected:
     TraitDrivenPreparedQueryCore& operator=(
         const TraitDrivenPreparedQueryCore&) = delete;
 
-    [[nodiscard]] std::uint64_t protocol_owned_capacity_bytes() const noexcept {
+    /// Slow owner walk retained only for a handful of protocol barriers and
+    /// focused tests. Hot admission/reconciliation reads the cached ledger.
+    [[nodiscard]] std::uint64_t
+    protocol_owned_capacity_bytes_oracle_() const noexcept {
         if (protocol_memory_evidence_.capacity_accounting_passes
                 == (std::numeric_limits<std::uint64_t>::max)()) {
             protocol_memory_evidence_.saturated = true;
@@ -5019,10 +5124,53 @@ protected:
             bytes = saturating_add(
                 bytes, selected_extent_control_capacity_bytes_(extent));
         }
-        if (protocol_session_) {
-            add(protocol_session_->control_bytes.capacity(), sizeof(std::byte));
-        }
+        add(protocol_control_scratch_.capacity(), sizeof(std::byte));
         return bytes;
+    }
+
+    [[nodiscard]] std::uint64_t
+    protocol_owned_capacity_bytes() const noexcept {
+        return protocol_owned_bytes_.total_bytes;
+    }
+
+    [[nodiscard]] bool replace_ledger_field_(
+            std::uint64_t& field,
+            std::uint64_t new_bytes) noexcept {
+        const std::uint64_t old_bytes = field;
+        if (!protocol_owned_bytes_.replace_checked(old_bytes, new_bytes)) {
+            return false;
+        }
+        field = new_bytes;
+        return true;
+    }
+
+    [[nodiscard]] bool replace_selected_extent_owner_(
+            SelectedExtent& extent,
+            std::uint64_t new_bytes) noexcept {
+        if (extent.owned_capacity_bytes
+                > protocol_owned_bytes_.selected_extent_owner_bytes) {
+            return false;
+        }
+        const std::uint64_t new_total =
+            protocol_owned_bytes_.selected_extent_owner_bytes
+            - extent.owned_capacity_bytes;
+        if (new_bytes
+                > (std::numeric_limits<std::uint64_t>::max)() - new_total) {
+            return false;
+        }
+        if (!replace_ledger_field_(
+                protocol_owned_bytes_.selected_extent_owner_bytes,
+                new_total + new_bytes)) {
+            return false;
+        }
+        extent.owned_capacity_bytes = new_bytes;
+        return true;
+    }
+
+    [[nodiscard]] bool protocol_ledger_matches_oracle_() const noexcept {
+        return protocol_owned_bytes_.field_sum_holds()
+            && protocol_owned_capacity_bytes_oracle_()
+                == protocol_owned_capacity_bytes();
     }
 
     class PermitGrowthGuard {
@@ -5067,8 +5215,21 @@ protected:
         }
     };
 
+    [[nodiscard]] bool release_control_scratch_noexcept_() noexcept {
+        {
+            std::vector<std::byte> empty;
+            protocol_control_scratch_.swap(empty);
+        }
+        return replace_ledger_field_(
+            protocol_owned_bytes_.control_scratch_bytes, 0u);
+    }
+
     void protocol_release_noexcept() noexcept {
         protocol_session_.reset();
+        {
+            std::vector<std::byte> empty;
+            protocol_control_scratch_.swap(empty);
+        }
         std::vector<SelectedExtent>{}.swap(protocol_selected_extents_);
         std::vector<std::size_t>{}.swap(protocol_ordinal_to_selected_);
         protocol_global_positions_.reset();
@@ -5079,8 +5240,13 @@ protected:
         protocol_query_hash_bits_ = 0u;
         std::vector<QueryRecord>{}.swap(protocol_query_records_);
         std::vector<hash_type>{}.swap(protocol_query_hashes_);
+        protocol_max_selected_control_bytes_ = 0u;
         protocol_global_position_storage_prepared_ = false;
         this->release_core_noexcept();
+        protocol_owned_bytes_.reset();
+        if (protocol_owned_capacity_bytes_oracle_() != 0u) {
+            protocol_memory_evidence_.saturated = true;
+        }
     }
 
     template <class T>
@@ -5096,12 +5262,16 @@ protected:
     }
 
     void mark_protocol_moved_from() noexcept {
+        protocol_session_.reset();
+        std::vector<std::byte>{}.swap(protocol_control_scratch_);
         protocol_global_positions_.reset();
         protocol_global_position_count_ = 0u;
         protocol_query_radix_offsets_.reset();
         protocol_query_radix_offset_count_ = 0u;
         protocol_query_radix_bits_ = 0u;
         protocol_query_hash_bits_ = 0u;
+        protocol_max_selected_control_bytes_ = 0u;
+        protocol_owned_bytes_.reset();
         protocol_global_position_storage_prepared_ = false;
         protocol_initialized_ = true;
         protocol_ready_ = false;
@@ -5157,14 +5327,7 @@ protected:
                 != PreparedShapeV5QueryAdmissionSubstage::none) {
             return;
         }
-        using bioseq::parallelism::saturating_add;
         using bioseq::parallelism::saturating_mul;
-        std::uint64_t selected_control_capacity_bytes = 0u;
-        for (const SelectedExtent& extent : protocol_selected_extents_) {
-            selected_control_capacity_bytes = saturating_add(
-                selected_control_capacity_bytes,
-                selected_extent_control_capacity_bytes_(extent));
-        }
         const std::uint64_t owned_capacity_bytes =
             protocol_owned_capacity_bytes();
         const std::uint64_t permit_bytes = this->permit_.bytes();
@@ -5191,10 +5354,9 @@ protected:
             .selected_extent_capacity = static_cast<std::uint64_t>(
                 protocol_selected_extents_.capacity()),
             .selected_control_capacity_bytes =
-                selected_control_capacity_bytes,
-            .control_payload_capacity_bytes = protocol_session_
-                ? static_cast<std::uint64_t>(
-                    protocol_session_->control_bytes.capacity()) : 0u,
+                protocol_owned_bytes_.selected_extent_owner_bytes,
+            .control_payload_capacity_bytes =
+                protocol_owned_bytes_.control_scratch_bytes,
             .releasable_protocol_query_hash_bytes =
                 !Traits::global_controls_then_positions
                     && protocol_initialized_
@@ -5342,6 +5504,12 @@ protected:
                 projected, retained_count, retained_bytes, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
         }
+        if (!replace_ledger_field_(
+                protocol_owned_bytes_.global_position_bytes,
+                retained_bytes)) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
         if (retained_count != 0u) {
             increment_memory_evidence_(
                 protocol_memory_evidence_.
@@ -5363,6 +5531,10 @@ protected:
                     position_image_reconcile,
                 projected, retained_count, retained_bytes, headroom);
             return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        if (!protocol_ledger_matches_oracle_()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
         }
         protocol_global_position_storage_prepared_ = true;
         return {};
@@ -5566,6 +5738,17 @@ protected:
             additional_logical_bytes);
     }
 
+    [[nodiscard]] static constexpr std::uint64_t query_hash_value_(
+            std::uint64_t hash) noexcept {
+        return hash;
+    }
+
+    [[nodiscard]] static std::uint64_t query_hash_value_(
+            const MinimapSketchData& minimizer) noexcept {
+        return minimizer.kmer();
+    }
+
+    template <class QueryValue>
     [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
     initialize_query_protocol(
             bioseq::parallelism::MemoryAdmissionController& admission,
@@ -5574,9 +5757,10 @@ protected:
             const ExpectedMinimizerCompatibility& expected,
             const MinimizerGenerationPayloadProfile& profile,
             std::span<const std::byte> encoded_directory,
-            std::span<const std::uint64_t> query_hashes,
+            std::span<const QueryValue> query_hashes,
             std::uint64_t max_occ,
-            PreparedShapeV5QueryReaderTestOptions test_options = {}) {
+            PreparedShapeV5QueryReaderTestOptions test_options = {},
+            bool query_hashes_are_sorted_unique = false) {
         protocol_admission_ = &admission;
         if constexpr (Traits::global_controls_then_positions) {
             protocol_test_options_ = test_options;
@@ -5587,11 +5771,21 @@ protected:
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
-        for (const std::uint64_t hash : query_hashes) {
+        std::uint64_t previous_hash = 0u;
+        bool has_previous_hash = false;
+        for (const QueryValue& query_value : query_hashes) {
+            const std::uint64_t hash = query_hash_value_(query_value);
             if (hash > profile.max_hash
                 || hash > (std::numeric_limits<hash_type>::max)()) {
                 return std::unexpected(MinimizerGenerationWireError::hash_range);
             }
+            if (query_hashes_are_sorted_unique
+                && has_previous_hash && hash <= previous_hash) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::row_order);
+            }
+            previous_hash = hash;
+            has_previous_hash = true;
         }
         const std::uint64_t query_bytes =
             bioseq::parallelism::saturating_mul(
@@ -5630,6 +5824,12 @@ protected:
                     0u, 0u, 0u, &core_failure);
             }
             return std::unexpected(admitted.error());
+        }
+        if (!replace_ledger_field_(
+                protocol_owned_bytes_.directory_bytes,
+                this->core_owned_capacity_bytes())) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
         }
         protocol_max_occ_ = max_occ;
 
@@ -5673,25 +5873,30 @@ protected:
         }
         try {
             protocol_query_hashes_.reserve(query_hashes.size());
-            for (const std::uint64_t hash : query_hashes) {
+            for (const QueryValue& query_value : query_hashes) {
+                const std::uint64_t hash = query_hash_value_(query_value);
                 protocol_query_hashes_.push_back(
                     static_cast<hash_type>(hash));
             }
-            std::ranges::sort(protocol_query_hashes_);
-            protocol_query_hashes_.erase(
-                std::unique(protocol_query_hashes_.begin(),
-                    protocol_query_hashes_.end()),
-                protocol_query_hashes_.end());
+            if (!query_hashes_are_sorted_unique) {
+                std::ranges::sort(protocol_query_hashes_);
+                protocol_query_hashes_.erase(
+                    std::unique(protocol_query_hashes_.begin(),
+                        protocol_query_hashes_.end()),
+                    protocol_query_hashes_.end());
+            }
             if constexpr (Traits::global_controls_then_positions) {
                 // The caller may provide duplicate hashes.  Canonicalize into
                 // a right-sized contiguous image before it becomes the
                 // permanent radix search surface; the existing 2x query-hash
                 // reservation covers the old and new vectors at this peak.
-                std::vector<hash_type> canonical;
-                canonical.reserve(protocol_query_hashes_.size());
-                canonical.assign(protocol_query_hashes_.begin(),
-                    protocol_query_hashes_.end());
-                protocol_query_hashes_.swap(canonical);
+                if (!query_hashes_are_sorted_unique) {
+                    std::vector<hash_type> canonical;
+                    canonical.reserve(protocol_query_hashes_.size());
+                    canonical.assign(protocol_query_hashes_.begin(),
+                        protocol_query_hashes_.end());
+                    protocol_query_hashes_.swap(canonical);
+                }
             }
         } catch (const std::bad_alloc&) {
             capture_admission_failure_(
@@ -5699,6 +5904,17 @@ protected:
                 projected, 0u, 0u, query_bytes);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
+        }
+        const std::uint64_t actual_query_hash_bytes =
+            bioseq::parallelism::saturating_mul(
+                protocol_query_hashes_.capacity(), sizeof(hash_type));
+        if (actual_query_hash_bytes
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || !replace_ledger_field_(
+                protocol_owned_bytes_.query_hash_bytes,
+                actual_query_hash_bytes)) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
         }
         if (inject_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
@@ -5864,6 +6080,9 @@ protected:
                 protocol_ordinal_to_selected_[entry.partition_id] =
                     protocol_selected_extents_.size();
                 protocol_selected_extents_.push_back(SelectedExtent{});
+                protocol_max_selected_control_bytes_ = (std::max)(
+                    protocol_max_selected_control_bytes_,
+                    entry.control_encoded_bytes);
             }
         } catch (const std::bad_alloc&) {
             capture_admission_failure_(
@@ -5871,6 +6090,43 @@ protected:
                 projected, 0u, 0u, route_bytes);
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
+        }
+        const std::uint64_t query_record_capacity_bytes =
+            bioseq::parallelism::saturating_mul(
+                protocol_query_records_.capacity(), sizeof(QueryRecord));
+        const std::uint64_t radix_offset_capacity_bytes =
+            bioseq::parallelism::saturating_mul(
+                protocol_query_radix_offset_count_, sizeof(std::uint32_t));
+        const std::uint64_t ordinal_map_capacity_bytes =
+            bioseq::parallelism::saturating_mul(
+                protocol_ordinal_to_selected_.capacity(),
+                sizeof(std::size_t));
+        const std::uint64_t selected_extent_vector_capacity_bytes =
+            bioseq::parallelism::saturating_mul(
+                protocol_selected_extents_.capacity(),
+                sizeof(SelectedExtent));
+        if (query_record_capacity_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+            || radix_offset_capacity_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+            || ordinal_map_capacity_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+            || selected_extent_vector_capacity_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+            || !replace_ledger_field_(
+                protocol_owned_bytes_.query_record_bytes,
+                query_record_capacity_bytes)
+            || !replace_ledger_field_(
+                protocol_owned_bytes_.radix_offset_bytes,
+                radix_offset_capacity_bytes)
+            || !replace_ledger_field_(
+                protocol_owned_bytes_.ordinal_map_bytes,
+                ordinal_map_capacity_bytes)
+            || !replace_ledger_field_(
+                protocol_owned_bytes_.selected_extent_vector_bytes,
+                selected_extent_vector_capacity_bytes)) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
         }
         if (inject_admission_failure_(
                 PreparedShapeV5QueryAdmissionSubstage::
@@ -5888,8 +6144,103 @@ protected:
             return protocol_poison<void>(
                 MinimizerGenerationWireError::admission);
         }
+        if (!protocol_ledger_matches_oracle_()) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
         initialize_physical_cursor();
         protocol_initialized_ = true;
+        return {};
+    }
+
+    /// Reserve the largest selected control extent once. ExtentSession owns
+    /// only cursor/checksum state and borrows this buffer; no per-extent
+    /// reserve/deallocate cycle remains on the cold-load path.
+    [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
+    ensure_control_scratch_() {
+        if (!protocol_control_scratch_.empty()) {
+            return std::unexpected(MinimizerGenerationWireError::row_order);
+        }
+        if (protocol_owned_bytes_.control_scratch_bytes != 0u) return {};
+        if (protocol_max_selected_control_bytes_
+                > (std::numeric_limits<std::size_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        const std::uint64_t headroom =
+            bioseq::parallelism::saturating_mul(
+                protocol_max_selected_control_bytes_,
+                bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        const std::uint64_t projected =
+            bioseq::parallelism::saturating_add(
+                protocol_owned_capacity_bytes(), headroom);
+        if (headroom == (std::numeric_limits<std::uint64_t>::max)()
+            || projected == (std::numeric_limits<std::uint64_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        PermitGrowthGuard guard{*this};
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_reservation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_reservation,
+                projected, 0u, 0u, headroom, nullptr, true);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        bioseq::parallelism::MemoryAdmissionFailure payload_failure;
+        if (!guard.grow(projected, &payload_failure)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_reservation,
+                projected, 0u, 0u, headroom, &payload_failure);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_allocation)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_allocation,
+                projected, 0u, 0u, headroom, nullptr, true);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        try {
+            protocol_control_scratch_.reserve(
+                static_cast<std::size_t>(
+                    protocol_max_selected_control_bytes_));
+        } catch (const std::bad_alloc&) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_allocation,
+                projected, 0u, 0u, headroom);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        const std::uint64_t actual_bytes =
+            protocol_control_scratch_.capacity();
+        if (!replace_ledger_field_(
+                protocol_owned_bytes_.control_scratch_bytes,
+                actual_bytes)) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        if (inject_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_reconcile)) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_reconcile,
+                projected, 0u, 0u, headroom, nullptr, true);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
+        if (!guard.reconcile()) {
+            capture_admission_failure_(
+                PreparedShapeV5QueryAdmissionSubstage::
+                    control_payload_reconcile,
+                projected, 0u, 0u, headroom);
+            return std::unexpected(MinimizerGenerationWireError::admission);
+        }
         return {};
     }
 
@@ -6067,8 +6418,28 @@ protected:
                                 > protocol_max_occ_) {
                             if constexpr (!Traits::
                                     global_controls_then_positions) {
+                                const std::uint64_t old_position_bytes =
+                                    bioseq::parallelism::saturating_mul(
+                                        record.positions.capacity(),
+                                        sizeof(std::uint64_t));
                                 std::vector<std::uint64_t>{}.swap(
                                     record.positions);
+                                if (old_position_bytes
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                    || old_position_bytes
+                                        > protocol_owned_bytes_.
+                                            query_record_position_bytes
+                                    || !replace_ledger_field_(
+                                        protocol_owned_bytes_.
+                                            query_record_position_bytes,
+                                        protocol_owned_bytes_.
+                                            query_record_position_bytes
+                                            - old_position_bytes)) {
+                                    return std::unexpected(
+                                        MinimizerGenerationWireError::
+                                            arithmetic_overflow);
+                                }
                             }
                             record.positions_complete = false;
                         }
@@ -6159,6 +6530,12 @@ protected:
                     protocol_memory_evidence_.
                         retained_selected_control_capacity_bytes,
                     selected_extent_control_capacity_bytes_(selected));
+                if (!replace_selected_extent_owner_(
+                        selected,
+                        selected_extent_control_capacity_bytes_(selected))) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::arithmetic_overflow);
+                }
                 selected.controls_complete = true;
                 return {};
             } catch (const std::bad_alloc&) {
@@ -6250,6 +6627,10 @@ protected:
                         ? maximum : record.positions.capacity() * 2u;
                 wanted = std::max(wanted, required);
                 PermitGrowthGuard guard{*this};
+                const std::uint64_t old_position_bytes =
+                    bioseq::parallelism::saturating_mul(
+                        record.positions.capacity(),
+                        sizeof(std::uint64_t));
                 const std::uint64_t additional =
                     bioseq::parallelism::saturating_mul(
                         wanted, sizeof(std::uint64_t));
@@ -6269,6 +6650,31 @@ protected:
                 } catch (const std::bad_alloc&) {
                     return std::unexpected(
                         MinimizerGenerationWireError::admission);
+                }
+                const std::uint64_t new_position_bytes =
+                    bioseq::parallelism::saturating_mul(
+                        record.positions.capacity(),
+                        sizeof(std::uint64_t));
+                if (old_position_bytes
+                            == (std::numeric_limits<std::uint64_t>::max)()
+                    || new_position_bytes
+                            == (std::numeric_limits<std::uint64_t>::max)()
+                    || old_position_bytes
+                        > protocol_owned_bytes_.query_record_position_bytes) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::arithmetic_overflow);
+                }
+                const std::uint64_t position_owner_without_old =
+                    protocol_owned_bytes_.query_record_position_bytes
+                    - old_position_bytes;
+                if (new_position_bytes
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - position_owner_without_old
+                    || !replace_ledger_field_(
+                        protocol_owned_bytes_.query_record_position_bytes,
+                        position_owner_without_old + new_position_bytes)) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::arithmetic_overflow);
                 }
                 if (!guard.reconcile()) {
                     return std::unexpected(
@@ -6424,86 +6830,16 @@ protected:
                     return protocol_poison<void>(
                         MinimizerGenerationWireError::arithmetic_overflow);
                 }
-                PermitGrowthGuard guard{*this};
-                const std::uint64_t headroom =
-                    bioseq::parallelism::saturating_mul(
-                        encoded_bytes,
-                        bioseq::parallelism::
-                            kVectorPreallocationHeadroomFactor);
-                const std::uint64_t projected =
-                    bioseq::parallelism::saturating_add(
-                        protocol_owned_capacity_bytes(), headroom);
-                if (headroom
-                            == (std::numeric_limits<std::uint64_t>::max)()
-                    || projected
-                            == (std::numeric_limits<std::uint64_t>::max)()) {
+                if (auto scratch = ensure_control_scratch_(); !scratch) {
                     protocol_session_.reset();
-                    return protocol_poison<void>(
-                        MinimizerGenerationWireError::arithmetic_overflow);
+                    return protocol_poison<void>(scratch.error());
                 }
-                if (inject_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_reservation)) {
-                    capture_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_reservation,
-                        projected, 0u, 0u, headroom, nullptr, true);
+                if (!protocol_control_scratch_.empty()
+                    || protocol_control_scratch_.capacity()
+                        < static_cast<std::size_t>(encoded_bytes)) {
                     protocol_session_.reset();
                     return protocol_poison<void>(
-                        MinimizerGenerationWireError::admission);
-                }
-                bioseq::parallelism::MemoryAdmissionFailure payload_failure;
-                if (!guard.grow(projected, &payload_failure)) {
-                    capture_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_reservation,
-                        projected, 0u, 0u, headroom, &payload_failure);
-                    protocol_session_.reset();
-                    return protocol_poison<void>(
-                        MinimizerGenerationWireError::admission);
-                }
-                if (inject_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_allocation)) {
-                    capture_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_allocation,
-                        projected, 0u, 0u, headroom, nullptr, true);
-                    protocol_session_.reset();
-                    return protocol_poison<void>(
-                        MinimizerGenerationWireError::admission);
-                }
-                try {
-                    protocol_session_->control_bytes.reserve(
-                        static_cast<std::size_t>(encoded_bytes));
-                } catch (const std::bad_alloc&) {
-                    capture_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_allocation,
-                        projected, 0u, 0u, headroom);
-                    protocol_session_.reset();
-                    return protocol_poison<void>(
-                        MinimizerGenerationWireError::admission);
-                }
-                if (inject_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_reconcile)) {
-                    capture_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_reconcile,
-                        projected, 0u, 0u, headroom, nullptr, true);
-                    protocol_session_.reset();
-                    return protocol_poison<void>(
-                        MinimizerGenerationWireError::admission);
-                }
-                if (!guard.reconcile()) {
-                    capture_admission_failure_(
-                        PreparedShapeV5QueryAdmissionSubstage::
-                            control_payload_reconcile,
-                        projected, 0u, 0u, headroom);
-                    protocol_session_.reset();
-                    return protocol_poison<void>(
-                        MinimizerGenerationWireError::admission);
+                        MinimizerGenerationWireError::element_count);
                 }
             }
         }
@@ -6551,25 +6887,34 @@ protected:
             return protocol_poison<void>(
                 MinimizerGenerationWireError::checksum);
         }
-        session.crc.update(row.bytes);
+        // Raw callers reached this point only after their mandatory row CRC
+        // traversal above; receipt callers carry the same authenticated
+        // address-bound checksum. Compose the extent CRC algebraically in
+        // both cases and never reread the payload solely for another CRC.
+        session.crc.value = crc64_append_validated_index_chunk_payload(
+            session.crc.checksum(), row.address,
+            static_cast<std::uint32_t>(row.bytes.size()),
+            row.row_checksum);
         if (positions && selected) {
             if (auto observed = observe_position_payload(entry, row.bytes);
                 !observed) {
                 return protocol_poison<void>(observed.error());
             }
         } else if (!positions && selected) {
-            try {
-                session.control_bytes.insert(
-                    session.control_bytes.end(),
-                    row.bytes.begin(), row.bytes.end());
-            } catch (const std::bad_alloc&) {
-                capture_admission_failure_(
-                    PreparedShapeV5QueryAdmissionSubstage::
-                        control_payload_allocation,
-                    this->permit_.bytes());
+            if (protocol_control_scratch_.size()
+                    > static_cast<std::size_t>(encoded_bytes)
+                || row.bytes.size()
+                    > protocol_control_scratch_.capacity()
+                        - protocol_control_scratch_.size()
+                || row.bytes.size()
+                    > static_cast<std::size_t>(encoded_bytes)
+                        - protocol_control_scratch_.size()) {
                 return protocol_poison<void>(
-                    MinimizerGenerationWireError::admission);
+                    MinimizerGenerationWireError::element_count);
             }
+            protocol_control_scratch_.insert(
+                protocol_control_scratch_.end(),
+                row.bytes.begin(), row.bytes.end());
         }
         ++session.next_chunk;
         if (session.next_chunk != chunk_count) return {};
@@ -6581,10 +6926,11 @@ protected:
         }
         if (!positions && selected) {
             const auto observed = observe_control_extent(
-                entry, session.control_bytes);
+                entry, protocol_control_scratch_);
             if (!observed) {
                 return protocol_poison<void>(observed.error());
             }
+            protocol_control_scratch_.clear();
         } else if (positions && selected) {
             SelectedExtent& extent =
                 protocol_selected_extents_[selected_index];
@@ -6643,19 +6989,32 @@ protected:
                 std::vector<SelectedControl>{}.swap(
                     extent.control_state.controls);
             }
+            if (!replace_selected_extent_owner_(extent, 0u)) {
+                return protocol_poison<void>(
+                    MinimizerGenerationWireError::arithmetic_overflow);
+            }
         }
         protocol_session_.reset();
-        this->permit_.shrink_to(protocol_owned_capacity_bytes());
         advance_physical_cursor();
         if constexpr (Traits::global_controls_then_positions) {
             if (protocol_position_phase_
                 && !protocol_global_position_storage_prepared_) {
+                if (!release_control_scratch_noexcept_()) {
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::arithmetic_overflow);
+                }
+                this->permit_.shrink_to(protocol_owned_capacity_bytes());
+                if (!protocol_ledger_matches_oracle_()) {
+                    return protocol_poison<void>(
+                        MinimizerGenerationWireError::arithmetic_overflow);
+                }
                 if (auto prepared = prepare_global_position_storage();
                     !prepared) {
                     return protocol_poison<void>(prepared.error());
                 }
             }
         }
+        this->permit_.shrink_to(protocol_owned_capacity_bytes());
         return {};
     }
 
@@ -6712,8 +7071,16 @@ protected:
                 }
             }
         }
-        protocol_ready_ = true;
+        if (!release_control_scratch_noexcept_()) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
         this->permit_.shrink_to(protocol_owned_capacity_bytes());
+        if (!protocol_ledger_matches_oracle_()) {
+            return protocol_poison<void>(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        protocol_ready_ = true;
         return {};
     }
 
@@ -6805,6 +7172,7 @@ struct PreparedShapeV5QueryReaderMemoryEvidence {
     std::uint64_t query_record_count = 0;
     std::uint64_t query_record_capacity = 0;
     std::uint64_t query_record_capacity_bytes = 0;
+    std::uint64_t query_record_position_capacity_bytes = 0;
     // Canonical u64 query hashes plus the exact high-bit radix offsets.  The
     // aggregate SQL key retains this stable name and exact owner equation.
     std::uint64_t query_hash_capacity_bytes = 0;
@@ -6835,6 +7203,8 @@ struct PreparedShapeV5QueryReaderMemoryEvidence {
         std::uint64_t accounted = directory_capacity_bytes;
         accounted = saturating_add(accounted, query_hash_capacity_bytes);
         accounted = saturating_add(accounted, query_record_capacity_bytes);
+        accounted = saturating_add(
+            accounted, query_record_position_capacity_bytes);
         accounted = saturating_add(accounted, ordinal_route_capacity_bytes);
         accounted = saturating_add(accounted, selected_extent_capacity_bytes);
         accounted = saturating_add(
@@ -6931,6 +7301,64 @@ public:
         return reader;
     }
 
+    /// Direct canonical-query overload used by the scheduler. The input must
+    /// already be strictly sorted and unique by kmer(); it is validated while
+    /// copying once into the reader-owned compact hash image, avoiding the
+    /// scheduler's temporary u64 vector, permit, and a second sort/unique.
+    [[nodiscard]] static std::expected<PreparedShapeV5QueryReader,
+        MinimizerGenerationWireError>
+    begin(
+            bioseq::parallelism::MemoryAdmissionController& admission,
+            const MinimizerGenerationHead& head,
+            const MinimizerGenerationManifest& manifest,
+            const ExpectedMinimizerCompatibility& expected,
+            std::span<const std::byte> encoded_directory,
+            std::span<const MinimapSketchData> sorted_unique_query_minimizers,
+            std::uint64_t max_occ,
+            PreparedShapeV5QueryAdmissionEvidence*
+                admission_failure_evidence = nullptr,
+            PreparedShapeV5QueryReaderTestOptions test_options = {}) {
+        if (admission_failure_evidence != nullptr) {
+            *admission_failure_evidence = {};
+        }
+        if (manifest.wire_format
+                != MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local
+            || expected.wire_format
+                != MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+        const auto profile = minimizer_generation_payload_profile(manifest);
+        if (!profile || !profile->shape_v5
+            || !expected.max_occ_cap
+            || *expected.max_occ_cap != profile->shape_v5->max_occ_cap
+            || max_occ > profile->shape_v5->max_occ_cap) {
+            return std::unexpected(
+                MinimizerGenerationWireError::compatibility_mismatch);
+        }
+        PreparedShapeV5QueryReader reader;
+        if (auto initialized = reader.initialize_query_protocol(
+                admission,
+                head,
+                manifest,
+                expected,
+                *profile,
+                encoded_directory,
+                sorted_unique_query_minimizers,
+                max_occ,
+                test_options,
+                true); !initialized) {
+            if (admission_failure_evidence != nullptr) {
+                *admission_failure_evidence =
+                    reader.protocol_admission_failure_evidence();
+            }
+            return std::unexpected(initialized.error());
+        }
+        return reader;
+    }
+
     [[nodiscard]] std::expected<void, MinimizerGenerationWireError>
     accept(const MinimizerGenerationRowView& row) {
         return this->accept_protocol_row(row);
@@ -7012,60 +7440,9 @@ public:
     [[nodiscard]] PreparedShapeV5QueryReaderMemoryEvidence
     memory_evidence() const noexcept {
         using bioseq::parallelism::saturating_add;
-        using bioseq::parallelism::saturating_mul;
-        std::uint64_t current_selected_control_capacity_bytes = 0u;
-        for (const auto& extent : this->protocol_selected_extents_) {
-            current_selected_control_capacity_bytes = saturating_add(
-                current_selected_control_capacity_bytes,
-                this->selected_extent_control_capacity_bytes_(extent));
-        }
-        const std::uint64_t query_record_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(
-                this->protocol_query_records_.capacity()),
-            sizeof(typename ProtocolCore::QueryRecord));
-        std::uint64_t query_hash_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(
-                this->protocol_query_hashes_.capacity()),
-            sizeof(typename ProtocolCore::hash_type));
-        query_hash_capacity_bytes = saturating_add(
-            query_hash_capacity_bytes,
-            saturating_mul(
-                static_cast<std::uint64_t>(
-                    this->protocol_query_radix_offset_count_),
-                sizeof(std::uint32_t)));
-        const std::uint64_t ordinal_route_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(
-                this->protocol_ordinal_to_selected_.capacity()),
-            sizeof(std::size_t));
-        const std::uint64_t selected_extent_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(
-                this->protocol_selected_extents_.capacity()),
-            sizeof(typename ProtocolCore::SelectedExtent));
-        const std::uint64_t global_position_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(
-                this->protocol_global_position_count_),
-            sizeof(std::uint64_t));
-        const std::uint64_t control_payload_capacity_bytes =
-            this->protocol_session_
-            ? static_cast<std::uint64_t>(
-                this->protocol_session_->control_bytes.capacity()) : 0u;
-        std::uint64_t owned_capacity_bytes =
-            this->directory_.owned_capacity_bytes();
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes, query_hash_capacity_bytes);
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes, query_record_capacity_bytes);
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes, ordinal_route_capacity_bytes);
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes, selected_extent_capacity_bytes);
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes,
-            current_selected_control_capacity_bytes);
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes, global_position_capacity_bytes);
-        owned_capacity_bytes = saturating_add(
-            owned_capacity_bytes, control_payload_capacity_bytes);
+        const auto& ledger = this->protocol_owned_bytes_;
+        const std::uint64_t query_hash_capacity_bytes = saturating_add(
+            ledger.query_hash_bytes, ledger.radix_offset_bytes);
         return PreparedShapeV5QueryReaderMemoryEvidence{
             .capacity_accounting_passes =
                 this->protocol_memory_evidence_.capacity_accounting_passes,
@@ -7090,7 +7467,9 @@ public:
                 this->protocol_query_records_.size()),
             .query_record_capacity = static_cast<std::uint64_t>(
                 this->protocol_query_records_.capacity()),
-            .query_record_capacity_bytes = query_record_capacity_bytes,
+            .query_record_capacity_bytes = ledger.query_record_bytes,
+            .query_record_position_capacity_bytes =
+                ledger.query_record_position_bytes,
             .query_hash_capacity_bytes = query_hash_capacity_bytes,
             .released_query_hash_capacity_bytes =
                 this->protocol_memory_evidence_.
@@ -7124,17 +7503,17 @@ public:
                 this->protocol_memory_evidence_.
                     retained_selected_control_capacity_bytes,
             .current_selected_control_capacity_bytes =
-                current_selected_control_capacity_bytes,
+                ledger.selected_extent_owner_bytes,
             .directory_capacity_bytes =
-                this->directory_.owned_capacity_bytes(),
-            .ordinal_route_capacity_bytes = ordinal_route_capacity_bytes,
+                ledger.directory_bytes,
+            .ordinal_route_capacity_bytes = ledger.ordinal_map_bytes,
             .selected_extent_capacity_bytes =
-                selected_extent_capacity_bytes,
+                ledger.selected_extent_vector_bytes,
             .global_position_capacity_bytes =
-                global_position_capacity_bytes,
+                ledger.global_position_bytes,
             .control_payload_capacity_bytes =
-                control_payload_capacity_bytes,
-            .owned_capacity_bytes = owned_capacity_bytes,
+                ledger.control_scratch_bytes,
+            .owned_capacity_bytes = ledger.total_bytes,
             .saturated = this->protocol_memory_evidence_.saturated,
         };
     }

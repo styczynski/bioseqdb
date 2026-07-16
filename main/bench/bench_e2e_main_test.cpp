@@ -106,7 +106,7 @@ TEST_CASE("E2E raw samples pin Format-5 memory evidence v2",
         serialized, nullptr, /*allow_exceptions=*/false);
     REQUIRE_FALSE(payload.is_discarded());
     REQUIRE(payload.at("payload_schema") == "bioseq.e2e.raw-sample");
-    REQUIRE(payload.at("payload_schema_version") == 4);
+    REQUIRE(payload.at("payload_schema_version") == 5);
 
     const auto& nested = payload.at("attestation").at(
         "format5_reader_memory_evidence");
@@ -160,7 +160,7 @@ TEST_CASE("E2E input setup follows exact expanded execution tuples",
     const auto focus_config = load_e2e_contract_config(focus_path);
     const auto focus_constraints = exact_e2e_execution_constraints(
         focus_config, "bench_e2e");
-    REQUIRE(focus_constraints.execution_tuples.size() == 2);
+    REQUIRE(focus_constraints.execution_tuples.size() == 4);
     REQUIRE(focus_config.at("test_cases").at("E2E_2GBP_DNA4")
                 .at("data").at("just_index_setup_only")
                 .get<std::string>()
@@ -202,4 +202,68 @@ TEST_CASE("E2E input setup follows exact expanded execution tuples",
     const auto absent = e2e_just_index_setup_requirements(no_index_only);
     REQUIRE_FALSE(absent.any_bioseq());
     REQUIRE_FALSE(absent.minimap2);
+}
+
+TEST_CASE("E2E primary rows require strand and executable CIGAR replay",
+          "[bench_e2e][correctness][cigar][strand]") {
+    E2eInput input{};
+    input.alphabet = "dna4";
+    input.cigar_projection = true;
+    input.queries.push_back(E2eQueryTruth{
+        .id = 0,
+        .bases = "ACGT",
+        .truth_target_start = 10,
+        .truth_target_end = 14,
+        .truth_is_reverse = false,
+        .target_window_start = 10,
+        .target_window_bases = "ACGT",
+    });
+
+    const it::rowset_t bioseq_rows{{
+        std::string{"0"}, std::string{"target"}, std::string{"10"},
+        std::string{"14"}, std::string{"0"}, std::string{"4"},
+        std::string{"f"}, std::string{"t"}, std::string{"4="},
+    }};
+    E2eOutput bioseq{};
+    parse_bioseq_batch_rows(bioseq_rows, input, bioseq);
+    REQUIRE(bioseq.found);
+    REQUIRE(bioseq.exact_primary_count_accepted == 1);
+    REQUIRE(bioseq.correct_strand_count == 1);
+    REQUIRE(bioseq.cigar_replay_count == 1);
+
+    E2eOutput minimap{};
+    parse_minimap2_paf(
+        "query0\t4\t0\t4\t+\tref0\t20\t10\t14\t4\t4\t60\t"
+        "tp:A:P\tcg:Z:4=\n",
+        input,
+        minimap);
+    REQUIRE(minimap.found);
+    REQUIRE(minimap.exact_primary_count_accepted == 1);
+    REQUIRE(minimap.correct_strand_count == 1);
+    REQUIRE(minimap.cigar_replay_count == 1);
+
+    E2eOutput extra{};
+    parse_minimap2_paf(
+        "query0\t4\t0\t4\t+\tref0\t20\t10\t14\t4\t4\t60\t"
+        "tp:A:P\tcg:Z:4=\n"
+        "query0\t4\t0\t4\t+\tref0\t20\t10\t14\t4\t4\t60\t"
+        "tp:A:S\tcg:Z:4=\n",
+        input,
+        extra);
+    REQUIRE_FALSE(extra.found);
+    REQUIRE(extra.exact_primary_count_accepted == 0);
+}
+
+TEST_CASE("cold Format-5 evidence requires receipt-backed CRC counters",
+          "[bench_e2e][raw-samples][format5][crc]") {
+    STATIC_REQUIRE(kColdIndexEvidenceKeys.size() == 59);
+    REQUIRE(std::ranges::find(
+        kColdIndexEvidenceKeys, "extent_crc_raw_bytes_hashed")
+        != kColdIndexEvidenceKeys.end());
+    REQUIRE(std::ranges::find(
+        kColdIndexEvidenceKeys, "extent_crc_combined_bytes")
+        != kColdIndexEvidenceKeys.end());
+    REQUIRE(std::ranges::find(
+        kColdIndexEvidenceKeys, "extent_crc_combine_rows")
+        != kColdIndexEvidenceKeys.end());
 }

@@ -1051,6 +1051,31 @@ TEST_CASE("DOC0371 stats merges saturate and identities fail closed",
     REQUIRE(merge_counter(oversized, 0));
     REQUIRE(oversized == sql_bigint_value_max);
 
+    PipelineOperationalStats stage_timing_delta{};
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::query_sketch)].host_wall_ns = 7u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::seed_lookup)].host_wall_ns = 11u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::chain_score)].host_wall_ns = 13u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::region_generation)].host_wall_ns = 17u;
+    stage_timing_delta.timing[
+        stage_index(PipelineStage::left_extension)].host_wall_ns = 19u;
+    PipelineOperationalStats stage_timing_aggregate{};
+    stage_timing_aggregate.merge(stage_timing_delta);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::query_sketch)].host_wall_ns == 7u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::seed_lookup)].host_wall_ns == 11u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::chain_score)].host_wall_ns == 13u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::region_generation)].host_wall_ns == 17u);
+    REQUIRE(stage_timing_aggregate.timing[
+        stage_index(PipelineStage::left_extension)].host_wall_ns == 19u);
+    REQUIRE_FALSE(stage_timing_aggregate.stats_saturated);
+
     PipelineOperationalStats operational{};
     operational.target_rows = sql_bigint_value_max;
     PipelineOperationalStats operational_increment{};
@@ -2697,12 +2722,55 @@ TEST_CASE("KSW2 batched proof rejects zero and tampered evidence",
 
     MatchResultCollection first;
     first.record_ksw2_batched_execution_proof(valid);
+    first.record_query_sketch_host_time(7u);
+    first.record_seed_lookup_host_time(11u);
+    first.record_chain_score_host_time(13u);
+    first.record_region_generation_host_time(17u);
+    first.record_alignment_result_host_time(19u);
     MatchResultCollection second;
     second.record_ksw2_batched_execution_proof(valid);
+    second.record_query_sketch_host_time(11u);
+    second.record_seed_lookup_host_time(19u);
+    second.record_chain_score_host_time(23u);
+    second.record_region_generation_host_time(29u);
+    second.record_alignment_result_host_time(31u);
     first.combine_execution_proof(second);
     REQUIRE(first.ksw2_batched_execution_accepted(true));
     REQUIRE(first.ksw2_batched_execution_proof.align_region_invocations
             == 2u);
+    REQUIRE(first.query_sketch_host_wall_ns == 18u);
+    REQUIRE(first.seed_lookup_host_wall_ns == 30u);
+    REQUIRE(first.chain_score_host_wall_ns == 36u);
+    REQUIRE(first.region_generation_host_wall_ns == 46u);
+    REQUIRE(first.alignment_result_host_wall_ns == 50u);
+    REQUIRE_FALSE(first.host_stage_timing_saturated);
+}
+
+TEST_CASE("Host timing phase handoff is non-overlapping and mergeable",
+          "[pipe][pipeline-stats][host-timing]") {
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+
+    MatchResultCollection collection;
+    collection.begin_region_host_phase(100u);
+    collection.transition_region_to_alignment_result_host_phase(
+        130u, /*alignment_enabled=*/true);
+    collection.finish_alignment_result_host_phase(180u);
+
+    REQUIRE(collection.region_generation_host_wall_ns == 30u);
+    REQUIRE(collection.alignment_result_host_wall_ns == 50u);
+    REQUIRE(collection.region_generation_host_wall_ns
+            + collection.alignment_result_host_wall_ns == 80u);
+    REQUIRE_FALSE(collection.region_host_phase_active);
+    REQUIRE_FALSE(collection.alignment_result_host_phase_active);
+    REQUIRE_FALSE(collection.host_stage_timing_saturated);
+
+    MatchResultCollection saturated;
+    saturated.record_alignment_result_host_time(
+        (std::numeric_limits<std::uint64_t>::max)());
+    saturated.record_alignment_result_host_time(1u);
+    REQUIRE(saturated.alignment_result_host_wall_ns
+            == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(saturated.host_stage_timing_saturated);
 }
 
 // =============================================================================
@@ -4245,6 +4313,14 @@ TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
             == ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof{});
     REQUIRE(result.scalar_pipeline_execution_proof.target_minimizers
             == ::bioseq::simd::HWY_NAMESPACE::ScalarMinimizerExecutionProof{});
+    REQUIRE(result.query_sketch_host_wall_ns > 0u);
+    REQUIRE(result.seed_lookup_host_wall_ns > 0u);
+    REQUIRE(result.chain_score_host_wall_ns > 0u);
+    REQUIRE(result.region_generation_host_wall_ns > 0u);
+    REQUIRE(result.alignment_result_host_wall_ns > 0u);
+    REQUIRE_FALSE(result.region_host_phase_active);
+    REQUIRE_FALSE(result.alignment_result_host_phase_active);
+    REQUIRE_FALSE(result.host_stage_timing_saturated);
     REQUIRE(result.scalar_pipeline_execution_proof.chain_score_calls == 0u);
     REQUIRE(result.scalar_pipeline_execution_proof.chain_backtrack_calls == 0u);
     REQUIRE(result.scalar_pipeline_execution_proof.ksw2_left_calls == 0u);

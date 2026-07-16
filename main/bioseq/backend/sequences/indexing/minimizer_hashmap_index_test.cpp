@@ -1443,6 +1443,53 @@ TEST_CASE("DOC0373 validated row CRC algebra reconstructs raw extent CRC",
     REQUIRE(algebraic_extent == direct_extent.checksum());
 }
 
+TEST_CASE("Format-5 cached ownership ledger replaces and moves exactly",
+          "[indexing][minimizer-hashmap][wire][v5][reader][admission][ledger]") {
+    using bioseq::indexing::ProtocolOwnedBytesLedger;
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<
+        ProtocolOwnedBytesLedger>);
+    STATIC_REQUIRE(std::is_nothrow_move_assignable_v<
+        ProtocolOwnedBytesLedger>);
+
+    ProtocolOwnedBytesLedger ledger;
+    const auto replace = [&ledger](std::uint64_t& field,
+                                   std::uint64_t value) {
+        REQUIRE(ledger.replace_checked(field, value));
+        field = value;
+        REQUIRE(ledger.field_sum_holds());
+    };
+    replace(ledger.directory_bytes, 101u);
+    replace(ledger.query_hash_bytes, 211u);
+    replace(ledger.query_record_bytes, 307u);
+    replace(ledger.selected_extent_owner_bytes, 401u);
+    replace(ledger.query_record_position_bytes, 503u);
+    replace(ledger.control_scratch_bytes, 601u);
+    replace(ledger.selected_extent_owner_bytes, 17u);
+    REQUIRE(ledger.add_temporary_peak_checked(8192u));
+
+    const std::uint64_t total_before_failure = ledger.total_bytes;
+    REQUIRE_FALSE(ledger.replace_checked(total_before_failure + 1u, 0u));
+    REQUIRE(ledger.total_bytes == total_before_failure);
+    REQUIRE(ledger.field_sum_holds());
+
+    ProtocolOwnedBytesLedger moved{std::move(ledger)};
+    REQUIRE(moved.total_bytes == total_before_failure);
+    REQUIRE(moved.field_sum_holds());
+    REQUIRE(ledger.total_bytes == 0u);
+    REQUIRE(ledger.field_sum_holds());
+    moved.reset();
+    REQUIRE(moved.total_bytes == 0u);
+    REQUIRE(moved.field_sum_holds());
+
+    ProtocolOwnedBytesLedger overflow;
+    overflow.directory_bytes =
+        (std::numeric_limits<std::uint64_t>::max)() - 3u;
+    overflow.total_bytes = overflow.directory_bytes;
+    REQUIRE_FALSE(overflow.replace_checked(0u, 4u));
+    REQUIRE_FALSE(overflow.add_temporary_peak_checked(4u));
+    REQUIRE(overflow.field_sum_holds());
+}
+
 TEST_CASE("DOC0371 generation head has a fixed little-endian 64-byte wire image",
           "[indexing][minimizer-hashmap][wire]") {
     using namespace bioseq::indexing;
@@ -8883,15 +8930,12 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.control_payload_capacity_bytes == 0u);
     REQUIRE(evidence.retained_layout_equation_holds());
     REQUIRE(evidence.owned_capacity_bytes == reader->admitted_bytes());
-    const std::uint64_t extent_count =
-        generation->directory.entries().size() * 2u;
-    const std::uint64_t fixed_passes = 7u + extent_count;
-    REQUIRE(evidence.capacity_accounting_passes >= fixed_passes);
-    REQUIRE(evidence.capacity_accounting_passes <= 7u + 3u * extent_count);
-    REQUIRE((evidence.capacity_accounting_passes - fixed_passes) % 4u == 0u);
-    REQUIRE((evidence.capacity_accounting_passes - fixed_passes) / 4u
-        <= extent_count / 2u);
-    REQUIRE(evidence.capacity_accounting_passes == 7u + 3u * extent_count);
+    // Full owner walks are now barrier-only: initialized, controls complete,
+    // exact position image published, and final ready. Extent count no longer
+    // appears in this equation.
+    constexpr std::uint64_t expected_barrier_audits = 4u;
+    REQUIRE(evidence.capacity_accounting_passes
+        == expected_barrier_audits);
     REQUIRE_FALSE(evidence.saturated);
     REQUIRE(reader->lookup(queries.front()).positions.front()
         == retained_bp(0u) << 1u);
@@ -8958,7 +9002,7 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.owned_capacity_bytes
         == sparse_reader->admitted_bytes());
     REQUIRE(sparse_evidence.capacity_accounting_passes
-        == 7u + extent_count + 4u * sparse_selected_extent_count);
+        == expected_barrier_audits);
     REQUIRE_FALSE(sparse_evidence.saturated);
 
     // A selected query absent from the target still crosses the same global
@@ -8994,20 +9038,11 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(empty_reader->lookup(absent_queries.front()).positions.empty());
 
     constexpr std::uint64_t aggregate_sessions = 2u;
-    const std::uint64_t aggregate_extents = aggregate_sessions * extent_count;
     const std::uint64_t aggregate_passes =
         evidence.capacity_accounting_passes
         + sparse_evidence.capacity_accounting_passes;
-    const std::uint64_t aggregate_fixed_passes =
-        7u * aggregate_sessions + aggregate_extents;
-    REQUIRE(aggregate_extents >= 2u * aggregate_sessions);
-    REQUIRE(aggregate_extents % 2u == 0u);
-    REQUIRE(aggregate_passes >= aggregate_fixed_passes);
-    REQUIRE((aggregate_passes - aggregate_fixed_passes) % 4u == 0u);
-    REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
-        == segment_count + sparse_selected_extent_count);
-    REQUIRE((aggregate_passes - aggregate_fixed_passes) / 4u
-        <= aggregate_extents / 2u);
+    REQUIRE(aggregate_passes
+        == aggregate_sessions * expected_barrier_audits);
 }
 
 TEST_CASE("DOC0373 Format-5 admission failures name the exact owner substage",

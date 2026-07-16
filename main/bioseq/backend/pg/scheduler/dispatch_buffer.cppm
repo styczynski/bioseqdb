@@ -140,6 +140,11 @@ inline void merge_cold_index_preparation_stats(
     delta.cold_index_heap_tid_forward_gap = source.heap_tid_forward_gap;
     delta.cold_index_heap_tid_backward_jump = source.heap_tid_backward_jump;
     delta.cold_index_extent_crc_bytes = source.extent_crc_bytes;
+    delta.cold_index_extent_crc_raw_bytes_hashed =
+        source.extent_crc_raw_bytes_hashed;
+    delta.cold_index_extent_crc_combined_bytes =
+        source.extent_crc_combined_bytes;
+    delta.cold_index_extent_crc_combine_rows = source.extent_crc_combine_rows;
     delta.cold_index_row_crc_bytes = source.row_crc_bytes;
     delta.cold_index_tuple_form_bytes = source.tuple_form_bytes;
     delta.cold_index_toast_values = source.toast_values;
@@ -2111,6 +2116,22 @@ public:
 					 errmsg("BioseqBatchJoin prepared-target counters are inconsistent")));
 			}
 			auto& operational = last_stats.operational;
+			if (!join_cpu_prepared_target
+					.query_union_prepare_host_wall_published
+				&& join_cpu_prepared_target
+					.query_union_prepare_host_wall_ns != 0u) {
+				const std::size_t query_sketch_stage =
+					::bioseq::pipeline_stats::stage_index(
+						::bioseq::pipeline_stats::PipelineStage::query_sketch);
+				operational.stats_saturated =
+					::bioseq::pipeline_stats::merge_counter(
+						operational.timing[query_sketch_stage].host_wall_ns,
+						join_cpu_prepared_target
+							.query_union_prepare_host_wall_ns)
+					|| operational.stats_saturated;
+				join_cpu_prepared_target
+					.query_union_prepare_host_wall_published = true;
+			}
 			::bioseq::pipeline_stats::PipelineOperationalStats prepared_delta{};
 			prepared_delta.cpu_prepared_index_builds =
 				prepared_after[0] - prepared_before[0];

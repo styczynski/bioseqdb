@@ -759,6 +759,12 @@ template<std::size_t N>
 	append("heap_tid_forward_gap", stats.cold_index_heap_tid_forward_gap);
 	append("heap_tid_backward_jump", stats.cold_index_heap_tid_backward_jump);
 	append("extent_crc_bytes", stats.cold_index_extent_crc_bytes);
+	append("extent_crc_raw_bytes_hashed",
+		stats.cold_index_extent_crc_raw_bytes_hashed);
+	append("extent_crc_combined_bytes",
+		stats.cold_index_extent_crc_combined_bytes);
+	append("extent_crc_combine_rows",
+		stats.cold_index_extent_crc_combine_rows);
 	append("row_crc_bytes", stats.cold_index_row_crc_bytes);
 	append("tuple_form_bytes", stats.cold_index_tuple_form_bytes);
 	append("policy_ns", stats.cold_index_policy_ns);

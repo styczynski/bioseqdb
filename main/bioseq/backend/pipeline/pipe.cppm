@@ -79,6 +79,7 @@ For testing/benchmarking faster iteration you can use level 1, level 3 requires 
 #include "common.h"
 
 #include <bit>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -714,6 +715,9 @@ struct PipelineOperationalStats {
     std::uint64_t cold_index_heap_tid_forward_gap = 0;
     std::uint64_t cold_index_heap_tid_backward_jump = 0;
     std::uint64_t cold_index_extent_crc_bytes = 0;
+    std::uint64_t cold_index_extent_crc_raw_bytes_hashed = 0;
+    std::uint64_t cold_index_extent_crc_combined_bytes = 0;
+    std::uint64_t cold_index_extent_crc_combine_rows = 0;
     std::uint64_t cold_index_row_crc_bytes = 0;
     std::uint64_t cold_index_tuple_form_bytes = 0;
     std::uint64_t cold_index_toast_values = 0;
@@ -1056,6 +1060,12 @@ struct PipelineOperationalStats {
             rhs.cold_index_heap_tid_backward_jump);
         add(cold_index_extent_crc_bytes,
             rhs.cold_index_extent_crc_bytes);
+        add(cold_index_extent_crc_raw_bytes_hashed,
+            rhs.cold_index_extent_crc_raw_bytes_hashed);
+        add(cold_index_extent_crc_combined_bytes,
+            rhs.cold_index_extent_crc_combined_bytes);
+        add(cold_index_extent_crc_combine_rows,
+            rhs.cold_index_extent_crc_combine_rows);
         add(cold_index_row_crc_bytes, rhs.cold_index_row_crc_bytes);
         add(cold_index_tuple_form_bytes,
             rhs.cold_index_tuple_form_bytes);
@@ -3209,6 +3219,26 @@ inline constexpr bool paper_nthash_has_canonical_two_bit_packing =
 
 // DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
+
+using HostStageClock = std::chrono::steady_clock;
+
+[[nodiscard]] inline std::uint64_t host_stage_now_ns() noexcept {
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        HostStageClock::now().time_since_epoch()).count();
+    return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
+}
+
+[[nodiscard]] inline std::uint64_t elapsed_host_stage_ns(
+        const std::uint64_t started_ns) noexcept {
+    const std::uint64_t finished_ns = host_stage_now_ns();
+    const std::uint64_t elapsed = finished_ns >= started_ns
+        ? finished_ns - started_ns : 0u;
+    // A stage that executed is positive evidence even on a platform whose
+    // steady-clock tick is coarser than one nanosecond. The clamp can add at
+    // most one nanosecond and keeps focused tests independent of clock
+    // resolution without sleeping.
+    return elapsed > 0 ? elapsed : 1u;
+}
 
 [[noreturn]] inline void throw_vulkan_declined(std::string_view stage) {
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
@@ -5623,6 +5653,7 @@ struct MinimizerStage
     // ignore it.
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
     MatchResultCollection* proof_dst = nullptr;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     // DOC0254 §5.4 / §8.4: the kernel writes directly into the per-query
     // arena slab via `sketch_collector_arena_adapter`, eliminating the
@@ -5633,6 +5664,8 @@ struct MinimizerStage
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& /*ignored*/, EmitToken<Sink>&& token) {
+        const std::uint64_t host_stage_started = host_timing_dst == nullptr
+            ? 0u : host_stage_now_ns();
         const std::size_t window_size = Cep::generic_fallback
             ? static_cast<std::size_t>(runtime_w)
             : Cep::window_len;
@@ -5778,6 +5811,10 @@ struct MinimizerStage
                 params, collector, *query_seq_, window_size, kmer_size);
         }
 
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->record_query_sketch_host_time(
+                elapsed_host_stage_ns(host_stage_started));
+        }
         return std::move(token).emit_batch(std::span<const MinimizerT>{
             sketches_slab.data(), sketches_slab.size()});
     }
@@ -5925,6 +5962,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr;
     MatchResultCollection* proof_dst = nullptr;
     PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     // DOC0307 §5.2 — host/device accessors for both the std::span CPU shape and
     // the MinimizerBatchView device shape.
@@ -5951,6 +5989,8 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
         EmitToken<Sink>&& token)
     {
+        const std::uint64_t host_stage_started = host_timing_dst == nullptr
+            ? 0u : host_stage_now_ns();
         const int32_t kmer_size = Cep::generic_fallback
             ? params.kmer_size
             : static_cast<int32_t>(Cep::kmer_len);
@@ -6173,6 +6213,11 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             (void)post_seed_owned_lifetime->complete_seed_user();
         }
 
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->record_seed_lookup_host_time(
+                elapsed_host_stage_ns(host_stage_started));
+        }
+
         return std::move(token).emit_batch(
             std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
     }
@@ -6223,10 +6268,13 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
     ChainingParams cp;
     sequence_size_t query_len = 0;
     MatchResultCollection* proof_dst = nullptr;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     template <is_constexpr_aligner_params Cep, class B, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process(B&& anchors_in, EmitToken<Sink>&& token) {
+        const std::uint64_t host_stage_started = host_timing_dst == nullptr
+            ? 0u : host_stage_now_ns();
         ChainingParams active_cp = cp;
         active_cp.query_len = query_len;
         const std::span<const Anchor> anchors_span{
@@ -6294,6 +6342,11 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
             Kernel::call(anchors_span, active_cp, chains_slab, reordered_slab);
         }
 
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->record_chain_score_host_time(
+                elapsed_host_stage_ns(host_stage_started));
+        }
+
         return std::move(token).emit_batch_pair(
             std::span<Chain> {chains_slab.data(),    chains_slab.size()},
             std::span<Anchor>{reordered_slab.data(), reordered_slab.size()});
@@ -6344,10 +6397,14 @@ struct RegionStage : StageBase<RegionStage, AlignRegion> {
     static constexpr std::string_view stage_name = "RegionStage";
 
     sequence_size_t query_len = 0;
+    MatchResultCollection* host_timing_dst = nullptr;
 
     template <is_constexpr_aligner_params Cep, class CB, class AB, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process_pair(CB&& chains, AB&& anchors, EmitToken<Sink>&& token) {
+        if (host_timing_dst != nullptr) {
+            host_timing_dst->begin_region_host_phase(host_stage_now_ns());
+        }
         // `AlignRegion` owns a `std::vector<CigarOp>` so the slab uses the
         // placement-new pattern; no intermediate `std::vector` is needed.
         auto regions_slab = make_arena_slab<AlignRegion>();
@@ -6526,10 +6583,15 @@ struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> 
     const bioseq::storage::lazy_compact_sequence<TR, Scanner>*             target_seq_;
     bool                                          enabled;
     MatchResultCollection*                        proof_dst_;
+    MatchResultCollection*                        host_timing_dst_;
 
     template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
     [[gnu::always_inline]]
     EmittedToken<Sink> process_pair(RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (host_timing_dst_ != nullptr) {
+            host_timing_dst_->transition_region_to_alignment_result_host_phase(
+                host_stage_now_ns(), enabled);
+        }
         if (enabled) {
             if constexpr (Kernel::emits_scalar_ksw2_execution_proof) {
                 if (proof_dst_ == nullptr) {
@@ -6677,6 +6739,7 @@ struct SinkStage {
     MatchResultCollection* dst_;
     sequence_size_t        query_len  = 0;
     sequence_size_t        target_len = 0;
+    MatchResultCollection* host_timing_dst_ = nullptr;
 
     [[gnu::always_inline]] inline void on_batch(std::span<AlignRegion> regions) {
         dst_->results.reserve(dst_->results.size() + regions.size());
@@ -6687,9 +6750,20 @@ struct SinkStage {
             dst_->results.push_back(
                 region_to_match_result(std::move(region_slot), query_len, target_len));
         }
+        if (host_timing_dst_ != nullptr
+            && host_timing_dst_->alignment_result_host_phase_active) {
+            host_timing_dst_->finish_alignment_result_host_phase(
+                host_stage_now_ns());
+        }
     }
 
-    [[gnu::always_inline]] inline void on_completed() noexcept { /* no-op */ }
+    [[gnu::always_inline]] inline void on_completed() noexcept {
+        if (host_timing_dst_ != nullptr
+            && host_timing_dst_->alignment_result_host_phase_active) {
+            host_timing_dst_->finish_alignment_result_host_phase(
+                host_stage_now_ns());
+        }
+    }
 };
 
 // =============================================================================
@@ -6744,6 +6818,9 @@ template <is_constexpr_aligner_params Cep, class Self, class Sink>
 // 9.4 make_minimap_pipeline — single source of truth for the pipeline shape
 // =============================================================================
 
+[[nodiscard]] inline bool vulkan_components_requested(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept;
+
 /**
  * @brief Build the full minimap pipeline value for one (Cep, BAA, CA, MA, EP).
  *
@@ -6777,6 +6854,8 @@ template <is_constexpr_aligner_params Cep,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     PostSeedOwnedLifetime* post_seed_owned_lifetime = nullptr)
 {
+    MatchResultCollection* host_timing_dst =
+        vulkan_components_requested(params) ? nullptr : &output_collection;
     MatchResultCollection* chaining_proof_dst = nullptr;
     if constexpr (CA
             == ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::SCALAR_MM2
@@ -6795,11 +6874,12 @@ template <is_constexpr_aligner_params Cep,
     auto tail = make_pipeline<Cep>(
         IndexStage<IndexT>{ {}, &target_index, gpu_index_identity },
         SeedHitStage{ {}, params, query_len, gpu_index_cache,
-                      &output_collection, post_seed_owned_lifetime },
+                      &output_collection, post_seed_owned_lifetime,
+                      host_timing_dst },
         ChainStage<kernel_t<CA>>{
             {}, params.to_chaining_params(), query_len,
-            chaining_proof_dst },
-        RegionStage{ {}, query_len },
+            chaining_proof_dst, host_timing_dst },
+        RegionStage{ {}, query_len, host_timing_dst },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
         DivergenceStage<MinimizerT, QueryMinimizers>{
@@ -6807,17 +6887,17 @@ template <is_constexpr_aligner_params Cep,
             params.compute_divergence },
         AlignStage<kernel_t<BAA>, QR, TR, Scanner>{
             {}, params, &scoring_matrix, &query_seq, &target_seq, params.do_cigar,
-            alignment_proof_dst },
+            alignment_proof_dst, host_timing_dst },
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
         MapqStage{ {}, params, params.compute_mapq },
-        SinkStage{ &output_collection, query_len, target_len }
+        SinkStage{ &output_collection, query_len, target_len, host_timing_dst }
     );
 
     if constexpr (EP == EntryPoint::FromSequence) {
         MinimizerStage<MinimizerT, kernel_t<MA>, QR, Scanner> head{
             {}, &query_seq, params.window_size, params.kmer_size, params,
-            &output_collection };
+            &output_collection, host_timing_dst };
         return head.template attach<Cep>(std::move(tail));
     } else {
         return tail;

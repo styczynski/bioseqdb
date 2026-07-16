@@ -2277,10 +2277,9 @@ next_shared_registry_claim_sequence() noexcept {
   if (g_bootstrap == nullptr) {
     return 0;
   }
-  std::uint64_t observed =
+  uint64 observed =
       pg_atomic_read_u64(&g_bootstrap->next_claim_sequence);
-  const std::uint64_t maximum =
-      (std::numeric_limits<std::uint64_t>::max)();
+  const uint64 maximum = (std::numeric_limits<uint64>::max)();
   while (observed != 0 && observed != maximum) {
     if (pg_atomic_compare_exchange_u64(
         &g_bootstrap->next_claim_sequence, &observed, observed + 1U)) {

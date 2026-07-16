@@ -858,13 +858,17 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		const Minimap2Params& base_params,
 		const bool include_persisted_parameter_group,
 		CpuPreparedTarget& prepared_target) {
+	const std::uint64_t query_union_prepare_started_ns =
+		static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
 	prepared_target.release_query_union_state_noexcept();
 	prepared_target.target_bp_size = target_bp_size;
 	prepared_target.query_count = query_headers.size();
 	prepared_target.physical_target_index_reads = 0;
 	prepared_target.total_unique_keys = 0;
 	prepared_target.key_set_checksum = 1469598103934665603ull;
+	prepared_target.query_union_prepare_host_wall_ns = 0;
 	prepared_target.unions_ready = false;
+	prepared_target.query_union_prepare_host_wall_published = false;
 	if (pipe::vulkan_components_requested(base_params)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1083,6 +1087,15 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	prepared_target.query_union_admission_bytes = measured_query_union_bytes;
 	prepared_target.query_union_permit->shrink_to(
 		prepared_target.query_union_admission_bytes);
+	const std::uint64_t query_union_prepare_finished_ns =
+		static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+	prepared_target.query_union_prepare_host_wall_ns =
+		query_union_prepare_finished_ns >= query_union_prepare_started_ns
+			? std::max<std::uint64_t>(
+				1u,
+				query_union_prepare_finished_ns
+					- query_union_prepare_started_ns)
+			: 1u;
 	prepared_target.unions_ready = true;
 }
 
@@ -1231,46 +1244,8 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 				grouped_shape_soa_segment_local
 		? *expected : *format4_expected;
 	session.validate_source_attestation(std::move(source_proof));
-	const std::uint64_t query_hash_bytes =
-		bioseq::parallelism::saturating_mul(
-			group.query_hash_union.size(), sizeof(std::uint64_t));
-	if (query_hash_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
-		fail("grouped32 query-hash conversion admission overflow");
-		return;
-	}
-	const std::uint64_t query_hash_headroom =
-		bioseq::parallelism::saturating_mul(
-			query_hash_bytes,
-			bioseq::parallelism::kVectorPreallocationHeadroomFactor);
-	if (query_hash_headroom
-		== (std::numeric_limits<std::uint64_t>::max)()) {
-		fail("grouped32 query-hash conversion headroom overflow");
-		return;
-	}
-	auto query_hash_permit =
-		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
-			query_hash_headroom);
-	if (!query_hash_permit) {
-		fail("grouped32 query-hash conversion was not admitted");
-		return;
-	}
-	std::vector<std::uint64_t> query_hashes;
-	query_hashes.reserve(group.query_hash_union.size());
-	const std::uint64_t actual_query_hash_bytes =
-		bioseq::parallelism::saturating_mul(
-			query_hashes.capacity(), sizeof(std::uint64_t));
-	if (actual_query_hash_bytes
-			== (std::numeric_limits<std::uint64_t>::max)()
-		|| actual_query_hash_bytes > query_hash_permit->bytes()) {
-		fail("grouped32 query-hash conversion capacity exceeded admission");
-		return;
-	}
-	query_hash_permit->shrink_to(actual_query_hash_bytes);
-	for (const MinimapSketchData& minimizer : group.query_hash_union) {
-		query_hashes.push_back(minimizer.kmer());
-	}
 	const auto format_shape_v5_failure =
-		[&query_hash_permit](
+		[](
 				const std::string_view phase,
 				const MinimizerGenerationWireError error,
 				const bioseq::indexing::
@@ -1327,7 +1302,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 			evidence.selected_control_capacity_bytes,
 			evidence.control_payload_capacity_bytes,
 			evidence.releasable_protocol_query_hash_bytes,
-			query_hash_permit->bytes(),
+			0u,
 			evidence.controller_failure_snapshot_present,
 			evidence.injected_failure);
 	};
@@ -1346,7 +1321,7 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		auto made = ShapeReader::begin(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected,
-			metadata.directory.encoded_bytes(), query_hashes,
+			metadata.directory.encoded_bytes(), group.query_hash_union,
 			static_cast<std::uint64_t>(group.max_occ),
 			&begin_admission_evidence);
 		if (!made) {
@@ -1355,10 +1330,17 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 				made.error(), begin_admission_evidence));
 			return;
 		}
-		bioseq::parallelism::release_admitted_vector_capacity_before_permit(
-			query_hashes, *query_hash_permit);
 		std::optional<ShapeReader> shape_reader{
 			std::in_place, std::move(*made)};
+		// ShapeReader now owns the exact canonical hash image. Format-5 is an
+		// ordinal-2 fail-closed path, so no later fallback can consume the
+		// scheduler's wider MinimapSketchData union. Release it before payload
+		// ingestion so the exact global-position image can use that admission
+		// headroom instead of retaining two equivalent query owners.
+		if (!prepared_target.release_group_query_hash_union_noexcept(group)) {
+			fail("Format-5 canonical query-union release disagrees with admission ownership");
+			return;
+		}
 		std::optional<MinimizerGenerationWireError> callback_error;
 		std::exception_ptr callback_exception;
 		const auto accept = [&](const bioseq::indexing::
@@ -1450,6 +1432,48 @@ void BatchProcessor::prepare_cpu_persisted_grouped32_target(
 		group.build_set_checksum = group.key_set_checksum;
 		++prepared_target.physical_target_index_reads;
 		return;
+	}
+
+	// Format 4 still consumes the legacy u64 span. Keep its conversion out of
+	// the Format-5 hot path: the latter now copies once directly from the
+	// already sorted/unique MinimapSketchData union into its canonical owner.
+	const std::uint64_t query_hash_bytes =
+		bioseq::parallelism::saturating_mul(
+			group.query_hash_union.size(), sizeof(std::uint64_t));
+	if (query_hash_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
+		fail("grouped32 query-hash conversion admission overflow");
+		return;
+	}
+	const std::uint64_t query_hash_headroom =
+		bioseq::parallelism::saturating_mul(
+			query_hash_bytes,
+			bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+	if (query_hash_headroom
+		== (std::numeric_limits<std::uint64_t>::max)()) {
+		fail("grouped32 query-hash conversion headroom overflow");
+		return;
+	}
+	auto query_hash_permit =
+		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+			query_hash_headroom);
+	if (!query_hash_permit) {
+		fail("grouped32 query-hash conversion was not admitted");
+		return;
+	}
+	std::vector<std::uint64_t> query_hashes;
+	query_hashes.reserve(group.query_hash_union.size());
+	const std::uint64_t actual_query_hash_bytes =
+		bioseq::parallelism::saturating_mul(
+			query_hashes.capacity(), sizeof(std::uint64_t));
+	if (actual_query_hash_bytes
+			== (std::numeric_limits<std::uint64_t>::max)()
+		|| actual_query_hash_bytes > query_hash_permit->bytes()) {
+		fail("grouped32 query-hash conversion capacity exceeded admission");
+		return;
+	}
+	query_hash_permit->shrink_to(actual_query_hash_bytes);
+	for (const MinimapSketchData& minimizer : group.query_hash_union) {
+		query_hashes.push_back(minimizer.kmer());
 	}
 
 	auto planned = bioseq::indexing::plan_minimizer_grouped32_cold_route(

@@ -632,6 +632,19 @@ inline void add_stage_host_time(
     add_operational_counter(stats, destination, elapsed_ns);
 }
 
+[[nodiscard]] inline std::uint64_t dispatch_host_now_ns() noexcept {
+    const auto now = bioseq::instr::clock::now_ns();
+    return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
+}
+
+[[nodiscard]] inline std::uint64_t elapsed_dispatch_host_ns(
+        const std::uint64_t started_ns) noexcept {
+    const std::uint64_t finished_ns = dispatch_host_now_ns();
+    const std::uint64_t elapsed_ns = finished_ns >= started_ns
+        ? finished_ns - started_ns : 0u;
+    return elapsed_ns > 0 ? elapsed_ns : 1u;
+}
+
 inline void record_block_aligner_execution_evidence(
         ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         const MatchResultCollection* execution_proof) noexcept {
@@ -669,6 +682,37 @@ inline void record_unattested_job(
         const MatchResultCollection* execution_proof,
         const bool consumed_shared_cached_query_proof,
         bool& cached_query_minimizer_proof_operation_accounted) noexcept {
+    if (execution_proof != nullptr) {
+        // CPU/SIMD stages write into the operation-local result collection;
+        // consume that delta once here, after any parallel row has joined.
+        // ChainStage is intentionally inclusive, so chain_backtrack remains
+        // zero. The left_extension timing slot likewise owns the coarse
+        // alignment-through-result interval; gap/right remain available for a
+        // later measured split. These owners never overlap.
+        // query_sketch is only the per-operation sketch recorded below or by
+        // MinimizerStage; the BatchJoin query-union preparation that precedes
+        // persisted payload delivery has a different lifetime owner and must
+        // be published separately rather than charged here twice.
+        using Stage = ::bioseq::pipeline_stats::PipelineStage;
+        add_stage_host_time(
+            stats, Stage::query_sketch,
+            execution_proof->query_sketch_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::seed_lookup,
+            execution_proof->seed_lookup_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::chain_score,
+            execution_proof->chain_score_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::region_generation,
+            execution_proof->region_generation_host_wall_ns);
+        add_stage_host_time(
+            stats, Stage::left_extension,
+            execution_proof->alignment_result_host_wall_ns);
+        stats.operational.stats_saturated =
+            stats.operational.stats_saturated
+            || execution_proof->host_stage_timing_saturated;
+    }
     ::bioseq::pipeline_stats::PipelineJobExecutionStats job{};
     job.requested_backend = backend_from_selected_params(params);
     job.requested_simd_chaining_policy =
@@ -3075,6 +3119,7 @@ template <class S>
     // the shared operation only once on the first proof-valid consumer.
     consumed_shared_cached_query_proof = false;
     bool row_consumed_persisted_query_sketch = false;
+	std::uint64_t query_sketch_host_wall_ns = 0;
 	auto* cpu_prepared_target = scanner_pg_ctx->cpu_prepared_target;
 	if (cpu_prepared_target != nullptr) {
 		if (selected_vulkan_execution(params)) {
@@ -3226,8 +3271,11 @@ template <class S>
             auto ensure_q =
                 [&query_minimizers, &query_minimizer_proof,
                  &query_seq, &idx_params,
-                 &row_consumed_persisted_query_sketch] {
+                 &row_consumed_persisted_query_sketch,
+                 &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
+                    const std::uint64_t query_sketch_started_ns =
+                        dispatch_host_now_ns();
                     if (selected_vulkan_execution(idx_params)) {
                         bioseq::gpu::vulkan::VulkanRuntimeError err{
                             "persisted Vulkan query sketch cannot use the CPU prepared-index path"};
@@ -3260,6 +3308,8 @@ template <class S>
 					}
                     query_minimizers.emplace(std::move(qc).extract_sketches_data());
                     query_minimizer_proof.emplace(std::move(proof));
+					query_sketch_host_wall_ns = elapsed_dispatch_host_ns(
+						query_sketch_started_ns);
 				} else if (!query_minimizer_proof.has_value()) {
 					raise_typed_dispatch_pg_error_as_cpp(
 						ERRCODE_DATA_CORRUPTED,
@@ -4188,6 +4238,10 @@ template <class S>
                 : minimap_port_pg_checked(fq_pg, ft_pg, params);
     }
 
+    if (query_sketch_host_wall_ns != 0u) {
+        collection.record_query_sketch_host_time(
+            query_sketch_host_wall_ns);
+    }
     if (row_consumed_persisted_query_sketch) {
 		const auto& completed_query_proof = per_row_query_mode
 			? row_query_minimizer_proof
