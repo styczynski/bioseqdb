@@ -470,6 +470,17 @@ class scoped_compile_db_cwd {
 // whole scan; clang tooling already skips units that have no compile command at all.
 // Module-map paths resolve against the current directory, which scoped_compile_db_cwd
 // pins to the compile db root before this runs.
+[[nodiscard]] bool command_is_satisfiable(
+    const clang::tooling::CompileCommand& command) {
+    for (const std::string& arg : command.CommandLine) {
+        if (!arg.empty() && arg.front() == '@'
+            && !llvm::sys::fs::exists(arg.substr(1))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::vector<std::string> buildable_units(
     const clang::tooling::CompilationDatabase& database,
     const std::vector<std::string>& reachable_units) {
@@ -478,15 +489,7 @@ std::vector<std::string> buildable_units(
     for (const std::string& unit : reachable_units) {
         for (const clang::tooling::CompileCommand& command :
              database.getCompileCommands(unit)) {
-            bool satisfiable = true;
-            for (const std::string& arg : command.CommandLine) {
-                if (!arg.empty() && arg.front() == '@'
-                    && !llvm::sys::fs::exists(arg.substr(1))) {
-                    satisfiable = false;
-                    break;
-                }
-            }
-            if (satisfiable) {
+            if (command_is_satisfiable(command)) {
                 kept.push_back(unit);
                 break;
             }
@@ -494,6 +497,44 @@ std::vector<std::string> buildable_units(
     }
     return kept;
 }
+
+// A unit present in several targets (a test/bench helper plus the shipped library)
+// yields one compile command per target. Only the shipped target's command has its
+// `@response` module map materialised in a library-only build, and a module unit's
+// provided module and export-import edges are identical across targets. This wrapper
+// therefore hands ClangTool exactly the first satisfiable command per unit, so the
+// scan never runs an unbuildable (test/bench-only) command whose module map is absent.
+class satisfiable_compilation_database final
+    : public clang::tooling::CompilationDatabase {
+  public:
+    explicit satisfiable_compilation_database(
+        const clang::tooling::CompilationDatabase& inner)
+        : inner_(inner) {}
+
+    std::vector<clang::tooling::CompileCommand> getCompileCommands(
+        llvm::StringRef file) const override {
+        std::vector<clang::tooling::CompileCommand> commands =
+            inner_.getCompileCommands(file);
+        for (clang::tooling::CompileCommand& command : commands) {
+            if (command_is_satisfiable(command)) {
+                return {std::move(command)};
+            }
+        }
+        return {};
+    }
+
+    std::vector<std::string> getAllFiles() const override {
+        return inner_.getAllFiles();
+    }
+
+    std::vector<clang::tooling::CompileCommand>
+    getAllCompileCommands() const override {
+        return inner_.getAllCompileCommands();
+    }
+
+  private:
+    const clang::tooling::CompilationDatabase& inner_;
+};
 
 module_graph scan_module_edges_from_db(
     const std::vector<std::string>& reachable_units,
@@ -511,7 +552,8 @@ module_graph scan_module_edges_from_db(
     }
     const scoped_compile_db_cwd cwd(compile_database);
     const std::vector<std::string> units = buildable_units(*database, reachable_units);
-    clang::tooling::ClangTool tool(*database, units);
+    const satisfiable_compilation_database satisfiable(*database);
+    clang::tooling::ClangTool tool(satisfiable, units);
     tool.appendArgumentsAdjuster(allowlist_adjuster());
     edges_factory factory(&result.units);
     if (tool.run(&factory) != 0) {
@@ -564,7 +606,8 @@ index run_structural_from_db(
     std::set<std::string> reachable_files(reachable_units.begin(), reachable_units.end());
     const scoped_compile_db_cwd cwd(compile_database);
     const std::vector<std::string> units = buildable_units(*database, reachable_units);
-    clang::tooling::ClangTool tool(*database, units);
+    const satisfiable_compilation_database satisfiable(*database);
+    clang::tooling::ClangTool tool(satisfiable, units);
     tool.appendArgumentsAdjuster(allowlist_adjuster());
     structural_factory factory(&result.entities, &reachable_files);
     if (tool.run(&factory) != 0) {
