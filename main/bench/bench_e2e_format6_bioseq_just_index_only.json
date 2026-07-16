@@ -1,0 +1,103 @@
+{
+  "params": {
+    "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "Restart-cold authenticated fragment-local MPF load plus mapping"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_fragment",
+        "enum": ["minimizers_per_fragment"]
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": ["task_parallel"]
+      }
+    }
+  },
+  "test_cases": {
+    "E2E_2GBP_DNA4": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "2gbp_dna4_mpf_fragment_local_focus",
+        "reference_length": 2000000000,
+        "fragment_count": 16,
+        "fragment_length_mean": 5000000,
+        "fragment_length_stddev": 100000,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "cigar_projection": true,
+        "just_index_setup_only": "minimizers_per_fragment",
+        "minimap2_split_bp": 2000000352,
+        "seed": 3219876
+      },
+      "description": "Bioseq-only 2-Gbp dna4 fragment-local MPF just_index measurement"
+    }
+  },
+  "bench_e2e": {
+    "tags": ["e2e", "performance", "cold-index", "mpf", "fragment-local", "bioseq-only"],
+    "description": "Bioseq-only measurement companion for comparison against an existing canonical minimap2 report.",
+    "fast": false,
+    "concurrency": {
+      "bench_lock": true,
+      "concurrency": false
+    },
+    "iteration_order": {
+      "mode": "interleaved_seeded",
+      "seed": 67
+    },
+    "matrix": {
+      "for": {
+        "E2E_2GBP_DNA4": 1
+      },
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_just_index": {
+          "minimizer_index": ["minimizers_per_fragment"],
+          "pipeline_mode": ["task_parallel"]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "rules": []},
+        "measured_region_ns_manual": {"type": "evaluation", "rules": []},
+        "correct_match_count": {"type": "evaluation", "rules": []},
+        "exact_primary_count_accepted": {"type": "evaluation", "rules": []},
+        "correct_strand_count": {"type": "evaluation", "rules": []},
+        "correct_cigar_count": {"type": "evaluation", "rules": []},
+        "pipeline_proof_accepted": {"type": "evaluation", "rules": []},
+        "persisted_format_version": {"type": "evaluation", "rules": []},
+        "persisted_format6_contract_valid": {"type": "evaluation", "rules": []},
+        "format6_restart_audit_accepted": {"type": "evaluation", "rules": []},
+        "format6_directory_rows": {"type": "evaluation", "rules": []},
+        "format6_control_rows": {"type": "evaluation", "rules": []},
+        "format6_posting_rows": {"type": "evaluation", "rules": []},
+        "format6_posting_ranges_delivered": {"type": "evaluation", "rules": []},
+        "format6_selected_block_count": {"type": "evaluation", "rules": []},
+        "format6_accepted_hash_count": {"type": "evaluation", "rules": []},
+        "format6_retained_position_count": {"type": "evaluation", "rules": []},
+        "format6_peak_admitted_bytes": {"type": "evaluation", "rules": []},
+        "format6_retained_owner_bytes": {"type": "evaluation", "rules": []},
+        "format6_admitted_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_query_record_capacity_bytes": {"type": "evaluation", "rules": []},
+        "format5_reader_ordinal_route_capacity_bytes": {"type": "evaluation", "rules": []},
+        "backend_fallbacks": {"type": "evaluation", "rules": []},
+        "just_index_restart_performed": {"type": "evaluation", "rules": []},
+        "just_index_restart_identity_changed": {"type": "evaluation", "rules": []},
+        "peak_postgres_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_minimap2_rss_mb": {"type": "evaluation", "rules": []},
+        "peak_swap_used_mb": {"type": "evaluation", "rules": []}
+      }
+    }
+  }
+}

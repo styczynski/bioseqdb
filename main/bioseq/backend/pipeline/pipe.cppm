@@ -3333,6 +3333,7 @@ namespace bioseq::simd::HWY_NAMESPACE::pipe {
 // `TargetIndex` spellings resolve to `MinimizerHashmapFragmentIndex`.
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
 using bioseq::indexing::MinimizerLookupIndex;
+using bioseq::indexing::MinimizerSeedIndex;
 
 // Export exception aliases through the pipeline module so PG importers do not
 // redundantly import the Highway-heavy implementation modules.
@@ -9113,6 +9114,7 @@ namespace bioseq::simd::HWY_NAMESPACE {
 // DOC0279 §9 — relocated index name in scope for this namespace's entry points.
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
 using bioseq::indexing::MinimizerLookupIndex;
+using bioseq::indexing::MinimizerSeedIndex;
 
 /**
  * @brief Run the minimap2 pipeline against a pre-built target index using a
@@ -9126,7 +9128,7 @@ using bioseq::indexing::MinimizerLookupIndex;
 template <class MinimizerT,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
-          ::bioseq::indexing::MinimizerLookupIndex IndexT,
+          ::bioseq::indexing::MinimizerSeedIndex IndexT,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(
@@ -9152,7 +9154,7 @@ template <class MinimizerT,
 template <class MinimizerT,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
-          ::bioseq::indexing::MinimizerLookupIndex IndexT,
+          ::bioseq::indexing::MinimizerSeedIndex IndexT,
           class Scanner = bioseq::storage::sequence_scanner_none<
               typename compact_sequence_range<QueryRange>::traits::storage_unit>>
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(

@@ -2278,11 +2278,11 @@ struct ReadyMinimizerFormat6PublicationPg {
     bool published = false;
 };
 
-/// Build and atomically publish one Format-6 generation from a fragmented
-/// PostgreSQL source.  Both historical MPF/MPS index names use the same
-/// canonical target-wide logical shape in Format-6.  Native minimizers are
-/// collected once into PostgreSQL-owned sorted spill runs; two bounded replays
-/// then satisfy the encoder's exact-count-before-postings contract.
+/// Build and atomically publish one sequence-wide Format-6 MPS generation
+/// from a fragmented PostgreSQL source. Native minimizers are collected into
+/// PostgreSQL-owned sorted spill runs; two bounded replays then satisfy the
+/// encoder's exact-count-before-postings contract. MPF is intentionally
+/// excluded: its physical fragment indexes must never cross this merge seam.
 template <class R, class Scanner>
 [[nodiscard]] inline ReadyMinimizerFormat6PublicationPg
 build_and_publish_minimizer_format6_generation_pg(
@@ -2312,15 +2312,14 @@ build_and_publish_minimizer_format6_generation_pg(
             bits_per_char,
         "Format-6 publisher requires canonical PostgreSQL packing");
 
-    const bool is_minimizer =
-        index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME
-        || index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+    const bool is_mps =
+        index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
     const bool active_snapshot_ready =
         bioseq::pg_utils::invoke_pg_as_cpp([] {
             return ActiveSnapshotSet()
                 && IsMVCCSnapshot(GetActiveSnapshot());
         });
-    if (!OidIsValid(user_relid) || column_attno <= 0 || !is_minimizer
+    if (!OidIsValid(user_relid) || column_attno <= 0 || !is_mps
         || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
         || locator.version != kLocatorVersion || locator.source_epoch == 0u
         || locator.total_bp_size == 0u || locator.num_fragments == 0u
@@ -2775,6 +2774,21 @@ inline void build_and_verify_minimizer_format6_generation_pg(
     constexpr std::uint16_t kAlphabetCode =
         pgseq_supported_alphabets::index_of<
             typename Traits::alphabet_type>();
+    if (index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
+        // MPF owns one persisted index per physical source fragment. Never
+        // route it through the target-wide Format-6 spill/merge publisher.
+        build_and_verify_grouped32_minimizer_generation_pg(
+            user_relid,
+            column_attno,
+            index_name,
+            locator,
+            sequence_rowno,
+            registered_source_snapshot,
+            storage,
+            sequence,
+            backend);
+        return;
+    }
     if constexpr (kAlphabetCode != 0u) {
         // Avoid instantiating the large Format-6 publisher for alphabet
         // specializations which are statically outside its registry.
@@ -2935,7 +2949,13 @@ build_and_publish_grouped32_minimizer_generation_pg(
         pgseq_supported_alphabets::index_of<
             typename Traits::alphabet_type>();
     constexpr std::uint64_t letters_per_unit = Traits::letters_per_unit;
+    constexpr std::uint64_t mpf_fragment_span_bp =
+        Scanner::fragment_storage_units * letters_per_unit;
     static_assert(letters_per_unit != 0);
+    static_assert(mpf_fragment_span_bp != 0);
+    const std::uint64_t persisted_segment_span_bp = is_mpf
+        ? mpf_fragment_span_bp
+        : bioseq::indexing::kMinimizerPreferredSegmentSpanBp;
     const std::uint64_t expected_units = locator.total_bp_size / letters_per_unit
         + (locator.total_bp_size % letters_per_unit != 0 ? 1u : 0u);
     const std::size_t expected_padding = static_cast<std::size_t>(
@@ -2993,7 +3013,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 bioseq::indexing::MinimizerGenerationWireFormat::
                     grouped_shape_soa_segment_local,
                 scheme, kAlphabetCode, kKmerSize,
-                bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
+                persisted_segment_span_bp,
                 kMaxOccCap);
         if (!derived_profile) {
             ready_minimizer_error_as_cpp(
@@ -3114,6 +3134,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 .source_content_checksum =
                     state->source_content_checksum,
                 .target_length = locator.total_bp_size,
+                .position_segment_span_bp = persisted_segment_span_bp,
                 .alphabet_code = state->source.alphabet_code,
                 .storage_unit_byte_width =
                     state->source.storage_unit_byte_width,
@@ -3304,8 +3325,12 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 || !manifest.shape_v5
                 || manifest.shape_v5->max_occ_cap != kMaxOccCap
                 || manifest.position_segment_span_bp == 0
-                || manifest.position_segment_span_bp
-                    > bioseq::indexing::kMinimizerPreferredSegmentSpanBp
+                || (is_mpf
+                    ? manifest.position_segment_span_bp
+                        != mpf_fragment_span_bp
+                    : manifest.position_segment_span_bp
+                        > bioseq::indexing::
+                            kMinimizerPreferredSegmentSpanBp)
                 || state->generation->head.compatibility_checksum
                     != result.compatibility_checksum
                 || state->generation->head.source_identity

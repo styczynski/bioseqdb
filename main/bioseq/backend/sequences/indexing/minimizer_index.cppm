@@ -44,19 +44,25 @@ struct MinimizerPositionSpan {
  */
 class MinimizerLookupSpans {
 private:
-    std::span<const std::uint64_t> contiguous_{};
+    const void* contiguous_data_ = nullptr;
+    std::size_t contiguous_size_ = 0u;
     std::span<const MinimizerPositionSpan> segmented_{};
     std::uint64_t global_occurrence_count_ = 0;
+    std::uint8_t contiguous_width_bytes_ = 0u;
     bool positions_complete_ = true;
 
     constexpr MinimizerLookupSpans(
-            std::span<const std::uint64_t> contiguous,
+            const void* contiguous_data,
+            std::size_t contiguous_size,
+            std::uint8_t contiguous_width_bytes,
             std::span<const MinimizerPositionSpan> segmented,
             std::uint64_t global_occurrence_count,
             bool positions_complete) noexcept
-        : contiguous_(contiguous),
+        : contiguous_data_(contiguous_data),
+          contiguous_size_(contiguous_size),
           segmented_(segmented),
           global_occurrence_count_(global_occurrence_count),
+          contiguous_width_bytes_(contiguous_width_bytes),
           positions_complete_(positions_complete) {}
 
 public:
@@ -65,7 +71,16 @@ public:
     [[nodiscard]] static constexpr MinimizerLookupSpans contiguous(
             std::span<const std::uint64_t> positions) noexcept {
         return MinimizerLookupSpans{
-            positions, {}, positions.size(), /*positions_complete=*/true};
+            positions.data(), positions.size(), sizeof(std::uint64_t), {},
+            positions.size(), /*positions_complete=*/true};
+    }
+
+    /// Borrow one directly consumable packed-32 position run.
+    [[nodiscard]] static constexpr MinimizerLookupSpans contiguous(
+            std::span<const std::uint32_t> positions) noexcept {
+        return MinimizerLookupSpans{
+            positions.data(), positions.size(), sizeof(std::uint32_t), {},
+            positions.size(), /*positions_complete=*/true};
     }
 
     [[nodiscard]] static constexpr MinimizerLookupSpans segmented(
@@ -73,13 +88,15 @@ public:
             std::uint64_t global_occurrence_count,
             bool positions_complete = true) noexcept {
         return MinimizerLookupSpans{
-            {}, spans, global_occurrence_count, positions_complete};
+            nullptr, 0u, 0u, spans, global_occurrence_count,
+            positions_complete};
     }
 
     [[nodiscard]] static constexpr MinimizerLookupSpans positions_unavailable(
             std::uint64_t global_occurrence_count) noexcept {
         return MinimizerLookupSpans{
-            {}, {}, global_occurrence_count, /*positions_complete=*/false};
+            nullptr, 0u, 0u, {}, global_occurrence_count,
+            /*positions_complete=*/false};
     }
 
     [[nodiscard]] constexpr std::uint64_t global_occurrence_count()
@@ -91,9 +108,24 @@ public:
         return positions_complete_;
     }
 
-    [[nodiscard]] constexpr std::span<const std::uint64_t>
+    [[nodiscard]] std::span<const std::uint64_t>
     contiguous_positions() const noexcept {
-        return contiguous_;
+        return contiguous_width_bytes_ == sizeof(std::uint64_t)
+            ? std::span<const std::uint64_t>{
+                static_cast<const std::uint64_t*>(contiguous_data_),
+                contiguous_size_}
+            : std::span<const std::uint64_t>{};
+    }
+
+    /// Packed-32 counterpart of `contiguous_positions()`. At most one
+    /// contiguous width is present in a well-formed result.
+    [[nodiscard]] std::span<const std::uint32_t>
+    contiguous_positions32() const noexcept {
+        return contiguous_width_bytes_ == sizeof(std::uint32_t)
+            ? std::span<const std::uint32_t>{
+                static_cast<const std::uint32_t*>(contiguous_data_),
+                contiguous_size_}
+            : std::span<const std::uint32_t>{};
     }
 
     [[nodiscard]] constexpr std::span<const MinimizerPositionSpan>
@@ -103,14 +135,22 @@ public:
 
     /// Validate exclusivity, nonempty segments and the authoritative count.
     [[nodiscard]] constexpr bool well_formed() const noexcept {
-        if (!contiguous_.empty() && !segmented_.empty()) {
+        const unsigned active_shapes =
+            static_cast<unsigned>(contiguous_size_ != 0u)
+            + static_cast<unsigned>(!segmented_.empty());
+        if (active_shapes > 1u
+            || (contiguous_size_ != 0u
+                && (contiguous_data_ == nullptr
+                    || (contiguous_width_bytes_ != sizeof(std::uint32_t)
+                        && contiguous_width_bytes_
+                            != sizeof(std::uint64_t))))) {
             return false;
         }
         if (!positions_complete_) {
-            return contiguous_.empty() && segmented_.empty();
+            return active_shapes == 0u;
         }
-        if (!contiguous_.empty()) {
-            return global_occurrence_count_ == contiguous_.size();
+        if (contiguous_size_ != 0u) {
+            return global_occurrence_count_ == contiguous_size_;
         }
         std::uint64_t observed = 0;
         for (const MinimizerPositionSpan& span : segmented_) {
@@ -147,6 +187,39 @@ concept MinimizerLookupIndex = requires (
     const T& const_index) {
     { const_index.target_length() }          -> std::convertible_to<bioseq::storage::sequence_size_t>;
 } && (ContiguousMinimizerLookupIndex<T> || SegmentedMinimizerLookupIndex<T>);
+
+/// Probe used only to state the fragment-native seed-stream concept.  A
+/// conforming index invokes the visitor once for each exact
+/// `(packed_target_position, query_minimizer)` hit while retaining every
+/// physical fragment as an independent lookup authority.
+struct FragmentNativeSeedHitVisitorProbe {
+    void operator()(
+            std::uint64_t,
+            const MinimapSketchData&) const noexcept {}
+};
+
+/// MPF-native alternative to a target-wide lookup index.  It streams seed
+/// hits directly from independently persisted fragment indexes and therefore
+/// never needs to concatenate postings or construct hash-to-fragment span
+/// tables.  The concrete production reader accepts the canonical
+/// MinimapSketchData query representation used by the persisted CPU lane.
+template <typename T>
+concept FragmentNativeMinimizerSeedIndex = requires (
+    const T& const_index,
+    std::span<const MinimapSketchData> query_minimizers,
+    std::int32_t max_occ,
+    FragmentNativeSeedHitVisitorProbe visitor) {
+    { const_index.target_length() }
+        -> std::convertible_to<bioseq::storage::sequence_size_t>;
+    { const_index.for_each_fragment_seed_hit(
+        query_minimizers, max_occ, visitor) } -> std::same_as<void>;
+};
+
+/// Any target index shape accepted by the seed stage: either ordinary
+/// per-hash lookup or direct fragment-native hit streaming.
+template <typename T>
+concept MinimizerSeedIndex =
+    MinimizerLookupIndex<T> || FragmentNativeMinimizerSeedIndex<T>;
 
 /// Zero-copy adapter used by seed consumers for both lookup shapes.
 template <MinimizerLookupIndex T>

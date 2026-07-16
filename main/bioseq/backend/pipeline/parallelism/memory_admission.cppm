@@ -148,6 +148,11 @@ public:
     [[nodiscard]] bool grow_to(
         std::uint64_t bytes,
         MemoryAdmissionFailure* failure = nullptr) noexcept;
+    /// Consolidate two reservations owned by the same controller without
+    /// changing the controller's global reserved-byte counter.  This is used
+    /// after parallel workers hand independently admitted allocations to one
+    /// aggregate lifetime owner.
+    [[nodiscard]] bool absorb(MemoryPermit&& other) noexcept;
 
     [[nodiscard]] std::uint64_t bytes() const noexcept {
         return bytes_;
@@ -564,6 +569,24 @@ inline bool MemoryPermit::grow_to(
     extra->owner_ = nullptr;
     extra->bytes_ = 0u;
     bytes_ = bytes;
+    return true;
+}
+
+inline bool MemoryPermit::absorb(MemoryPermit&& other) noexcept {
+    if (this == &other) {
+        return true;
+    }
+    if (other.owner_ == nullptr) {
+        return other.bytes_ == 0u;
+    }
+    if (owner_ == nullptr || owner_ != other.owner_
+        || bytes_ > (std::numeric_limits<std::uint64_t>::max)()
+                - other.bytes_) {
+        return false;
+    }
+    bytes_ += other.bytes_;
+    other.owner_ = nullptr;
+    other.bytes_ = 0u;
     return true;
 }
 

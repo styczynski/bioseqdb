@@ -36,6 +36,7 @@ module;
 
 #include <cstdlib>
 #include <cstdint>
+#include <concepts>
 #include <cmath>
 #include <cstring>
 #include <bit>
@@ -49,6 +50,7 @@ module;
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 export module bioseq.sequences.minimap_port;
 
@@ -107,7 +109,9 @@ using bioseq::chaining::backtrack_chains;
 // DOC0279 §9 / §7.1 — the relocated minimizer index + its concept. Highway-
 // namespace consumers reference them cross-namespace (POD value type + concept).
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
+using bioseq::indexing::FragmentNativeMinimizerSeedIndex;
 using bioseq::indexing::MinimizerLookupIndex;
+using bioseq::indexing::MinimizerSeedIndex;
 using bioseq::indexing::MinimizerLookupSpans;
 using bioseq::indexing::MinimizerPositionSpan;
 using bioseq::indexing::lookup_minimizer_spans;
@@ -689,16 +693,24 @@ struct AlignRegion {
 // Phase 2: Collect seed hits — look up query minimizers in target index
 // ============================================================================
 
-/** Append one borrowed target-position run for a single query minimizer. */
+/**
+ * Append one borrowed packed target-position run for a single query
+ * minimizer. Position width is resolved once by the caller, so a Format-6
+ * uint32 posting remains packed through the seed loop and is widened only in
+ * the register used to construct its anchor.
+ */
+template <std::unsigned_integral StoredPosition>
 inline void append_seed_hits_from_position_span(
-    std::span<const std::uint64_t> target_hits,
+    std::span<const StoredPosition> target_hits,
     std::uint32_t query_strand_bit,
     sequence_size_t forward_query_pos,
     sequence_size_t reverse_query_pos,
     std::uint32_t query_span_value,
     ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
 {
-    for (const std::uint64_t target_hit : target_hits) {
+    for (const StoredPosition stored_target_hit : target_hits) {
+        const std::uint64_t target_hit =
+            static_cast<std::uint64_t>(stored_target_hit);
         const sequence_size_t ref_position =
             static_cast<sequence_size_t>(target_hit >> 1u);
         const std::uint32_t target_strand_bit =
@@ -717,6 +729,24 @@ inline void append_seed_hits_from_position_span(
         anchor.segment_id = 0;
         anchors_out.push_back(anchor);
     }
+}
+
+inline void sort_seed_hits(
+    ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
+{
+    static const auto* _sort_desc =
+        bioseq::instr::register_region_static("collect_seed_hits_sort");
+    auto _sort_scope = bioseq::instr::region(_sort_desc);
+    struct AnchorRefBitsKey {
+        [[nodiscard, gnu::always_inline]]
+        inline std::uint64_t operator()(const Anchor& anchor) const noexcept {
+            return anchor.ref_bits();
+        }
+    };
+    bioseq::sorting::radix_sort(
+        anchors_out.data(),
+        anchors_out.data() + anchors_out.size(),
+        AnchorRefBitsKey{});
 }
 
 /**
@@ -827,10 +857,19 @@ void collect_seed_hits(
         // so reverse_pos_base - forward_query_pos never underflows.)
         const sequence_size_t reverse_query_pos = reverse_pos_base - forward_query_pos;
 
-        const auto contiguous = target_hits.contiguous_positions();
-        if (!contiguous.empty()) {
+        const auto contiguous32 = target_hits.contiguous_positions32();
+        const auto contiguous64 = target_hits.contiguous_positions();
+        if (!contiguous32.empty()) {
             append_seed_hits_from_position_span(
-                contiguous,
+                contiguous32,
+                query_strand_bit,
+                forward_query_pos,
+                reverse_query_pos,
+                query_span_value,
+                anchors_out);
+        } else if (!contiguous64.empty()) {
+            append_seed_hits_from_position_span(
+                contiguous64,
                 query_strand_bit,
                 forward_query_pos,
                 reverse_query_pos,
@@ -870,25 +909,7 @@ void collect_seed_hits(
     // main/DOCS/REPORTS/NEW_SPEEDUP_REPORT_2__DOC0149.md for the full V1-vs-V2
     // numbers; the SIMD variant becomes attractive again on AVX-512
     // hosts and is left as a future-work option.
-    {
-    static const auto* _sort_desc =
-        bioseq::instr::register_region_static("collect_seed_hits_sort");
-    auto _sort_scope = bioseq::instr::region(_sort_desc);
-    /// Anchor sort key — extracts the 64-bit `ref_bits` field for the radix
-    /// sort.  Non-capturing struct functor (DOC0249 R4) so the file-wide grep
-    /// gate for capture-all lambdas under `bioseq/backend/pipeline/` is clean
-    /// even on a bare `[](const Anchor&){...}` extractor.
-    struct AnchorRefBitsKey {
-        [[nodiscard, gnu::always_inline]]
-        inline std::uint64_t operator()(const Anchor& anchor) const noexcept {
-            return anchor.ref_bits();
-        }
-    };
-    bioseq::sorting::radix_sort(
-        anchors_out.data(),
-        anchors_out.data() + anchors_out.size(),
-        AnchorRefBitsKey{});
-    }  // end collect_seed_hits_sort scope
+    sort_seed_hits(anchors_out);
 
     bioseq_log_lazy<DBG>([&] {
         bioseq_log_progress<DBG>("[minimap_port] Collected {} seed anchors from {} query minimizers"
@@ -896,6 +917,87 @@ void collect_seed_hits(
                 anchors_out.size(), query_minimizers.size(),
                 bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                 bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
+    });
+}
+
+/// MPF-native seed collection.  Unlike the ordinary per-hash lookup shape,
+/// this asks each persisted fragment index to stream its own matching packed
+/// positions directly into the query's anchor slab.  The only sort is the
+/// normal post-seed anchor ordering required by chaining; postings themselves
+/// are never concatenated, merged, or sorted across fragments.
+template <class MinimizerT, FragmentNativeMinimizerSeedIndex IndexT>
+requires std::same_as<
+    std::remove_cv_t<MinimizerT>,
+    MinimapSketchData>
+void collect_seed_hits(
+    std::span<const MinimizerT> query_minimizers,
+    const IndexT& target_index,
+    sequence_size_t query_len,
+    int32_t max_occ,
+    int32_t kmer_size,
+    ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
+{
+    static const auto* _seed_hits_desc =
+        bioseq::instr::register_region_static("collect_seed_hits");
+    auto _seed_hits_scope = bioseq::instr::region(_seed_hits_desc);
+    anchors_out.reserve(query_minimizers.size() * 2);
+    if (max_occ < 0) [[unlikely]] {
+        throw std::invalid_argument(
+            "collect_seed_hits requires a nonnegative max_occ");
+    }
+
+    static const auto* _idx_lookup_desc =
+        bioseq::instr::register_region_static("target_index_lookup");
+    {
+        auto _idx_lookup_scope = bioseq::instr::region(_idx_lookup_desc);
+        const std::uint32_t query_span_value =
+            static_cast<std::uint32_t>(kmer_size);
+        const sequence_size_t reverse_pos_base =
+            query_len - 2 + query_span_value;
+        target_index.for_each_fragment_seed_hit(
+            std::span<const MinimapSketchData>{
+                query_minimizers.data(), query_minimizers.size()},
+            max_occ,
+            [&](const std::uint64_t target_hit,
+                const MinimapSketchData& query_minimizer) {
+                const sequence_size_t ref_position =
+                    static_cast<sequence_size_t>(target_hit >> 1u);
+                const std::uint32_t target_strand_bit =
+                    static_cast<std::uint32_t>(target_hit & 1u);
+                const std::uint64_t query_pos_encoded =
+                    query_minimizer.pos_strand_encoded();
+                const std::uint32_t query_strand_bit =
+                    static_cast<std::uint32_t>(
+                        query_pos_encoded & 1u);
+                const sequence_size_t forward_query_pos =
+                    static_cast<sequence_size_t>(
+                        query_pos_encoded >> 1u);
+                const std::uint32_t is_reverse_bit =
+                    target_strand_bit ^ query_strand_bit;
+                const sequence_size_t reverse_query_pos =
+                    reverse_pos_base - forward_query_pos;
+
+                Anchor anchor;
+                anchor.ref_position = ref_position;
+                anchor.is_reverse = is_reverse_bit;
+                anchor.query_position = is_reverse_bit
+                    ? reverse_query_pos : forward_query_pos;
+                anchor.query_span =
+                    static_cast<std::uint8_t>(query_span_value);
+                anchor.flags = 0;
+                anchor.segment_id = 0;
+                anchors_out.push_back(anchor);
+            });
+    }
+
+    sort_seed_hits(anchors_out);
+    bioseq_log_lazy<DBG>([&] {
+        bioseq_log_progress<DBG>(
+            "[minimap_port] Collected {} fragment-native seed anchors from {} "
+            "query minimizers | footprint={}MB avail={}MB",
+            anchors_out.size(), query_minimizers.size(),
+            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
+            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
     });
 }
 
@@ -1644,6 +1746,7 @@ static_assert([] {
             : BlockInputOrder::Forward,
         .phase      = phase,
         .trace      = params.do_cigar || params.compute_edit_distance,
+        .compute_edit_distance = params.compute_edit_distance,
     };
 }
 
@@ -2107,6 +2210,36 @@ struct AlignOnePhase {
     const Minimap2Params&                      params;
     int32_t                                    align_bandwidth;
 
+    /**
+     * Return exact edit accounting for one completed fill.
+     *
+     * Native Block traceback counts edits while its already-expanded padded
+     * query/target ranks are resident. Other kernels retain the established
+     * post-result expansion path and therefore keep identical semantics.
+     */
+    template <bool strand_reversed>
+    [[gnu::always_inline]] sequence_size_t exact_edit_distance_for_fill(
+            const KswAlignResult& fill_result,
+            std::size_t query_start,
+            std::size_t query_end,
+            std::size_t target_start,
+            std::size_t target_end) const {
+        if constexpr (base_alignment_algorithm
+                == BaseAlignmentAlgorithmType::BLOCK_ALIGNER) {
+            if (!fill_result.edit_distance_valid) {
+                bioseq_log<ERR>(
+                    "Block Aligner result omitted requested exact edit accounting");
+                std::abort();
+            }
+            return static_cast<sequence_size_t>(fill_result.edit_distance);
+        } else {
+            return exact_edit_distance_from_packed_cigar<strand_reversed>(
+                query_seq, target_seq,
+                query_start, query_end, target_start, target_end,
+                std::span<const std::uint32_t>(fill_result.cigar));
+        }
+    }
+
     template <bool strand_reversed>
     [[gnu::always_inline]] bool apply_gap_fill_result(
             AlignRegion& region,
@@ -2125,14 +2258,13 @@ struct AlignOnePhase {
         const std::int64_t fill_query_end = fill_result.zdropped
             ? qs + (fill_result.max_q + 1) : qe;
         if (params.compute_edit_distance) {
-            region.edit_distance += exact_edit_distance_from_packed_cigar<
+            region.edit_distance += exact_edit_distance_for_fill<
                 strand_reversed>(
-                    query_seq, target_seq,
+                    fill_result,
                     static_cast<std::size_t>(qs),
                     static_cast<std::size_t>(fill_query_end),
                     static_cast<std::size_t>(rs),
-                    static_cast<std::size_t>(fill_ref_end),
-                    std::span<const std::uint32_t>(fill_result.cigar));
+                    static_cast<std::size_t>(fill_ref_end));
         }
         if (fill_result.zdropped) {
             final_ref_end = fill_ref_end;
@@ -2209,14 +2341,13 @@ struct AlignOnePhase {
                 ? seed_query_start - outer_query_start : left_result.max_q + 1;
             final_query_start = seed_query_start - left_query_offset;
             if (params.compute_edit_distance) {
-                region.edit_distance += exact_edit_distance_from_packed_cigar<
+                region.edit_distance += exact_edit_distance_for_fill<
                     strand_reversed>(
-                        query_seq, target_seq,
+                        left_result,
                         static_cast<std::size_t>(final_query_start),
                         static_cast<std::size_t>(seed_query_start),
                         static_cast<std::size_t>(final_ref_start),
-                        static_cast<std::size_t>(seed_ref_start),
-                        std::span<const std::uint32_t>(left_result.cigar));
+                        static_cast<std::size_t>(seed_ref_start));
             }
             prior_phase_zdropped = left_result.zdropped;
         }
@@ -2296,6 +2427,10 @@ struct AlignOnePhase {
                             }
                         }
                         region.dp_score += packed_attempt.certificate.score;
+                        if (params.compute_edit_distance) {
+                            region.edit_distance += static_cast<sequence_size_t>(
+                                packed_attempt.certificate.edit_distance);
+                        }
                         final_ref_end = re;
                         final_query_end = qe;
                         qs = qe;
@@ -2440,14 +2575,13 @@ struct AlignOnePhase {
                 ? outer_query_end - seed_query_end : right_result.max_q + 1;
             final_query_end = seed_query_end + right_query_offset;
             if (params.compute_edit_distance) {
-                region.edit_distance += exact_edit_distance_from_packed_cigar<
+                region.edit_distance += exact_edit_distance_for_fill<
                     strand_reversed>(
-                        query_seq, target_seq,
+                        right_result,
                         static_cast<std::size_t>(seed_query_end),
                         static_cast<std::size_t>(final_query_end),
                         static_cast<std::size_t>(seed_ref_end),
-                        static_cast<std::size_t>(final_ref_end),
-                        std::span<const std::uint32_t>(right_result.cigar));
+                        static_cast<std::size_t>(final_ref_end));
             }
         }
 
@@ -3641,6 +3775,7 @@ struct MatchResultCollection {
     // dispatch boundary consumes them exactly once into the existing stable
     // PipelineStage timing slots.
     std::uint64_t query_sketch_host_wall_ns = 0;
+    std::uint64_t persisted_index_decode_host_wall_ns = 0;
     std::uint64_t seed_lookup_host_wall_ns = 0;
     std::uint64_t chain_score_host_wall_ns = 0;
     std::uint64_t region_generation_host_wall_ns = 0;
@@ -3746,6 +3881,12 @@ struct MatchResultCollection {
     void record_query_sketch_host_time(
             const std::uint64_t elapsed_ns) noexcept {
         record_host_stage_time(query_sketch_host_wall_ns, elapsed_ns);
+    }
+
+    void record_persisted_index_decode_host_time(
+            const std::uint64_t elapsed_ns) noexcept {
+        record_host_stage_time(
+            persisted_index_decode_host_wall_ns, elapsed_ns);
     }
 
     void record_seed_lookup_host_time(const std::uint64_t elapsed_ns) noexcept {
@@ -3856,6 +3997,8 @@ struct MatchResultCollection {
         partial_vulkan_execution_proof.combine(
             other.partial_vulkan_execution_proof);
         record_query_sketch_host_time(other.query_sketch_host_wall_ns);
+        record_persisted_index_decode_host_time(
+            other.persisted_index_decode_host_wall_ns);
         record_seed_lookup_host_time(other.seed_lookup_host_wall_ns);
         record_chain_score_host_time(other.chain_score_host_wall_ns);
         record_region_generation_host_time(

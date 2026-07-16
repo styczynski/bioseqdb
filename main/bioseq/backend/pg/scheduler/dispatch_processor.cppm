@@ -253,6 +253,12 @@ public:
 	struct CpuPreparedQuerySketch {
 		std::uint64_t query_ordinal = 0;
 		std::uint64_t query_bp_size = 0;
+		/* During parallel preparation each query owns an independent permit.
+		 * The backend thread absorbs it into the target aggregate before
+		 * publication.  It is declared before minimizers so exceptional
+		 * teardown deallocates vector storage before releasing admission. */
+		std::optional<bioseq::parallelism::MemoryPermit>
+			parallel_preparation_permit{};
 		std::vector<MinimapSketchData> minimizers{};
 		pipe::MinimizerRangeExecutionProof proof{};
 	};
@@ -286,10 +292,12 @@ public:
 		 * positions through the legacy pair/hashmap assembly path. */
 		std::optional<bioseq::indexing::PreparedGrouped32QueryReader>
 			persisted_grouped32_reader{};
-		/* Production Format-5 is consumed in its native shape/SoA form.  Keep
-		 * it distinct from the frozen Format-4 reader so a row can never be
-		 * silently relabelled or transcoded through the legacy hashmap. */
-		std::optional<bioseq::indexing::PreparedShapeV5QueryReader>
+		/* Production MPF Format-5 keeps every physical-fragment index
+		 * independent. Its only target-wide state is query-specific global
+		 * occurrence counts required by max-occ pruning; no posting owner,
+		 * span federation, or hash-to-fragment lookup index is retained. */
+		std::optional<
+			bioseq::indexing::PreparedShapeV5FragmentQueryReader>
 			persisted_shape_v5_reader{};
 		std::optional<bioseq::indexing::MinimizerFormat6SelectiveReader>
 			persisted_format6_reader{};
@@ -301,6 +309,7 @@ public:
 		std::uint64_t duplicate_build_attempts = 0;
 		std::uint64_t persisted_reader_loads = 0;
 		std::uint64_t persisted_reader_queries = 0;
+		std::uint64_t persisted_reader_load_host_wall_ns = 0;
 		std::uint64_t persisted_generation_id = 0;
 		/* Correctness authority for Format-6.  The legacy u64 field below is
 		 * retained only for the existing pipeline evidence ABI and must never

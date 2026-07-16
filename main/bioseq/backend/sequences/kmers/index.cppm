@@ -602,6 +602,14 @@ public:
         return permit_.bytes();
     }
 
+    [[nodiscard]] std::pair<std::vector<MinimizerT>, Permit>
+    release_owned_storage() && {
+        return {
+            std::move(sketches_),
+            std::move(permit_),
+        };
+    }
+
 private:
     [[nodiscard]] static bool checked_bytes(
             std::size_t count,

@@ -626,6 +626,10 @@ public:
 		return destination_.size();
 	}
 
+	[[nodiscard]] bool reserve(const std::size_t required) {
+		return ensure_capacity(required);
+	}
+
 	[[always_inline]] void collect(const MinimapSketchData& minimizer) {
 		append_hash(minimizer.kmer());
 		append_retained(minimizer);
@@ -1286,6 +1290,191 @@ void dispatch_append_cpu_prepared_query_sketch(
 	pg_unreachable();
 }
 
+enum class ParallelPreparedQuerySketchStatus : std::uint8_t {
+	pending,
+	ready,
+	admission_unavailable,
+	collector_growth_failed,
+	capacity_mismatch,
+	proof_invalid,
+	unsupported_typmod,
+};
+
+template <class Alphabet, std::size_t Width>
+[[nodiscard]] ParallelPreparedQuerySketchStatus
+prepare_independently_admitted_query_sketch(
+		const pgseq_t& header,
+		const std::uint64_t query_ordinal,
+		const std::int32_t kmer_size,
+		const std::int32_t window_size,
+		const MinimizerSketchBackend sketch_backend,
+		BatchProcessor::CpuPreparedQuerySketch& destination) {
+	using sequence_t = compact_sequence_stdc_instance<
+		pgseq_t, Alphabet, Width>;
+	compact_sequence_range<sequence_t> query{header};
+	auto permit =
+		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+			0u);
+	if (!permit) {
+		return ParallelPreparedQuerySketchStatus::admission_unavailable;
+	}
+	admitted_sketch_collector_t<
+		MinimapSketchData,
+		bioseq::parallelism::MemoryPermit> collector{
+			std::move(*permit),
+			bioseq::parallelism::kVectorPreallocationHeadroomFactor};
+	auto proof = pipe::minimizer_dispatch_range<MinimapSketchData>(
+		collector,
+		query,
+		0,
+		static_cast<bioseq::storage::sequence_size_t>(query.size()),
+		static_cast<std::size_t>(window_size),
+		static_cast<std::size_t>(kmer_size),
+		sketch_backend,
+		pipe::ExactSimdRangeRoute::require_continuation);
+	if (!collector.ok()) {
+		return ParallelPreparedQuerySketchStatus::collector_growth_failed;
+	}
+	if (!pipe::minimizer_range_proof_matches_backend(
+			sketch_backend,
+			proof,
+			/*require_nonempty_vector_work=*/false,
+			pipe::ExactSimdRangeRoute::require_continuation)) {
+		return ParallelPreparedQuerySketchStatus::proof_invalid;
+	}
+	auto owned = std::move(collector).release_owned_storage();
+	const std::uint64_t measured_bytes =
+		bioseq::parallelism::saturating_mul(
+			owned.first.capacity(), sizeof(MinimapSketchData));
+	if (measured_bytes
+			== (std::numeric_limits<std::uint64_t>::max)()
+		|| measured_bytes != owned.second.bytes()) {
+		return ParallelPreparedQuerySketchStatus::capacity_mismatch;
+	}
+	destination = BatchProcessor::CpuPreparedQuerySketch{
+		.query_ordinal = query_ordinal,
+		.query_bp_size = static_cast<std::uint64_t>(query.bp_size()),
+		.parallel_preparation_permit =
+			std::optional<bioseq::parallelism::MemoryPermit>{
+				std::move(owned.second)},
+		.minimizers = std::move(owned.first),
+		.proof = std::move(proof),
+	};
+	return ParallelPreparedQuerySketchStatus::ready;
+}
+
+[[nodiscard]] ParallelPreparedQuerySketchStatus
+dispatch_prepare_independently_admitted_query_sketch(
+		const std::uint8_t alphabet_code,
+		const std::uint8_t storage_unit_byte_width,
+		const pgseq_t& header,
+		const std::uint64_t query_ordinal,
+		const std::int32_t kmer_size,
+		const std::int32_t window_size,
+		const MinimizerSketchBackend sketch_backend,
+		BatchProcessor::CpuPreparedQuerySketch& destination) {
+	constexpr std::uint8_t dna4_code = static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<seq::dna4>());
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+	constexpr std::uint8_t dna5_code = static_cast<std::uint8_t>(
+		pgseq_supported_alphabets::index_of<seq::dna5>());
+#endif
+	#define BIOSEQ_PREPARE_INDEPENDENT(ALPHABET, WIDTH) \
+		return prepare_independently_admitted_query_sketch<ALPHABET, WIDTH>( \
+			header, query_ordinal, kmer_size, window_size, sketch_backend, \
+			destination)
+	if (alphabet_code == dna4_code) {
+		switch (storage_unit_byte_width) {
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
+			case 1: BIOSEQ_PREPARE_INDEPENDENT(seq::dna4, 1);
+			case 2: BIOSEQ_PREPARE_INDEPENDENT(seq::dna4, 2);
+			case 4: BIOSEQ_PREPARE_INDEPENDENT(seq::dna4, 4);
+#endif
+			case 8: BIOSEQ_PREPARE_INDEPENDENT(seq::dna4, 8);
+			default: break;
+		}
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+	} else if (alphabet_code == dna5_code) {
+		switch (storage_unit_byte_width) {
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
+			case 1: BIOSEQ_PREPARE_INDEPENDENT(seq::dna5, 1);
+			case 2: BIOSEQ_PREPARE_INDEPENDENT(seq::dna5, 2);
+			case 4: BIOSEQ_PREPARE_INDEPENDENT(seq::dna5, 4);
+#endif
+			case 8: BIOSEQ_PREPARE_INDEPENDENT(seq::dna5, 8);
+			default: break;
+		}
+#endif
+	}
+#undef BIOSEQ_PREPARE_INDEPENDENT
+	return ParallelPreparedQuerySketchStatus::unsupported_typmod;
+}
+
+[[nodiscard]] bool reserve_parallel_query_sketch_slots(
+		std::vector<BatchProcessor::CpuPreparedQuerySketch>& destination,
+		const std::size_t required,
+		bioseq::parallelism::MemoryPermit& permit,
+		std::uint64_t& retained_bytes) {
+	if (required > destination.max_size()) {
+		return false;
+	}
+	if (required > destination.capacity()) {
+		const std::uint64_t old_bytes =
+			bioseq::parallelism::saturating_mul(
+				destination.capacity(),
+				sizeof(BatchProcessor::CpuPreparedQuerySketch));
+		const std::uint64_t requested_bytes =
+			bioseq::parallelism::saturating_mul(
+				required,
+				sizeof(BatchProcessor::CpuPreparedQuerySketch));
+		const std::uint64_t allocation_headroom =
+			bioseq::parallelism::saturating_mul(
+				requested_bytes,
+				bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+		const std::uint64_t peak =
+			bioseq::parallelism::saturating_add(
+				retained_bytes, allocation_headroom);
+		if (old_bytes == (std::numeric_limits<std::uint64_t>::max)()
+			|| requested_bytes
+				== (std::numeric_limits<std::uint64_t>::max)()
+			|| allocation_headroom
+				== (std::numeric_limits<std::uint64_t>::max)()
+			|| peak == (std::numeric_limits<std::uint64_t>::max)()
+			|| retained_bytes < old_bytes
+			|| !permit.grow_to(peak)) {
+			return false;
+		}
+		try {
+			destination.reserve(required);
+		} catch (const std::bad_alloc&) {
+			permit.shrink_to(retained_bytes);
+			return false;
+		} catch (...) {
+			permit.shrink_to(retained_bytes);
+			throw;
+		}
+		const std::uint64_t measured_bytes =
+			bioseq::parallelism::saturating_mul(
+				destination.capacity(),
+				sizeof(BatchProcessor::CpuPreparedQuerySketch));
+		if (measured_bytes
+				== (std::numeric_limits<std::uint64_t>::max)()
+			|| measured_bytes > allocation_headroom) {
+			return false;
+		}
+		retained_bytes =
+			bioseq::parallelism::saturating_add(
+				retained_bytes - old_bytes, measured_bytes);
+		if (retained_bytes
+				== (std::numeric_limits<std::uint64_t>::max)()) {
+			return false;
+		}
+		permit.shrink_to(retained_bytes);
+	}
+	destination.resize(required);
+	return true;
+}
+
 using Grouped32ColdPlan =
 	bioseq::indexing::MinimizerGrouped32ColdRoutePlan;
 using Grouped32PayloadGroup =
@@ -1447,6 +1636,13 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
 				 errmsg("BioseqBatchJoin CPU preparation received a NULL query header")));
 		}
+		if (query_header->alphabet_code != alphabet_code
+			|| query_header->storage_unit_byte_width
+				!= storage_unit_byte_width) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin query typmod changed during CPU preparation")));
+		}
 	}
 	if (query_ordinals.size() != query_headers.size()) {
 		ereport(ERROR,
@@ -1559,74 +1755,261 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		});
 		return prepared_target.groups.back();
 	};
+	bool used_parallel_canonical_preparation = false;
+	bool parallel_group_is_uniform =
+		union_storage == CpuQueryUnionStorage::canonical_u32
+		&& include_persisted_parameter_group
+		&& query_headers.size() >= 2u
+		&& prepared_target.query_sketch_cache_permit.has_value();
+	std::int32_t parallel_max_occ = 0;
+	MinimizerSketchBackend parallel_sketch_backend =
+		MinimizerSketchBackend::Scalar;
 	for (std::size_t query_index = 0u;
-		 query_index < query_headers.size();
+		 parallel_group_is_uniform && query_index < query_headers.size();
 		 ++query_index) {
 		const pgseq_t* const query_header = query_headers[query_index];
-		const std::uint64_t query_ordinal = query_ordinals[query_index];
-		if (query_header == nullptr
-			|| query_header->alphabet_code != alphabet_code
-			|| query_header->storage_unit_byte_width
-				!= storage_unit_byte_width) {
-			bioseq::pg_utils::invoke_pg_as_cpp([] {
-				ereport(ERROR,
-					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					 errmsg("BioseqBatchJoin query typmod changed during CPU preparation")));
-			});
-			pg_unreachable();
-		}
 		const Minimap2Params effective = effective_params_for_pair(
 			base_params,
 			std::min<std::uint64_t>(target_bp_size, query_header->bp_size));
 		const MinimizerSketchBackend sketch_backend =
 			pipe::target_index_sketch_backend_from_params(effective);
-		auto append_to = [&](CpuPreparedIndexGroup& group) {
-			if (union_storage
-					== CpuQueryUnionStorage::canonical_u32) {
-				dispatch_append_cpu_prepared_query_sketch(
-					alphabet_code,
-					storage_unit_byte_width,
-					*query_header,
-					query_ordinal,
-					group.kmer_size,
-					group.window_size,
-					group.sketch_backend,
-					group.canonical_query_hash_union_u32,
-					*prepared_target.query_union_permit,
-					prepared_target.query_union_admission_bytes,
-					prepared_target.query_sketch_cache_permit
-						? &group.retained_query_sketches
-						: nullptr,
-					prepared_target.query_sketch_cache_permit
-						? &*prepared_target.query_sketch_cache_permit
-						: nullptr,
-					prepared_target.query_sketch_cache_permit
-						? &prepared_target.
-							query_sketch_cache_admission_bytes
-						: nullptr);
-			} else {
-				dispatch_append_cpu_prepared_query_sketch(
-					alphabet_code,
-					storage_unit_byte_width,
-					*query_header,
-					query_ordinal,
-					group.kmer_size,
-					group.window_size,
-					group.sketch_backend,
-					group.query_hash_union,
-					*prepared_target.query_union_permit,
-					prepared_target.query_union_admission_bytes);
+		if (query_index == 0u) {
+			parallel_max_occ = effective.max_occ;
+			parallel_sketch_backend = sketch_backend;
+		} else if (parallel_max_occ != effective.max_occ
+			|| parallel_sketch_backend != sketch_backend) {
+			parallel_group_is_uniform = false;
+		}
+	}
+	auto& pool = bioseq::parallelism::GlobalPool::instance();
+	parallel_group_is_uniform =
+		parallel_group_is_uniform
+		&& bioseq::parallelism::dispatch_parallel(pool.mode())
+		&& pool.max_concurrency() > 1u;
+	if (parallel_group_is_uniform) {
+		CpuPreparedIndexGroup& group = ensure_group(
+			15, 10, parallel_max_occ, parallel_sketch_backend);
+		if (!reserve_parallel_query_sketch_slots(
+				group.retained_query_sketches,
+				query_headers.size(),
+				*prepared_target.query_sketch_cache_permit,
+				prepared_target.query_sketch_cache_admission_bytes)) {
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("BioseqBatchJoin parallel query-sketch slots cannot be admitted")));
+			});
+			pg_unreachable();
+		}
+		std::vector<ParallelPreparedQuerySketchStatus> statuses(
+			query_headers.size(),
+			ParallelPreparedQuerySketchStatus::pending);
+		std::vector<std::exception_ptr> exceptions(query_headers.size());
+		pool.parallel_for_with_context(
+			0u,
+			query_headers.size(),
+			1u,
+			bioseq::parallelism::range_body{
+				[&](const std::size_t lo, const std::size_t hi) {
+					for (std::size_t query_index = lo;
+						 query_index < hi;
+						 ++query_index) {
+						try {
+							statuses[query_index] =
+								dispatch_prepare_independently_admitted_query_sketch(
+									alphabet_code,
+									storage_unit_byte_width,
+									*query_headers[query_index],
+									query_ordinals[query_index],
+									group.kmer_size,
+									group.window_size,
+									group.sketch_backend,
+									group.retained_query_sketches[
+										query_index]);
+						} catch (...) {
+							exceptions[query_index] =
+								std::current_exception();
+						}
+					}
+				}});
+		for (std::size_t query_index = 0u;
+			 query_index < query_headers.size();
+			 ++query_index) {
+			if (exceptions[query_index]) {
+				std::rethrow_exception(exceptions[query_index]);
 			}
-		};
-		if (include_persisted_parameter_group) {
-			append_to(ensure_group(
-				15, 10, effective.max_occ, sketch_backend));
-		} else {
-			append_to(ensure_group(
-				effective.kmer_size,
-				effective.window_size,
-				effective.max_occ,
-				sketch_backend));
+			switch (statuses[query_index]) {
+				case ParallelPreparedQuerySketchStatus::ready:
+					break;
+				case ParallelPreparedQuerySketchStatus::
+						admission_unavailable:
+				case ParallelPreparedQuerySketchStatus::
+						collector_growth_failed:
+				case ParallelPreparedQuerySketchStatus::
+						capacity_mismatch:
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						ereport(ERROR,
+							(errcode(ERRCODE_OUT_OF_MEMORY),
+							 errmsg("BioseqBatchJoin parallel query sketch exceeded admission")));
+					});
+					pg_unreachable();
+				case ParallelPreparedQuerySketchStatus::proof_invalid:
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("BioseqBatchJoin parallel query sketch proof does not match the selected backend")));
+					});
+					pg_unreachable();
+				case ParallelPreparedQuerySketchStatus::
+						unsupported_typmod:
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						ereport(ERROR,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("BioseqBatchJoin parallel query preparation received an unsupported typmod")));
+					});
+					pg_unreachable();
+				case ParallelPreparedQuerySketchStatus::pending:
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("BioseqBatchJoin parallel query preparation left an incomplete slot")));
+					});
+					pg_unreachable();
+			}
+		}
+		std::size_t canonical_size = 0u;
+		for (CpuPreparedQuerySketch& retained
+			 : group.retained_query_sketches) {
+			const std::uint64_t retained_minimizer_bytes =
+				bioseq::parallelism::saturating_mul(
+					retained.minimizers.capacity(),
+					sizeof(MinimapSketchData));
+			const std::uint64_t reconciled_cache_bytes =
+				bioseq::parallelism::saturating_add(
+					prepared_target.query_sketch_cache_admission_bytes,
+					retained_minimizer_bytes);
+			if (!retained.parallel_preparation_permit.has_value()
+				|| retained_minimizer_bytes
+					== (std::numeric_limits<std::uint64_t>::max)()
+				|| retained_minimizer_bytes
+					!= retained.parallel_preparation_permit->bytes()
+				|| reconciled_cache_bytes
+					== (std::numeric_limits<std::uint64_t>::max)()
+				|| !prepared_target.query_sketch_cache_permit->absorb(
+					std::move(*retained.parallel_preparation_permit))
+				|| retained.minimizers.size()
+					> group.canonical_query_hash_union_u32.max_size()
+						- canonical_size) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_OUT_OF_MEMORY),
+						 errmsg("BioseqBatchJoin parallel query cache cannot be consolidated")));
+				});
+				pg_unreachable();
+			}
+			retained.parallel_preparation_permit.reset();
+			prepared_target.query_sketch_cache_admission_bytes =
+				reconciled_cache_bytes;
+			canonical_size += retained.minimizers.size();
+		}
+		AdmittedCanonicalU32QueryCollector canonical_collector{
+			group.canonical_query_hash_union_u32,
+			*prepared_target.query_union_permit,
+			prepared_target.query_union_admission_bytes};
+		if (!canonical_collector.reserve(canonical_size)) {
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("BioseqBatchJoin parallel canonical query union cannot be admitted")));
+			});
+			pg_unreachable();
+		}
+		for (const CpuPreparedQuerySketch& retained
+			 : group.retained_query_sketches) {
+			for (const MinimapSketchData& minimizer
+				 : retained.minimizers) {
+				canonical_collector.collect(minimizer);
+			}
+		}
+		if (!canonical_collector.hash_width_valid()) {
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("Format-6 canonical query hash exceeds its authenticated u32 profile")));
+			});
+			pg_unreachable();
+		}
+		if (!canonical_collector.ok()) {
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("BioseqBatchJoin parallel canonical query union growth cannot be admitted")));
+			});
+			pg_unreachable();
+		}
+		used_parallel_canonical_preparation = true;
+	}
+	if (!used_parallel_canonical_preparation) {
+		for (std::size_t query_index = 0u;
+			 query_index < query_headers.size();
+			 ++query_index) {
+			const pgseq_t* const query_header = query_headers[query_index];
+			const std::uint64_t query_ordinal = query_ordinals[query_index];
+			const Minimap2Params effective = effective_params_for_pair(
+				base_params,
+				std::min<std::uint64_t>(
+					target_bp_size, query_header->bp_size));
+			const MinimizerSketchBackend sketch_backend =
+				pipe::target_index_sketch_backend_from_params(effective);
+			auto append_to = [&](CpuPreparedIndexGroup& group) {
+				if (union_storage
+						== CpuQueryUnionStorage::canonical_u32) {
+					dispatch_append_cpu_prepared_query_sketch(
+						alphabet_code,
+						storage_unit_byte_width,
+						*query_header,
+						query_ordinal,
+						group.kmer_size,
+						group.window_size,
+						group.sketch_backend,
+						group.canonical_query_hash_union_u32,
+						*prepared_target.query_union_permit,
+						prepared_target.query_union_admission_bytes,
+						prepared_target.query_sketch_cache_permit
+							? &group.retained_query_sketches
+							: nullptr,
+						prepared_target.query_sketch_cache_permit
+							? &*prepared_target.
+								query_sketch_cache_permit
+							: nullptr,
+						prepared_target.query_sketch_cache_permit
+							? &prepared_target.
+								query_sketch_cache_admission_bytes
+							: nullptr);
+				} else {
+					dispatch_append_cpu_prepared_query_sketch(
+						alphabet_code,
+						storage_unit_byte_width,
+						*query_header,
+						query_ordinal,
+						group.kmer_size,
+						group.window_size,
+						group.sketch_backend,
+						group.query_hash_union,
+						*prepared_target.query_union_permit,
+						prepared_target.query_union_admission_bytes);
+				}
+			};
+			if (include_persisted_parameter_group) {
+				append_to(ensure_group(
+					15, 10, effective.max_occ, sketch_backend));
+			} else {
+				append_to(ensure_group(
+					effective.kmer_size,
+					effective.window_size,
+					effective.max_occ,
+					sketch_backend));
+			}
 		}
 	}
 	for (CpuPreparedIndexGroup& group : prepared_target.groups) {
@@ -2099,27 +2482,59 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 						minimizer_format6_compatibility_digest(
 							compatibility),
 			};
-		auto format6_reader =
-			bioseq::indexing::MinimizerFormat6SelectiveReader::open(
-				bioseq::parallelism::MemoryAdmissionController::instance(),
-				format6_session.encoded_head(),
-				format6_session.encoded_manifest(),
-				format6_expected,
-				format6_session.source_ref(),
-				canonical_view,
-				static_cast<std::uint64_t>(format6_group.max_occ));
-		if (!format6_reader) {
-			fail(fmt::format(
-				"Format-6 selective reader rejected authenticated storage error={}",
-				static_cast<unsigned>(format6_reader.error())));
-			return;
-		}
-		const auto format6_head = format6_session.head();
-		const auto format6_manifest = format6_session.manifest();
-		MinimizerGenerationReadStats read_stats =
-			format6_session.finish();
-		const auto& memory_evidence =
-			format6_reader->memory_evidence();
+			const std::uint64_t format6_load_started_ns =
+				static_cast<std::uint64_t>(
+					bioseq::instr::clock::now_ns());
+			auto format6_reader =
+				bioseq::indexing::MinimizerFormat6SelectiveReader::open(
+					bioseq::parallelism::MemoryAdmissionController::instance(),
+					format6_session.encoded_head(),
+					format6_session.encoded_manifest(),
+					format6_expected,
+					format6_session.source_ref(),
+					canonical_view,
+					static_cast<std::uint64_t>(format6_group.max_occ));
+			if (!format6_reader) {
+				fail(fmt::format(
+					"Format-6 selective reader rejected authenticated storage error={}",
+					static_cast<unsigned>(format6_reader.error())));
+				return;
+			}
+			const auto format6_head = format6_session.head();
+			const auto format6_manifest = format6_session.manifest();
+			MinimizerGenerationReadStats read_stats =
+				format6_session.finish();
+			const std::uint64_t format6_load_finished_ns =
+				static_cast<std::uint64_t>(
+					bioseq::instr::clock::now_ns());
+			const std::uint64_t format6_load_ns =
+				format6_load_finished_ns >= format6_load_started_ns
+					? std::max<std::uint64_t>(
+						1u,
+						format6_load_finished_ns
+							- format6_load_started_ns)
+					: 1u;
+			bioseq_log<DBG>(
+				"[bioseq] Format-6 selective reader: load_ns={} "
+				"rows={} payload_bytes={} retained_positions={} "
+				"stored_position_width={}",
+				static_cast<unsigned long long>(format6_load_ns),
+				static_cast<unsigned long long>(
+					read_stats.format6.directory_rows
+					+ read_stats.format6.control_rows
+					+ read_stats.format6.posting_rows),
+				static_cast<unsigned long long>(
+					read_stats.format6.directory_bytes
+					+ read_stats.format6.control_bytes
+					+ read_stats.format6.posting_bytes),
+				static_cast<unsigned long long>(
+					format6_reader->memory_evidence()
+						.retained_position_count),
+				static_cast<unsigned>(
+					format6_manifest.compatibility
+						.stored_posting_width_bytes));
+			const auto& memory_evidence =
+				format6_reader->memory_evidence();
 		const std::uint64_t peak_admitted_bytes = std::max({
 			memory_evidence.directory_phase_peak_admitted_bytes,
 			memory_evidence.control_phase_peak_admitted_bytes,
@@ -2342,7 +2757,11 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		query_ordinals,
 		base_params,
 		/*include_persisted_parameter_group=*/true,
-		CpuQueryUnionStorage::minimizer_sketch,
+		manifest.wire_format
+				== MinimizerGenerationWireFormat::
+					grouped_shape_soa_segment_local
+			? CpuQueryUnionStorage::canonical_u32
+			: CpuQueryUnionStorage::minimizer_sketch,
 		prepared_target);
 	if (!prepared_target.unions_ready
 		|| prepared_target.groups.size() != 1u) {
@@ -2353,8 +2772,13 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	if (group.kmer_size != 15 || group.window_size != 10
 		|| group.max_occ < 0
 		|| group.sketch_backend != sketch_backend
-		|| !group.canonical_query_hash_union_u32.empty()
-		|| group.canonical_query_hash_union_u32.capacity() != 0u
+		|| (manifest.wire_format
+				== MinimizerGenerationWireFormat::
+					grouped_shape_soa_segment_local
+			? (!group.query_hash_union.empty()
+				|| group.query_hash_union.capacity() != 0u)
+			: (!group.canonical_query_hash_union_u32.empty()
+				|| group.canonical_query_hash_union_u32.capacity() != 0u))
 		|| group.persisted_grouped32_reader
 		|| group.persisted_shape_v5_reader
 		|| group.persisted_format6_reader
@@ -2362,134 +2786,53 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		fail("legacy/F5 parameter group is not the pinned exclusive cold-read shape");
 		return;
 	}
-	const auto format_shape_v5_failure =
-		[](
-				const std::string_view phase,
-				const MinimizerGenerationWireError error,
-				const bioseq::indexing::
-					PreparedShapeV5QueryAdmissionEvidence& evidence) {
-		if (error != MinimizerGenerationWireError::admission) {
-			return fmt::format("{} wire_error={}", phase,
-				static_cast<unsigned>(error));
-		}
-		return fmt::format(
-			"{} wire_error={} admission_substage={} controller_reason={} "
-			"retained_position_count={} retained_position_bytes={} "
-			"allocation_headroom_bytes={} projected_bytes={} "
-			"requested_growth_bytes={} owned_capacity_bytes={} "
-			"permit_bytes={} controller_reserved_bytes={} "
-			"controller_budget_ceiling_bytes={} "
-			"controller_allocatable_after_reservations_bytes={} "
-			"process_footprint_bytes={} system_available_bytes={} "
-			"system_total_bytes={} process_soft_cap_bytes={} "
-			"query_record_count={} query_record_capacity={} "
-			"query_hash_count={} query_hash_capacity={} "
-			"selected_extent_count={} selected_extent_capacity={} "
-			"selected_control_capacity_bytes={} "
-			"control_payload_capacity_bytes={} "
-			"releasable_protocol_query_hash_bytes={} "
-			"releasable_external_query_hash_bytes={} "
-			"controller_failure_snapshot_present={} injected_failure={}",
-			phase,
-			static_cast<unsigned>(error),
-			bioseq::indexing::
-				prepared_shape_v5_query_admission_substage_name(
-					evidence.substage),
-			bioseq::parallelism::memory_admission_failure_reason_name(
-				evidence.controller_reason),
-			evidence.retained_position_count,
-			evidence.retained_position_bytes,
-			evidence.allocation_headroom_bytes,
-			evidence.projected_bytes,
-			evidence.requested_growth_bytes,
-			evidence.owned_capacity_bytes,
-			evidence.permit_bytes,
-			evidence.controller_reserved_bytes,
-			evidence.controller_budget_ceiling_bytes,
-			evidence.controller_allocatable_after_reservations_bytes,
-			evidence.process_footprint_bytes,
-			evidence.system_available_bytes,
-			evidence.system_total_bytes,
-			evidence.process_soft_cap_bytes,
-			evidence.query_record_count,
-			evidence.query_record_capacity,
-			evidence.query_hash_count,
-			evidence.query_hash_capacity,
-			evidence.selected_extent_count,
-			evidence.selected_extent_capacity,
-			evidence.selected_control_capacity_bytes,
-			evidence.control_payload_capacity_bytes,
-			evidence.releasable_protocol_query_hash_bytes,
-			0u,
-			evidence.controller_failure_snapshot_present,
-			evidence.injected_failure);
-	};
-
-	// Format 5 is stored in the S1 primary-key order: every control extent,
-	// then every position extent.  The trait-driven reader retains only hashes
-	// requested by this target-wide query union, while the PostgreSQL session
-	// authenticates the complete immutable generation in one ordered scan.
-	// No raw sequence fragment is read and no legacy hashmap is assembled.
+	// MPF Format 5 remains a collection of independent physical-fragment
+	// indexes. The mmap image is the byte-exact artifact produced by the
+	// writer's complete authenticated READY reread, fsync, and durable rename.
+	// Cold open checks the exact generation identity and prepares only fragment
+	// address plans. Query-wave max-occ reduction is fused into the parallel
+	// fragment probe; no target-wide posting/count owner is constructed.
 	if (manifest.wire_format
 			== MinimizerGenerationWireFormat::
 				grouped_shape_soa_segment_local) {
-		using ShapeReader = bioseq::indexing::PreparedShapeV5QueryReader;
-		bioseq::indexing::PreparedShapeV5QueryAdmissionEvidence
-			begin_admission_evidence;
-		auto made = ShapeReader::begin(
+		using ShapeReader =
+			bioseq::indexing::PreparedShapeV5FragmentQueryReader;
+		const std::uint64_t shape_v5_load_started_ns =
+			static_cast<std::uint64_t>(
+				bioseq::instr::clock::now_ns());
+		auto mapped_image = open_exact_minimizer_format5_image_pg(
+			identity, sequence_rowno, head, manifest);
+		const std::span<const std::byte> mapped_payload =
+			mapped_image.payload();
+		auto mapped_payload_owner =
+			std::move(mapped_image).release_mapping_owner();
+		auto made = ShapeReader::open(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected,
-			metadata.directory.encoded_bytes(), group.query_hash_union,
+			metadata.directory.encoded_bytes(),
 			static_cast<std::uint64_t>(group.max_occ),
-			&begin_admission_evidence);
+			std::move(mapped_payload_owner),
+			mapped_payload);
 		if (!made) {
-			fail(format_shape_v5_failure(
-				"Format-5 reader begin rejected",
-				made.error(), begin_admission_evidence));
+			fail(fmt::format(
+				"fragment-native Format-5 reader rejected wire_error={}",
+				static_cast<unsigned>(made.error())));
 			return;
 		}
 		std::optional<ShapeReader> shape_reader{
 			std::in_place, std::move(*made)};
-		// ShapeReader now owns the exact canonical hash image. Format-5 is an
-		// ordinal-2 fail-closed path, so no later fallback can consume the
-		// scheduler's wider MinimapSketchData union. Release it before payload
-		// ingestion so the exact global-position image can use that admission
-		// headroom instead of retaining two equivalent query owners.
-		if (!prepared_target.release_group_query_hash_union_noexcept(group)) {
-			fail("Format-5 canonical query-union release disagrees with admission ownership");
-			return;
-		}
-		std::optional<MinimizerGenerationWireError> callback_error;
-		std::exception_ptr callback_exception;
-		const auto accept = [&](const bioseq::indexing::
-				ValidatedMinimizerGenerationRowReceipt& receipt) noexcept {
-			if (callback_error || callback_exception) return;
-			try {
-				auto accepted = shape_reader->accept(receipt);
-				if (!accepted) callback_error = accepted.error();
-			} catch (...) {
-				callback_exception = std::current_exception();
-			}
-		};
-		(void)session.read_full_generation_payload_once(accept, accept);
-		if (callback_exception) {
-			std::rethrow_exception(callback_exception);
-		}
-		if (callback_error) {
-			fail(format_shape_v5_failure(
-				"Format-5 payload ingest rejected",
-				*callback_error,
-				shape_reader->admission_failure_evidence()));
-			return;
-		}
-		if (auto finished = shape_reader->finish(); !finished) {
-			fail(fmt::format(
-				"Format-5 reader final validation rejected wire_error={}",
-				static_cast<unsigned>(finished.error())));
-			return;
-		}
-
-		const MinimizerGenerationReadStats read_stats = session.finish();
+		const MinimizerGenerationReadStats read_stats =
+			session.finish_mapped_format5_payload();
+		const std::uint64_t shape_v5_load_finished_ns =
+			static_cast<std::uint64_t>(
+				bioseq::instr::clock::now_ns());
+		group.persisted_reader_load_host_wall_ns =
+			shape_v5_load_finished_ns >= shape_v5_load_started_ns
+				? std::max<std::uint64_t>(
+					1u,
+					shape_v5_load_finished_ns
+						- shape_v5_load_started_ns)
+				: 1u;
 		const auto scheme =
 			bioseq::indexing::minimizer_scheme_identity_for_backend(
 				group.sketch_backend);
@@ -2516,17 +2859,17 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			&& read_stats.head_scans == 1
 			&& read_stats.manifest_directory_scans == 1
 			&& read_stats.metadata_repeated_reads == 0
-			&& read_stats.full_generation.scan_calls == 1
-			&& read_stats.bulk_read_calls == 1
-			&& read_stats.range_scan_calls == 1
-			&& read_stats.index_scans == 3
-			&& read_stats.payload.delivered_chunks
-				== read_stats.payload.heap_rows_read
-			&& read_stats.payload.delivered_bytes
-				== manifest.payload_bytes
+			&& read_stats.full_generation.scan_calls == 0
+			&& read_stats.bulk_read_calls == 0
+			&& read_stats.range_scan_calls == 0
+			&& read_stats.index_scans == 2
+			&& read_stats.payload.delivered_chunks == 0
+			&& read_stats.payload.heap_rows_read == 0
+			&& read_stats.payload.delivered_bytes == 0
+			&& read_stats.payload_bytes_read == 0
 			&& read_stats.cold.route_empty == 0
 			&& read_stats.cold.route_selective == 0
-			&& read_stats.cold.route_full == 1
+			&& read_stats.cold.route_full == 0
 			&& read_stats.source_parent_rows_read == 1
 			&& read_stats.source_catalog_rows_read == 1
 			&& read_stats.source_catalog_index_scans == 1
