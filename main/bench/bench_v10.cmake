@@ -41,6 +41,7 @@ AddCommonTargetX(
     "${BIOSEQ_DIR}/include2"
     "${BIOSEQ_DIR}/backend"
     "${BENCH_V10_DIR}/tool_minimap2"
+    "${BENCH_V10_DIR}/tool_sneakysnake/SneakySnake"
     "${BIOSEQ_DIR}/../safestringlib/include"
     "${BIOSEQ_DIR}/../vendor/fmtlog"
     "${BIOSEQ_DIR}/../vendor/fmt"
@@ -70,7 +71,12 @@ AddCommonTargetX(
     bioseq_modules_nopg
   SOURCES
     "${BENCH_V10_DIR}/bench_v10_main.cpp"
+    "${BENCH_V10_DIR}/bench_prefilters.cpp"
     "${BENCH_FRAMEWORK_DIR}/interactive.cppm"
+    # Keep the upstream reference linkage deliberately narrow. The complete
+    # worktree is vendored for provenance/data, but no driver, kthread, CUDA,
+    # FPGA, or HLS source participates in bioseq_bench.
+    "${BENCH_V10_DIR}/tool_sneakysnake/SneakySnake/SneakySnake.c"
     ${BENCH_V10_C_SRC}
   SUPPORT_CXX_MODULES
   CXX_MOD_BASE_DIRS

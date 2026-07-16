@@ -108,6 +108,8 @@ import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.rmq;
 import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.minimap_port;
+import bioseq.sequences.prefilters.sneaky_snake;
+import bioseq.sequences.prefilters.sneaky_snake_vulkan;
 import bioseq.common.context;
 import bioseq.instr;
 import bioseq.storage.scanner;
@@ -6706,6 +6708,349 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>,
 };
 
 /**
+ * Query-scoped SneakySnake lower-bound gate.  Only mandatory global
+ * seed-to-seed fills are evaluated; local left/right extension windows are
+ * intentionally excluded.  A region is removed only when the sum of proven
+ * per-fill lower bounds exceeds the SQL predicate's maximum edit count.
+ */
+template <supports_compact_sequence_range QR,
+          supports_compact_sequence_range TR,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QR>::traits::storage_unit>>
+struct PrefilterStage
+    : StageBase<PrefilterStage<QR, TR, Scanner>, AlignRegion> {
+    static constexpr std::string_view stage_name = "PrefilterStage";
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+    const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
+    const bioseq::storage::lazy_compact_sequence<TR, Scanner>* target_seq_;
+    MatchResultCollection* proof_dst_ = nullptr;
+
+    [[nodiscard]] static constexpr std::string_view backend_name(
+        PrefilterBackendType backend) noexcept {
+        switch (backend) {
+            case PrefilterBackendType::AUTO: return "auto";
+            case PrefilterBackendType::SCALAR: return "scalar";
+            case PrefilterBackendType::SIMD: return "highway_simd";
+            case PrefilterBackendType::VULKAN: return "vulkan";
+        }
+        return "unknown";
+    }
+
+    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    EmittedToken<Sink> process_pair(
+        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (!params.prefilter_enabled || !params.compute_edit_distance
+            || regions.size() == 0) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+
+        static const auto* prefilter_region =
+            bioseq::instr::register_region_static("sneaky_snake_prefilter");
+        auto prefilter_scope = bioseq::instr::region(prefilter_region);
+
+        std::vector<std::uint8_t> query_ranks;
+        std::vector<std::uint8_t> target_ranks;
+        std::vector<SneakySnakeJob> jobs;
+        std::vector<std::size_t> job_regions;
+        const std::uint64_t max_flat_offset =
+            (std::numeric_limits<std::uint32_t>::max)();
+
+        for (std::size_t region_index = 0;
+             region_index < regions.size(); ++region_index) {
+            const AlignRegion& region = regions[region_index];
+            (void)for_each_mandatory_alignment_gap(
+                region,
+                std::span<const Anchor>{anchors.data(), anchors.size()},
+                params,
+                [this, &query_ranks, &target_ranks, &jobs, &job_regions,
+                 &region, region_index, max_flat_offset](
+                    const MandatoryAlignmentGapWindow& window) {
+                    const std::uint64_t query_length =
+                        window.query_end - window.query_start;
+                    const std::uint64_t target_length =
+                        window.target_end - window.target_start;
+                    if (window.query_end > query_seq_->bp_size()
+                        || window.target_end > target_seq_->bp_size()
+                        || query_length > max_flat_offset
+                        || target_length > max_flat_offset
+                        || query_ranks.size() > max_flat_offset - query_length
+                        || target_ranks.size() > max_flat_offset - target_length) {
+                        /* Unsupported valid geometry is a conservative accept,
+                         * never a hidden fallback or false rejection. */
+                        return true;
+                    }
+
+                    const auto query_offset = static_cast<std::uint32_t>(
+                        query_ranks.size());
+                    const auto target_offset = static_cast<std::uint32_t>(
+                        target_ranks.size());
+                    query_ranks.resize(
+                        query_ranks.size() + static_cast<std::size_t>(query_length));
+                    target_ranks.resize(
+                        target_ranks.size() + static_cast<std::size_t>(target_length));
+                    std::span<std::uint8_t> query_destination{
+                        query_ranks.data() + query_offset,
+                        static_cast<std::size_t>(query_length)};
+                    std::span<std::uint8_t> target_destination{
+                        target_ranks.data() + target_offset,
+                        static_cast<std::size_t>(target_length)};
+                    if (region.is_reverse) {
+                        query_seq_->template to_encoded_into<true, false>(
+                            query_destination,
+                            static_cast<std::size_t>(window.query_start),
+                            static_cast<std::size_t>(window.query_end));
+                    } else {
+                        query_seq_->template to_encoded_into<false, false>(
+                            query_destination,
+                            static_cast<std::size_t>(window.query_start),
+                            static_cast<std::size_t>(window.query_end));
+                    }
+                    target_seq_->template to_encoded_into<false, false>(
+                        target_destination,
+                        static_cast<std::size_t>(window.target_start),
+                        static_cast<std::size_t>(window.target_end));
+                    jobs.push_back(SneakySnakeJob{
+                        .query_offset = query_offset,
+                        .target_offset = target_offset,
+                        .query_length = static_cast<std::uint32_t>(query_length),
+                        .target_length = static_cast<std::uint32_t>(target_length),
+                        .max_edits = params.prefilter_max_edits,
+                    });
+                    job_regions.push_back(region_index);
+                    return true;
+                });
+        }
+
+        if (jobs.empty()) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+
+        const SneakySnakeBatchInput input{
+            .query_ranks = query_ranks,
+            .target_ranks = target_ranks,
+            .jobs = jobs,
+        };
+        std::vector<SneakySnakeResult> results;
+        const PrefilterBackendType selected = params.prefilter_backend
+            == PrefilterBackendType::AUTO
+                ? PrefilterBackendType::SIMD
+                : params.prefilter_backend;
+        switch (selected) {
+            case PrefilterBackendType::SCALAR:
+                results = sneaky_snake_scalar_batch(input);
+                break;
+            case PrefilterBackendType::SIMD:
+            case PrefilterBackendType::AUTO:
+                results = sneaky_snake_simd_batch(input);
+                break;
+            case PrefilterBackendType::VULKAN: {
+                std::vector<::bioseq::sequences::prefilters::
+                    SneakySnakeVulkanJob> vulkan_jobs;
+                vulkan_jobs.reserve(jobs.size());
+                for (const SneakySnakeJob& job : jobs) {
+                    vulkan_jobs.push_back({
+                        .query_offset = job.query_offset,
+                        .target_offset = job.target_offset,
+                        .query_length = job.query_length,
+                        .target_length = job.target_length,
+                        .max_edits = job.max_edits,
+                    });
+                }
+                const auto vulkan_results =
+                    ::bioseq::sequences::prefilters::
+                        run_sneaky_snake_vulkan_batch(
+                            query_ranks, target_ranks, vulkan_jobs);
+                results.reserve(vulkan_results.size());
+                for (const auto& result : vulkan_results) {
+                    results.push_back(SneakySnakeResult{
+                        .lower_bound = result.lower_bound,
+                        .status = result.status,
+                        .accepted = result.accepted,
+                        .reserved = result.reserved,
+                    });
+                }
+                break;
+            }
+        }
+        if (results.size() != jobs.size()) {
+            throw std::runtime_error(
+                "SneakySnake backend returned the wrong result count");
+        }
+
+        const std::size_t input_region_count = regions.size();
+        std::uint64_t evaluated_jobs = 0u;
+        std::uint64_t length_difference_jobs = 0u;
+        std::uint64_t unsupported_jobs = 0u;
+        std::uint64_t rejected_jobs = 0u;
+        std::vector<std::uint64_t> lower_bounds(regions.size(), 0u);
+        std::vector<bool> keep(regions.size(), true);
+        for (std::size_t index = 0; index < results.size(); ++index) {
+            const SneakySnakeResult& result = results[index];
+            const std::size_t region_index = job_regions[index];
+            switch (static_cast<SneakySnakeStatus>(result.status)) {
+                case SneakySnakeStatus::success:
+                    ++evaluated_jobs;
+                    break;
+                case SneakySnakeStatus::conservative_unequal:
+                    ++length_difference_jobs;
+                    break;
+                case SneakySnakeStatus::unsupported_conservative:
+                    ++unsupported_jobs;
+                    break;
+                default:
+                    throw std::runtime_error(
+                        "SneakySnake backend returned an unknown status");
+            }
+            if (!sneaky_snake_accepted(result)) ++rejected_jobs;
+            if (result.status == static_cast<std::uint32_t>(
+                    SneakySnakeStatus::unsupported_conservative)) continue;
+            lower_bounds[region_index] =
+                bioseq::parallelism::saturating_add(
+                    lower_bounds[region_index],
+                    static_cast<std::uint64_t>(result.lower_bound));
+            if (!sneaky_snake_accepted(result)
+                || lower_bounds[region_index] > params.prefilter_max_edits) {
+                keep[region_index] = false;
+            }
+        }
+
+        std::size_t output_size = 0;
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            if (!keep[index]) continue;
+            if (output_size != index) {
+                regions.data()[output_size] = std::move(regions.data()[index]);
+            }
+            ++output_size;
+        }
+        if (proof_dst_ == nullptr) {
+            throw std::logic_error(
+                "SneakySnake prefilter stage has no execution-proof sink");
+        }
+        SneakySnakePrefilterExecutionProof call_proof{};
+        call_proof.record_batch(
+            selected,
+            static_cast<std::uint64_t>(jobs.size()),
+            evaluated_jobs,
+            length_difference_jobs,
+            unsupported_jobs,
+            rejected_jobs,
+            static_cast<std::uint64_t>(input_region_count - output_size),
+            static_cast<std::uint64_t>(output_size));
+        proof_dst_->record_sneaky_snake_prefilter_execution_proof(call_proof);
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), output_size},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
+    }
+
+    template <is_constexpr_aligner_params Cep>
+    [[nodiscard]] StageDescription describe() const {
+        StageDescription desc;
+        desc.stage_name = std::string{stage_name};
+        if (params.prefilter_enabled) {
+            StageAlgorithmDescription algorithm;
+            algorithm.name = "SneakySnake edit lower bound";
+            algorithm.parameters.push_back({
+                "backend", std::string{backend_name(params.prefilter_backend)}});
+            algorithm.parameters.push_back({
+                "max_edits", std::to_string(params.prefilter_max_edits)});
+            algorithm.parameters.push_back({
+                "submaze_width",
+                std::to_string(sneaky_snake_default_submaze_width)});
+            algorithm.computed_properties.push_back({
+                "domain", "mandatory seed-to-seed global fills"});
+            algorithm.computed_properties.push_back({
+                "survivor_check", "exact post-alignment edit distance"});
+            desc.algorithm = std::move(algorithm);
+        }
+        return desc;
+    }
+};
+
+/**
+ * Authoritative exact edit-distance predicate gate.
+ *
+ * This runs after traceback has populated `AlignRegion::edit_distance` and
+ * before the final primary/secondary and MAPQ pass.  Consequently a candidate
+ * that does not satisfy the SQL predicate cannot influence the classification
+ * or mapping-quality metadata of a candidate that does.  The earlier
+ * SneakySnake stage remains only a conservative work-avoidance gate.
+ */
+struct ExactEditFilterStage
+    : StageBase<ExactEditFilterStage, AlignRegion> {
+    static constexpr std::string_view stage_name = "ExactEditFilterStage";
+
+    ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
+
+    template <is_constexpr_aligner_params Cep, class RB, class AB, class Sink>
+    EmittedToken<Sink> process_pair(
+        RB&& regions, AB&& anchors, EmitToken<Sink>&& token) {
+        if (!params.exact_edit_filter_enabled) {
+            return std::move(token).emit_batch_pair(
+                std::span<AlignRegion>{regions.data(), regions.size()},
+                std::span<const Anchor>{anchors.data(), anchors.size()});
+        }
+        if (!params.compute_edit_distance) {
+            throw std::logic_error(
+                "exact edit filter requires exact edit-distance accounting");
+        }
+
+        const std::int64_t exclusive_upper_bound =
+            params.exact_edit_filter_exclusive_upper_bound;
+        std::size_t output_size = 0;
+        for (std::size_t index = 0; index < regions.size(); ++index) {
+            AlignRegion& region = regions.data()[index];
+            if (!region.has_alignment) {
+                throw std::runtime_error(
+                    "exact edit filter received a region without alignment traceback");
+            }
+            const bool keep = exclusive_upper_bound > 0
+                && region.edit_distance < static_cast<std::uint64_t>(
+                    exclusive_upper_bound);
+            if (!keep) continue;
+
+            if (output_size != index) {
+                regions.data()[output_size] = std::move(region);
+            }
+            AlignRegion& survivor = regions.data()[output_size];
+            survivor.region_id = static_cast<std::int32_t>(output_size);
+            survivor.parent = -1;
+            survivor.secondary_score = 0;
+            survivor.secondary_count = 0;
+            survivor.secondary_dp_max = 0;
+            survivor.mapq = 0;
+            ++output_size;
+        }
+
+        return std::move(token).emit_batch_pair(
+            std::span<AlignRegion>{regions.data(), output_size},
+            std::span<const Anchor>{anchors.data(), anchors.size()});
+    }
+
+    template <is_constexpr_aligner_params Cep>
+    [[nodiscard]] StageDescription describe() const {
+        StageDescription desc;
+        desc.stage_name = std::string{stage_name};
+        if (params.exact_edit_filter_enabled) {
+            StageAlgorithmDescription algorithm;
+            algorithm.name = "Exact edit-distance predicate";
+            algorithm.parameters.push_back({
+                "exclusive_upper_bound",
+                std::to_string(
+                    params.exact_edit_filter_exclusive_upper_bound)});
+            algorithm.computed_properties.push_back({
+                "classification_domain", "exact predicate survivors"});
+            desc.algorithm = std::move(algorithm);
+        }
+        return desc;
+    }
+};
+
+/**
  * @brief Stage 8: base-level alignment via the chosen aligner (conditional).
  *
  * DOC0254 §6.3 — reparameterised on `Kernel = kernel_t<BAA>`.  Algorithm
@@ -7029,9 +7374,13 @@ template <is_constexpr_aligner_params Cep,
         DivergenceStage<MinimizerT, QueryMinimizers>{
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
+        PrefilterStage<QR, TR, Scanner>{
+            {}, params, &query_seq, &target_seq, &output_collection },
         AlignStage<kernel_t<BAA>, QR, TR, Scanner>{
-            {}, params, &scoring_matrix, &query_seq, &target_seq, params.do_cigar,
+            {}, params, &scoring_matrix, &query_seq, &target_seq,
+            params.do_cigar || params.compute_edit_distance,
             alignment_proof_dst, host_timing_dst },
+        ExactEditFilterStage{{}, params},
         PrimarySecondaryStage{ {}, params.mask_level, params.mask_len, sub_diff(params) },
         SecondaryFilterStage{ {}, params.pri_ratio, min_diff(params), params.best_n },
         MapqStage{ {}, params, params.compute_mapq },
@@ -7072,6 +7421,9 @@ template <is_constexpr_aligner_params Cep,
         || params.vulkan_fused_frontend_enabled
         || params.vulkan_gpu_index_build_enabled
         || params.vulkan_extend_enabled
+        || (params.prefilter_enabled
+            && params.prefilter_backend ==
+               ::bioseq::simd::HWY_NAMESPACE::PrefilterBackendType::VULKAN)
         || params.minimizer_algorithm ==
                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
                    VULKAN_MINIMAP_INT
@@ -7101,6 +7453,9 @@ template <is_constexpr_aligner_params Cep,
                    BLOCK_ALIGNER
         && !params.compute_divergence
         && !params.compute_mapq
+        && !params.compute_edit_distance
+        && !params.exact_edit_filter_enabled
+        && !params.prefilter_enabled
         && params.max_occ >= 0
         && (!params.do_cigar || params.vulkan_extend_enabled);
 }
@@ -7157,6 +7512,9 @@ template <is_constexpr_aligner_params Cep,
         && !params.do_cigar
         && !params.compute_divergence
         && !params.compute_mapq
+        && !params.compute_edit_distance
+        && !params.exact_edit_filter_enabled
+        && !params.prefilter_enabled
         && params.max_occ >= 0;
 }
 
@@ -8300,20 +8658,12 @@ struct algorithm_enum_values<::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmTy
     using target_t = ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using enum_t   = target_t;
     static constexpr target_t default_value = target_t::SCALAR;
-#if defined(__APPLE__)
     using value_list = value_sequence<target_t,
         target_t::SCALAR,
         target_t::SIMD_MINIMAP2_SLOW,
         target_t::TWO_STACK_NTHASH,
         target_t::VULKAN_MINIMAP_INT,
         target_t::PAPER_NTHASH_SIMD>;
-#else
-    using value_list = value_sequence<target_t,
-        target_t::SCALAR,
-        target_t::SIMD_MINIMAP2_SLOW,
-        target_t::TWO_STACK_NTHASH,
-        target_t::PAPER_NTHASH_SIMD>;
-#endif
 
     template <class... Args>
     [[nodiscard, gnu::always_inline]] static constexpr target_t read_field(

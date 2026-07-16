@@ -32,6 +32,7 @@ module;
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -119,6 +120,7 @@ constexpr std::size_t kBioseqRuntimeBufferReserve = 8192;
  */
 struct BioseqScanFeatureFlags {
 	bool uses_cigar      = false;  ///< bioseq.cigar(a) in target list
+	bool uses_edit       = false;  ///< bioseq.edit(a) projection or exact predicate
 	bool uses_divergence = false;  ///< bioseq.divergence(a) in target list
 	bool uses_mapq       = false;  ///< bioseq.mapq(a) in target list
 	bool has_mmsearch    = false;  ///< WHERE mmsearch(seq, 'query'::bioseq.seq) present
@@ -242,6 +244,7 @@ struct BioseqPlaceholderConsts {
 	Const* target_end_node            = nullptr;
 	Const* num_matches_node           = nullptr;
 	Const* block_length_node          = nullptr;
+	Const* edit_distance_node         = nullptr;
 	Const* mapq_node                  = nullptr;
 	Const* chain_score_node           = nullptr;
 	Const* dp_max_score_node          = nullptr;
@@ -290,6 +293,11 @@ struct BioseqScanRuntime {
 	List*                                     newtargetlist = nullptr;
 	PerScanAlignerState                       aligner_state{};
 	MmsearchParamRebind                       param_rebind{};
+	bool                                      edit_predicate_active = false;
+	std::int64_t                              edit_exclusive_upper_bound = 0;
+	AttrNumber                                edit_sequence_attno = InvalidAttrNumber;
+	Index                                     match_sequence_varno = 0;
+	AttrNumber                                match_sequence_attno = InvalidAttrNumber;
 	/* True only after the access-method source itself returned EOF. */
 	bool                                      source_exhausted = false;
 	bool                                      locator_passthrough = false;
@@ -514,6 +522,7 @@ struct BioseqStubOids {
 	Oid target_end_oid;
 	Oid num_matches_oid;
 	Oid block_length_oid;
+	Oid edit_oid;
 	Oid mapq_oid;
 	Oid chain_score_oid;
 	Oid dp_max_score_oid;
@@ -560,6 +569,7 @@ struct BioseqStubOids {
 	result.target_end_oid            = resolve("bioseq.target_end(anyelement)");
 	result.num_matches_oid           = resolve("bioseq.num_matches(anyelement)");
 	result.block_length_oid          = resolve("bioseq.block_length(anyelement)");
+	result.edit_oid                  = resolve("bioseq.edit(anyelement)");
 	result.mapq_oid                  = resolve("bioseq.mapq(anyelement)");
 	result.chain_score_oid           = resolve("bioseq.chain_score(anyelement)");
 	result.dp_max_score_oid          = resolve("bioseq.dp_max_score(anyelement)");
@@ -624,6 +634,7 @@ static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
 		o.target_end_oid,
 		o.num_matches_oid,
 		o.block_length_oid,
+		o.edit_oid,
 		o.mapq_oid,
 		o.chain_score_oid,
 		o.dp_max_score_oid,
@@ -742,6 +753,7 @@ storage_prunable_quals_without_mmsearch(List* quals, const BioseqStubOids& oids)
 		|| funcid == o.target_end_oid
 		|| funcid == o.num_matches_oid
 		|| funcid == o.block_length_oid
+		|| funcid == o.edit_oid
 		|| funcid == o.mapq_oid
 		|| funcid == o.chain_score_oid
 		|| funcid == o.dp_max_score_oid
@@ -752,6 +764,39 @@ storage_prunable_quals_without_mmsearch(List* quals, const BioseqStubOids& oids)
 		|| funcid == o.has_cigar_oid
 		|| funcid == o.divergence_oid
 		|| funcid == o.cigar_oid;
+}
+
+/* `anyelement` match helpers traditionally accept a target-owned row marker
+ * such as the primary key.  When bioseq.edit is instead given a bioseq.seq
+ * Var, that Var carries biological meaning and must be the exact sequence
+ * column aligned by mmsearch; silently substituting another column's helper
+ * with the shared MatchResult edit count would return a plausible wrong value. */
+[[nodiscard]] static bool edit_sequence_argument_matches_target(
+		const FuncExpr* function,
+		Index target_relid,
+		AttrNumber target_sequence_attno,
+		const BioseqStubOids& oids) noexcept {
+	if (function == nullptr || function->funcid != oids.edit_oid) return true;
+	if (list_length(function->args) != 1) return false;
+	Node* argument_node = reinterpret_cast<Node*>(linitial(function->args));
+	if (argument_node == nullptr
+		|| exprType(argument_node) != oids.bioseq_seq_type_oid) {
+		/* Preserve the established target-owned row-marker helper form. */
+		return true;
+	}
+	Var* argument = pg_node_try_as<Var>(argument_node);
+	if (argument == nullptr) {
+		/* A sequence-valued wrapper (COALESCE, cast, PHV expression, etc.)
+		 * has biological identity that the shared MatchResult cannot safely
+		 * infer.  Only the exact mmsearch target Var is supported. */
+		return false;
+	}
+	return target_relid != 0
+		&& target_sequence_attno > 0
+		&& argument->varno == target_relid
+		&& argument->varattno == target_sequence_attno
+		&& argument->varlevelsup == 0
+		&& bms_is_empty(argument->varnullingrels);
 }
 
 /*
@@ -776,6 +821,9 @@ struct feature_flag_visitor {
 			}
 			if (fe->funcid == o->cigar_oid || fe->funcid == o->has_cigar_oid) {
 				detector.flags.uses_cigar = true;
+			}
+			if (fe->funcid == o->edit_oid) {
+				detector.flags.uses_edit = true;
 			}
 			if (fe->funcid == o->divergence_oid) {
 				detector.flags.uses_divergence = true;
@@ -809,6 +857,127 @@ detect_feature_flags(List* targetlist, List* qual, const BioseqStubOids& oids)
 		pg_walk_expression_including_root(q, detector, visitor);
 	}
 	return detector.flags;
+}
+
+constexpr int kBioseqEditPredicateMagic = 0x42534531; /* BSE1 */
+constexpr int kBioseqEditPredicateVersion = 1;
+
+struct StrictEditPredicate {
+	std::int64_t exclusive_upper_bound = 0;
+	AttrNumber sequence_attno = InvalidAttrNumber;
+};
+
+struct EditFunctionProbe {
+	const BioseqStubOids* oids = nullptr;
+	bool found = false;
+};
+
+struct edit_function_probe_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+		pg_expression_walk_cursor, pg_node_view node,
+		EditFunctionProbe& probe) const {
+		if (FuncExpr* function = node.try_as<FuncExpr>();
+			function != nullptr && function->funcid == probe.oids->edit_oid) {
+			probe.found = true;
+			return pg_walk_step::stop;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+[[nodiscard]] static bool contains_bioseq_edit(
+		Node* expression, const BioseqStubOids& oids) {
+	if (expression == nullptr) return false;
+	EditFunctionProbe probe{&oids, false};
+	edit_function_probe_visitor visitor;
+	pg_walk_expression_including_root(expression, probe, visitor);
+	return probe.found;
+}
+
+/* Supported SQL contract: one top-level `bioseq.edit(Var) < integer Const`.
+ * The predicate is removed from the pre-alignment qual and enforced against
+ * MatchResult::edit_distance while draining aligned output. */
+[[nodiscard]] static Node* strict_edit_operand(
+		Node* operand, Index scan_relid) noexcept {
+	PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(operand);
+	if (placeholder == nullptr) return operand;
+	/* bioseq_placeholder_support introduces this exact wrapper for aggregate
+	 * and join plans.  Accept only a scan-owned, non-nulled PHV; unwrapping a
+	 * generic or outer-join-nullable PHV would discard planner semantics. */
+	if (placeholder->phid == 0 || placeholder->phlevelsup != 0
+		|| !bms_is_empty(placeholder->phnullingrels)
+		|| bms_num_members(placeholder->phrels) != 1
+		|| !bms_is_member(static_cast<int>(scan_relid), placeholder->phrels)) {
+		return nullptr;
+	}
+	return reinterpret_cast<Node*>(placeholder->phexpr);
+}
+
+[[nodiscard]] static std::optional<StrictEditPredicate>
+decode_strict_edit_upper_bound(
+		Node* expression, Index scan_relid, const BioseqStubOids& oids) {
+	OpExpr* comparison = pg_node_try_as<OpExpr>(expression);
+	if (comparison == nullptr || comparison->opresulttype != BOOLOID
+		|| list_length(comparison->args) != 2) {
+		return std::nullopt;
+	}
+	PList<Node> arguments(comparison->args);
+	FuncExpr* edit = pg_node_try_as<FuncExpr>(
+		strict_edit_operand(arguments.first(), scan_relid));
+	Const* upper = pg_node_try_as<Const>(arguments.second());
+	if (edit == nullptr || edit->funcid != oids.edit_oid
+		|| edit->funcresulttype != INT8OID || list_length(edit->args) != 1
+		|| upper == nullptr || upper->constisnull) {
+		return std::nullopt;
+	}
+	/* Operator names are schema-overloadable.  A bare SQL literal such as 10
+	 * is int4, so PostgreSQL resolves BIGINT < 10 to its built-in int84lt
+	 * implementation rather than inserting an int8 cast.  Accept only the
+	 * three exact built-in RHS integer widths and normalize their Const datum;
+	 * an arbitrary operator merely named `<` must remain fail-closed. */
+	const Oid opcode = get_opcode(comparison->opno);
+	std::int64_t exclusive_upper_bound = 0;
+	switch (upper->consttype) {
+	case INT8OID:
+		if (opcode != F_INT8LT) return std::nullopt;
+		exclusive_upper_bound = DatumGetInt64(upper->constvalue);
+		break;
+	case INT4OID:
+		if (opcode != F_INT84LT) return std::nullopt;
+		exclusive_upper_bound = static_cast<std::int64_t>(
+			DatumGetInt32(upper->constvalue));
+		break;
+	case INT2OID:
+		if (opcode != F_INT82LT) return std::nullopt;
+		exclusive_upper_bound = static_cast<std::int64_t>(
+			DatumGetInt16(upper->constvalue));
+		break;
+	default:
+		return std::nullopt;
+	}
+	Var* sequence = pg_node_try_as<Var>(
+		reinterpret_cast<Node*>(linitial(edit->args)));
+	if (sequence == nullptr || sequence->varno != scan_relid
+		|| sequence->varattno <= 0 || sequence->varlevelsup != 0
+		|| !bms_is_empty(sequence->varnullingrels)
+		|| sequence->vartype != oids.bioseq_seq_type_oid) {
+		return std::nullopt;
+	}
+	return StrictEditPredicate{
+		.exclusive_upper_bound = exclusive_upper_bound,
+		.sequence_attno = sequence->varattno,
+	};
+}
+
+[[nodiscard]] static List* quals_without_bioseq_edit(
+		List* quals, const BioseqStubOids& oids) {
+	PList<Node> filtered;
+	for (Node* qual : PList<Node>(quals)) {
+		if (qual != nullptr && !contains_bioseq_edit(qual, oids)) {
+			filtered.append(qual);
+		}
+	}
+	return filtered.release();
 }
 
 /* Planner baserestrictinfo is a List<RestrictInfo>, not an expression list.
@@ -1344,6 +1513,8 @@ struct VarInjectorCtx {
 	BioseqPlaceholderConsts* consts;
 	const BioseqStubOids*    oids;
 	Relation                 current_relation;
+	Index                    match_sequence_varno;
+	AttrNumber               match_sequence_attno;
 };
 
 /* functions to cost paths in-place */
@@ -4522,6 +4693,48 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	cscan->scan.plan.qual = extract_actual_clauses(
 		clauses, false /* no pseudoconstants */);
 
+	/* Split the exact edit predicate out before ExecInitQual sees it.  Its
+	 * placeholder has no value until MatchResults are drained, whereas every
+	 * remaining scan qual is valid in the ordinary pre-alignment phase. */
+	std::optional<StrictEditPredicate> strict_edit_predicate;
+	{
+		const BioseqStubOids& edit_oids = get_cached_stub_oids();
+		PList<Node> pre_alignment_quals;
+		for (Node* qual : PList<Node>(cscan->scan.plan.qual)) {
+			if (!contains_bioseq_edit(qual, edit_oids)) {
+				pre_alignment_quals.append(qual);
+				continue;
+			}
+			const auto decoded = decode_strict_edit_upper_bound(
+				qual, best_path->path.parent->relid, edit_oids);
+			if (!decoded.has_value() || strict_edit_predicate.has_value()) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("unsupported bioseq.edit predicate"),
+					 errdetail("Use exactly one top-level bioseq.edit(sequence_column) < integer constant predicate.")));
+			}
+			strict_edit_predicate = *decoded;
+		}
+		cscan->scan.plan.qual = pre_alignment_quals.release();
+
+		if (strict_edit_predicate.has_value()) {
+			PList<List> edit_expr_lists(cscan->custom_exprs);
+			cscan->custom_exprs = list_make2(
+				quals_without_bioseq_edit(edit_expr_lists.first(), edit_oids),
+				quals_without_bioseq_edit(edit_expr_lists.second(), edit_oids));
+			Const* threshold = makeConst(
+				INT8OID, -1, InvalidOid, 8,
+				Int64GetDatum(strict_edit_predicate->exclusive_upper_bound),
+				false, true);
+			List* tag = list_make4(
+				makeInteger(kBioseqEditPredicateMagic),
+				makeInteger(kBioseqEditPredicateVersion),
+				threshold,
+				makeInteger(strict_edit_predicate->sequence_attno));
+			cscan->custom_private = lappend(cscan->custom_private, tag);
+		}
+	}
+
 			const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
 			if (!locator_passthrough_requested) for(auto n : PList<TargetEntry>(root->processed_tlist)) {
 			if (FuncExpr* fe = pg_node_try_as<FuncExpr>(pg_as_node(n->expr))) {
@@ -4596,9 +4809,11 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 struct BatchJoinPlaceholderRegistration {
 	const BioseqStubOids* oids = nullptr;
 	Index target_relid = 0;
+	AttrNumber target_sequence_attno = InvalidAttrNumber;
 	List** combined_tlist = nullptr;
 	List** encoded_sites = nullptr;
 	bool invalid = false;
+	bool edit_sequence_mismatch = false;
 };
 
 [[nodiscard]] static bool batch_join_expression_has_match_helper(
@@ -4667,10 +4882,32 @@ struct batch_join_placeholder_registration_visitor {
 			FuncExpr* helper = batch_join_exact_helper_phv_function(
 				placeholder, registration.target_relid);
 			if (helper != nullptr) {
+				if (!edit_sequence_argument_matches_target(
+						helper,
+						registration.target_relid,
+						registration.target_sequence_attno,
+						*registration.oids)) {
+					registration.invalid = true;
+					registration.edit_sequence_mismatch = true;
+					return pg_walk_step::stop;
+				}
 				batch_join_register_placeholder_site(
 					reinterpret_cast<Node*>(placeholder), helper, registration);
 				return registration.invalid
 					? pg_walk_step::stop : pg_walk_step::skip_subtree;
+			}
+			FuncExpr* wrapped_helper = pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(placeholder->phexpr));
+			if (registration.oids != nullptr
+				&& wrapped_helper != nullptr
+				&& !edit_sequence_argument_matches_target(
+					wrapped_helper,
+					registration.target_relid,
+					registration.target_sequence_attno,
+					*registration.oids)) {
+				registration.invalid = true;
+				registration.edit_sequence_mismatch = true;
+				return pg_walk_step::stop;
 			}
 			/* A generic PHV containing a helper has evaluation/nulling semantics
 			 * that this join cannot reproduce.  Do not descend and accidentally
@@ -4688,6 +4925,15 @@ struct batch_join_placeholder_registration_visitor {
 			if (registration.oids != nullptr
 				&& is_bioseq_projection_funcid(
 					function->funcid, *registration.oids)) {
+				if (!edit_sequence_argument_matches_target(
+						function,
+						registration.target_relid,
+						registration.target_sequence_attno,
+						*registration.oids)) {
+					registration.invalid = true;
+					registration.edit_sequence_mismatch = true;
+					return pg_walk_step::stop;
+				}
 				FuncExpr* exact = batch_join_exact_target_helper(
 					reinterpret_cast<Node*>(function), registration.target_relid);
 				if (exact == nullptr) {
@@ -4979,12 +5225,19 @@ BioseqBatchJoin_PlanCustomPath(
 		BatchJoinPlaceholderRegistration registration{
 			&oids,
 			target_var->varno,
+			target_storage_seq_attno,
 			&combined_tlist,
 			&placeholder_sites,
+			false,
 			false};
 		batch_join_placeholder_registration_visitor visitor;
 		pg_walk_expression_including_root(
 			reinterpret_cast<Node*>(copied->expr), registration, visitor);
+		if (registration.edit_sequence_mismatch) {
+			ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("bioseq.edit projection must reference the mmsearch target column")));
+		}
 		if (registration.invalid) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
@@ -5333,12 +5586,19 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	runtime.locator_passthrough = false;
 	runtime.locator_parent_token = 0;
 	runtime.locator_rowno_resno = InvalidAttrNumber;
-	if (list_length(cscan->custom_private) == 1) {
-		Node* tag_node = reinterpret_cast<Node*>(linitial(cscan->custom_private));
-		if (tag_node != nullptr && IsA(tag_node, List)) {
-			List* tag = reinterpret_cast<List*>(tag_node);
+	runtime.edit_predicate_active = false;
+	runtime.edit_exclusive_upper_bound = 0;
+	runtime.edit_sequence_attno = InvalidAttrNumber;
+	runtime.match_sequence_varno = 0;
+	runtime.match_sequence_attno = InvalidAttrNumber;
+	for (Node* private_node : PList<Node>(cscan->custom_private)) {
+		if (private_node == nullptr || !IsA(private_node, List)) continue;
+		List* tag = reinterpret_cast<List*>(private_node);
+		if (list_length(tag) == 0
+			|| !IsA(reinterpret_cast<Node*>(linitial(tag)), Integer)) continue;
+		const int magic = intVal(linitial(tag));
+		if (magic == kBioseqLocatorPassthroughMagic) {
 			if (list_length(tag) != 4
-				|| intVal(list_nth(tag, 0)) != kBioseqLocatorPassthroughMagic
 				|| intVal(list_nth(tag, 1)) != kBioseqBatchJoinPlanVersion) {
 				ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -5348,6 +5608,30 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			runtime.locator_parent_token = intVal(list_nth(tag, 2));
 			runtime.locator_rowno_resno = static_cast<AttrNumber>(
 				intVal(list_nth(tag, 3)));
+		} else if (magic == kBioseqEditPredicateMagic) {
+			Const* threshold = list_length(tag) == 4
+				? pg_node_try_as<Const>(reinterpret_cast<Node*>(list_nth(tag, 2)))
+				: nullptr;
+			Node* sequence_attno_node = list_length(tag) == 4
+				? reinterpret_cast<Node*>(list_nth(tag, 3))
+				: nullptr;
+			if (list_length(tag) != 4
+				|| intVal(list_nth(tag, 1)) != kBioseqEditPredicateVersion
+				|| threshold == nullptr || threshold->constisnull
+				|| threshold->consttype != INT8OID
+				|| sequence_attno_node == nullptr
+				|| !IsA(sequence_attno_node, Integer)
+				|| intVal(sequence_attno_node) <= 0
+				|| intVal(sequence_attno_node) > MaxAttrNumber) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("Bioseq edit-predicate plan tag is invalid")));
+			}
+			runtime.edit_predicate_active = true;
+			runtime.edit_exclusive_upper_bound =
+				DatumGetInt64(threshold->constvalue);
+			runtime.edit_sequence_attno = static_cast<AttrNumber>(
+				intVal(sequence_attno_node));
 		}
 	}
 
@@ -5478,6 +5762,11 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		Var* pk_var = pg_node_try_as<Var>(arg0);
 		if (pk_var == nullptr) continue;
 		if (pk_var->varattno <= 0) continue;
+		/* Projection helpers are semantically tied to the current MatchResult,
+		 * not to an int key argument.  The direct-query surface therefore
+		 * permits bioseq.edit(seq) / bioseq.cigar(seq).  Retain the historical
+		 * optional PK capture only when the supplied Var is actually INT4. */
+		if (pk_var->vartype != INT4OID) continue;
 		primary_key_attno = pk_var->varattno;
 		bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() detected primary_key varattno={} from bioseq projection funcid={}",
 				static_cast<int>(primary_key_attno), fe->funcid);
@@ -6025,6 +6314,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		primary_mmsearch_fe = fe;
 		primary_seq_attno = col_var->varattno;
 		primary_typmod_packed = col_var->vartypmod;
+		runtime.match_sequence_varno = col_var->varno;
+		runtime.match_sequence_attno = col_var->varattno;
 
 		pfree(attname_cstr);
 		/*
@@ -6042,7 +6333,17 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			 errdetail("the alignment runtime consumed %llu of %llu top-level mmsearch qualifiers; executing any remainder through the SQL stub is forbidden",
 				static_cast<unsigned long long>(consumed_mmsearch_qual_count),
 				static_cast<unsigned long long>(top_level_mmsearch_qual_count)),
-			 errhint("Use a bioseq.seq column as the first argument and a non-null Const, PARAM_EXEC, PARAM_EXTERN, or same-relation bioseq.seq Var as the second argument.")));
+				 errhint("Use a bioseq.seq column as the first argument and a non-null Const, PARAM_EXEC, PARAM_EXTERN, or same-relation bioseq.seq Var as the second argument.")));
+	}
+	if (runtime.edit_predicate_active
+		&& (primary_seq_attno == InvalidAttrNumber
+			|| runtime.edit_sequence_attno != primary_seq_attno)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq.edit predicate must reference the mmsearch target column"),
+			 errdetail("bioseq.edit attribute %d does not match mmsearch target attribute %d",
+				 static_cast<int>(runtime.edit_sequence_attno),
+				 static_cast<int>(primary_seq_attno))));
 	}
 
 	/*
@@ -6056,8 +6357,16 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	 * runtime.aligner_state so EXPLAIN can reproduce the user-visible
 	 * decision tree without re-walking the plan.
 	 */
-	const BioseqScanFeatureFlags features = detect_feature_flags(
+	BioseqScanFeatureFlags features = detect_feature_flags(
 		cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
+	features.uses_edit = features.uses_edit || runtime.edit_predicate_active;
+	features.any_match_projection =
+		features.any_match_projection || runtime.edit_predicate_active;
+	if (features.uses_edit && !features.has_mmsearch) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq.edit requires mmsearch in the same scan")));
+	}
 	if (features.has_mmsearch && IsParallelWorker()) {
 		ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -6112,9 +6421,36 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	const bioseq::indexing::IndexReadRequirement index_read_requirement =
 		explicit_index_read_requirement.value_or(
 			bioseq::indexing::IndexReadRequirement::allow);
-	aligner_params.do_cigar           = features.uses_cigar;
+	aligner_params.do_cigar           = features.uses_cigar || features.uses_edit;
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
+	aligner_params.compute_edit_distance = features.uses_edit;
+	aligner_params.exact_edit_filter_enabled =
+		runtime.edit_predicate_active;
+	aligner_params.exact_edit_filter_exclusive_upper_bound =
+		runtime.edit_exclusive_upper_bound;
+	if (runtime.edit_predicate_active
+		&& runtime.edit_exclusive_upper_bound > 0
+		&& static_cast<std::uint64_t>(runtime.edit_exclusive_upper_bound - 1)
+			<= (std::numeric_limits<std::uint32_t>::max)()) {
+		aligner_params.prefilter_enabled = true;
+		aligner_params.prefilter_max_edits = static_cast<std::uint32_t>(
+			runtime.edit_exclusive_upper_bound - 1);
+		const bool existing_vulkan_route =
+			aligner_params.chaining_algorithm
+				== bioseq::simd::active_target::ChainingAlgorithmType::VULKAN_TILED_DP
+			|| aligner_params.minimizer_algorithm
+				== bioseq::simd::active_target::MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+			|| aligner_params.vulkan_seed_hits_enabled
+			|| aligner_params.vulkan_fused_frontend_enabled
+			|| aligner_params.vulkan_gpu_index_build_enabled
+			|| aligner_params.vulkan_extend_enabled;
+		aligner_params.prefilter_backend = existing_vulkan_route
+			? bioseq::simd::active_target::PrefilterBackendType::VULKAN
+			: (bioseq_enable_vectorization
+				? bioseq::simd::active_target::PrefilterBackendType::SIMD
+				: bioseq::simd::active_target::PrefilterBackendType::SCALAR);
+	}
 	const bool selected_vulkan =
 		bioseq::simd::active_target::pipe::vulkan_components_requested(
 			aligner_params);
@@ -6429,6 +6765,7 @@ lookup_bioseq_placeholder_const(Oid funcid, const VarInjectorCtx* ctx)
 	if (funcid == o->target_end_oid)             return c->target_end_node;
 	if (funcid == o->num_matches_oid)            return c->num_matches_node;
 	if (funcid == o->block_length_oid)           return c->block_length_node;
+	if (funcid == o->edit_oid)                   return c->edit_distance_node;
 	if (funcid == o->mapq_oid)                   return c->mapq_node;
 	if (funcid == o->chain_score_oid)            return c->chain_score_node;
 	if (funcid == o->dp_max_score_oid)           return c->dp_max_score_node;
@@ -6556,6 +6893,15 @@ struct var_injector_mutator {
 	[[nodiscard]] pg_node_mutation
 	operator()(pg_expression_mutation_cursor, pg_node_view node, VarInjectorCtx &injector_context) const {
 		if (FuncExpr* funcExpr = node.try_as<FuncExpr>()) {
+			if (!edit_sequence_argument_matches_target(
+					funcExpr,
+					injector_context.match_sequence_varno,
+					injector_context.match_sequence_attno,
+					*injector_context.oids)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("bioseq.edit projection must reference the mmsearch target column")));
+			}
 			Const* replacement = lookup_bioseq_placeholder_const(funcExpr->funcid, &injector_context);
 			if (replacement != nullptr) {
 				bioseq_log<DBG>("[bioseq] pg: var_injector_mutator() replacing bioseq funcid={} with placeholder Const",
@@ -6673,6 +7019,7 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 	set_bigint(consts.target_end_node,         match.target_end);
 	set_bigint(consts.num_matches_node,        match.num_matches);
 	set_bigint(consts.block_length_node,       match.block_length);
+	set_bigint(consts.edit_distance_node,      match.edit_distance);
 	set_int(consts.mapq_node,                  match.mapq);
 	set_int(consts.chain_score_node,           match.chain_score);
 	set_int(consts.dp_max_score_node,          match.dp_max_score);
@@ -7060,6 +7407,8 @@ static void batch_join_set_placeholder_value(
 		bigint(match.num_matches);
 	} else if (site.funcid == oids.block_length_oid) {
 		bigint(match.block_length);
+	} else if (site.funcid == oids.edit_oid) {
+		bigint(match.edit_distance);
 	} else if (site.funcid == oids.mapq_oid) {
 		value = Int32GetDatum(match.mapq);
 	} else if (site.funcid == oids.chain_score_oid) {
@@ -7583,12 +7932,16 @@ static void BioseqBatchJoin_BeginCustomScan(
 		params.do_cigar = false;
 		params.compute_divergence = false;
 		params.compute_mapq = false;
+		params.compute_edit_distance = false;
 		const BioseqStubOids& batch_oids = get_cached_stub_oids();
 		for (const BioseqBatchJoinPlaceholderSite& site :
 			 runtime->placeholder_sites) {
 			params.do_cigar = params.do_cigar
 				|| site.funcid == batch_oids.cigar_oid
-				|| site.funcid == batch_oids.has_cigar_oid;
+				|| site.funcid == batch_oids.has_cigar_oid
+				|| site.funcid == batch_oids.edit_oid;
+			params.compute_edit_distance = params.compute_edit_distance
+				|| site.funcid == batch_oids.edit_oid;
 			params.compute_divergence = params.compute_divergence
 				|| site.funcid == batch_oids.divergence_oid;
 			params.compute_mapq = params.compute_mapq
@@ -8512,6 +8865,18 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 					continue;
 				}
 
+			if (runtime.edit_predicate_active
+				&& (runtime.edit_exclusive_upper_bound <= 0
+					|| next->match->edit_distance
+						>= static_cast<std::uint64_t>(
+							runtime.edit_exclusive_upper_bound))) {
+				/* SneakySnake is only a lower-bound gate.  Every survivor is
+				 * aligned, and this exact comparison is the authoritative SQL
+				 * predicate (strict `<`, including the boundary case). */
+				InstrCountFiltered1(node, 1);
+				continue;
+			}
+
 			/*
 			 * Update every placeholder Const from the MatchResult. The
 			 * subsequent ExecProject reads the current constvalue of
@@ -8856,6 +9221,7 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 		runtime.placeholder_consts.target_end_node            = bigint_placeholder();
 		runtime.placeholder_consts.num_matches_node           = bigint_placeholder();
 		runtime.placeholder_consts.block_length_node          = bigint_placeholder();
+		runtime.placeholder_consts.edit_distance_node         = bigint_placeholder();
 		runtime.placeholder_consts.mapq_node                  = int_placeholder();
 		runtime.placeholder_consts.chain_score_node           = int_placeholder();
 		runtime.placeholder_consts.dp_max_score_node          = int_placeholder();
@@ -8878,6 +9244,8 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 		injector_ctx.consts           = &runtime.placeholder_consts;
 		injector_ctx.oids             = &oids_snapshot;
 		injector_ctx.current_relation = bioseqScanState->custom_scanstate.ss.ss_currentRelation;
+		injector_ctx.match_sequence_varno = runtime.match_sequence_varno;
+		injector_ctx.match_sequence_attno = runtime.match_sequence_attno;
 
 		runtime.newtargetlist = reinterpret_cast<List *>(var_injector(
 			reinterpret_cast<Node *>(targetlist),

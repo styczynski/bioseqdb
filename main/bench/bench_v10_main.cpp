@@ -20,6 +20,7 @@
  */
 #include "common_simd.h"
 #include "common.h"
+#include "prefilter_pipeline_truth.hpp"
 
 #include <simdjson.h>
 #include <nlohmann/json.hpp>
@@ -37,6 +38,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -64,6 +67,11 @@ import bench.tool_minimap2;
 import bioseq.sequences.generation;
 import bioseq.gpu.vulkan.runtime;
 
+namespace bioseq::bench_prefilters {
+[[nodiscard]] bioseq::bench_framework::ErasedBenchmark
+make_prefilter_kernel_benchmark(std::string config_path);
+}
+
 #ifndef BIOSEQ_BENCH_REPORT_DIR
 #error "BIOSEQ_BENCH_REPORT_DIR must be defined by the build system"
 #endif
@@ -86,6 +94,8 @@ using bioseq::simd::HWY_NAMESPACE::MatchResult;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+using bioseq::simd::HWY_NAMESPACE::PrefilterBackendType;
+using bioseq::simd::HWY_NAMESPACE::SneakySnakePrefilterExecutionProof;
 using bioseq::simd::HWY_NAMESPACE::PartialVulkanExecutionProof;
 using bioseq::simd::HWY_NAMESPACE::TwoStackExecutionProof;
 using bioseq::simd::HWY_NAMESPACE::PackedPaperNthashExecutionProof;
@@ -100,6 +110,21 @@ using bench_generator_t = gen::alphabet_sequence_generator<seq::dna4, std::uint3
 // Comparable mappings may differ from the reference coordinate, but the
 // contract is strict: a delta of 15 bp is already a rejection.
 constexpr std::int32_t kPositionTolerance = 15;
+
+struct PrefilterPipelineMatchCountParityState {
+    struct ThresholdState {
+        bool prefilter_off_scheduled = false;
+        bool vulkan_scheduled = false;
+        std::optional<std::size_t> prefilter_off_match_count;
+        std::optional<std::size_t> vulkan_match_count;
+        std::optional<bool> vulkan_hardware_available;
+        bool comparison_performed = false;
+        bool comparison_passed = false;
+    };
+
+    std::mutex mutex;
+    std::map<std::uint32_t, ThresholdState> by_threshold;
+};
 
 struct AlignerInput {
     /// Generated pairs are read-only after `on_input` returns, but
@@ -120,12 +145,19 @@ struct AlignerInput {
     /// REPR_STORAGE_* test cases to force a specific MinimizerRepr
     /// storage instantiation (K=7 → 32-bit, K=27 → 128-bit).
     std::int32_t kmer_size_override = 0;
+    /// Shared because the framework may move/copy an input while every timed
+    /// execution tuple for one batch must contribute to the same zero-work
+    /// parity ledger. The evaluator is the only writer.
+    std::shared_ptr<PrefilterPipelineMatchCountParityState>
+        prefilter_pipeline_match_count_parity =
+            std::make_shared<PrefilterPipelineMatchCountParityState>();
 };
 
 struct AlignerOutput {
     std::size_t total_results          = 0;
     std::size_t correct_pairs          = 0;
     std::size_t total_pairs            = 0;
+    std::vector<std::uint8_t> correct_pair_flags;
     double      sum_abs_position_offset = 0.0;
     bool        vulkan_hardware_unavailable = false;
     /// The three Vulkan-labelled rows in this historical report_76 matrix are
@@ -133,6 +165,14 @@ struct AlignerOutput {
     /// all-on-GPU acceptance condition.
     bool        historical_partial_gpu_probe = false;
     bool        all_gpu_acceptance_eligible = false;
+    bool        edit_threshold_enforced = false;
+    std::uint32_t edit_threshold = 0u;
+    bool        prefilter_enabled = false;
+    PrefilterBackendType prefilter_backend = PrefilterBackendType::AUTO;
+    SneakySnakePrefilterExecutionProof
+        sneaky_snake_prefilter_execution_proof{};
+    bool sneaky_snake_prefilter_execution_proof_present = false;
+    bool sneaky_snake_prefilter_execution_proof_accepted = false;
     bool        phase_c_gpu_index_ownership_proof_accepted = false;
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
     TwoStackExecutionProof exact_simd_query_execution_proof{};
@@ -310,6 +350,24 @@ struct SimdChainingEndpointQualification {
         value = parsed;
     }
     return value;
+}
+
+[[nodiscard]] std::uint32_t read_max_edits_param(
+    const ParamMap& params,
+    std::uint32_t fallback = 40u) noexcept
+{
+    const auto found = params.find("max_edits");
+    if (found == params.end() || !found->second.is_integer()) {
+        return fallback;
+    }
+    const std::int64_t raw = found->second.as_integer();
+    if (raw < 0) {
+        return fallback;
+    }
+    return static_cast<std::uint32_t>(std::min<std::int64_t>(
+        raw,
+        static_cast<std::int64_t>(
+            (std::numeric_limits<std::uint32_t>::max)())));
 }
 
 enum class EndpointDecoyPlacement : std::uint8_t {
@@ -1681,14 +1739,13 @@ evaluate_grouped32_validation(
 
 /// Materialise a `(query, target)` batch from the `data` JSON blob.
 /// Lives in `on_input`; runs once per `(benchmark, test_case, group)`
-/// batch.  The `constraints` argument carries the same numbers
-/// `estimate_aligner_resources` returned, but we don't need them — the
-/// generator dimensions come straight from the JSON blob — so the
-/// parameter is unused.
+/// batch. The generator dimensions come from the JSON blob; the framework-
+/// resolved tuples in `constraints` seed the zero-work off/Vulkan parity
+/// ledger with the rows and thresholds that are actually scheduled.
 [[nodiscard]] AlignerInput build_input(std::string_view /*data_dir*/,
                                         std::string_view test_case_name,
                                         simdjson::dom::element data,
-                                        const RunConstraints& /*constraints*/) {
+                                        const RunConstraints& constraints) {
     gen::generator_params params{};
     params.reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length",
@@ -1720,6 +1777,23 @@ evaluate_grouped32_validation(
     input.pairs = bench_generator_t(params).generate_sequences_pairs(params.fragment_count);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
+
+    // Record only the framework-resolved tuples that will actually consume
+    // this cached input. This is schedule provenance, not reference work: an
+    // available Vulkan result is accepted only when the same threshold also
+    // has a scheduled prefilter-off row in this batch.
+    for (const auto& tuple : constraints.execution_tuples) {
+        const bool is_prefilter_off =
+            tuple.algorithm_name == "bioseq_prefilter_off";
+        const bool is_prefilter_vulkan =
+            tuple.algorithm_name == "bioseq_prefilter_vulkan";
+        if (!is_prefilter_off && !is_prefilter_vulkan) continue;
+        const std::uint32_t threshold = read_max_edits_param(tuple.params);
+        auto& scheduled = input.prefilter_pipeline_match_count_parity
+            ->by_threshold[threshold];
+        scheduled.prefilter_off_scheduled |= is_prefilter_off;
+        scheduled.vulkan_scheduled |= is_prefilter_vulkan;
+    }
 
     // Pre-decode each pair's compact representation into ACGT so the
     // tool_minimap2 cell does not pay the O(bp_size) decompress
@@ -1945,7 +2019,9 @@ evaluate_grouped32_validation(
 struct AlgorithmDispatch {
     bool is_minimap2_reference = false;
     bool explicit_vulkan = false;
+    bool explicit_prefilter_vulkan = false;
     bool historical_partial_gpu_probe = false;
+    bool enforce_edit_threshold = false;
     Minimap2Params params{};
 };
 
@@ -1977,7 +2053,8 @@ struct AlgorithmDispatch {
 }
 
 [[nodiscard]] AlgorithmDispatch dispatch_algorithm(std::string_view algo,
-                                                    std::int32_t kmer_override) {
+                                                    std::int32_t kmer_override,
+                                                    std::uint32_t max_edits = 40u) {
     AlgorithmDispatch dispatch;
     dispatch.params.kmer_size   = kmer_override > 0 ? kmer_override : 15;
     dispatch.params.window_size = 10;
@@ -2000,6 +2077,34 @@ struct AlgorithmDispatch {
         dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
         dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::SCALAR;
+    } else if (algo == "bioseq_prefilter_off"
+               || algo == "bioseq_prefilter_scalar"
+               || algo == "bioseq_prefilter_simd"
+               || algo == "bioseq_prefilter_vulkan") {
+        // Controlled full-pipeline comparison: all rows use identical SIMD
+        // sketch/chaining and KSW2 extension, compute exact edit distance, and
+        // expose only matches satisfying the same E. The sole varied dimension
+        // is whether/where the lower-bound prefilter executes.
+        dispatch.params.chaining_algorithm       = ChainingAlgorithmType::SIMD_MM2;
+        dispatch.params.base_alignment_algorithm = BaseAlignmentAlgorithmType::KSW2;
+        dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+        dispatch.params.compute_edit_distance    = true;
+        dispatch.params.prefilter_max_edits      = max_edits;
+        dispatch.params.exact_edit_filter_enabled = true;
+        dispatch.params.exact_edit_filter_exclusive_upper_bound =
+            static_cast<std::int64_t>(max_edits) + 1;
+        dispatch.enforce_edit_threshold          = true;
+        if (algo != "bioseq_prefilter_off") {
+            dispatch.params.prefilter_enabled = true;
+            if (algo == "bioseq_prefilter_scalar") {
+                dispatch.params.prefilter_backend = PrefilterBackendType::SCALAR;
+            } else if (algo == "bioseq_prefilter_simd") {
+                dispatch.params.prefilter_backend = PrefilterBackendType::SIMD;
+            } else {
+                dispatch.params.prefilter_backend = PrefilterBackendType::VULKAN;
+                dispatch.explicit_prefilter_vulkan = true;
+            }
+        }
     } else if (algo == "bioseq_ksw2_simd_dp_two_stack_nthash"
                || algo == "bioseq_ksw2_simd_dp_two_stack_nthash_exact_visited"
                || algo == "bioseq_ksw2_simd_dp_two_stack_nthash_bounded_batch_approximate") {
@@ -3020,17 +3125,24 @@ static_assert([] {
 /// into the AlignerOutput.
 [[nodiscard]] AlignerOutput run_aligner_impl(
                                           std::string_view algo,
-                                          const ParamMap& /*params*/,
+                                          const ParamMap& params,
                                           const AlignerInput& input,
                                           bool strict_xxl_gate,
                                           bool capture_full_route_proof) {
-    const AlgorithmDispatch dispatch = dispatch_algorithm(algo, input.kmer_size_override);
+    const std::uint32_t edit_threshold = read_max_edits_param(params);
+    const AlgorithmDispatch dispatch = dispatch_algorithm(
+        algo, input.kmer_size_override, edit_threshold);
 
     AlignerOutput output;
     output.total_pairs = input.pairs.size();
+    output.correct_pair_flags.assign(input.pairs.size(), 0u);
     output.historical_partial_gpu_probe =
         dispatch.historical_partial_gpu_probe;
     output.all_gpu_acceptance_eligible = false;
+    output.edit_threshold_enforced = dispatch.enforce_edit_threshold;
+    output.edit_threshold = dispatch.params.prefilter_max_edits;
+    output.prefilter_enabled = dispatch.params.prefilter_enabled;
+    output.prefilter_backend = dispatch.params.prefilter_backend;
     output.simd_chaining_policy_selected =
         dispatch.params.chaining_algorithm == ChainingAlgorithmType::SIMD_MM2;
     output.selected_simd_chaining_policy =
@@ -3040,7 +3152,8 @@ static_assert([] {
             "Vulkan row '{}' lacks explicit historical partial-GPU classification",
             algo));
     }
-    if (dispatch.explicit_vulkan && !is_explicit_vulkan_hardware_available(algo)) {
+    if ((dispatch.explicit_vulkan || dispatch.explicit_prefilter_vulkan)
+        && !is_explicit_vulkan_hardware_available(algo)) {
         if (strict_xxl_gate) {
             throw std::runtime_error(
                 "strict XXL gate requires every selected Vulkan row to execute");
@@ -3094,7 +3207,10 @@ static_assert([] {
                  input.targets_acgt[pair_index].size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (dispatch.explicit_vulkan || strict_xxl_gate) {
+            if (dispatch.enforce_edit_threshold
+                || dispatch.explicit_vulkan
+                || dispatch.explicit_prefilter_vulkan
+                || strict_xxl_gate) {
                 throw;
             }
             every_pair_route_proven = false;
@@ -3107,13 +3223,17 @@ static_assert([] {
                  input.targets_acgt[pair_index].size(),
                  dispatch.params.kmer_size,
                  exception.what());
-            if (strict_xxl_gate) throw;
+            if (dispatch.enforce_edit_threshold
+                || dispatch.explicit_prefilter_vulkan
+                || strict_xxl_gate) throw;
             every_pair_route_proven = false;
             continue;
         } catch (...) {
             bioseq_log<ERR>("[bench_v10] aligner threw non-std exception (algo='{}', pair_index={})",
                  algo, pair_index);
-            if (strict_xxl_gate) throw;
+            if (dispatch.enforce_edit_threshold
+                || dispatch.explicit_prefilter_vulkan
+                || strict_xxl_gate) throw;
             every_pair_route_proven = false;
             continue;
         }
@@ -3152,6 +3272,11 @@ static_assert([] {
                 results.ksw2_batched_execution_proof);
             output.ksw2_batched_execution_proof_present = true;
         }
+        if (results.sneaky_snake_prefilter_execution_proof_present) {
+            output.sneaky_snake_prefilter_execution_proof.combine(
+                results.sneaky_snake_prefilter_execution_proof);
+            output.sneaky_snake_prefilter_execution_proof_present = true;
+        }
         if (capture_full_route_proof) {
             if (results.simd_chaining_execution_proof_present) {
                 output.simd_chaining_execution_proof.combine(
@@ -3168,6 +3293,10 @@ static_assert([] {
             results.partial_vulkan_execution_proof);
         bool found_primary = false;
         for (const auto& match : results.view()) {
+            if (dispatch.enforce_edit_threshold
+                && match.edit_distance > dispatch.params.prefilter_max_edits) {
+                continue;
+            }
             output.total_results += 1;
             if (!match.is_primary || found_primary) continue;
             found_primary = true;
@@ -3177,6 +3306,7 @@ static_assert([] {
             output.sum_abs_position_offset += static_cast<double>(abs_offset);
             if (abs_offset < kPositionTolerance &&
                 match.is_reverse == pair.is_reverse) {
+                output.correct_pair_flags[pair_index] = 1u;
                 output.correct_pairs += 1;
             }
         }
@@ -3187,6 +3317,58 @@ static_assert([] {
             output.partial_vulkan_execution_proof);
     output.selected_route_execution_proof_accepted =
         every_pair_route_proven;
+    if (dispatch.enforce_edit_threshold && !every_pair_route_proven) {
+        throw std::runtime_error(fmt::format(
+            "exact-threshold benchmark row '{}' did not complete and prove "
+            "every input pair",
+            algo));
+    }
+    const bool prefilter_proof_is_zero =
+        output.sneaky_snake_prefilter_execution_proof
+            == SneakySnakePrefilterExecutionProof{};
+    if (!dispatch.params.prefilter_enabled) {
+        if (output.sneaky_snake_prefilter_execution_proof_present
+            || !prefilter_proof_is_zero) {
+            throw std::runtime_error(fmt::format(
+                "prefilter-off row '{}' emitted SneakySnake execution proof",
+                algo));
+        }
+    } else {
+        const bool require_evaluated_vulkan_jobs =
+            dispatch.params.prefilter_backend == PrefilterBackendType::VULKAN
+            && dispatch.params.prefilter_max_edits <= 31u;
+        output.sneaky_snake_prefilter_execution_proof_accepted =
+            output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                dispatch.params.prefilter_backend,
+                require_evaluated_vulkan_jobs,
+                require_evaluated_vulkan_jobs);
+        if (!output.sneaky_snake_prefilter_execution_proof_accepted) {
+            const auto& proof =
+                output.sneaky_snake_prefilter_execution_proof;
+            throw std::runtime_error(fmt::format(
+                "prefilter row '{}' lacks accepted operation proof: "
+                "present={} backend={} dispatches={} scalar={} simd={} "
+                "vulkan={} jobs={} evaluated={} length_only={} "
+                "unsupported={} rejected_jobs={} rejected_regions={} "
+                "survivors={} saturated={}",
+                algo,
+                output.sneaky_snake_prefilter_execution_proof_present,
+                static_cast<unsigned>(dispatch.params.prefilter_backend),
+                proof.dispatches,
+                proof.scalar_dispatches,
+                proof.simd_dispatches,
+                proof.vulkan_dispatches,
+                proof.jobs,
+                proof.evaluated_jobs,
+                proof.length_difference_jobs,
+                proof.unsupported_jobs,
+                proof.rejected_jobs,
+                proof.rejected_regions,
+                proof.surviving_regions,
+                proof.saturated));
+        }
+    }
     if (strict_xxl_gate
         && (output.total_pairs != 1
             || output.total_results != 1
@@ -3611,17 +3793,207 @@ evaluate_simd_chaining_endpoint_qualification(
     };
 }
 
+struct PrefilterPipelineMatchCountParityEvidence {
+    bool required = false;
+    bool performed = false;
+    bool passed = false;
+};
+
+/// Record only results produced by the existing timed rows. No reference
+/// pipeline is executed here. The seeded repetition-major schedule includes
+/// both off and Vulkan in repeat zero, so the second observation compares
+/// immediately; all later observations also prove per-row determinism.
+[[nodiscard]] PrefilterPipelineMatchCountParityEvidence
+record_prefilter_pipeline_match_count_parity(
+    std::string_view algorithm,
+    const ParamMap& params,
+    const AlignerInput& input,
+    const AlignerOutput& output)
+{
+    const bool is_prefilter_off = algorithm == "bioseq_prefilter_off";
+    const bool is_prefilter_vulkan =
+        algorithm == "bioseq_prefilter_vulkan";
+    if (!is_prefilter_off && !is_prefilter_vulkan) return {};
+    if (!input.prefilter_pipeline_match_count_parity) {
+        throw std::logic_error(
+            "prefilter pipeline parity state is unexpectedly absent");
+    }
+
+    const std::uint32_t threshold = read_max_edits_param(params);
+    auto& shared = *input.prefilter_pipeline_match_count_parity;
+    std::scoped_lock lock{shared.mutex};
+    auto& state = shared.by_threshold[threshold];
+    const auto record_stable_count =
+        [threshold](std::optional<std::size_t>& destination,
+                    const std::size_t observed,
+                    std::string_view row_name) {
+            if (destination.has_value() && *destination != observed) {
+                throw std::runtime_error(fmt::format(
+                    "nondeterministic {} match count for max_edits={}: "
+                    "first={} repeated={}",
+                    row_name, threshold, *destination, observed));
+            }
+            destination = observed;
+        };
+
+    if (is_prefilter_off) {
+        if (!state.prefilter_off_scheduled) {
+            throw std::logic_error(fmt::format(
+                "observed unscheduled prefilter-off row for max_edits={}",
+                threshold));
+        }
+        record_stable_count(
+            state.prefilter_off_match_count,
+            output.total_results,
+            "prefilter-off");
+    } else {
+        if (!state.vulkan_scheduled) {
+            throw std::logic_error(fmt::format(
+                "observed unscheduled Vulkan prefilter row for max_edits={}",
+                threshold));
+        }
+        const bool hardware_available =
+            !output.vulkan_hardware_unavailable;
+        if (state.vulkan_hardware_available.has_value()
+            && *state.vulkan_hardware_available != hardware_available) {
+            throw std::runtime_error(fmt::format(
+                "nondeterministic Vulkan hardware availability for "
+                "max_edits={}: first={} repeated={}",
+                threshold,
+                *state.vulkan_hardware_available,
+                hardware_available));
+        }
+        state.vulkan_hardware_available = hardware_available;
+        if (hardware_available) {
+            if (!state.prefilter_off_scheduled) {
+                throw std::runtime_error(fmt::format(
+                    "available Vulkan prefilter row has no scheduled "
+                    "same-threshold prefilter-off reference for "
+                    "max_edits={}",
+                    threshold));
+            }
+            record_stable_count(
+                state.vulkan_match_count,
+                output.total_results,
+                "Vulkan prefilter");
+        }
+    }
+
+    if (state.vulkan_hardware_available.value_or(false)
+        && state.prefilter_off_match_count.has_value()
+        && state.vulkan_match_count.has_value()) {
+        state.comparison_performed = true;
+        state.comparison_passed = *state.vulkan_match_count
+            == *state.prefilter_off_match_count;
+        if (!state.comparison_passed) {
+            throw std::runtime_error(fmt::format(
+                "available Vulkan prefilter pipeline changed exact-threshold "
+                "match count: vulkan={} prefilter_off={} max_edits={}",
+                *state.vulkan_match_count,
+                *state.prefilter_off_match_count,
+                threshold));
+        }
+    }
+
+    return {
+        .required = state.vulkan_hardware_available.value_or(false),
+        .performed = state.comparison_performed,
+        .passed = state.comparison_passed,
+    };
+}
+
 /// Translate `Output` into the evaluation metrics declared in the JSON
 /// config. The framework drops keys that aren't declared on the active
 /// benchmark, so we always emit the full set; only the keys the running
 /// benchmark consumes land in the report.
 [[nodiscard]] std::map<std::string, double> evaluate_aligner(
-    std::string_view /*algo*/,
-    const ParamMap& /*params*/,
-    const AlignerInput& /*input*/,
+    std::string_view algorithm,
+    const ParamMap& params,
+    const AlignerInput& input,
     const AlignerOutput& output)
 {
+    const auto prefilter_match_count_parity =
+        record_prefilter_pipeline_match_count_parity(
+            algorithm, params, input, output);
     std::map<std::string, double> metrics;
+    metrics.emplace("pipeline_backend_available",
+        output.vulkan_hardware_unavailable ? 0.0 : 1.0);
+    metrics.emplace("vulkan_match_count_parity_required",
+        prefilter_match_count_parity.required ? 1.0 : 0.0);
+    metrics.emplace("vulkan_match_count_parity_performed",
+        prefilter_match_count_parity.performed ? 1.0 : 0.0);
+    metrics.emplace("vulkan_match_count_parity_passed",
+        prefilter_match_count_parity.passed ? 1.0 : 0.0);
+    metrics.emplace("edit_threshold_enforced",
+        output.edit_threshold_enforced ? 1.0 : 0.0);
+    metrics.emplace("edit_threshold",
+        static_cast<double>(output.edit_threshold));
+    metrics.emplace("prefilter_enabled",
+        output.prefilter_enabled ? 1.0 : 0.0);
+    metrics.emplace("prefilter_backend_off",
+        !output.prefilter_enabled
+            && !output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof
+                == SneakySnakePrefilterExecutionProof{}
+        ? 1.0 : 0.0);
+    metrics.emplace("prefilter_backend_scalar",
+        output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                PrefilterBackendType::SCALAR)
+        ? 1.0 : 0.0);
+    metrics.emplace("prefilter_backend_simd",
+        output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                PrefilterBackendType::SIMD)
+        ? 1.0 : 0.0);
+    metrics.emplace("prefilter_backend_vulkan",
+        output.sneaky_snake_prefilter_execution_proof_present
+            && output.sneaky_snake_prefilter_execution_proof.accepted(
+                PrefilterBackendType::VULKAN,
+                /*require_evaluated_jobs=*/true,
+                /*forbid_unsupported_jobs=*/true)
+        ? 1.0 : 0.0);
+    metrics.emplace("prefilter_execution_proof_present",
+        output.sneaky_snake_prefilter_execution_proof_present ? 1.0 : 0.0);
+    metrics.emplace("prefilter_execution_proof_accepted",
+        output.sneaky_snake_prefilter_execution_proof_accepted ? 1.0 : 0.0);
+    metrics.emplace("prefilter_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.dispatches));
+    metrics.emplace("prefilter_scalar_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.scalar_dispatches));
+    metrics.emplace("prefilter_simd_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.simd_dispatches));
+    metrics.emplace("prefilter_vulkan_dispatches", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.vulkan_dispatches));
+    metrics.emplace("prefilter_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.jobs));
+    metrics.emplace("prefilter_evaluated_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.evaluated_jobs));
+    metrics.emplace("prefilter_length_difference_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof
+            .length_difference_jobs));
+    metrics.emplace("prefilter_unsupported_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.unsupported_jobs));
+    metrics.emplace("prefilter_rejected_jobs", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.rejected_jobs));
+    metrics.emplace("prefilter_rejected_regions", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.rejected_regions));
+    metrics.emplace("prefilter_surviving_regions", static_cast<double>(
+        output.sneaky_snake_prefilter_execution_proof.surviving_regions));
+    metrics.emplace("prefilter_execution_proof_saturated",
+        output.sneaky_snake_prefilter_execution_proof.saturated ? 1.0 : 0.0);
+    metrics.emplace("ksw2_left_calls", static_cast<double>(
+        output.scalar_pipeline_execution_proof.ksw2_left_calls));
+    metrics.emplace("ksw2_gap_calls", static_cast<double>(
+        output.scalar_pipeline_execution_proof.ksw2_gap_calls));
+    metrics.emplace("ksw2_right_calls", static_cast<double>(
+        output.scalar_pipeline_execution_proof.ksw2_right_calls));
+    metrics.emplace("ksw2_total_calls", static_cast<double>(
+        output.scalar_pipeline_execution_proof.ksw2_left_calls
+        + output.scalar_pipeline_execution_proof.ksw2_gap_calls
+        + output.scalar_pipeline_execution_proof.ksw2_right_calls));
+    metrics.emplace("ksw2_input_cell_area", static_cast<double>(
+        output.scalar_pipeline_execution_proof.ksw2_input_cell_area));
     metrics.emplace("selected_route_execution_proof_accepted",
         output.selected_route_execution_proof_accepted ? 1.0 : 0.0);
     metrics.emplace("ksw2_batched_execution_proof_accepted",
@@ -3982,6 +4354,69 @@ evaluate_simd_chaining_endpoint_qualification(
     metrics.emplace("mean_position_offset_bp",
                      output.total_pairs == 0 ? 0.0
                      : output.sum_abs_position_offset / pairs_d);
+    return metrics;
+}
+
+/// Evaluate primary correctness against an independent exact-threshold truth
+/// set. This work is outside the timed callback. In particular, a generated
+/// dataset may contain input pairs but no pair whose ground-truth interval has
+/// ED <= E; that empty truth set has complete recall, while a nonempty truth
+/// set with no returned correct pairs remains a real zero and will regress.
+[[nodiscard]] std::map<std::string, double> evaluate_prefilter_pipeline(
+    std::string_view algorithm,
+    const ParamMap& params,
+    const AlignerInput& input,
+    const AlignerOutput& output)
+{
+    auto metrics = evaluate_aligner(algorithm, params, input, output);
+    if (output.vulkan_hardware_unavailable) {
+        return metrics;
+    }
+
+    if (input.pairs.size() != input.queries_acgt.size()
+        || input.pairs.size() != input.targets_acgt.size()) {
+        throw std::logic_error(
+            "prefilter truth oracle input vectors are not in lock-step");
+    }
+
+    if (output.correct_pair_flags.size() != input.pairs.size()) {
+        throw std::logic_error(
+            "prefilter correctness flags are not in lock-step with inputs");
+    }
+    std::vector<std::uint8_t> threshold_truth_flags(
+        input.pairs.size(), 0u);
+    for (std::size_t index = 0u; index < input.pairs.size(); ++index) {
+        const auto& pair = input.pairs[index];
+        const auto& target = input.targets_acgt[index];
+        if (pair.truth_target_start > pair.truth_target_end
+            || pair.truth_target_end > target.size()) {
+            throw std::logic_error(
+                "prefilter truth oracle interval is outside the target");
+        }
+        const std::string truth =
+            bioseq::bench_prefilter_truth::oriented_truth_sequence(
+                std::string_view{target}.substr(
+                    pair.truth_target_start,
+                    pair.truth_target_end - pair.truth_target_start),
+                pair.is_reverse);
+        threshold_truth_flags[index] =
+            bioseq::bench_prefilter_truth::edit_distance_within(
+                input.queries_acgt[index], truth, output.edit_threshold)
+            ? 1u : 0u;
+    }
+    const auto correctness =
+        bioseq::bench_prefilter_truth::summarize_primary_correctness(
+            threshold_truth_flags, output.correct_pair_flags);
+    if (correctness.observed_correct_pairs != output.correct_pairs) {
+        throw std::logic_error(
+            "prefilter per-pair correctness flags disagree with aggregate");
+    }
+    metrics.insert_or_assign("threshold_truth_pair_count",
+        static_cast<double>(correctness.truth_pairs));
+    metrics.insert_or_assign("threshold_correct_pair_count",
+        static_cast<double>(correctness.correct_truth_pairs));
+    metrics.insert_or_assign("primary_correct_fraction",
+        correctness.fraction);
     return metrics;
 }
 
@@ -4574,6 +5009,11 @@ int main(int argc, char** argv) {
     auto eval = std::function<std::map<std::string, double>(
         std::string_view, const ParamMap&,
         const AlignerInput&, const AlignerOutput&)>{evaluate_aligner};
+    auto eval_prefilter_pipeline =
+        std::function<std::map<std::string, double>(
+            std::string_view, const ParamMap&,
+            const AlignerInput&, const AlignerOutput&)>{
+                evaluate_prefilter_pipeline};
     auto serialize_paired = std::function<std::string(
         std::string_view, const ParamMap&,
         const AlignerInput&, const AlignerOutput&)>{
@@ -4624,6 +5064,12 @@ int main(int argc, char** argv) {
                 build_grouped32,
                 run_grouped32,
                 evaluate_grouped32),
+        bioseq::bench_prefilters::make_prefilter_kernel_benchmark(
+            config_path),
+        create_benchmark<AlignerInput, AlignerOutput>(
+            "SneakySnake full-pipeline regional impact",
+            "bench_prefilter_pipeline",
+            config_path, estimate, build, run, eval_prefilter_pipeline),
         create_benchmark<AlignerInput, AlignerOutput>(
             "Aligner full grid (length × error × algorithm)",
             "bench_aligners_grid", config_path, estimate, build, run, eval),

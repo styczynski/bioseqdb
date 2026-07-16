@@ -103,11 +103,16 @@ WORKSPACE_ROOT = PROJECT_ROOT.parent
 # box-side server.py is invoked with BIOSEQ_BUILD_PRESET=aws-x64-linux, so the
 # worker configures/builds build/aws-x64-linux/ (the Linux/libc++/x64-linux-triplet
 # tree the verify.sh provisioning already populated) instead of the macOS/arm64
-# bench-opt tree. On a normal local checkout the env vars are unset and these
-# fall back to the everyday DOC0270 presets. The build dir always derives from the
+# bench-opt tree. Explicit environment overrides remain authoritative; without
+# one, Linux hosts select the existing aws-x64-linux family and non-Linux hosts
+# retain the everyday DOC0270 bench-opt family. The build dir always derives from the
 # preset name (every CMakePresets entry uses binaryDir ${sourceDir}/build/${presetName}),
 # so overriding the preset name is sufficient — no separate dir override needed.
-DEFAULT_BUILD_PRESET = os.environ.get("BIOSEQ_BUILD_PRESET", "bench-opt")
+_HOST_DEFAULT_BUILD_PRESET = (
+    "aws-x64-linux" if sys.platform.startswith("linux") else "bench-opt"
+)
+DEFAULT_BUILD_PRESET = os.environ.get(
+    "BIOSEQ_BUILD_PRESET", _HOST_DEFAULT_BUILD_PRESET)
 
 
 def _default_debug_preset(production_preset: str) -> str:
@@ -282,7 +287,26 @@ def _safe_parallel_jobs() -> int:
 CMAKE_PARALLEL_JOBS = _safe_parallel_jobs()
 HARD_TIMEOUT_MIN = float(os.environ.get("BIOSEQ_BUILD_HARD_TIMEOUT_MIN", "240.0"))
 HARD_TIMEOUT_SEC = HARD_TIMEOUT_MIN * 60.0
-AWS_HEAVY_JOBS = "4"
+
+
+def _safe_heavy_jobs() -> int:
+    """Throttle the highest-RSS module compiles within the global job cap."""
+    override = os.environ.get("BIOSEQ_BUILD_HEAVY_JOBS")
+    if override:
+        try:
+            requested = int(override)
+        except ValueError as exc:
+            raise RuntimeError(
+                "BIOSEQ_BUILD_HEAVY_JOBS must be a positive integer") from exc
+        if requested <= 0:
+            raise RuntimeError(
+                "BIOSEQ_BUILD_HEAVY_JOBS must be a positive integer")
+        return requested
+    return max(1, min(4, CMAKE_PARALLEL_JOBS // 2))
+
+
+AWS_HEAVY_JOBS = str(_safe_heavy_jobs())
+AWS_DEBUG_HEAVY_JOBS = str(max(1, int(AWS_HEAVY_JOBS) // 2))
 AWS_GCC_TYPED_DISPATCH_OPT_LEVEL = "O1"
 AWS_GCC_TYPED_DISPATCH_JOBS = "1"
 AWS_GCC161_CXX_FLAGS = (
@@ -1462,8 +1486,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     # explicit start_build argument below is the sole supported override.
     env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
     env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
-    if not _is_aws_preset(active_preset):
-        _ensure_local_toolchain_environment(env, active_build_dir)
+    # The local MCP may itself run on the provisioned Linux build host.  Keep
+    # the provisioned environment when present, but also recover VCPKG_ROOT
+    # from an existing configured tree for a fresh sibling test/debug tree.
+    _ensure_local_toolchain_environment(env, active_build_dir)
     if _is_aws_clang_preset(active_preset):
         env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
     elif _is_aws_gcc_preset(active_preset):
@@ -1581,15 +1607,20 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     log_handle,
                     f"unexpected generator {current_generator!r}; AWS presets require Ninja",
                 )
+            desired_heavy_jobs = (
+                AWS_DEBUG_HEAVY_JOBS
+                if _is_debug_preset(active_preset)
+                else AWS_HEAVY_JOBS
+            )
             current_heavy_jobs = _cmake_cache_value(active_build_dir, "BIOSEQ_HEAVY_JOBS")
             repair_args = [
-                f"-DBIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS}",
+                f"-DBIOSEQ_HEAVY_JOBS={desired_heavy_jobs}",
             ]
             repair_unset_args = []
             repair_reasons = []
-            if current_heavy_jobs != AWS_HEAVY_JOBS:
+            if current_heavy_jobs != desired_heavy_jobs:
                 repair_reasons.append(
-                    f"BIOSEQ_HEAVY_JOBS={AWS_HEAVY_JOBS} "
+                    f"BIOSEQ_HEAVY_JOBS={desired_heavy_jobs} "
                     f"(was {current_heavy_jobs or 'unset'})")
             if _is_aws_clang_preset(active_preset):
                 current_triplet = _cmake_cache_value(active_build_dir, "VCPKG_TARGET_TRIPLET")

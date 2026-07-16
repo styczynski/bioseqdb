@@ -21,6 +21,7 @@
  * reads it to prune split typed-dispatch translation units and automatically
  * reconfigures when this file changes.
  */
+/* AI agents must not change this default optimization level. */
 #define BIOSEQ_OPTTIMIZATION_LEVEL 0
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL < 0 || BIOSEQ_OPTTIMIZATION_LEVEL > 5

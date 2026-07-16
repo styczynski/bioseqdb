@@ -1,5 +1,29 @@
 {
   "params": {
+    "sneakysnake_original": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold passed to the exact bundled SneakySnake.c source"}
+    },
+    "sneakysnake_scalar": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the native rank-buffer scalar port"}
+    },
+    "sneakysnake_simd": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the Highway batch port"}
+    },
+    "sneakysnake_vulkan": {
+      "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the fail-closed hardware Vulkan batch port"}
+    },
+    "bioseq_prefilter_off": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold applied after the common pipeline; lower-bound prefilter disabled"}
+    },
+    "bioseq_prefilter_scalar": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold and scalar SneakySnake pipeline stage"}
+    },
+    "bioseq_prefilter_simd": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold and Highway SIMD SneakySnake pipeline stage"}
+    },
+    "bioseq_prefilter_vulkan": {
+      "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold and fail-closed hardware Vulkan SneakySnake pipeline stage"}
+    },
     "minimap2_dp":                              {"_": {"type": "integer", "default": 0, "description": "no params; passthrough"}},
     "minimap2_rmq":                             {"_": {"type": "integer", "default": 0}},
     "bioseq_ksw2_scalar_dp_scalar_mm":          {"_": {"type": "integer", "default": 0}},
@@ -28,6 +52,26 @@
   },
 
   "test_cases": {
+    "SNEAKYSNAKE_ERR_E2_100BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 100},
+      "description": "Deterministic 1024-pair prefix of the upstream 100 bp ERR E2 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "SNEAKYSNAKE_ERR_E40_100BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 100},
+      "description": "Deterministic 1024-pair prefix of the upstream 100 bp ERR E40 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "SNEAKYSNAKE_SRR_E8_250BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/SRR826471_1_E8_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 250},
+      "description": "Deterministic 1024-pair prefix of the upstream 250 bp SRR E8 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "SNEAKYSNAKE_SRR_E100_250BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/SRR826471_1_E100_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 250},
+      "description": "Deterministic 1024-pair prefix of the upstream 250 bp SRR E100 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
     "SHORT_HIFI":      { "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.001, "insertion_rate": 0.0005, "deletion_rate": 0.0005, "insertion_length_mean": 1.0, "deletion_length_mean": 1.0, "reverse_complement_rate": 0.5, "seed": 1234567 }, "description": "300 bp fragments, ~0.2% HiFi-style error, 3 kbp reference"   },
     "SHORT_CCS":       { "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.005, "insertion_rate": 0.005,  "deletion_rate": 0.005,  "insertion_length_mean": 1.5, "deletion_length_mean": 1.5, "reverse_complement_rate": 0.5, "seed": 2345678 }, "description": "300 bp fragments, ~1.5% CCS-style error"   },
     "SHORT_ONT_MODERN":{ "data": { "fragment_count": 12, "fragment_length_mean": 300, "fragment_length_stddev": 50,    "reference_length": 3000,      "substitution_rate": 0.005, "insertion_rate": 0.025,  "deletion_rate": 0.020,  "insertion_length_mean": 2.0, "deletion_length_mean": 2.0, "reverse_complement_rate": 0.5, "seed": 3456789 }, "description": "300 bp fragments, ~5% ONT-modern error"   },
@@ -125,6 +169,140 @@
         "valid_result": { "type": "evaluation" },
         "validated_words": { "type": "evaluation" },
         "terminal_word_witness": { "type": "evaluation" }
+      }
+    }
+  },
+  "bench_prefilter_kernels": {
+    "tags": ["prefilter", "sneakysnake", "simd", "vulkan"],
+    "description": "Separate prefilter microbenchmark inside bioseq_bench. One-time shared input preparation (dataset read, byte-rank flattening, jobs) and the untimed bundled-source/scalar/edit-distance oracles are reported separately. The measured backend_batch region is the complete selected batch API call; for Vulkan it includes upload, dispatch, synchronization, and result readback. callback_total additionally includes output materialization and separately reported runtime validation, while callback_non_backend is its difference from backend_batch. No per-row pseudo end-to-end number incorrectly adds the shared input setup. These <=250 bp fixtures use one complete maze (t=y=len), avoiding the source implementation's multi-maze tail quirks. CPU/source rows sweep E=2/8/40/100; Vulkan rows sweep only the kernel's evaluated E=2/8/16/31 domain. Every available row is validated after backend timing against source decisions and exact ED truth; available Vulkan rows additionally require status-0 execution and exact scalar lower-bound/status/decision parity. Vulkan-unavailable rows are nonblocking and never CPU-fallback.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 5121008},
+    "matrix": {
+      "for": {
+        "SNEAKYSNAKE_ERR_E2_100BP": 3,
+        "SNEAKYSNAKE_ERR_E40_100BP": 3,
+        "SNEAKYSNAKE_SRR_E8_250BP": 3,
+        "SNEAKYSNAKE_SRR_E100_250BP": 3
+      },
+      "over": {
+        "sneakysnake_original": {"max_edits": [2, 8, 40, 100]},
+        "sneakysnake_scalar": {"max_edits": [2, 8, 40, 100]},
+        "sneakysnake_simd": {"max_edits": [2, 8, 40, 100]},
+        "sneakysnake_vulkan": {"max_edits": [2, 8, 16, 31]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "region": "sneaky_snake_backend_batch", "rules": []},
+        "input_preparation_ns": {"type": "evaluation", "rules": []},
+        "oracle_preparation_ns": {"type": "evaluation", "rules": []},
+        "backend_batch_ns": {"type": "evaluation", "rules": []},
+        "callback_non_backend_ns": {"type": "evaluation", "rules": []},
+        "callback_total_ns": {"type": "evaluation", "rules": []},
+        "validation_ns": {"type": "evaluation", "rules": []},
+        "input_valid": {"type": "evaluation", "rules": []},
+        "backend_available": {"type": "evaluation", "rules": []},
+        "runtime_validation_performed": {"type": "evaluation", "rules": []},
+        "runtime_validation_passed": {"type": "evaluation", "rules": []},
+        "vulkan_validation_required": {"type": "evaluation", "rules": []},
+        "result_count_valid": {"type": "evaluation", "rules": []},
+        "pair_count": {"type": "evaluation", "rules": []},
+        "base_count": {"type": "evaluation", "rules": []},
+        "accepted_count": {"type": "evaluation", "rules": []},
+        "rejected_count": {"type": "evaluation", "rules": []},
+        "rejection_rate": {"type": "evaluation", "rules": []},
+        "evaluated_count": {"type": "evaluation", "rules": []},
+        "reference_decision_mismatches": {"type": "evaluation", "rules": []},
+        "reference_decision_mismatch_rate": {"type": "evaluation", "rules": []},
+        "true_similar_count": {"type": "evaluation", "rules": []},
+        "true_dissimilar_count": {"type": "evaluation", "rules": []},
+        "false_accept_count": {"type": "evaluation", "rules": []},
+        "false_reject_count": {"type": "evaluation", "rules": []},
+        "false_accept_rate": {"type": "evaluation", "rules": []},
+        "false_reject_rate": {"type": "evaluation", "rules": []},
+        "backend_pairs_per_second": {"type": "evaluation", "rules": []},
+        "backend_bases_per_second": {"type": "evaluation", "rules": []},
+        "callback_pairs_per_second": {"type": "evaluation", "rules": []},
+        "callback_bases_per_second": {"type": "evaluation", "rules": []},
+        "lower_bound_sum": {"type": "evaluation", "rules": []},
+        "lower_bound_max": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
+  "bench_prefilter_pipeline": {
+    "tags": ["aligner", "prefilter", "sneakysnake", "pipeline"],
+    "description": "Controlled on/off regional-impact benchmark in the existing aligner harness. Every row uses TWO_STACK_NTHASH + bounded SIMD_MM2 + KSW2, computes exact edit distance, and exposes only matches with ED<=16. The varied dimension is prefilter off versus scalar/SIMD/Vulkan. E=16 lies inside the Vulkan kernel's evaluated E<=31 domain, so the GPU row must report evaluated maze jobs and zero status-2 jobs. Named-region output includes sneaky_snake_prefilter and mm_align_skeleton. Operation-originated proof reports actual backend dispatches, status-classified jobs, rejected jobs/regions, survivors, KSW2 calls, and input-cell area; enabled rows fail closed unless proof is present with non-empty work from the selected backend, while the off row requires proof absence. A shared zero-work evaluator ledger records framework-resolved off/Vulkan schedule provenance by threshold, requires an available Vulkan row to have a scheduled same-threshold off row, compares their actual timed match counts as soon as both repeat-zero rows have completed, rejects count changes across repetitions, and never replays either pipeline. Hardware-Vulkan absence reports required/performed/passed=0 without CPU fallback or a blocking comparison.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 5124040},
+    "matrix": {
+      "for": {"MEDIUM_HIFI": 5, "MEDIUM_ONT_MODERN": 5},
+      "over": {
+        "bioseq_prefilter_off": {"max_edits": [16]},
+        "bioseq_prefilter_scalar": {"max_edits": [16]},
+        "bioseq_prefilter_simd": {"max_edits": [16]},
+        "bioseq_prefilter_vulkan": {"max_edits": [16]}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "rules": []},
+        "region_visits": {"type": "region", "rules": []},
+        "pipeline_backend_available": {"type": "evaluation", "rules": []},
+        "vulkan_match_count_parity_required": {"type": "evaluation", "rules": []},
+        "vulkan_match_count_parity_performed": {"type": "evaluation", "rules": []},
+        "vulkan_match_count_parity_passed": {"type": "evaluation", "rules": []},
+        "edit_threshold_enforced": {"type": "evaluation", "rules": []},
+        "edit_threshold": {"type": "evaluation", "rules": []},
+        "prefilter_enabled": {"type": "evaluation", "rules": []},
+        "prefilter_backend_off": {"type": "evaluation", "rules": []},
+        "prefilter_backend_scalar": {"type": "evaluation", "rules": []},
+        "prefilter_backend_simd": {"type": "evaluation", "rules": []},
+        "prefilter_backend_vulkan": {"type": "evaluation", "rules": []},
+        "prefilter_execution_proof_present": {"type": "evaluation", "rules": []},
+        "prefilter_execution_proof_accepted": {"type": "evaluation", "rules": []},
+        "prefilter_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_scalar_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_simd_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_vulkan_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_evaluated_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_length_difference_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_unsupported_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_rejected_jobs": {"type": "evaluation", "rules": []},
+        "prefilter_rejected_regions": {"type": "evaluation", "rules": []},
+        "prefilter_surviving_regions": {"type": "evaluation", "rules": []},
+        "prefilter_execution_proof_saturated": {"type": "evaluation", "rules": []},
+        "selected_route_execution_proof_accepted": {"type": "evaluation", "rules": []},
+        "ksw2_left_calls": {"type": "evaluation", "rules": []},
+        "ksw2_gap_calls": {"type": "evaluation", "rules": []},
+        "ksw2_right_calls": {"type": "evaluation", "rules": []},
+        "ksw2_total_calls": {"type": "evaluation", "rules": []},
+        "ksw2_input_cell_area": {"type": "evaluation", "rules": []},
+        "match_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_preserves_exact_threshold_results", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_preserves_exact_threshold_results", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "threshold_truth_pair_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_uses_same_threshold_truth", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_uses_same_threshold_truth", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "threshold_correct_pair_count": {
+          "type": "evaluation",
+          "rules": [
+            ["scalar_prefilter_preserves_threshold_correct_pairs", {"key": "bioseq_prefilter_scalar"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}],
+            ["simd_prefilter_preserves_threshold_correct_pairs", {"key": "bioseq_prefilter_simd"}, {"compare": "=", "tolerance%": 0, "aggregate": "sum"}, {"key": "bioseq_prefilter_off"}]
+          ]
+        },
+        "primary_correct_fraction": {"type": "evaluation", "rules": []},
+        "mean_position_offset_bp": {"type": "evaluation", "rules": []}
       }
     }
   },

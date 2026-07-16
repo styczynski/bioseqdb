@@ -108,7 +108,26 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   if(DEFINED ENV{BIOSEQ_LIBCXX_MODULES_JSON})
     set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}")
   else()
-    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json)
+    # The official LLVM tarball and apt.llvm.org packages install this file in
+    # different locations.  Detached build workers do not necessarily inherit
+    # bootstrap.sh's BIOSEQ_LIBCXX_MODULES_JSON profile export, so discover the
+    # two supported layouts directly from the selected LLVM root.
+    set(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES
+      "${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+      "${BIOSEQ_LLVM_ROOT}/lib/libc++.modules.json")
+    foreach(_BIOSEQ_LIBCXX_MODULES_JSON
+        IN LISTS _BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES)
+      if(EXISTS "${_BIOSEQ_LIBCXX_MODULES_JSON}")
+        set(CMAKE_CXX_STDLIB_MODULES_JSON "${_BIOSEQ_LIBCXX_MODULES_JSON}")
+        break()
+      endif()
+    endforeach()
+    if(NOT CMAKE_CXX_STDLIB_MODULES_JSON)
+      message(FATAL_ERROR
+        "libc++.modules.json was not found under BIOSEQ_LLVM_ROOT='${BIOSEQ_LLVM_ROOT}'")
+    endif()
+    unset(_BIOSEQ_LIBCXX_MODULES_JSON)
+    unset(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES)
   endif()
   # CMake 4.2 + Ninja on the AWS box cannot relink the PostgreSQL extension to
   # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
@@ -207,6 +226,14 @@ project(
   VERSION 4.2.3
   LANGUAGES CXX
 )
+
+# CMake's import-std support creates this static helper during project().  Its
+# objects are folded into static libraries that are subsequently linked into
+# the PostgreSQL shared modules, so they must be position-independent too.
+if(TARGET __cmake_cxx26)
+  set_property(TARGET __cmake_cxx26
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "22.1.6")

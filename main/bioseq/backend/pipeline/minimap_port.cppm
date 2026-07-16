@@ -182,6 +182,172 @@ enum class MinimizerAlgorithmType : uint8_t {
     PAPER_NTHASH_SIMD = 4,
 };
 
+/// SneakySnake execution backend.  The SQL-facing path normally selects
+/// AUTO, which is resolved once before pipeline execution from the existing
+/// vectorization/Vulkan choices; it is intentionally not backed by a GUC.
+enum class PrefilterBackendType : uint8_t {
+    AUTO    = 0,
+    SCALAR  = 1,
+    SIMD    = 2,
+    VULKAN  = 3,
+};
+
+/// Operation-originated evidence for the SneakySnake prefilter stage.
+///
+/// A selector never populates this value.  The stage records one dispatch only
+/// after the selected backend has returned a complete result batch and the
+/// per-region survivor decision has been applied.  This makes the proof useful
+/// to benchmark and SQL callers that must distinguish requested policy from
+/// real maze execution.
+struct SneakySnakePrefilterExecutionProof {
+    std::uint64_t dispatches = 0;
+    std::uint64_t scalar_dispatches = 0;
+    std::uint64_t simd_dispatches = 0;
+    std::uint64_t vulkan_dispatches = 0;
+    std::uint64_t jobs = 0;
+    std::uint64_t evaluated_jobs = 0;
+    std::uint64_t length_difference_jobs = 0;
+    std::uint64_t unsupported_jobs = 0;
+    std::uint64_t rejected_jobs = 0;
+    std::uint64_t rejected_regions = 0;
+    std::uint64_t surviving_regions = 0;
+    bool saturated = false;
+
+    static constexpr void add(
+            std::uint64_t& destination,
+            const std::uint64_t increment,
+            bool& saturated_flag) noexcept {
+        if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                            - destination) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            saturated_flag = true;
+            return;
+        }
+        destination += increment;
+    }
+
+    constexpr void record_batch(
+            const PrefilterBackendType backend,
+            const std::uint64_t job_count,
+            const std::uint64_t evaluated_count,
+            const std::uint64_t length_difference_count,
+            const std::uint64_t unsupported_count,
+            const std::uint64_t rejected_job_count,
+            const std::uint64_t rejected_region_count,
+            const std::uint64_t surviving_region_count) noexcept {
+        add(dispatches, 1u, saturated);
+        switch (backend) {
+            case PrefilterBackendType::SCALAR:
+                add(scalar_dispatches, 1u, saturated);
+                break;
+            case PrefilterBackendType::SIMD:
+                add(simd_dispatches, 1u, saturated);
+                break;
+            case PrefilterBackendType::VULKAN:
+                add(vulkan_dispatches, 1u, saturated);
+                break;
+            case PrefilterBackendType::AUTO:
+                // AUTO must be resolved before an operation can be attested.
+                saturated = true;
+                break;
+        }
+        add(jobs, job_count, saturated);
+        add(evaluated_jobs, evaluated_count, saturated);
+        add(length_difference_jobs, length_difference_count, saturated);
+        add(unsupported_jobs, unsupported_count, saturated);
+        add(rejected_jobs, rejected_job_count, saturated);
+        add(rejected_regions, rejected_region_count, saturated);
+        add(surviving_regions, surviving_region_count, saturated);
+    }
+
+    constexpr void combine(
+            const SneakySnakePrefilterExecutionProof& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        add(dispatches, other.dispatches, overflow);
+        add(scalar_dispatches, other.scalar_dispatches, overflow);
+        add(simd_dispatches, other.simd_dispatches, overflow);
+        add(vulkan_dispatches, other.vulkan_dispatches, overflow);
+        add(jobs, other.jobs, overflow);
+        add(evaluated_jobs, other.evaluated_jobs, overflow);
+        add(length_difference_jobs, other.length_difference_jobs, overflow);
+        add(unsupported_jobs, other.unsupported_jobs, overflow);
+        add(rejected_jobs, other.rejected_jobs, overflow);
+        add(rejected_regions, other.rejected_regions, overflow);
+        add(surviving_regions, other.surviving_regions, overflow);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool accepted(
+            const PrefilterBackendType expected_backend,
+            const bool require_evaluated_jobs = false,
+            const bool forbid_unsupported_jobs = false) const noexcept {
+        if (saturated || dispatches == 0u || jobs == 0u
+            || evaluated_jobs > jobs
+            || length_difference_jobs > jobs - evaluated_jobs
+            || unsupported_jobs
+                != jobs - evaluated_jobs - length_difference_jobs
+            || rejected_jobs > jobs
+            || rejected_regions > (std::numeric_limits<std::uint64_t>::max)()
+                    - surviving_regions
+            || rejected_regions + surviving_regions == 0u
+            || scalar_dispatches > dispatches
+            || simd_dispatches > dispatches - scalar_dispatches
+            || vulkan_dispatches
+                != dispatches - scalar_dispatches - simd_dispatches
+            || (require_evaluated_jobs && evaluated_jobs == 0u)
+            || (forbid_unsupported_jobs && unsupported_jobs != 0u)) {
+            return false;
+        }
+        switch (expected_backend) {
+            case PrefilterBackendType::SCALAR:
+                return scalar_dispatches == dispatches
+                    && simd_dispatches == 0u
+                    && vulkan_dispatches == 0u;
+            case PrefilterBackendType::SIMD:
+                return scalar_dispatches == 0u
+                    && simd_dispatches == dispatches
+                    && vulkan_dispatches == 0u;
+            case PrefilterBackendType::VULKAN:
+                return scalar_dispatches == 0u
+                    && simd_dispatches == 0u
+                    && vulkan_dispatches == dispatches;
+            case PrefilterBackendType::AUTO:
+                return false;
+        }
+        return false;
+    }
+
+    constexpr bool operator==(
+        const SneakySnakePrefilterExecutionProof&) const noexcept = default;
+};
+
+static_assert([] {
+    SneakySnakePrefilterExecutionProof proof{};
+    proof.record_batch(
+        PrefilterBackendType::SIMD, 4u, 2u, 1u, 1u, 1u, 1u, 2u);
+    SneakySnakePrefilterExecutionProof tail{};
+    tail.record_batch(
+        PrefilterBackendType::SIMD, 2u, 2u, 0u, 0u, 0u, 0u, 1u);
+    proof.combine(tail);
+    return proof.dispatches == 2u
+        && proof.jobs == 6u
+        && proof.evaluated_jobs == 4u
+        && proof.accepted(PrefilterBackendType::SIMD);
+}());
+static_assert([] {
+    SneakySnakePrefilterExecutionProof proof{};
+    proof.record_batch(
+        PrefilterBackendType::SCALAR,
+        (std::numeric_limits<std::uint64_t>::max)(),
+        (std::numeric_limits<std::uint64_t>::max)(),
+        0u, 0u, 0u, 0u, 1u);
+    proof.record_batch(
+        PrefilterBackendType::SCALAR, 1u, 1u, 0u, 0u, 0u, 0u, 1u);
+    return proof.saturated
+        && proof.jobs == (std::numeric_limits<std::uint64_t>::max)()
+        && !proof.accepted(PrefilterBackendType::SCALAR);
+}());
+
 [[nodiscard]] constexpr const char* chaining_algorithm_name(ChainingAlgorithmType mode) {
     switch (mode) {
         case ChainingAlgorithmType::SCALAR_MM2:      return "Minimap2 Scalar";
@@ -273,6 +439,29 @@ struct Minimap2Params {
     /// MatchResult::mapq. Driven by whether bioseq.mapq(...) is requested.
     /// Skipping this omits the O(regions) log-computation loop.
     bool    compute_mapq        = true;
+
+    /// Compute the exact unit-cost edit distance represented by the emitted
+    /// alignment.  This forces traceback at the SQL boundary and is used to
+    /// enforce bioseq.edit(...) predicates after SneakySnake's lower-bound
+    /// gate admits a candidate.
+    bool    compute_edit_distance = false;
+
+    /// Apply the authoritative strict edit predicate to aligned regions before
+    /// the final primary/secondary and MAPQ pass.  This is deliberately
+    /// separate from `prefilter_enabled`: SneakySnake may conservatively admit
+    /// a candidate (or be unavailable for the threshold), whereas this filter
+    /// always uses the exact traced edit count.  The signed exclusive bound
+    /// preserves SQL `<` semantics, including the reject-all `bound <= 0`
+    /// case, without unsigned conversion surprises.
+    bool         exact_edit_filter_enabled = false;
+    std::int64_t exact_edit_filter_exclusive_upper_bound = 0;
+
+    /// Enable the query-scoped SneakySnake lower-bound stage.  The threshold
+    /// is the largest admissible exact edit count (so SQL `edit(...) < 10`
+    /// stores 9).  No heuristic divergence/bandwidth value is used here.
+    bool                 prefilter_enabled   = false;
+    std::uint32_t        prefilter_max_edits = 0;
+    PrefilterBackendType prefilter_backend   = PrefilterBackendType::AUTO;
 
     /// Block aligner tunables (ignored when base_alignment_algorithm == KSW2).
     ///
@@ -432,6 +621,7 @@ struct MatchResult {
     bool    is_primary             = true; ///< primary mapping flag
     bool    has_cigar              = false;///< whether CIGAR alignment was performed
     std::vector<CigarOp> cigar;            ///< CIGAR string
+    sequence_size_t edit_distance  = 0;    ///< exact unit-cost edits in the reported alignment
 };
 
 // ============================================================================
@@ -479,6 +669,7 @@ struct AlignRegion {
     int32_t mapq            = 0;
 
     std::vector<CigarOp> cigar;
+    sequence_size_t edit_distance = 0;
 };
 
 // fast_log2 is now in bioseq_sequences.chaining.utils
@@ -1452,7 +1643,7 @@ static_assert([] {
             ? BlockInputOrder::Reversed
             : BlockInputOrder::Forward,
         .phase      = phase,
-        .trace      = params.do_cigar,
+        .trace      = params.do_cigar || params.compute_edit_distance,
     };
 }
 
@@ -1618,6 +1809,237 @@ struct BlockPhaseEligibility {
     std::uint64_t right = 0;
 };
 
+/// Geometry of one mandatory seed-to-seed global fill.  Left/right
+/// extensions are deliberately excluded: they are local/X-drop domains and
+/// therefore cannot support a no-false-reject edit-threshold prefilter.
+struct MandatoryAlignmentGapWindow {
+    sequence_size_t query_start = 0;
+    sequence_size_t query_end = 0;
+    sequence_size_t target_start = 0;
+    sequence_size_t target_end = 0;
+};
+
+template <class Callback>
+[[gnu::always_inline]] bool for_each_mandatory_alignment_gap(
+    const AlignRegion& region,
+    std::span<const Anchor> anchors,
+    const Minimap2Params& params,
+    Callback&& callback)
+{
+    if (region.seed_count <= 1 || region.anchor_start < 0
+        || static_cast<std::size_t>(region.anchor_start)
+            >= anchors.size()) {
+        return true;
+    }
+    const std::int32_t anchor_begin = region.anchor_start;
+    const Anchor& first_anchor = anchors[anchor_begin];
+    const std::int64_t first_span =
+        static_cast<std::int64_t>(first_anchor.query_span);
+    std::int64_t query_start =
+        static_cast<std::int64_t>(first_anchor.query_position) + 1 - first_span;
+    std::int64_t target_start =
+        static_cast<std::int64_t>(first_anchor.ref_position) + 1 - first_span;
+    query_start = std::max<std::int64_t>(0, query_start);
+    target_start = std::max<std::int64_t>(0, target_start);
+
+    for (std::int32_t index = 1; index < region.seed_count; ++index) {
+        const std::size_t anchor_index = static_cast<std::size_t>(
+            anchor_begin + index);
+        if (anchor_index >= anchors.size()) return false;
+        const Anchor& current = anchors[anchor_index];
+        const std::int64_t query_end =
+            static_cast<std::int64_t>(current.query_position) + 1;
+        const std::int64_t target_end =
+            static_cast<std::int64_t>(current.ref_position) + 1;
+        const bool is_last = index == region.seed_count - 1;
+        const std::int64_t query_length = query_end - query_start;
+        const std::int64_t target_length = target_end - target_start;
+        if (!is_last
+            && (query_length < params.min_ksw_len
+                || target_length < params.min_ksw_len)) {
+            continue;
+        }
+        if (query_length <= 0 || target_length <= 0) {
+            query_start = query_end;
+            target_start = target_end;
+            continue;
+        }
+        const MandatoryAlignmentGapWindow window{
+            .query_start = static_cast<sequence_size_t>(query_start),
+            .query_end = static_cast<sequence_size_t>(query_end),
+            .target_start = static_cast<sequence_size_t>(target_start),
+            .target_end = static_cast<sequence_size_t>(target_end),
+        };
+        if (!callback(window)) return false;
+        query_start = query_end;
+        target_start = target_end;
+    }
+    return true;
+}
+
+/**
+ * Compute the exact unit-cost edit distance represented by one packed CIGAR
+ * and its already-clipped sequence windows.  Generic M operations must be
+ * compared against the underlying alphabet ranks because the block aligner
+ * deliberately projects both Eq and X to M at its public CIGAR boundary.
+ */
+template <bool strand_reversed,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+[[nodiscard]] sequence_size_t exact_edit_distance_from_packed_cigar(
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    std::size_t query_start,
+    std::size_t query_end,
+    std::size_t target_start,
+    std::size_t target_end,
+    std::span<const std::uint32_t> cigar)
+{
+    if (query_end < query_start || target_end < target_start) {
+        throw std::invalid_argument("exact edit-distance window is inverted");
+    }
+    const std::size_t query_length = query_end - query_start;
+    const std::size_t target_length = target_end - target_start;
+    std::vector<std::uint8_t> query_ranks(query_length);
+    std::vector<std::uint8_t> target_ranks(target_length);
+    query_seq.template to_encoded_into<strand_reversed, false>(
+        std::span<std::uint8_t>(query_ranks), query_start, query_end);
+    target_seq.template to_encoded_into<false, false>(
+        std::span<std::uint8_t>(target_ranks), target_start, target_end);
+
+    std::size_t query_position = 0;
+    std::size_t target_position = 0;
+    sequence_size_t edits = 0;
+    for (const std::uint32_t packed : cigar) {
+        const std::uint32_t opcode = packed & 0xfU;
+        const std::size_t length = static_cast<std::size_t>(packed >> 4);
+        const bool consumes_query = opcode == CIGAR_MATCH
+            || opcode == CIGAR_EQ || opcode == CIGAR_X
+            || opcode == CIGAR_INS;
+        const bool consumes_target = opcode == CIGAR_MATCH
+            || opcode == CIGAR_EQ || opcode == CIGAR_X
+            || opcode == CIGAR_DEL || opcode == CIGAR_N_SKIP;
+        if ((consumes_query
+                && (query_position > query_length
+                    || length > query_length - query_position))
+            || (consumes_target
+                && (target_position > target_length
+                    || length > target_length - target_position))) {
+            throw std::runtime_error(
+                "alignment CIGAR consumes beyond its exact edit-distance window");
+        }
+
+        switch (opcode) {
+            case CIGAR_MATCH:
+                for (std::size_t offset = 0; offset < length; ++offset) {
+                    edits += query_ranks[query_position + offset]
+                        != target_ranks[target_position + offset];
+                }
+                break;
+            case CIGAR_EQ:
+                break;
+            case CIGAR_X:
+            case CIGAR_INS:
+            case CIGAR_DEL:
+            case CIGAR_N_SKIP:
+                edits += static_cast<sequence_size_t>(length);
+                break;
+            default:
+                throw std::runtime_error(
+                    "alignment CIGAR contains an unsupported exact edit-distance opcode");
+        }
+        if (consumes_query) query_position += length;
+        if (consumes_target) target_position += length;
+    }
+    if (query_position != query_length || target_position != target_length) {
+        throw std::runtime_error(
+            "alignment CIGAR does not cover its exact edit-distance window");
+    }
+    return edits;
+}
+
+/**
+ * Count the implicit seed alignment of a single-seed region.
+ *
+ * Multi-seed regions include the first seed in their first mandatory gap
+ * fill.  A single-seed region has no such fill, so the seed lies between the
+ * independently aligned left and right extensions.  A minimizer hash is not
+ * a proof that the underlying ranks are equal; exact edit-distance callers
+ * must compare this span explicitly.
+ */
+template <bool strand_reversed,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+[[nodiscard]] sequence_size_t exact_edit_distance_for_implicit_seed(
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    std::size_t query_start,
+    std::size_t query_end,
+    std::size_t target_start,
+    std::size_t target_end)
+{
+    if (query_end < query_start || target_end < target_start) {
+        throw std::invalid_argument("implicit seed edit-distance window is inverted");
+    }
+    if (query_end > query_seq.bp_size() || target_end > target_seq.bp_size()) {
+        throw std::out_of_range(
+            "implicit seed edit-distance window exceeds the sequence");
+    }
+
+    const std::size_t query_length = query_end - query_start;
+    const std::size_t target_length = target_end - target_start;
+    const std::size_t common_length = std::min(query_length, target_length);
+    std::vector<std::uint8_t> query_ranks(common_length);
+    std::vector<std::uint8_t> target_ranks(common_length);
+    query_seq.template to_encoded_into<strand_reversed, false>(
+        std::span<std::uint8_t>(query_ranks),
+        query_start,
+        query_start + common_length);
+    target_seq.template to_encoded_into<false, false>(
+        std::span<std::uint8_t>(target_ranks),
+        target_start,
+        target_start + common_length);
+
+    sequence_size_t edits = static_cast<sequence_size_t>(
+        query_length > target_length
+            ? query_length - target_length
+            : target_length - query_length);
+    for (std::size_t offset = 0; offset < common_length; ++offset) {
+        edits += query_ranks[offset] != target_ranks[offset];
+    }
+    return edits;
+}
+
+inline void append_implicit_seed_cigar(
+    std::vector<CigarOp>& cigar,
+    std::size_t query_length,
+    std::size_t target_length)
+{
+    const auto append_op = [&cigar](std::uint32_t opcode, std::size_t length) {
+        if (length == 0) return;
+        if (!cigar.empty() && cigar.back().opcode == opcode) {
+            cigar.back().length += static_cast<std::uint32_t>(length);
+        } else {
+            cigar.push_back(CigarOp{
+                .length = static_cast<std::uint32_t>(length),
+                .opcode = opcode,
+            });
+        }
+    };
+
+    const std::size_t common_length = std::min(query_length, target_length);
+    append_op(CIGAR_MATCH, common_length);
+    if (query_length > common_length) {
+        append_op(CIGAR_INS, query_length - common_length);
+    } else if (target_length > common_length) {
+        append_op(CIGAR_DEL, target_length - common_length);
+    }
+}
+
 /// Derive the complete native-Block phase contract before dispatch from only
 /// immutable region geometry. These values are deliberately recorded outside
 /// the call branches they attest, so deleting or bypassing a phase cannot
@@ -1685,7 +2107,8 @@ struct AlignOnePhase {
     const Minimap2Params&                      params;
     int32_t                                    align_bandwidth;
 
-    [[gnu::always_inline]] static bool apply_gap_fill_result(
+    template <bool strand_reversed>
+    [[gnu::always_inline]] bool apply_gap_fill_result(
             AlignRegion& region,
             const KswAlignResult& fill_result,
             std::int64_t qe,
@@ -1697,9 +2120,23 @@ struct AlignOnePhase {
         if (!fill_result.cigar.empty()) {
             append_cigar(region.cigar, fill_result.cigar);
         }
+        const std::int64_t fill_ref_end = fill_result.zdropped
+            ? rs + (fill_result.max_t + 1) : re;
+        const std::int64_t fill_query_end = fill_result.zdropped
+            ? qs + (fill_result.max_q + 1) : qe;
+        if (params.compute_edit_distance) {
+            region.edit_distance += exact_edit_distance_from_packed_cigar<
+                strand_reversed>(
+                    query_seq, target_seq,
+                    static_cast<std::size_t>(qs),
+                    static_cast<std::size_t>(fill_query_end),
+                    static_cast<std::size_t>(rs),
+                    static_cast<std::size_t>(fill_ref_end),
+                    std::span<const std::uint32_t>(fill_result.cigar));
+        }
         if (fill_result.zdropped) {
-            final_ref_end = rs + (fill_result.max_t + 1);
-            final_query_end = qs + (fill_result.max_q + 1);
+            final_ref_end = fill_ref_end;
+            final_query_end = fill_query_end;
             region.dp_score += fill_result.max;
             return true;
         }
@@ -1771,6 +2208,16 @@ struct AlignOnePhase {
             const int32_t left_query_offset = left_result.reach_end
                 ? seed_query_start - outer_query_start : left_result.max_q + 1;
             final_query_start = seed_query_start - left_query_offset;
+            if (params.compute_edit_distance) {
+                region.edit_distance += exact_edit_distance_from_packed_cigar<
+                    strand_reversed>(
+                        query_seq, target_seq,
+                        static_cast<std::size_t>(final_query_start),
+                        static_cast<std::size_t>(seed_query_start),
+                        static_cast<std::size_t>(final_ref_start),
+                        static_cast<std::size_t>(seed_ref_start),
+                        std::span<const std::uint32_t>(left_result.cigar));
+            }
             prior_phase_zdropped = left_result.zdropped;
         }
 
@@ -1896,7 +2343,7 @@ struct AlignOnePhase {
                                 BlockAlignerPhase::GapExtension,
                                 block_execution_proof);
                     }
-                    if (apply_gap_fill_result(
+                    if (apply_gap_fill_result<strand_reversed>(
                             region, fill_result, qe, re, qs, rs,
                             final_query_end, final_ref_end)) {
                         zdropped_any = true;
@@ -1911,12 +2358,16 @@ struct AlignOnePhase {
                         static_cast<size_t>(rs),
                         static_cast<size_t>(re),
                         scoring_matrix, params,
-                        align_bandwidth, -1, params.zdrop,
+                        params.compute_edit_distance ? -1 : align_bandwidth,
+                        -1,
+                        params.compute_edit_distance
+                            ? -1
+                            : params.zdrop,
                         KswFlags{.approx_max = true},
                         block_execution_proof,
                         scalar_execution_proof,
                         ScalarKsw2Phase::gap);
-                    if (apply_gap_fill_result(
+                    if (apply_gap_fill_result<strand_reversed>(
                             region, fill_result, qe, re, qs, rs,
                             final_query_end, final_ref_end)) {
                         zdropped_any = true;
@@ -1928,6 +2379,21 @@ struct AlignOnePhase {
         } else {
             final_ref_end = seed_ref_end;
             final_query_end = seed_query_end;
+            if (params.do_cigar || params.compute_edit_distance) {
+                append_implicit_seed_cigar(
+                    region.cigar,
+                    static_cast<std::size_t>(seed_query_end - seed_query_start),
+                    static_cast<std::size_t>(seed_ref_end - seed_ref_start));
+            }
+            if (params.compute_edit_distance) {
+                region.edit_distance += exact_edit_distance_for_implicit_seed<
+                    strand_reversed>(
+                        query_seq, target_seq,
+                        static_cast<std::size_t>(seed_query_start),
+                        static_cast<std::size_t>(seed_query_end),
+                        static_cast<std::size_t>(seed_ref_start),
+                        static_cast<std::size_t>(seed_ref_end));
+            }
         }
 
         // === 3. Right extension ===
@@ -1973,6 +2439,16 @@ struct AlignOnePhase {
             const int32_t right_query_offset = right_result.reach_end
                 ? outer_query_end - seed_query_end : right_result.max_q + 1;
             final_query_end = seed_query_end + right_query_offset;
+            if (params.compute_edit_distance) {
+                region.edit_distance += exact_edit_distance_from_packed_cigar<
+                    strand_reversed>(
+                        query_seq, target_seq,
+                        static_cast<std::size_t>(seed_query_end),
+                        static_cast<std::size_t>(final_query_end),
+                        static_cast<std::size_t>(seed_ref_end),
+                        static_cast<std::size_t>(final_ref_end),
+                        std::span<const std::uint32_t>(right_result.cigar));
+            }
         }
 
         // Set final coordinates from alignment extent (align.c:897-899).
@@ -2131,6 +2607,7 @@ void align_regions(
 
         region.cigar.clear();
         region.dp_score = 0;
+        region.edit_distance = 0;
 
         BlockAlignerExecutionProof* region_block_proof = nullptr;
         if constexpr (base_alignment_algorithm
@@ -2714,6 +3191,7 @@ void compute_mapping_quality(
         .is_primary            = (region.parent == region.region_id),
         .has_cigar             = region.has_alignment,
         .cigar                 = std::move(region.cigar),
+        .edit_distance         = region.edit_distance,
     };
 }
 
@@ -3146,6 +3624,8 @@ struct MatchResultCollection {
     BlockAlignerExecutionProof block_aligner_execution_proof{};
     ScalarPipelineExecutionProof scalar_pipeline_execution_proof{};
     Ksw2BatchedExecutionProof ksw2_batched_execution_proof{};
+    SneakySnakePrefilterExecutionProof
+        sneaky_snake_prefilter_execution_proof{};
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
     bool exact_simd_query_execution_proof_present = false;
     bool exact_simd_target_execution_proof_present = false;
@@ -3155,6 +3635,7 @@ struct MatchResultCollection {
     bool block_aligner_execution_proof_present = false;
     bool scalar_pipeline_execution_proof_present = false;
     bool ksw2_batched_execution_proof_present = false;
+    bool sneaky_snake_prefilter_execution_proof_present = false;
     // Operation-local CPU/SIMD wall clocks. These travel with the result so
     // parallel rows never update shared statement statistics. The PostgreSQL
     // dispatch boundary consumes them exactly once into the existing stable
@@ -3223,6 +3704,12 @@ struct MatchResultCollection {
             const Ksw2BatchedExecutionProof& proof) noexcept {
         ksw2_batched_execution_proof.combine(proof);
         ksw2_batched_execution_proof_present = true;
+    }
+
+    void record_sneaky_snake_prefilter_execution_proof(
+            const SneakySnakePrefilterExecutionProof& proof) noexcept {
+        sneaky_snake_prefilter_execution_proof.combine(proof);
+        sneaky_snake_prefilter_execution_proof_present = true;
     }
 
     void record_scalar_query_minimizer_execution_proof(
@@ -3361,6 +3848,10 @@ struct MatchResultCollection {
         if (other.ksw2_batched_execution_proof_present) {
             record_ksw2_batched_execution_proof(
                 other.ksw2_batched_execution_proof);
+        }
+        if (other.sneaky_snake_prefilter_execution_proof_present) {
+            record_sneaky_snake_prefilter_execution_proof(
+                other.sneaky_snake_prefilter_execution_proof);
         }
         partial_vulkan_execution_proof.combine(
             other.partial_vulkan_execution_proof);
