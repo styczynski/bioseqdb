@@ -3094,92 +3094,171 @@ struct Rev3LoadedPgRow {
     IndexChunkAddress address{};
     std::uint32_t chunk_bytes = 0;
     std::uint64_t checksum = 0;
-    bioseq::pg_utils::pg_detoasted_ptr<bytea> blob{};
+    // The schema is frozen to PLAIN and the loader rejects every external or
+    // compressed datum. Payload bytes either borrow the current scan slot or
+    // one admitted batch; neither form needs detoast ownership or pfree.
     std::span<const std::byte> bytes;
     std::optional<ValidatedMinimizerGenerationRowReceipt>
         validated_receipt;
 
-    void release() {
+    void release() noexcept {
         // The receipt seals a callback-scoped span into blob storage. Destroy
-        // that authority before the backing varlena can be released.
+        // that authority before the scan slot may be advanced.
         validated_receipt.reset();
-        bioseq::pg_utils::invoke_pg_as_cpp(
-            [this] { blob.free_if_copy(); });
         bytes = {};
     }
 };
 
-/// Decode all eight non-NULL fields and validate PLAIN storage, byte count and
-/// the address-bound row checksum before any caller observes the payload.
-[[nodiscard]] inline Rev3LoadedPgRow load_rev3_pg_row_or_error(
+/// One deformation of the frozen eight-column heap tuple.  This object is
+/// deliberately trivial: the hot full-generation scan can form it inside one
+/// outer PostgreSQL error boundary without a longjmp crossing a C++ owner.
+struct Rev3DeformedPgRow {
+    HeapTuple tuple = nullptr;
+    std::array<Datum, kRev3IndexAttributeDescriptors.size()> values{};
+    std::array<bool, kRev3IndexAttributeDescriptors.size()> nulls{};
+};
+
+static_assert(std::is_trivially_copyable_v<Rev3DeformedPgRow>);
+static_assert(std::is_trivially_destructible_v<Rev3DeformedPgRow>);
+
+struct Rev3NextDeformedPgRow {
+    Rev3DeformedPgRow row{};
+    bool found = false;
+};
+
+static_assert(std::is_trivially_copyable_v<Rev3NextDeformedPgRow>);
+static_assert(std::is_trivially_destructible_v<Rev3NextDeformedPgRow>);
+
+/// PostgreSQL leaf: deform all fixed attributes once instead of entering one
+/// PG_TRY/sigsetjmp bridge per heap_getattr call.  Call either from an existing
+/// invoke_pg_as_cpp boundary or through deform_rev3_pg_row_or_error().
+[[nodiscard]] inline Rev3DeformedPgRow deform_rev3_pg_row_pg_leaf(
         Relation relation,
         HeapTuple tuple) {
-    TupleDesc tuple_desc = RelationGetDescr(relation);
-    bool is_null = false;
-    const auto read_attribute = [tuple, tuple_desc, &is_null](
-            AttrNumber attribute_number) {
-        return bioseq::pg_utils::invoke_pg_as_cpp(
-            [tuple, tuple_desc, &is_null, attribute_number] {
-                return heap_getattr(
-                    tuple, attribute_number, tuple_desc, &is_null);
-            });
+    Rev3DeformedPgRow deformed{.tuple = tuple};
+    heap_deform_tuple(tuple, RelationGetDescr(relation),
+        deformed.values.data(), deformed.nulls.data());
+    return deformed;
+}
+
+/// Standalone deformation bridge used by metadata, publication validation,
+/// and selective reads. The full-generation route instead combines its fetch
+/// and deformation through next_rev3_pg_row_or_error().
+[[nodiscard]] inline Rev3DeformedPgRow deform_rev3_pg_row_or_error(
+        Relation relation,
+        HeapTuple tuple) {
+    return bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation, tuple] {
+            return deform_rev3_pg_row_pg_leaf(relation, tuple);
+        });
+}
+
+/// Fetch and deform one ordered-scan row under one PostgreSQL boundary. The
+/// returned object is trivial; authentication and arbitrary sinks run only
+/// after PG_END_TRY has restored PostgreSQL's exception stack.
+[[nodiscard]] inline Rev3NextDeformedPgRow next_rev3_pg_row_or_error(
+        Relation relation,
+        SysScanDesc scan) {
+    return bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation, scan] {
+            HeapTuple tuple = systable_getnext_ordered(
+                scan, ForwardScanDirection);
+            if (!HeapTupleIsValid(tuple)) return Rev3NextDeformedPgRow{};
+            return Rev3NextDeformedPgRow{
+                .row = deform_rev3_pg_row_pg_leaf(relation, tuple),
+                .found = true,
+            };
+        });
+}
+
+/// Trivial borrowed projection used while a PostgreSQL sigsetjmp frame is
+/// active.  It performs no allocation, owns no receipt, and reports semantic
+/// failure as a static message for the C++ caller to raise after leaving the
+/// PostgreSQL boundary.
+struct Rev3ProjectedPgRow {
+    std::uint64_t query_key = 0;
+    IndexChunkAddress address{};
+    std::uint32_t chunk_bytes = 0;
+    std::uint64_t checksum = 0;
+    std::span<const std::byte> bytes{};
+    const char* error = nullptr;
+};
+
+static_assert(std::is_trivially_copyable_v<Rev3ProjectedPgRow>);
+static_assert(std::is_trivially_destructible_v<Rev3ProjectedPgRow>);
+
+/// Decode the frozen eight-column projection and prove inline PLAIN/length
+/// shape without constructing any C++ authority object.  Address-bound CRC
+/// validation remains outside PostgreSQL error frames.
+[[nodiscard]] inline Rev3ProjectedPgRow project_rev3_deformed_pg_row(
+        const Rev3DeformedPgRow& deformed) noexcept {
+    const auto read_attribute = [&deformed](AttrNumber attribute_number) {
+        return deformed.values[static_cast<std::size_t>(
+            attribute_number - 1)];
     };
-    const auto fail = [](std::string_view message) {
-        rev3_storage_error_as_cpp(message);
+    const auto attribute_is_null = [&deformed](AttrNumber attribute_number) {
+        return deformed.nulls[static_cast<std::size_t>(
+            attribute_number - 1)];
+    };
+    const auto failed = [](const char* message) noexcept {
+        return Rev3ProjectedPgRow{.error = message};
     };
     const Datum query_key_datum = read_attribute(kRev3AttQueryKey);
-    if (is_null) fail("row query key is NULL");
+    if (attribute_is_null(kRev3AttQueryKey)) {
+        return failed("row query key is NULL");
+    }
     const std::int64_t signed_query_key = DatumGetInt64(query_key_datum);
-    if (signed_query_key < 0) fail("row query key is negative");
+    if (signed_query_key < 0) return failed("row query key is negative");
     const Datum generation_datum = read_attribute(kRev3AttGenerationId);
-    if (is_null) fail("row generation ID is NULL");
+    if (attribute_is_null(kRev3AttGenerationId)) {
+        return failed("row generation ID is NULL");
+    }
     const std::int64_t signed_generation_id = DatumGetInt64(generation_datum);
     if (signed_generation_id < 0) {
-        fail("row generation ID is negative");
+        return failed("row generation ID is negative");
     }
     const Datum position_datum = read_attribute(kRev3AttPositionSegment);
-    if (is_null) fail("row position segment is NULL");
+    if (attribute_is_null(kRev3AttPositionSegment)) {
+        return failed("row position segment is NULL");
+    }
     const std::int32_t position_segment = DatumGetInt32(position_datum);
     const Datum sub_key_datum = read_attribute(kRev3AttSubKey);
-    if (is_null) fail("row sub-key is NULL");
+    if (attribute_is_null(kRev3AttSubKey)) {
+        return failed("row sub-key is NULL");
+    }
     const std::int64_t sub_key = DatumGetInt64(sub_key_datum);
     const Datum chunk_no_datum = read_attribute(kRev3AttChunkNo);
-    if (is_null) fail("row chunk number is NULL");
+    if (attribute_is_null(kRev3AttChunkNo)) {
+        return failed("row chunk number is NULL");
+    }
     const std::int32_t signed_chunk_no = DatumGetInt32(chunk_no_datum);
-    if (signed_chunk_no < 0) fail("row chunk number is negative");
+    if (signed_chunk_no < 0) return failed("row chunk number is negative");
     const Datum chunk_bytes_datum = read_attribute(kRev3AttChunkBytes);
-    if (is_null) fail("row byte count is NULL");
+    if (attribute_is_null(kRev3AttChunkBytes)) {
+        return failed("row byte count is NULL");
+    }
     const std::int32_t signed_chunk_bytes = DatumGetInt32(chunk_bytes_datum);
     if (signed_chunk_bytes <= 0) {
-        fail("row byte count is non-positive");
+        return failed("row byte count is non-positive");
     }
     const Datum checksum_datum = read_attribute(kRev3AttChecksum);
-    if (is_null) fail("row checksum is NULL");
+    if (attribute_is_null(kRev3AttChecksum)) {
+        return failed("row checksum is NULL");
+    }
     const std::int64_t signed_checksum = DatumGetInt64(checksum_datum);
     const Datum blob_datum = read_attribute(kRev3AttBlob);
-    if (is_null) fail("row blob is NULL");
+    if (attribute_is_null(kRev3AttBlob)) return failed("row blob is NULL");
     auto* original_blob = reinterpret_cast<varlena*>(
         DatumGetPointer(blob_datum));
+    if (original_blob == nullptr) return failed("row blob pointer is NULL");
     if (VARATT_IS_EXTERNAL(original_blob)
         || VARATT_IS_COMPRESSED(original_blob)) {
-        fail("PLAIN row contains toasted/compressed data");
+        return failed("PLAIN row contains toasted/compressed data");
     }
-    auto detoasted = bioseq::pg_utils::invoke_pg_as_cpp([blob_datum] {
-        return bioseq::pg_utils::detoast_packed_as<bytea>(
-            bioseq::pg_utils::pg_datum::from_raw(blob_datum));
-    });
-    const auto release_detoasted = [&detoasted] {
-        bioseq::pg_utils::invoke_pg_as_cpp(
-            [&detoasted] { detoasted.free_if_copy(); });
-    };
-    if (detoasted.is_copy) {
-        release_detoasted();
-        fail("PLAIN row required detoasting");
-    }
-    const std::size_t payload_bytes = VARSIZE_ANY_EXHDR(detoasted.ptr);
+    auto* inline_blob = reinterpret_cast<bytea*>(original_blob);
+    const std::size_t payload_bytes = VARSIZE_ANY_EXHDR(inline_blob);
     if (payload_bytes != static_cast<std::size_t>(signed_chunk_bytes)) {
-        release_detoasted();
-        fail("row byte count disagrees with BYTEA length");
+        return failed("row byte count disagrees with BYTEA length");
     }
     const IndexChunkAddress address{
         .generation_id = static_cast<std::uint64_t>(signed_generation_id),
@@ -3188,29 +3267,62 @@ struct Rev3LoadedPgRow {
         .chunk_no = static_cast<std::uint32_t>(signed_chunk_no),
     };
     const std::span<const std::byte> bytes{
-        reinterpret_cast<const std::byte*>(VARDATA_ANY(detoasted.ptr)),
+        reinterpret_cast<const std::byte*>(VARDATA_ANY(inline_blob)),
         payload_bytes};
     const std::uint64_t checksum = checksum_from_pg_bigint(signed_checksum);
-    auto validated_receipt =
-        bioseq::indexing::validate_minimizer_generation_row_receipt(
-            MinimizerGenerationRowView{
-                .address = address,
-                .bytes = bytes,
-                .row_checksum = checksum,
-            });
-    if (!validated_receipt) {
-        release_detoasted();
-        fail("row checksum disagrees");
-    }
-    return Rev3LoadedPgRow{
+    return Rev3ProjectedPgRow{
         .query_key = static_cast<std::uint64_t>(signed_query_key),
         .address = address,
         .chunk_bytes = static_cast<std::uint32_t>(signed_chunk_bytes),
         .checksum = checksum,
-        .blob = std::move(detoasted),
         .bytes = bytes,
+    };
+}
+
+/// Validate the address-bound row checksum only after PostgreSQL deformation
+/// has completed.  Callers outside a PG boundary may safely own the receipt
+/// and invoke arbitrary C++ sinks.
+[[nodiscard]] inline Rev3LoadedPgRow load_rev3_projected_pg_row_or_error(
+        const Rev3ProjectedPgRow& projected) {
+    if (projected.error != nullptr) {
+        rev3_storage_error_as_cpp(projected.error);
+    }
+    auto validated_receipt =
+        bioseq::indexing::validate_minimizer_generation_row_receipt(
+            MinimizerGenerationRowView{
+                .address = projected.address,
+                .bytes = projected.bytes,
+                .row_checksum = projected.checksum,
+            });
+    if (!validated_receipt) {
+        rev3_storage_error_as_cpp("row checksum disagrees");
+    }
+    return Rev3LoadedPgRow{
+        .query_key = projected.query_key,
+        .address = projected.address,
+        .chunk_bytes = projected.chunk_bytes,
+        .checksum = projected.checksum,
+        .bytes = projected.bytes,
         .validated_receipt = std::move(*validated_receipt),
     };
+}
+
+/// Decode all eight non-NULL fields and validate PLAIN storage, byte count and
+/// the address-bound row checksum before any caller observes the payload.
+[[nodiscard]] inline Rev3LoadedPgRow load_rev3_deformed_pg_row_or_error(
+        const Rev3DeformedPgRow& deformed) {
+    return load_rev3_projected_pg_row_or_error(
+        project_rev3_deformed_pg_row(deformed));
+}
+
+/// General single-row loader.  Its hot-path PostgreSQL work is one deformation
+/// bridge regardless of the eight-column schema width.
+[[nodiscard]] inline Rev3LoadedPgRow load_rev3_pg_row_or_error(
+        Relation relation,
+        HeapTuple tuple) {
+    const Rev3DeformedPgRow deformed =
+        deform_rev3_pg_row_or_error(relation, tuple);
+    return load_rev3_deformed_pg_row_or_error(deformed);
 }
 
 /// Relation-owning sink factory target used directly by the existing common
@@ -4945,6 +5057,24 @@ private:
         }
     }
 
+    /// Preserve the original PG/C++ failure while deterministically ending an
+    /// active scan and releasing both relation locks plus snapshot ownership.
+    /// Cleanup runs after invoke_pg_as_cpp restored PostgreSQL's exception
+    /// stack, never from a destructor during C++ unwinding.
+    [[noreturn]] void cleanup_failed_session_and_rethrow_() {
+        std::exception_ptr original_error = std::current_exception();
+        state_ = State::failed;
+        try {
+            close_relations_checked_();
+        } catch (...) {
+            // A cleanup ERROR must not replace the initiating corruption or
+            // sink exception. The failed transaction's ResourceOwner remains
+            // the final backstop for a PG object that could not be closed.
+            abandon_relations_noexcept_();
+        }
+        std::rethrow_exception(original_error);
+    }
+
     struct ProjectedExtentRange {
         index_sub_key_t logical_begin = 0;
         index_sub_key_t logical_end = 0;
@@ -6587,14 +6717,19 @@ public:
             Crc64Ecma182 extent_row_checksum{};
             Crc64Ecma182 payload_row_checksum{};
 
-            for (HeapTuple tuple;
-                 (tuple = bioseq::pg_utils::invoke_pg_as_cpp([&] {
-                      return systable_getnext_ordered(
-                          active_scan_, ForwardScanDirection);
-                  })) != nullptr;) {
+            // One bridge now covers fetch plus all eight deformations. Row
+            // authority and arbitrary sinks execute only after PG_END_TRY, so
+            // neither a receipt nor sink-owned C++ state can be crossed by the
+            // storage layer's siglongjmp boundary.
+            for (;;) {
+                const Rev3NextDeformedPgRow next =
+                    next_rev3_pg_row_or_error(
+                        heap_relation_, active_scan_);
+                if (!next.found) break;
+                HeapTuple tuple = next.row.tuple;
                 record_payload_tid_(tuple);
                 LoadedRow row =
-                    load_rev3_pg_row_or_error(heap_relation_, tuple);
+                    load_rev3_deformed_pg_row_or_error(next.row);
                 stats_.cold.add(
                     stats_.cold.row_crc_bytes, row.bytes.size());
                 stats_.cold.add(
@@ -6778,7 +6913,7 @@ public:
                 }
             }
             bioseq::pg_utils::invoke_pg_as_cpp(
-                [&] { systable_endscan_ordered(active_scan_); });
+                [this] { systable_endscan_ordered(active_scan_); });
             active_scan_ = nullptr;
             if (!payload_complete || extent_chunk != 0
                 || stats_.full_generation.completed_extents
@@ -6825,13 +6960,8 @@ public:
             stats_.payload_bytes_read = local.delivered_bytes;
             add_cold_index_buffer_usage(stats_.cold, payload_buffer_begin);
             state_ = State::full_generation_payload_complete;
-        } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
-            state_ = State::failed;
-            abandon_relations_noexcept_();
-            throw;
         } catch (...) {
-            state_ = State::failed;
-            throw;
+            cleanup_failed_session_and_rethrow_();
         }
         return local;
     }

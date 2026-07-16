@@ -143,6 +143,7 @@ export module bioseq.scheduler.dispatch_processor;
 
 import bioseq.common.mlogging;
 import bioseq.common.hashing;
+import bioseq.common.radix_sort;
 import bioseq.common.sequan_compat;
 import bioseq.pg_utils;
 import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs

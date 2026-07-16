@@ -1013,13 +1013,41 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		}
 	}
 	for (CpuPreparedIndexGroup& group : prepared_target.groups) {
-		std::sort(
-			group.query_hash_union.begin(),
-			group.query_hash_union.end(),
-			[](const MinimapSketchData& lhs,
-			   const MinimapSketchData& rhs) noexcept {
-				return lhs.kmer() < rhs.kmer();
-			});
+		/* The target-wide union has tens of millions of trivially-copyable
+		 * sketches on the production workload.  The existing in-place radix
+		 * implementation avoids comparison-sort's O(Q log Q) key extraction
+		 * without introducing another full-size owner or admission peak. */
+		if (group.query_hash_union.size() > 1u) {
+			std::uint64_t maximum_hash = 0u;
+			for (const MinimapSketchData& minimizer
+					: group.query_hash_union) {
+				maximum_hash = std::max(maximum_hash, minimizer.kmer());
+			}
+			if (maximum_hash
+					<= (std::numeric_limits<std::uint32_t>::max)()) {
+				/* Every currently registered persisted DNA4 profile is at
+				 * most 32 bits. Returning the proven narrower key avoids four
+				 * known-zero radix passes while the fallback below keeps the
+				 * generic 35-bit MinimapSketchData contract intact. */
+				bioseq::sorting::radix_sort(
+					group.query_hash_union.data(),
+					group.query_hash_union.data()
+						+ group.query_hash_union.size(),
+					[](const MinimapSketchData& minimizer) noexcept
+							-> std::uint32_t {
+						return static_cast<std::uint32_t>(minimizer.kmer());
+					});
+			} else {
+				bioseq::sorting::radix_sort(
+					group.query_hash_union.data(),
+					group.query_hash_union.data()
+						+ group.query_hash_union.size(),
+					[](const MinimapSketchData& minimizer) noexcept
+							-> std::uint64_t {
+						return minimizer.kmer();
+					});
+			}
+		}
 		group.query_hash_union.erase(
 			std::unique(
 				group.query_hash_union.begin(),

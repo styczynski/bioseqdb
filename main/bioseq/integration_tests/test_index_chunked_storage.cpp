@@ -197,7 +197,8 @@ TEST_CASE("DOC0371 revision-3 full-generation payload uses one ordered scan",
 }
 
 TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
-          "[indexing][doc0371][rev3][full-generation][corruption]") {
+          "[indexing][doc0371][rev3][full-generation][corruption]"
+          "[pg-storage-recovery]") {
     auto ctx = fresh_context({"doc0371_full_generation_corrupt"});
     exec_sql(ctx,
         "CREATE TABLE doc0371_full_generation_corrupt "
@@ -222,6 +223,8 @@ TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
         "LIMIT 1);",
         built[0].value(), built[2].value()));
     connection_test_context reader;
+    const long long reader_backend_pid = query_scalar_int(
+        reader, "SELECT pg_backend_pid();");
     const auto error = sql_error(reader, fmt::format(
         "SELECT * FROM "
         "bioseq_internal.rev3_test_read_full_generation_fixture("
@@ -231,6 +234,32 @@ TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
     REQUIRE(error.sqlstate == "55000");
     REQUIRE(error.contains("checksum"));
     REQUIRE(query_scalar_int(reader, "SELECT 1;") == 1);
+    REQUIRE(query_scalar_int(reader, "SELECT pg_backend_pid();")
+        == reader_backend_pid);
+
+    // The scan-wide PostgreSQL bridge must unwind the callback-scoped receipt,
+    // scan descriptor, locks and snapshot before propagating corruption. A new
+    // immutable generation in the same source relation must reopen and stream
+    // successfully through the same backend connection.
+    const auto rebuilt = query_one(ctx, fmt::format(
+        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "'doc0371_full_generation_corrupt'::regclass, "
+        "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
+        "4::smallint);", rowno));
+    const auto recovered = query_one(reader, fmt::format(
+        "SELECT * FROM "
+        "bioseq_internal.rev3_test_read_full_generation_fixture("
+        "'doc0371_full_generation_corrupt'::regclass, "
+        "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
+        "4::smallint, 'scalar');", rowno));
+    REQUIRE(recovered.size() == 16);
+    REQUIRE(recovered[0] == rebuilt[0]);
+    REQUIRE(recovered[2] == rebuilt[2]);
+    REQUIRE(recovered[7].value() == "1");
+    REQUIRE(recovered[8].value() == "3");
+    REQUIRE(recovered[9].value() == "1");
+    REQUIRE(query_scalar_int(reader, "SELECT pg_backend_pid();")
+        == reader_backend_pid);
 }
 
 TEST_CASE("DOC0279 missing manifest forces recompute; reserved sentinels are ignored",
