@@ -1832,16 +1832,11 @@ struct batch_join_target_projection_visitor {
 		return false;
 	}
 	const auto decoded = compact_sequence_stdc_type_params::decode(typmod);
-	constexpr std::uint8_t dna4_code = static_cast<std::uint8_t>(
-		pgseq_supported_alphabets::index_of<seq::dna4>());
-	constexpr std::uint8_t dna5_code = static_cast<std::uint8_t>(
-		pgseq_supported_alphabets::index_of<seq::dna5>());
-	const bool alphabet_supported = decoded.alphabet_code == dna4_code
-		|| decoded.alphabet_code == dna5_code;
-	const bool width_supported = decoded.storage_unit_byte_width == 1
-		|| decoded.storage_unit_byte_width == 2
-		|| decoded.storage_unit_byte_width == 4
-		|| decoded.storage_unit_byte_width == 8;
+	const bool alphabet_supported =
+		decoded.alphabet_code < pgseq_supported_alphabets::alphabet_count;
+	const bool width_supported =
+		pgseq_supported_storage_unit_byte_widths::contains_runtime(
+			decoded.storage_unit_byte_width);
 	return alphabet_supported && width_supported
 		&& decoded.encode() == typmod;
 }

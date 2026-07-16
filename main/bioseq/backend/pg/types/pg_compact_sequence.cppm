@@ -22,6 +22,7 @@ module;
 
 #include <cstdint>
 
+#include "headers/pg_build_config.h"
 #include "headers/pg_compat.h"
 
 extern "C" {
@@ -58,11 +59,60 @@ export constexpr int32_t PG_SEQ_TYPMOD_UNCONSTRAINED = -1;
 // ----------------------------------------------------------------------------
 
 export using pgseq_supported_alphabets =
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    supported_alphabets<
+        alphabet_entry<seq::dna4, "dna4">>;
+#else
     supported_alphabets<
         alphabet_entry<seq::dna4, "dna4">,
         alphabet_entry<seq::dna5, "dna5">>;
+#endif
+
+export using pgseq_supported_storage_unit_byte_widths =
+#if BIOSEQ_OPTTIMIZATION_LEVEL <= 1
+    supported_storage_unit_byte_widths<8u>;
+#else
+    all_storage_unit_byte_widths;
+#endif
+
+export using pgseq_unconstrained_input_alphabet =
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    seq::dna4;
+#else
+    seq::dna5;
+#endif
+
 export using pgseq_t =
-    compact_sequence_stdc<pgseq_supported_alphabets>;
+    compact_sequence_stdc<
+        pgseq_supported_alphabets,
+        std::uint32_t,
+        std::int32_t,
+        pgseq_supported_storage_unit_byte_widths>;
+
+/// Normalize a requested PostgreSQL storage width to the active build
+/// profile. Levels 0 and 1 intentionally collapse every valid typmod width to
+/// uint64_t so downstream dispatch has one width specialisation.
+export [[nodiscard]] constexpr std::uint8_t
+pgseq_normalize_storage_unit_byte_width(
+    std::uint8_t requested_byte_width) noexcept
+{
+#if BIOSEQ_OPTTIMIZATION_LEVEL <= 1
+    (void)requested_byte_width;
+    return 8u;
+#else
+    return requested_byte_width;
+#endif
+}
+
+export [[nodiscard]] constexpr compact_sequence_stdc_type_params
+pgseq_normalize_type_params(
+    compact_sequence_stdc_type_params params) noexcept
+{
+    params.storage_unit_byte_width =
+        pgseq_normalize_storage_unit_byte_width(
+            params.storage_unit_byte_width);
+    return params;
+}
 
 // ============================================================================
 // DRIFT GUARDS — DOC0261 R6 / R6.1.
@@ -80,7 +130,11 @@ export using pgseq_t =
 // DOC0261 R6.1 — the generated CSV must be byte-identical to the
 // historical hand-written errhint.
 static_assert(pgseq_supported_alphabets::valid_alphabet_names_csv()
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+              == std::string_view{"'dna4'"},
+#else
               == std::string_view{"'dna4', 'dna5'"},
+#endif
               "valid_alphabet_names_csv must match today's hand-written hint "
               "byte-for-byte — DOC0261 R6.1");
 
@@ -93,11 +147,13 @@ static_assert(
         std::string_view{"dna4"},
     "integration_tests::Dna4Entry::alphabet_name_sv drifted from the "
     "production pack — DOC0261 R6 source-of-truth promise");
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 static_assert(
     pgseq_supported_alphabets::entry_for<seq::dna5>::alphabet_name_sv ==
         std::string_view{"dna5"},
     "integration_tests::Dna5Entry::alphabet_name_sv drifted from the "
     "production pack — DOC0261 R6 source-of-truth promise");
+#endif
 
 // ----------------------------------------------------------------------------
 // pg_alloc — the postgres-specific allocator lambda. Returns nullptr for
@@ -251,7 +307,8 @@ Datum pg_compact_sequence_typmod_in(PG_FUNCTION_ARGS)
 		         errmsg("bioseq.seq width \"%s\" is not supported", width_str),
 		         errhint("Supported widths: 8, 16, 32, 64")));
 
-	const uint8_t byte_width = static_cast<uint8_t>(width_long / 8);
+	const uint8_t byte_width = pgseq_normalize_storage_unit_byte_width(
+		static_cast<uint8_t>(width_long / 8));
 	const int32_t packed = compact_sequence_stdc_type_params{
 		.alphabet_code           = alphabet_code,
 		.storage_unit_byte_width = byte_width,
@@ -272,7 +329,8 @@ Datum pg_compact_sequence_typmod_out(PG_FUNCTION_ARGS)
 	if (typmod < 0)
 		PG_RETURN_CSTRING(pstrdup(""));
 
-	const auto tp = compact_sequence_stdc_type_params::decode(typmod);
+	const auto tp = pgseq_normalize_type_params(
+		compact_sequence_stdc_type_params::decode(typmod));
 	const std::string_view alphabet_name =
 		pgseq_supported_alphabets::name_of_alphabet_code(tp.alphabet_code);
 	const unsigned width_bits =
@@ -300,13 +358,17 @@ Datum pg_compact_sequence_in(PG_FUNCTION_ARGS)
 	if (typmod < 0) {
 		// Postgres passes typmod = -1 for free-standing literals (the
 		// cast target's typmod is applied later via bioseq.seq_cast).
-		// Default to dna5/uint8 because dna5 is a superset of dna4.
+		// The fast dna4-only profile cannot instantiate dna5. Other
+		// profiles retain dna5 as the unconstrained-literal alphabet.
 		tp = {
-			.alphabet_code = pgseq_supported_alphabets::index_of<seq::dna5>(),
-			.storage_unit_byte_width = 1u,
+			.alphabet_code = pgseq_supported_alphabets::index_of<
+				pgseq_unconstrained_input_alphabet>(),
+			.storage_unit_byte_width =
+				pgseq_normalize_storage_unit_byte_width(1u),
 		};
 	} else {
-		tp = compact_sequence_stdc_type_params::decode(typmod);
+		tp = pgseq_normalize_type_params(
+			compact_sequence_stdc_type_params::decode(typmod));
 	}
 	const std::size_t length = std::strlen(lit);
 
@@ -381,7 +443,8 @@ Datum pg_compact_sequence_cast(PG_FUNCTION_ARGS)
 	if (target_typmod < 0)
 		PG_RETURN_POINTER(src);
 
-	const auto target = compact_sequence_stdc_type_params::decode(target_typmod);
+	const auto target = pgseq_normalize_type_params(
+		compact_sequence_stdc_type_params::decode(target_typmod));
 	if (src->get_type_params() == target)
 		PG_RETURN_POINTER(src);
 
@@ -460,13 +523,21 @@ Datum pg_compact_sequence_recv(PG_FUNCTION_ARGS)
 		                static_cast<unsigned>(alphabet_code),
 		                static_cast<unsigned>(width_code))));
 	const uint8_t byte_width = static_cast<uint8_t>(1u << width_code);
+	if (!pgseq_supported_storage_unit_byte_widths::contains_runtime(byte_width))
+		ereport(ERROR,
+		        (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+		         errmsg("bioseq.seq binary: storage width %u is disabled by "
+		                "BIOSEQ_OPTTIMIZATION_LEVEL=%d",
+		                static_cast<unsigned>(byte_width * 8u),
+		                BIOSEQ_OPTTIMIZATION_LEVEL)));
 
 	const uint16_t padding_letters = static_cast<uint16_t>(pq_getmsgint(buf, 2));
 	const uint32_t bp_size_w       = static_cast<uint32_t>(pq_getmsgint(buf, 4));
 	const uint32_t unit_count_w    = static_cast<uint32_t>(pq_getmsgint(buf, 4));
 
 	if (typmod >= 0) {
-		const auto t = compact_sequence_stdc_type_params::decode(typmod);
+		const auto t = pgseq_normalize_type_params(
+			compact_sequence_stdc_type_params::decode(typmod));
 		if (t.alphabet_code != alphabet_code
 		    || t.storage_unit_byte_width != byte_width)
 			ereport(ERROR,

@@ -120,6 +120,7 @@ module;
 
 #include <hwy/highway.h>
 #include "common.h"
+#include "headers/pg_build_config.h"
 
 #include <algorithm>
 #include <array>
@@ -185,6 +186,7 @@ HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w1(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -226,6 +228,7 @@ namespace hn = hwy::HWY_NAMESPACE;
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
+#endif
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna4_w8(
     const size_t batch_size,
@@ -241,6 +244,7 @@ namespace hn = hwy::HWY_NAMESPACE;
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w1(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -282,7 +286,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
+#endif
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>> process_sequences_dna5_w8(
     const size_t batch_size,
     const uint8_t alphabet_code,
@@ -296,6 +302,7 @@ namespace hn = hwy::HWY_NAMESPACE;
     std::uint64_t broadcast_query_ordinal,
     ::bioseq::pipeline_stats::PipelineExecutionStats& stats,
     BatchProcessor::ScannerPgContext* scanner_pg_ctx);
+#endif
 
 [[nodiscard]] std::map<int32_t, std::vector<MatchResult>>
 dispatch_process_sequences_typed(
@@ -313,16 +320,24 @@ dispatch_process_sequences_typed(
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
     static_assert(
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+        pgseq_supported_alphabets::alphabet_count == 1,
+        "Level 0 BatchProcessor dispatch requires the dna4-only alphabet pack");
+#else
         pgseq_supported_alphabets::alphabet_count == 2,
         "BatchProcessor typed dispatcher must be extended when pgseq_supported_alphabets changes");
+#endif
     static constexpr uint8_t dna4_code =
         static_cast<uint8_t>(pgseq_supported_alphabets::index_of<seq::dna4>());
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
     static constexpr uint8_t dna5_code =
         static_cast<uint8_t>(pgseq_supported_alphabets::index_of<seq::dna5>());
+#endif
 
     switch (alphabet_code) {
         case dna4_code:
             switch (storage_unit_byte_width) {
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
                 case 1: return process_sequences_dna4_w1(
         batch_size,
         alphabet_code,
@@ -362,6 +377,7 @@ dispatch_process_sequences_typed(
         broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
+#endif
                 case 8: return process_sequences_dna4_w8(
         batch_size,
         alphabet_code,
@@ -377,8 +393,10 @@ dispatch_process_sequences_typed(
         scanner_pg_ctx);
             }
             break;
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
         case dna5_code:
             switch (storage_unit_byte_width) {
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
                 case 1: return process_sequences_dna5_w1(
         batch_size,
         alphabet_code,
@@ -418,6 +436,7 @@ dispatch_process_sequences_typed(
         broadcast_query_ordinal,
         stats,
         scanner_pg_ctx);
+#endif
                 case 8: return process_sequences_dna5_w8(
         batch_size,
         alphabet_code,
@@ -433,6 +452,7 @@ dispatch_process_sequences_typed(
         scanner_pg_ctx);
             }
             break;
+#endif
     }
     ASSERT(false, fmt::format(
         "BatchProcessor::process_sequences invalid typmod alphabet={} width={}",
@@ -687,31 +707,45 @@ void dispatch_append_cpu_prepared_query_sketch(
 		std::vector<MinimapSketchData>& destination,
 		bioseq::parallelism::MemoryPermit& destination_permit,
 		std::uint64_t& retained_destination_bytes) {
-	static_assert(pgseq_supported_alphabets::alphabet_count == 2);
+	static_assert(
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+		pgseq_supported_alphabets::alphabet_count == 1
+#else
+		pgseq_supported_alphabets::alphabet_count == 2
+#endif
+	);
 	constexpr std::uint8_t dna4_code = static_cast<std::uint8_t>(
 		pgseq_supported_alphabets::index_of<seq::dna4>());
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 	constexpr std::uint8_t dna5_code = static_cast<std::uint8_t>(
 		pgseq_supported_alphabets::index_of<seq::dna5>());
+#endif
 #define BIOSEQ_APPEND_PREPARED(ALPHABET, WIDTH) \
 	append_cpu_prepared_query_sketch<ALPHABET, WIDTH>( \
 		header, kmer_size, window_size, sketch_backend, destination, \
 		destination_permit, retained_destination_bytes)
 	if (alphabet_code == dna4_code) {
 		switch (storage_unit_byte_width) {
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
 			case 1: return BIOSEQ_APPEND_PREPARED(seq::dna4, 1);
 			case 2: return BIOSEQ_APPEND_PREPARED(seq::dna4, 2);
 			case 4: return BIOSEQ_APPEND_PREPARED(seq::dna4, 4);
+#endif
 			case 8: return BIOSEQ_APPEND_PREPARED(seq::dna4, 8);
 			default: break;
 		}
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 	} else if (alphabet_code == dna5_code) {
 		switch (storage_unit_byte_width) {
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
 			case 1: return BIOSEQ_APPEND_PREPARED(seq::dna5, 1);
 			case 2: return BIOSEQ_APPEND_PREPARED(seq::dna5, 2);
 			case 4: return BIOSEQ_APPEND_PREPARED(seq::dna5, 4);
+#endif
 			case 8: return BIOSEQ_APPEND_PREPARED(seq::dna5, 8);
 			default: break;
 		}
+#endif
 	}
 #undef BIOSEQ_APPEND_PREPARED
 	bioseq::pg_utils::invoke_pg_as_cpp([] {

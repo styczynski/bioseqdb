@@ -6,6 +6,33 @@ set(VCPKG_CMAKE_CONFIGURE_OPTIONS ${VCPKG_CMAKE_CONFIGURE_OPTIONS} -DSQLGEN_POST
 set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 
+set(BIOSEQ_PG_BUILD_CONFIG_HEADER
+  "${CMAKE_CURRENT_LIST_DIR}/include2/headers/pg_build_config.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${BIOSEQ_PG_BUILD_CONFIG_HEADER}")
+file(STRINGS "${BIOSEQ_PG_BUILD_CONFIG_HEADER}"
+  _bioseq_opttimization_level_line
+  REGEX "^#define BIOSEQ_OPTTIMIZATION_LEVEL [0-5]$")
+list(LENGTH _bioseq_opttimization_level_line
+  _bioseq_opttimization_level_line_count)
+if(NOT _bioseq_opttimization_level_line_count EQUAL 1)
+  message(FATAL_ERROR
+    "${BIOSEQ_PG_BUILD_CONFIG_HEADER} must contain exactly one literal "
+    "'#define BIOSEQ_OPTTIMIZATION_LEVEL N' with N in 0..5")
+endif()
+string(REGEX REPLACE
+  "^#define BIOSEQ_OPTTIMIZATION_LEVEL ([0-5])$" "\\1"
+  BIOSEQ_OPTTIMIZATION_LEVEL
+  "${_bioseq_opttimization_level_line}")
+if(NOT BIOSEQ_OPTTIMIZATION_LEVEL MATCHES "^[0-5]$")
+  message(FATAL_ERROR
+    "BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range 0..5; got "
+    "'${BIOSEQ_OPTTIMIZATION_LEVEL}'")
+endif()
+message(STATUS
+  "bioseq: BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL} "
+  "(from pg_build_config.h)")
+
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
 set(BIOSEQ_GPU_ARCHIVE_BUILDER_SRC
@@ -593,6 +620,29 @@ set(BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_segmented.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_impl_dna5_w8_inmemory_chunked_segmented.cpp)
+
+# The typed dispatch implementation is split into one translation unit per
+# alphabet/storage-width/scan-shape combination. Levels 0 and 1 must prune
+# those files from the target itself; leaving them in SRC_FILES would still
+# pay the module-import and template parsing cost even if their bodies were
+# preprocessor-disabled.
+set(BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
+  ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES})
+if(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "0")
+  list(FILTER BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
+    INCLUDE REGEX "_dna4_w8(_|\\.cpp$)")
+elseif(BIOSEQ_OPTTIMIZATION_LEVEL STREQUAL "1")
+  list(FILTER BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
+    INCLUDE REGEX "_dna[45]_w8(_|\\.cpp$)")
+endif()
+list(REMOVE_ITEM SRC_FILES ${BIOSEQ_DISPATCH_PROCESSOR_TYPED_SOURCES})
+list(APPEND SRC_FILES ${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES})
+list(LENGTH BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCES
+  BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT)
+message(STATUS
+  "bioseq: enabled ${BIOSEQ_DISPATCH_PROCESSOR_ENABLED_TYPED_SOURCE_COUNT} "
+  "typed dispatch processor translation units")
+
 if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
   if(NOT BIOSEQ_GCC_TEMPLATE_FORCE_INLINE)
     target_compile_definitions(bioseq_modules_nopg PRIVATE

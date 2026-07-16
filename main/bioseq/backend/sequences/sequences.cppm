@@ -506,24 +506,89 @@ concept is_in_supported_alphabets_v =
     && ::bioseq::common::templating::contains_type_v<
            A, typename Pack::alphabets_tuple>;
 
-/// Pick the matching templated lambda body for a runtime storage_unit_byte_width
-/// in {1, 2, 4, 8}. The four cases pin a `size_t` NTTP to the templated
-/// lambda; callers recover the storage_unit type via
-/// `typename boost::uint_t<BW * 8>::least`.
+/// Compile-time list of storage-unit byte widths supported by one
+/// `compact_sequence_stdc` instantiation. PostgreSQL build profiles use this
+/// policy to remove disallowed width specialisations from the type itself,
+/// while standalone/default users retain the full {1,2,4,8} list.
+template<std::size_t... byte_widths>
+requires (sizeof...(byte_widths) > 0)
+struct supported_storage_unit_byte_widths {
+    static constexpr bool is_valid_supported_storage_unit_byte_widths = true;
+    static constexpr std::size_t width_count = sizeof...(byte_widths);
+
+    static_assert(
+        ((byte_widths == 1u || byte_widths == 2u
+          || byte_widths == 4u || byte_widths == 8u) && ...),
+        "supported storage-unit byte widths must be drawn from {1,2,4,8}");
+    static_assert(
+        ::bioseq::common::templating::unique_types_in_tuple_v<
+            std::tuple<std::integral_constant<std::size_t, byte_widths>...>>,
+        "supported storage-unit byte widths must be unique");
+
+    template<std::size_t byte_width>
+    static constexpr bool contains =
+        ((byte_width == byte_widths) || ...);
+
+    [[nodiscard]] static constexpr bool contains_runtime(
+        std::uint8_t byte_width) noexcept
+    {
+        return ((byte_width == byte_widths) || ...);
+    }
+
+private:
+    template<std::size_t first_width, std::size_t... remaining_widths,
+             class HandlerFn>
+    [[gnu::always_inline]]
+    static constexpr void dispatch_impl(
+        std::uint8_t byte_width, HandlerFn& handler)
+    {
+        if (byte_width == first_width) {
+            handler.template operator()<first_width>();
+            return;
+        }
+        if constexpr (sizeof...(remaining_widths) > 0) {
+            dispatch_impl<remaining_widths...>(byte_width, handler);
+        } else {
+            ASSERT(false,
+                   fmt::format(
+                       "storage-unit byte width {} is not enabled by this "
+                       "compact-sequence type",
+                       static_cast<unsigned>(byte_width)));
+        }
+    }
+
+public:
+    /// Pin a supported runtime width as a `size_t` NTTP and invoke `handler`.
+    /// Only widths in this policy are instantiated.
+    template<class HandlerFn>
+    [[gnu::always_inline]]
+    static constexpr void dispatch(
+        std::uint8_t byte_width, HandlerFn&& handler)
+    {
+        dispatch_impl<byte_widths...>(byte_width, handler);
+    }
+};
+
+template<class T>
+concept is_supported_storage_unit_byte_widths_v = requires {
+    requires T::is_valid_supported_storage_unit_byte_widths == true;
+    { T::width_count } -> std::convertible_to<std::size_t>;
+    { T::contains_runtime(std::uint8_t{}) } -> std::same_as<bool>;
+};
+
+using all_storage_unit_byte_widths =
+    supported_storage_unit_byte_widths<1u, 2u, 4u, 8u>;
+
+/// Default standalone dispatch across all compact-sequence storage widths.
+/// PostgreSQL-bound code dispatches through its `compact_sequence_stdc`
+/// width policy instead.
 template<class HandlerFn>
 [[gnu::always_inline]]
 inline constexpr void dispatch_storage_unit_byte_width(
     std::uint8_t byte_width, HandlerFn&& handler)
 {
-    switch (byte_width) {
-        case 1: handler.template operator()<size_t{1}>(); return;
-        case 2: handler.template operator()<size_t{2}>(); return;
-        case 4: handler.template operator()<size_t{4}>(); return;
-        case 8: handler.template operator()<size_t{8}>(); return;
-    }
-    ASSERT(false,
-           fmt::format("dispatch_storage_unit_byte_width: invalid width {}",
-                       static_cast<unsigned>(byte_width)));
+    all_storage_unit_byte_widths::dispatch(
+        byte_width, std::forward<HandlerFn>(handler));
 }
 
 /// Constexpr round-up of `bytes` to the next multiple of sizeof(uint64_t).
@@ -1945,10 +2010,14 @@ concept is_compact_sequence_stdc =
     requires {
         requires S::is_valid_compact_sequence_stdc == true;
         typename S::supported_alphabets_type;
+        typename S::supported_storage_unit_byte_widths_type;
         typename S::bp_size_t;
         typename S::varlena_header_t;
         typename S::alphabet_code_t;
-    } && is_supported_alphabets_v<typename S::supported_alphabets_type>;
+    }
+    && is_supported_alphabets_v<typename S::supported_alphabets_type>
+    && is_supported_storage_unit_byte_widths_v<
+        typename S::supported_storage_unit_byte_widths_type>;
 
 // `is_compact_sequence_stdc_instance` is defined earlier in this module
 // (near the primary `compact_sequence_range` template) so it can
@@ -1965,8 +2034,8 @@ template<
 requires (
     is_compact_sequence_stdc<S>
     && is_in_supported_alphabets_v<typename S::supported_alphabets_type, alphabet_t>
-    && (storage_unit_byte_width == 1 || storage_unit_byte_width == 2
-        || storage_unit_byte_width == 4 || storage_unit_byte_width == 8)
+    && S::supported_storage_unit_byte_widths_type::template contains<
+        storage_unit_byte_width>
 )
 struct compact_sequence_stdc_instance;
 
@@ -1979,12 +2048,20 @@ struct compact_sequence_stdc_instance;
 template<
     class supported_alphabets_t,
     class p_bp_size_t = std::uint32_t,
-    class p_varlena_header_t = std::int32_t
+    class p_varlena_header_t = std::int32_t,
+    class supported_storage_unit_byte_widths_t =
+        all_storage_unit_byte_widths
 >
-requires (is_supported_alphabets_v<supported_alphabets_t>)
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
 struct compact_sequence_stdc {
 public:
     using supported_alphabets_type = supported_alphabets_t;
+    using supported_storage_unit_byte_widths_type =
+        supported_storage_unit_byte_widths_t;
     using bp_size_t                = p_bp_size_t;
     using varlena_header_t         = p_varlena_header_t;
     using alphabet_code_t          = typename supported_alphabets_t::alphabet_code_t;
@@ -2048,7 +2125,7 @@ public:
     {
         supported_alphabets_t::dispatch_alphabet_by_code(alpha_code,
             [&]<class A>() {
-                dispatch_storage_unit_byte_width(byte_width,
+                supported_storage_unit_byte_widths_t::dispatch(byte_width,
                     [&]<size_t BW>() {
                         handler.template operator()<
                             compact_sequence_stdc_instance<
@@ -2182,8 +2259,8 @@ template<
 requires (
     is_compact_sequence_stdc<S>
     && is_in_supported_alphabets_v<typename S::supported_alphabets_type, alphabet_t>
-    && (storage_unit_byte_width == 1 || storage_unit_byte_width == 2
-        || storage_unit_byte_width == 4 || storage_unit_byte_width == 8)
+    && S::supported_storage_unit_byte_widths_type::template contains<
+        storage_unit_byte_width>
 )
 struct compact_sequence_stdc_instance {
     using compact_sequence_stdc_type = S;
@@ -2355,11 +2432,25 @@ static_assert(is_compact_sequence_stdc_instance<_check_instance_t>);
 // definitions via `import bioseq_sequences.simd;`.
 // ---------------------------------------------------------------------
 
-template<class supported_alphabets_t, class p_bp_size_t, class p_varlena_header_t>
-requires (is_supported_alphabets_v<supported_alphabets_t>)
+template<
+    class supported_alphabets_t,
+    class p_bp_size_t,
+    class p_varlena_header_t,
+    class supported_storage_unit_byte_widths_t
+>
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
 template<class HandlerFn>
 [[gnu::always_inline]]
-inline void compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::convert_to(HandlerFn&& handler) const
+inline void compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>::convert_to(
+        HandlerFn&& handler) const
 {
     dispatch_instance(alphabet_code, storage_unit_byte_width,
         [&]<class S>() {
@@ -2368,11 +2459,24 @@ inline void compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_
         });
 }
 
-template<class supported_alphabets_t, class p_bp_size_t, class p_varlena_header_t>
-requires (is_supported_alphabets_v<supported_alphabets_t>)
+template<
+    class supported_alphabets_t,
+    class p_bp_size_t,
+    class p_varlena_header_t,
+    class supported_storage_unit_byte_widths_t
+>
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
 template<class SendParam, class SendFn>
-inline void compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::send_to(
-    SendParam& send_param, SendFn&& send_fn) const
+inline void compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>::send_to(
+        SendParam& send_param, SendFn&& send_fn) const
 {
     dispatch_instance(alphabet_code, storage_unit_byte_width,
         [&]<class S>() {
@@ -2392,9 +2496,22 @@ inline void compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_
         });
 }
 
-template<class supported_alphabets_t, class p_bp_size_t, class p_varlena_header_t>
-requires (is_supported_alphabets_v<supported_alphabets_t>)
-inline std::size_t compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::unit_count() const noexcept
+template<
+    class supported_alphabets_t,
+    class p_bp_size_t,
+    class p_varlena_header_t,
+    class supported_storage_unit_byte_widths_t
+>
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
+inline std::size_t compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>::unit_count() const noexcept
 {
     std::size_t result = 0;
     dispatch_instance(alphabet_code, storage_unit_byte_width,
@@ -2407,23 +2524,44 @@ inline std::size_t compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_v
     return result;
 }
 
-template<class supported_alphabets_t, class p_bp_size_t, class p_varlena_header_t>
-requires (is_supported_alphabets_v<supported_alphabets_t>)
+template<
+    class supported_alphabets_t,
+    class p_bp_size_t,
+    class p_varlena_header_t,
+    class supported_storage_unit_byte_widths_t
+>
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
 template<sequence_alphabet alphabet_t, class Alloc>
 requires (
     is_in_supported_alphabets_v<supported_alphabets_t, alphabet_t>
-    && stdc_allocator<Alloc, compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>>
+    && stdc_allocator<Alloc, compact_sequence_stdc<
+        supported_alphabets_t,
+        p_bp_size_t,
+        p_varlena_header_t,
+        supported_storage_unit_byte_widths_t>>
 )
-inline compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>*
-compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::reserve(
+inline compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>*
+compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>::reserve(
     std::uint8_t target_storage_byte_width,
     std::uint32_t unit_count_value,
     Alloc&& alloc)
 {
     DEBUG_ASSERT(
-        target_storage_byte_width == 1 || target_storage_byte_width == 2
-        || target_storage_byte_width == 4 || target_storage_byte_width == 8,
-        fmt::format("reserve: storage_unit_byte_width {} not in {{1,2,4,8}}",
+        supported_storage_unit_byte_widths_t::contains_runtime(
+            target_storage_byte_width),
+        fmt::format("reserve: storage_unit_byte_width {} is not enabled",
                     static_cast<unsigned>(target_storage_byte_width)));
 
     const std::size_t payload_bytes_value =
@@ -2442,8 +2580,17 @@ compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::r
     return hdr;
 }
 
-template<class supported_alphabets_t, class p_bp_size_t, class p_varlena_header_t>
-requires (is_supported_alphabets_v<supported_alphabets_t>)
+template<
+    class supported_alphabets_t,
+    class p_bp_size_t,
+    class p_varlena_header_t,
+    class supported_storage_unit_byte_widths_t
+>
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
 template<
     sequence_alphabet alphabet_t,
     class RecvParam, class RecvFn,
@@ -2451,10 +2598,22 @@ template<
 >
 requires (
     is_in_supported_alphabets_v<supported_alphabets_t, alphabet_t>
-    && stdc_allocator<Alloc, compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>>
+    && stdc_allocator<Alloc, compact_sequence_stdc<
+        supported_alphabets_t,
+        p_bp_size_t,
+        p_varlena_header_t,
+        supported_storage_unit_byte_widths_t>>
 )
-inline compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>*
-compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::convert_from(
+inline compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>*
+compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>::convert_from(
     std::uint8_t target_storage_byte_width,
     std::uint16_t in_padding_letters,
     p_bp_size_t in_bp_size,
@@ -2464,13 +2623,15 @@ compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::c
     Alloc&& alloc)
 {
     DEBUG_ASSERT(
-        target_storage_byte_width == 1 || target_storage_byte_width == 2
-        || target_storage_byte_width == 4 || target_storage_byte_width == 8,
-        fmt::format("convert_from(recv): storage_unit_byte_width {} not in {{1,2,4,8}}",
+        supported_storage_unit_byte_widths_t::contains_runtime(
+            target_storage_byte_width),
+        fmt::format(
+            "convert_from(recv): storage_unit_byte_width {} is not enabled",
                     static_cast<unsigned>(target_storage_byte_width)));
 
     compact_sequence_stdc* result = nullptr;
-    dispatch_storage_unit_byte_width(target_storage_byte_width,
+    supported_storage_unit_byte_widths_t::dispatch(
+        target_storage_byte_width,
         [&]<std::size_t BW>() {
             using storage_unit_t = typename boost::uint_t<BW * 8>::least;
             using sca_t = sequence_custom_alphabet<
@@ -2530,25 +2691,48 @@ compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::c
     return result;
 }
 
-template<class supported_alphabets_t, class p_bp_size_t, class p_varlena_header_t>
-requires (is_supported_alphabets_v<supported_alphabets_t>)
+template<
+    class supported_alphabets_t,
+    class p_bp_size_t,
+    class p_varlena_header_t,
+    class supported_storage_unit_byte_widths_t
+>
+requires (
+    is_supported_alphabets_v<supported_alphabets_t>
+    && is_supported_storage_unit_byte_widths_v<
+        supported_storage_unit_byte_widths_t>
+)
 template<class Alloc>
-requires (stdc_allocator<Alloc, compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>>)
-inline compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>*
-compact_sequence_stdc<supported_alphabets_t, p_bp_size_t, p_varlena_header_t>::recast_storage_width(
+requires (stdc_allocator<Alloc, compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>>)
+inline compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>*
+compact_sequence_stdc<
+    supported_alphabets_t,
+    p_bp_size_t,
+    p_varlena_header_t,
+    supported_storage_unit_byte_widths_t>::recast_storage_width(
     std::uint8_t target_byte_width,
     Alloc&& alloc) const
 {
     ASSERT(
-        target_byte_width == 1 || target_byte_width == 2
-        || target_byte_width == 4 || target_byte_width == 8,
-        fmt::format("recast_storage_width: target_byte_width {} not in {{1,2,4,8}}",
+        supported_storage_unit_byte_widths_t::contains_runtime(
+            target_byte_width),
+        fmt::format(
+            "recast_storage_width: target_byte_width {} is not enabled",
                     static_cast<unsigned>(target_byte_width)));
 
     std::uint16_t new_padding = 0;
     std::size_t   payload_bytes_value = 0;
     convert_to([&]<class S>(const compact_sequence_range<S>& /*src*/) {
-        dispatch_storage_unit_byte_width(target_byte_width,
+        supported_storage_unit_byte_widths_t::dispatch(
+            target_byte_width,
             [&]<std::size_t TgtBW>() {
                 constexpr std::size_t tgt_lpu =
                     (TgtBW * 8) / S::letter_bit_width;

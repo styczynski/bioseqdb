@@ -3612,10 +3612,10 @@ TEST_CASE("DOC0256 — value_dispatch_smallest_ge picks the right bucket",
           "[pipe][doc0256][value-dispatch-smallest-ge]")
 {
     // The bucket list is the union of `compute_breakpoints_for<K>()` across
-    // every K in `kmer_size_buckets`. With the default
-    // PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 2, kmer_size_buckets = {15, 7, 27}
+    // every K in `kmer_size_buckets`. With
+    // BIOSEQ_OPTTIMIZATION_LEVEL >= 4, kmer_size_buckets = {15, 7, 27}
     // and the union resolves to L = {7, 15, 17, 27, 33, 49, 63}. With
-    // PIPELINE_TEMPLATE_BRANCHING_LEVEL = 1, kmer_size_buckets = {15} and
+    // BIOSEQ_OPTTIMIZATION_LEVEL <= 3, kmer_size_buckets = {15} and
     // the union collapses to K=15's per-K breakpoints. Gate the table
     // accordingly so the test stays meaningful at both branching levels.
     if constexpr (kmer_size_buckets.size() >= 3u) {
@@ -3828,7 +3828,7 @@ TEST_CASE("DOC0256 — dispatch_chain heterogeneous NTTPs (L, K, BAA)",
         REQUIRE(baa_out == BAA::KSW2);
     }
     // Gated by `kmer_size_buckets.size()`: only run when the K=7 dispatch
-    // branch is actually compiled in. PIPELINE_TEMPLATE_BRANCHING_LEVEL=1
+    // branch is actually compiled in. BIOSEQ_OPTTIMIZATION_LEVEL <= 3
     // collapses kmer_size_buckets to {15u} for faster builds, in which case
     // the dispatch chain has no K=7 leaf — the test would assert against
     // the smallest-ge fallback (which is K=15) and spuriously fail.
@@ -4010,10 +4010,10 @@ TEST_CASE("DOC0256 — non-canonical kmer_size resolves to the right L bucket",
             REQUIRE(k_out == kmer_size_default);
             // round_up_seq_len_log2(1<<10, k) = max(10, k) = k for k in {11, 21}.
             // Then seq_len_log2_step picks the smallest L >= k from the
-            // (union over kmer_size_buckets) breakpoint list. With the
-            // default PIPELINE_TEMPLATE_BRANCHING_LEVEL >= 2 that list is
+            // (union over kmer_size_buckets) breakpoint list. With
+            // BIOSEQ_OPTTIMIZATION_LEVEL >= 4 that list is
             // {7, 15, 17, 27, 33, 49, 63}: k=11 → L=15;  k=21 → L=27.
-            // With PIPELINE_TEMPLATE_BRANCHING_LEVEL == 1, only K=15 is in
+            // With BIOSEQ_OPTTIMIZATION_LEVEL <= 3, only K=15 is in
             // the union so the list collapses to K=15's per-K breakpoints
             // {15, 33, 63}: k=11 → L=15; k=21 → L=33.
             if constexpr (kmer_size_buckets.size() >= 3u) {

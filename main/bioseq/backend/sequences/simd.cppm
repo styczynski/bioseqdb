@@ -1958,13 +1958,15 @@ inline StdcT* stdc_convert_from_cstr(
     Alloc&& alloc)
 {
     DEBUG_ASSERT(
-        target_storage_byte_width == 1 || target_storage_byte_width == 2
-        || target_storage_byte_width == 4 || target_storage_byte_width == 8,
-        fmt::format("stdc_convert_from_cstr: storage_unit_byte_width {} not in {{1,2,4,8}}",
+        StdcT::supported_storage_unit_byte_widths_type::contains_runtime(
+            target_storage_byte_width),
+        fmt::format(
+            "stdc_convert_from_cstr: storage_unit_byte_width {} is not enabled",
                     static_cast<unsigned>(target_storage_byte_width)));
 
     StdcT* result = nullptr;
-    dispatch_storage_unit_byte_width(target_storage_byte_width,
+    StdcT::supported_storage_unit_byte_widths_type::dispatch(
+        target_storage_byte_width,
         [&]<std::size_t BW>() {
             // DOC0268 (this run) — pin to std::uintN_t (NOT
             // boost::uint_t<>::least). On macOS arm64 the boost variant
