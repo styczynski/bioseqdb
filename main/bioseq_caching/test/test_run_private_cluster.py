@@ -47,7 +47,7 @@ class PrivateClusterCleanupTest(unittest.TestCase):
             root = Path(temporary)
             cluster = RUNNER.UniquePrivateCluster(self._inputs(root))
 
-            def fake_command(command, *, env=None, output_path=None):
+            def fake_command(command, *, output_path=None, **_kwargs):
                 if output_path is not None:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_text("captured diagnostic\n", encoding="utf-8")
@@ -59,9 +59,9 @@ class PrivateClusterCleanupTest(unittest.TestCase):
                     )
                 if program == "psql":
                     raise RUNNER.ClusterCommandError("injected bootstrap failure")
-                return mock.Mock(returncode=0, stdout="")
+                return ""
 
-            with mock.patch.object(RUNNER, "_run_checked", side_effect=fake_command):
+            with mock.patch.object(RUNNER._generic, "_run_checked", side_effect=fake_command):
                 with self.assertRaises(RUNNER.ClusterCommandError):
                     cluster.start()
                 cluster.stop()
@@ -77,7 +77,7 @@ class PrivateClusterCleanupTest(unittest.TestCase):
             root = Path(temporary)
             cluster = RUNNER.UniquePrivateCluster(self._inputs(root))
 
-            def fake_command(command, *, env=None, output_path=None):
+            def fake_command(command, *, output_path=None, **_kwargs):
                 if output_path is not None:
                     output_path.parent.mkdir(parents=True, exist_ok=True)
                     output_path.write_text("captured diagnostic\n", encoding="utf-8")
@@ -86,9 +86,9 @@ class PrivateClusterCleanupTest(unittest.TestCase):
                     (cluster.data_dir / "postgresql.conf").write_text(
                         "# generated\n", encoding="utf-8"
                     )
-                return mock.Mock(returncode=0, stdout="")
+                return ""
 
-            with mock.patch.object(RUNNER, "_run_checked", side_effect=fake_command):
+            with mock.patch.object(RUNNER._generic, "_run_checked", side_effect=fake_command):
                 with self.assertRaisesRegex(RuntimeError, "injected runner failure"):
                     with cluster:
                         raise RuntimeError("injected runner failure")

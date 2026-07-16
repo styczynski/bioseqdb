@@ -5,6 +5,11 @@ The runner never installs either extension and never touches the shared
 development server. Every invocation owns a unique data directory, socket,
 port, and database. Runner output and PostgreSQL logs remain under the selected
 output root after data/socket cleanup.
+
+The disposable-cluster lifecycle (unique data/socket/log directories, Unix-socket
+startup, bootstrap, cleanup, signal forwarding) lives in the shared generic runner
+`main/cmake/private_postgres.py`; this module is the cache-specific consumer that
+maps cache inputs onto it and drives the bioseq_cache regression/TAP tools (§6).
 """
 
 from __future__ import annotations
@@ -12,48 +17,38 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
-import datetime as dt
-import getpass
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import signal
-import socket
 import subprocess
 import sys
-import tempfile
 import uuid
-from typing import Iterable, Mapping, Sequence
+from typing import Mapping, Sequence
 
 
-class ClusterCommandError(RuntimeError):
-    """A cluster lifecycle or test command failed."""
+def _load_generic_runner():
+    """Import the shared generic private-cluster runner from main/cmake."""
+    # test -> bioseq_caching -> main; the generic runner lives in main/cmake.
+    runner_path = Path(__file__).resolve().parents[2] / "cmake" / "private_postgres.py"
+    spec = importlib.util.spec_from_file_location(
+        "bioseq_generic_private_postgres", runner_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load generic private-cluster runner: {runner_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _resolved_file(value: str, label: str) -> Path:
-    path = Path(value).expanduser().resolve()
-    if not path.is_file():
-        raise ClusterCommandError(f"{label} is not a file: {path}")
-    return path
+_generic = _load_generic_runner()
 
-
-def _resolved_dir(value: str, label: str) -> Path:
-    path = Path(value).expanduser().resolve()
-    if not path.is_dir():
-        raise ClusterCommandError(f"{label} is not a directory: {path}")
-    return path
-
-
-def _postgresql_conf_literal(value: str) -> str:
-    if "\n" in value or "\r" in value:
-        raise ClusterCommandError("PostgreSQL configuration value contains a newline")
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _available_local_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
+# One shared error type and path validators across the generic lifecycle and this
+# cache consumer, so `run` catches lifecycle failures and callers see one class.
+ClusterCommandError = _generic.ClusterCommandError
+_resolved_file = _generic._resolved_file
+_resolved_dir = _generic._resolved_dir
 
 
 def _run_checked(
@@ -62,6 +57,12 @@ def _run_checked(
     env: Mapping[str, str] | None = None,
     output_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one cache test-driver command (pg_regress/prove/psql), capturing output.
+
+    Distinct from the generic lifecycle's `_run_checked`: the regression and TAP
+    suites run without a wall-clock deadline, so this helper imposes none and
+    returns the completed process for callers that read stdout.
+    """
     completed = subprocess.run(
         list(command),
         env=dict(env) if env is not None else None,
@@ -95,137 +96,51 @@ class ClusterInputs:
     bioseq_bootstrap: Path | None = None
 
 
-class UniquePrivateCluster:
-    """Lifecycle owner for one private PostgreSQL node and test database."""
+class UniquePrivateCluster(_generic.UniquePrivateCluster):
+    """bioseq_cache consumer of the generic disposable-cluster lifecycle.
+
+    The lifecycle (initdb/config/startup/bootstrap/cleanup) is inherited; only the
+    cache-specific input mapping, the runner output directory, and the extension
+    environment handed to the test tools are cache-owned.
+    """
 
     def __init__(self, inputs: ClusterInputs) -> None:
-        self.inputs = inputs
-        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.cache_inputs = inputs
         suffix = uuid.uuid4().hex[:10]
-        self.run_dir = inputs.output_root / f"{inputs.kind}_{stamp}_{os.getpid()}_{suffix}"
-        self.data_dir = self.run_dir / "data"
-        # AF_UNIX socket paths are capped at 107 bytes on Linux. Keep the socket
-        # directory short even when the retained build-tree log path is deep.
-        self.socket_dir = Path(
-            tempfile.mkdtemp(prefix=f"bqc_{os.getpid()}_", dir=tempfile.gettempdir())
+        library_dirs: list[Path] = [inputs.cache_dso.parent]
+        bootstraps: list[Path] = [inputs.cache_bootstrap]
+        bootstrap_labels: list[str] = ["bootstrap_cache"]
+        if inputs.bioseq_dso is not None:
+            library_dirs.append(inputs.bioseq_dso.parent)
+        if inputs.bioseq_bootstrap is not None:
+            bootstraps.append(inputs.bioseq_bootstrap)
+            bootstrap_labels.append("bootstrap_provider")
+        super().__init__(
+            _generic.ClusterInputs(
+                bindir=inputs.bindir,
+                database=f"bioseq_cache_{os.getpid()}_{suffix}",
+                config_template=inputs.config_template,
+                output_root=inputs.output_root,
+                run_label=inputs.kind,
+                bootstraps=tuple(bootstraps),
+                bootstrap_labels=tuple(bootstrap_labels),
+                library_dirs=tuple(library_dirs),
+                preload_libraries=("bioseq_cache",),
+            )
         )
         self.runner_output_dir = self.run_dir / "runner"
-        self.server_log = self.run_dir / "server_startup.log"
-        self.lifecycle_log = self.run_dir / "lifecycle.log"
-        self.port = _available_local_port()
-        self.database = f"bioseq_cache_{os.getpid()}_{suffix}"
-        self.database_user = getpass.getuser()
-        self._started = False
-        self._database_created = False
-
-    def _program(self, name: str) -> Path:
-        program = self.inputs.bindir / name
-        if not program.is_file():
-            raise ClusterCommandError(f"PostgreSQL program not found: {program}")
-        return program
-
-    def _append_lifecycle(self, message: str) -> None:
-        timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
-        with self.lifecycle_log.open("a", encoding="utf-8") as stream:
-            stream.write(f"{timestamp} {message}\n")
-
-    def _write_configuration(self) -> None:
-        base = self.inputs.config_template.read_text(encoding="utf-8")
-        library_dirs = [self.inputs.cache_dso.parent]
-        if self.inputs.bioseq_dso is not None:
-            library_dirs.append(self.inputs.bioseq_dso.parent)
-        unique_dirs = list(dict.fromkeys(str(path) for path in library_dirs))
-        dynamic_path = os.pathsep.join([*unique_dirs, "$libdir"])
-        additions = [
-            "",
-            "# Unique values appended by run_private_cluster.py",
-            f"port = {self.port}",
-            f"unix_socket_directories = {_postgresql_conf_literal(str(self.socket_dir))}",
-            f"dynamic_library_path = {_postgresql_conf_literal(dynamic_path)}",
-            "shared_preload_libraries = 'bioseq_cache'",
-            "",
-        ]
-        with (self.data_dir / "postgresql.conf").open("a", encoding="utf-8") as stream:
-            if base and not base.endswith("\n"):
-                base += "\n"
-            stream.write(base)
-            stream.write("\n".join(additions))
 
     def start(self) -> None:
-        self.run_dir.mkdir(parents=True, exist_ok=False)
-        self.runner_output_dir.mkdir()
-        self._append_lifecycle(f"initializing data directory {self.data_dir}")
-        _run_checked(
-            [
-                str(self._program("initdb")),
-                "--pgdata",
-                str(self.data_dir),
-                "--username",
-                self.database_user,
-                "--auth-local=trust",
-                "--auth-host=reject",
-                "--encoding=UTF8",
-                "--no-locale",
-                "--no-sync",
-            ],
-            output_path=self.run_dir / "initdb.log",
-        )
-        self._write_configuration()
-        self._append_lifecycle(f"starting private node on port {self.port}")
-        _run_checked(
-            [
-                str(self._program("pg_ctl")),
-                "--pgdata",
-                str(self.data_dir),
-                "--log",
-                str(self.server_log),
-                "--wait",
-                "start",
-            ],
-            output_path=self.run_dir / "pg_ctl_start.log",
-        )
-        self._started = True
-        _run_checked(
-            [
-                str(self._program("createdb")),
-                "--host",
-                str(self.socket_dir),
-                "--port",
-                str(self.port),
-                "--username",
-                self.database_user,
-                self.database,
-            ],
-            output_path=self.run_dir / "createdb.log",
-        )
-        self._database_created = True
-        self._bootstrap(self.inputs.cache_bootstrap, "cache")
-        if self.inputs.bioseq_bootstrap is not None:
-            self._bootstrap(self.inputs.bioseq_bootstrap, "provider")
-
-    def _bootstrap(self, bootstrap: Path, label: str) -> None:
-        self._append_lifecycle(f"executing {label} bootstrap {bootstrap}")
-        _run_checked(
-            [
-                str(self._program("psql")),
-                "-X",
-                "-v",
-                "ON_ERROR_STOP=1",
-                "--host",
-                str(self.socket_dir),
-                "--port",
-                str(self.port),
-                "--username",
-                self.database_user,
-                "--dbname",
-                self.database,
-                "--file",
-                str(bootstrap),
-            ],
-            output_path=self.run_dir / f"bootstrap_{label}.log",
-        )
+        super().start()
+        self.runner_output_dir.mkdir(parents=True, exist_ok=True)
 
     def environment(self) -> dict[str, str]:
+        """Full inherited environment plus the bioseq_cache extension handles.
+
+        The test tools (pg_regress/prove) expect the ambient environment, unlike
+        the generic §13.1 allowlist used for launched children; this preserves the
+        cache tools' pre-existing contract.
+        """
         env = os.environ.copy()
         env.update(
             {
@@ -233,17 +148,17 @@ class UniquePrivateCluster:
                 "PGPORT": str(self.port),
                 "PGUSER": self.database_user,
                 "PGDATABASE": self.database,
-                "BIOSEQ_CACHE_DSO": str(self.inputs.cache_dso),
-                "BIOSEQ_CACHE_LIBDIR": str(self.inputs.cache_dso.parent),
-                "BIOSEQ_CACHE_BOOTSTRAP_SQL": str(self.inputs.cache_bootstrap),
+                "BIOSEQ_CACHE_DSO": str(self.cache_inputs.cache_dso),
+                "BIOSEQ_CACHE_LIBDIR": str(self.cache_inputs.cache_dso.parent),
+                "BIOSEQ_CACHE_BOOTSTRAP_SQL": str(self.cache_inputs.cache_bootstrap),
                 "BIOSEQ_CACHE_PRIVATE_RUN_DIR": str(self.run_dir),
             }
         )
-        if self.inputs.bioseq_dso is not None:
-            env["BIOSEQ_DSO"] = str(self.inputs.bioseq_dso)
-            env["BIOSEQ_LIBDIR"] = str(self.inputs.bioseq_dso.parent)
-        if self.inputs.bioseq_bootstrap is not None:
-            env["BIOSEQ_BOOTSTRAP_SQL"] = str(self.inputs.bioseq_bootstrap)
+        if self.cache_inputs.bioseq_dso is not None:
+            env["BIOSEQ_DSO"] = str(self.cache_inputs.bioseq_dso)
+            env["BIOSEQ_LIBDIR"] = str(self.cache_inputs.bioseq_dso.parent)
+        if self.cache_inputs.bioseq_bootstrap is not None:
+            env["BIOSEQ_BOOTSTRAP_SQL"] = str(self.cache_inputs.bioseq_bootstrap)
         return env
 
     def psql(self, sql: str, *, output_name: str) -> str:
@@ -267,73 +182,6 @@ class UniquePrivateCluster:
             output_path=self.run_dir / output_name,
         )
         return completed.stdout
-
-    def _copy_collector_logs(self) -> None:
-        source = self.data_dir / "pg_log"
-        destination = self.run_dir / "postgresql_logs"
-        if source.is_dir():
-            destination.mkdir(exist_ok=True)
-            for log_file in source.iterdir():
-                if log_file.is_file():
-                    shutil.copy2(log_file, destination / log_file.name)
-
-    def stop(self) -> None:
-        if self._started and self._database_created:
-            with contextlib.suppress(Exception):
-                _run_checked(
-                    [
-                        str(self._program("dropdb")),
-                        "--if-exists",
-                        "--host",
-                        str(self.socket_dir),
-                        "--port",
-                        str(self.port),
-                        "--username",
-                        self.database_user,
-                        self.database,
-                    ],
-                    output_path=self.run_dir / "dropdb.log",
-                )
-        if self._started:
-            try:
-                _run_checked(
-                    [
-                        str(self._program("pg_ctl")),
-                        "--pgdata",
-                        str(self.data_dir),
-                        "--wait",
-                        "--mode=fast",
-                        "stop",
-                    ],
-                    output_path=self.run_dir / "pg_ctl_stop.log",
-                )
-            except Exception:
-                with contextlib.suppress(Exception):
-                    _run_checked(
-                        [
-                            str(self._program("pg_ctl")),
-                            "--pgdata",
-                            str(self.data_dir),
-                            "--wait",
-                            "--mode=immediate",
-                            "stop",
-                        ],
-                        output_path=self.run_dir / "pg_ctl_stop_immediate.log",
-                    )
-        self._copy_collector_logs()
-        shutil.rmtree(self.data_dir, ignore_errors=True)
-        shutil.rmtree(self.socket_dir, ignore_errors=True)
-        if self.run_dir.exists():
-            self._append_lifecycle("private data and socket directories removed")
-        self._started = False
-        self._database_created = False
-
-    def __enter__(self) -> "UniquePrivateCluster":
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self.stop()
 
 
 def _run_regression_tool(
