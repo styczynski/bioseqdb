@@ -388,9 +388,11 @@ add_custom_command(
   COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
           --site "${_staging_dir}"
           --stamp "${_html_validation_stamp}"
+          --asset-lock "${_static_dir}/third_party.lock.yaml"
   DEPENDS "${_staging_manifest}" "${_venv_stamp}"
           "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
-  COMMENT "website: independent html5lib validation of staging"
+          "${_static_dir}/third_party.lock.yaml"
+  COMMENT "website: independent html5lib + §20.7 site-relationship validation of staging"
   VERBATIM)
 
 # --- optional pinned-browser acceptance at two base paths (step 10) -----------
@@ -416,9 +418,11 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
     COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
             --site "${_fixture_root_slash}"
             --stamp "${_output_root}/fixture-root-validation.stamp"
+            --asset-lock "${_static_dir}/third_party.lock.yaml"
     COMMAND "${_venv_python}" "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
             --site "${_fixture_root_bioseqdb}"
             --stamp "${_output_root}/fixture-bioseqdb-validation.stamp"
+            --asset-lock "${_static_dir}/third_party.lock.yaml"
     COMMAND "${CMAKE_COMMAND}"
             -DPYTHON=${_venv_python}
             -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
