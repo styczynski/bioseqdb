@@ -2403,6 +2403,7 @@ void decorate_code_entity_ranges(
     site.copyright_year = config.copyright_year;
     site.status_label = config.status_label;
     site.version = version;
+    site.assets_base_url = url(bundle_prefix);
     site.css_url = url(bundle_prefix + "css/site.css");
     site.js_url = url(bundle_prefix + "js/main.js");
     site.favicon_url = url(bundle_prefix + "favicon.svg");

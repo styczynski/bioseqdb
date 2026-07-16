@@ -387,6 +387,115 @@ def _exercise_doc_frame(page, *, expect_toc: bool) -> None:
             _check(found, f"on-this-page anchor #{target} has no matching element")
 
 
+def _exercise_capability_tracer(page) -> None:
+    """Architecture capability tracer (§15.2): real <button> options, exactly one
+    selected, selecting one traces its architecture node and clears the rest, and
+    arrow keys move the selection (§15.4 keyboard-operable, buttons-not-divs)."""
+    tracer = page.locator("[data-capability-tracer]")
+    if tracer.count() == 0:
+        return
+    options = tracer.locator(".capability-option")
+    total = options.count()
+    _check(total >= 2, "capability tracer has fewer than two options")
+    _check(options.first.evaluate("el => el.tagName") == "BUTTON",
+           "capability option is not a real <button>")
+    _check(tracer.locator(".capability-option[aria-pressed='true']").count() == 1,
+           "capability tracer must start with exactly one selection")
+    second = options.nth(1)
+    trace = second.get_attribute("data-trace") or ""
+    second.click()
+    _check(second.get_attribute("aria-pressed") == "true",
+           "clicked capability did not become pressed")
+    _check(tracer.locator(".capability-option[aria-pressed='true']").count() == 1,
+           "selecting a capability left more than one pressed")
+    node = tracer.locator(f"[data-arch-node='{trace}']")
+    _check(node.count() == 1 and "is-traced" in (node.get_attribute("class") or ""),
+           f"capability trace '{trace}' did not highlight its architecture node")
+    second.focus()
+    page.keyboard.press("ArrowRight")
+    _check(tracer.locator(".capability-option[aria-pressed='true']").count() == 1,
+           "arrow-key navigation left the tracer without a single selection")
+
+
+def _exercise_connectors(page) -> None:
+    """Callout connectors (§15.2): an aria-hidden SVG overlay that landing.mjs
+    draws from each annotation to the query card; layout must not depend on it."""
+    grid = page.locator("[data-connectors]")
+    if grid.count() == 0:
+        return
+    svg = grid.locator(".connector-layer")
+    _check(svg.count() == 1, "hero query is missing its connector layer")
+    _check(svg.first.get_attribute("aria-hidden") == "true",
+           "connector layer must be aria-hidden")
+
+
+def _exercise_workflow(page) -> None:
+    """Workflow progress (§15.2): a progress fill plus per-step markers."""
+    workflow = page.locator("[data-workflow]")
+    if workflow.count() == 0:
+        return
+    _check(workflow.locator("[data-workflow-progress]").count() == 1,
+           "workflow has no progress fill")
+    _check(workflow.locator("[data-wf-step]").count() >= 1, "workflow has no steps")
+
+
+def _exercise_media_band(page) -> None:
+    """Media band (§15.2): a self-hosted video with controls, muted (no forced
+    audio), no autoplay attribute, and an mp4 source with inline fallback."""
+    video = page.locator("video[data-media-band]")
+    if video.count() == 0:
+        return
+    first = video.first
+    _check(first.get_attribute("controls") is not None, "media band video has no controls")
+    _check(first.get_attribute("autoplay") is None,
+           "media band video must not carry the autoplay attribute")
+    _check(first.get_attribute("muted") is not None,
+           "media band video must be muted so it never forces audio")
+    source = video.locator("source")
+    _check(source.count() >= 1
+           and (source.first.get_attribute("src") or "").endswith(".mp4"),
+           "media band video has no mp4 <source>")
+
+
+def _exercise_reduced_motion(page) -> None:
+    """Reduced-motion branch (§15.3): under prefers-reduced-motion the reveal
+    effects are disabled (content shown immediately, never armed-hidden) and the
+    decorative video does not autoplay. Reloads to re-run the JS under emulation."""
+    if page.locator(".landing-hero").count() == 0:
+        return
+    page.emulate_media(reduced_motion="reduce")
+    page.reload(wait_until="networkidle")
+    reveal = page.locator("[data-reveal]")
+    total = reveal.count()
+    if total > 0:
+        _check(page.locator("[data-reveal].reveal-armed").count() == 0,
+               "reduced motion still armed the reveal animations")
+        _check(page.locator("[data-reveal].is-revealed").count() == total,
+               "reduced motion did not reveal every section immediately")
+    if page.locator("video[data-media-band]").count() > 0:
+        paused = page.evaluate(
+            "() => { const v = document.querySelector('video[data-media-band]');"
+            " return v ? v.paused : true; }")
+        _check(paused, "decorative video autoplayed under reduced motion")
+    page.emulate_media(reduced_motion="no-preference")
+    page.reload(wait_until="networkidle")
+
+
+def _exercise_responsive(page, label: str) -> None:
+    """Responsive layout (§15.3/§20): no horizontal overflow and the key landmarks
+    are present at each required visual width."""
+    for width in (360, 768, 1024, 1440):
+        page.set_viewport_size({"width": width, "height": 900})
+        page.wait_for_timeout(120)
+        overflow = page.evaluate(
+            "() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
+        _check(overflow <= 1, f"{label}: {overflow}px horizontal overflow at width {width}")
+    _check(page.locator("header.site-header").count() == 1, f"{label}: missing header landmark")
+    _check(page.locator("main#main").count() == 1, f"{label}: missing main landmark")
+    _check(page.locator("footer.site-footer").count() == 1, f"{label}: missing footer landmark")
+    page.set_viewport_size({"width": 1280, "height": 900})
+
+
 def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
              verbose: bool) -> None:
     expected_headers = server.extra_headers
@@ -434,6 +543,11 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_version_selector(page)
                 _exercise_search_tokens(page)
                 _exercise_search(page)
+                _exercise_capability_tracer(page)
+                _exercise_connectors(page)
+                _exercise_workflow(page)
+                _exercise_media_band(page)
+                _exercise_reduced_motion(page)
             if label == "tutorial":
                 _exercise_tooltip(page)
                 _exercise_copy(page)
@@ -445,6 +559,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_entity(page)
                 _exercise_jsonld(page)
                 _exercise_doc_frame(page, expect_toc=True)
+            _exercise_responsive(page, label)
 
         if console_errors:
             raise AssertionFail("console/page errors: " + "; ".join(console_errors))

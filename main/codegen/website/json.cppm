@@ -1143,6 +1143,7 @@ namespace {
     site_object["status_label"] = site.status_label
         ? boost::json::value(*site.status_label) : boost::json::value(nullptr);
     site_object["version"] = site.version;
+    site_object["assets_base_url"] = site.assets_base_url;
     site_object["css_url"] = site.css_url;
     site_object["js_url"] = site.js_url;
     site_object["favicon_url"] = site.favicon_url;

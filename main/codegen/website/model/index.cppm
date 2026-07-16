@@ -315,6 +315,7 @@ struct site_view {
     std::uint32_t copyright_year{};
     std::optional<std::string> status_label;
     std::string version;
+    std::string assets_base_url;
     std::string css_url;
     std::string js_url;
     std::string favicon_url;

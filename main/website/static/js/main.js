@@ -8,6 +8,7 @@ import { initTabs } from "./tabs.mjs";
 import { initTooltips } from "./tooltips.mjs";
 import { initSearch } from "./search.mjs";
 import { initNav } from "./nav.mjs";
+import { initLanding } from "./landing.mjs";
 
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -107,5 +108,6 @@ document.addEventListener("DOMContentLoaded", () => {
   initTabs();
   initCodeDecorator();
   initTooltips();
+  initLanding();
   document.documentElement.dataset.reducedMotion = reduceMotion ? "true" : "false";
 });

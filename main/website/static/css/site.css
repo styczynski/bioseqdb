@@ -358,7 +358,7 @@ img, video { max-width: 100%; height: auto; }
 .section-lede { color: var(--text-muted); font-size: 16.5px; margin: 14px 0 0; }
 
 /* Annotated hero query: code + result card beside its callouts. */
-.annotate-grid { display: grid; grid-template-columns: 1fr; gap: 28px; align-items: start; }
+.annotate-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 28px; align-items: start; }
 .callout-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 18px; }
 .callout { border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--surface); padding: 16px 18px; }
 .callout-select { border-color: rgba(70, 184, 222, 0.32); }
@@ -536,3 +536,59 @@ img, video { max-width: 100%; height: auto; }
 .error-page { max-width: 640px; }
 .error-links { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 16px; margin-top: 24px; }
 .error-links a { font-family: var(--font-mono); font-size: 14px; }
+
+/* ---- Landing interactions (§15.2/§15.3), progressively enhanced by landing.mjs.
+   Every hidden/animated initial state is only applied once JS arms it, so no-JS
+   and reduced-motion visitors always see fully rendered content. ---- */
+
+/* Reveal-on-scroll: the armed (hidden) state exists only while JS has armed it
+   and it has not yet been revealed. */
+.reveal-armed:not(.is-revealed) { opacity: 0; transform: translateY(16px); }
+.reveal-armed { transition: opacity 0.5s ease, transform 0.5s ease; }
+.is-revealed { opacity: 1; transform: none; }
+
+/* Callout connectors: an aria-hidden overlay drawn by landing.mjs; layout never
+   depends on it. */
+.annotate-grid { position: relative; }
+.annotate-grid > .annotate-code, .annotate-grid > .callout-list { position: relative; z-index: 1; min-width: 0; }
+.connector-layer { position: absolute; inset: 0; width: 100%; max-width: 100%; z-index: 0; pointer-events: none; overflow: hidden; }
+.connector-path { fill: none; stroke: var(--accent-cyan); stroke-width: 1.5; opacity: 0.45; }
+.connector-path-animated { stroke-dasharray: 6 6; animation: connector-dash 1.2s linear infinite; }
+@keyframes connector-dash { to { stroke-dashoffset: -12; } }
+
+/* Workflow progress: a decorative bar plus a per-step active highlight. */
+.workflow { position: relative; }
+.workflow-progress { height: 3px; border-radius: 3px; background: var(--surface-border); overflow: hidden; margin-bottom: 18px; }
+.workflow-progress-fill { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent-cyan), var(--accent-orange)); transition: width 0.4s ease; }
+.workflow-card.is-active { background: rgba(242, 101, 34, 0.06); }
+.workflow-card.is-active .workflow-num { color: var(--accent-orange); }
+
+/* Architecture capability tracer. */
+.capability-tracer { display: grid; grid-template-columns: 1fr; gap: 24px; align-items: start; }
+.capability-diagram { border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--surface); padding: 20px; }
+.capability-diagram-title { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.14em; font-size: 11px; color: var(--eyebrow); margin: 0 0 14px; }
+.arch-flow { display: flex; flex-wrap: wrap; gap: 10px; }
+.arch-node { font-family: var(--font-mono); font-size: 12.5px; color: var(--text-muted); border: 1px solid var(--surface-border); border-radius: 8px; padding: 8px 12px; background: rgba(255, 255, 255, 0.02); transition: color 0.2s ease, border-color 0.2s ease, background 0.2s ease; }
+.arch-node.is-traced { color: #071320; background: var(--accent-cyan); border-color: transparent; font-weight: 600; }
+.capability-options { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.capability-option { display: flex; flex-direction: column; gap: 8px; text-align: left; min-height: 44px; padding: 16px 18px; border: 1px solid var(--surface-border); border-radius: var(--radius); background: var(--surface); color: var(--text); cursor: pointer; transition: border-color 0.2s ease, background 0.2s ease; }
+.capability-option:hover { border-color: rgba(70, 184, 222, 0.4); }
+.capability-option.is-selected, .capability-option[aria-pressed="true"] { border-color: var(--accent-orange); background: rgba(242, 101, 34, 0.08); }
+.capability-option:focus-visible { outline: 2px solid var(--accent-cyan); outline-offset: 2px; }
+.capability-chip { align-self: flex-start; font-family: var(--font-mono); font-size: 12px; font-weight: 600; color: var(--accent-cyan); border: 1px solid var(--surface-border); border-radius: 6px; padding: 2px 8px; }
+.capability-title { font-family: var(--font-head); font-weight: 600; font-size: 17px; }
+.capability-desc { color: var(--text-muted); font-size: 14px; }
+
+/* Decorative media band: a self-hosted video presented as a figure with controls. */
+.media-band { margin: 0; }
+.media-band-video { display: block; width: 100%; height: auto; max-width: 100%; border: 1px solid var(--surface-border); border-radius: var(--radius); background: #06111c; aspect-ratio: 16 / 9; }
+.media-band-fallback { padding: 24px; color: var(--text-muted); font-size: 15px; }
+.media-band-caption { margin-top: 12px; color: var(--text-muted); font-size: 14px; }
+
+@media (min-width: 768px) {
+  .capability-options { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 1024px) {
+  .capability-tracer { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 40px; }
+  .capability-diagram { position: sticky; top: 88px; }
+}
