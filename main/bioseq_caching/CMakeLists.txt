@@ -137,7 +137,7 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_regress
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
       --kind regress
       --runner "${BIOSEQ_CACHE_PG_REGRESS}"
       --bindir "${PostgreSQL_BIN_DIR}"
@@ -151,7 +151,7 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_isolation
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
       --kind isolation
       --runner "${BIOSEQ_CACHE_PG_ISOLATION_REGRESS}"
       --bindir "${PostgreSQL_BIN_DIR}"
@@ -165,7 +165,7 @@ if(BIOSEQ_CACHE_BUILD_TESTS AND BIOSEQ_CACHE_TESTING)
 
   add_custom_target(test_bioseq_cache_tap
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_LIST_DIR}/test/run_private_provider_tests.py"
       --kind tap
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"

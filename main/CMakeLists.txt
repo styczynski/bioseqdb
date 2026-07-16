@@ -390,7 +390,7 @@ if(BIOSEQ_BUILD_CORE AND BIOSEQ_BUILD_CACHE
 
   add_custom_target(test_bioseq_cache_bioseq_private
     COMMAND "${Python3_EXECUTABLE}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/run_private_cluster.py"
+      "${CMAKE_CURRENT_SOURCE_DIR}/bioseq_caching/test/run_private_provider_tests.py"
       --kind bioseq-provider
       --bindir "${PostgreSQL_BIN_DIR}"
       --dso "$<TARGET_FILE:postgresql_bioseq_cache>"

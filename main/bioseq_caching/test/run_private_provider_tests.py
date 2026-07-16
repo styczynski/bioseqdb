@@ -292,7 +292,10 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--bioseq-bootstrap")
     parser.add_argument(
         "--config",
-        default=str(Path(__file__).with_name("postgresql.conf.in")),
+        # The lifecycle-owned base config; the cache adapter only supplies the
+        # cache preload/library additions on top of it (§13.1).
+        default=str(Path(__file__).resolve().parents[2]
+                    / "cmake" / "private_postgresql.conf.in"),
     )
     parser.add_argument("--inputdir")
     parser.add_argument("--schedule")

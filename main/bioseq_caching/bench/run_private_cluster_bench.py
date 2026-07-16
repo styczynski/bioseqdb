@@ -29,7 +29,7 @@ from typing import Any, Mapping, Sequence
 SCRIPT_DIR = Path(__file__).resolve().parent
 CACHE_ROOT = SCRIPT_DIR.parent
 REPOSITORY_ROOT = CACHE_ROOT.parents[1]
-PRIVATE_RUNNER_PATH = CACHE_ROOT / "test" / "run_private_cluster.py"
+PRIVATE_RUNNER_PATH = CACHE_ROOT / "test" / "run_private_provider_tests.py"
 
 
 def _load_private_runner() -> Any:
@@ -2228,7 +2228,7 @@ def run(argv: Sequence[str]) -> int:
         bindir=bindir,
         cache_dso=cache_dso,
         cache_bootstrap=cache_bootstrap,
-        config_template=CACHE_ROOT / "test" / "postgresql.conf.in",
+        config_template=REPOSITORY_ROOT / "main" / "cmake" / "private_postgresql.conf.in",
         output_root=run_output_root,
         kind="bench",
     )
