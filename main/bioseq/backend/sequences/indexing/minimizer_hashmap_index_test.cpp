@@ -49,6 +49,7 @@ import bioseq.indexing.minimizer_sequence;
 import bioseq.indexing.symbol_counts;
 import bioseq.parallelism.memory_admission;
 import bioseq.indexing.registry;
+import bioseq.common.hashing;                        // §6 shared SHA-256
 
 #include "index_test_fakes.h"
 
@@ -3361,7 +3362,7 @@ TEST_CASE("MPS SHA-256 binding matches standard known vectors and split updates"
         }
     };
 
-    mps_evidence_detail::Sha256 empty;
+    bioseq::common::sha256_hasher empty;
     require_hex(
         empty.finalize(),
         "e3b0c44298fc1c149afbf4c8996fb924"
@@ -3370,7 +3371,7 @@ TEST_CASE("MPS SHA-256 binding matches standard known vectors and split updates"
     const auto bytes = [](std::string_view value) {
         return std::as_bytes(std::span{value.data(), value.size()});
     };
-    mps_evidence_detail::Sha256 contiguous;
+    bioseq::common::sha256_hasher contiguous;
     contiguous.update(bytes("abc"));
     const MpsContentDigest contiguous_digest = contiguous.finalize();
     require_hex(
@@ -3378,11 +3379,33 @@ TEST_CASE("MPS SHA-256 binding matches standard known vectors and split updates"
         "ba7816bf8f01cfea414140de5dae2223"
         "b00361a396177a9cb410ff61f20015ad");
 
-    mps_evidence_detail::Sha256 split;
+    bioseq::common::sha256_hasher split;
     split.update(bytes("a"));
     split.update(bytes("b"));
     split.update(bytes("c"));
     REQUIRE(split.finalize() == contiguous_digest);
+
+    // §6 promoted helpers: lowercase-hex rendering and the one-shot convenience
+    // share the same digest and match the canonical "abc" vector.
+    REQUIRE(bioseq::common::to_hex(contiguous_digest)
+            == "ba7816bf8f01cfea414140de5dae2223"
+               "b00361a396177a9cb410ff61f20015ad");
+    REQUIRE(bioseq::common::sha256_hex("abc")
+            == "ba7816bf8f01cfea414140de5dae2223"
+               "b00361a396177a9cb410ff61f20015ad");
+    REQUIRE(bioseq::common::sha256_hex("")
+            == "e3b0c44298fc1c149afbf4c8996fb924"
+               "27ae41e4649b934ca495991b7852b855");
+
+    // update_little_endian locks the byte order the MPS scan digest depends on.
+    bioseq::common::sha256_hasher little_endian;
+    little_endian.update_little_endian(0x0807060504030201ull);
+    bioseq::common::sha256_hasher raw_bytes;
+    const std::array<std::byte, 8> le_expected{
+        std::byte{0x01}, std::byte{0x02}, std::byte{0x03}, std::byte{0x04},
+        std::byte{0x05}, std::byte{0x06}, std::byte{0x07}, std::byte{0x08}};
+    raw_bytes.update(le_expected);
+    REQUIRE(little_endian.finalize() == raw_bytes.finalize());
 }
 
 TEST_CASE("inactive format-4 MPS spill authority is non-forgeable and detects mutation",
