@@ -2116,7 +2116,7 @@ struct AlignOnePhase {
             std::int64_t& qs,
             std::int64_t& rs,
             std::int64_t& final_query_end,
-            std::int64_t& final_ref_end) {
+            std::int64_t& final_ref_end) const {
         if (!fill_result.cigar.empty()) {
             append_cigar(region.cigar, fill_result.cigar);
         }
