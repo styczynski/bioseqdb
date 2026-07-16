@@ -894,7 +894,7 @@ struct edit_function_probe_visitor {
 	return probe.found;
 }
 
-/* Supported SQL contract: one top-level `bioseq.edit(Var) < int8 Const`.
+/* Supported SQL contract: one top-level `bioseq.edit(Var) < integer Const`.
  * The predicate is removed from the pre-alignment qual and enforced against
  * MatchResult::edit_distance while draining aligned output. */
 [[nodiscard]] static Node* strict_edit_operand(
@@ -921,20 +921,38 @@ decode_strict_edit_upper_bound(
 		|| list_length(comparison->args) != 2) {
 		return std::nullopt;
 	}
-	/* Operator names are schema-overloadable.  Only PostgreSQL's built-in
-	 * int8lt function has the strict BIGINT semantics encoded by this plan
-	 * tag; accepting an arbitrary operator merely named `<` would let user
-	 * code bypass the exact post-filter contract. */
-	if (get_opcode(comparison->opno) != F_INT8LT) return std::nullopt;
-
 	PList<Node> arguments(comparison->args);
 	FuncExpr* edit = pg_node_try_as<FuncExpr>(
 		strict_edit_operand(arguments.first(), scan_relid));
 	Const* upper = pg_node_try_as<Const>(arguments.second());
 	if (edit == nullptr || edit->funcid != oids.edit_oid
 		|| edit->funcresulttype != INT8OID || list_length(edit->args) != 1
-		|| upper == nullptr || upper->constisnull
-		|| upper->consttype != INT8OID) {
+		|| upper == nullptr || upper->constisnull) {
+		return std::nullopt;
+	}
+	/* Operator names are schema-overloadable.  A bare SQL literal such as 10
+	 * is int4, so PostgreSQL resolves BIGINT < 10 to its built-in int84lt
+	 * implementation rather than inserting an int8 cast.  Accept only the
+	 * three exact built-in RHS integer widths and normalize their Const datum;
+	 * an arbitrary operator merely named `<` must remain fail-closed. */
+	const Oid opcode = get_opcode(comparison->opno);
+	std::int64_t exclusive_upper_bound = 0;
+	switch (upper->consttype) {
+	case INT8OID:
+		if (opcode != F_INT8LT) return std::nullopt;
+		exclusive_upper_bound = DatumGetInt64(upper->constvalue);
+		break;
+	case INT4OID:
+		if (opcode != F_INT84LT) return std::nullopt;
+		exclusive_upper_bound = static_cast<std::int64_t>(
+			DatumGetInt32(upper->constvalue));
+		break;
+	case INT2OID:
+		if (opcode != F_INT82LT) return std::nullopt;
+		exclusive_upper_bound = static_cast<std::int64_t>(
+			DatumGetInt16(upper->constvalue));
+		break;
+	default:
 		return std::nullopt;
 	}
 	Var* sequence = pg_node_try_as<Var>(
@@ -946,7 +964,7 @@ decode_strict_edit_upper_bound(
 		return std::nullopt;
 	}
 	return StrictEditPredicate{
-		.exclusive_upper_bound = DatumGetInt64(upper->constvalue),
+		.exclusive_upper_bound = exclusive_upper_bound,
 		.sequence_attno = sequence->varattno,
 	};
 }
@@ -4698,7 +4716,7 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 				ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("unsupported bioseq.edit predicate"),
-					 errdetail("Use exactly one top-level bioseq.edit(sequence_column) < BIGINT constant predicate.")));
+					 errdetail("Use exactly one top-level bioseq.edit(sequence_column) < integer constant predicate.")));
 			}
 			strict_edit_predicate = *decoded;
 		}

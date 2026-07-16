@@ -2807,6 +2807,16 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
         "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10;",
         kSneakySnakeEdits,
         query_literal)) == 2);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10::bigint;",
+        kSneakySnakeEdits,
+        query_literal)) == 2);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} "
+        "WHERE mmsearch(seq0, {}) AND bioseq.edit(seq0) < 10::smallint;",
+        kSneakySnakeEdits,
+        query_literal)) == 2);
 
     const auto wrong_column = sql_error(ctx, fmt::format(
         "SELECT pk FROM {} "
