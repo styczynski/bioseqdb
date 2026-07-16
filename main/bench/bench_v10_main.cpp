@@ -37,6 +37,8 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -108,6 +110,21 @@ using bench_generator_t = gen::alphabet_sequence_generator<seq::dna4, std::uint3
 // contract is strict: a delta of 15 bp is already a rejection.
 constexpr std::int32_t kPositionTolerance = 15;
 
+struct PrefilterPipelineMatchCountParityState {
+    struct ThresholdState {
+        bool prefilter_off_scheduled = false;
+        bool vulkan_scheduled = false;
+        std::optional<std::size_t> prefilter_off_match_count;
+        std::optional<std::size_t> vulkan_match_count;
+        std::optional<bool> vulkan_hardware_available;
+        bool comparison_performed = false;
+        bool comparison_passed = false;
+    };
+
+    std::mutex mutex;
+    std::map<std::uint32_t, ThresholdState> by_threshold;
+};
+
 struct AlignerInput {
     /// Generated pairs are read-only after `on_input` returns, but
     /// `tool_minimap2` / `minimap_port` take non-const `compact_sequence_range&`
@@ -127,6 +144,12 @@ struct AlignerInput {
     /// REPR_STORAGE_* test cases to force a specific MinimizerRepr
     /// storage instantiation (K=7 → 32-bit, K=27 → 128-bit).
     std::int32_t kmer_size_override = 0;
+    /// Shared because the framework may move/copy an input while every timed
+    /// execution tuple for one batch must contribute to the same zero-work
+    /// parity ledger. The evaluator is the only writer.
+    std::shared_ptr<PrefilterPipelineMatchCountParityState>
+        prefilter_pipeline_match_count_parity =
+            std::make_shared<PrefilterPipelineMatchCountParityState>();
 };
 
 struct AlignerOutput {
@@ -1714,14 +1737,13 @@ evaluate_grouped32_validation(
 
 /// Materialise a `(query, target)` batch from the `data` JSON blob.
 /// Lives in `on_input`; runs once per `(benchmark, test_case, group)`
-/// batch.  The `constraints` argument carries the same numbers
-/// `estimate_aligner_resources` returned, but we don't need them — the
-/// generator dimensions come straight from the JSON blob — so the
-/// parameter is unused.
+/// batch. The generator dimensions come from the JSON blob; the framework-
+/// resolved tuples in `constraints` seed the zero-work off/Vulkan parity
+/// ledger with the rows and thresholds that are actually scheduled.
 [[nodiscard]] AlignerInput build_input(std::string_view /*data_dir*/,
                                         std::string_view test_case_name,
                                         simdjson::dom::element data,
-                                        const RunConstraints& /*constraints*/) {
+                                        const RunConstraints& constraints) {
     gen::generator_params params{};
     params.reference_length = static_cast<std::size_t>(
         read_int_field(data, "reference_length",
@@ -1753,6 +1775,23 @@ evaluate_grouped32_validation(
     input.pairs = bench_generator_t(params).generate_sequences_pairs(params.fragment_count);
     input.kmer_size_override = static_cast<std::int32_t>(
         read_int_field(data, "kmer_size", 0));
+
+    // Record only the framework-resolved tuples that will actually consume
+    // this cached input. This is schedule provenance, not reference work: an
+    // available Vulkan result is accepted only when the same threshold also
+    // has a scheduled prefilter-off row in this batch.
+    for (const auto& tuple : constraints.execution_tuples) {
+        const bool is_prefilter_off =
+            tuple.algorithm_name == "bioseq_prefilter_off";
+        const bool is_prefilter_vulkan =
+            tuple.algorithm_name == "bioseq_prefilter_vulkan";
+        if (!is_prefilter_off && !is_prefilter_vulkan) continue;
+        const std::uint32_t threshold = read_max_edits_param(tuple.params);
+        auto& scheduled = input.prefilter_pipeline_match_count_parity
+            ->by_threshold[threshold];
+        scheduled.prefilter_off_scheduled |= is_prefilter_off;
+        scheduled.vulkan_scheduled |= is_prefilter_vulkan;
+    }
 
     // Pre-decode each pair's compact representation into ACGT so the
     // tool_minimap2 cell does not pay the O(bp_size) decompress
@@ -3750,19 +3789,137 @@ evaluate_simd_chaining_endpoint_qualification(
     };
 }
 
+struct PrefilterPipelineMatchCountParityEvidence {
+    bool required = false;
+    bool performed = false;
+    bool passed = false;
+};
+
+/// Record only results produced by the existing timed rows. No reference
+/// pipeline is executed here. The seeded repetition-major schedule includes
+/// both off and Vulkan in repeat zero, so the second observation compares
+/// immediately; all later observations also prove per-row determinism.
+[[nodiscard]] PrefilterPipelineMatchCountParityEvidence
+record_prefilter_pipeline_match_count_parity(
+    std::string_view algorithm,
+    const ParamMap& params,
+    const AlignerInput& input,
+    const AlignerOutput& output)
+{
+    const bool is_prefilter_off = algorithm == "bioseq_prefilter_off";
+    const bool is_prefilter_vulkan =
+        algorithm == "bioseq_prefilter_vulkan";
+    if (!is_prefilter_off && !is_prefilter_vulkan) return {};
+    if (!input.prefilter_pipeline_match_count_parity) {
+        throw std::logic_error(
+            "prefilter pipeline parity state is unexpectedly absent");
+    }
+
+    const std::uint32_t threshold = read_max_edits_param(params);
+    auto& shared = *input.prefilter_pipeline_match_count_parity;
+    std::scoped_lock lock{shared.mutex};
+    auto& state = shared.by_threshold[threshold];
+    const auto record_stable_count =
+        [threshold](std::optional<std::size_t>& destination,
+                    const std::size_t observed,
+                    std::string_view row_name) {
+            if (destination.has_value() && *destination != observed) {
+                throw std::runtime_error(fmt::format(
+                    "nondeterministic {} match count for max_edits={}: "
+                    "first={} repeated={}",
+                    row_name, threshold, *destination, observed));
+            }
+            destination = observed;
+        };
+
+    if (is_prefilter_off) {
+        if (!state.prefilter_off_scheduled) {
+            throw std::logic_error(fmt::format(
+                "observed unscheduled prefilter-off row for max_edits={}",
+                threshold));
+        }
+        record_stable_count(
+            state.prefilter_off_match_count,
+            output.total_results,
+            "prefilter-off");
+    } else {
+        if (!state.vulkan_scheduled) {
+            throw std::logic_error(fmt::format(
+                "observed unscheduled Vulkan prefilter row for max_edits={}",
+                threshold));
+        }
+        const bool hardware_available =
+            !output.vulkan_hardware_unavailable;
+        if (state.vulkan_hardware_available.has_value()
+            && *state.vulkan_hardware_available != hardware_available) {
+            throw std::runtime_error(fmt::format(
+                "nondeterministic Vulkan hardware availability for "
+                "max_edits={}: first={} repeated={}",
+                threshold,
+                *state.vulkan_hardware_available,
+                hardware_available));
+        }
+        state.vulkan_hardware_available = hardware_available;
+        if (hardware_available) {
+            if (!state.prefilter_off_scheduled) {
+                throw std::runtime_error(fmt::format(
+                    "available Vulkan prefilter row has no scheduled "
+                    "same-threshold prefilter-off reference for "
+                    "max_edits={}",
+                    threshold));
+            }
+            record_stable_count(
+                state.vulkan_match_count,
+                output.total_results,
+                "Vulkan prefilter");
+        }
+    }
+
+    if (state.vulkan_hardware_available.value_or(false)
+        && state.prefilter_off_match_count.has_value()
+        && state.vulkan_match_count.has_value()) {
+        state.comparison_performed = true;
+        state.comparison_passed = *state.vulkan_match_count
+            == *state.prefilter_off_match_count;
+        if (!state.comparison_passed) {
+            throw std::runtime_error(fmt::format(
+                "available Vulkan prefilter pipeline changed exact-threshold "
+                "match count: vulkan={} prefilter_off={} max_edits={}",
+                *state.vulkan_match_count,
+                *state.prefilter_off_match_count,
+                threshold));
+        }
+    }
+
+    return {
+        .required = state.vulkan_hardware_available.value_or(false),
+        .performed = state.comparison_performed,
+        .passed = state.comparison_passed,
+    };
+}
+
 /// Translate `Output` into the evaluation metrics declared in the JSON
 /// config. The framework drops keys that aren't declared on the active
 /// benchmark, so we always emit the full set; only the keys the running
 /// benchmark consumes land in the report.
 [[nodiscard]] std::map<std::string, double> evaluate_aligner(
-    std::string_view /*algo*/,
-    const ParamMap& /*params*/,
-    const AlignerInput& /*input*/,
+    std::string_view algorithm,
+    const ParamMap& params,
+    const AlignerInput& input,
     const AlignerOutput& output)
 {
+    const auto prefilter_match_count_parity =
+        record_prefilter_pipeline_match_count_parity(
+            algorithm, params, input, output);
     std::map<std::string, double> metrics;
     metrics.emplace("pipeline_backend_available",
         output.vulkan_hardware_unavailable ? 0.0 : 1.0);
+    metrics.emplace("vulkan_match_count_parity_required",
+        prefilter_match_count_parity.required ? 1.0 : 0.0);
+    metrics.emplace("vulkan_match_count_parity_performed",
+        prefilter_match_count_parity.performed ? 1.0 : 0.0);
+    metrics.emplace("vulkan_match_count_parity_passed",
+        prefilter_match_count_parity.passed ? 1.0 : 0.0);
     metrics.emplace("edit_threshold_enforced",
         output.edit_threshold_enforced ? 1.0 : 0.0);
     metrics.emplace("edit_threshold",
