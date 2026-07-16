@@ -44,6 +44,7 @@ using dna5_u64 = sequence_custom_alphabet<seq::dna5, std::uint64_t>;
 struct ReferenceRun {
     KswAlignResult result;
     BlockAlignerExecutionProof proof;
+    BlockAlignerConstructionEvidence construction;
 };
 
 [[nodiscard]] std::vector<seq::dna4> dna4_from_ascii(
@@ -124,20 +125,24 @@ struct ReferenceRun {
 }
 
 template<bool strand_reversed, bool enable_diagonal_certificate, class Sequence>
-[[nodiscard]] ReferenceRun run_block_mode(
-        std::string_view query,
-        std::string_view reference,
+[[nodiscard]] ReferenceRun run_block_region_mode(
+        std::string_view query_source,
+        std::string_view reference_source,
+        std::size_t query_start,
+        std::size_t query_end,
+        std::size_t reference_start,
+        std::size_t reference_end,
         const ScoringMatrix<Sequence>& scoring,
         const BlockAlignerParams& params) {
     using typed_range_t = compact_sequence_range<Sequence>;
     using alphabet_t = typename typed_range_t::traits::alphabet_type;
-    std::vector<alphabet_t> query_data(query.size());
-    std::vector<alphabet_t> reference_data(reference.size());
-    for (std::size_t i = 0; i < query.size(); ++i) {
-        query_data[i].assign_char(query[i]);
+    std::vector<alphabet_t> query_data(query_source.size());
+    std::vector<alphabet_t> reference_data(reference_source.size());
+    for (std::size_t i = 0; i < query_source.size(); ++i) {
+        query_data[i].assign_char(query_source[i]);
     }
-    for (std::size_t i = 0; i < reference.size(); ++i) {
-        reference_data[i].assign_char(reference[i]);
+    for (std::size_t i = 0; i < reference_source.size(); ++i) {
+        reference_data[i].assign_char(reference_source[i]);
     }
     typed_range_t query_range(query_data);
     typed_range_t reference_range(reference_data);
@@ -148,8 +153,22 @@ template<bool strand_reversed, bool enable_diagonal_certificate, class Sequence>
     run.result = HwyBlockAligner::align<
         strand_reversed, enable_diagonal_certificate>(
             lazy_query, lazy_reference,
-            0, query.size(), 0, reference.size(), scoring, params, &run.proof);
+            query_start, query_end, reference_start, reference_end,
+            scoring, params, &run.proof,
+            &run.construction);
     return run;
+}
+
+template<bool strand_reversed, bool enable_diagonal_certificate, class Sequence>
+[[nodiscard]] ReferenceRun run_block_mode(
+        std::string_view query,
+        std::string_view reference,
+        const ScoringMatrix<Sequence>& scoring,
+        const BlockAlignerParams& params) {
+    return run_block_region_mode<
+        strand_reversed, enable_diagonal_certificate, Sequence>(
+            query, reference, 0, query.size(), 0, reference.size(),
+            scoring, params);
 }
 
 void check_align_result_identical(
@@ -307,15 +326,27 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
               == static_cast<std::uint64_t>(expect_certificate));
         CHECK(forced_dp.proof.simd_diagonal_certificate_calls == 0);
         CHECK(forced_dp.proof.simd_dp_cells > 0);
+        CHECK(forced_dp.construction.align_arena_scopes == 1);
+        CHECK(forced_dp.construction.padded_sequence_allocations == 2);
+        CHECK(forced_dp.construction.scratch_allocations == 1);
+        CHECK(forced_dp.construction.trace_allocations == 1);
         if (expect_certificate) {
             CHECK(optimized.proof.simd_dp_cells == 0);
             CHECK(optimized.proof.simd_dp_vector_batches == 0);
             CHECK(optimized.proof.simd_diagonal_certificate_vector_batches > 0);
             CHECK(optimized.proof.simd_diagonal_certificate_symbols
                   == query.size());
+            CHECK(optimized.construction.align_arena_scopes == 0);
+            CHECK(optimized.construction.padded_sequence_allocations == 0);
+            CHECK(optimized.construction.scratch_allocations == 0);
+            CHECK(optimized.construction.trace_allocations == 0);
         } else {
             CHECK(optimized.proof.simd_dp_cells > 0);
             CHECK(optimized.proof.simd_diagonal_certificate_symbols == 0);
+            CHECK(optimized.construction.align_arena_scopes == 1);
+            CHECK(optimized.construction.padded_sequence_allocations == 2);
+            CHECK(optimized.construction.scratch_allocations == 1);
+            CHECK(optimized.construction.trace_allocations == 1);
         }
     };
 
@@ -323,6 +354,16 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
         "ACGTACGTTGCATGCAAAAACCCCGGGGTTTT"
         "TGCATGCAACGTACGTCCCCAAAATTTTGGGG";
     compare_dna4(exact, exact, true);
+
+    // Cross the fixed 1024-symbol scan boundary and leave one active byte in
+    // the final hardware vector for every admitted lane shape. This is the
+    // NEON full-load tail safety oracle.
+    std::string long_unaligned_exact(1057, 'A');
+    constexpr std::string_view dna4_cycle = "ACGT";
+    for (std::size_t i = 0; i < long_unaligned_exact.size(); ++i) {
+        long_unaligned_exact[i] = dna4_cycle[i % dna4_cycle.size()];
+    }
+    compare_dna4(long_unaligned_exact, long_unaligned_exact, true);
 
     BlockAlignerParams score_only_params = params;
     score_only_params.trace = false;
@@ -337,6 +378,10 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     CHECK(score_only_optimized.result.cigar.empty());
     CHECK(score_only_optimized.proof.simd_diagonal_certificate_calls == 1);
     CHECK(score_only_optimized.proof.simd_dp_cells == 0);
+    CHECK(score_only_optimized.construction.align_arena_scopes == 0);
+    CHECK(score_only_optimized.construction.padded_sequence_allocations == 0);
+    CHECK(score_only_optimized.construction.scratch_allocations == 0);
+    CHECK(score_only_optimized.construction.trace_allocations == 0);
 
     BlockAlignerExecutionProof tampered = score_only_optimized.proof;
     tampered.simd_diagonal_certificate_vector_batches = 0;
@@ -423,6 +468,9 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
     check_align_result_identical(dna5_optimized.result, dna5_forced.result);
     CHECK(dna5_optimized.proof.simd_diagonal_certificate_calls == 1);
     CHECK(dna5_optimized.proof.simd_dp_cells == 0);
+    CHECK(dna5_optimized.construction.align_arena_scopes == 0);
+    CHECK(dna5_optimized.construction.padded_sequence_allocations == 0);
+    CHECK(dna5_optimized.construction.scratch_allocations == 0);
 
     // Reverse-strand template coordinates are encoded to canonical reverse
     // complement before the scan. Compare those exact consumed bytes too.
@@ -441,6 +489,59 @@ TEST_CASE("Block Global diagonal certificate is byte-identical to forced DP",
         reverse_optimized.result, reverse_forced.result);
     CHECK(reverse_optimized.proof.simd_diagonal_certificate_calls == 1);
     CHECK(reverse_optimized.proof.simd_dp_cells == 0);
+    CHECK(reverse_optimized.construction.align_arena_scopes == 0);
+    CHECK(reverse_optimized.construction.padded_sequence_allocations == 0);
+    CHECK(reverse_optimized.construction.scratch_allocations == 0);
+
+    // Nonzero reverse-complement coordinates must remain continuous when the
+    // early scan splits the requested subregion at its 1024-symbol boundary.
+    std::string reverse_subregion_source(1129, 'A');
+    for (std::size_t i = 0; i < reverse_subregion_source.size(); ++i) {
+        reverse_subregion_source[i] =
+            dna4_cycle[(i * 3u + i / 11u) % dna4_cycle.size()];
+    }
+    const std::string reverse_subregion_full =
+        reverse_complement_ascii(reverse_subregion_source);
+    constexpr std::size_t reverse_query_start = 17;
+    constexpr std::size_t reverse_region_size = 1041;
+    constexpr std::size_t reverse_reference_start = 9;
+    const std::string reverse_subregion_target =
+        std::string(reverse_reference_start, 'C')
+        + reverse_subregion_full.substr(
+            reverse_query_start, reverse_region_size)
+        + std::string(13, 'G');
+    const ReferenceRun reverse_subregion_optimized =
+        run_block_region_mode<true, true, dna4_u64>(
+            reverse_subregion_source, reverse_subregion_target,
+            reverse_query_start,
+            reverse_query_start + reverse_region_size,
+            reverse_reference_start,
+            reverse_reference_start + reverse_region_size,
+            scoring, params);
+    const ReferenceRun reverse_subregion_forced =
+        run_block_region_mode<true, false, dna4_u64>(
+            reverse_subregion_source, reverse_subregion_target,
+            reverse_query_start,
+            reverse_query_start + reverse_region_size,
+            reverse_reference_start,
+            reverse_reference_start + reverse_region_size,
+            scoring, params);
+    check_align_result_identical(
+        reverse_subregion_optimized.result,
+        reverse_subregion_forced.result);
+    CHECK(reverse_subregion_optimized.proof.accepted());
+    CHECK(reverse_subregion_forced.proof.accepted());
+    CHECK(reverse_subregion_optimized.proof.simd_diagonal_certificate_calls
+          == 1);
+    CHECK(reverse_subregion_optimized.proof.simd_diagonal_certificate_symbols
+          == reverse_region_size);
+    CHECK(reverse_subregion_optimized.proof.simd_dp_cells == 0);
+    CHECK(reverse_subregion_forced.proof.simd_dp_cells > 0);
+    CHECK(reverse_subregion_optimized.construction.align_arena_scopes == 0);
+    CHECK(reverse_subregion_optimized.construction
+              .padded_sequence_allocations == 0);
+    CHECK(reverse_subregion_optimized.construction.scratch_allocations == 0);
+    CHECK(reverse_subregion_optimized.construction.trace_allocations == 0);
 }
 
 TEST_CASE("Block Aligner empty Global/XDrop results match scan_block.rs",

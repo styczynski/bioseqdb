@@ -58,6 +58,25 @@ using bioseq::indexing::index_sub_key_t;
 constexpr std::size_t kMax = 1024;
 using Storage = FakeFragmentStorage<kMax>;
 
+/// Independent bit-at-a-time oracle for the normal (non-reflected),
+/// zero-initialized/no-final-XOR CRC-64/ECMA-182 convention.
+[[nodiscard]] std::uint64_t reference_crc64_ecma182(
+        std::span<const std::byte> bytes,
+        std::uint64_t initial = 0u) noexcept {
+    std::uint64_t checksum = initial;
+    for (const std::byte byte : bytes) {
+        checksum ^= static_cast<std::uint64_t>(
+            std::to_integer<std::uint8_t>(byte)) << 56u;
+        for (unsigned bit = 0u; bit < 8u; ++bit) {
+            checksum = (checksum & (std::uint64_t{1u} << 63u)) != 0u
+                ? (checksum << 1u)
+                    ^ bioseq::indexing::kCrc64Ecma182Polynomial
+                : checksum << 1u;
+        }
+    }
+    return checksum;
+}
+
 // Deterministic byte fill for chunk (sub_key, global byte offset).
 [[nodiscard]] char fill_byte(index_sub_key_t sub_key, std::size_t global_off) {
     return (char)(((std::size_t)sub_key * 1315423911u + global_off * 2654435761u) & 0xFF);
@@ -133,6 +152,7 @@ TEST_CASE("DOC0371 payload-row checksum pins LE metadata order and relocation id
         0x0102030405060708ULL, -2, -3, 0x11223344U, 3,
         std::span<const std::byte>{blob});
     STATIC_REQUIRE(actual == expected);
+    STATIC_REQUIRE(actual == 0x75AC50EBED1FCB63ULL);
     STATIC_REQUIRE(actual != bioseq::indexing::crc64_index_chunk_row(
         0x0102030405060709ULL, -2, -3, 0x11223344U, 3,
         std::span<const std::byte>{blob}));
@@ -148,6 +168,108 @@ TEST_CASE("DOC0371 payload-row checksum pins LE metadata order and relocation id
     STATIC_REQUIRE(actual != bioseq::indexing::crc64_index_chunk_row(
         0x0102030405060708ULL, -2, -3, 0x11223344U, 4,
         std::span<const std::byte>{blob}));
+}
+
+TEST_CASE("CRC-64 bulk path matches the bit oracle for every boundary",
+          "[indexing][chunk-io][crc][bulk][differential]") {
+    using bioseq::indexing::Crc64Ecma182;
+    using bioseq::indexing::crc64_ecma182;
+    using bioseq::indexing::crc64_ecma182_concatenate;
+
+    constexpr std::array<std::size_t, 26> lengths{
+        0u, 1u, 2u, 3u, 7u, 8u, 9u, 15u, 16u, 17u, 23u, 24u,
+        25u, 31u, 32u, 33u, 63u, 64u, 65u, 255u, 256u, 257u,
+        8'063u, 8'064u, 8'065u, 65'535u,
+    };
+    constexpr std::size_t maximum_offset = 15u;
+    std::vector<std::byte> storage(lengths.back() + maximum_offset + 1u);
+    std::uint64_t random = 0xD1B54A32D192ED03ULL;
+    for (std::byte& byte : storage) {
+        random ^= random >> 12u;
+        random ^= random << 25u;
+        random ^= random >> 27u;
+        byte = static_cast<std::byte>(
+            (random * 0x2545F4914F6CDD1DULL) & 0xffu);
+    }
+
+    for (std::size_t offset = 0u; offset <= maximum_offset; ++offset) {
+        for (const std::size_t length : lengths) {
+            INFO("alignment offset=" << offset << " length=" << length);
+            const auto bytes = std::span<const std::byte>{storage}
+                .subspan(offset, length);
+            const std::uint64_t expected = reference_crc64_ecma182(bytes);
+            REQUIRE(crc64_ecma182(bytes) == expected);
+
+            const std::uint64_t prior = 0xA5A5A5A55A5A5A5AULL
+                ^ static_cast<std::uint64_t>(offset * 131u + length);
+            Crc64Ecma182 incremental{prior};
+            std::size_t consumed = 0u;
+            std::size_t chunk_ordinal = 0u;
+            while (consumed < bytes.size()) {
+                const std::size_t wanted = 1u
+                    + ((chunk_ordinal * 17u + offset * 7u + length) % 41u);
+                const std::size_t count = (std::min)(
+                    wanted, bytes.size() - consumed);
+                incremental.update(bytes.subspan(consumed, count));
+                consumed += count;
+                ++chunk_ordinal;
+            }
+            incremental.update(bytes.subspan(bytes.size(), 0u));
+            REQUIRE(incremental.checksum()
+                == reference_crc64_ecma182(bytes, prior));
+
+            const std::size_t split = length / 2u;
+            const auto left = bytes.first(split);
+            const auto right = bytes.subspan(split);
+            REQUIRE(crc64_ecma182_concatenate(
+                crc64_ecma182(left), crc64_ecma182(right), right.size())
+                == expected);
+        }
+    }
+
+    for (std::size_t iteration = 0u; iteration < 128u; ++iteration) {
+        random ^= random >> 12u;
+        random ^= random << 25u;
+        random ^= random >> 27u;
+        const std::size_t offset = static_cast<std::size_t>(random & 15u);
+        random *= 0x2545F4914F6CDD1DULL;
+        const std::size_t length = static_cast<std::size_t>(
+            random % (storage.size() - offset));
+        INFO("random iteration=" << iteration << " offset=" << offset
+            << " length=" << length);
+        const auto bytes = std::span<const std::byte>{storage}
+            .subspan(offset, length);
+        const std::uint64_t expected = reference_crc64_ecma182(bytes);
+        REQUIRE(crc64_ecma182(bytes) == expected);
+
+        Crc64Ecma182 chunked;
+        std::size_t consumed = 0u;
+        while (consumed < bytes.size()) {
+            random ^= random >> 12u;
+            random ^= random << 25u;
+            random ^= random >> 27u;
+            random *= 0x2545F4914F6CDD1DULL;
+            const std::size_t wanted = 1u
+                + static_cast<std::size_t>(random % 257u);
+            const std::size_t count = (std::min)(
+                wanted, bytes.size() - consumed);
+            chunked.update(bytes.subspan(consumed, count));
+            consumed += count;
+        }
+        REQUIRE(chunked.checksum() == expected);
+    }
+
+    std::string runtime_golden{
+        "The quick brown fox jumps over the lazy dog"};
+    REQUIRE(crc64_ecma182(std::string_view{runtime_golden})
+        == 0x41E05242FFA9883BULL);
+
+    std::vector<std::byte> runtime_blob{
+        std::byte{0x61}, std::byte{0x62}, std::byte{0x63}};
+    REQUIRE(bioseq::indexing::crc64_index_chunk_row(
+        0x0102030405060708ULL, -2, -3, 0x11223344U, 3,
+        std::span<const std::byte>{runtime_blob})
+        == 0x75AC50EBED1FCB63ULL);
 }
 
 TEST_CASE("DOC0373 Format-5 PostgreSQL tuple batching flushes before row nine",

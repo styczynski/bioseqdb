@@ -484,6 +484,16 @@ struct BlockDiagonalCertificate {
     std::uint64_t symbols = 0;
 };
 
+/// Exact construction counters used by the forced-old differential oracle.
+/// They describe arena-backed aligner construction only; the early
+/// certificate uses fixed stack chunks and therefore leaves all fields zero.
+struct BlockAlignerConstructionEvidence {
+    std::uint64_t align_arena_scopes = 0;
+    std::uint64_t padded_sequence_allocations = 0;
+    std::uint64_t scratch_allocations = 0;
+    std::uint64_t trace_allocations = 0;
+};
+
 // BlockSIMDMatrix is replaced by ScoringMatrix from alignment_hwy_utils.
 
 // =============================================================================
@@ -1775,20 +1785,37 @@ enum class BlockAlignerContractError : std::uint8_t {
 ///
 /// Strict D > U proves both optimality and CIGAR uniqueness.  Equality is not
 /// enough because it leaves the old traceback tie policy observable.
-template<supports_compact_sequence_range QueryRange, size_t AlphabetDim>
+template<
+    bool is_reversed,
+    supports_compact_sequence_range QueryRange,
+    supports_compact_sequence_range TargetRange,
+    size_t AlphabetDim,
+    class Scanner>
 [[nodiscard]] HWY_INLINE BlockDiagonalCertificate
 ba_try_global_diagonal_certificate(
-        const BlockPaddedBytes& query,
-        const BlockPaddedBytes& reference,
+        const bioseq::storage::lazy_compact_sequence<
+            QueryRange, Scanner>& query_seq,
+        const bioseq::storage::lazy_compact_sequence<
+            TargetRange, Scanner>& target_seq,
+        size_t query_start,
+        size_t query_end,
+        size_t target_start,
+        size_t target_end,
         const ScoringMatrix<QueryRange>& scoring_matrix,
-        const BlockAlignerParams& params) noexcept {
+        const BlockAlignerParams& params) {
     BlockDiagonalCertificate result;
-    const size_t n = query.len();
+    const bool ordered_coordinates = query_end >= query_start
+        && target_end >= target_start;
+    const size_t n = ordered_coordinates ? query_end - query_start : 0u;
+    const size_t target_len = ordered_coordinates
+        ? target_end - target_start : 0u;
     if (params.mode != BlockAlignmentMode::Global
         || params.phase != BlockAlignerPhase::GapExtension
         || params.input_order != BlockInputOrder::Forward
         || params.gap_open <= 0 || params.gap_extend <= 0
-        || n == 0 || reference.len() != n
+        || !ordered_coordinates || n == 0 || target_len != n
+        || query_end > query_seq.bp_size()
+        || target_end > target_seq.bp_size()
         || n > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
         return result;
     }
@@ -1819,28 +1846,69 @@ ba_try_global_diagonal_certificate(
         }
     }
 
+    // Encode bounded chunks into stack storage in exactly the orientation the
+    // DP would consume. Certified calls therefore never enter the align arena
+    // or construct padded/scratch/trace owners. A rejected certificate pays
+    // this small linear scan and then falls through to the unchanged DP path.
+    constexpr size_t scan_chunk_symbols = 1024u;
+    // Every byte subsequently inspected is overwritten by the encoder. Keep
+    // these uninitialised: value-initialising 2 KiB here would replace the
+    // padding memset we are deliberately removing with another per-call
+    // memset of the same shape.
+    alignas(64) std::array<std::uint8_t, scan_chunk_symbols> query_chunk;
+    alignas(64) std::array<std::uint8_t, scan_chunk_symbols> target_chunk;
     const hn::Rebind<uint8_t, BlockAlignerSimdTag> d8;
     const size_t lanes = hn::Lanes(d8);
     const auto rank_limit = hn::Set(
         d8, static_cast<uint8_t>(biological_ranks));
     std::uint64_t equal_symbols = 0;
-    for (size_t offset = 0; offset < n; offset += lanes) {
-        const size_t active_lanes = std::min(lanes, n - offset);
-        const auto active = hn::FirstN(d8, active_lanes);
-        const auto query_bytes = hn::MaskedLoad(
-            active, d8, query.ptr_at(1 + offset));
-        const auto reference_bytes = hn::MaskedLoad(
-            active, d8, reference.ptr_at(1 + offset));
-        const auto valid_ranks = hn::And(
-            hn::Lt(query_bytes, rank_limit),
-            hn::Lt(reference_bytes, rank_limit));
-        if (hn::CountTrue(d8, hn::And(active, valid_ranks))
-            != active_lanes) {
-            return BlockDiagonalCertificate{};
+    for (size_t chunk_offset = 0; chunk_offset < n;
+         chunk_offset += scan_chunk_symbols) {
+        const size_t chunk_size = std::min(
+            scan_chunk_symbols, n - chunk_offset);
+        encode_region_via_ptr_at<is_reversed, false>(
+            query_seq,
+            std::span<std::uint8_t>{query_chunk.data(), chunk_size},
+            query_start + chunk_offset,
+            query_start + chunk_offset + chunk_size);
+        encode_region_via_ptr_at<false, false>(
+            target_seq,
+            std::span<std::uint8_t>{target_chunk.data(), chunk_size},
+            target_start + chunk_offset,
+            target_start + chunk_offset + chunk_size);
+        // Highway's masked load is permitted to issue a full hardware load
+        // (notably on NEON). Initialise only the inactive bytes of the one
+        // partial vector so that load never observes indeterminate storage.
+        // Full 1024-symbol chunks are lane-aligned for every admitted Block
+        // lane shape, so the hot bulk path performs no padding writes.
+        const size_t tail_lanes = chunk_size % lanes;
+        if (tail_lanes != 0) {
+            const size_t tail_padding = lanes - tail_lanes;
+            std::memset(
+                query_chunk.data() + chunk_size, 0, tail_padding);
+            std::memset(
+                target_chunk.data() + chunk_size, 0, tail_padding);
         }
-        equal_symbols += hn::CountTrue(
-            d8, hn::And(active, hn::Eq(query_bytes, reference_bytes)));
-        ++result.vector_batches;
+        for (size_t offset = 0; offset < chunk_size; offset += lanes) {
+            const size_t active_lanes = std::min(
+                lanes, chunk_size - offset);
+            const auto active = hn::FirstN(d8, active_lanes);
+            const auto query_bytes = hn::MaskedLoad(
+                active, d8, query_chunk.data() + offset);
+            const auto reference_bytes = hn::MaskedLoad(
+                active, d8, target_chunk.data() + offset);
+            const auto valid_ranks = hn::And(
+                hn::Lt(query_bytes, rank_limit),
+                hn::Lt(reference_bytes, rank_limit));
+            if (hn::CountTrue(d8, hn::And(active, valid_ranks))
+                != active_lanes) {
+                return BlockDiagonalCertificate{};
+            }
+            equal_symbols += hn::CountTrue(
+                d8, hn::And(active, hn::Eq(
+                    query_bytes, reference_bytes)));
+            ++result.vector_batches;
+        }
     }
 
     const std::uint64_t unequal_symbols = static_cast<std::uint64_t>(n)
@@ -2020,7 +2088,8 @@ public:
         size_t target_end,
         const ScoringMatrix<QueryRange>& scoring_matrix,
         const BlockAlignerParams& params,
-        BlockAlignerExecutionProof* execution_proof = nullptr)
+        BlockAlignerExecutionProof* execution_proof = nullptr,
+        BlockAlignerConstructionEvidence* construction_evidence = nullptr)
     {
         using query_alphabet_t = typename compact_sequence_range<
             QueryRange>::traits::alphabet_type;
@@ -2124,50 +2193,15 @@ public:
             return result;
         }
 
-        // Every arena-backed buffer below (BlockPaddedBytes, BlockAlignedBuf,
-        // BlockTrace, scratch encoded-sequence spans) dies here. The CIGAR
-        // output lives on result's own vector so it survives the unwind.
-        auto align_scope = context::current().push<context::Arena::Align>();
-
-        const size_t min_size = std::max(params.min_size, L);
-        const size_t max_size = std::max(params.max_size, L);
-
-        // Convert positive q/e into the reference's negative gap costs.
-        const int8_t gap_open_neg = static_cast<int8_t>(
-            -(static_cast<int>(params.gap_open) + params.gap_extend));
-        const int8_t gap_extend_neg = static_cast<int8_t>(-params.gap_extend);
-
-        BlockPaddedBytes query_padded, ref_padded;
-        if (params.input_order == BlockInputOrder::Reversed) {
-            // Emit the reversed alignment orientation directly from compact
-            // storage. This is the same orientation matrix used by the prior
-            // KSW encoder, without a scalar whole-buffer reverse pass.
-            query_padded.template fill<is_reversed, true, AlphabetDim>(
-                query_seq, query_start, query_end, max_size);
-            ref_padded.template fill<false, true, AlphabetDim>(
-                target_seq, target_start, target_end, max_size);
-            if (execution_proof != nullptr) {
-                execution_proof->add(
-                    execution_proof->reversed_compact_symbols, query_len);
-                execution_proof->add(
-                    execution_proof->reversed_compact_symbols, target_len);
-            }
-        } else {
-            // Hot path (gap-fill): encode the sub-region directly into
-            // the padded buffer. Saves one arena allocation and one
-            // memcpy per query/target compared to the previous
-            // encode-then-pad pipeline.
-            query_padded.template fill<is_reversed, false, AlphabetDim>(
-                query_seq, query_start, query_end, max_size);
-            ref_padded.template fill<false, false, AlphabetDim>(
-                target_seq, target_start, target_end, max_size);
-        }
-
         BlockCoreMetrics metrics;
         if constexpr (enable_diagonal_certificate) {
             const BlockDiagonalCertificate certificate =
-                ba_try_global_diagonal_certificate<QueryRange, AlphabetDim>(
-                    query_padded, ref_padded, scoring_matrix, params);
+                ba_try_global_diagonal_certificate<
+                    is_reversed, QueryRange, TargetRange,
+                    AlphabetDim, Scanner>(
+                        query_seq, target_seq,
+                        query_start, query_end, target_start, target_end,
+                        scoring_matrix, params);
             if (certificate.certified) {
                 result.score = certificate.score;
                 result.max = certificate.score;
@@ -2196,8 +2230,57 @@ public:
             }
         }
 
+        // Every arena-backed buffer below (BlockPaddedBytes, BlockAlignedBuf,
+        // BlockTrace, scratch encoded-sequence spans) dies here. The CIGAR
+        // output lives on result's own vector so it survives the unwind.
+        if (construction_evidence != nullptr) {
+            ++construction_evidence->align_arena_scopes;
+        }
+        auto align_scope = context::current().push<context::Arena::Align>();
+
+        const size_t min_size = std::max(params.min_size, L);
+        const size_t max_size = std::max(params.max_size, L);
+
+        // Convert positive q/e into the reference's negative gap costs.
+        const int8_t gap_open_neg = static_cast<int8_t>(
+            -(static_cast<int>(params.gap_open) + params.gap_extend));
+        const int8_t gap_extend_neg = static_cast<int8_t>(-params.gap_extend);
+
+        BlockPaddedBytes query_padded, ref_padded;
+        if (construction_evidence != nullptr) {
+            construction_evidence->padded_sequence_allocations += 2u;
+        }
+        if (params.input_order == BlockInputOrder::Reversed) {
+            // Emit the reversed alignment orientation directly from compact
+            // storage. This is the same orientation matrix used by the prior
+            // KSW encoder, without a scalar whole-buffer reverse pass.
+            query_padded.template fill<is_reversed, true, AlphabetDim>(
+                query_seq, query_start, query_end, max_size);
+            ref_padded.template fill<false, true, AlphabetDim>(
+                target_seq, target_start, target_end, max_size);
+            if (execution_proof != nullptr) {
+                execution_proof->add(
+                    execution_proof->reversed_compact_symbols, query_len);
+                execution_proof->add(
+                    execution_proof->reversed_compact_symbols, target_len);
+            }
+        } else {
+            // Hot path (gap-fill): encode the sub-region directly into
+            // the padded buffer. Saves one arena allocation and one
+            // memcpy per query/target compared to the previous
+            // encode-then-pad pipeline.
+            query_padded.template fill<is_reversed, false, AlphabetDim>(
+                query_seq, query_start, query_end, max_size);
+            ref_padded.template fill<false, false, AlphabetDim>(
+                target_seq, target_start, target_end, max_size);
+        }
+
         // Allocate scratch space
         const bool do_trace = params.trace;
+        if (construction_evidence != nullptr) {
+            ++construction_evidence->scratch_allocations;
+            construction_evidence->trace_allocations += do_trace ? 1u : 0u;
+        }
         BlockAlignerScratch scratch(query_len, target_len, max_size, do_trace);
         // The reference clears the full maximum border/checkpoint geometry.
         scratch.clear(d, query_len, target_len, max_size, do_trace);
