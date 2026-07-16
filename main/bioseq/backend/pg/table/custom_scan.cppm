@@ -10011,7 +10011,11 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 					{
 						continue;
 					}
-					ExplainOpenGroup("Stage", stage.stage_name.c_str(), true, es);
+					// Each stage is an unlabeled object inside the "Pipeline
+					// Stages" array: a labeled group here would emit
+					// `[ "IndexStage": { ... } ]`, which is not valid JSON. The
+					// stage name is preserved by the "Stage Name" property below.
+					ExplainOpenGroup("Stage", nullptr, true, es);
 					ExplainPropertyText("Stage Name",
 						stage.stage_name.c_str(), es);
 					if (stage.algorithm.has_value()) {
@@ -10035,7 +10039,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 							static_cast<uint64_t>(*stage.estimated_batch_size),
 							es);
 					}
-					ExplainCloseGroup("Stage", stage.stage_name.c_str(), true, es);
+					ExplainCloseGroup("Stage", nullptr, true, es);
 				}
 				ExplainCloseGroup("Pipeline Stages", "Pipeline Stages", false, es);
 			}
