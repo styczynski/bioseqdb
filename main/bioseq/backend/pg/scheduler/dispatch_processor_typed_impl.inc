@@ -496,6 +496,11 @@ choose_deferred_minimizer_persist_index(
     return pipe::vulkan_components_requested(params);
 }
 
+[[nodiscard]] inline bool selected_vulkan_accelerator(
+        const Minimap2Params& params) noexcept {
+    return pipe::vulkan_accelerator_requested(params);
+}
+
 [[nodiscard]] inline bool selected_vulkan_coordinate_prereqs_active(
         const Minimap2Params& params) noexcept {
     return pipe::complete_all_gpu_tuple_selected(params);
@@ -6612,7 +6617,7 @@ template <class S>
                 && per_row_query_mode
                 && per_row_query_hdrs != nullptr
                 && !dispatch_params.enable_profiling
-                && !selected_vulkan_execution(dispatch_params)
+                && !selected_vulkan_accelerator(dispatch_params)
                 && bioseq::parallelism::task_parallel(pool.mode())
                 && pool.max_concurrency() > 1
                 && batch_size
@@ -7011,7 +7016,7 @@ template <class S>
 
             const bool may_dispatch_parallel =
                 !dispatch_params.enable_profiling
-                && !selected_vulkan_execution(dispatch_params)
+                && !selected_vulkan_accelerator(dispatch_params)
                 && !use_scanner_pg
                 && !chunked_scanner_forced
                 && bioseq::parallelism::dispatch_parallel(pool.mode())

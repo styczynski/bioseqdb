@@ -7503,11 +7503,14 @@ template <is_constexpr_aligner_params Cep,
  * iteration's pipeline is built.  Per-query results are appended to
  * `out_per_query` in input order.
  */
-/// Return whether the resolved statement asks for any biological Vulkan
+/// Return whether the resolved statement asks for any full biological Vulkan
 /// component. `vulkan_enabled` is deliberately absent: it is only the runtime
 /// capability gate, and enabling that gate must not turn an otherwise CPU/SIMD
-/// tuple into a GPU-selected statement. The cache toggle is likewise a policy
-/// for a selected seed path rather than an execution request of its own.
+/// tuple into a full GPU-selected statement.  The rank prefilter is also absent:
+/// it is an explicitly requested, self-contained accelerator inside the generic
+/// pipeline and does not authorize GPU-to-CPU fallback for minimization,
+/// chaining, or alignment. The cache toggle is likewise only policy for a
+/// selected seed path.
 [[nodiscard]] inline bool vulkan_components_requested(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
 {
@@ -7515,15 +7518,25 @@ template <is_constexpr_aligner_params Cep,
         || params.vulkan_fused_frontend_enabled
         || params.vulkan_gpu_index_build_enabled
         || params.vulkan_extend_enabled
-        || (params.prefilter_enabled
-            && params.prefilter_backend ==
-               ::bioseq::prefilter_stats::PrefilterBackendType::VULKAN)
         || params.minimizer_algorithm ==
                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
                    VULKAN_MINIMAP_INT
         || params.chaining_algorithm ==
                ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::
                    VULKAN_TILED_DP;
+}
+
+/// Return whether any Vulkan work can execute for this statement.  This is a
+/// thread-placement/runtime-lifetime predicate, not biological route
+/// admission: a standalone rank prefilter is allowed inside the generic
+/// CPU/SIMD pipeline while `vulkan_components_requested()` remains false.
+[[nodiscard]] inline bool vulkan_accelerator_requested(
+    const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params) noexcept
+{
+    return vulkan_components_requested(params)
+        || (params.prefilter_enabled
+            && params.prefilter_backend ==
+               ::bioseq::prefilter_stats::PrefilterBackendType::VULKAN);
 }
 
 /// Exact statement shape that the current dedicated resident GPU route can
@@ -8089,7 +8102,8 @@ template <is_constexpr_aligner_params Cep,
 
     std::vector<MatchResultCollection> out_per_query;
     const bool may_parallel_batch =
-        bioseq::parallelism::task_parallel(
+        !vulkan_accelerator_requested(params)
+        && bioseq::parallelism::task_parallel(
             bioseq::parallelism::GlobalPool::instance().mode())
         && query_seqs.size()
             >= bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT
@@ -10761,7 +10775,8 @@ template <supports_compact_sequence_range QueryRange,
     }
 
     auto& pool = bioseq::parallelism::GlobalPool::instance();
-    if (!bioseq::parallelism::task_parallel(pool.mode())
+    if (pipe::vulkan_accelerator_requested(params)
+        || !bioseq::parallelism::task_parallel(pool.mode())
         || pool.max_concurrency() <= 1
         || target_sketch_backend == MinimizerSketchBackend::VulkanSegment
         || !bioseq::storage::lazy_is_worker_shareable(query_seq)

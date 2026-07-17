@@ -79,6 +79,12 @@ import bioseq.storage.indexing_pg.handles;
 
 namespace bioseq::parallelism::pg {
 
+[[nodiscard]] inline bool is_standalone_backend_process() noexcept {
+    return MyBackendType == B_STANDALONE_BACKEND
+        && !IsPostmasterEnvironment
+        && !IsUnderPostmaster;
+}
+
 struct PgSchedulerStats {
     static constexpr std::size_t kInflightSlots =
         bioseq::parallelism::SchedulerStats::kInflightSlots;
@@ -1669,6 +1675,15 @@ void wait_for_runtime_ready() {
     if (backend_runtime_ready) {
         return;
     }
+    // PostgreSQL single-user mode has no postmaster child and launches no
+    // registered background workers.  Waiting on preload-owned shared state
+    // would therefore time out forever.  The process is not forked, so the
+    // normal in-process Vulkan/compiler path is safe and needs no supervisor
+    // archive handoff.
+    if (is_standalone_backend_process()) {
+        backend_runtime_ready = true;
+        return;
+    }
     if (g_shared == nullptr) {
         auto prepared = prepare_backend_local_shader_cache_env();
         if (!prepared) {
@@ -2268,7 +2283,8 @@ pg_shader_provider_load_module(
 
 void install_pg_shader_provider_if_available() noexcept {
 #if defined(__APPLE__)
-    if (process_shared_preload_libraries_in_progress) {
+    if (process_shared_preload_libraries_in_progress
+        || is_standalone_backend_process()) {
         return;
     }
     static bioseq::gpu::vulkan::RuntimeShaderProvider provider{

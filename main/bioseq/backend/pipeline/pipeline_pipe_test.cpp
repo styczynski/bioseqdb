@@ -5270,13 +5270,23 @@ TEST_CASE("canonical Vulkan selection separates capability from a complete all-G
     using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using ::bioseq::simd::HWY_NAMESPACE::pipe::
         complete_all_gpu_tuple_selected;
+    using ::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_accelerator_requested;
     using ::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested;
 
     Minimap2Params params{};
     params.vulkan_enabled = true;
     params.vulkan_index_cache_enabled = true;
     REQUIRE_FALSE(vulkan_components_requested(params));
+    REQUIRE_FALSE(vulkan_accelerator_requested(params));
     REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+
+    params.prefilter_enabled = true;
+    params.prefilter_backend =
+        bioseq::prefilter_stats::PrefilterBackendType::VULKAN;
+    REQUIRE_FALSE(vulkan_components_requested(params));
+    REQUIRE(vulkan_accelerator_requested(params));
+    REQUIRE_FALSE(complete_all_gpu_tuple_selected(params));
+    params.prefilter_enabled = false;
 
     params.minimizer_algorithm = MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
     REQUIRE(vulkan_components_requested(params));

@@ -1189,8 +1189,12 @@ require_aligner_options_const(FuncExpr* mmsearch_fe, const BioseqStubOids& oids)
 apply_aligner_options_override(FuncExpr* mmsearch_fe,
 							   bioseq::simd::active_target::Minimap2Params& params,
 							   bioseq::indexing::IndexReadRequirement& index_read_requirement,
-							   const BioseqStubOids& oids)
+							   const BioseqStubOids& oids,
+							   bool* vulkan_enabled_explicit = nullptr)
 {
+	if (vulkan_enabled_explicit != nullptr) {
+		*vulkan_enabled_explicit = false;
+	}
 	Const* opt_const = require_aligner_options_const(mmsearch_fe, oids);
 	if (opt_const == nullptr) {
 		return false;
@@ -1436,6 +1440,9 @@ apply_aligner_options_override(FuncExpr* mmsearch_fe,
 	 */
 	if (idx < n_attrs && !nulls[idx]) {
 		params.vulkan_enabled = DatumGetBool(values[idx]);
+		if (vulkan_enabled_explicit != nullptr) {
+			*vulkan_enabled_explicit = true;
+		}
 	}
 	++idx;
 	/* DOC0307 Phase B — vulkan_seed_hits_enabled. */
@@ -6376,28 +6383,50 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	bioseq::simd::active_target::Minimap2Params aligner_params = build_params_from_gucs();
 	std::optional<bioseq::indexing::IndexReadRequirement>
 		explicit_index_read_requirement;
+	std::optional<bool> explicit_vulkan_enabled;
 	bioseq::indexing::IndexReadRequirement primary_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
+	bool primary_vulkan_enabled_explicit = false;
 	const bool primary_requirement_explicit = apply_aligner_options_override(
 		primary_mmsearch_fe,
 		aligner_params,
 		primary_requirement,
-		scan_stub_oids);
+		scan_stub_oids,
+		&primary_vulkan_enabled_explicit);
 	finalize_simd_chaining_policy(aligner_params);
 	if (primary_requirement_explicit) {
 		explicit_index_read_requirement = primary_requirement;
+	}
+	if (primary_vulkan_enabled_explicit) {
+		explicit_vulkan_enabled = aligner_params.vulkan_enabled;
 	}
 	for (FuncExpr* extra_fe : extra_mmsearch_fes) {
 		bioseq::simd::active_target::Minimap2Params ignored_extra_params =
 			aligner_params;
 		bioseq::indexing::IndexReadRequirement extra_requirement =
 			bioseq::indexing::IndexReadRequirement::allow;
+		bool extra_vulkan_enabled_explicit = false;
 		const bool extra_requirement_explicit = apply_aligner_options_override(
 			extra_fe,
 			ignored_extra_params,
 			extra_requirement,
-			scan_stub_oids);
+			scan_stub_oids,
+			&extra_vulkan_enabled_explicit);
 		finalize_simd_chaining_policy(ignored_extra_params);
+		if (extra_vulkan_enabled_explicit) {
+			if (explicit_vulkan_enabled.has_value()
+				&& ignored_extra_params.vulkan_enabled
+					!= *explicit_vulkan_enabled) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("stacked mmsearch vulkan_enabled conflicts: explicit values differ"),
+					 errdetail("first_explicit=%s next_explicit=%s",
+						 *explicit_vulkan_enabled ? "true" : "false",
+						 ignored_extra_params.vulkan_enabled
+							 ? "true" : "false")));
+			}
+			explicit_vulkan_enabled = ignored_extra_params.vulkan_enabled;
+		}
 		if (!extra_requirement_explicit) {
 			continue;
 		}
@@ -6417,6 +6446,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 						 extra_requirement).data())));
 		}
 		explicit_index_read_requirement = extra_requirement;
+	}
+	if (explicit_vulkan_enabled.has_value()) {
+		aligner_params.vulkan_enabled = *explicit_vulkan_enabled;
 	}
 	const bioseq::indexing::IndexReadRequirement index_read_requirement =
 		explicit_index_read_requirement.value_or(
@@ -6445,7 +6477,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			|| aligner_params.vulkan_fused_frontend_enabled
 			|| aligner_params.vulkan_gpu_index_build_enabled
 			|| aligner_params.vulkan_extend_enabled;
-		aligner_params.prefilter_backend = existing_vulkan_route
+		const bool standalone_vulkan_prefilter_requested =
+			explicit_vulkan_enabled.value_or(false);
+		aligner_params.prefilter_backend =
+			(existing_vulkan_route || standalone_vulkan_prefilter_requested)
 			? bioseq::prefilter_stats::PrefilterBackendType::VULKAN
 			: (bioseq_enable_vectorization
 				? bioseq::prefilter_stats::PrefilterBackendType::SIMD
@@ -6453,6 +6488,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	}
 	const bool selected_vulkan =
 		bioseq::simd::active_target::pipe::vulkan_components_requested(
+			aligner_params);
+	const bool selected_vulkan_accelerator =
+		bioseq::simd::active_target::pipe::vulkan_accelerator_requested(
 			aligner_params);
 	const bool executable_scan =
 		(eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0;
@@ -6482,12 +6520,15 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	 * executable path retains the fail-closed enablement, cache and device
 	 * checks below. */
 	const bool executable_vulkan =
-		features.has_mmsearch && selected_vulkan && executable_scan;
+		features.has_mmsearch
+		&& selected_vulkan_accelerator
+		&& executable_scan;
 	if (executable_vulkan && !aligner_params.vulkan_enabled) {
 		raise_column_scan_vulkan_error_as_cpp(
 			"selected Vulkan execution requires "
 			"bioseq.aligner.vulkan_enabled=on",
-			"Set bioseq.aligner.vulkan_enabled=on, or select non-Vulkan "
+			"Set bioseq.aligner.vulkan_enabled=on, remove the per-call "
+			"standalone Vulkan prefilter request, or select non-Vulkan "
 			"minimizer/chaining algorithms before dispatch.");
 	}
 	if (executable_vulkan && aligner_params.vulkan_enabled) {
@@ -6500,8 +6541,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				vulkan_runtime.initialization_error());
 			raise_column_scan_vulkan_error_as_cpp(
 				diagnostic,
-				"Install a working Vulkan ICD, or select non-Vulkan "
-				"minimizer/chaining algorithms before dispatch.");
+				"Install a working Vulkan ICD, remove or set false the per-call "
+				"aligner_options(vulkan_enabled) standalone prefilter request, "
+				"or select non-Vulkan minimizer/chaining algorithms before dispatch.");
 		}
 		if (vulkan_runtime.features().software_device) {
 			const std::string diagnostic = fmt::format(
@@ -6512,8 +6554,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				vulkan_runtime.features().device_type);
 			raise_column_scan_vulkan_error_as_cpp(
 				diagnostic,
-				"Use a hardware Vulkan ICD, or select non-Vulkan "
-				"minimizer/chaining algorithms before dispatch.");
+				"Use a hardware Vulkan ICD, remove or set false the per-call "
+				"aligner_options(vulkan_enabled) standalone prefilter request, "
+				"or select non-Vulkan minimizer/chaining algorithms before dispatch.");
 		}
 	}
 

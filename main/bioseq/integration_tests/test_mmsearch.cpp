@@ -243,6 +243,8 @@ void require_gatekeeper_explain_proof(
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
     REQUIRE(plan_contains(plan, "PrefilterStage"));
     REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
     require_explain_property_value(
         plan, "Prefilter Proof Present", "true");
     require_explain_property_value(
@@ -281,6 +283,44 @@ void require_gatekeeper_explain_proof(
         plan, "Prefilter Proof Saturated", "false");
     require_explain_property_value(
         plan, "Prefilter Proof Valid", "true");
+}
+
+void require_gatekeeper_explain_selection(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE(plan_contains(plan, "backend: vulkan"));
+    REQUIRE(plan_contains(
+        plan, "algorithm: batch_resolved_gatekeeper_or_sneaky_snake"));
+    REQUIRE(plan_contains(plan, "max_edits: 4"));
+    REQUIRE(plan_contains(
+        plan, "gatekeeper_auto_domain: length in {32,64}, E in {2,4}"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
+}
+
+void require_cpu_prefilter_explain_selection(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE(plan_contains(plan, "backend: highway_simd"));
+    REQUIRE(plan_contains(plan, "algorithm: sneaky_snake"));
+    REQUIRE_FALSE(plan_contains(plan, "backend: vulkan"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
+}
+
+void require_no_prefilter_explain_selection(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE_FALSE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE_FALSE(find_explain_property(
+        plan, "Prefilter Proof Present").has_value());
+    REQUIRE_FALSE(find_explain_property(
+        plan, "Prefilter Dispatches").has_value());
 }
 
 [[nodiscard]] std::string index_requirement_sql(
@@ -2777,8 +2817,9 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
             seq_row{.pk = 3, .sequences = {std::string{thirteen_edits}}},
         });
 
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
     exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';");
-    exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'vulkan_minimap_int';");
+    exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash';");
     exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
     exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 10;");
 
@@ -2791,7 +2832,6 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
         "WHERE mmsearch(seq0, {}, "
         "      aligner_options(kmer_size => 7, window_size => 1, "
         "                      min_chain_score => 1, best_n => 0, "
-        "                      minimizer_algorithm => 3, "
         "                      vulkan_enabled => true)) "
         "  AND bioseq.edit(seq0) < 5 "
         "ORDER BY pk;",
@@ -2806,7 +2846,6 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
         "  WHERE mmsearch(seq0, {}, "
         "        aligner_options(kmer_size => 7, window_size => 1, "
         "                        min_chain_score => 1, best_n => 0, "
-        "                        minimizer_algorithm => 3, "
         "                        vulkan_enabled => true))"
         ") "
         "SELECT pk, ed, qs, cigar "
@@ -2814,13 +2853,74 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
         kGatekeeperEdits,
         query_literal);
 
+    const std::string implicit_vulkan_capability_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0) FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "                      min_chain_score => 1, best_n => 0)) "
+        "  AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+    const std::string explicit_false_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0) FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "                      min_chain_score => 1, best_n => 0, "
+        "                      vulkan_enabled => false)) "
+        "  AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+    const auto selected_plan = explain_text<false>(ctx, active_sql);
+    require_gatekeeper_explain_selection(selected_plan);
+    require_cpu_prefilter_explain_selection(
+        explain_text<false>(ctx, implicit_vulkan_capability_sql));
+    require_cpu_prefilter_explain_selection(
+        explain_text<false>(ctx, explicit_false_sql));
+    require_no_prefilter_explain_selection(
+        explain_text<false>(ctx, baseline_sql));
+
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+    const std::array<std::string, 2u> stacked_explicit_sqls{
+        fmt::format(
+            "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
+            "mmsearch(seq0, {}, aligner_options(vulkan_enabled => true)) "
+            "AND mmsearch(seq0, {}, aligner_options()) "
+            "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+            kGatekeeperEdits, query_literal, query_literal),
+        fmt::format(
+            "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
+            "mmsearch(seq0, {}, aligner_options()) "
+            "AND mmsearch(seq0, {}, aligner_options(vulkan_enabled => true)) "
+            "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+            kGatekeeperEdits, query_literal, query_literal),
+    };
+    for (const auto& stacked_sql : stacked_explicit_sqls) {
+        require_gatekeeper_explain_selection(
+            explain_text<false>(ctx, stacked_sql));
+    }
+    const auto conflicting_vulkan_options = sql_error(ctx, fmt::format(
+        "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
+        "mmsearch(seq0, {}, aligner_options(vulkan_enabled => true)) "
+        "AND mmsearch(seq0, {}, aligner_options(vulkan_enabled => false)) "
+        "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+        kGatekeeperEdits, query_literal, query_literal));
+    REQUIRE(conflicting_vulkan_options.sqlstate == "22023");
+    REQUIRE(conflicting_vulkan_options.contains("vulkan_enabled conflicts"));
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
+
     if (selected_vulkan_runtime_untrusted(ctx)) {
-        exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
         const auto error = sql_error(ctx, active_sql);
         REQUIRE(error.sqlstate == "XX000");
         REQUIRE(error.contains("Vulkan aligner execution failed"));
+        REQUIRE((
+            error.contains("requires a usable Vulkan runtime")
+            || error.contains("requires a hardware GPU")));
+        REQUIRE_FALSE(error.contains("complete-tuple admission"));
         REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
-        return;
+        SKIP("hardware Vulkan SQL execution is unavailable; route-selection "
+             "and fail-closed detail were verified");
     }
 
     rowset_t reference_active;
@@ -2840,14 +2940,7 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
         require_gatekeeper_edit_rows(baseline_rows);
         REQUIRE(active_rows == baseline_rows);
         const auto baseline_plan = explain_text<true>(ctx, baseline_sql);
-        REQUIRE(plan_contains(baseline_plan, "Custom Scan (BioseqScan)"));
-        REQUIRE_FALSE(plan_contains(baseline_plan, "PrefilterStage"));
-        REQUIRE_FALSE(plan_contains(
-            baseline_plan, "Rank edit-distance prefilter"));
-        REQUIRE_FALSE(find_explain_property(
-            baseline_plan, "Prefilter Proof Present").has_value());
-        REQUIRE_FALSE(find_explain_property(
-            baseline_plan, "Prefilter Dispatches").has_value());
+        require_no_prefilter_explain_selection(baseline_plan);
 
         if (!reference_recorded) {
             reference_active = active_rows;
