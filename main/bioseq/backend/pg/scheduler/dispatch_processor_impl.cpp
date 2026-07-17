@@ -2933,7 +2933,10 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 
 		std::optional<MinimizerGenerationWireError> callback_error;
 		std::exception_ptr callback_exception;
-		const auto accept = [&](const bioseq::indexing::
+		const auto accept = [
+				&callback_error,
+				&callback_exception,
+				&shape_reader](const bioseq::indexing::
 				ValidatedMinimizerGenerationRowReceipt& receipt) noexcept {
 			if (callback_error || callback_exception) return;
 			try {
