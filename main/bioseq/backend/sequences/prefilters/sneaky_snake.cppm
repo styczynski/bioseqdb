@@ -20,61 +20,22 @@ module;
 #include <cstring>
 #include <limits>
 #include <span>
-#include <type_traits>
 #include <vector>
 
 export module bioseq.sequences.prefilters.sneaky_snake;
+
+export import bioseq.sequences.prefilters.prefilter_types;
 
 export {
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
 namespace hn = hwy::HWY_NAMESPACE;
+namespace prefilters = bioseq::sequences::prefilters;
 
 /// Production maze geometry shared by the CPU and Vulkan implementations.
 inline constexpr std::uint32_t sneaky_snake_default_submaze_width = 512u;
 inline constexpr std::uint32_t sneaky_snake_default_max_escape_segments = 512u;
-
-/// Stable wire ordinals shared with the Vulkan result buffer.
-enum class SneakySnakeStatus : std::uint32_t {
-    success = 0u,
-    conservative_unequal = 1u,
-    unsupported_conservative = 2u,
-};
-
-/// Stable CPU/GPU job ABI. Offsets address the corresponding flat rank buffer.
-struct SneakySnakeJob {
-    std::uint32_t query_offset = 0u;
-    std::uint32_t target_offset = 0u;
-    std::uint32_t query_length = 0u;
-    std::uint32_t target_length = 0u;
-    std::uint32_t max_edits = 0u;
-};
-
-/// Stable CPU/GPU result ABI. accepted is encoded as 0 or 1.
-struct SneakySnakeResult {
-    std::uint32_t lower_bound = 0u;
-    std::uint32_t status = static_cast<std::uint32_t>(
-        SneakySnakeStatus::success);
-    std::uint32_t accepted = 1u;
-    std::uint32_t reserved = 0u;
-};
-
-static_assert(std::is_standard_layout_v<SneakySnakeJob>);
-static_assert(std::is_trivially_copyable_v<SneakySnakeJob>);
-static_assert(sizeof(SneakySnakeJob) == 5u * sizeof(std::uint32_t));
-static_assert(offsetof(SneakySnakeJob, query_offset) == 0u);
-static_assert(offsetof(SneakySnakeJob, target_offset) == 4u);
-static_assert(offsetof(SneakySnakeJob, query_length) == 8u);
-static_assert(offsetof(SneakySnakeJob, target_length) == 12u);
-static_assert(offsetof(SneakySnakeJob, max_edits) == 16u);
-static_assert(std::is_standard_layout_v<SneakySnakeResult>);
-static_assert(std::is_trivially_copyable_v<SneakySnakeResult>);
-static_assert(sizeof(SneakySnakeResult) == 4u * sizeof(std::uint32_t));
-static_assert(offsetof(SneakySnakeResult, lower_bound) == 0u);
-static_assert(offsetof(SneakySnakeResult, status) == 4u);
-static_assert(offsetof(SneakySnakeResult, accepted) == 8u);
-static_assert(offsetof(SneakySnakeResult, reserved) == 12u);
 
 struct SneakySnakeOptions {
     /// A zero value selects sneaky_snake_default_submaze_width.
@@ -83,38 +44,14 @@ struct SneakySnakeOptions {
     std::uint32_t max_escape_segments = 0u;
 };
 
-struct SneakySnakeBatchInput {
-    std::span<const std::uint8_t> query_ranks{};
-    std::span<const std::uint8_t> target_ranks{};
-    std::span<const SneakySnakeJob> jobs{};
-};
-
-[[nodiscard]] constexpr bool sneaky_snake_evaluated(
-    const SneakySnakeResult& result) noexcept
-{
-    return result.status
-        == static_cast<std::uint32_t>(SneakySnakeStatus::success);
-}
-
-[[nodiscard]] constexpr bool sneaky_snake_accepted(
-    const SneakySnakeResult& result) noexcept
-{
-    return result.accepted != 0u;
-}
-
 namespace sneaky_snake_detail {
 
-[[nodiscard]] constexpr SneakySnakeResult make_result(
+[[nodiscard]] constexpr prefilters::PrefilterResult make_result(
     std::uint32_t lower_bound,
-    SneakySnakeStatus status,
+    prefilters::PrefilterStatus status,
     bool accepted) noexcept
 {
-    return SneakySnakeResult{
-        .lower_bound = lower_bound,
-        .status = static_cast<std::uint32_t>(status),
-        .accepted = accepted ? 1u : 0u,
-        .reserved = 0u,
-    };
+    return prefilters::make_prefilter_result(lower_bound, status, accepted);
 }
 
 [[nodiscard]] constexpr std::uint32_t effective_width(
@@ -132,17 +69,6 @@ namespace sneaky_snake_detail {
     return options.max_escape_segments == 0u
         ? width
         : options.max_escape_segments;
-}
-
-[[nodiscard]] inline bool slice_is_in_bounds(
-    std::span<const std::uint8_t> ranks,
-    std::uint32_t offset,
-    std::uint32_t length) noexcept
-{
-    const std::size_t offset_size = static_cast<std::size_t>(offset);
-    const std::size_t length_size = static_cast<std::size_t>(length);
-    return offset_size <= ranks.size()
-        && length_size <= ranks.size() - offset_size;
 }
 
 [[nodiscard]] inline std::uint32_t diagonal_run_scalar(
@@ -422,7 +348,7 @@ template <CpuTraversal traversal, class D>
 }
 
 template <CpuTraversal traversal, class D>
-[[nodiscard]] inline SneakySnakeResult equal_length_for(
+[[nodiscard]] inline prefilters::PrefilterResult equal_length_for(
     D d,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
@@ -431,7 +357,7 @@ template <CpuTraversal traversal, class D>
 {
     const std::uint32_t length = static_cast<std::uint32_t>(query.size());
     if (length == 0u) {
-        return make_result(0u, SneakySnakeStatus::success, true);
+        return make_result(0u, prefilters::PrefilterStatus::success, true);
     }
 
     const std::uint32_t width = effective_width(options);
@@ -459,7 +385,7 @@ template <CpuTraversal traversal, class D>
             if (lower_bound > max_edits) {
                 return make_result(
                     lower_bound,
-                    SneakySnakeStatus::success,
+                    prefilters::PrefilterStatus::success,
                     false);
             }
             position += best + 1u;
@@ -469,13 +395,13 @@ template <CpuTraversal traversal, class D>
 
     return make_result(
         lower_bound,
-        SneakySnakeStatus::success,
+        prefilters::PrefilterStatus::success,
         lower_bound <= max_edits);
 }
 
 /// Evaluate one already-size-checked rank pair without repeating span limits.
 template <CpuTraversal traversal, class D>
-[[nodiscard]] inline SneakySnakeResult bounded_for(
+[[nodiscard]] inline prefilters::PrefilterResult bounded_for(
     D d,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
@@ -490,7 +416,7 @@ template <CpuTraversal traversal, class D>
             : target_length - query_length;
         return make_result(
             difference,
-            SneakySnakeStatus::conservative_unequal,
+            prefilters::PrefilterStatus::conservative_unequal,
             difference <= max_edits);
     }
 
@@ -499,7 +425,7 @@ template <CpuTraversal traversal, class D>
 }
 
 /// Scalar traversal wrapper used by both public scalar entry points.
-[[nodiscard]] inline SneakySnakeResult bounded_scalar(
+[[nodiscard]] inline prefilters::PrefilterResult bounded_scalar(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -511,18 +437,8 @@ template <CpuTraversal traversal, class D>
 
 } // namespace sneaky_snake_detail
 
-[[nodiscard]] inline bool sneaky_snake_job_in_bounds(
-    const SneakySnakeBatchInput& input,
-    const SneakySnakeJob& job) noexcept
-{
-    return sneaky_snake_detail::slice_is_in_bounds(
-               input.query_ranks, job.query_offset, job.query_length)
-        && sneaky_snake_detail::slice_is_in_bounds(
-               input.target_ranks, job.target_offset, job.target_length);
-}
-
 /// Scalar single-job entry point over rank spans.
-[[nodiscard]] inline SneakySnakeResult sneaky_snake_scalar(
+[[nodiscard]] inline prefilters::PrefilterResult sneaky_snake_scalar(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -531,7 +447,7 @@ template <CpuTraversal traversal, class D>
     constexpr std::size_t max_u32 = (std::numeric_limits<std::uint32_t>::max)();
     if (query.size() > max_u32 || target.size() > max_u32) {
         return sneaky_snake_detail::make_result(
-            0u, SneakySnakeStatus::unsupported_conservative, true);
+            0u, prefilters::PrefilterStatus::unsupported_conservative, true);
     }
 
     return sneaky_snake_detail::bounded_scalar(
@@ -539,16 +455,16 @@ template <CpuTraversal traversal, class D>
 }
 
 /// Scalar reference batch implementation over flat uint8 rank buffers.
-[[nodiscard]] inline std::vector<SneakySnakeResult> sneaky_snake_scalar_batch(
-    const SneakySnakeBatchInput& input,
+[[nodiscard]] inline std::vector<prefilters::PrefilterResult> sneaky_snake_scalar_batch(
+    const prefilters::PrefilterBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    std::vector<SneakySnakeResult> results(input.jobs.size());
+    std::vector<prefilters::PrefilterResult> results(input.jobs.size());
     for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        const SneakySnakeJob& job = input.jobs[index];
-        if (!sneaky_snake_job_in_bounds(input, job)) {
+        const prefilters::PrefilterJob& job = input.jobs[index];
+        if (!prefilters::prefilter_job_in_bounds(input, job)) {
             results[index] = sneaky_snake_detail::make_result(
-                0u, SneakySnakeStatus::unsupported_conservative, true);
+                0u, prefilters::PrefilterStatus::unsupported_conservative, true);
             continue;
         }
         results[index] = sneaky_snake_detail::bounded_scalar(
@@ -562,18 +478,18 @@ template <CpuTraversal traversal, class D>
 
 /// Highway batch implementation with contiguous byte-vector scans per job.
 template <class D>
-[[nodiscard]] inline std::vector<SneakySnakeResult>
+[[nodiscard]] inline std::vector<prefilters::PrefilterResult>
 sneaky_snake_simd_batch_for(
     D d,
-    const SneakySnakeBatchInput& input,
+    const prefilters::PrefilterBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    std::vector<SneakySnakeResult> results(input.jobs.size());
+    std::vector<prefilters::PrefilterResult> results(input.jobs.size());
     for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
-        const SneakySnakeJob& job = input.jobs[index];
-        if (!sneaky_snake_job_in_bounds(input, job)) {
+        const prefilters::PrefilterJob& job = input.jobs[index];
+        if (!prefilters::prefilter_job_in_bounds(input, job)) {
             results[index] = sneaky_snake_detail::make_result(
-                0u, SneakySnakeStatus::unsupported_conservative, true);
+                0u, prefilters::PrefilterStatus::unsupported_conservative, true);
             continue;
         }
         results[index] = sneaky_snake_detail::bounded_for<
@@ -590,8 +506,8 @@ sneaky_snake_simd_batch_for(
 }
 
 /// Active-target Highway entry point used by the pipeline and benchmarks.
-[[nodiscard]] inline std::vector<SneakySnakeResult> sneaky_snake_simd_batch(
-    const SneakySnakeBatchInput& input,
+[[nodiscard]] inline std::vector<prefilters::PrefilterResult> sneaky_snake_simd_batch(
+    const prefilters::PrefilterBatchInput& input,
     SneakySnakeOptions options = {})
 {
     const hn::ScalableTag<std::uint8_t> d;

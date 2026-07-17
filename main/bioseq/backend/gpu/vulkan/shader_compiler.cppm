@@ -110,6 +110,9 @@ enum class ShaderKind : std::uint8_t {
     // Rank-buffer SneakySnake prefilter. Appended to preserve every existing
     // ShaderKind cache ordinal.
     sneaky_snake_rank_batch,
+    // Rank-buffer GateKeeper threshold prefilter. Appended to preserve every
+    // established ShaderKind cache ordinal.
+    gatekeeper_rank_batch,
 };
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
@@ -242,7 +245,8 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return DescriptorLayoutKind::seq_sort;
         case ShaderKind::align_extend_banded_affine:  return DescriptorLayoutKind::align_extension;
         case ShaderKind::align_extend_simple_cigar:   return DescriptorLayoutKind::align_extension_cigar;
-        case ShaderKind::sneaky_snake_rank_batch:     return DescriptorLayoutKind::align_extension;
+        case ShaderKind::sneaky_snake_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch:       return DescriptorLayoutKind::align_extension;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -313,7 +317,8 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return 40;  // SeqSortPush (10 × u32)
         case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
         case ShaderKind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
-        case ShaderKind::sneaky_snake_rank_batch:     return 8;   // GpuSneakySnakePush
+        case ShaderKind::sneaky_snake_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch:       return 16;  // GpuPrefilterPush
     }
     return 0;
 }
@@ -5282,21 +5287,18 @@ void main() {
 }
 )GLSL";
 
-/// Rank-buffer SneakySnake lower-bound filter. A uniform push-constant mode
-/// keeps low-edit batches on independent scalar invocations and assigns high-
-/// edit batches to fixed eight-lane logical teams. Equal-length inputs use
-/// bounded MAX_SPAN-symbol submazes; unequal and unsupported shapes remain
-/// conservative. Team-mode barriers are uniform and the implementation has no
-/// subgroup-size assumption or atomics.
-constexpr std::string_view kSneakySnakeRankBatchBody = R"GLSL(
+/// Shared rank-prefilter GLSL ABI. Both algorithms consume byte-rank streams,
+/// the canonical 20-byte job/16-byte result records, and the same bounds-aware
+/// 16-byte push block. Every load helper checks the exact logical byte count;
+/// algorithm bodies still reject a malformed job before making any load.
+constexpr std::string_view kRankPrefilterPreamble = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
-const uint MAX_SUPPORTED_EDITS = 31u;
 const uint STATUS_OK = 0u;
 const uint STATUS_LENGTH_DIFFERENCE_ONLY = 1u;
 const uint STATUS_UNSUPPORTED = 2u;
 
-struct SneakySnakeJob {
+struct PrefilterJob {
     uint query_offset;
     uint target_offset;
     uint query_length;
@@ -5304,7 +5306,7 @@ struct SneakySnakeJob {
     uint max_edits;
 };
 
-struct SneakySnakeResult {
+struct PrefilterResult {
     uint lower_bound;
     uint status;
     uint accepted;
@@ -5318,39 +5320,47 @@ layout(std430, set = 0, binding = 1) readonly buffer TargetRanks {
     uint target_rank_words[];
 };
 layout(std430, set = 0, binding = 2) readonly buffer Jobs {
-    SneakySnakeJob jobs[];
+    PrefilterJob jobs[];
 };
 layout(std430, set = 0, binding = 3) buffer Results {
-    SneakySnakeResult results[];
+    PrefilterResult results[];
 };
 
 layout(push_constant) uniform Params {
     uint job_count;
-    uint team_size;
+    uint mode;
+    uint query_rank_count;
+    uint target_rank_count;
 } pc;
 
-const uint TEAM_SIZE = 8u;
-const uint TEAM_COUNT = LOCAL_SIZE_X / TEAM_SIZE;
-shared SneakySnakeJob sh_job[TEAM_COUNT];
-shared uint sh_position[TEAM_COUNT];
-shared uint sh_submaze_end[TEAM_COUNT];
-shared uint sh_escape_round[TEAM_COUNT];
-shared uint sh_lower_bound[TEAM_COUNT];
-shared uint sh_active[TEAM_COUNT];
-shared uint sh_lane_best[LOCAL_SIZE_X];
-shared uint sh_any_active;
+bool rank_slice_is_in_bounds(uint offset, uint length, uint rank_count) {
+    return offset <= rank_count && length <= rank_count - offset;
+}
+
+bool prefilter_job_is_in_bounds(PrefilterJob job) {
+    return rank_slice_is_in_bounds(
+               job.query_offset, job.query_length, pc.query_rank_count)
+        && rank_slice_is_in_bounds(
+               job.target_offset, job.target_length, pc.target_rank_count);
+}
 
 uint query_rank(uint rank_index) {
+    if (rank_index >= pc.query_rank_count) return 0u;
     uint word = query_rank_words[rank_index >> 2u];
     return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
 }
 
 uint target_rank(uint rank_index) {
+    if (rank_index >= pc.target_rank_count) return 0u;
     uint word = target_rank_words[rank_index >> 2u];
     return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
 }
 
 uint query_rank_quad(uint rank_index) {
+    if (rank_index > pc.query_rank_count
+        || 4u > pc.query_rank_count - rank_index) {
+        return 0u;
+    }
     uint word_index = rank_index >> 2u;
     uint bit_offset = (rank_index & 3u) << 3u;
     uint word = query_rank_words[word_index] >> bit_offset;
@@ -5360,8 +5370,55 @@ uint query_rank_quad(uint rank_index) {
     return word;
 }
 
+uint target_rank_quad(uint rank_index) {
+    if (rank_index > pc.target_rank_count
+        || 4u > pc.target_rank_count - rank_index) {
+        return 0u;
+    }
+    uint word_index = rank_index >> 2u;
+    uint bit_offset = (rank_index & 3u) << 3u;
+    uint word = target_rank_words[word_index] >> bit_offset;
+    if (bit_offset != 0u) {
+        word |= target_rank_words[word_index + 1u] << (32u - bit_offset);
+    }
+    return word;
+}
+
+void write_prefilter_result(
+    uint job_index,
+    uint lower_bound,
+    uint status,
+    bool accepted,
+    uint diagnostic)
+{
+    results[job_index].lower_bound = lower_bound;
+    results[job_index].status = status;
+    results[job_index].accepted = accepted ? 1u : 0u;
+    results[job_index].reserved = diagnostic;
+}
+)GLSL";
+
+/// Rank-buffer SneakySnake lower-bound filter. A uniform push-constant mode
+/// keeps low-edit batches on independent scalar invocations and assigns high-
+/// edit batches to fixed eight-lane logical teams. Equal-length inputs use
+/// bounded MAX_SPAN-symbol submazes; unequal and unsupported shapes remain
+/// conservative. Team-mode barriers are uniform and the implementation has no
+/// subgroup-size assumption or atomics.
+constexpr std::string_view kSneakySnakeRankBatchBody = R"GLSL(
+const uint MAX_SUPPORTED_EDITS = 31u;
+const uint TEAM_SIZE = 8u;
+const uint TEAM_COUNT = LOCAL_SIZE_X / TEAM_SIZE;
+shared PrefilterJob sh_job[TEAM_COUNT];
+shared uint sh_position[TEAM_COUNT];
+shared uint sh_submaze_end[TEAM_COUNT];
+shared uint sh_escape_round[TEAM_COUNT];
+shared uint sh_lower_bound[TEAM_COUNT];
+shared uint sh_active[TEAM_COUNT];
+shared uint sh_lane_best[LOCAL_SIZE_X];
+shared uint sh_any_active;
+
 uint matching_run(
-    SneakySnakeJob job,
+    PrefilterJob job,
     uint position,
     uint submaze_end,
     uint query_cursor)
@@ -5404,15 +5461,14 @@ void write_result(
     uint status,
     bool accepted)
 {
-    results[job_index].lower_bound = lower_bound;
-    results[job_index].status = status;
-    results[job_index].accepted = accepted ? 1u : 0u;
-    results[job_index].reserved = 0u;
+    write_prefilter_result(
+        job_index, lower_bound, status, accepted, 0u);
 }
 
 void solve_job_scalar(uint job_index) {
-    SneakySnakeJob job = jobs[job_index];
-    if (job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
+    PrefilterJob job = jobs[job_index];
+    if (!prefilter_job_is_in_bounds(job)
+        || job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
         write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
         return;
     }
@@ -5486,7 +5542,7 @@ void solve_job_scalar(uint job_index) {
 }
 
 void main() {
-    if (pc.team_size != TEAM_SIZE) {
+    if (pc.mode != TEAM_SIZE) {
         uint64_t stride = uint64_t(gl_NumWorkGroups.x)
             * uint64_t(gl_WorkGroupSize.x);
         if (stride == uint64_t(0)) return;
@@ -5516,9 +5572,11 @@ void main() {
         if (team_lane == 0u) {
             sh_active[team] = 0u;
             if (team_has_job) {
-                SneakySnakeJob job = jobs[job_index];
+                PrefilterJob job = jobs[job_index];
                 sh_job[team] = job;
-                if (job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
+                if (!prefilter_job_is_in_bounds(job)
+                    || job.max_edits > MAX_SUPPORTED_EDITS
+                    || MAX_SPAN == 0) {
                     write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
                 } else if (job.query_length != job.target_length) {
                     uint length_difference = job.query_length > job.target_length
@@ -5555,7 +5613,7 @@ void main() {
 
             uint local_best = 0u;
             if (sh_active[team] != 0u) {
-                SneakySnakeJob job = sh_job[team];
+                PrefilterJob job = sh_job[team];
                 uint position = sh_position[team];
                 uint submaze_end = sh_submaze_end[team];
                 uint diagonal_count = 2u * job.max_edits + 1u;
@@ -5604,7 +5662,7 @@ void main() {
                         sh_lane_best[first_lane + offset]);
                 }
 
-                SneakySnakeJob job = sh_job[team];
+                PrefilterJob job = sh_job[team];
                 uint position = sh_position[team];
                 uint submaze_end = sh_submaze_end[team];
                 uint remaining_in_submaze = submaze_end - position;
@@ -5645,6 +5703,306 @@ void main() {
             }
             barrier();
         }
+    }
+}
+)GLSL";
+
+/// Clean-room GateKeeper threshold filter over caller-normalised rank bytes.
+/// One invocation owns one job. Mismatch masks stream through four uint words;
+/// a mask rejection is authoritative only after the exact fixed-band guard.
+constexpr std::string_view kGatekeeperRankBatchBody = R"GLSL(
+const uint MAX_GATEKEEPER_LENGTH = 128u;
+const uint MAX_GATEKEEPER_EDITS = 8u;
+const uint MASK_REJECTION_CANDIDATE_MASK = 0x00010000u;
+const uint EXACT_GUARD_ACTIVATED_MASK = 0x00020000u;
+const uint GUARD_CONFIRMED_REJECTION_MASK = 0x00040000u;
+const uint HAMMING_EXACT_REJECTION_MASK = 0x00080000u;
+
+uint packed_byte_mismatch_bits(uint difference) {
+    uint mismatch_bits = 0u;
+    for (uint byte_index = 0u; byte_index < 4u; ++byte_index) {
+        uint byte_value = (difference >> (byte_index * 8u)) & 0xffu;
+        if (byte_value != 0u) mismatch_bits |= 1u << byte_index;
+    }
+    return mismatch_bits;
+}
+
+void set_mask_bit(inout uvec4 mask, uint position) {
+    mask[position >> 5u] |= 1u << (position & 31u);
+}
+
+void append_mismatch_quad(
+    inout uvec4 mask,
+    uint output_position,
+    uint mismatch_bits)
+{
+    uint word_index = output_position >> 5u;
+    uint word_shift = output_position & 31u;
+    mask[word_index] |= mismatch_bits << word_shift;
+    if (word_shift > 28u && word_index + 1u < 4u) {
+        mask[word_index + 1u] |= mismatch_bits >> (32u - word_shift);
+    }
+}
+
+uvec4 mismatch_mask_segment(
+    PrefilterJob job,
+    uint query_relative,
+    uint target_relative,
+    uint count,
+    uint output_position)
+{
+    uvec4 mask = uvec4(0u);
+    uint position = 0u;
+    while (count - position >= 4u) {
+        uint query_word = query_rank_quad(
+            job.query_offset + query_relative + position);
+        uint target_word = target_rank_quad(
+            job.target_offset + target_relative + position);
+        append_mismatch_quad(
+            mask,
+            output_position + position,
+            packed_byte_mismatch_bits(query_word ^ target_word));
+        position += 4u;
+    }
+    while (position < count) {
+        if (query_rank(job.query_offset + query_relative + position)
+            != target_rank(job.target_offset + target_relative + position)) {
+            set_mask_bit(mask, output_position + position);
+        }
+        ++position;
+    }
+    return mask;
+}
+
+uvec4 valid_mask(uint length) {
+    uvec4 mask = uvec4(0u);
+    uint full_words = length >> 5u;
+    uint tail_bits = length & 31u;
+    for (uint word_index = 0u; word_index < 4u; ++word_index) {
+        if (word_index < full_words) {
+            mask[word_index] = 0xffffffffu;
+        } else if (word_index == full_words && tail_bits != 0u) {
+            mask[word_index] = (1u << tail_bits) - 1u;
+        }
+    }
+    return mask;
+}
+
+uvec4 mask_shift_left(uvec4 value, uint shift) {
+    uvec4 shifted = uvec4(0u);
+    for (uint word_index = 0u; word_index < 4u; ++word_index) {
+        shifted[word_index] = value[word_index] << shift;
+        if (word_index != 0u) {
+            shifted[word_index] |= value[word_index - 1u] >> (32u - shift);
+        }
+    }
+    return shifted;
+}
+
+uvec4 mask_shift_right(uvec4 value, uint shift) {
+    uvec4 shifted = uvec4(0u);
+    for (uint word_index = 0u; word_index < 4u; ++word_index) {
+        shifted[word_index] = value[word_index] >> shift;
+        if (word_index + 1u < 4u) {
+            shifted[word_index] |= value[word_index + 1u] << (32u - shift);
+        }
+    }
+    return shifted;
+}
+
+uvec4 amend_internal_short_zero_runs(uvec4 mismatch, uint length) {
+    uvec4 left_one = mask_shift_left(mismatch, 1u);
+    uvec4 right_one = mask_shift_right(mismatch, 1u);
+    uvec4 right_two = mask_shift_right(mismatch, 2u);
+    uvec4 single = (~mismatch) & left_one & right_one;
+    uvec4 pair_start = (~mismatch) & (~right_one) & left_one & right_two;
+    return (mismatch | single | pair_start
+            | mask_shift_left(pair_start, 1u))
+        & valid_mask(length);
+}
+
+uint mask_popcount(uvec4 mask) {
+    return uint(bitCount(mask.x) + bitCount(mask.y)
+        + bitCount(mask.z) + bitCount(mask.w));
+}
+
+uint nibble_cost(uint nibble) {
+    if (nibble == 0u) return 0u;
+    if (nibble == 0x5u || nibble == 0x6u || nibble == 0x9u
+        || nibble == 0xau || nibble == 0xbu || nibble == 0xdu) {
+        return 2u;
+    }
+    return 1u;
+}
+
+uint capped_mask_estimate(uvec4 mask, uint length, uint max_edits) {
+    uint estimate = 0u;
+    uint word_count = (length + 31u) >> 5u;
+    for (uint word_index = 0u; word_index < word_count; ++word_index) {
+        uint word = mask[word_index];
+        for (uint nibble_index = 0u; nibble_index < 8u; ++nibble_index) {
+            estimate += nibble_cost((word >> (4u * nibble_index)) & 0xfu);
+            if (estimate > max_edits) return max_edits + 1u;
+        }
+    }
+    return estimate;
+}
+
+uint saturated_increment(uint value, uint cap) {
+    return value >= cap ? cap : value + 1u;
+}
+
+bool exact_edit_distance_is_above_threshold(PrefilterJob job) {
+    uint query_length = job.query_length;
+    uint target_length = job.target_length;
+    uint max_edits = job.max_edits;
+    uint length_difference = query_length > target_length
+        ? query_length - target_length
+        : target_length - query_length;
+    if (length_difference > max_edits) return true;
+    if (max_edits >= max(query_length, target_length)) return false;
+
+    uint cap = max_edits + 1u;
+    uint center = max_edits + 1u;
+    uint width = 2u * max_edits + 3u;
+    uint previous[19];
+    uint current[19];
+    for (uint slot = 0u; slot < 19u; ++slot) previous[slot] = cap;
+    for (uint column = 0u; column <= min(target_length, max_edits);
+         ++column) {
+        previous[center + column] = column;
+    }
+
+    for (uint row = 1u; row <= query_length; ++row) {
+        for (uint slot = 0u; slot < 19u; ++slot) current[slot] = cap;
+        uint column_begin = row > max_edits ? row - max_edits : 0u;
+        uint column_end = min(target_length, row + max_edits);
+        for (uint column = column_begin; column <= column_end; ++column) {
+            int diagonal = int(column) - int(row);
+            uint slot = uint(int(center) + diagonal);
+            if (column == 0u) {
+                current[slot] = min(row, cap);
+            } else {
+                uint deletion = saturated_increment(previous[slot + 1u], cap);
+                uint insertion = saturated_increment(current[slot - 1u], cap);
+                uint substitution = previous[slot];
+                if (query_rank(job.query_offset + row - 1u)
+                    != target_rank(job.target_offset + column - 1u)) {
+                    substitution = saturated_increment(substitution, cap);
+                }
+                current[slot] = min(deletion, min(insertion, substitution));
+            }
+        }
+        for (uint slot = 0u; slot < width; ++slot) {
+            previous[slot] = current[slot];
+        }
+    }
+
+    uint final_slot = uint(
+        int(center) + int(target_length) - int(query_length));
+    return previous[final_slot] > max_edits;
+}
+
+void solve_gatekeeper_job(uint job_index) {
+    PrefilterJob job = jobs[job_index];
+    if (!prefilter_job_is_in_bounds(job)) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+        return;
+    }
+    if (job.query_length != job.target_length) {
+        uint length_difference = job.query_length > job.target_length
+            ? job.query_length - job.target_length
+            : job.target_length - job.query_length;
+        write_prefilter_result(
+            job_index,
+            length_difference,
+            STATUS_LENGTH_DIFFERENCE_ONLY,
+            length_difference <= job.max_edits,
+            0u);
+        return;
+    }
+    if (job.query_length == 0u) {
+        write_prefilter_result(job_index, 0u, STATUS_OK, true, 0u);
+        return;
+    }
+    if (pc.mode != 0u || uint(MAX_SPAN) != MAX_GATEKEEPER_LENGTH
+        || job.query_length > MAX_GATEKEEPER_LENGTH
+        || job.max_edits > MAX_GATEKEEPER_EDITS) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+        return;
+    }
+
+    uint length = job.query_length;
+    uvec4 hamming = mismatch_mask_segment(job, 0u, 0u, length, 0u)
+        & valid_mask(length);
+    uint hamming_distance = mask_popcount(hamming);
+    if (hamming_distance <= job.max_edits) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_OK, true, hamming_distance);
+        return;
+    }
+    if (job.max_edits == 0u) {
+        write_prefilter_result(
+            job_index,
+            1u,
+            STATUS_OK,
+            false,
+            1u | HAMMING_EXACT_REJECTION_MASK);
+        return;
+    }
+
+    uvec4 final_mask = amend_internal_short_zero_runs(hamming, length);
+    for (uint shift = 1u; shift <= job.max_edits; ++shift) {
+        if (shift >= length) break;
+        uint compared_length = length - shift;
+
+        uvec4 shifted_mask = mismatch_mask_segment(
+            job, 0u, shift, compared_length, shift);
+        shifted_mask = amend_internal_short_zero_runs(shifted_mask, length);
+        set_mask_bit(shifted_mask, shift - 1u);
+        final_mask &= shifted_mask;
+
+        shifted_mask = mismatch_mask_segment(
+            job, shift, 0u, compared_length, 0u);
+        shifted_mask = amend_internal_short_zero_runs(shifted_mask, length);
+        set_mask_bit(shifted_mask, length - shift);
+        final_mask &= shifted_mask;
+    }
+    final_mask &= valid_mask(length);
+
+    uint estimate = capped_mask_estimate(
+        final_mask, length, job.max_edits);
+    if (estimate <= job.max_edits) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_OK, true, estimate);
+        return;
+    }
+
+    uint diagnostic = estimate | MASK_REJECTION_CANDIDATE_MASK
+        | EXACT_GUARD_ACTIVATED_MASK;
+    if (exact_edit_distance_is_above_threshold(job)) {
+        write_prefilter_result(
+            job_index,
+            job.max_edits + 1u,
+            STATUS_OK,
+            false,
+            diagnostic | GUARD_CONFIRMED_REJECTION_MASK);
+        return;
+    }
+    write_prefilter_result(
+        job_index, 0u, STATUS_OK, true, diagnostic);
+}
+
+void main() {
+    uint64_t stride = uint64_t(gl_NumWorkGroups.x)
+        * uint64_t(gl_WorkGroupSize.x);
+    if (stride == uint64_t(0)) return;
+    for (uint64_t job_index = uint64_t(gl_GlobalInvocationID.x);
+         job_index < uint64_t(pc.job_count);
+         job_index += stride) {
+        solve_gatekeeper_job(uint(job_index));
     }
 }
 )GLSL";
@@ -7451,6 +7809,17 @@ enum class SeqSortStage : std::uint8_t {
     prefix_check,
 };
 
+/// Compose one rank-prefilter shader from the single bounds-aware wire/load
+/// preamble and its algorithm-specific body.
+[[nodiscard]] std::string rank_prefilter_body(std::string_view algorithm_body)
+{
+    std::string body;
+    body.reserve(kRankPrefilterPreamble.size() + algorithm_body.size());
+    body += kRankPrefilterPreamble;
+    body += algorithm_body;
+    return body;
+}
+
 /// Compose a seq-sort kind's full body from the shared snippets. Order matters:
 /// push -> readers/low_symbol_mask -> canon (defines lpu/unit_bits/canon) ->
 /// key/compare (uses canon) -> stage main.
@@ -7588,7 +7957,9 @@ enum class SeqSortStage : std::uint8_t {
         case ShaderKind::align_extend_simple_cigar:
             return std::string{kAlignmentExtensionSimpleCigarBody};
         case ShaderKind::sneaky_snake_rank_batch:
-            return std::string{kSneakySnakeRankBatchBody};
+            return rank_prefilter_body(kSneakySnakeRankBatchBody);
+        case ShaderKind::gatekeeper_rank_batch:
+            return rank_prefilter_body(kGatekeeperRankBatchBody);
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }
@@ -7742,6 +8113,14 @@ std::vector<std::uint32_t> compile_shader_spirv(const ShaderCompileRequest& requ
         throw ShaderCompileError(fmt::format(
             "compile_shader_spirv: SneakySnake submaze span {} must be 512",
             request.max_span));
+    }
+    if (request.kind == ShaderKind::gatekeeper_rank_batch
+        && (request.tile_size != 384u || request.local_size != 64u
+            || request.max_span != 128u)) {
+        throw ShaderCompileError(fmt::format(
+            "compile_shader_spirv: GateKeeper key ({}, {}, {}) must be "
+            "(384, 64, 128)",
+            request.tile_size, request.local_size, request.max_span));
     }
 
     ensure_glslang_initialized();

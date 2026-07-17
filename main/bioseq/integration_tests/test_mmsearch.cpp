@@ -2602,7 +2602,7 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
     const auto plan = explain_text<true>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
     REQUIRE(plan_contains(plan, "PrefilterStage"));
-    REQUIRE(plan_contains(plan, "SneakySnake edit lower bound"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
     REQUIRE(plan_contains(plan, "max_edits: 9"));
     REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 10"));

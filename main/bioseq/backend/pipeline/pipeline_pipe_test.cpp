@@ -4341,6 +4341,36 @@ using range_t  = compact_sequence_range<dna4_u64>;
 
 }  // namespace doc0307_e2e
 
+TEST_CASE("Prefilter algorithm resolver admits only the measured Vulkan matrix",
+          "[pipe][prefilter][gatekeeper][resolver]") {
+    using bioseq::sequences::prefilters::PrefilterJob;
+    using bioseq::simd::HWY_NAMESPACE::ResolvedPrefilterAlgorithm;
+
+    const std::array<PrefilterJob, 2u> measured{
+        PrefilterJob{.query_length = 32u, .target_length = 32u,
+                     .max_edits = 2u},
+        PrefilterJob{.query_length = 64u, .target_length = 64u,
+                     .max_edits = 4u},
+    };
+    CHECK(resolve_prefilter_algorithm(
+        PrefilterBackendType::VULKAN, measured)
+        == ResolvedPrefilterAlgorithm::gatekeeper);
+    CHECK(resolve_prefilter_algorithm(
+        PrefilterBackendType::SIMD, measured)
+        == ResolvedPrefilterAlgorithm::sneaky_snake);
+
+    auto outside = measured;
+    outside[0].query_length = 48u;
+    outside[0].target_length = 48u;
+    CHECK(resolve_prefilter_algorithm(
+        PrefilterBackendType::VULKAN, outside)
+        == ResolvedPrefilterAlgorithm::sneaky_snake);
+    CHECK(resolve_prefilter_algorithm(
+        PrefilterBackendType::VULKAN,
+        std::span<const PrefilterJob>{})
+        == ResolvedPrefilterAlgorithm::sneaky_snake);
+}
+
 TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable routes",
           "[pipe][sneaky-snake][prefilter][composition]") {
     using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
@@ -4450,9 +4480,11 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
         REQUIRE(observed.size() == 2u);
         CHECK(observed[0].anchor_start == 0);
         CHECK(observed[1].anchor_start == 7);
-        REQUIRE(proof.sneaky_snake_prefilter_execution_proof_present);
-        const auto& route = proof.sneaky_snake_prefilter_execution_proof;
+        REQUIRE(proof.prefilter_execution_proof_present);
+        const auto& route = proof.prefilter_execution_proof;
         CHECK(route.dispatches == 1u);
+        CHECK(route.sneaky_snake_dispatches == 1u);
+        CHECK(route.gatekeeper_dispatches == 0u);
         CHECK(route.scalar_dispatches
               == (backend == PrefilterBackendType::SCALAR ? 1u : 0u));
         CHECK(route.simd_dispatches
@@ -4464,6 +4496,10 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
         CHECK(route.rejected_jobs == 1u);
         CHECK(route.rejected_regions == 2u);
         CHECK(route.surviving_regions == 2u);
+        CHECK(route.mask_rejection_candidates == 0u);
+        CHECK(route.exact_guard_activations == 0u);
+        CHECK(route.guard_confirmed_rejections == 0u);
+        CHECK(route.hamming_exact_rejections == 0u);
         CHECK_FALSE(route.saturated);
     }
 }

@@ -108,8 +108,11 @@ import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.rmq;
 import bioseq.sequences.chaining.vulkan;
 import bioseq.sequences.minimap_port;
+import bioseq.sequences.prefilters.prefilter_types;
 import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.prefilters.sneaky_snake_vulkan;
+import bioseq.sequences.prefilters.gatekeeper;
+import bioseq.sequences.prefilters.gatekeeper_vulkan;
 import bioseq.common.context;
 import bioseq.instr;
 import bioseq.storage.scanner;
@@ -3329,6 +3332,8 @@ export {
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE::pipe {
+
+namespace prefilters = ::bioseq::sequences::prefilters;
 // DOC0279 §9 — bring the relocated index into this namespace so the prior
 // `TargetIndex` spellings resolve to `MinimizerHashmapFragmentIndex`.
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
@@ -6708,8 +6713,29 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>,
     }
 };
 
+[[nodiscard]] inline ResolvedPrefilterAlgorithm resolve_prefilter_algorithm(
+    PrefilterBackendType backend,
+    std::span<const prefilters::PrefilterJob> jobs) noexcept
+{
+    if (backend != PrefilterBackendType::VULKAN) {
+        return ResolvedPrefilterAlgorithm::sneaky_snake;
+    }
+    for (const prefilters::PrefilterJob& job : jobs) {
+        const bool measured_length = job.query_length == job.target_length
+            && (job.query_length == 32u || job.query_length == 64u);
+        const bool measured_threshold =
+            job.max_edits == 2u || job.max_edits == 4u;
+        if (!measured_length || !measured_threshold) {
+            return ResolvedPrefilterAlgorithm::sneaky_snake;
+        }
+    }
+    return jobs.empty()
+        ? ResolvedPrefilterAlgorithm::sneaky_snake
+        : ResolvedPrefilterAlgorithm::gatekeeper;
+}
+
 /**
- * Query-scoped SneakySnake lower-bound gate.  Only mandatory global
+ * Query-scoped rank-prefilter lower-bound gate.  Only mandatory global
  * seed-to-seed fills are evaluated; local left/right extension windows are
  * intentionally excluded.  A region is removed only when the sum of proven
  * per-fill lower bounds exceeds the SQL predicate's maximum edit count.
@@ -6749,12 +6775,12 @@ struct PrefilterStage
         }
 
         static const auto* prefilter_region =
-            bioseq::instr::register_region_static("sneaky_snake_prefilter");
+            bioseq::instr::register_region_static("prefilter");
         auto prefilter_scope = bioseq::instr::region(prefilter_region);
 
         std::vector<std::uint8_t> query_ranks;
         std::vector<std::uint8_t> target_ranks;
-        std::vector<SneakySnakeJob> jobs;
+        std::vector<prefilters::PrefilterJob> jobs;
         std::vector<std::size_t> job_regions;
         const std::uint64_t max_flat_offset =
             (std::numeric_limits<std::uint32_t>::max)();
@@ -6813,7 +6839,7 @@ struct PrefilterStage
                         target_destination,
                         static_cast<std::size_t>(window.target_start),
                         static_cast<std::size_t>(window.target_end));
-                    jobs.push_back(SneakySnakeJob{
+                    jobs.push_back(prefilters::PrefilterJob{
                         .query_offset = query_offset,
                         .target_offset = target_offset,
                         .query_length = static_cast<std::uint32_t>(query_length),
@@ -6831,16 +6857,18 @@ struct PrefilterStage
                 std::span<const Anchor>{anchors.data(), anchors.size()});
         }
 
-        const SneakySnakeBatchInput input{
+        const prefilters::PrefilterBatchInput input{
             .query_ranks = query_ranks,
             .target_ranks = target_ranks,
             .jobs = jobs,
         };
-        std::vector<SneakySnakeResult> results;
+        std::vector<prefilters::PrefilterResult> results;
         const PrefilterBackendType selected = params.prefilter_backend
             == PrefilterBackendType::AUTO
                 ? PrefilterBackendType::SIMD
                 : params.prefilter_backend;
+        const ResolvedPrefilterAlgorithm algorithm =
+            resolve_prefilter_algorithm(selected, jobs);
         switch (selected) {
             case PrefilterBackendType::SCALAR:
                 results = sneaky_snake_scalar_batch(input);
@@ -6850,37 +6878,19 @@ struct PrefilterStage
                 results = sneaky_snake_simd_batch(input);
                 break;
             case PrefilterBackendType::VULKAN: {
-                std::vector<::bioseq::sequences::prefilters::
-                    SneakySnakeVulkanJob> vulkan_jobs;
-                vulkan_jobs.reserve(jobs.size());
-                for (const SneakySnakeJob& job : jobs) {
-                    vulkan_jobs.push_back({
-                        .query_offset = job.query_offset,
-                        .target_offset = job.target_offset,
-                        .query_length = job.query_length,
-                        .target_length = job.target_length,
-                        .max_edits = job.max_edits,
-                    });
-                }
-                const auto vulkan_results =
-                    ::bioseq::sequences::prefilters::
-                        run_sneaky_snake_vulkan_batch(
-                            query_ranks, target_ranks, vulkan_jobs);
-                results.reserve(vulkan_results.size());
-                for (const auto& result : vulkan_results) {
-                    results.push_back(SneakySnakeResult{
-                        .lower_bound = result.lower_bound,
-                        .status = result.status,
-                        .accepted = result.accepted,
-                        .reserved = result.reserved,
-                    });
+                if (algorithm == ResolvedPrefilterAlgorithm::gatekeeper) {
+                    results = prefilters::run_gatekeeper_vulkan_batch(
+                        query_ranks, target_ranks, jobs);
+                } else {
+                    results = prefilters::run_sneaky_snake_vulkan_batch(
+                        query_ranks, target_ranks, jobs);
                 }
                 break;
             }
         }
         if (results.size() != jobs.size()) {
             throw std::runtime_error(
-                "SneakySnake backend returned the wrong result count");
+                "rank prefilter backend returned the wrong result count");
         }
 
         const std::size_t input_region_count = regions.size();
@@ -6888,33 +6898,51 @@ struct PrefilterStage
         std::uint64_t length_difference_jobs = 0u;
         std::uint64_t unsupported_jobs = 0u;
         std::uint64_t rejected_jobs = 0u;
+        std::uint64_t mask_rejection_candidates = 0u;
+        std::uint64_t exact_guard_activations = 0u;
+        std::uint64_t guard_confirmed_rejections = 0u;
+        std::uint64_t hamming_exact_rejections = 0u;
         std::vector<std::uint64_t> lower_bounds(regions.size(), 0u);
         std::vector<bool> keep(regions.size(), true);
         for (std::size_t index = 0; index < results.size(); ++index) {
-            const SneakySnakeResult& result = results[index];
+            const prefilters::PrefilterResult& result = results[index];
             const std::size_t region_index = job_regions[index];
-            switch (static_cast<SneakySnakeStatus>(result.status)) {
-                case SneakySnakeStatus::success:
+            switch (static_cast<prefilters::PrefilterStatus>(result.status)) {
+                case prefilters::PrefilterStatus::success:
                     ++evaluated_jobs;
                     break;
-                case SneakySnakeStatus::conservative_unequal:
+                case prefilters::PrefilterStatus::conservative_unequal:
                     ++length_difference_jobs;
                     break;
-                case SneakySnakeStatus::unsupported_conservative:
+                case prefilters::PrefilterStatus::unsupported_conservative:
                     ++unsupported_jobs;
                     break;
                 default:
                     throw std::runtime_error(
-                        "SneakySnake backend returned an unknown status");
+                        "rank prefilter backend returned an unknown status");
             }
-            if (!sneaky_snake_accepted(result)) ++rejected_jobs;
+            if (algorithm == ResolvedPrefilterAlgorithm::gatekeeper) {
+                mask_rejection_candidates +=
+                    prefilters::gatekeeper_mask_rejection_candidate(result)
+                        ? 1u : 0u;
+                exact_guard_activations +=
+                    prefilters::gatekeeper_exact_guard_activated(result)
+                        ? 1u : 0u;
+                guard_confirmed_rejections +=
+                    prefilters::gatekeeper_guard_confirmed_rejection(result)
+                        ? 1u : 0u;
+                hamming_exact_rejections +=
+                    prefilters::gatekeeper_hamming_exact_rejection(result)
+                        ? 1u : 0u;
+            }
+            if (!prefilters::prefilter_accepted(result)) ++rejected_jobs;
             if (result.status == static_cast<std::uint32_t>(
-                    SneakySnakeStatus::unsupported_conservative)) continue;
+                    prefilters::PrefilterStatus::unsupported_conservative)) continue;
             lower_bounds[region_index] =
                 bioseq::parallelism::saturating_add(
                     lower_bounds[region_index],
                     static_cast<std::uint64_t>(result.lower_bound));
-            if (!sneaky_snake_accepted(result)
+            if (!prefilters::prefilter_accepted(result)
                 || lower_bounds[region_index] > params.prefilter_max_edits) {
                 keep[region_index] = false;
             }
@@ -6930,10 +6958,11 @@ struct PrefilterStage
         }
         if (proof_dst_ == nullptr) {
             throw std::logic_error(
-                "SneakySnake prefilter stage has no execution-proof sink");
+                "rank prefilter stage has no execution-proof sink");
         }
-        SneakySnakePrefilterExecutionProof call_proof{};
+        PrefilterExecutionProof call_proof{};
         call_proof.record_batch(
+            algorithm,
             selected,
             static_cast<std::uint64_t>(jobs.size()),
             evaluated_jobs,
@@ -6941,8 +6970,12 @@ struct PrefilterStage
             unsupported_jobs,
             rejected_jobs,
             static_cast<std::uint64_t>(input_region_count - output_size),
-            static_cast<std::uint64_t>(output_size));
-        proof_dst_->record_sneaky_snake_prefilter_execution_proof(call_proof);
+            static_cast<std::uint64_t>(output_size),
+            mask_rejection_candidates,
+            exact_guard_activations,
+            guard_confirmed_rejections,
+            hamming_exact_rejections);
+        proof_dst_->record_prefilter_execution_proof(call_proof);
         return std::move(token).emit_batch_pair(
             std::span<AlignRegion>{regions.data(), output_size},
             std::span<const Anchor>{anchors.data(), anchors.size()});
@@ -6954,9 +6987,14 @@ struct PrefilterStage
         desc.stage_name = std::string{stage_name};
         if (params.prefilter_enabled) {
             StageAlgorithmDescription algorithm;
-            algorithm.name = "SneakySnake edit lower bound";
+            algorithm.name = "Rank edit-distance prefilter";
             algorithm.parameters.push_back({
                 "backend", std::string{backend_name(params.prefilter_backend)}});
+            algorithm.parameters.push_back({
+                "algorithm",
+                params.prefilter_backend == PrefilterBackendType::VULKAN
+                    ? "batch_resolved_gatekeeper_or_sneaky_snake"
+                    : "sneaky_snake"});
             algorithm.parameters.push_back({
                 "max_edits", std::to_string(params.prefilter_max_edits)});
             algorithm.parameters.push_back({
@@ -6966,6 +7004,8 @@ struct PrefilterStage
                 "domain", "mandatory seed-to-seed global fills"});
             algorithm.computed_properties.push_back({
                 "survivor_check", "exact post-alignment edit distance"});
+            algorithm.computed_properties.push_back({
+                "gatekeeper_auto_domain", "length in {32,64}, E in {2,4}"});
             desc.algorithm = std::move(algorithm);
         }
         return desc;
