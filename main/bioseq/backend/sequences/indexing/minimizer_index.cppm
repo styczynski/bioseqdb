@@ -17,7 +17,9 @@ module;
 #include <vector>
 export module bioseq.indexing.minimizer_index;
 import bioseq.sequences.kmers;     // MinimapSketchData (POD), via the HWY_NAMESPACE using below
+import bioseq.sequences.chaining.utils; // prepared fragment-anchor query view
 import bioseq.storage.size;        // sequence_size_t
+import bioseq.parallelism.memory_admission;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 export namespace bioseq::indexing {
@@ -188,38 +190,47 @@ concept MinimizerLookupIndex = requires (
     { const_index.target_length() }          -> std::convertible_to<bioseq::storage::sequence_size_t>;
 } && (ContiguousMinimizerLookupIndex<T> || SegmentedMinimizerLookupIndex<T>);
 
-/// Probe used only to state the fragment-native seed-stream concept.  A
-/// conforming index invokes the visitor once for each exact
-/// `(packed_target_position, query_minimizer)` hit while retaining every
-/// physical fragment as an independent lookup authority.
-struct FragmentNativeSeedHitVisitorProbe {
-    void operator()(
-            std::uint64_t,
-            const MinimapSketchData&) const noexcept {}
+/// Structural interface for an MPF reader that prepares one query wave into
+/// final chaining anchors.  The concrete request/scratch/batch types remain
+/// owned by the reader module; aliases avoid a circular dependency from this
+/// common concept module back to the hashmap implementation.
+template <typename T>
+concept PreparedFragmentAnchorBatchReader = requires (
+    const T& const_reader,
+    bioseq::parallelism::MemoryAdmissionController& admission,
+    std::span<const typename T::fragment_seed_query_type> queries,
+    typename T::query_wave_scratch_type& scratch,
+    std::int32_t max_occ) {
+    typename T::fragment_seed_query_type;
+    typename T::query_wave_scratch_type;
+    typename T::prepared_fragment_anchor_batch_type;
+    { const_reader.prepare_fragment_anchor_batch(
+        admission, queries, max_occ, scratch) }
+        -> std::same_as<typename T::prepared_fragment_anchor_batch_type>;
 };
 
-/// MPF-native alternative to a target-wide lookup index.  It streams seed
-/// hits directly from independently persisted fragment indexes and therefore
-/// never needs to concatenate postings or construct hash-to-fragment span
-/// tables.  The concrete production reader accepts the canonical
-/// MinimapSketchData query representation used by the persisted CPU lane.
+/// Per-query borrowed view produced by `PreparedFragmentAnchorBatchReader`.
+/// Anchors are already in the final canonical order and remain owned by the
+/// wave batch, so the pipeline must neither copy nor globally re-sort them.
 template <typename T>
-concept FragmentNativeMinimizerSeedIndex = requires (
+concept PreparedFragmentAnchorQueryIndex = requires (
     const T& const_index,
     std::span<const MinimapSketchData> query_minimizers,
+    bioseq::storage::sequence_size_t query_length,
     std::int32_t max_occ,
-    FragmentNativeSeedHitVisitorProbe visitor) {
+    std::int32_t kmer_size) {
     { const_index.target_length() }
         -> std::convertible_to<bioseq::storage::sequence_size_t>;
-    { const_index.for_each_fragment_seed_hit(
-        query_minimizers, max_occ, visitor) } -> std::same_as<void>;
+    { const_index.ordered_fragment_seed_anchors(
+        query_minimizers, query_length, max_occ, kmer_size) }
+        -> std::same_as<std::span<const bioseq::chaining::Anchor>>;
 };
 
 /// Any target index shape accepted by the seed stage: either ordinary
-/// per-hash lookup or direct fragment-native hit streaming.
+/// per-hash lookup or a prepared fragment-anchor query view.
 template <typename T>
 concept MinimizerSeedIndex =
-    MinimizerLookupIndex<T> || FragmentNativeMinimizerSeedIndex<T>;
+    MinimizerLookupIndex<T> || PreparedFragmentAnchorQueryIndex<T>;
 
 /// Zero-copy adapter used by seed consumers for both lookup shapes.
 template <MinimizerLookupIndex T>

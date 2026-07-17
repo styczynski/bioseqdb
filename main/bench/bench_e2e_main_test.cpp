@@ -110,13 +110,97 @@ namespace {
     };
 }
 
+inline constexpr auto kFragmentNativeFlatMetricFields =
+    std::to_array<std::pair<
+        std::string_view, std::int64_t E2eOutput::*>>({
+        {"fragment_native_waves", &E2eOutput::fragment_native_waves},
+        {"fragment_native_queries", &E2eOutput::fragment_native_queries},
+        {"fragment_native_occurrence_fill_ns",
+            &E2eOutput::fragment_native_occurrence_fill_ns},
+        {"fragment_native_occurrence_radix_ns",
+            &E2eOutput::fragment_native_occurrence_radix_ns},
+        {"fragment_native_unique_plan_build_ns",
+            &E2eOutput::fragment_native_unique_plan_build_ns},
+        {"fragment_native_query_plan_radix_fill_ns",
+            &E2eOutput::fragment_native_query_plan_radix_fill_ns},
+        {"fragment_native_control_count_pass_ns",
+            &E2eOutput::fragment_native_control_count_pass_ns},
+        {"fragment_native_rejected_control_validation_ns",
+            &E2eOutput::fragment_native_rejected_control_validation_ns},
+        {"fragment_native_orientation_layout_ns",
+            &E2eOutput::fragment_native_orientation_layout_ns},
+        {"fragment_native_direct_emission_ns",
+            &E2eOutput::fragment_native_direct_emission_ns},
+        {"fragment_native_local_sort_ns",
+            &E2eOutput::fragment_native_local_sort_ns},
+        {"fragment_native_tie_normalization_ns",
+            &E2eOutput::fragment_native_tie_normalization_ns},
+        {"fragment_native_control_count_bytes",
+            &E2eOutput::fragment_native_control_count_bytes},
+        {"fragment_native_rejected_control_validation_bytes",
+            &E2eOutput::fragment_native_rejected_control_validation_bytes},
+        {"fragment_native_pass2_position_bytes",
+            &E2eOutput::fragment_native_pass2_position_bytes},
+        {"fragment_native_pass3_position_bytes",
+            &E2eOutput::fragment_native_pass3_position_bytes},
+        {"fragment_native_anchors_constructed",
+            &E2eOutput::fragment_native_anchors_constructed},
+        {"fragment_native_local_sort_bytes",
+            &E2eOutput::fragment_native_local_sort_bytes},
+        {"fragment_native_tie_normalization_bytes",
+            &E2eOutput::fragment_native_tie_normalization_bytes},
+        {"fragment_native_exact_final_bytes",
+            &E2eOutput::fragment_native_exact_final_bytes},
+        {"fragment_native_peak_exact_final_bytes",
+            &E2eOutput::fragment_native_peak_exact_final_bytes},
+        {"fragment_native_global_sort_calls_invoked",
+            &E2eOutput::fragment_native_global_sort_calls_invoked},
+        {"fragment_native_global_sort_calls_skipped",
+            &E2eOutput::fragment_native_global_sort_calls_skipped},
+        {"fragment_native_candidate_anchor_bytes",
+            &E2eOutput::fragment_native_candidate_anchor_bytes},
+        {"fragment_native_plan_ordinal_bytes",
+            &E2eOutput::fragment_native_plan_ordinal_bytes},
+        {"fragment_native_compaction_bytes",
+            &E2eOutput::fragment_native_compaction_bytes},
+        {"fragment_native_final_copy_bytes",
+            &E2eOutput::fragment_native_final_copy_bytes},
+        {"fragment_native_peak_occurrence_capacity_bytes",
+            &E2eOutput::fragment_native_peak_occurrence_capacity_bytes},
+        {"fragment_native_peak_query_plan_capacity_bytes",
+            &E2eOutput::fragment_native_peak_query_plan_capacity_bytes},
+        {"fragment_native_peak_query_radix_capacity_bytes",
+            &E2eOutput::fragment_native_peak_query_radix_capacity_bytes},
+        {"fragment_native_peak_occurrence_count_capacity_bytes",
+            &E2eOutput::fragment_native_peak_occurrence_count_capacity_bytes},
+        {"fragment_native_peak_block_layout_capacity_bytes",
+            &E2eOutput::fragment_native_peak_block_layout_capacity_bytes},
+        {"fragment_native_peak_block_evidence_capacity_bytes",
+            &E2eOutput::fragment_native_peak_block_evidence_capacity_bytes},
+        {"fragment_native_occurrence_allocations",
+            &E2eOutput::fragment_native_occurrence_allocations},
+        {"fragment_native_query_plan_allocations",
+            &E2eOutput::fragment_native_query_plan_allocations},
+        {"fragment_native_query_radix_allocations",
+            &E2eOutput::fragment_native_query_radix_allocations},
+        {"fragment_native_occurrence_count_allocations",
+            &E2eOutput::fragment_native_occurrence_count_allocations},
+        {"fragment_native_block_layout_allocations",
+            &E2eOutput::fragment_native_block_layout_allocations},
+        {"fragment_native_block_evidence_allocations",
+            &E2eOutput::fragment_native_block_evidence_allocations},
+        {"fragment_native_evidence_saturated",
+            &E2eOutput::fragment_native_evidence_saturated},
+    });
+static_assert(kFragmentNativeFlatMetricFields.size() == 40);
+
 }  // namespace
 
 TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
           "[bench_e2e][raw-samples][format5][format6]") {
     const nlohmann::json memory_evidence{
         {"schema", "bioseq.format5_reader_memory_evidence"},
-        {"version", 2},
+        {"version", 3},
         {"execution_id", 41},
         {"backend_pid", 42},
         {"database_oid", 43},
@@ -140,6 +224,46 @@ TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
         {"format5_reader_exact_position_image_failures", 0},
         {"format5_reader_retained_layout_checks", 1},
         {"format5_reader_retained_layout_failures", 0},
+        {"fragment_native_waves", 2},
+        {"fragment_native_queries", 16},
+        {"fragment_native_occurrence_fill_ns", 101},
+        {"fragment_native_occurrence_radix_ns", 102},
+        {"fragment_native_unique_plan_build_ns", 103},
+        {"fragment_native_query_plan_radix_fill_ns", 104},
+        {"fragment_native_control_count_pass_ns", 105},
+        {"fragment_native_rejected_control_validation_ns", 0},
+        {"fragment_native_orientation_layout_ns", 106},
+        {"fragment_native_direct_emission_ns", 107},
+        {"fragment_native_local_sort_ns", 108},
+        {"fragment_native_tie_normalization_ns", 109},
+        {"fragment_native_control_count_bytes", 2000},
+        {"fragment_native_rejected_control_validation_bytes", 0},
+        {"fragment_native_pass2_position_bytes", 1600},
+        {"fragment_native_pass3_position_bytes", 1600},
+        {"fragment_native_anchors_constructed", 100},
+        {"fragment_native_local_sort_bytes", 1200},
+        {"fragment_native_tie_normalization_bytes", 240},
+        {"fragment_native_exact_final_bytes", 2400},
+        {"fragment_native_peak_exact_final_bytes", 1200},
+        {"fragment_native_global_sort_calls_invoked", 0},
+        {"fragment_native_global_sort_calls_skipped", 16},
+        {"fragment_native_candidate_anchor_bytes", 0},
+        {"fragment_native_plan_ordinal_bytes", 0},
+        {"fragment_native_compaction_bytes", 0},
+        {"fragment_native_final_copy_bytes", 0},
+        {"fragment_native_peak_occurrence_capacity_bytes", 400},
+        {"fragment_native_peak_query_plan_capacity_bytes", 500},
+        {"fragment_native_peak_query_radix_capacity_bytes", 600},
+        {"fragment_native_peak_occurrence_count_capacity_bytes", 700},
+        {"fragment_native_peak_block_layout_capacity_bytes", 800},
+        {"fragment_native_peak_block_evidence_capacity_bytes", 900},
+        {"fragment_native_occurrence_allocations", 1},
+        {"fragment_native_query_plan_allocations", 2},
+        {"fragment_native_query_radix_allocations", 3},
+        {"fragment_native_occurrence_count_allocations", 4},
+        {"fragment_native_block_layout_allocations", 5},
+        {"fragment_native_block_evidence_allocations", 6},
+        {"fragment_native_evidence_saturated", false},
         {"format5_reader_memory_evidence_saturated", false},
         {"stats_saturated", false},
     };
@@ -195,20 +319,60 @@ TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
         "format5_reader_exact_position_image_failures",
         "format5_reader_retained_layout_checks",
         "format5_reader_retained_layout_failures",
+        "fragment_native_waves",
+        "fragment_native_queries",
+        "fragment_native_occurrence_fill_ns",
+        "fragment_native_occurrence_radix_ns",
+        "fragment_native_unique_plan_build_ns",
+        "fragment_native_query_plan_radix_fill_ns",
+        "fragment_native_control_count_pass_ns",
+        "fragment_native_rejected_control_validation_ns",
+        "fragment_native_orientation_layout_ns",
+        "fragment_native_direct_emission_ns",
+        "fragment_native_local_sort_ns",
+        "fragment_native_tie_normalization_ns",
+        "fragment_native_control_count_bytes",
+        "fragment_native_rejected_control_validation_bytes",
+        "fragment_native_pass2_position_bytes",
+        "fragment_native_pass3_position_bytes",
+        "fragment_native_anchors_constructed",
+        "fragment_native_local_sort_bytes",
+        "fragment_native_tie_normalization_bytes",
+        "fragment_native_exact_final_bytes",
+        "fragment_native_peak_exact_final_bytes",
+        "fragment_native_global_sort_calls_invoked",
+        "fragment_native_global_sort_calls_skipped",
+        "fragment_native_candidate_anchor_bytes",
+        "fragment_native_plan_ordinal_bytes",
+        "fragment_native_compaction_bytes",
+        "fragment_native_final_copy_bytes",
+        "fragment_native_peak_occurrence_capacity_bytes",
+        "fragment_native_peak_query_plan_capacity_bytes",
+        "fragment_native_peak_query_radix_capacity_bytes",
+        "fragment_native_peak_occurrence_count_capacity_bytes",
+        "fragment_native_peak_block_layout_capacity_bytes",
+        "fragment_native_peak_block_evidence_capacity_bytes",
+        "fragment_native_occurrence_allocations",
+        "fragment_native_query_plan_allocations",
+        "fragment_native_query_radix_allocations",
+        "fragment_native_occurrence_count_allocations",
+        "fragment_native_block_layout_allocations",
+        "fragment_native_block_evidence_allocations",
+        "fragment_native_evidence_saturated",
         "format5_reader_memory_evidence_saturated",
         "stats_saturated",
     };
-    REQUIRE(expected_keys.size() == 27);
+    REQUIRE(expected_keys.size() == 67);
     std::set<std::string> actual_keys;
     for (const auto& [key, value] : nested.items()) {
         (void)value;
         actual_keys.insert(key);
     }
     REQUIRE(actual_keys == expected_keys);
-    REQUIRE(nested.size() == 27);
+    REQUIRE(nested.size() == 67);
     REQUIRE(nested.at("schema")
             == "bioseq.format5_reader_memory_evidence");
-    REQUIRE(nested.at("version") == 2);
+    REQUIRE(nested.at("version") == 3);
     REQUIRE(nested == memory_evidence);
     const auto& format6_nested = payload.at("attestation").at(
         "format6_reader_evidence");
@@ -217,6 +381,37 @@ TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
             == "bioseq.format6_reader_evidence");
     REQUIRE(format6_nested.at("version") == 1);
     REQUIRE(format6_nested == format6_evidence);
+}
+
+TEST_CASE("E2E publishes fragment-native evidence as configured flat metrics",
+          "[bench_e2e][evaluation][format5][fragment-native]") {
+    E2eOutput output{};
+    std::int64_t next_value = 1;
+    for (const auto& [key, member] : kFragmentNativeFlatMetricFields) {
+        output.*member = key == "fragment_native_evidence_saturated"
+            ? 1
+            : next_value++;
+    }
+
+    const E2eInput input{};
+    const ParamMap params{};
+    const auto metrics = e2e_eval("format5-test", params, input, output);
+    for (const auto& [key, member] : kFragmentNativeFlatMetricFields) {
+        const std::string metric_name{key};
+        REQUIRE(metrics.contains(metric_name));
+        REQUIRE(metrics.at(metric_name)
+            == static_cast<double>(output.*member));
+    }
+
+    const auto config_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "bench_e2e_format6_bioseq_just_index_only.json";
+    const auto config = load_e2e_contract_config(config_path);
+    const auto& configured_metrics =
+        config.at("bench_e2e").at("matrix").at("metrics");
+    for (const auto& [key, member] : kFragmentNativeFlatMetricFields) {
+        (void)member;
+        REQUIRE(configured_metrics.contains(std::string{key}));
+    }
 }
 
 TEST_CASE("E2E input setup follows exact expanded execution tuples",

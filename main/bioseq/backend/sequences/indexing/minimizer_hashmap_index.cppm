@@ -48,6 +48,7 @@ import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — coll
 import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
 import bioseq.storage.lazy;                          // lazy_compact_sequence, make_lazy_in_memory
 import bioseq.storage.size;                          // sequence_size_t
+import bioseq.sequences.chaining.utils;              // Anchor, CanonicalAnchorLess
 import bioseq.common.radix_sort;                  // bioseq::sorting::radix_sort
 import bioseq.instr;                                 // instrumentation region scoping
 import bioseq.parallelism.mode;
@@ -7877,6 +7878,8 @@ public:
         if (!profile || !profile->shape_v5
             || !expected.max_occ_cap
             || *expected.max_occ_cap != profile->shape_v5->max_occ_cap
+            || profile->shape_v5->max_occ_cap
+                == (std::numeric_limits<std::uint64_t>::max)()
             || max_occ > profile->shape_v5->max_occ_cap) {
             return std::unexpected(
                 MinimizerGenerationWireError::compatibility_mismatch);
@@ -8121,6 +8124,565 @@ public:
 };
 static_assert(MinimizerLookupIndex<PreparedShapeV5QueryReader>);
 
+struct FragmentSeedQuery {
+    std::span<const MinimapSketchData> minimizers{};
+    sequence_size_t query_length = 0u;
+    std::int32_t kmer_size = 0;
+};
+
+struct BlockQueryAnchorLayout {
+    std::uint64_t forward_begin = 0u;
+    std::uint64_t forward_count = 0u;
+    std::uint64_t reverse_begin = 0u;
+    std::uint64_t reverse_count = 0u;
+    std::uint64_t forward_cursor = 0u;
+    std::uint64_t reverse_cursor = 0u;
+};
+static_assert(sizeof(BlockQueryAnchorLayout) == 48u);
+
+struct PreparedQueryAnchors {
+    std::unique_ptr<bioseq::chaining::Anchor[]> anchors{};
+    std::uint64_t anchor_count = 0u;
+    const MinimapSketchData* minimizer_data = nullptr;
+    std::uint64_t minimizer_count = 0u;
+    sequence_size_t query_length = 0u;
+    std::int32_t kmer_size = 0;
+    std::uint64_t sortedness_receipt = 0u;
+};
+
+/// Immutable operation evidence for one successful fragment-native query wave.
+/// Work/timing fields are additive across waves; retained-capacity fields are
+/// peaks because one QueryWaveScratch owner is reused serially.
+struct PreparedFragmentAnchorBatchEvidence {
+    std::uint64_t waves = 0u;
+    std::uint64_t queries = 0u;
+    std::uint64_t occurrence_fill_ns = 0u;
+    std::uint64_t occurrence_radix_ns = 0u;
+    std::uint64_t unique_plan_build_ns = 0u;
+    std::uint64_t query_plan_radix_fill_ns = 0u;
+    std::uint64_t control_count_pass_ns = 0u;
+    std::uint64_t rejected_control_validation_ns = 0u;
+    std::uint64_t orientation_layout_ns = 0u;
+    std::uint64_t direct_emission_ns = 0u;
+    std::uint64_t local_sort_ns = 0u;
+    std::uint64_t tie_normalization_ns = 0u;
+    std::uint64_t control_count_bytes = 0u;
+    std::uint64_t rejected_control_validation_bytes = 0u;
+    std::uint64_t pass2_position_bytes = 0u;
+    std::uint64_t pass3_position_bytes = 0u;
+    std::uint64_t anchors_constructed = 0u;
+    std::uint64_t local_sort_bytes = 0u;
+    std::uint64_t tie_normalization_bytes = 0u;
+    std::uint64_t exact_final_bytes = 0u;
+    std::uint64_t peak_exact_final_bytes = 0u;
+    std::uint64_t global_sort_calls_invoked = 0u;
+    std::uint64_t global_sort_calls_skipped = 0u;
+    std::uint64_t candidate_anchor_bytes = 0u;
+    std::uint64_t plan_ordinal_bytes = 0u;
+    std::uint64_t compaction_bytes = 0u;
+    std::uint64_t final_copy_bytes = 0u;
+    std::uint64_t peak_occurrence_capacity_bytes = 0u;
+    std::uint64_t peak_query_plan_capacity_bytes = 0u;
+    std::uint64_t peak_query_radix_capacity_bytes = 0u;
+    std::uint64_t peak_occurrence_count_capacity_bytes = 0u;
+    std::uint64_t peak_block_layout_capacity_bytes = 0u;
+    std::uint64_t peak_block_evidence_capacity_bytes = 0u;
+    std::uint64_t occurrence_allocations = 0u;
+    std::uint64_t query_plan_allocations = 0u;
+    std::uint64_t query_radix_allocations = 0u;
+    std::uint64_t occurrence_count_allocations = 0u;
+    std::uint64_t block_layout_allocations = 0u;
+    std::uint64_t block_evidence_allocations = 0u;
+    bool saturated = false;
+
+    void merge(const PreparedFragmentAnchorBatchEvidence& other) noexcept {
+        bool overflow = saturated || other.saturated;
+        const auto add = [&overflow](
+                std::uint64_t& destination,
+                std::uint64_t increment) noexcept {
+            if (increment
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - destination) {
+                destination = (std::numeric_limits<std::uint64_t>::max)();
+                overflow = true;
+            } else {
+                destination += increment;
+            }
+        };
+        add(waves, other.waves);
+        add(queries, other.queries);
+        add(occurrence_fill_ns, other.occurrence_fill_ns);
+        add(occurrence_radix_ns, other.occurrence_radix_ns);
+        add(unique_plan_build_ns, other.unique_plan_build_ns);
+        add(query_plan_radix_fill_ns, other.query_plan_radix_fill_ns);
+        add(control_count_pass_ns, other.control_count_pass_ns);
+        add(rejected_control_validation_ns,
+            other.rejected_control_validation_ns);
+        add(orientation_layout_ns, other.orientation_layout_ns);
+        add(direct_emission_ns, other.direct_emission_ns);
+        add(local_sort_ns, other.local_sort_ns);
+        add(tie_normalization_ns, other.tie_normalization_ns);
+        add(control_count_bytes, other.control_count_bytes);
+        add(rejected_control_validation_bytes,
+            other.rejected_control_validation_bytes);
+        add(pass2_position_bytes, other.pass2_position_bytes);
+        add(pass3_position_bytes, other.pass3_position_bytes);
+        add(anchors_constructed, other.anchors_constructed);
+        add(local_sort_bytes, other.local_sort_bytes);
+        add(tie_normalization_bytes, other.tie_normalization_bytes);
+        add(exact_final_bytes, other.exact_final_bytes);
+        add(global_sort_calls_invoked, other.global_sort_calls_invoked);
+        add(global_sort_calls_skipped, other.global_sort_calls_skipped);
+        add(candidate_anchor_bytes, other.candidate_anchor_bytes);
+        add(plan_ordinal_bytes, other.plan_ordinal_bytes);
+        add(compaction_bytes, other.compaction_bytes);
+        add(final_copy_bytes, other.final_copy_bytes);
+        add(occurrence_allocations, other.occurrence_allocations);
+        add(query_plan_allocations, other.query_plan_allocations);
+        add(query_radix_allocations, other.query_radix_allocations);
+        add(occurrence_count_allocations,
+            other.occurrence_count_allocations);
+        add(block_layout_allocations, other.block_layout_allocations);
+        add(block_evidence_allocations, other.block_evidence_allocations);
+        peak_exact_final_bytes = std::max(
+            peak_exact_final_bytes, other.peak_exact_final_bytes);
+        peak_occurrence_capacity_bytes = std::max(
+            peak_occurrence_capacity_bytes,
+            other.peak_occurrence_capacity_bytes);
+        peak_query_plan_capacity_bytes = std::max(
+            peak_query_plan_capacity_bytes,
+            other.peak_query_plan_capacity_bytes);
+        peak_query_radix_capacity_bytes = std::max(
+            peak_query_radix_capacity_bytes,
+            other.peak_query_radix_capacity_bytes);
+        peak_occurrence_count_capacity_bytes = std::max(
+            peak_occurrence_count_capacity_bytes,
+            other.peak_occurrence_count_capacity_bytes);
+        peak_block_layout_capacity_bytes = std::max(
+            peak_block_layout_capacity_bytes,
+            other.peak_block_layout_capacity_bytes);
+        peak_block_evidence_capacity_bytes = std::max(
+            peak_block_evidence_capacity_bytes,
+            other.peak_block_evidence_capacity_bytes);
+        saturated = overflow;
+    }
+
+    [[nodiscard]] constexpr bool forbidden_buffers_are_zero()
+            const noexcept {
+        return candidate_anchor_bytes == 0u
+            && plan_ordinal_bytes == 0u
+            && compaction_bytes == 0u
+            && final_copy_bytes == 0u
+            && global_sort_calls_invoked == 0u;
+    }
+
+    [[nodiscard]] constexpr bool operator==(
+        const PreparedFragmentAnchorBatchEvidence&) const noexcept = default;
+};
+
+struct FragmentBlockWaveEvidence {
+    std::uint64_t pass2_position_bytes = 0u;
+    std::uint64_t pass3_position_bytes = 0u;
+    std::uint64_t anchors_constructed = 0u;
+    std::uint64_t local_sort_bytes = 0u;
+    std::uint64_t tie_normalization_bytes = 0u;
+};
+
+class PreparedShapeV5FragmentQueryReader;
+
+/// Reusable, separately admitted query-wave planning state. The scratch owns
+/// only transient planner/layout capacity and is never referenced by a
+/// returned anchor span.
+class QueryWaveScratch {
+private:
+    enum class WaveState : std::uint8_t {
+        idle,
+        preparing,
+        outstanding,
+        cleaning,
+    };
+
+    struct QueryOccurrence {
+        std::uint32_t hash = 0u;
+        std::uint32_t batch_query_ordinal = 0u;
+        std::uint32_t query_ordinal = 0u;
+    };
+    static_assert(sizeof(QueryOccurrence) == 12u);
+
+    struct QueryHashPlan {
+        std::uint32_t hash = 0u;
+        std::uint32_t occurrence_begin = 0u;
+        std::uint32_t occurrence_count = 0u;
+        std::uint32_t global_occurrence_count = 0u;
+    };
+    static_assert(sizeof(QueryHashPlan) == 16u);
+
+    // Declared first so all owned capacities die before their permit.
+    bioseq::parallelism::MemoryPermit permit_{};
+    std::vector<QueryOccurrence> occurrences_{};
+    std::vector<QueryHashPlan> query_plans_{};
+    std::vector<std::uint32_t> query_plan_radix_{};
+    std::unique_ptr<std::atomic<std::uint32_t>[]>
+        occurrence_counts_{};
+    std::size_t occurrence_count_capacity_ = 0u;
+    std::size_t active_occurrence_count_ = 0u;
+    std::vector<BlockQueryAnchorLayout> block_query_layouts_{};
+    std::vector<FragmentBlockWaveEvidence> block_evidence_{};
+    bioseq::parallelism::MemoryAdmissionController* admission_ = nullptr;
+    std::atomic<WaveState> wave_state_{WaveState::idle};
+
+    friend class PreparedShapeV5FragmentQueryReader;
+
+    QueryWaveScratch() = default;
+
+    [[nodiscard]] std::uint64_t retained_capacity_bytes_() const noexcept {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        std::uint64_t bytes = saturating_mul(
+            occurrences_.capacity(), sizeof(QueryOccurrence));
+        bytes = saturating_add(bytes, saturating_mul(
+            query_plans_.capacity(), sizeof(QueryHashPlan)));
+        bytes = saturating_add(bytes, saturating_mul(
+            query_plan_radix_.capacity(), sizeof(std::uint32_t)));
+        bytes = saturating_add(bytes, saturating_mul(
+            occurrence_count_capacity_,
+            sizeof(std::atomic<std::uint32_t>)));
+        bytes = saturating_add(bytes, saturating_mul(
+            block_query_layouts_.capacity(),
+            sizeof(BlockQueryAnchorLayout)));
+        bytes = saturating_add(bytes, saturating_mul(
+            block_evidence_.capacity(),
+            sizeof(FragmentBlockWaveEvidence)));
+        return bytes;
+    }
+
+    void release_all_capacity_noexcept_() noexcept {
+        {
+            std::vector<QueryOccurrence> empty_occurrences;
+            std::vector<QueryHashPlan> empty_plans;
+            std::vector<std::uint32_t> empty_radix;
+            std::vector<BlockQueryAnchorLayout> empty_layouts;
+            std::vector<FragmentBlockWaveEvidence> empty_block_evidence;
+            occurrences_.swap(empty_occurrences);
+            query_plans_.swap(empty_plans);
+            query_plan_radix_.swap(empty_radix);
+            block_query_layouts_.swap(empty_layouts);
+            block_evidence_.swap(empty_block_evidence);
+            occurrence_counts_.reset();
+        }
+        occurrence_count_capacity_ = 0u;
+        active_occurrence_count_ = 0u;
+        permit_.shrink_to(0u);
+    }
+
+    template <class T>
+    void ensure_vector_capacity_(
+            std::vector<T>& values,
+            std::size_t required_capacity) {
+        if (required_capacity <= values.capacity()) return;
+        if (required_capacity > values.max_size()) {
+            throw PersistedMinimizerLookupError(
+                "fragment-native query scratch capacity is out of range");
+        }
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        const std::uint64_t retained = retained_capacity_bytes_();
+        const std::uint64_t requested = saturating_mul(
+            required_capacity, sizeof(T));
+        const std::uint64_t headroom = saturating_mul(
+            requested,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        const std::uint64_t peak = saturating_add(retained, headroom);
+        if (requested == (std::numeric_limits<std::uint64_t>::max)()
+            || headroom == (std::numeric_limits<std::uint64_t>::max)()
+            || peak == (std::numeric_limits<std::uint64_t>::max)()
+            || !permit_.grow_to(peak)) {
+            throw PersistedMinimizerLookupError(
+                "fragment-native query scratch admission failed");
+        }
+        try {
+            values.reserve(required_capacity);
+        } catch (const std::bad_alloc&) {
+            permit_.shrink_to(retained_capacity_bytes_());
+            throw PersistedMinimizerLookupError(
+                "fragment-native query scratch allocation failed");
+        }
+        const std::uint64_t actual = retained_capacity_bytes_();
+        if (actual == (std::numeric_limits<std::uint64_t>::max)()
+            || (actual > permit_.bytes() && !permit_.grow_to(actual))) {
+            release_all_capacity_noexcept_();
+            throw PersistedMinimizerLookupError(
+                "fragment-native query scratch reconciliation failed");
+        }
+        permit_.shrink_to(actual);
+    }
+
+    void ensure_occurrence_count_capacity_(std::size_t required_capacity) {
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+        if (required_capacity > occurrence_count_capacity_) {
+            const std::uint64_t retained = retained_capacity_bytes_();
+            const std::uint64_t allocation = saturating_mul(
+                required_capacity,
+                sizeof(std::atomic<std::uint32_t>));
+            const std::uint64_t peak = saturating_add(
+                retained, allocation);
+            if (allocation
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || peak
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || !permit_.grow_to(peak)) {
+                throw PersistedMinimizerLookupError(
+                    "fragment-native occurrence-count admission failed");
+            }
+            std::unique_ptr<std::atomic<std::uint32_t>[]> replacement;
+            try {
+                replacement =
+                    std::make_unique<std::atomic<std::uint32_t>[]>(
+                        required_capacity);
+            } catch (const std::bad_alloc&) {
+                permit_.shrink_to(retained_capacity_bytes_());
+                throw PersistedMinimizerLookupError(
+                    "fragment-native occurrence-count allocation failed");
+            }
+            occurrence_counts_ = std::move(replacement);
+            occurrence_count_capacity_ = required_capacity;
+            const std::uint64_t actual = retained_capacity_bytes_();
+            if (actual
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || actual > permit_.bytes()) {
+                release_all_capacity_noexcept_();
+                throw PersistedMinimizerLookupError(
+                    "fragment-native occurrence-count reconciliation failed");
+            }
+            permit_.shrink_to(actual);
+        }
+        active_occurrence_count_ = required_capacity;
+        for (std::size_t ordinal = 0u;
+             ordinal < required_capacity;
+             ++ordinal) {
+            occurrence_counts_[ordinal].store(
+                0u, std::memory_order_relaxed);
+        }
+    }
+
+    void clear_wave_storage_noexcept_() noexcept {
+        // The next activation zeros its exact U-sized range once. No reader
+        // observes inactive counters, so clearing them here would add a second
+        // O(U) atomic-store pass to every wave.
+        active_occurrence_count_ = 0u;
+        occurrences_.clear();
+        query_plans_.clear();
+        query_plan_radix_.clear();
+        block_query_layouts_.clear();
+        block_evidence_.clear();
+    }
+
+    void reset_failed_wave_() noexcept {
+        clear_wave_storage_noexcept_();
+        wave_state_.store(WaveState::idle, std::memory_order_release);
+    }
+
+public:
+    QueryWaveScratch(QueryWaveScratch&& other) noexcept
+        : permit_(std::move(other.permit_)),
+          occurrences_(std::move(other.occurrences_)),
+          query_plans_(std::move(other.query_plans_)),
+          query_plan_radix_(std::move(other.query_plan_radix_)),
+          occurrence_counts_(std::move(other.occurrence_counts_)),
+          occurrence_count_capacity_(
+              other.occurrence_count_capacity_),
+          active_occurrence_count_(other.active_occurrence_count_),
+          block_query_layouts_(
+              std::move(other.block_query_layouts_)),
+          block_evidence_(std::move(other.block_evidence_)),
+          admission_(other.admission_),
+          wave_state_(other.wave_state_.exchange(
+              WaveState::idle, std::memory_order_relaxed)) {
+        other.occurrence_count_capacity_ = 0u;
+        other.active_occurrence_count_ = 0u;
+        other.admission_ = nullptr;
+    }
+
+    QueryWaveScratch& operator=(QueryWaveScratch&&) = delete;
+    QueryWaveScratch(const QueryWaveScratch&) = delete;
+    QueryWaveScratch& operator=(const QueryWaveScratch&) = delete;
+
+    [[nodiscard]] static std::expected<
+        QueryWaveScratch,
+        MinimizerGenerationWireError>
+    create(bioseq::parallelism::MemoryAdmissionController& admission) {
+        auto permit = admission.try_reserve(0u);
+        if (!permit) {
+            return std::unexpected(
+                MinimizerGenerationWireError::admission);
+        }
+        QueryWaveScratch scratch;
+        scratch.permit_ = std::move(*permit);
+        scratch.admission_ = &admission;
+        return scratch;
+    }
+
+    void complete_wave_after_join() noexcept {
+        WaveState expected = WaveState::outstanding;
+        if (wave_state_.compare_exchange_strong(
+                expected,
+                WaveState::cleaning,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            clear_wave_storage_noexcept_();
+            wave_state_.store(WaveState::idle, std::memory_order_release);
+        }
+    }
+
+    void release_retained_capacity() {
+        WaveState expected = WaveState::idle;
+        if (!wave_state_.compare_exchange_strong(
+                expected,
+                WaveState::cleaning,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            throw PersistedMinimizerLookupError(
+                "fragment-native query scratch is still in use");
+        }
+        release_all_capacity_noexcept_();
+        wave_state_.store(WaveState::idle, std::memory_order_release);
+    }
+
+    [[nodiscard]] bool wave_outstanding() const noexcept {
+        return wave_state_.load(std::memory_order_acquire)
+            != WaveState::idle;
+    }
+
+    [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
+        return permit_.bytes();
+    }
+};
+
+/// Immutable, separately admitted final anchor owner.
+class PreparedFragmentAnchorBatch {
+private:
+    static constexpr std::uint64_t sortedness_receipt_ =
+        UINT64_C(0x46524147414E4348); // "FRAGANCH"
+
+    // Declared first so exact anchors die before their permit.
+    bioseq::parallelism::MemoryPermit permit_{};
+    std::unique_ptr<PreparedQueryAnchors[]> queries_{};
+    std::size_t query_count_ = 0u;
+    std::uint64_t target_length_ = 0u;
+    std::uint64_t max_occ_ = 0u;
+    std::uint64_t owned_bytes_ = 0u;
+    PreparedFragmentAnchorBatchEvidence evidence_{};
+    bool ready_ = false;
+
+    friend class PreparedShapeV5FragmentQueryReader;
+
+    explicit PreparedFragmentAnchorBatch(
+            bioseq::parallelism::MemoryPermit&& permit) noexcept
+        : permit_(std::move(permit)) {}
+
+public:
+    class QueryView {
+    private:
+        const PreparedFragmentAnchorBatch* batch_ = nullptr;
+        std::size_t query_index_ = 0u;
+
+        friend class PreparedFragmentAnchorBatch;
+
+        QueryView(
+                const PreparedFragmentAnchorBatch& batch,
+                std::size_t query_index) noexcept
+            : batch_(&batch), query_index_(query_index) {}
+
+    public:
+        QueryView() = default;
+
+        [[nodiscard]] std::uint64_t target_length() const noexcept {
+            return batch_ == nullptr ? 0u : batch_->target_length_;
+        }
+
+        [[nodiscard]] std::span<const bioseq::chaining::Anchor>
+        ordered_fragment_seed_anchors(
+                std::span<const MinimapSketchData> minimizers,
+                sequence_size_t query_length,
+                std::int32_t max_occ,
+                std::int32_t kmer_size) const {
+            if (batch_ == nullptr || !batch_->ready_
+                || query_index_ >= batch_->query_count_
+                || max_occ < 0
+                || static_cast<std::uint64_t>(max_occ)
+                    != batch_->max_occ_) {
+                throw PersistedMinimizerLookupError(
+                    "prepared fragment anchor batch is inconsistent");
+            }
+            const PreparedQueryAnchors& query =
+                batch_->queries_[query_index_];
+            if (query.minimizer_data != minimizers.data()
+                || query.minimizer_count != minimizers.size()
+                || query.query_length != query_length
+                || query.kmer_size != kmer_size
+                || query.sortedness_receipt != sortedness_receipt_
+                || query.anchor_count
+                    > (std::numeric_limits<std::size_t>::max)()
+                || (query.anchor_count != 0u
+                    && query.anchors == nullptr)) {
+                throw PersistedMinimizerLookupError(
+                    "prepared fragment anchor query identity is inconsistent");
+            }
+            return std::span<const bioseq::chaining::Anchor>{
+                query.anchors.get(),
+                static_cast<std::size_t>(query.anchor_count)};
+        }
+    };
+
+    PreparedFragmentAnchorBatch(
+            PreparedFragmentAnchorBatch&& other) noexcept
+        : permit_(std::move(other.permit_)),
+          queries_(std::move(other.queries_)),
+          query_count_(other.query_count_),
+          target_length_(other.target_length_),
+          max_occ_(other.max_occ_),
+          owned_bytes_(other.owned_bytes_),
+          evidence_(other.evidence_),
+          ready_(other.ready_) {
+        other.query_count_ = 0u;
+        other.target_length_ = 0u;
+        other.max_occ_ = 0u;
+        other.owned_bytes_ = 0u;
+        other.evidence_ = {};
+        other.ready_ = false;
+    }
+
+    PreparedFragmentAnchorBatch& operator=(
+            PreparedFragmentAnchorBatch&&) = delete;
+    PreparedFragmentAnchorBatch(
+            const PreparedFragmentAnchorBatch&) = delete;
+    PreparedFragmentAnchorBatch& operator=(
+            const PreparedFragmentAnchorBatch&) = delete;
+
+    [[nodiscard]] QueryView query_view(
+            std::size_t query_index) const {
+        if (!ready_ || query_index >= query_count_) {
+            throw PersistedMinimizerLookupError(
+                "prepared fragment anchor query is out of range");
+        }
+        return QueryView{*this, query_index};
+    }
+
+    [[nodiscard]] std::size_t query_count() const noexcept {
+        return query_count_;
+    }
+
+    [[nodiscard]] std::uint64_t admitted_bytes() const noexcept {
+        return permit_.bytes();
+    }
+
+    [[nodiscard]] const PreparedFragmentAnchorBatchEvidence& evidence()
+            const noexcept {
+        return evidence_;
+    }
+};
+
 /// Fragment-native Format-5 reader.  Every physical position segment remains
 /// an independently persisted mmap view. Seed collection probes fragment-local
 /// controls and packed positions directly. Max-occ reduction is transient
@@ -8133,110 +8695,10 @@ static_assert(MinimizerLookupIndex<PreparedShapeV5QueryReader>);
 /// rereading fragment payload.
 class PreparedShapeV5FragmentQueryReader {
 public:
-    struct PreparedFragmentSeedHit {
-        std::uint64_t packed_target_position = 0;
-        std::uint32_t query_minimizer_ordinal = 0;
-        std::uint32_t query_hash_plan_ordinal = 0;
-    };
-
-    /// Transient query-wave result produced by probing independent MPF
-    /// fragments in parallel.  This is seed output, not a target index:
-    /// fragment controls/postings remain separate and no hash-to-fragment
-    /// directory or cross-fragment posting owner is retained.
-    class PreparedFragmentSeedBatch {
-    private:
-        struct FragmentBlock {
-            std::vector<std::vector<PreparedFragmentSeedHit>> query_hits{};
-        };
-
-        std::vector<FragmentBlock> fragment_blocks_{};
-        std::vector<std::uint64_t> expected_query_hit_counts_{};
-        std::uint64_t target_length_ = 0;
-        std::uint64_t max_occ_ = 0;
-        std::size_t query_count_ = 0;
-
-        friend class PreparedShapeV5FragmentQueryReader;
-
-    public:
-        class QueryView {
-        private:
-            const PreparedFragmentSeedBatch* batch_ = nullptr;
-            std::span<const MinimapSketchData> query_minimizers_{};
-            std::size_t query_index_ = 0;
-
-        public:
-            QueryView() = default;
-
-            QueryView(
-                    const PreparedFragmentSeedBatch& batch,
-                    std::size_t query_index,
-                    std::span<const MinimapSketchData> query_minimizers)
-                : batch_(&batch),
-                  query_minimizers_(query_minimizers),
-                  query_index_(query_index) {}
-
-            [[nodiscard]] std::uint64_t target_length() const noexcept {
-                return batch_ == nullptr ? 0u : batch_->target_length_;
-            }
-
-            template <class Visitor>
-            void for_each_fragment_seed_hit(
-                    std::span<const MinimapSketchData> query_minimizers,
-                    std::int32_t max_occ,
-                    Visitor&& visitor) const {
-                if (batch_ == nullptr
-                    || query_index_ >= batch_->query_count_
-                    || max_occ < 0
-                    || static_cast<std::uint64_t>(max_occ)
-                        != batch_->max_occ_
-                    || query_minimizers.data()
-                        != query_minimizers_.data()
-                    || query_minimizers.size()
-                        != query_minimizers_.size()) {
-                    throw PersistedMinimizerLookupError(
-                        "prepared fragment seed query identity is inconsistent");
-                }
-                std::uint64_t observed = 0u;
-                for (const FragmentBlock& block
-                     : batch_->fragment_blocks_) {
-                    const auto& hits = block.query_hits[query_index_];
-                    for (const PreparedFragmentSeedHit& hit : hits) {
-                        if (hit.query_minimizer_ordinal
-                                >= query_minimizers_.size()
-                            || observed
-                                == (std::numeric_limits<
-                                    std::uint64_t>::max)()) {
-                            throw PersistedMinimizerLookupError(
-                                "prepared fragment seed stream is invalid");
-                        }
-                        ++observed;
-                        std::invoke(
-                            visitor,
-                            hit.packed_target_position,
-                            query_minimizers_[
-                                hit.query_minimizer_ordinal]);
-                    }
-                }
-                if (observed
-                        != batch_->expected_query_hit_counts_[
-                            query_index_]) {
-                    throw PersistedMinimizerLookupError(
-                        "prepared fragment seed count disagrees");
-                }
-            }
-        };
-
-        [[nodiscard]] QueryView query_view(
-                std::size_t query_index,
-                std::span<const MinimapSketchData>
-                    query_minimizers) const {
-            if (query_index >= query_count_) {
-                throw PersistedMinimizerLookupError(
-                    "prepared fragment seed query is out of range");
-            }
-            return QueryView{*this, query_index, query_minimizers};
-        }
-    };
+    using fragment_seed_query_type = FragmentSeedQuery;
+    using query_wave_scratch_type = QueryWaveScratch;
+    using prepared_fragment_anchor_batch_type =
+        PreparedFragmentAnchorBatch;
 
 private:
     static constexpr std::uint32_t query_radix_bits_ = 20u;
@@ -8247,17 +8709,13 @@ private:
         std::uint64_t position_offset = 0;
     };
 
-    struct QueryOccurrence {
-        std::uint32_t hash = 0;
-        std::uint32_t batch_query_ordinal = 0;
-        std::uint32_t query_ordinal = 0;
-    };
-
-    struct QueryHashPlan {
-        std::uint32_t hash = 0;
-        std::uint32_t occurrence_begin = 0;
-        std::uint32_t occurrence_count = 0;
-        std::uint32_t global_occurrence_count = 0;
+    struct FragmentBlockPlan {
+        std::uint32_t entry_begin = 0u;
+        std::uint32_t entry_end = 0u;
+        std::uint32_t first_position_segment = 0u;
+        std::uint32_t last_position_segment = 0u;
+        std::uint64_t reference_begin = 0u;
+        std::uint64_t reference_end = 0u;
     };
 
     bioseq::parallelism::MemoryPermit permit_{};
@@ -8268,8 +8726,13 @@ private:
     std::shared_ptr<const void> mapped_payload_owner_{};
     std::span<const std::byte> mapped_payload_{};
     std::unique_ptr<EntryPlan[]> entry_plans_{};
+    std::unique_ptr<FragmentBlockPlan[]> block_plans_{};
     std::size_t entry_count_ = 0;
+    std::size_t block_count_ = 0;
+    std::uint32_t largest_block_entry_count_ = 0u;
+    std::uint32_t oversized_segment_block_count_ = 0u;
     std::uint64_t max_occ_ = 0;
+    std::uint64_t total_control_count_scan_bytes_ = 0u;
     std::uint64_t owned_bytes_ = 0;
     bool ready_ = false;
 
@@ -8280,6 +8743,19 @@ private:
         return hash >> (32u - query_radix_bits_);
     }
 
+    [[nodiscard]] static std::uint64_t stage_now_ns_() noexcept {
+        const auto now = bioseq::instr::clock::now_ns();
+        return now > 0 ? static_cast<std::uint64_t>(now) : 1u;
+    }
+
+    [[nodiscard]] static std::uint64_t elapsed_stage_ns_(
+            std::uint64_t started_ns) noexcept {
+        const std::uint64_t finished_ns = stage_now_ns_();
+        const std::uint64_t elapsed = finished_ns >= started_ns
+            ? finished_ns - started_ns : 0u;
+        return elapsed > 0u ? elapsed : 1u;
+    }
+
     /// Reserve one fragment-local occurrence count in a query-wave counter.
     /// A value of max_occ + 1 is the only rejected state. This bounds decoded
     /// candidates for a globally repetitive hash to at most max_occ while
@@ -8287,7 +8763,7 @@ private:
     /// accepted. The counter is query state, never persisted MPF index state.
     [[nodiscard]] static bool reserve_query_occurrences_(
             std::atomic<std::uint32_t>& global_count,
-            std::uint32_t local_count,
+            std::uint64_t local_count,
             std::uint32_t max_occ) noexcept {
         const std::uint32_t rejected = max_occ + 1u;
         std::uint32_t current =
@@ -8306,7 +8782,7 @@ private:
             }
             if (global_count.compare_exchange_weak(
                     current,
-                    current + local_count,
+                    current + static_cast<std::uint32_t>(local_count),
                     std::memory_order_relaxed,
                     std::memory_order_relaxed)) {
                 return true;
@@ -8326,6 +8802,27 @@ private:
             std::memory_order_relaxed);
     }
 
+    [[nodiscard]] static bool add_atomic_checked_(
+            std::atomic<std::uint64_t>& destination,
+            const std::uint64_t increment) noexcept {
+        std::uint64_t current = destination.load(
+            std::memory_order_relaxed);
+        for (;;) {
+            if (increment
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - current) {
+                return false;
+            }
+            if (destination.compare_exchange_weak(
+                    current,
+                    current + increment,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+    }
+
     [[nodiscard]] static std::optional<MinimizerGenerationWireError>
     recorded_error_(
             const std::atomic<std::uint32_t>& source) noexcept {
@@ -8342,10 +8839,117 @@ private:
         bioseq::parallelism::parallel_for_pipeline(
             0u,
             count,
-            32u,
-            64u,
+            1u,
+            bioseq::parallelism::TaskParallelMinTriggers::
+                MIN_FRAGMENTS_COUNT,
             bioseq::parallelism::TaskParallelRegion::fragment_build,
             std::forward<Body>(body));
+    }
+
+    /// Count-only control scan for pass 1. It deliberately does not load a
+    /// prefix scalar or position byte; accepted plans receive the full range
+    /// validation in passes 2 and 3.
+    template <class Visitor>
+    [[nodiscard]] static std::expected<void,
+        MinimizerGenerationWireError>
+    visit_control_counts_(
+            std::span<const std::byte> input,
+            const MinimizerBucketDirEntry& entry,
+            const MinimizerGenerationPayloadProfile& profile,
+            Visitor&& visitor) noexcept {
+        using namespace minimizer_generation_wire_detail;
+        if (!profile.shape_v5
+            || profile.wire_format
+                != MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local
+            || entry.control_encoded_bytes != input.size()
+            || entry.control_element_count == 0u
+            || entry.control_element_count
+                > (std::numeric_limits<std::size_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::byte_count);
+        }
+        const auto layout = minimizer_shape_v5_control_layout(
+            entry.control_element_count,
+            profile.shape_v5->hash_width,
+            entry.shape_offset_width,
+            profile.shape_v5->count_width);
+        if (!layout || layout->encoded_bytes != input.size()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::byte_count);
+        }
+        const std::size_t count =
+            static_cast<std::size_t>(entry.control_element_count);
+        const std::size_t hash_width = static_cast<std::uint8_t>(
+            profile.shape_v5->hash_width);
+        const std::size_t offset_width = static_cast<std::uint8_t>(
+            entry.shape_offset_width);
+        const std::size_t count_width = static_cast<std::uint8_t>(
+            profile.shape_v5->count_width);
+        if (hash_width == 0u || offset_width == 0u
+            || count_width == 0u
+            || count
+                > (std::numeric_limits<std::size_t>::max)()
+                    / hash_width
+            || count == (std::numeric_limits<std::size_t>::max)()
+            || count + 1u
+                > (std::numeric_limits<std::size_t>::max)()
+                    / offset_width
+            || count
+                > (std::numeric_limits<std::size_t>::max)()
+                    / count_width) {
+            return std::unexpected(
+                MinimizerGenerationWireError::arithmetic_overflow);
+        }
+        const std::size_t hash_end = count * hash_width;
+        const std::size_t prefix_begin =
+            static_cast<std::size_t>(layout->prefix_offset);
+        const std::size_t prefix_end =
+            prefix_begin + (count + 1u) * offset_width;
+        const std::size_t count_begin =
+            static_cast<std::size_t>(layout->count_offset);
+        const std::size_t count_end =
+            count_begin + count * count_width;
+        if (prefix_end < prefix_begin || count_end < count_begin
+            || !all_zero(input, hash_end, prefix_begin)
+            || !all_zero(input, prefix_end, count_begin)
+            || !all_zero(input, count_end, input.size())) {
+            return std::unexpected(
+                MinimizerGenerationWireError::reserved_nonzero);
+        }
+
+        std::uint64_t previous_hash = 0u;
+        std::uint64_t first_hash = 0u;
+        std::uint64_t last_hash = 0u;
+        for (std::size_t index = 0u; index < count; ++index) {
+            const auto hash = read_shape_scalar(
+                input,
+                index * hash_width,
+                profile.shape_v5->hash_width);
+            const auto saturated_count = read_shape_scalar(
+                input,
+                count_begin + index * count_width,
+                profile.shape_v5->count_width);
+            if (!hash || !saturated_count
+                || *hash > profile.max_hash
+                || (index != 0u && *hash <= previous_hash)
+                || *saturated_count == 0u
+                || *saturated_count
+                    > profile.shape_v5->max_occ_cap + 1u) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::control_range);
+            }
+            if (index == 0u) first_hash = *hash;
+            last_hash = *hash;
+            std::invoke(visitor, *hash, *saturated_count);
+            previous_hash = *hash;
+        }
+        if (first_hash != entry.lo_hash
+            || last_hash != entry.hi_hash) {
+            return std::unexpected(
+                MinimizerGenerationWireError::control_range);
+        }
+        return {};
     }
 
     template <class Visitor>
@@ -8491,7 +9095,7 @@ private:
             const MinimizerBucketDirEntry& entry,
             const MinimizerPositionSegmentCore& core,
             const MinimizerGenerationPayloadProfile& profile,
-            Visitor&& visitor) {
+            Visitor&& visitor) noexcept {
         using namespace minimizer_generation_wire_detail;
         if (!profile.shape_v5
             || control.position_end <= control.position_begin
@@ -8501,7 +9105,8 @@ private:
         }
         const std::size_t width = static_cast<std::uint8_t>(
             profile.shape_v5->position_width);
-        if (entry.position_element_count
+        if (width == 0u
+            || entry.position_element_count
                 > (std::numeric_limits<std::size_t>::max)() / width
             || input.size()
                 != static_cast<std::size_t>(
@@ -8544,12 +9149,338 @@ private:
         return {};
     }
 
+    [[nodiscard]] static bool add_checked_(
+            std::uint64_t& destination,
+            std::uint64_t value) noexcept {
+        if (destination
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - value) {
+            return false;
+        }
+        destination += value;
+        return true;
+    }
+
+    /// Delegate both ordinary and fragment-native ordering to the same
+    /// duplicate-linear authority and return exact payload-work receipts for
+    /// independently timed primary and tie stages.
+    [[nodiscard]] static bioseq::chaining::CanonicalAnchorSortEvidence
+    sort_anchor_slice_primary_(
+            bioseq::chaining::Anchor* anchors,
+            std::size_t anchor_count) noexcept {
+        return bioseq::chaining::sort_canonical_anchor_primary(
+            std::span<bioseq::chaining::Anchor>{anchors, anchor_count});
+    }
+
+    [[nodiscard]] static bioseq::chaining::CanonicalAnchorSortEvidence
+    normalize_anchor_slice_ties_(
+            bioseq::chaining::Anchor* anchors,
+            std::size_t anchor_count) noexcept {
+        return bioseq::chaining::normalize_canonical_anchor_ties(
+            std::span<bioseq::chaining::Anchor>{anchors, anchor_count});
+    }
+
+    [[nodiscard]] static std::expected<
+        bioseq::chaining::Anchor,
+        MinimizerGenerationWireError>
+    make_fragment_anchor_(
+            std::uint64_t packed_target,
+            const MinimapSketchData& minimizer,
+            sequence_size_t query_length,
+            std::uint8_t query_span) noexcept {
+        const std::uint64_t ref_position = packed_target >> 1u;
+        const std::uint32_t target_strand =
+            static_cast<std::uint32_t>(packed_target & 1u);
+        const std::uint64_t encoded =
+            minimizer.pos_strand_encoded();
+        const std::uint32_t query_strand =
+            static_cast<std::uint32_t>(encoded & 1u);
+        const std::uint64_t forward_last = encoded >> 1u;
+        if (ref_position >= (std::uint64_t{1} << 63u)
+            || query_span == 0u
+            || query_length < query_span
+            || forward_last >= query_length
+            || forward_last + 1u < query_span) {
+            return std::unexpected(
+                MinimizerGenerationWireError::position_range);
+        }
+        const std::uint64_t kmer_start =
+            forward_last + 1u - query_span;
+        const std::uint64_t reverse_last =
+            query_length - 1u - kmer_start;
+        const std::uint32_t reverse =
+            target_strand ^ query_strand;
+        return bioseq::chaining::Anchor{
+            .ref_position = ref_position,
+            .query_position =
+                reverse != 0u ? reverse_last : forward_last,
+            .is_reverse = reverse,
+            .query_span = query_span,
+            .flags = 0u,
+            .segment_id = 0u,
+        };
+    }
+
+    template <class Visitor>
+    [[nodiscard]] std::expected<void,
+        MinimizerGenerationWireError>
+    visit_matched_control_counts_(
+            const FragmentBlockPlan& block,
+            std::span<const QueryWaveScratch::QueryHashPlan> query_plans,
+            std::span<const std::uint32_t> query_plan_radix,
+            Visitor&& visitor) const noexcept {
+        if (block.entry_begin >= block.entry_end
+            || block.entry_end > entry_count_
+            || query_plan_radix.size()
+                != static_cast<std::size_t>(
+                    query_radix_bucket_count_) + 1u) {
+            return std::unexpected(
+                MinimizerGenerationWireError::directory_size);
+        }
+        const auto entries = directory_.entries();
+        for (std::size_t ordinal = block.entry_begin;
+             ordinal < block.entry_end;
+             ++ordinal) {
+            const MinimizerBucketDirEntry& entry = entries[ordinal];
+            const EntryPlan& entry_plan = entry_plans_[ordinal];
+            if (entry_plan.control_offset > mapped_payload_.size()
+                || entry.control_encoded_bytes
+                    > mapped_payload_.size()
+                        - entry_plan.control_offset) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::byte_count);
+            }
+            const auto controls = mapped_payload_.subspan(
+                static_cast<std::size_t>(entry_plan.control_offset),
+                static_cast<std::size_t>(
+                    entry.control_encoded_bytes));
+            std::uint32_t active_bucket =
+                (std::numeric_limits<std::uint32_t>::max)();
+            std::uint32_t plan_cursor = 0u;
+            std::uint32_t plan_end = 0u;
+            std::optional<MinimizerGenerationWireError>
+                callback_error;
+            const auto decoded = visit_control_counts_(
+                controls,
+                entry,
+                profile_,
+                [&callback_error, &active_bucket, &plan_cursor, &plan_end,
+                 query_plan_radix, query_plans, &visitor](std::uint64_t hash,
+                    std::uint64_t local_count) noexcept {
+                    if (callback_error) return;
+                    const std::uint32_t hash32 =
+                        static_cast<std::uint32_t>(hash);
+                    const std::uint32_t bucket =
+                        query_bucket_(hash32);
+                    if (bucket != active_bucket) {
+                        active_bucket = bucket;
+                        plan_cursor = query_plan_radix[bucket];
+                        plan_end = query_plan_radix[bucket + 1u];
+                    }
+                    while (plan_cursor < plan_end
+                        && query_plans[plan_cursor].hash < hash32) {
+                        ++plan_cursor;
+                    }
+                    if (plan_cursor == plan_end
+                        || query_plans[plan_cursor].hash != hash32) {
+                        return;
+                    }
+                    callback_error = std::invoke(
+                        visitor, plan_cursor, local_count);
+                    ++plan_cursor;
+                });
+            if (!decoded) return std::unexpected(decoded.error());
+            if (callback_error) {
+                return std::unexpected(*callback_error);
+            }
+        }
+        return {};
+    }
+
+    template <class Visitor>
+    [[nodiscard]] std::expected<void,
+        MinimizerGenerationWireError>
+    visit_matched_controls_(
+            const FragmentBlockPlan& block,
+            std::span<const QueryWaveScratch::QueryHashPlan> query_plans,
+            std::span<const std::uint32_t> query_plan_radix,
+            std::uint32_t max_occ,
+            Visitor&& visitor,
+            std::uint64_t* matched_prefix_bytes = nullptr) const noexcept {
+        using namespace minimizer_generation_wire_detail;
+        if (block.entry_begin >= block.entry_end
+            || block.entry_end > entry_count_
+            || query_plan_radix.size()
+                != static_cast<std::size_t>(
+                    query_radix_bucket_count_) + 1u) {
+            return std::unexpected(
+                MinimizerGenerationWireError::directory_size);
+        }
+        const auto entries = directory_.entries();
+        for (std::size_t ordinal = block.entry_begin;
+             ordinal < block.entry_end;
+             ++ordinal) {
+            const MinimizerBucketDirEntry& entry = entries[ordinal];
+            const EntryPlan& entry_plan = entry_plans_[ordinal];
+            if (entry_plan.control_offset > mapped_payload_.size()
+                || entry.control_encoded_bytes
+                    > mapped_payload_.size()
+                        - entry_plan.control_offset) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::byte_count);
+            }
+            const auto controls = mapped_payload_.subspan(
+                static_cast<std::size_t>(entry_plan.control_offset),
+                static_cast<std::size_t>(
+                    entry.control_encoded_bytes));
+            const auto layout = minimizer_shape_v5_control_layout(
+                entry.control_element_count,
+                profile_.shape_v5->hash_width,
+                entry.shape_offset_width,
+                profile_.shape_v5->count_width);
+            if (!layout || layout->encoded_bytes != controls.size()) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::byte_count);
+            }
+            const std::size_t offset_width =
+                static_cast<std::uint8_t>(
+                    entry.shape_offset_width);
+            const std::size_t prefix_begin =
+                static_cast<std::size_t>(layout->prefix_offset);
+            std::uint32_t active_bucket =
+                (std::numeric_limits<std::uint32_t>::max)();
+            std::uint32_t plan_cursor = 0u;
+            std::uint32_t plan_end = 0u;
+            std::optional<MinimizerGenerationWireError>
+                callback_error;
+            std::optional<std::uint64_t>
+                previous_accepted_position_end;
+            std::size_t control_ordinal = 0u;
+            const auto decoded = visit_control_counts_(
+                controls,
+                entry,
+                profile_,
+                [this, &control_ordinal, &callback_error, &active_bucket,
+                 &plan_cursor, &plan_end, query_plan_radix, query_plans,
+                 controls, prefix_begin, offset_width, &entry,
+                 &previous_accepted_position_end, max_occ, &visitor,
+                 matched_prefix_bytes, ordinal](std::uint64_t hash,
+                    std::uint64_t saturated_count) noexcept {
+                    const std::size_t current_ordinal =
+                        control_ordinal++;
+                    if (callback_error) return;
+                    const std::uint32_t hash32 =
+                        static_cast<std::uint32_t>(hash);
+                    const std::uint32_t bucket =
+                        query_bucket_(hash32);
+                    if (bucket != active_bucket) {
+                        active_bucket = bucket;
+                        plan_cursor = query_plan_radix[bucket];
+                        plan_end = query_plan_radix[bucket + 1u];
+                    }
+                    while (plan_cursor < plan_end
+                        && query_plans[plan_cursor].hash < hash32) {
+                        ++plan_cursor;
+                    }
+                    if (plan_cursor == plan_end
+                        || query_plans[plan_cursor].hash != hash32) {
+                        return;
+                    }
+                    const std::uint32_t matched_plan = plan_cursor++;
+                    const std::uint32_t global_count =
+                        query_plans[matched_plan].
+                            global_occurrence_count;
+                    if (matched_prefix_bytes != nullptr
+                        && !add_checked_(
+                            *matched_prefix_bytes,
+                            2u * static_cast<std::uint64_t>(
+                                offset_width))) {
+                        callback_error =
+                            MinimizerGenerationWireError::
+                                arithmetic_overflow;
+                        return;
+                    }
+                    const std::size_t prefix_offset =
+                        prefix_begin
+                        + current_ordinal * offset_width;
+                    const std::uint64_t position_begin =
+                        read_shape_scalar_trusted_(
+                            controls,
+                            prefix_offset,
+                            entry.shape_offset_width);
+                    const std::uint64_t position_end =
+                        read_shape_scalar_trusted_(
+                            controls,
+                            prefix_offset + offset_width,
+                            entry.shape_offset_width);
+                    if (position_end <= position_begin
+                        || position_end
+                            > entry.position_element_count
+                        || (current_ordinal == 0u
+                            && position_begin != 0u)
+                        || (current_ordinal + 1u
+                                == entry.control_element_count
+                            && position_end
+                                != entry.position_element_count)
+                        || (previous_accepted_position_end
+                            && position_begin
+                                < *previous_accepted_position_end)) {
+                        callback_error =
+                            MinimizerGenerationWireError::
+                                control_range;
+                        return;
+                    }
+                    previous_accepted_position_end = position_end;
+                    const std::uint64_t delta =
+                        position_end - position_begin;
+                    if (saturated_count != std::min(
+                            delta,
+                            profile_.shape_v5->
+                                max_occ_cap + 1u)) {
+                        callback_error =
+                            MinimizerGenerationWireError::
+                                control_range;
+                        return;
+                    }
+                    // A globally rejected query hash still names a selected
+                    // control. Authenticate its prefix geometry and saturated
+                    // count before suppressing the position walk; otherwise a
+                    // corrupt heavy control could hide behind max-occ pruning.
+                    if (global_count == 0u) {
+                        callback_error =
+                            MinimizerGenerationWireError::partition_id;
+                        return;
+                    }
+                    if (global_count > max_occ) {
+                        return;
+                    }
+                    callback_error = std::invoke(
+                        visitor,
+                        ordinal,
+                        matched_plan,
+                        MinimizerShapeV5DecodedControl{
+                            .hash = hash,
+                            .position_begin = position_begin,
+                            .position_end = position_end,
+                            .saturated_count = saturated_count,
+                        });
+                });
+            if (!decoded) return std::unexpected(decoded.error());
+            if (callback_error) {
+                return std::unexpected(*callback_error);
+            }
+        }
+        return {};
+    }
+
     [[nodiscard]] std::uint64_t final_owned_bytes_() const noexcept {
         using bioseq::parallelism::saturating_add;
         using bioseq::parallelism::saturating_mul;
         std::uint64_t bytes = directory_.owned_capacity_bytes();
         bytes = saturating_add(bytes, saturating_mul(
             entry_count_, sizeof(EntryPlan)));
+        bytes = saturating_add(bytes, saturating_mul(
+            block_count_, sizeof(FragmentBlockPlan)));
         return bytes;
     }
 
@@ -8589,10 +9520,8 @@ public:
             || max_occ > profile->shape_v5->max_occ_cap
             || profile->max_hash
                 > (std::numeric_limits<std::uint32_t>::max)()
-            || manifest.position_count
-                > (std::numeric_limits<std::uint32_t>::max)()
-            || max_occ
-                >= (std::numeric_limits<std::uint32_t>::max)()
+            || max_occ > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int32_t>::max)())
             || mapped_payload_owner == nullptr
             || mapped_payload.size() != manifest.payload_bytes
             || encoded_directory.size() != manifest.directory_bytes) {
@@ -8613,23 +9542,25 @@ public:
         }
         const std::size_t entry_count =
             encoded_directory.size() / directory_stride;
+        if (entry_count
+                > (std::numeric_limits<std::uint32_t>::max)()) {
+            return std::unexpected(
+                MinimizerGenerationWireError::directory_size);
+        }
         std::uint64_t initial_bytes = saturating_add(
             encoded_directory.size(),
             saturating_mul(
                 entry_count, sizeof(MinimizerBucketDirEntry)));
         initial_bytes = saturating_add(initial_bytes, saturating_mul(
             entry_count, sizeof(EntryPlan)));
-        const std::uint64_t initial_headroom = saturating_mul(
-            initial_bytes,
-            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        initial_bytes = saturating_add(initial_bytes, saturating_mul(
+            entry_count, sizeof(FragmentBlockPlan)));
         if (initial_bytes
-                == (std::numeric_limits<std::uint64_t>::max)()
-            || initial_headroom
                 == (std::numeric_limits<std::uint64_t>::max)()) {
             return std::unexpected(
                 MinimizerGenerationWireError::arithmetic_overflow);
         }
-        auto permit = admission.try_reserve(initial_headroom);
+        auto permit = admission.try_reserve(initial_bytes);
         if (!permit) {
             return std::unexpected(
                 MinimizerGenerationWireError::admission);
@@ -8646,8 +9577,8 @@ public:
         reader.entry_count_ = entry_count;
         reader.max_occ_ = max_occ;
         try {
-            auto directory = DirView::decode(
-                encoded_directory, *profile);
+            auto directory = DirView::decode_admitted(
+                encoded_directory, *profile, reader.permit_);
             if (!directory) {
                 return std::unexpected(directory.error());
             }
@@ -8666,6 +9597,7 @@ public:
         }
 
         std::uint64_t total_control_bytes = 0u;
+        std::uint64_t total_control_count_scan_bytes = 0u;
         std::uint64_t total_position_bytes = 0u;
         const auto entries = reader.directory_.entries();
         for (std::size_t ordinal = 0u;
@@ -8685,6 +9617,22 @@ public:
             reader.entry_plans_[ordinal].control_offset =
                 total_control_bytes;
             total_control_bytes += entry.control_encoded_bytes;
+            const std::uint64_t prefix_element_count = saturating_add(
+                entry.control_element_count, 1u);
+            const std::uint64_t prefix_bytes = saturating_mul(
+                prefix_element_count,
+                static_cast<std::uint8_t>(entry.shape_offset_width));
+            if (prefix_element_count
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || prefix_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || prefix_bytes > entry.control_encoded_bytes
+                || !add_checked_(
+                    total_control_count_scan_bytes,
+                    entry.control_encoded_bytes - prefix_bytes)) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::arithmetic_overflow);
+            }
             total_position_bytes += entry.position_encoded_bytes;
         }
         if (total_control_bytes
@@ -8694,6 +9642,8 @@ public:
             return std::unexpected(
                 MinimizerGenerationWireError::byte_count);
         }
+        reader.total_control_count_scan_bytes_ =
+            total_control_count_scan_bytes;
         std::uint64_t position_cursor = 0u;
         for (std::size_t ordinal = 0u;
              ordinal < entries.size();
@@ -8701,6 +9651,139 @@ public:
             reader.entry_plans_[ordinal].position_offset =
                 total_control_bytes + position_cursor;
             position_cursor += entries[ordinal].position_encoded_bytes;
+        }
+
+        // Build a compact address plan whose block boundaries can never split
+        // an equal-position-segment run. Empty physical segments are permitted
+        // gaps and need no synthetic directory entry.
+        constexpr std::size_t target_entries_per_block = 128u;
+        for (std::size_t ordinal = 1u;
+             ordinal < entries.size();
+             ++ordinal) {
+            if (entries[ordinal].position_segment
+                    < entries[ordinal - 1u].position_segment) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::directory_order);
+            }
+        }
+        std::size_t block_count = 0u;
+        for (std::size_t begin = 0u;
+             begin < entries.size();) {
+            std::size_t end = std::min(
+                entries.size(),
+                begin + target_entries_per_block);
+            const auto terminal_segment =
+                entries[end - 1u].position_segment;
+            while (end < entries.size()
+                && entries[end].position_segment
+                    == terminal_segment) {
+                ++end;
+            }
+            ++block_count;
+            begin = end;
+        }
+        try {
+            if (block_count != 0u) {
+                reader.block_plans_ =
+                    std::make_unique<FragmentBlockPlan[]>(
+                        block_count);
+            }
+        } catch (const std::bad_alloc&) {
+            return std::unexpected(
+                MinimizerGenerationWireError::admission);
+        }
+        reader.block_count_ = block_count;
+
+        std::uint64_t previous_block_reference_end = 0u;
+        bool have_previous_block = false;
+        std::size_t block_ordinal = 0u;
+        for (std::size_t begin = 0u;
+             begin < entries.size();) {
+            std::size_t end = std::min(
+                entries.size(),
+                begin + target_entries_per_block);
+            const auto terminal_segment =
+                entries[end - 1u].position_segment;
+            while (end < entries.size()
+                && entries[end].position_segment
+                    == terminal_segment) {
+                ++end;
+            }
+            if (begin >= end
+                || end > entries.size()
+                || end
+                    > (std::numeric_limits<std::uint32_t>::max)()) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::directory_size);
+            }
+
+            FragmentBlockPlan& block =
+                reader.block_plans_[block_ordinal];
+            block.entry_begin = static_cast<std::uint32_t>(begin);
+            block.entry_end = static_cast<std::uint32_t>(end);
+            block.first_position_segment =
+                static_cast<std::uint32_t>(
+                    entries[begin].position_segment);
+            block.last_position_segment =
+                static_cast<std::uint32_t>(
+                    entries[end - 1u].position_segment);
+
+            bool have_core = false;
+            std::uint64_t previous_core_end = 0u;
+            std::int32_t previous_segment = -1;
+            std::size_t segment_run_begin = begin;
+            for (std::size_t ordinal = begin;
+                 ordinal < end;
+                 ++ordinal) {
+                const std::int32_t segment =
+                    entries[ordinal].position_segment;
+                if (segment == previous_segment) continue;
+                if (previous_segment >= 0
+                    && ordinal - segment_run_begin
+                        > target_entries_per_block) {
+                    ++reader.oversized_segment_block_count_;
+                }
+                segment_run_begin = ordinal;
+                const auto core = minimizer_position_segment_core(
+                    manifest,
+                    static_cast<std::uint32_t>(segment));
+                if (!core || core->end_bp <= core->begin_bp
+                    || (have_core
+                        && previous_core_end > core->begin_bp)) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::bp_range);
+                }
+                if (!have_core) {
+                    block.reference_begin = core->begin_bp;
+                    have_core = true;
+                }
+                block.reference_end = core->end_bp;
+                previous_core_end = core->end_bp;
+                previous_segment = segment;
+            }
+            if (end - segment_run_begin
+                    > target_entries_per_block) {
+                ++reader.oversized_segment_block_count_;
+            }
+            if (!have_core
+                || block.reference_end <= block.reference_begin
+                || (have_previous_block
+                    && previous_block_reference_end
+                        > block.reference_begin)) {
+                return std::unexpected(
+                    MinimizerGenerationWireError::bp_range);
+            }
+            previous_block_reference_end = block.reference_end;
+            have_previous_block = true;
+            reader.largest_block_entry_count_ = std::max(
+                reader.largest_block_entry_count_,
+                static_cast<std::uint32_t>(end - begin));
+            ++block_ordinal;
+            begin = end;
+        }
+        if (block_ordinal != block_count) {
+            return std::unexpected(
+                MinimizerGenerationWireError::directory_size);
         }
 
         // The PostgreSQL-owned image is published only after a complete
@@ -8712,22 +9795,34 @@ public:
 
         reader.owned_bytes_ = reader.final_owned_bytes_();
         if (reader.owned_bytes_
-                == (std::numeric_limits<std::uint64_t>::max)()) {
+                == (std::numeric_limits<std::uint64_t>::max)()
+            || (reader.owned_bytes_ > reader.permit_.bytes()
+                && !reader.permit_.grow_to(reader.owned_bytes_))) {
             return std::unexpected(
-                MinimizerGenerationWireError::arithmetic_overflow);
+                reader.owned_bytes_
+                        == (std::numeric_limits<std::uint64_t>::max)()
+                    ? MinimizerGenerationWireError::arithmetic_overflow
+                    : MinimizerGenerationWireError::admission);
         }
         reader.permit_.shrink_to(reader.owned_bytes_);
         reader.ready_ = true;
         return reader;
     }
 
-    /// Probe every physical MPF fragment once for a bounded query wave.
-    /// Independent fragment blocks run in parallel and retain only their
-    /// transient seed results.  There is no target-wide posting merge, sort,
-    /// span federation, or hash-to-fragment index.
-    [[nodiscard]] PreparedFragmentSeedBatch prepare_fragment_seed_batch(
-            std::span<const std::span<const MinimapSketchData>> queries,
-            std::int32_t max_occ) const {
+    /// Prepare one immutable, canonically ordered anchor span per query.
+    /// Pass 1 reads controls only, pass 2 lays out accepted orientations, and
+    /// pass 3 emits directly into disjoint exact final slices.
+    [[nodiscard]] PreparedFragmentAnchorBatch
+    prepare_fragment_anchor_batch(
+            bioseq::parallelism::MemoryAdmissionController& admission,
+            std::span<const FragmentSeedQuery> queries,
+            std::int32_t max_occ,
+            QueryWaveScratch& scratch) const {
+        using QueryOccurrence = QueryWaveScratch::QueryOccurrence;
+        using QueryHashPlan = QueryWaveScratch::QueryHashPlan;
+        using bioseq::parallelism::saturating_add;
+        using bioseq::parallelism::saturating_mul;
+
         if (!ready_ || mapped_payload_owner_ == nullptr
             || mapped_payload_.size() != manifest_.payload_bytes) {
             throw PersistedMinimizerLookupError(
@@ -8741,487 +9836,1378 @@ public:
                 "fragment-native Format-5 query policy is inconsistent");
         }
 
-        PreparedFragmentSeedBatch batch;
-        batch.target_length_ = manifest_.target_length;
-        batch.max_occ_ = static_cast<std::uint64_t>(max_occ);
-        batch.query_count_ = queries.size();
-        batch.expected_query_hit_counts_.assign(queries.size(), 0u);
-        if (queries.empty()) return batch;
-
-        std::uint64_t total_query_minimizers = 0u;
-        for (const auto query_minimizers : queries) {
-            if (query_minimizers.size()
-                    > (std::numeric_limits<std::uint32_t>::max)()
-                || total_query_minimizers
-                    > (std::numeric_limits<std::uint32_t>::max)()
-                        - query_minimizers.size()) {
-                throw PersistedMinimizerLookupError(
-                    "fragment-native Format-5 query wave is too large");
-            }
-            total_query_minimizers += query_minimizers.size();
-        }
-        std::vector<QueryOccurrence> occurrences;
-        occurrences.reserve(
-            static_cast<std::size_t>(total_query_minimizers));
-        for (std::size_t batch_query = 0u;
-             batch_query < queries.size();
-             ++batch_query) {
-            const auto query_minimizers = queries[batch_query];
-            for (std::size_t ordinal = 0u;
-                 ordinal < query_minimizers.size();
-                 ++ordinal) {
-                const std::uint64_t hash =
-                    query_minimizers[ordinal].kmer();
-                if (hash
-                        > (std::numeric_limits<std::uint32_t>::max)()) {
-                    throw PersistedMinimizerLookupError(
-                        "fragment-native Format-5 query hash is out of range");
-                }
-                occurrences.push_back(QueryOccurrence{
-                    .hash = static_cast<std::uint32_t>(hash),
-                    .batch_query_ordinal =
-                        static_cast<std::uint32_t>(batch_query),
-                    .query_ordinal =
-                        static_cast<std::uint32_t>(ordinal),
-                });
-            }
-        }
-        if (occurrences.empty()) return batch;
-        struct QueryOccurrenceHashKey {
-            [[nodiscard, gnu::always_inline]]
-            std::uint32_t operator()(
-                    const QueryOccurrence& occurrence) const noexcept {
-                return occurrence.hash;
-            }
-        };
-        bioseq::sorting::radix_sort(
-            occurrences.data(),
-            occurrences.data() + occurrences.size(),
-            QueryOccurrenceHashKey{});
-
-        std::vector<QueryHashPlan> query_plans;
-        query_plans.reserve(occurrences.size());
-        for (std::size_t begin = 0u;
-             begin < occurrences.size();) {
-            std::size_t end = begin + 1u;
-            while (end < occurrences.size()
-                && occurrences[end].hash == occurrences[begin].hash) {
-                ++end;
-            }
-            if (begin
-                    > (std::numeric_limits<std::uint32_t>::max)()
-                || end - begin
-                    > (std::numeric_limits<std::uint32_t>::max)()) {
-                throw PersistedMinimizerLookupError(
-                    "fragment-native Format-5 query occurrence overflow");
-            }
-            query_plans.push_back(QueryHashPlan{
-                .hash = occurrences[begin].hash,
-                .occurrence_begin =
-                    static_cast<std::uint32_t>(begin),
-                .occurrence_count =
-                    static_cast<std::uint32_t>(end - begin),
-                .global_occurrence_count = 0u,
-            });
-            begin = end;
-        }
-        if (query_plans.empty()) return batch;
-
-        std::vector<std::uint32_t> query_plan_radix(
-            query_radix_bucket_count_ + 1u, 0u);
-        std::uint32_t query_plan_cursor = 0u;
-        for (std::uint32_t bucket = 0u;
-             bucket <= query_radix_bucket_count_;
-             ++bucket) {
-            while (query_plan_cursor < query_plans.size()
-                && query_bucket_(
-                    query_plans[query_plan_cursor].hash) < bucket) {
-                ++query_plan_cursor;
-            }
-            query_plan_radix[bucket] = query_plan_cursor;
+        // Acquire the reusable scratch before reading or mutating any of its
+        // non-atomic owners. The busy state remains published through the
+        // synchronous joins that borrow the prepared batch and is cleared by
+        // complete_wave_after_join. A failed preparation clears it in the
+        // catch path below, so there is no reentrant vector/permit race.
+        QueryWaveScratch::WaveState expected_state =
+            QueryWaveScratch::WaveState::idle;
+        if (!scratch.wave_state_.compare_exchange_strong(
+                expected_state,
+                QueryWaveScratch::WaveState::preparing,
+                std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            throw PersistedMinimizerLookupError(
+                "fragment-native query scratch is already in use");
         }
 
-        std::unique_ptr<std::atomic<std::uint32_t>[]>
-            global_occurrence_counts;
         try {
-            global_occurrence_counts =
-                std::make_unique<std::atomic<std::uint32_t>[]>(
-                    query_plans.size());
-            for (std::size_t plan = 0u;
-                 plan < query_plans.size();
-                 ++plan) {
-                global_occurrence_counts[plan].store(
-                    0u, std::memory_order_relaxed);
-            }
-        } catch (const std::bad_alloc&) {
-            throw PersistedMinimizerLookupError(
-                "fragment-native Format-5 query count admission failed");
-        }
-
-        // Keep enough independent blocks for load balancing while avoiding
-        // thousands of tiny per-query vectors and allocator calls.
-        constexpr std::size_t entries_per_fragment_block = 128u;
-        const auto entries = directory_.entries();
-        const std::size_t block_count =
-            (entries.size() + entries_per_fragment_block - 1u)
-                / entries_per_fragment_block;
-        batch.fragment_blocks_.resize(block_count);
-        for (auto& block : batch.fragment_blocks_) {
-            block.query_hits.resize(queries.size());
-        }
-
-        std::atomic<std::uint32_t> first_error{0u};
-        const std::uint32_t max_occ_u32 =
-            static_cast<std::uint32_t>(max_occ);
-        parallel_entries_(
-            block_count,
-            [&](std::size_t block_begin, std::size_t block_end) {
-                using namespace minimizer_generation_wire_detail;
-                for (std::size_t block_ordinal = block_begin;
-                     block_ordinal < block_end;
-                     ++block_ordinal) {
-                    if (first_error.load(
-                            std::memory_order_relaxed) != 0u) {
-                        return;
-                    }
-                    auto& block =
-                        batch.fragment_blocks_[block_ordinal];
-                    const std::size_t entry_begin =
-                        block_ordinal * entries_per_fragment_block;
-                    const std::size_t entry_end = std::min(
-                        entries.size(),
-                        entry_begin + entries_per_fragment_block);
-                    for (std::size_t ordinal = entry_begin;
-                         ordinal < entry_end;
-                         ++ordinal) {
-                        if (first_error.load(
-                                std::memory_order_relaxed) != 0u) {
-                            return;
-                        }
-                        const MinimizerBucketDirEntry& entry =
-                            entries[ordinal];
-                        const EntryPlan& entry_plan =
-                            entry_plans_[ordinal];
-                        const auto core =
-                            minimizer_position_segment_core(
-                                manifest_,
-                                static_cast<std::uint32_t>(
-                                    entry.position_segment));
-                        if (!core) {
-                            record_error_(
-                                first_error,
-                                MinimizerGenerationWireError::
-                                    position_range);
-                            return;
-                        }
-                        const auto controls = mapped_payload_.subspan(
-                            static_cast<std::size_t>(
-                                entry_plan.control_offset),
-                            static_cast<std::size_t>(
-                                entry.control_encoded_bytes));
-                        const auto positions = mapped_payload_.subspan(
-                            static_cast<std::size_t>(
-                                entry_plan.position_offset),
-                            static_cast<std::size_t>(
-                                entry.position_encoded_bytes));
-                        const auto layout =
-                            minimizer_shape_v5_control_layout(
-                                entry.control_element_count,
-                                profile_.shape_v5->hash_width,
-                                entry.shape_offset_width,
-                                profile_.shape_v5->count_width);
-                        if (!layout
-                            || layout->encoded_bytes
-                                != controls.size()) {
-                            record_error_(
-                                first_error,
-                                MinimizerGenerationWireError::
-                                    byte_count);
-                            return;
-                        }
-                        const std::size_t control_count =
-                            static_cast<std::size_t>(
-                                entry.control_element_count);
-                        const std::size_t hash_width =
-                            static_cast<std::uint8_t>(
-                                profile_.shape_v5->hash_width);
-                        const std::size_t offset_width =
-                            static_cast<std::uint8_t>(
-                                entry.shape_offset_width);
-                        const std::size_t count_width =
-                            static_cast<std::uint8_t>(
-                                profile_.shape_v5->count_width);
-                        const std::size_t prefix_begin =
-                            static_cast<std::size_t>(
-                                layout->prefix_offset);
-                        const std::size_t count_begin =
-                            static_cast<std::size_t>(
-                                layout->count_offset);
-                        std::uint32_t active_bucket =
-                            (std::numeric_limits<std::uint32_t>::max)();
-                        std::uint32_t bucket_plan_cursor = 0u;
-                        std::uint32_t bucket_plan_end = 0u;
-
-                        for (std::size_t control_ordinal = 0u;
-                             control_ordinal < control_count;
-                             ++control_ordinal) {
-                            const std::uint64_t hash =
-                                read_shape_scalar_trusted_(
-                                controls,
-                                control_ordinal * hash_width,
-                                profile_.shape_v5->hash_width);
-                            const auto hash32 =
-                                static_cast<std::uint32_t>(hash);
-                            const std::uint32_t bucket =
-                                query_bucket_(hash32);
-                            if (bucket != active_bucket) {
-                                active_bucket = bucket;
-                                bucket_plan_cursor =
-                                    query_plan_radix[bucket];
-                                bucket_plan_end =
-                                    query_plan_radix[bucket + 1u];
-                            }
-                            while (bucket_plan_cursor < bucket_plan_end
-                                && query_plans[bucket_plan_cursor].hash
-                                    < hash32) {
-                                ++bucket_plan_cursor;
-                            }
-                            if (bucket_plan_cursor == bucket_plan_end
-                                || query_plans[bucket_plan_cursor].hash
-                                    != hash32) {
-                                continue;
-                            }
-                            const std::uint32_t query_plan_ordinal =
-                                bucket_plan_cursor;
-                            const std::uint64_t local_count_u64 =
-                                read_shape_scalar_trusted_(
-                                    controls,
-                                    count_begin
-                                        + control_ordinal
-                                            * count_width,
-                                    profile_.shape_v5->count_width);
-                            if (local_count_u64 == 0u
-                                || local_count_u64
-                                    > profile_.shape_v5->
-                                        max_occ_cap + 1u) {
-                                record_error_(
-                                    first_error,
-                                    MinimizerGenerationWireError::
-                                        control_range);
-                                return;
-                            }
-                            if (!reserve_query_occurrences_(
-                                    global_occurrence_counts[
-                                        query_plan_ordinal],
-                                    static_cast<std::uint32_t>(
-                                        local_count_u64),
-                                    max_occ_u32)) {
-                                ++bucket_plan_cursor;
-                                continue;
-                            }
-                            const std::uint64_t position_begin =
-                                read_shape_scalar_trusted_(
-                                    controls,
-                                    prefix_begin
-                                        + control_ordinal
-                                            * offset_width,
-                                    entry.shape_offset_width);
-                            const std::uint64_t position_end =
-                                position_begin + local_count_u64;
-                            if (position_end < position_begin
-                                || position_end
-                                    > entry.position_element_count) {
-                                record_error_(
-                                    first_error,
-                                    MinimizerGenerationWireError::
-                                        control_range);
-                                return;
-                            }
-                            const MinimizerShapeV5DecodedControl control{
-                                .hash = hash,
-                                .position_begin = position_begin,
-                                .position_end = position_end,
-                                .saturated_count = local_count_u64,
-                            };
-                            const QueryHashPlan& query_plan =
-                                query_plans[query_plan_ordinal];
-                            const auto decoded = visit_position_range_(
-                                positions,
-                                control,
-                                entry,
-                                *core,
-                                profile_,
-                                [&](std::uint64_t packed_target_position) {
-                                    const std::size_t occurrence_end =
-                                        static_cast<std::size_t>(
-                                            query_plan.occurrence_begin)
-                                        + query_plan.occurrence_count;
-                                    for (std::size_t occurrence =
-                                             query_plan.occurrence_begin;
-                                         occurrence < occurrence_end;
-                                         ++occurrence) {
-                                        const QueryOccurrence&
-                                            query_occurrence =
-                                                occurrences[occurrence];
-                                        block.query_hits[
-                                            query_occurrence.
-                                                batch_query_ordinal].
-                                            push_back(
-                                                PreparedFragmentSeedHit{
-                                                    .packed_target_position =
-                                                        packed_target_position,
-                                                    .query_minimizer_ordinal =
-                                                        query_occurrence.
-                                                            query_ordinal,
-                                                    .query_hash_plan_ordinal =
-                                                        query_plan_ordinal,
-                                                });
-                                    }
-                                });
-                            if (!decoded) {
-                                record_error_(
-                                    first_error,
-                                    decoded.error());
-                                return;
-                            }
-                            ++bucket_plan_cursor;
-                        }
-                    }
-                }
-            });
-        if (const auto error = recorded_error_(first_error)) {
-            throw PersistedMinimizerLookupError(
-                "fragment-native Format-5 fragment payload is invalid");
-        }
-
-        // Finalize the one query-wave max-occ reduction. Each hash counter was
-        // updated only by independent fragment probes and saturates at
-        // max_occ + 1; no target posting owner or cross-fragment index exists.
-        for (std::size_t plan_ordinal = 0u;
-             plan_ordinal < query_plans.size();
-             ++plan_ordinal) {
-            QueryHashPlan& query_plan = query_plans[plan_ordinal];
-            const std::uint32_t global_count =
-                global_occurrence_counts[plan_ordinal].load(
-                    std::memory_order_relaxed);
-            query_plan.global_occurrence_count = global_count;
-            if (global_count == 0u || global_count > max_occ_u32) {
-                continue;
-            }
-            const std::size_t occurrence_end =
-                static_cast<std::size_t>(query_plan.occurrence_begin)
-                + query_plan.occurrence_count;
-            for (std::size_t occurrence =
-                     query_plan.occurrence_begin;
-                 occurrence < occurrence_end;
-                 ++occurrence) {
-                std::uint64_t& expected =
-                    batch.expected_query_hit_counts_[
-                        occurrences[occurrence].
-                            batch_query_ordinal];
-                if (expected
-                        > (std::numeric_limits<std::uint64_t>::max)()
-                            - global_count) {
-                    throw PersistedMinimizerLookupError(
-                        "fragment-native Format-5 seed count overflow");
-                }
-                expected += global_count;
-            }
-        }
-        global_occurrence_counts.reset();
-
-        // Successful atomic reservations decoded at most max_occ candidates
-        // per hash during the fragment pass. If a later independent fragment
-        // pushed the transient count into the rejected max_occ + 1 state,
-        // discard those bounded earlier candidates now. This is query-result
-        // compaction only: no target posting owner or cross-fragment index is
-        // retained, and accepted positions are never decoded a second time.
-        parallel_entries_(
-            block_count,
-            [&](std::size_t block_begin, std::size_t block_end) {
-                for (std::size_t block_ordinal = block_begin;
-                     block_ordinal < block_end;
-                     ++block_ordinal) {
-                    auto& block =
-                        batch.fragment_blocks_[block_ordinal];
-                    for (auto& hits : block.query_hits) {
-                        std::size_t write = 0u;
-                        for (std::size_t read = 0u;
-                             read < hits.size();
-                             ++read) {
-                            const PreparedFragmentSeedHit hit = hits[read];
-                            if (hit.query_hash_plan_ordinal
-                                    >= query_plans.size()) {
-                                record_error_(
-                                    first_error,
-                                    MinimizerGenerationWireError::
-                                        partition_id);
-                                return;
-                            }
-                            const std::uint32_t global_count =
-                                query_plans[
-                                    hit.query_hash_plan_ordinal].
-                                    global_occurrence_count;
-                            if (global_count == 0u
-                                || global_count > max_occ_u32) {
-                                continue;
-                            }
-                            if (write != read) {
-                                hits[write] = hit;
-                            }
-                            ++write;
-                        }
-                        hits.resize(write);
-                    }
-                }
-            });
-        if (const auto error = recorded_error_(first_error)) {
-            throw PersistedMinimizerLookupError(
-                "fragment-native Format-5 seed compaction failed");
-        }
-
-        for (std::size_t query_index = 0u;
-             query_index < queries.size();
-             ++query_index) {
-            std::uint64_t observed = 0u;
-            for (const auto& block : batch.fragment_blocks_) {
-                const std::size_t count =
-                    block.query_hits[query_index].size();
-                if (observed
-                        > (std::numeric_limits<
-                            std::uint64_t>::max)()
-                            - count) {
-                    throw PersistedMinimizerLookupError(
-                        "fragment-native Format-5 seed count overflow");
-                }
-                observed += count;
-            }
-            if (observed
-                    != batch.expected_query_hit_counts_[query_index]) {
+            if (!scratch.permit_ || scratch.admission_ != &admission) {
                 throw PersistedMinimizerLookupError(
-                    "fragment-native Format-5 seed count disagrees");
+                    "fragment-native Format-5 query scratch identity is inconsistent");
             }
-        }
-        return batch;
-    }
+            scratch.clear_wave_storage_noexcept_();
+            std::uint64_t total_query_minimizers = 0u;
+            for (const FragmentSeedQuery& query : queries) {
+                if (!bioseq::simd::HWY_NAMESPACE::
+                        minimizer_query_length_is_representable<
+                            MinimapSketchData>(
+                                query.query_length)
+                    || query.kmer_size <= 0
+                    || query.kmer_size
+                        > (std::numeric_limits<std::uint8_t>::max)()
+                    || query.kmer_size
+                        != static_cast<std::int32_t>(
+                            profile_.kmer_size)
+                    || query.minimizers.size()
+                        > (std::numeric_limits<std::uint32_t>::max)()
+                    || total_query_minimizers
+                        > (std::numeric_limits<std::uint32_t>::max)()
+                            - query.minimizers.size()
+                    || (!query.minimizers.empty()
+                        && query.query_length
+                            < static_cast<std::uint64_t>(
+                                query.kmer_size))) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native Format-5 query descriptor is invalid");
+                }
+                for (const MinimapSketchData& minimizer
+                     : query.minimizers) {
+                    const std::uint64_t forward_last =
+                        minimizer.pos_strand_encoded() >> 1u;
+                    if (minimizer.kmer() > profile_.max_hash
+                        || minimizer.kmer()
+                            > (std::numeric_limits<
+                                std::uint32_t>::max)()
+                        || forward_last >= query.query_length
+                        || forward_last + 1u
+                            < static_cast<std::uint64_t>(
+                                query.kmer_size)) {
+                        throw PersistedMinimizerLookupError(
+                            "fragment-native Format-5 query minimizer is invalid");
+                    }
+                }
+                total_query_minimizers += query.minimizers.size();
+            }
 
-    /// Single-query compatibility surface.  It uses the same fragment-parallel
-    /// wave implementation as the scheduler batch route.
-    template <class Visitor>
-    void for_each_fragment_seed_hit(
-            std::span<const MinimapSketchData> query_minimizers,
-            std::int32_t max_occ,
-            Visitor&& visitor) const {
-        const std::array<std::span<const MinimapSketchData>, 1u> queries{
-            query_minimizers};
-        const auto batch = prepare_fragment_seed_batch(
-            std::span<const std::span<const MinimapSketchData>>{queries},
-            max_occ);
-        const auto view = batch.query_view(0u, query_minimizers);
-        view.for_each_fragment_seed_hit(
-            query_minimizers,
-            max_occ,
-            std::forward<Visitor>(visitor));
+            auto batch_permit = admission.try_reserve(0u);
+            if (!batch_permit) {
+                throw PersistedMinimizerLookupError(
+                    "fragment-native anchor batch admission failed");
+            }
+            PreparedFragmentAnchorBatch batch{
+                std::move(*batch_permit)};
+            batch.query_count_ = queries.size();
+            batch.target_length_ = manifest_.target_length;
+            batch.max_occ_ = static_cast<std::uint64_t>(max_occ);
+            batch.evidence_.waves = 1u;
+            batch.evidence_.queries = queries.size();
+            batch.evidence_.global_sort_calls_skipped = queries.size();
+
+            const std::uint64_t metadata_bytes = saturating_mul(
+                queries.size(), sizeof(PreparedQueryAnchors));
+            if (queries.size()
+                    > (std::numeric_limits<std::size_t>::max)()
+                        / sizeof(PreparedQueryAnchors)
+                || metadata_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || !batch.permit_.grow_to(metadata_bytes)) {
+                throw PersistedMinimizerLookupError(
+                    "fragment-native anchor metadata admission failed");
+            }
+            try {
+                if (!queries.empty()) {
+                    batch.queries_ =
+                        std::make_unique<PreparedQueryAnchors[]>(
+                            queries.size());
+                }
+            } catch (const std::bad_alloc&) {
+                batch.permit_.shrink_to(0u);
+                throw PersistedMinimizerLookupError(
+                    "fragment-native anchor metadata allocation failed");
+            }
+            batch.owned_bytes_ = metadata_bytes;
+            batch.permit_.shrink_to(batch.owned_bytes_);
+            for (std::size_t query_ordinal = 0u;
+                 query_ordinal < queries.size();
+                 ++query_ordinal) {
+                PreparedQueryAnchors& destination =
+                    batch.queries_[query_ordinal];
+                const FragmentSeedQuery& source =
+                    queries[query_ordinal];
+                destination.minimizer_data =
+                    source.minimizers.data();
+                destination.minimizer_count =
+                    source.minimizers.size();
+                destination.query_length = source.query_length;
+                destination.kmer_size = source.kmer_size;
+            }
+
+            const std::uint64_t occurrence_fill_started_ns =
+                stage_now_ns_();
+            const std::size_t occurrence_count =
+                static_cast<std::size_t>(total_query_minimizers);
+            const std::size_t old_occurrence_capacity =
+                scratch.occurrences_.capacity();
+            scratch.ensure_vector_capacity_(
+                scratch.occurrences_, occurrence_count);
+            batch.evidence_.occurrence_allocations =
+                scratch.occurrences_.capacity() > old_occurrence_capacity
+                ? 1u : 0u;
+            batch.evidence_.peak_occurrence_capacity_bytes = saturating_mul(
+                scratch.occurrences_.capacity(), sizeof(QueryOccurrence));
+            scratch.occurrences_.resize(occurrence_count);
+            std::size_t occurrence_cursor = 0u;
+            for (std::size_t query_ordinal = 0u;
+                 query_ordinal < queries.size();
+                 ++query_ordinal) {
+                const auto minimizers =
+                    queries[query_ordinal].minimizers;
+                for (std::size_t minimizer_ordinal = 0u;
+                     minimizer_ordinal < minimizers.size();
+                     ++minimizer_ordinal) {
+                    scratch.occurrences_[occurrence_cursor++] =
+                        QueryOccurrence{
+                            .hash = static_cast<std::uint32_t>(
+                                minimizers[minimizer_ordinal].kmer()),
+                            .batch_query_ordinal =
+                                static_cast<std::uint32_t>(
+                                    query_ordinal),
+                            .query_ordinal =
+                                static_cast<std::uint32_t>(
+                                    minimizer_ordinal),
+                        };
+                }
+            }
+            if (occurrence_cursor != occurrence_count) {
+                throw PersistedMinimizerLookupError(
+                    "fragment-native query occurrence count disagrees");
+            }
+            batch.evidence_.occurrence_fill_ns = elapsed_stage_ns_(
+                occurrence_fill_started_ns);
+
+            const std::uint64_t occurrence_radix_started_ns =
+                stage_now_ns_();
+            if (!scratch.occurrences_.empty()) {
+                struct QueryOccurrenceHashKey {
+                    [[nodiscard, gnu::always_inline]]
+                    std::uint32_t operator()(
+                            const QueryOccurrence& occurrence)
+                            const noexcept {
+                        return occurrence.hash;
+                    }
+                };
+                bioseq::sorting::radix_sort(
+                    scratch.occurrences_.data(),
+                    scratch.occurrences_.data()
+                        + scratch.occurrences_.size(),
+                    QueryOccurrenceHashKey{});
+            }
+            batch.evidence_.occurrence_radix_ns = elapsed_stage_ns_(
+                occurrence_radix_started_ns);
+
+            const std::uint64_t unique_plan_started_ns = stage_now_ns_();
+            const std::size_t old_query_plan_capacity =
+                scratch.query_plans_.capacity();
+            scratch.ensure_vector_capacity_(
+                scratch.query_plans_, occurrence_count);
+            batch.evidence_.query_plan_allocations =
+                scratch.query_plans_.capacity() > old_query_plan_capacity
+                ? 1u : 0u;
+            batch.evidence_.peak_query_plan_capacity_bytes = saturating_mul(
+                scratch.query_plans_.capacity(), sizeof(QueryHashPlan));
+            scratch.query_plans_.clear();
+            for (std::size_t begin = 0u;
+                 begin < scratch.occurrences_.size();) {
+                std::size_t end = begin + 1u;
+                while (end < scratch.occurrences_.size()
+                    && scratch.occurrences_[end].hash
+                        == scratch.occurrences_[begin].hash) {
+                    ++end;
+                }
+                scratch.query_plans_.push_back(QueryHashPlan{
+                    .hash = scratch.occurrences_[begin].hash,
+                    .occurrence_begin =
+                        static_cast<std::uint32_t>(begin),
+                    .occurrence_count =
+                        static_cast<std::uint32_t>(end - begin),
+                    .global_occurrence_count = 0u,
+                });
+                begin = end;
+            }
+            batch.evidence_.unique_plan_build_ns = elapsed_stage_ns_(
+                unique_plan_started_ns);
+
+            if (!scratch.query_plans_.empty()) {
+                const std::uint64_t query_radix_fill_started_ns =
+                    stage_now_ns_();
+                const std::size_t radix_size =
+                    static_cast<std::size_t>(
+                        query_radix_bucket_count_) + 1u;
+                const std::size_t old_query_radix_capacity =
+                    scratch.query_plan_radix_.capacity();
+                scratch.ensure_vector_capacity_(
+                    scratch.query_plan_radix_, radix_size);
+                batch.evidence_.query_radix_allocations =
+                    scratch.query_plan_radix_.capacity()
+                            > old_query_radix_capacity
+                    ? 1u : 0u;
+                batch.evidence_.peak_query_radix_capacity_bytes =
+                    saturating_mul(
+                        scratch.query_plan_radix_.capacity(),
+                        sizeof(std::uint32_t));
+                scratch.query_plan_radix_.resize(radix_size);
+                std::uint32_t plan_cursor = 0u;
+                for (std::uint32_t bucket = 0u;
+                     bucket <= query_radix_bucket_count_;
+                     ++bucket) {
+                    while (plan_cursor
+                            < scratch.query_plans_.size()
+                        && query_bucket_(
+                            scratch.query_plans_[plan_cursor].hash)
+                            < bucket) {
+                        ++plan_cursor;
+                    }
+                    scratch.query_plan_radix_[bucket] =
+                        plan_cursor;
+                }
+                const std::size_t old_occurrence_count_capacity =
+                    scratch.occurrence_count_capacity_;
+                scratch.ensure_occurrence_count_capacity_(
+                    scratch.query_plans_.size());
+                batch.evidence_.occurrence_count_allocations =
+                    scratch.occurrence_count_capacity_
+                            > old_occurrence_count_capacity
+                    ? 1u : 0u;
+                batch.evidence_.peak_occurrence_count_capacity_bytes =
+                    saturating_mul(
+                        scratch.occurrence_count_capacity_,
+                        sizeof(std::atomic<std::uint32_t>));
+                batch.evidence_.query_plan_radix_fill_ns =
+                    elapsed_stage_ns_(query_radix_fill_started_ns);
+
+                const std::uint32_t max_occ_u32 =
+                    static_cast<std::uint32_t>(max_occ);
+                std::atomic<std::uint32_t> first_error{0u};
+
+                // Pass 1: controls and saturated counts only.
+                const std::uint64_t control_count_started_ns =
+                    stage_now_ns_();
+                parallel_entries_(
+                    block_count_,
+                    [this, &scratch, &first_error, max_occ_u32](
+                            std::size_t block_begin,
+                            std::size_t block_end) noexcept {
+                        const std::span<const QueryHashPlan> plans{
+                            scratch.query_plans_};
+                        const std::span<const std::uint32_t> radix{
+                            scratch.query_plan_radix_};
+                        for (std::size_t block_ordinal = block_begin;
+                             block_ordinal < block_end;
+                             ++block_ordinal) {
+                            if (first_error.load(
+                                    std::memory_order_relaxed) != 0u) {
+                                return;
+                            }
+                            const auto counted =
+                                visit_matched_control_counts_(
+                                    block_plans_[block_ordinal],
+                                    plans,
+                                    radix,
+                                    [&scratch, max_occ_u32](
+                                            std::uint32_t plan_ordinal,
+                                            std::uint64_t local_count)
+                                            noexcept
+                                            -> std::optional<
+                                                MinimizerGenerationWireError> {
+                                        (void)reserve_query_occurrences_(
+                                            scratch.occurrence_counts_[
+                                                plan_ordinal],
+                                            local_count,
+                                            max_occ_u32);
+                                        return std::nullopt;
+                                    });
+                            if (!counted) {
+                                record_error_(
+                                    first_error, counted.error());
+                                return;
+                            }
+                        }
+                    });
+                if (const auto error = recorded_error_(first_error)) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native control-count pass failed; wire_error="
+                        + std::to_string(static_cast<unsigned>(*error)));
+                }
+                batch.evidence_.control_count_pass_ns = elapsed_stage_ns_(
+                    control_count_started_ns);
+                batch.evidence_.control_count_bytes =
+                    total_control_count_scan_bytes_;
+
+                bool have_matched_controls = false;
+                for (std::size_t plan_ordinal = 0u;
+                     plan_ordinal < scratch.query_plans_.size();
+                     ++plan_ordinal) {
+                    QueryHashPlan& plan =
+                        scratch.query_plans_[plan_ordinal];
+                    const std::uint32_t global_count =
+                        scratch.occurrence_counts_[plan_ordinal].load(
+                            std::memory_order_relaxed);
+                    plan.global_occurrence_count = global_count;
+                    have_matched_controls =
+                        have_matched_controls || global_count != 0u;
+                    if (global_count == 0u
+                        || global_count > max_occ_u32) {
+                        continue;
+                    }
+                    const std::size_t begin =
+                        plan.occurrence_begin;
+                    const std::size_t end =
+                        begin + plan.occurrence_count;
+                    if (end < begin
+                        || end > scratch.occurrences_.size()) {
+                        throw PersistedMinimizerLookupError(
+                            "fragment-native query plan range is invalid");
+                    }
+                    for (std::size_t occurrence = begin;
+                         occurrence < end;
+                         ++occurrence) {
+                        const std::uint32_t query_ordinal =
+                            scratch.occurrences_[occurrence].
+                                batch_query_ordinal;
+                        if (query_ordinal >= queries.size()
+                            || !add_checked_(
+                                batch.queries_[query_ordinal].
+                                    anchor_count,
+                                global_count)) {
+                            throw PersistedMinimizerLookupError(
+                                "fragment-native expected anchor count overflow");
+                        }
+                    }
+                }
+
+                const bool have_accepted_anchors = std::ranges::any_of(
+                    std::span<const PreparedQueryAnchors>{
+                        batch.queries_.get(), batch.query_count_},
+                    [](const PreparedQueryAnchors& query) noexcept {
+                        return query.anchor_count != 0u;
+                    });
+                if (!have_accepted_anchors) {
+                    // Matched heavy controls still require prefix/count
+                    // authentication, but no layout, position walk, final
+                    // allocation, emission pass, or sort is needed.
+                    if (have_matched_controls) {
+                        const std::uint64_t rejected_validation_started_ns =
+                            stage_now_ns_();
+                        first_error.store(0u, std::memory_order_relaxed);
+                        std::atomic<std::uint64_t>
+                            rejected_prefix_bytes{0u};
+                        parallel_entries_(
+                            block_count_,
+                            [this, &scratch, &first_error,
+                             &rejected_prefix_bytes, max_occ_u32](
+                                std::size_t block_begin,
+                                std::size_t block_end) noexcept {
+                            const std::span<const QueryHashPlan> plans{
+                                scratch.query_plans_};
+                            const std::span<const std::uint32_t> radix{
+                                scratch.query_plan_radix_};
+                            for (std::size_t block_ordinal = block_begin;
+                                 block_ordinal < block_end;
+                                 ++block_ordinal) {
+                                if (first_error.load(
+                                        std::memory_order_relaxed) != 0u) {
+                                    return;
+                                }
+                                std::uint64_t block_prefix_bytes = 0u;
+                                const auto validated =
+                                    visit_matched_controls_(
+                                        block_plans_[block_ordinal],
+                                        plans,
+                                        radix,
+                                        max_occ_u32,
+                                        [](std::size_t,
+                                           std::uint32_t,
+                                           const MinimizerShapeV5DecodedControl&)
+                                                noexcept
+                                                -> std::optional<
+                                                    MinimizerGenerationWireError> {
+                                            return MinimizerGenerationWireError::
+                                                partition_id;
+                                        },
+                                        &block_prefix_bytes);
+                                if (!validated) {
+                                    record_error_(
+                                        first_error, validated.error());
+                                    return;
+                                }
+                                if (!add_atomic_checked_(
+                                        rejected_prefix_bytes,
+                                        block_prefix_bytes)) {
+                                    record_error_(
+                                        first_error,
+                                        MinimizerGenerationWireError::
+                                            arithmetic_overflow);
+                                    return;
+                                }
+                            }
+                            });
+                        if (const auto error = recorded_error_(first_error)) {
+                            throw PersistedMinimizerLookupError(
+                                "fragment-native rejected-control validation failed; "
+                                "wire_error="
+                                + std::to_string(
+                                    static_cast<unsigned>(*error)));
+                        }
+                        batch.evidence_.rejected_control_validation_ns =
+                            elapsed_stage_ns_(rejected_validation_started_ns);
+                        batch.evidence_.
+                            rejected_control_validation_bytes =
+                                total_control_count_scan_bytes_;
+                        if (!add_checked_(
+                                batch.evidence_.
+                                    rejected_control_validation_bytes,
+                                rejected_prefix_bytes.load(
+                                    std::memory_order_relaxed))) {
+                            throw PersistedMinimizerLookupError(
+                                "fragment-native rejected-control byte "
+                                "accounting overflow");
+                        }
+                    }
+                } else {
+
+                // Layout state is activated only after Pass 1 has proved the
+                // exact accepted anchor counts. This keeps failed count waves
+                // from publishing/zeroing partially active layout owners.
+                const std::uint64_t orientation_layout_started_ns =
+                    stage_now_ns_();
+                if (queries.size() != 0u
+                    && block_count_
+                        > (std::numeric_limits<std::size_t>::max)()
+                            / queries.size()) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native block/query layout overflow");
+                }
+                const std::size_t layout_count =
+                    block_count_ * queries.size();
+                const std::size_t old_block_layout_capacity =
+                    scratch.block_query_layouts_.capacity();
+                scratch.ensure_vector_capacity_(
+                    scratch.block_query_layouts_, layout_count);
+                batch.evidence_.block_layout_allocations =
+                    scratch.block_query_layouts_.capacity()
+                            > old_block_layout_capacity
+                    ? 1u : 0u;
+                batch.evidence_.peak_block_layout_capacity_bytes =
+                    saturating_mul(
+                        scratch.block_query_layouts_.capacity(),
+                        sizeof(BlockQueryAnchorLayout));
+                scratch.block_query_layouts_.resize(layout_count);
+                std::fill(
+                    scratch.block_query_layouts_.begin(),
+                    scratch.block_query_layouts_.end(),
+                    BlockQueryAnchorLayout{});
+                const std::size_t old_block_evidence_capacity =
+                    scratch.block_evidence_.capacity();
+                scratch.ensure_vector_capacity_(
+                    scratch.block_evidence_, block_count_);
+                batch.evidence_.block_evidence_allocations =
+                    scratch.block_evidence_.capacity()
+                            > old_block_evidence_capacity
+                    ? 1u : 0u;
+                batch.evidence_.peak_block_evidence_capacity_bytes =
+                    saturating_mul(
+                        scratch.block_evidence_.capacity(),
+                        sizeof(FragmentBlockWaveEvidence));
+                scratch.block_evidence_.resize(block_count_);
+                std::fill(
+                    scratch.block_evidence_.begin(),
+                    scratch.block_evidence_.end(),
+                    FragmentBlockWaveEvidence{});
+
+                // Pass 2: accepted positions only, counting orientation.
+                first_error.store(0u, std::memory_order_relaxed);
+                parallel_entries_(
+                    block_count_,
+                    [this, queries, &scratch, &first_error, max_occ_u32](
+                            std::size_t block_begin,
+                            std::size_t block_end) noexcept {
+                        const std::span<const QueryHashPlan> plans{
+                            scratch.query_plans_};
+                        const std::span<const std::uint32_t> radix{
+                            scratch.query_plan_radix_};
+                        const std::span<const QueryOccurrence> occurrences{
+                            scratch.occurrences_};
+                        const auto entries = directory_.entries();
+                        for (std::size_t block_ordinal = block_begin;
+                             block_ordinal < block_end;
+                             ++block_ordinal) {
+                            if (first_error.load(
+                                    std::memory_order_relaxed) != 0u) {
+                                return;
+                            }
+                            std::uint64_t block_position_bytes = 0u;
+                            const auto counted =
+                                visit_matched_controls_(
+                                    block_plans_[block_ordinal],
+                                    plans,
+                                    radix,
+                                    max_occ_u32,
+                                    [this, queries, plans, occurrences,
+                                     &scratch, block_ordinal, entries,
+                                     &block_position_bytes](
+                                            std::size_t entry_ordinal,
+                                            std::uint32_t plan_ordinal,
+                                            const MinimizerShapeV5DecodedControl&
+                                                control) noexcept
+                                            -> std::optional<
+                                                MinimizerGenerationWireError> {
+                                        const auto core =
+                                            minimizer_position_segment_core(
+                                                manifest_,
+                                                static_cast<std::uint32_t>(
+                                                    entries[entry_ordinal].
+                                                        position_segment));
+                                        if (!core) {
+                                            return MinimizerGenerationWireError::
+                                                position_range;
+                                        }
+                                        const EntryPlan& entry_plan =
+                                            entry_plans_[entry_ordinal];
+                                        const auto& entry =
+                                            entries[entry_ordinal];
+                                        if (entry_plan.position_offset
+                                                > mapped_payload_.size()
+                                            || entry.position_encoded_bytes
+                                                > mapped_payload_.size()
+                                                    - entry_plan.
+                                                        position_offset) {
+                                            return MinimizerGenerationWireError::
+                                                byte_count;
+                                        }
+                                        const auto positions =
+                                            mapped_payload_.subspan(
+                                                static_cast<std::size_t>(
+                                                    entry_plan.
+                                                        position_offset),
+                                                static_cast<std::size_t>(
+                                                    entry.
+                                                        position_encoded_bytes));
+                                        std::uint64_t target_strand_zero = 0u;
+                                        std::uint64_t target_strand_one = 0u;
+                                        bool count_overflow = false;
+                                        const auto decoded =
+                                            visit_position_range_(
+                                                positions,
+                                                control,
+                                                entry,
+                                                *core,
+                                                profile_,
+                                                [&target_strand_zero,
+                                                 &target_strand_one,
+                                                 &count_overflow](
+                                                        std::uint64_t packed)
+                                                        noexcept {
+                                                    std::uint64_t& count =
+                                                        (packed & 1u) == 0u
+                                                        ? target_strand_zero
+                                                        : target_strand_one;
+                                                    if (count
+                                                            == (std::numeric_limits<
+                                                                std::uint64_t>::
+                                                                max)()) {
+                                                        count_overflow = true;
+                                                    } else {
+                                                        ++count;
+                                                    }
+                                                });
+                                        if (!decoded) return decoded.error();
+                                        std::uint64_t observed = 0u;
+                                        if (count_overflow
+                                            || !add_checked_(
+                                                observed,
+                                                target_strand_zero)
+                                            || !add_checked_(
+                                                observed,
+                                                target_strand_one)
+                                            || observed
+                                                != control.position_end
+                                                    - control.position_begin) {
+                                            return MinimizerGenerationWireError::
+                                                arithmetic_overflow;
+                                        }
+                                        const std::uint64_t position_bytes =
+                                            bioseq::parallelism::saturating_mul(
+                                                observed,
+                                                static_cast<std::uint8_t>(
+                                                    profile_.shape_v5->
+                                                        position_width));
+                                        if (position_bytes
+                                                == (std::numeric_limits<
+                                                    std::uint64_t>::max)()
+                                            || !add_checked_(
+                                                block_position_bytes,
+                                                position_bytes)) {
+                                            return MinimizerGenerationWireError::
+                                                arithmetic_overflow;
+                                        }
+
+                                        const QueryHashPlan& plan =
+                                            plans[plan_ordinal];
+                                        const std::size_t begin =
+                                            plan.occurrence_begin;
+                                        const std::size_t end =
+                                            begin + plan.occurrence_count;
+                                        if (end < begin
+                                            || end > occurrences.size()) {
+                                            return MinimizerGenerationWireError::
+                                                partition_id;
+                                        }
+                                        const std::size_t layout_base =
+                                            block_ordinal * queries.size();
+                                        for (std::size_t occurrence = begin;
+                                             occurrence < end;
+                                             ++occurrence) {
+                                            const QueryOccurrence& item =
+                                                occurrences[occurrence];
+                                            if (item.batch_query_ordinal
+                                                    >= queries.size()
+                                                || item.query_ordinal
+                                                    >= queries[
+                                                        item.
+                                                            batch_query_ordinal].
+                                                        minimizers.size()) {
+                                                return
+                                                    MinimizerGenerationWireError::
+                                                        partition_id;
+                                            }
+                                            const std::size_t layout_ordinal =
+                                                layout_base
+                                                + item.batch_query_ordinal;
+                                            if (layout_ordinal
+                                                    >= scratch.
+                                                        block_query_layouts_.
+                                                        size()) {
+                                                return
+                                                MinimizerGenerationWireError::
+                                                    arithmetic_overflow;
+                                            }
+                                            BlockQueryAnchorLayout& layout =
+                                                scratch.
+                                                    block_query_layouts_[
+                                                        layout_ordinal];
+                                            const std::uint32_t query_strand =
+                                                static_cast<std::uint32_t>(
+                                                    queries[
+                                                        item.
+                                                            batch_query_ordinal].
+                                                        minimizers[
+                                                            item.
+                                                                query_ordinal].
+                                                        pos_strand_encoded()
+                                                    & 1u);
+                                            const std::uint64_t forward =
+                                                query_strand == 0u
+                                                ? target_strand_zero
+                                                : target_strand_one;
+                                            const std::uint64_t reverse =
+                                                query_strand == 0u
+                                                ? target_strand_one
+                                                : target_strand_zero;
+                                            if (!add_checked_(
+                                                    layout.forward_count,
+                                                    forward)
+                                                || !add_checked_(
+                                                    layout.reverse_count,
+                                                    reverse)) {
+                                                return
+                                                    MinimizerGenerationWireError::
+                                                        arithmetic_overflow;
+                                            }
+                                        }
+                                        return std::nullopt;
+                                    });
+                            if (!counted) {
+                                record_error_(
+                                    first_error, counted.error());
+                                return;
+                            }
+                            if (block_ordinal
+                                    >= scratch.block_evidence_.size()) {
+                                record_error_(
+                                    first_error,
+                                    MinimizerGenerationWireError::
+                                        arithmetic_overflow);
+                                return;
+                            }
+                            scratch.block_evidence_[block_ordinal].
+                                pass2_position_bytes = block_position_bytes;
+                        }
+                    });
+                if (const auto error = recorded_error_(first_error)) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native orientation-layout pass failed; "
+                        "wire_error="
+                        + std::to_string(static_cast<unsigned>(*error)));
+                }
+
+                // Prefix [all forward blocks][all reverse blocks].
+                for (std::size_t query_ordinal = 0u;
+                     query_ordinal < queries.size();
+                     ++query_ordinal) {
+                    std::uint64_t cursor = 0u;
+                    for (std::size_t block_ordinal = 0u;
+                         block_ordinal < block_count_;
+                         ++block_ordinal) {
+                        BlockQueryAnchorLayout& layout =
+                            scratch.block_query_layouts_[
+                                block_ordinal * queries.size()
+                                + query_ordinal];
+                        layout.forward_begin = cursor;
+                        layout.forward_cursor = cursor;
+                        if (!add_checked_(
+                                cursor, layout.forward_count)) {
+                            throw PersistedMinimizerLookupError(
+                                "fragment-native forward anchor prefix overflow");
+                        }
+                    }
+                    for (std::size_t block_ordinal = 0u;
+                         block_ordinal < block_count_;
+                         ++block_ordinal) {
+                        BlockQueryAnchorLayout& layout =
+                            scratch.block_query_layouts_[
+                                block_ordinal * queries.size()
+                                + query_ordinal];
+                        layout.reverse_begin = cursor;
+                        layout.reverse_cursor = cursor;
+                        if (!add_checked_(
+                                cursor, layout.reverse_count)) {
+                            throw PersistedMinimizerLookupError(
+                                "fragment-native reverse anchor prefix overflow");
+                        }
+                    }
+                    if (cursor
+                            != batch.queries_[query_ordinal].
+                                anchor_count
+                        || cursor
+                            > (std::numeric_limits<std::size_t>::max)()) {
+                        throw PersistedMinimizerLookupError(
+                            "fragment-native anchor layout count disagrees");
+                    }
+                }
+
+                std::uint64_t final_owned_bytes = batch.owned_bytes_;
+                for (std::size_t query_ordinal = 0u;
+                     query_ordinal < queries.size();
+                     ++query_ordinal) {
+                    const PreparedQueryAnchors& query =
+                        batch.queries_[query_ordinal];
+                    const std::uint64_t anchor_bytes = saturating_mul(
+                        query.anchor_count,
+                        sizeof(bioseq::chaining::Anchor));
+                    final_owned_bytes = saturating_add(
+                        final_owned_bytes, anchor_bytes);
+                    if (anchor_bytes
+                            == (std::numeric_limits<
+                                std::uint64_t>::max)()
+                        || final_owned_bytes
+                            == (std::numeric_limits<
+                                std::uint64_t>::max)()
+                        || query.anchor_count
+                            > (std::numeric_limits<
+                                std::size_t>::max)()
+                                / sizeof(
+                                    bioseq::chaining::Anchor)) {
+                        throw PersistedMinimizerLookupError(
+                            "fragment-native exact anchor size overflow");
+                    }
+                }
+                // Reserve the complete immutable result before allocating its
+                // first per-query array. A later query can therefore never
+                // discover an admission failure after earlier anchors exist.
+                if (!batch.permit_.grow_to(final_owned_bytes)) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native exact anchor admission failed");
+                }
+                try {
+                    for (std::size_t query_ordinal = 0u;
+                         query_ordinal < queries.size();
+                         ++query_ordinal) {
+                        PreparedQueryAnchors& query =
+                            batch.queries_[query_ordinal];
+                        if (query.anchor_count == 0u) continue;
+                        query.anchors =
+                            std::make_unique_for_overwrite<
+                                bioseq::chaining::Anchor[]>(
+                                    static_cast<std::size_t>(
+                                        query.anchor_count));
+                    }
+                } catch (const std::bad_alloc&) {
+                    // Batch destruction releases every earlier query array
+                    // before returning the aggregate permit.
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native exact anchor allocation failed");
+                }
+                batch.owned_bytes_ = final_owned_bytes;
+                batch.permit_.shrink_to(batch.owned_bytes_);
+                batch.evidence_.orientation_layout_ns = elapsed_stage_ns_(
+                    orientation_layout_started_ns);
+
+                // Pass 3: direct exact emission. Primary and tie sorting use
+                // separate joined fragment barriers below so their wall times
+                // remain independently attributable.
+                const std::uint64_t direct_emission_started_ns =
+                    stage_now_ns_();
+                first_error.store(0u, std::memory_order_relaxed);
+                parallel_entries_(
+                    block_count_,
+                    [this, queries, &batch, &scratch, &first_error,
+                     max_occ_u32](
+                            std::size_t block_begin,
+                            std::size_t block_end) noexcept {
+                        const std::span<const QueryHashPlan> plans{
+                            scratch.query_plans_};
+                        const std::span<const std::uint32_t> radix{
+                            scratch.query_plan_radix_};
+                        const std::span<const QueryOccurrence> occurrences{
+                            scratch.occurrences_};
+                        const auto entries = directory_.entries();
+                        for (std::size_t block_ordinal = block_begin;
+                             block_ordinal < block_end;
+                             ++block_ordinal) {
+                            if (first_error.load(
+                                    std::memory_order_relaxed) != 0u) {
+                                return;
+                            }
+                            const FragmentBlockPlan& block =
+                                block_plans_[block_ordinal];
+                            std::uint64_t block_position_bytes = 0u;
+                            std::uint64_t block_anchors_constructed = 0u;
+                            const auto emitted =
+                                visit_matched_controls_(
+                                    block,
+                                    plans,
+                                    radix,
+                                    max_occ_u32,
+                                    [this, queries, plans, occurrences, &batch,
+                                     &scratch, block_ordinal, entries, &block,
+                                     &block_position_bytes,
+                                     &block_anchors_constructed](
+                                            std::size_t entry_ordinal,
+                                            std::uint32_t plan_ordinal,
+                                            const MinimizerShapeV5DecodedControl&
+                                                control) noexcept
+                                            -> std::optional<
+                                                MinimizerGenerationWireError> {
+                                        const auto core =
+                                            minimizer_position_segment_core(
+                                                manifest_,
+                                                static_cast<std::uint32_t>(
+                                                    entries[entry_ordinal].
+                                                        position_segment));
+                                        if (!core) {
+                                            return MinimizerGenerationWireError::
+                                                position_range;
+                                        }
+                                        const EntryPlan& entry_plan =
+                                            entry_plans_[entry_ordinal];
+                                        const auto& entry =
+                                            entries[entry_ordinal];
+                                        if (entry_plan.position_offset
+                                                > mapped_payload_.size()
+                                            || entry.position_encoded_bytes
+                                                > mapped_payload_.size()
+                                                    - entry_plan.
+                                                        position_offset) {
+                                            return MinimizerGenerationWireError::
+                                                byte_count;
+                                        }
+                                        const auto positions =
+                                            mapped_payload_.subspan(
+                                                static_cast<std::size_t>(
+                                                    entry_plan.
+                                                        position_offset),
+                                                static_cast<std::size_t>(
+                                                    entry.
+                                                        position_encoded_bytes));
+                                        const QueryHashPlan& plan =
+                                            plans[plan_ordinal];
+                                        const std::size_t begin =
+                                            plan.occurrence_begin;
+                                        const std::size_t end =
+                                            begin + plan.occurrence_count;
+                                        if (end < begin
+                                            || end > occurrences.size()) {
+                                            return MinimizerGenerationWireError::
+                                                partition_id;
+                                        }
+                                        std::optional<
+                                            MinimizerGenerationWireError>
+                                            emit_error;
+                                        const auto decoded =
+                                            visit_position_range_(
+                                                positions,
+                                                control,
+                                                entry,
+                                                *core,
+                                                profile_,
+                                                [&emit_error, begin, end,
+                                                 occurrences, queries, &block,
+                                                 block_ordinal, &scratch,
+                                                 &batch](std::uint64_t packed)
+                                                        noexcept {
+                                                    if (emit_error) return;
+                                                    for (std::size_t
+                                                             occurrence =
+                                                                 begin;
+                                                         occurrence < end;
+                                                         ++occurrence) {
+                                                        const QueryOccurrence&
+                                                            item =
+                                                                occurrences[
+                                                                    occurrence];
+                                                        const std::size_t
+                                                            query_ordinal =
+                                                                item.
+                                                                    batch_query_ordinal;
+                                                        if (query_ordinal
+                                                                >= queries.
+                                                                    size()
+                                                            || item.
+                                                                    query_ordinal
+                                                                >= queries[
+                                                                    query_ordinal].
+                                                                    minimizers.
+                                                                    size()) {
+                                                            emit_error =
+                                                                MinimizerGenerationWireError::
+                                                                    partition_id;
+                                                            return;
+                                                        }
+                                                        const auto anchor =
+                                                            make_fragment_anchor_(
+                                                                packed,
+                                                                queries[
+                                                                    query_ordinal].
+                                                                    minimizers[
+                                                                        item.
+                                                                            query_ordinal],
+                                                                queries[
+                                                                    query_ordinal].
+                                                                    query_length,
+                                                                static_cast<
+                                                                    std::uint8_t>(
+                                                                    queries[
+                                                                        query_ordinal].
+                                                                        kmer_size));
+                                                        if (!anchor
+                                                            || anchor->
+                                                                    ref_position
+                                                                < block.
+                                                                    reference_begin
+                                                            || anchor->
+                                                                    ref_position
+                                                                >= block.
+                                                                    reference_end) {
+                                                            emit_error = anchor
+                                                                ? MinimizerGenerationWireError::
+                                                                    position_range
+                                                                : anchor.error();
+                                                            return;
+                                                        }
+                                                        const std::size_t
+                                                            layout_ordinal =
+                                                                block_ordinal
+                                                                * queries.size()
+                                                                + query_ordinal;
+                                                        if (layout_ordinal
+                                                                >= scratch.
+                                                                    block_query_layouts_.
+                                                                    size()) {
+                                                            emit_error =
+                                                                MinimizerGenerationWireError::
+                                                                    arithmetic_overflow;
+                                                            return;
+                                                        }
+                                                        BlockQueryAnchorLayout&
+                                                            layout =
+                                                                scratch.
+                                                                    block_query_layouts_[
+                                                                        layout_ordinal];
+                                                        std::uint64_t* cursor =
+                                                            anchor->is_reverse
+                                                            != 0u
+                                                            ? &layout.
+                                                                reverse_cursor
+                                                            : &layout.
+                                                                forward_cursor;
+                                                        const std::uint64_t
+                                                            slice_begin =
+                                                                anchor->
+                                                                    is_reverse
+                                                                != 0u
+                                                                ? layout.
+                                                                    reverse_begin
+                                                                : layout.
+                                                                    forward_begin;
+                                                        const std::uint64_t
+                                                            slice_count =
+                                                                anchor->
+                                                                    is_reverse
+                                                                != 0u
+                                                                ? layout.
+                                                                    reverse_count
+                                                                : layout.
+                                                                    forward_count;
+                                                        if (slice_begin
+                                                                > (std::numeric_limits<
+                                                                    std::uint64_t>::
+                                                                    max)()
+                                                                    - slice_count
+                                                            || *cursor
+                                                                < slice_begin
+                                                            || *cursor
+                                                                >= slice_begin
+                                                                    + slice_count
+                                                            || *cursor
+                                                                >= batch.
+                                                                    queries_[
+                                                                        query_ordinal].
+                                                                    anchor_count
+                                                            || batch.queries_[
+                                                                    query_ordinal].
+                                                                    anchors
+                                                                == nullptr) {
+                                                            emit_error =
+                                                                MinimizerGenerationWireError::
+                                                                    arithmetic_overflow;
+                                                            return;
+                                                        }
+                                                        batch.queries_[
+                                                            query_ordinal].
+                                                            anchors[
+                                                                static_cast<
+                                                                    std::size_t>(
+                                                                    *cursor)] =
+                                                            *anchor;
+                                                        ++*cursor;
+                                                    }
+                                                });
+                                        if (!decoded) return decoded.error();
+                                        if (emit_error) return emit_error;
+                                        const std::uint64_t decoded_positions =
+                                            control.position_end
+                                            - control.position_begin;
+                                        const std::uint64_t position_bytes =
+                                            bioseq::parallelism::saturating_mul(
+                                                decoded_positions,
+                                                static_cast<std::uint8_t>(
+                                                    profile_.shape_v5->
+                                                        position_width));
+                                        const std::uint64_t constructed =
+                                            bioseq::parallelism::saturating_mul(
+                                                decoded_positions,
+                                                plan.occurrence_count);
+                                        if (position_bytes
+                                                == (std::numeric_limits<
+                                                    std::uint64_t>::max)()
+                                            || constructed
+                                                == (std::numeric_limits<
+                                                    std::uint64_t>::max)()
+                                            || !add_checked_(
+                                                block_position_bytes,
+                                                position_bytes)
+                                            || !add_checked_(
+                                                block_anchors_constructed,
+                                                constructed)) {
+                                            return MinimizerGenerationWireError::
+                                                arithmetic_overflow;
+                                        }
+                                        return std::nullopt;
+                                    });
+                            if (!emitted) {
+                                record_error_(
+                                    first_error, emitted.error());
+                                return;
+                            }
+                            if (block_ordinal
+                                    >= scratch.block_evidence_.size()) {
+                                record_error_(
+                                    first_error,
+                                    MinimizerGenerationWireError::
+                                        arithmetic_overflow);
+                                return;
+                            }
+                            scratch.block_evidence_[block_ordinal].
+                                pass3_position_bytes = block_position_bytes;
+                            scratch.block_evidence_[block_ordinal].
+                                anchors_constructed =
+                                    block_anchors_constructed;
+
+                            for (std::size_t query_ordinal = 0u;
+                                 query_ordinal < queries.size();
+                                 ++query_ordinal) {
+                                BlockQueryAnchorLayout& layout =
+                                    scratch.block_query_layouts_[
+                                        block_ordinal * queries.size()
+                                        + query_ordinal];
+                                if (layout.forward_begin
+                                        > (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                            - layout.forward_count
+                                    || layout.reverse_begin
+                                        > (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                            - layout.reverse_count
+                                    || layout.forward_cursor
+                                        != layout.forward_begin
+                                            + layout.forward_count
+                                    || layout.reverse_cursor
+                                        != layout.reverse_begin
+                                            + layout.reverse_count) {
+                                    record_error_(
+                                        first_error,
+                                        MinimizerGenerationWireError::
+                                            arithmetic_overflow);
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                if (const auto error = recorded_error_(first_error)) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native direct anchor emission failed; "
+                        "wire_error="
+                        + std::to_string(static_cast<unsigned>(*error)));
+                }
+                batch.evidence_.direct_emission_ns = elapsed_stage_ns_(
+                    direct_emission_started_ns);
+
+                const auto run_local_order_stage =
+                    [this, queries, &batch, &scratch, &first_error](
+                            bool normalize_ties) {
+                        first_error.store(0u, std::memory_order_relaxed);
+                        parallel_entries_(
+                            block_count_,
+                            [queries, &batch, &scratch, &first_error,
+                             normalize_ties](
+                                    std::size_t block_begin,
+                                    std::size_t block_end) noexcept {
+                                for (std::size_t block_ordinal = block_begin;
+                                     block_ordinal < block_end;
+                                     ++block_ordinal) {
+                                    if (first_error.load(
+                                            std::memory_order_relaxed) != 0u
+                                        || block_ordinal
+                                            >= scratch.block_evidence_.size()) {
+                                        if (block_ordinal
+                                                >= scratch.block_evidence_.
+                                                    size()) {
+                                            record_error_(
+                                                first_error,
+                                                MinimizerGenerationWireError::
+                                                    arithmetic_overflow);
+                                        }
+                                        return;
+                                    }
+                                    std::uint64_t block_order_bytes = 0u;
+                                    for (std::size_t query_ordinal = 0u;
+                                         query_ordinal < queries.size();
+                                         ++query_ordinal) {
+                                        const BlockQueryAnchorLayout& layout =
+                                            scratch.block_query_layouts_[
+                                                block_ordinal * queries.size()
+                                                + query_ordinal];
+                                        auto& query =
+                                            batch.queries_[query_ordinal];
+                                        const auto order_slice =
+                                            [normalize_ties,
+                                             &block_order_bytes](
+                                                    bioseq::chaining::Anchor*
+                                                        anchors,
+                                                    std::uint64_t count)
+                                                    noexcept -> bool {
+                                                if (count < 2u) return true;
+                                                const auto evidence =
+                                                    normalize_ties
+                                                    ? normalize_anchor_slice_ties_(
+                                                        anchors,
+                                                        static_cast<std::size_t>(
+                                                            count))
+                                                    : sort_anchor_slice_primary_(
+                                                        anchors,
+                                                        static_cast<std::size_t>(
+                                                            count));
+                                                const std::uint64_t bytes =
+                                                    normalize_ties
+                                                    ? evidence.tie_bytes
+                                                    : evidence.primary_bytes;
+                                                return !evidence.saturated
+                                                    && add_checked_(
+                                                        block_order_bytes,
+                                                        bytes);
+                                            };
+                                        if ((layout.forward_count > 1u
+                                                && !order_slice(
+                                                    query.anchors.get()
+                                                        + static_cast<
+                                                            std::size_t>(
+                                                            layout.
+                                                                forward_begin),
+                                                    layout.forward_count))
+                                            || (layout.reverse_count > 1u
+                                                && !order_slice(
+                                                    query.anchors.get()
+                                                        + static_cast<
+                                                            std::size_t>(
+                                                            layout.
+                                                                reverse_begin),
+                                                    layout.reverse_count))) {
+                                            record_error_(
+                                                first_error,
+                                                MinimizerGenerationWireError::
+                                                    arithmetic_overflow);
+                                            return;
+                                        }
+                                    }
+                                    FragmentBlockWaveEvidence& block_evidence =
+                                        scratch.block_evidence_[block_ordinal];
+                                    if (normalize_ties) {
+                                        block_evidence.
+                                            tie_normalization_bytes =
+                                                block_order_bytes;
+                                    } else {
+                                        block_evidence.local_sort_bytes =
+                                            block_order_bytes;
+                                    }
+                                }
+                            });
+                        if (const auto error = recorded_error_(first_error)) {
+                            throw PersistedMinimizerLookupError(
+                                std::string{normalize_ties
+                                    ? "fragment-native tie normalization failed; "
+                                    : "fragment-native local primary sort failed; "}
+                                + "wire_error="
+                                + std::to_string(
+                                    static_cast<unsigned>(*error)));
+                        }
+                    };
+
+                const std::uint64_t local_sort_started_ns = stage_now_ns_();
+                run_local_order_stage(/*normalize_ties=*/false);
+                batch.evidence_.local_sort_ns = elapsed_stage_ns_(
+                    local_sort_started_ns);
+                const std::uint64_t tie_normalization_started_ns =
+                    stage_now_ns_();
+                run_local_order_stage(/*normalize_ties=*/true);
+                batch.evidence_.tie_normalization_ns = elapsed_stage_ns_(
+                    tie_normalization_started_ns);
+
+                std::uint64_t expected_constructed = 0u;
+                for (std::size_t query_ordinal = 0u;
+                     query_ordinal < queries.size();
+                     ++query_ordinal) {
+                    if (!add_checked_(
+                            expected_constructed,
+                            batch.queries_[query_ordinal].anchor_count)) {
+                        throw PersistedMinimizerLookupError(
+                            "fragment-native evidence anchor total overflow");
+                    }
+                }
+                for (const FragmentBlockWaveEvidence& block_evidence
+                     : scratch.block_evidence_) {
+                    if (!add_checked_(
+                            batch.evidence_.pass2_position_bytes,
+                            block_evidence.pass2_position_bytes)
+                        || !add_checked_(
+                            batch.evidence_.pass3_position_bytes,
+                            block_evidence.pass3_position_bytes)
+                        || !add_checked_(
+                            batch.evidence_.anchors_constructed,
+                            block_evidence.anchors_constructed)
+                        || !add_checked_(
+                            batch.evidence_.local_sort_bytes,
+                            block_evidence.local_sort_bytes)
+                        || !add_checked_(
+                            batch.evidence_.tie_normalization_bytes,
+                            block_evidence.tie_normalization_bytes)) {
+                        throw PersistedMinimizerLookupError(
+                        "fragment-native evidence reduction overflow");
+                    }
+                }
+                const std::uint64_t exact_final_bytes = saturating_mul(
+                    expected_constructed,
+                    sizeof(bioseq::chaining::Anchor));
+                if (batch.evidence_.pass2_position_bytes
+                        != batch.evidence_.pass3_position_bytes
+                    || batch.evidence_.anchors_constructed
+                        != expected_constructed
+                    || exact_final_bytes
+                        == (std::numeric_limits<std::uint64_t>::max)()) {
+                    throw PersistedMinimizerLookupError(
+                        "fragment-native evidence pass equation failed");
+                }
+                batch.evidence_.exact_final_bytes = exact_final_bytes;
+                batch.evidence_.peak_exact_final_bytes = exact_final_bytes;
+                }
+            }
+
+            const auto less =
+                bioseq::chaining::CanonicalAnchorLess{};
+            for (std::size_t query_ordinal = 0u;
+                 query_ordinal < queries.size();
+                 ++query_ordinal) {
+                PreparedQueryAnchors& query =
+                    batch.queries_[query_ordinal];
+                for (std::size_t anchor_ordinal = 1u;
+                     anchor_ordinal
+                        < static_cast<std::size_t>(
+                            query.anchor_count);
+                     ++anchor_ordinal) {
+                    if (less(
+                            query.anchors[anchor_ordinal],
+                            query.anchors[anchor_ordinal - 1u])) {
+                        throw PersistedMinimizerLookupError(
+                            "fragment-native anchor order proof failed");
+                    }
+                }
+                query.sortedness_receipt =
+                    PreparedFragmentAnchorBatch::
+                        sortedness_receipt_;
+            }
+            if (batch.owned_bytes_
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || batch.owned_bytes_ > batch.permit_.bytes()) {
+                throw PersistedMinimizerLookupError(
+                    "fragment-native anchor ownership proof failed");
+            }
+            if (!batch.evidence_.forbidden_buffers_are_zero()
+                || batch.evidence_.exact_final_bytes
+                    > batch.owned_bytes_) {
+                throw PersistedMinimizerLookupError(
+                    "fragment-native evidence ownership proof failed");
+            }
+            batch.permit_.shrink_to(batch.owned_bytes_);
+            batch.ready_ = true;
+            scratch.wave_state_.store(
+                QueryWaveScratch::WaveState::outstanding,
+                std::memory_order_release);
+            return batch;
+        } catch (...) {
+            scratch.reset_failed_wave_();
+            throw;
+        }
     }
 
     [[nodiscard]] bool ready() const noexcept {
@@ -9236,6 +11222,20 @@ public:
         return permit_.bytes();
     }
 
+    [[nodiscard]] std::size_t fragment_block_count() const noexcept {
+        return block_count_;
+    }
+
+    [[nodiscard]] std::uint32_t largest_fragment_block_entry_count()
+            const noexcept {
+        return largest_block_entry_count_;
+    }
+
+    [[nodiscard]] std::uint32_t oversized_segment_block_count()
+            const noexcept {
+        return oversized_segment_block_count_;
+    }
+
     [[nodiscard]] PreparedShapeV5QueryReaderMemoryEvidence
     memory_evidence() const noexcept {
         const std::uint64_t directory_bytes =
@@ -9243,6 +11243,9 @@ public:
         const std::uint64_t entry_plan_bytes =
             bioseq::parallelism::saturating_mul(
             entry_count_, sizeof(EntryPlan));
+        const std::uint64_t block_plan_bytes =
+            bioseq::parallelism::saturating_mul(
+                block_count_, sizeof(FragmentBlockPlan));
         return PreparedShapeV5QueryReaderMemoryEvidence{
             .capacity_accounting_passes = 1u,
             .global_position_storage_preparations = 0u,
@@ -9270,7 +11273,9 @@ public:
             .retained_selected_control_capacity_bytes = 0u,
             .current_selected_control_capacity_bytes = 0u,
             .directory_capacity_bytes = directory_bytes,
-            .ordinal_route_capacity_bytes = entry_plan_bytes,
+            .ordinal_route_capacity_bytes =
+                bioseq::parallelism::saturating_add(
+                    entry_plan_bytes, block_plan_bytes),
             .selected_extent_capacity_bytes = 0u,
             .global_position_capacity_bytes = 0u,
             .control_payload_capacity_bytes = 0u,
@@ -9281,11 +11286,10 @@ public:
     }
 };
 
-static_assert(FragmentNativeMinimizerSeedIndex<
+static_assert(PreparedFragmentAnchorBatchReader<
     PreparedShapeV5FragmentQueryReader>);
-static_assert(FragmentNativeMinimizerSeedIndex<
-    PreparedShapeV5FragmentQueryReader::
-        PreparedFragmentSeedBatch::QueryView>);
+static_assert(PreparedFragmentAnchorQueryIndex<
+    PreparedFragmentAnchorBatch::QueryView>);
 static_assert(!MinimizerLookupIndex<
     PreparedShapeV5FragmentQueryReader>);
 

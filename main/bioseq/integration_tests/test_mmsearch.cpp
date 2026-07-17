@@ -576,6 +576,10 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         "SELECT (bioseq."
         "last_alignment_format5_reader_memory_evidence_v2() IS NULL)::int;")
         == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq."
+        "last_alignment_format5_reader_memory_evidence_v3() IS NULL)::int;")
+        == 1);
     seed_batch_join_target(ctx);
     load_batch_join_queries(ctx, 2);
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
@@ -771,7 +775,8 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         ") SELECT "
         "jsonb_typeof(evidence.value)='object' "
         "AND (SELECT count(*) FROM jsonb_object_keys(evidence.value))=27 "
-        "AND (evidence.value->>'version')::bigint=2, "
+        "AND (evidence.value->>'version')::bigint=2 "
+        "AND NOT (evidence.value ? 'fragment_native_waves'), "
         "(evidence.value->>'execution_id')::bigint=stats.execution_id "
         "AND (evidence.value->>'backend_pid')::bigint=stats.backend_pid "
         "AND (evidence.value->>'database_oid')::bigint=stats.database_oid, "
@@ -789,6 +794,54 @@ TEST_CASE("alignment execution stats v2 preserves v1 ABI and snapshots SIMD proo
         "FROM evidence CROSS JOIN stats;");
     REQUIRE(memory_v2.size() == 4u);
     for (const auto& assertion : memory_v2) {
+        REQUIRE(assertion.value_or("") == "t");
+    }
+
+    const row_t memory_v3 = query_one(ctx,
+        "WITH evidence AS MATERIALIZED ("
+        " SELECT bioseq.last_alignment_format5_reader_memory_evidence_v3()"
+        "        AS value"
+        ") SELECT "
+        "jsonb_typeof(evidence.value)='object' "
+        "AND (SELECT count(*) FROM jsonb_object_keys(evidence.value))=67 "
+        "AND evidence.value->>'schema'="
+        "    'bioseq.format5_reader_memory_evidence' "
+        "AND (evidence.value->>'version')::bigint=3, "
+        "evidence.value ?& ARRAY["
+        " 'fragment_native_waves','fragment_native_queries',"
+        " 'fragment_native_control_count_pass_ns',"
+        " 'fragment_native_pass2_position_bytes',"
+        " 'fragment_native_pass3_position_bytes',"
+        " 'fragment_native_anchors_constructed',"
+        " 'fragment_native_exact_final_bytes',"
+        " 'fragment_native_peak_exact_final_bytes',"
+        " 'fragment_native_global_sort_calls_invoked',"
+        " 'fragment_native_global_sort_calls_skipped',"
+        " 'fragment_native_candidate_anchor_bytes',"
+        " 'fragment_native_plan_ordinal_bytes',"
+        " 'fragment_native_compaction_bytes',"
+        " 'fragment_native_final_copy_bytes',"
+        " 'fragment_native_evidence_saturated'"
+        "]::text[], "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+        " WHERE entry.key LIKE 'fragment_native_%'"
+        " AND entry.key <> 'fragment_native_evidence_saturated'"
+        " AND jsonb_typeof(entry.value) <> 'number'"
+        "), "
+        "NOT EXISTS ("
+        " SELECT 1 FROM jsonb_each(evidence.value) AS entry"
+        " WHERE entry.key LIKE 'fragment_native_%'"
+        " AND entry.key <> 'fragment_native_evidence_saturated'"
+        " AND (entry.value #>> '{}')::numeric <> 0"
+        ") "
+        "AND jsonb_typeof(evidence.value->"
+        "    'fragment_native_evidence_saturated')='boolean' "
+        "AND NOT (evidence.value->>"
+        "    'fragment_native_evidence_saturated')::boolean "
+        "FROM evidence;");
+    REQUIRE(memory_v3.size() == 4u);
+    for (const auto& assertion : memory_v3) {
         REQUIRE(assertion.value_or("") == "t");
     }
 }
@@ -1327,7 +1380,7 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
 
-TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and selective query unions",
+TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and selective query unions",
 				  "[mmsearch][batch-join][just-index][rev3][format5][simd]"
 				  "[cold-route][full][empty][selective][zero-work-authenticity]") {
 	struct RouteCase {
@@ -1359,8 +1412,7 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 	}};
 
 	for (const std::string_view index_name : {
-			std::string_view{"minimizers_per_fragment"},
-			std::string_view{"minimizers_per_sequence"}}) {
+			std::string_view{"minimizers_per_fragment"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
 			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -1388,10 +1440,9 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
 				kBatchJoinTarget, index_name, rowno));
 			REQUIRE(publication.size() > 25u);
-			/* The production fixture now publishes Format 5 / ABI 3.  Format 5
-			 * currently authenticates and streams the complete payload in one
-			 * PostgreSQL index scan for every query union; it does not use the
-			 * Format-4 compatibility path's two-phase selective reader. */
+			/* The production fixture publishes Format 5 / ABI 3. The reader
+			 * authenticates head, manifest, and directory through PostgreSQL,
+			 * then installs the exact kind-bound immutable mapped payload. */
 			REQUIRE(publication[7].value_or("") == "5");
 			REQUIRE(publication[19].value_or("") == "3");
 			REQUIRE(publication[8].value_or("") == "t");
@@ -1454,7 +1505,13 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 				const auto number = [&proof](std::size_t field) {
 					return std::stoll(proof[field].value());
 				};
-				REQUIRE(proof[0].value() == "simd_cpu");
+				std::string proof_dump;
+				for (std::size_t field = 0; field < proof.size(); ++field) {
+					if (!proof_dump.empty()) proof_dump += ' ';
+					proof_dump += fmt::format(
+						"{}={}", field, proof[field].value_or("<null>"));
+				}
+				INFO(proof_dump);
 				INFO(fmt::format(
 					"requested_backend={} actual_backend={} empty={} "
 					"route_bits={}/{}/{} query_simd={} chain_score_simd={} "
@@ -1464,6 +1521,7 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 					stats_i64(stage_stats[0], 27),
 					stats_i64(stage_stats[7], 27),
 					stats_i64(stage_stats[8], 27)));
+				REQUIRE(proof[0].value() == "simd_cpu");
 				/* The 14-bp query has no complete k=15 minimizer and therefore
 				 * executes no biological backend. Keep the requested SIMD intent,
 				 * but do not manufacture a SIMD execution claim from configuration.
@@ -1478,25 +1536,84 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 				}
 				REQUIRE(number(8) == 1);
 				REQUIRE(number(9) == 1);
-				REQUIRE(number(10) == 3);
-				REQUIRE(number(11) == 1);
-				REQUIRE(number(12) == 1);
-				REQUIRE(number(13) == 1);
-				REQUIRE(number(14) == 1);
-				REQUIRE(number(15) == 0);
-				REQUIRE(number(16) == 0);
-				REQUIRE(number(17) == 1);
-				REQUIRE(number(18) == 0);
+				/* Both Format-5 index kinds authenticate metadata in two
+				 * relation scans and install the immutable mapped payload. No
+				 * payload relation rows, bulk reads, request groups, or range
+				 * scans are executed. */
+				REQUIRE(number(10) == 2);
+				for (const std::size_t zero : {
+						11u, 12u, 13u, 14u, 15u, 16u, 17u, 18u,
+						20u, 22u, 24u, 25u}) {
+					REQUIRE(number(zero) == 0);
+				}
 				REQUIRE(number(19) > 0);
-				REQUIRE(number(20) == 0);
-				REQUIRE(number(21) > 0);
-				REQUIRE(number(22) == 0);
-				REQUIRE(number(23) > number(19));
-				REQUIRE(number(24) == number(19));
-				REQUIRE(number(25) == number(21));
-				REQUIRE(proof[26].value() == "t");
+					REQUIRE(number(21) > 0);
+					REQUIRE(number(23) > number(19));
+					REQUIRE(proof[26].value() == "t");
 
-				if (route.empty) {
+					const row_t fragment_evidence = query_one(ctx,
+						"WITH first_read AS MATERIALIZED ("
+						" SELECT bioseq."
+						"last_alignment_format5_reader_memory_evidence_v3() AS value"
+						"), second_read AS MATERIALIZED ("
+						" SELECT bioseq."
+						"last_alignment_format5_reader_memory_evidence_v3() AS value"
+						") SELECT "
+						"first_read.value->>'schema',"
+						"first_read.value->>'version',"
+						"first_read.value->>'fragment_native_waves',"
+						"first_read.value->>'fragment_native_queries',"
+						"first_read.value->>'fragment_native_occurrence_fill_ns',"
+						"first_read.value->>'fragment_native_control_count_bytes',"
+						"first_read.value->>'fragment_native_pass2_position_bytes',"
+						"first_read.value->>'fragment_native_pass3_position_bytes',"
+						"first_read.value->>'fragment_native_anchors_constructed',"
+						"first_read.value->>'fragment_native_exact_final_bytes',"
+						"first_read.value->>'fragment_native_peak_exact_final_bytes',"
+						"first_read.value->>'fragment_native_global_sort_calls_invoked',"
+						"first_read.value->>'fragment_native_global_sort_calls_skipped',"
+						"first_read.value->>'fragment_native_candidate_anchor_bytes',"
+						"first_read.value->>'fragment_native_plan_ordinal_bytes',"
+						"first_read.value->>'fragment_native_compaction_bytes',"
+						"first_read.value->>'fragment_native_final_copy_bytes',"
+						"first_read.value->>'fragment_native_evidence_saturated',"
+						"(first_read.value = second_read.value)::text "
+						"FROM first_read CROSS JOIN second_read;");
+					REQUIRE(fragment_evidence.size() == 19u);
+					for (const auto& field : fragment_evidence) {
+						REQUIRE(field.has_value());
+					}
+					const auto fragment_number = [&fragment_evidence](
+							const std::size_t field) {
+						return std::stoull(fragment_evidence[field].value());
+					};
+					REQUIRE(fragment_evidence[0].value()
+						== "bioseq.format5_reader_memory_evidence");
+					REQUIRE(fragment_number(1) == 3u);
+					REQUIRE(fragment_number(2) == 1u);
+					REQUIRE(fragment_number(3) == 1u);
+					REQUIRE(fragment_number(4) > 0u);
+					REQUIRE(fragment_number(5) > 0u);
+					REQUIRE(fragment_number(6) == fragment_number(7));
+					REQUIRE(fragment_number(10) == fragment_number(9));
+					REQUIRE(fragment_number(11) == 0u);
+					REQUIRE(fragment_number(12) == 1u);
+					for (const std::size_t zero : {13u, 14u, 15u, 16u}) {
+						REQUIRE(fragment_number(zero) == 0u);
+					}
+					REQUIRE(fragment_evidence[17].value() == "false");
+					REQUIRE(fragment_evidence[18].value() == "true");
+					if (route.empty) {
+						REQUIRE(fragment_number(6) == 0u);
+						REQUIRE(fragment_number(8) == 0u);
+						REQUIRE(fragment_number(9) == 0u);
+					} else {
+						REQUIRE(fragment_number(6) > 0u);
+						REQUIRE(fragment_number(8) > 0u);
+						REQUIRE(fragment_number(9) > 0u);
+					}
+
+					if (route.empty) {
 					for (const std::size_t zero : {28u, 29u, 30u, 31u}) {
 						REQUIRE(number(zero) == 0);
 					}
@@ -1550,6 +1667,38 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 			}
 		}
 	}
+}
+
+TEST_CASE("ordinal-2 BatchJoin rejects Format-5 MPS before the MPF reader",
+			  "[mmsearch][batch-join][just-index][rev3][format5][mps]"
+			  "[index-kind][error][doc0383]") {
+	auto ctx = fresh_context({kBatchJoinTarget});
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+	seed_batch_join_target(ctx, batch_join_wide_target_sequence());
+	exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
+	exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+	exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+	exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
+	exec_sqlf(ctx,
+		"SELECT bioseq.set_active_read_index('{}'::regclass, "
+		"'minimizers_per_sequence');",
+		kBatchJoinTarget);
+	const auto rowno = static_cast<std::uint64_t>(query_scalar_int(
+		ctx,
+		fmt::format(
+			"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
+			"FROM {} ORDER BY pk LIMIT 1;",
+			kBatchJoinTarget, kBatchJoinTarget)));
+	const row_t publication = query_one(ctx, fmt::format(
+		"SELECT * FROM bioseq_internal.rev3_test_build_ready_mps_generation("
+		"'{}'::regclass, 'minimizers_per_sequence', {}, 'exact_simd');",
+		kBatchJoinTarget, rowno));
+	REQUIRE(publication.size() > 25u);
+	REQUIRE(publication[7].value_or("") == "5");
+	load_batch_join_query(ctx, std::string(48u, 'A'));
+	require_no_current_compatible_persisted_index(
+		ctx, batch_join_sql(2) + ";");
+	REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
 TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPF and MPS",

@@ -6468,13 +6468,12 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	if (index_read_requirement
 		== bioseq::indexing::IndexReadRequirement::
 			require_compatible_persisted
-		&& selected_vulkan
 		&& executable_scan) {
 		ereport(ERROR,
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			 errmsg("required compatible persisted minimizer index unavailable"),
-			 errdetail("ordinal 2 requires a revision-3 READY generation and has no live Vulkan grouped32 reader; CPU direct grouped32 execution does not authorize a GPU fallback"),
-			 errhint("Select the all-CPU/SIMD pipeline or choose index_read_requirement=allow/require_absent; GPU-to-CPU fallback is forbidden.")));
+			 errdetail("ordinal 2 requires a revision-3 READY generation retained by the BatchJoin prepared-reader lifecycle; ordinary column scans have no compatible persisted reader"),
+			 errhint("Use BioseqBatchJoin with a compatible READY generation, or choose index_read_requirement=allow/require_absent; recompute and cache fallback are forbidden.")));
 	}
 	/* Plain EXPLAIN must describe the selected pipeline without touching the
 	 * process-owned Vulkan runtime or its immutable Metal policy.  PostgreSQL

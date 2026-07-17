@@ -2342,6 +2342,76 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
         &PipelineOperationalStats::format5_reader_control_payload_capacity_bytes);
 }
 
+TEST_CASE("DOC0383 fragment-native query evidence preserves additive and peak merge semantics",
+          "[pipe][pipeline-stats][fragment-native][evidence][merge][saturation]") {
+    using bioseq::indexing::PreparedFragmentAnchorBatchEvidence;
+    using bioseq::pipeline_stats::PipelineOperationalStats;
+
+    PreparedFragmentAnchorBatchEvidence first{};
+    first.waves = 1u;
+    first.queries = 3u;
+    first.occurrence_fill_ns = 11u;
+    first.control_count_bytes = 101u;
+    first.pass2_position_bytes = 40u;
+    first.pass3_position_bytes = 40u;
+    first.anchors_constructed = 12u;
+    first.exact_final_bytes = 288u;
+    first.peak_exact_final_bytes = 288u;
+    first.global_sort_calls_skipped = 3u;
+    first.peak_occurrence_capacity_bytes = 96u;
+    first.peak_block_layout_capacity_bytes = 144u;
+    first.occurrence_allocations = 1u;
+
+    PreparedFragmentAnchorBatchEvidence second{};
+    second.waves = 2u;
+    second.queries = 5u;
+    second.occurrence_fill_ns = 17u;
+    second.control_count_bytes = 203u;
+    second.pass2_position_bytes = 72u;
+    second.pass3_position_bytes = 72u;
+    second.anchors_constructed = 21u;
+    second.exact_final_bytes = 504u;
+    second.peak_exact_final_bytes = 360u;
+    second.global_sort_calls_skipped = 5u;
+    second.peak_occurrence_capacity_bytes = 80u;
+    second.peak_block_layout_capacity_bytes = 192u;
+    second.occurrence_allocations = 0u;
+
+    first.merge(second);
+    REQUIRE(first.waves == 3u);
+    REQUIRE(first.queries == 8u);
+    REQUIRE(first.occurrence_fill_ns == 28u);
+    REQUIRE(first.control_count_bytes == 304u);
+    REQUIRE(first.pass2_position_bytes == 112u);
+    REQUIRE(first.pass2_position_bytes == first.pass3_position_bytes);
+    REQUIRE(first.anchors_constructed == 33u);
+    REQUIRE(first.exact_final_bytes == 792u);
+    REQUIRE(first.peak_exact_final_bytes == 360u);
+    REQUIRE(first.global_sort_calls_invoked == 0u);
+    REQUIRE(first.global_sort_calls_skipped == 8u);
+    REQUIRE(first.peak_occurrence_capacity_bytes == 96u);
+    REQUIRE(first.peak_block_layout_capacity_bytes == 192u);
+    REQUIRE(first.occurrence_allocations == 1u);
+    REQUIRE(first.forbidden_buffers_are_zero());
+    REQUIRE_FALSE(first.saturated);
+
+    PipelineOperationalStats aggregate{};
+    PipelineOperationalStats delta{};
+    delta.fragment_native_query_evidence = first;
+    aggregate.merge(delta);
+    REQUIRE(aggregate.fragment_native_query_evidence == first);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats overflow{};
+    overflow.fragment_native_query_evidence.waves =
+        (std::numeric_limits<std::uint64_t>::max)();
+    aggregate.merge(overflow);
+    REQUIRE(aggregate.fragment_native_query_evidence.waves
+        == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(aggregate.fragment_native_query_evidence.saturated);
+    REQUIRE(aggregate.stats_saturated);
+}
+
 TEST_CASE("Format-6 reader receipts preserve max peaks and report-once owners",
           "[pipe][pipeline-stats][format6][identity][saturation]") {
     using namespace bioseq::pipeline_stats;

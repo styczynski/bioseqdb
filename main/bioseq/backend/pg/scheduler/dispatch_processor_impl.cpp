@@ -1067,6 +1067,15 @@ void append_cpu_prepared_query_sketch(
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
+	if (!minimizer_query_length_is_representable<MinimapSketchData>(
+			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
+		bioseq::pg_utils::invoke_pg_as_cpp([] {
+			ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+		});
+		pg_unreachable();
+	}
 	const auto fail = [](const char* message) -> void {
 		bioseq::pg_utils::invoke_pg_as_cpp([message] {
 			ereport(ERROR,
@@ -1293,6 +1302,7 @@ void dispatch_append_cpu_prepared_query_sketch(
 enum class ParallelPreparedQuerySketchStatus : std::uint8_t {
 	pending,
 	ready,
+	query_length_unsupported,
 	admission_unavailable,
 	collector_growth_failed,
 	capacity_mismatch,
@@ -1312,6 +1322,10 @@ prepare_independently_admitted_query_sketch(
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
+	if (!minimizer_query_length_is_representable<MinimapSketchData>(
+			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
+		return ParallelPreparedQuerySketchStatus::query_length_unsupported;
+	}
 	auto permit =
 		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
 			0u);
@@ -1643,6 +1657,13 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("BioseqBatchJoin query typmod changed during CPU preparation")));
 		}
+		if (!minimizer_query_length_is_representable<MinimapSketchData>(
+				static_cast<bioseq::storage::sequence_size_t>(
+					query_header->bp_size))) {
+			ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+		}
 	}
 	if (query_ordinals.size() != query_headers.size()) {
 		ereport(ERROR,
@@ -1841,6 +1862,14 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			switch (statuses[query_index]) {
 				case ParallelPreparedQuerySketchStatus::ready:
 					break;
+				case ParallelPreparedQuerySketchStatus::
+						query_length_unsupported:
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+					});
+					pg_unreachable();
 				case ParallelPreparedQuerySketchStatus::
 						admission_unavailable:
 				case ParallelPreparedQuerySketchStatus::
@@ -2679,6 +2708,21 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		return;
 	}
 	opened_format6.session.reset();
+	/*
+	 * Format-5's fragment-native reader consumes independent MPF physical
+	 * fragments.  An MPS generation may use the same common wire profile, but
+	 * its merged-sequence ownership is a different index contract and must not
+	 * be relabelled as MPF merely because the bytes decode.  Format-6 has its
+	 * own kind-aware reader above; after that clean fallback boundary only MPF
+	 * is eligible for the Format-5 path.
+	 */
+	if (identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
+		unavailable(fmt::format(
+			"Format-5 fragment-native execution supports {} only; active index {} requires its own native persisted reader",
+			MINIMIZERS_PER_FRAGMENT_INDEX_NAME,
+			identity.index_name));
+		return;
+	}
 
 	const auto expected =
 		bioseq::indexing::expected_minimizer_compatibility_for_backend(

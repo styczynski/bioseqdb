@@ -48,6 +48,7 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -264,6 +265,80 @@ BIN_DIR = BUILD_DIR / "bioseq"
 STATE_FILE = Path("/tmp/bioseq_build_mcp_state.json")
 LOCK_FILE = Path("/tmp/bioseq_build_mcp.lock")
 LOG_DIR = Path("/tmp")
+
+# Local machine policy for compiler-only realtime scheduling.  The enablement
+# key is read exclusively from the root-owned /etc/environment; an MCP process
+# environment can neither enable RT nor raise its priority.  The installed
+# launcher contains the same literal priority and drops back to the invoking
+# non-root uid/gid before execing either exact LLVM-22 compiler path.
+LOCAL_BUILD_ENVIRONMENT_FILE = Path("/etc/environment")
+LOCAL_CLANG_RT_PRIORITY_KEY = "BIOSEQ_BUILD_RT_PRIORITY"
+LOCAL_CLANG_RT_PRIORITY = 1
+LOCAL_CLANG_RT_LAUNCHER = Path(
+    "/usr/local/libexec/bioseq-clang-rt-launcher")
+LOCAL_LLVM22_CLANG = Path("/usr/lib/llvm-22/bin/clang")
+LOCAL_LLVM22_CLANGXX = Path("/usr/lib/llvm-22/bin/clang++")
+LOCAL_CLANG_RT_CMAKE_KEYS = (
+    "CMAKE_C_COMPILER_LAUNCHER",
+    "CMAKE_CXX_COMPILER_LAUNCHER",
+)
+
+
+def _trusted_root_owned_path_error(
+        path: Path, *, executable: bool = False) -> str | None:
+    """Return why ``path`` is unsafe for a privileged hand-off, if any."""
+    try:
+        metadata = path.stat()
+    except OSError as exc:
+        return f"cannot stat {path}: {exc}"
+    if not stat.S_ISREG(metadata.st_mode):
+        return f"{path} is not a regular file"
+    if metadata.st_uid != 0:
+        return f"{path} is not owned by root"
+    if metadata.st_mode & 0o022:
+        return f"{path} is group- or world-writable"
+    if executable and not os.access(path, os.X_OK):
+        return f"{path} is not executable"
+    return None
+
+
+def _require_trusted_root_owned_path(
+        path: Path, *, executable: bool = False) -> None:
+    problem = _trusted_root_owned_path_error(path, executable=executable)
+    if problem is not None:
+        raise RuntimeError(problem)
+
+
+def _refuse_root_build_identity(context: str) -> str | None:
+    """Return a fail-closed diagnostic when a build path runs as root."""
+    if os.geteuid() == 0:
+        return (
+            f"{context} refuses to run as root; build and compiler processes "
+            "must retain a non-root uid")
+    return None
+
+
+def _ensure_build_worker_timesharing_policy() -> None:
+    """Ensure the worker itself cannot leak an inherited realtime policy.
+
+    Linux scheduling policy is inherited across fork/exec.  A worker launched
+    by an accidentally promoted parent therefore demotes itself before it can
+    start CMake, Ninja, tests, or benchmarks.  Selecting SCHED_OTHER for one's
+    own thread is an unprivileged reduction in scheduling privilege.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        policy = os.sched_getscheduler(0)
+        if policy != os.SCHED_OTHER:
+            os.sched_setscheduler(0, os.SCHED_OTHER, os.sched_param(0))
+        if (os.sched_getscheduler(0) != os.SCHED_OTHER
+                or os.sched_getparam(0).sched_priority != 0):
+            raise RuntimeError("worker scheduler did not settle at SCHED_OTHER/0")
+    except (AttributeError, OSError) as exc:
+        raise RuntimeError(
+            "could not enforce SCHED_OTHER/0 for the build worker") from exc
+
 
 def _safe_parallel_jobs() -> int:
     """Cap build parallelism by BOTH core count and RAM.
@@ -1127,7 +1202,8 @@ def _cmake_install_cmd(active_build_dir: Path, active_preset: str) -> list[str]:
 def _prepare_aws_postgresql_test_database(active_preset: str, log_handle,
                                           deadline: float) -> None:
     """Make the AWS PostgreSQL instance match integration-test defaults."""
-    if not _is_aws_preset(active_preset):
+    if (not sys.platform.startswith("linux")
+            or not _is_aws_preset(active_preset)):
         return
 
     log_handle.write(
@@ -1193,6 +1269,69 @@ def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
         raise RuntimeError(msg) from exc
 
 
+def _trusted_root_owned_executable(path: str) -> Path:
+    """Resolve and validate an executable before crossing to another OS uid."""
+    try:
+        resolved = Path(path).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError(f"cannot resolve trusted executable {path}: {exc}") from exc
+    _require_trusted_root_owned_path(resolved, executable=True)
+    for directory in resolved.parents:
+        try:
+            metadata = directory.stat()
+        except OSError as exc:
+            raise RuntimeError(
+                f"cannot stat executable parent {directory}: {exc}") from exc
+        if metadata.st_uid != 0 or metadata.st_mode & 0o022:
+            raise RuntimeError(
+                f"executable parent {directory} is not root-owned and "
+                "non-writable")
+    return resolved
+
+
+def _query_postgresql_data_directory(psql: str, active_preset: str) -> str:
+    """Query directly, with a narrowly validated AWS postgres-uid fallback."""
+    argv = [psql, "-t", "-c", "SHOW data_directory;", "postgres"]
+    direct_detail = ""
+    try:
+        direct = subprocess.run(
+            argv, capture_output=True, text=True, timeout=10)
+        if direct.returncode == 0:
+            return direct.stdout.strip()
+        direct_detail = (direct.stderr or direct.stdout).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        direct_detail = str(exc)
+
+    if not _is_aws_preset(active_preset):
+        raise RuntimeError(
+            "direct psql SHOW data_directory failed: "
+            f"{direct_detail or 'unknown error'}")
+
+    trusted_psql = _trusted_root_owned_executable(psql)
+    trusted_sudo = _trusted_root_owned_executable("/usr/bin/sudo")
+    try:
+        fallback = subprocess.run(
+            [str(trusted_sudo), "-n", "-u", "postgres", "--",
+             str(trusted_psql), "-t", "-c", "SHOW data_directory;",
+             "postgres"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "direct psql failed and trusted AWS postgres-uid fallback could "
+            f"not launch (direct: {direct_detail or 'unknown error'}; "
+            f"fallback: {exc})") from exc
+    if fallback.returncode != 0:
+        fallback_detail = (fallback.stderr or fallback.stdout).strip()
+        raise RuntimeError(
+            "direct psql and trusted AWS postgres-uid fallback failed "
+            f"(direct: {direct_detail or 'unknown error'}; "
+            f"fallback: {fallback_detail or f'exit {fallback.returncode}'})")
+    return fallback.stdout.strip()
+
+
 def _restart_postgresql(active_build_dir: Path, active_preset: str,
                         log_handle, deadline: float) -> None:
     """Restart the PostgreSQL postmaster after installing a new extension dylib.
@@ -1250,12 +1389,7 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
         raise RuntimeError(msg)
 
     try:
-        res = subprocess.run([psql, "-t", "-c", "SHOW data_directory;", "postgres"],
-                             capture_output=True, text=True, timeout=10)
-        if res.returncode != 0:
-            raise RuntimeError(
-                f"psql SHOW data_directory exited {res.returncode}: {res.stderr.strip()}")
-        data_dir = res.stdout.strip()
+        data_dir = _query_postgresql_data_directory(psql, active_preset)
     except Exception as exc:
         msg = f"could not query data_directory ({exc}); cannot restart PG after installing extension"
         _log(f"ERROR: {msg}")
@@ -1323,12 +1457,7 @@ def _postgresql_e2e_restart_shell_command(active_build_dir: Path,
     if not os.path.isfile(psql):
         raise RuntimeError(f"psql not found at {psql}")
 
-    res = subprocess.run([psql, "-t", "-c", "SHOW data_directory;", "postgres"],
-                         capture_output=True, text=True, timeout=10)
-    if res.returncode != 0:
-        raise RuntimeError(
-            f"psql SHOW data_directory exited {res.returncode}: {res.stderr.strip()}")
-    data_dir = res.stdout.strip()
+    data_dir = _query_postgresql_data_directory(psql, active_preset)
     if not data_dir or not os.path.isdir(data_dir):
         raise RuntimeError(f"data_directory '{data_dir}' is not a directory")
 
@@ -1440,6 +1569,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
     configure, compilation, installation and every other mode remain immune to
     a caller's configuration override.
     """
+    identity_error = _refuse_root_build_identity("detached build worker")
+    if identity_error is not None:
+        _log(identity_error)
+        return 1
+    try:
+        _ensure_build_worker_timesharing_policy()
+    except RuntimeError as exc:
+        _log(f"detached build worker scheduling error: {exc}")
+        return 1
     bench_flags = bench_flags or []
     test_flags = test_flags or []
     state = _load_state()
@@ -1468,6 +1606,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
         f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
         f"# bench_e2e_config={bench_e2e_config or ''}\n"
+        f"# clang_rt_priority={entry.get('rt_priority')}\n"
         f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
     )
     log_handle.flush()
@@ -1502,6 +1641,20 @@ def _run_build_worker(mode: str, build_only: bool = False,
         env.setdefault("BIOSEQ_TEST_PGPORT", "5432")
 
     try:
+        machine_rt_priority = _configured_local_build_rt_priority()
+        effective_rt_priority = (
+            machine_rt_priority
+            if _local_clang_rt_is_enabled(
+                active_preset, machine_rt_priority)
+            else None
+        )
+        if entry.get("rt_priority") != effective_rt_priority:
+            raise RuntimeError(
+                "clang realtime machine policy changed between scheduling "
+                f"and worker start (scheduled={entry.get('rt_priority')}, "
+                f"current={effective_rt_priority}); refusing to build")
+        _preflight_local_clang_rt_launcher(
+            active_preset, machine_rt_priority)
         _update_entry(mode, step="configuring", build_only=build_only,
                       debug=debug, preset=active_preset,
                       build_dir=str(active_build_dir),
@@ -1520,6 +1673,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
         required_cache_args = [
             f"-D{name}={value}" for name, value in required_cache.items()
         ]
+        initial_clang_rt_args = _initial_clang_rt_cmake_args(
+            active_preset, machine_rt_priority)
         build_ninja = active_build_dir / "build.ninja"
         expected_test_indexes = mode_details.preset_family == "test"
         if not build_ninja.exists():
@@ -1530,7 +1685,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "previous configure did not produce build.ninja",
                 )
             rc = _stream_subprocess(
-                ["cmake", "--preset", active_preset, *required_cache_args],
+                ["cmake", "--preset", active_preset, *required_cache_args,
+                 *initial_clang_rt_args],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
             )
             if rc != 0:
@@ -1707,6 +1863,27 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 if rc != 0:
                     raise RuntimeError(
                         f"AWS cache repair exited with code {rc}")
+
+        # Run this after every cache-clearing/toolchain repair above so the
+        # final generated compile rules cannot lose (or retain, when disabled)
+        # our exact managed launcher value.
+        clang_rt_repairs, clang_rt_reasons = (
+            _clang_rt_cmake_cache_repairs(
+                active_build_dir, active_preset, machine_rt_priority)
+        )
+        if clang_rt_repairs:
+            log_handle.write(
+                "# clang RT cache repair: "
+                + "; ".join(clang_rt_reasons) + ".\n")
+            log_handle.flush()
+            rc = _stream_subprocess(
+                ["cmake", "--preset", active_preset, *clang_rt_repairs],
+                log_handle, deadline, cwd=PROJECT_ROOT, env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    "clang RT compiler-launcher cache repair exited with "
+                    f"code {rc}")
 
         configured_test_indexes = _cmake_cache_bool(
             active_build_dir, "BIOSEQ_TEST_INDEXES")
@@ -2099,11 +2276,143 @@ def _validate_bench_e2e_config_override(mode: str, requested_path):
     return str(resolved), None
 
 
+def _configured_local_build_rt_priority() -> int | None:
+    """Return the root-owned machine opt-in for compiler-only SCHED_RR/1.
+
+    Process environment is deliberately ignored: it is controlled by the MCP
+    launcher and must not override the machine's exact priority-one ceiling.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    if not LOCAL_BUILD_ENVIRONMENT_FILE.exists():
+        return None
+    _require_trusted_root_owned_path(LOCAL_BUILD_ENVIRONMENT_FILE)
+    raw = ""
+    try:
+        lines = LOCAL_BUILD_ENVIRONMENT_FILE.read_text(
+            encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot read {LOCAL_BUILD_ENVIRONMENT_FILE}: {exc}") from exc
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == LOCAL_CLANG_RT_PRIORITY_KEY:
+            raw = value.strip()
+            if (len(raw) >= 2
+                    and raw[0] == raw[-1]
+                    and raw[0] in {"'", '"'}):
+                raw = raw[1:-1].strip()
+            break
+    if not raw:
+        return None
+    try:
+        priority = int(raw, 10)
+    except ValueError as exc:
+        raise ValueError(
+            f"{LOCAL_CLANG_RT_PRIORITY_KEY} must be exactly "
+            f"{LOCAL_CLANG_RT_PRIORITY}") from exc
+    if priority != LOCAL_CLANG_RT_PRIORITY:
+        raise ValueError(
+            f"{LOCAL_CLANG_RT_PRIORITY_KEY} must be exactly "
+            f"{LOCAL_CLANG_RT_PRIORITY}")
+    return priority
+
+
+def _local_clang_rt_is_enabled(
+        active_preset: str, rt_priority: int | None) -> bool:
+    return (
+        rt_priority == LOCAL_CLANG_RT_PRIORITY
+        and _is_aws_clang_preset(active_preset)
+    )
+
+
+def _preflight_local_clang_rt_launcher(
+        active_preset: str, rt_priority: int | None) -> None:
+    """Prove the trusted launcher can create an unprivileged RR/1 probe."""
+    if not _local_clang_rt_is_enabled(active_preset, rt_priority):
+        return
+    for path in (
+            LOCAL_CLANG_RT_LAUNCHER,
+            LOCAL_LLVM22_CLANG,
+            LOCAL_LLVM22_CLANGXX,
+            Path("/usr/bin/chrt"),
+            Path("/usr/bin/setpriv"),
+            Path("/usr/bin/sudo")):
+        _trusted_root_owned_executable(str(path))
+    sudo_metadata = Path("/usr/bin/sudo").stat()
+    if not (sudo_metadata.st_mode & stat.S_ISUID):
+        raise RuntimeError("/usr/bin/sudo is not setuid; clang RT is unavailable")
+    try:
+        probe = subprocess.run(
+            [str(LOCAL_CLANG_RT_LAUNCHER), "--preflight"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            "failed to invoke the clang realtime launcher preflight"
+        ) from exc
+    if probe.returncode != 0:
+        detail = (probe.stderr or probe.stdout).strip()
+        raise RuntimeError(
+            "clang realtime launcher preflight failed: "
+            f"{detail or f'exit {probe.returncode}'}")
+
+
+def _initial_clang_rt_cmake_args(
+        active_preset: str, rt_priority: int | None) -> list[str]:
+    if not _local_clang_rt_is_enabled(active_preset, rt_priority):
+        return []
+    launcher = str(LOCAL_CLANG_RT_LAUNCHER)
+    return [
+        f"-D{key}:FILEPATH={launcher}"
+        for key in LOCAL_CLANG_RT_CMAKE_KEYS
+    ]
+
+
+def _clang_rt_cmake_cache_repairs(
+        active_build_dir: Path,
+        active_preset: str,
+        rt_priority: int | None) -> tuple[list[str], list[str]]:
+    """Return CMake argv/reasons to enforce or remove our managed launcher.
+
+    Disabling RT or selecting a non-Clang preset removes only the exact
+    launcher value managed here; unrelated user-provided compiler launchers
+    remain untouched.
+    """
+    managed = str(LOCAL_CLANG_RT_LAUNCHER)
+    enabled = _local_clang_rt_is_enabled(active_preset, rt_priority)
+    args: list[str] = []
+    reasons: list[str] = []
+    for key in LOCAL_CLANG_RT_CMAKE_KEYS:
+        current = _cmake_cache_value(active_build_dir, key)
+        if enabled and current != managed:
+            args.append(f"-D{key}:FILEPATH={managed}")
+            reasons.append(f"{key}={managed} (was {current or 'unset'})")
+        elif not enabled and current == managed:
+            args.append(f"-U{key}")
+            reasons.append(f"clearing managed {key}")
+    return args, reasons
+
+
 def tool_start_build(mode: str, build_only: bool = False,
                      debug: bool = False, bench_filter=None,
                      debug_report: bool = False,
                      debug_report_supplied: bool = False,
                      bench_e2e_config=None) -> str:
+    identity_error = _refuse_root_build_identity("start_build")
+    if identity_error is not None:
+        return f"Build worker identity error: {identity_error}"
+    # Linux scheduling policy is per-thread and inherited across fork/exec.
+    # Demote only this MCP request thread before it spawns the detached worker,
+    # closing the gap where a server left at a sticky RT policy could otherwise
+    # hand that policy to the worker before the worker's own fail-closed check.
+    try:
+        _ensure_build_worker_timesharing_policy()
+    except RuntimeError as exc:
+        return f"Build worker scheduling configuration error: {exc}"
     if mode not in VALID_MODES:
         return (f"Invalid mode '{mode}'. Valid modes are: "
                 f"{', '.join(VALID_MODES)}.")
@@ -2162,6 +2471,23 @@ def tool_start_build(mode: str, build_only: bool = False,
                     f"Current step: {step}. "
                     f"Predicted finish in {_format_minutes(eta_min)}")
 
+        # Validate the machine-owned compiler policy only after request
+        # validation and conflict detection.  The preflight creates one
+        # short-lived unprivileged RR/1 probe; it never changes this persistent
+        # MCP server's scheduling policy.
+        try:
+            machine_rt_priority = _configured_local_build_rt_priority()
+            _preflight_local_clang_rt_launcher(
+                selected_preset, machine_rt_priority)
+        except (RuntimeError, ValueError) as exc:
+            return f"Build worker scheduling configuration error: {exc}"
+        configured_rt_priority = (
+            machine_rt_priority
+            if _local_clang_rt_is_enabled(
+                selected_preset, machine_rt_priority)
+            else None
+        )
+
         # Reserve the slot atomically before spawning the worker so a
         # concurrent start_build observes "running" immediately and
         # doesn't race past the same check.
@@ -2173,20 +2499,23 @@ def tool_start_build(mode: str, build_only: bool = False,
         )
 
         server_path = Path(__file__).resolve()
-        proc = subprocess.Popen(
-            [sys.executable, str(server_path),
-             "--run-build", mode,
-             "--build-only", ("true" if build_only else "false"),
-             "--debug", ("true" if debug else "false"),
-             "--bench-flags", json.dumps(bench_flags),
-             "--test-flags", json.dumps(test_flags),
-             "--bench-e2e-config", resolved_e2e_config or ""],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            close_fds=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(server_path),
+                 "--run-build", mode,
+                 "--build-only", ("true" if build_only else "false"),
+                 "--debug", ("true" if debug else "false"),
+                 "--bench-flags", json.dumps(bench_flags),
+                 "--test-flags", json.dumps(test_flags),
+                 "--bench-e2e-config", resolved_e2e_config or ""],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except OSError as exc:
+            return f"Build worker spawn error: {exc}"
 
         state[mode] = {
             "mode": mode,
@@ -2209,10 +2538,12 @@ def tool_start_build(mode: str, build_only: bool = False,
             "bench_flags": bench_flags,
             "focused_test_args": test_flags,
             "bench_e2e_config": resolved_e2e_config,
+            "rt_priority": configured_rt_priority,
             "effective_run_args": test_flags if mode == "unit+integration" else bench_flags,
         }
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
+             f"rt_priority={configured_rt_priority} "
              f"bench_flags={bench_flags} focused_test_args={test_flags} "
              f"bench_e2e_config={resolved_e2e_config} "
              f"log={log_path}")
@@ -2250,6 +2581,15 @@ def _run_build_inline(mode: str, build_only: bool = False,
     Returns the worker's exit code, or a small non-worker code on a pre-flight
     refusal (2 = invalid mode, 3 = a conflicting build is already running here).
     """
+    identity_error = _refuse_root_build_identity("synchronous build worker")
+    if identity_error is not None:
+        _log(identity_error)
+        return 2
+    try:
+        _ensure_build_worker_timesharing_policy()
+    except RuntimeError as exc:
+        _log(f"synchronous build worker scheduling error: {exc}")
+        return 2
     if mode not in VALID_MODES:
         _log(f"--run-build-sync: invalid mode '{mode}'")
         return 2
@@ -2268,6 +2608,20 @@ def _run_build_inline(mode: str, build_only: bool = False,
                  f"already running on this host (pid={running_entry.get('pid')}); "
                  f"refusing to start {mode}")
             return 3
+
+        try:
+            machine_rt_priority = _configured_local_build_rt_priority()
+            _preflight_local_clang_rt_launcher(
+                selected_preset, machine_rt_priority)
+        except (RuntimeError, ValueError) as exc:
+            _log(f"--run-build-sync: scheduling configuration error: {exc}")
+            return 2
+        configured_rt_priority = (
+            machine_rt_priority
+            if _local_clang_rt_is_enabled(
+                selected_preset, machine_rt_priority)
+            else None
+        )
 
         started_at = time.time()
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
@@ -2295,6 +2649,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "uses_private_cluster": MODES[mode].uses_private_cluster,
             "bench_flags": list(bench_flags or []),
             "focused_test_args": list(test_flags or []),
+            "rt_priority": configured_rt_priority,
             "effective_run_args": (
                 list(test_flags or []) if mode == "unit+integration"
                 else list(bench_flags or [])
@@ -2303,6 +2658,7 @@ def _run_build_inline(mode: str, build_only: bool = False,
         _save_state(state)
         _log(f"--run-build-sync: running {mode} inline (pid={os.getpid()}, "
              f"preset={selected_preset}, build_only={build_only}, "
+             f"clang_rt_priority={configured_rt_priority}, "
              f"bench_flags={bench_flags or []}, "
              f"focused_test_args={test_flags or []}, log={log_path})")
 

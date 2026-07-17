@@ -205,6 +205,29 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace {
 
+/// Arms before fragment-anchor preparation and completes the scratch wave only
+/// after the synchronous prepare/consumer scope has unwound. The scratch API is
+/// idempotent/noexcept, so preparation and alignment failures both leave the
+/// reusable planner clean.
+class FragmentAnchorWaveCompletion final {
+private:
+    bioseq::indexing::QueryWaveScratch* scratch_ = nullptr;
+
+public:
+    explicit FragmentAnchorWaveCompletion(
+            bioseq::indexing::QueryWaveScratch& scratch) noexcept
+        : scratch_(&scratch) {}
+
+    ~FragmentAnchorWaveCompletion() noexcept {
+        scratch_->complete_wave_after_join();
+    }
+
+    FragmentAnchorWaveCompletion(
+        const FragmentAnchorWaveCompletion&) = delete;
+    FragmentAnchorWaveCompletion& operator=(
+        const FragmentAnchorWaveCompletion&) = delete;
+};
+
 constexpr std::string_view kMinimizersPerFragmentIndex =
     bioseq::indexing::MinimizerHashmapFragmentIndex::index_name;
 constexpr std::string_view kMinimizersPerSequenceIndex =
@@ -715,6 +738,13 @@ inline void record_unattested_job(
         stats.operational.stats_saturated =
             stats.operational.stats_saturated
             || execution_proof->host_stage_timing_saturated;
+        if (execution_proof->fragment_native_query_evidence_present) {
+            stats.operational.fragment_native_query_evidence.merge(
+                execution_proof->fragment_native_query_evidence);
+            stats.operational.stats_saturated =
+                stats.operational.stats_saturated
+                || stats.operational.fragment_native_query_evidence.saturated;
+        }
     }
     ::bioseq::pipeline_stats::PipelineJobExecutionStats job{};
     job.requested_backend = backend_from_selected_params(params);
@@ -3486,6 +3516,14 @@ template <class S>
                  &row_consumed_persisted_query_sketch,
                  &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
+                    if (!minimizer_query_length_is_representable<
+                            MinimapSketchData>(
+                                static_cast<sequence_size_t>(
+                                    query_seq.bp_size()))) {
+                        raise_typed_dispatch_pg_error_as_cpp(
+                            ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                            "query exceeds the 28-bit minimizer position domain");
+                    }
                     const std::uint64_t query_sketch_started_ns =
                         dispatch_host_now_ns();
                     if (selected_vulkan_execution(idx_params)) {
@@ -3687,14 +3725,59 @@ template <class S>
 								/*gpu_index_cache=*/nullptr,
 								bioseq::indexing::GpuIndexCacheIdentity{});
 							} else {
-							collection = minimap2_port_with_index_pg_checked(
-								fq_pg,
-								ft_pg,
-								alignment_query_minimizers,
-								*prepared_group->persisted_shape_v5_reader,
-								idx_params,
-								/*gpu_index_cache=*/nullptr,
-								bioseq::indexing::GpuIndexCacheIdentity{});
+							collection = run_aligner_pg_checked(
+								"fragment-native single-query anchor preparation",
+									[&alignment_query_minimizers, &query_seq,
+									 &idx_params, prepared_group, &fq_pg,
+									 &ft_pg]() -> MatchResultCollection {
+									const std::uint64_t prepare_started_ns =
+										dispatch_host_now_ns();
+									auto& admission = bioseq::parallelism::
+										MemoryAdmissionController::instance();
+									auto scratch_result = bioseq::indexing::
+										QueryWaveScratch::create(admission);
+									if (!scratch_result) {
+										throw bioseq::indexing::
+											PersistedMinimizerLookupError(
+												"fragment-native query scratch was not "
+												"admitted; wire_error="
+												+ std::to_string(static_cast<unsigned>(
+													scratch_result.error())));
+									}
+									auto scratch = std::move(*scratch_result);
+									const bioseq::indexing::FragmentSeedQuery request{
+										.minimizers = alignment_query_minimizers,
+										.query_length = static_cast<sequence_size_t>(
+											query_seq.bp_size()),
+										.kmer_size = idx_params.kmer_size,
+									};
+									FragmentAnchorWaveCompletion wave_completion{
+										scratch};
+									auto prepared = prepared_group->
+										persisted_shape_v5_reader->
+										prepare_fragment_anchor_batch(
+											admission,
+											std::span<const bioseq::indexing::
+												FragmentSeedQuery>{&request, 1u},
+											idx_params.max_occ,
+											scratch);
+									const auto query_index = prepared.query_view(0u);
+									const std::uint64_t prepare_host_wall_ns =
+										elapsed_dispatch_host_ns(prepare_started_ns);
+									MatchResultCollection out = minimap2_port_with_index(
+										fq_pg,
+										ft_pg,
+										alignment_query_minimizers,
+										query_index,
+										idx_params,
+										/*gpu_index_cache=*/nullptr,
+										bioseq::indexing::GpuIndexCacheIdentity{});
+										out.record_seed_lookup_host_time(
+											prepare_host_wall_ns);
+										out.record_fragment_native_query_evidence(
+											prepared.evidence());
+										return out;
+								});
 							}
 						} else {
 						ensure_q();
@@ -6844,35 +6927,132 @@ template <class S>
                                         "fragment-native Format-5 reader disappeared");
                                 }
 
+                                auto& memory_admission = bioseq::parallelism::
+                                    MemoryAdmissionController::instance();
+                                const std::uint64_t first_wave_prepare_started_ns =
+                                    dispatch_host_now_ns();
+                                auto scratch_result = bioseq::indexing::
+                                    QueryWaveScratch::create(memory_admission);
+                                if (!scratch_result) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query scratch was "
+                                            "not admitted; wire_error="
+                                            + std::to_string(
+                                                static_cast<unsigned>(
+                                                    scratch_result.error())));
+                                }
+                                // Reuse one admitted scratch owner across the
+                                // serial waves. Each prepared batch owns its
+                                // final anchors independently and is destroyed
+                                // after its synchronous query wave completes.
+                                auto query_wave_scratch =
+                                    std::move(*scratch_result);
+
+                                const std::uint64_t descriptor_bytes =
+                                    bioseq::parallelism::saturating_mul(
+                                        shape_v5_wave_size,
+                                        sizeof(bioseq::indexing::
+                                            FragmentSeedQuery));
+                                const std::uint64_t descriptor_headroom =
+                                    bioseq::parallelism::saturating_mul(
+                                        descriptor_bytes,
+                                        bioseq::parallelism::
+                                            kVectorPreallocationHeadroomFactor);
+                                if (descriptor_bytes
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                    || descriptor_headroom
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptor "
+                                            "capacity overflow");
+                                }
+                                auto descriptor_permit_result =
+                                    memory_admission.try_reserve(
+                                        descriptor_headroom);
+                                if (!descriptor_permit_result) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptors "
+                                            "were not admitted");
+                                }
+                                // Declared before the vector so reverse
+                                // destruction releases storage before permit.
+                                auto descriptor_permit =
+                                    std::move(*descriptor_permit_result);
+                                std::vector<bioseq::indexing::FragmentSeedQuery>
+                                    wave_queries;
+                                try {
+                                    wave_queries.reserve(shape_v5_wave_size);
+                                } catch (const std::bad_alloc&) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptor "
+                                            "allocation failed");
+                                }
+                                const std::uint64_t actual_descriptor_bytes =
+                                    bioseq::parallelism::saturating_mul(
+                                        wave_queries.capacity(),
+                                        sizeof(bioseq::indexing::
+                                            FragmentSeedQuery));
+                                if (actual_descriptor_bytes
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                    || (actual_descriptor_bytes
+                                            > descriptor_permit.bytes()
+                                        && !descriptor_permit.grow_to(
+                                            actual_descriptor_bytes))) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptor "
+                                            "reconciliation failed");
+                                }
+                                descriptor_permit.shrink_to(
+                                    actual_descriptor_bytes);
+
                                 for (std::size_t wave_begin = 0u;
                                      wave_begin < batch_size;
                                      wave_begin += shape_v5_wave_size) {
+                                    const std::uint64_t
+                                        seed_wave_prepare_started_ns =
+                                            wave_begin == 0u
+                                            ? first_wave_prepare_started_ns
+                                            : dispatch_host_now_ns();
                                     const std::size_t wave_end = std::min(
                                         batch_size,
                                         wave_begin + shape_v5_wave_size);
-                                    std::vector<std::span<
-                                        const MinimapSketchData>>
-                                            wave_queries;
-                                    wave_queries.reserve(
-                                        wave_end - wave_begin);
+                                    wave_queries.clear();
                                     for (std::size_t row = wave_begin;
                                          row < wave_end;
                                          ++row) {
-                                        wave_queries.emplace_back(
-                                            retained_query_sketches[row]
-                                                ->minimizers);
+                                        wave_queries.push_back(
+                                            bioseq::indexing::FragmentSeedQuery{
+                                                .minimizers =
+                                                    retained_query_sketches[row]
+                                                        ->minimizers,
+                                                .query_length =
+                                                    static_cast<sequence_size_t>(
+                                                        (*per_row_query_hdrs)[row]
+                                                            ->bp_size),
+                                                .kmer_size =
+                                                    native_query_params[row]
+                                                        .kmer_size,
+                                            });
                                     }
-                                    const std::uint64_t
-                                        seed_wave_prepare_started_ns =
-                                            dispatch_host_now_ns();
-                                    const auto prepared_seed_batch =
-                                        shape_v5_reader->
-                                            prepare_fragment_seed_batch(
-                                                std::span<const std::span<
-                                                    const MinimapSketchData>>{
-                                                        wave_queries},
-                                                native_query_params[
-                                                    wave_begin].max_occ);
+                                    FragmentAnchorWaveCompletion
+                                        wave_completion{query_wave_scratch};
+                                    auto prepared_seed_batch = shape_v5_reader->
+                                        prepare_fragment_anchor_batch(
+                                            memory_admission,
+                                            std::span<const bioseq::indexing::
+                                                FragmentSeedQuery>{
+                                                    wave_queries},
+                                            native_query_params[
+                                                wave_begin].max_occ,
+                                            query_wave_scratch);
                                     const std::uint64_t
                                         seed_wave_prepare_host_wall_ns =
                                             elapsed_dispatch_host_ns(
@@ -6890,7 +7070,6 @@ template <class S>
                                                     query_batch,
                                             [&align_query,
                                              &prepared_seed_batch,
-                                             &retained_query_sketches,
                                              wave_begin](
                                                     const std::size_t lo,
                                                     const std::size_t hi) {
@@ -6901,15 +7080,15 @@ template <class S>
                                                         prepared_seed_batch.
                                                             query_view(
                                                                 row
-                                                                    - wave_begin,
-                                                                retained_query_sketches[
-                                                                    row]->
-                                                                    minimizers);
+                                                                    - wave_begin);
                                                     align_query(
                                                         row,
                                                         query_index);
                                                 }
                                             });
+                                    native_collections[wave_begin].
+                                        record_fragment_native_query_evidence(
+                                            prepared_seed_batch.evidence());
                                     native_collections[wave_begin].
                                         record_seed_lookup_host_time(
                                             seed_wave_prepare_host_wall_ns);

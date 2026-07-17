@@ -68,7 +68,6 @@ import bioseq.sequences.chaining.utils;
 import bioseq.sequences.chaining.scalar;
 import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.rmq;
-import bioseq.common.radix_sort;
 import bioseq.common.context;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
@@ -109,7 +108,6 @@ using bioseq::chaining::backtrack_chains;
 // DOC0279 §9 / §7.1 — the relocated minimizer index + its concept. Highway-
 // namespace consumers reference them cross-namespace (POD value type + concept).
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
-using bioseq::indexing::FragmentNativeMinimizerSeedIndex;
 using bioseq::indexing::MinimizerLookupIndex;
 using bioseq::indexing::MinimizerSeedIndex;
 using bioseq::indexing::MinimizerLookupSpans;
@@ -737,16 +735,9 @@ inline void sort_seed_hits(
     static const auto* _sort_desc =
         bioseq::instr::register_region_static("collect_seed_hits_sort");
     auto _sort_scope = bioseq::instr::region(_sort_desc);
-    struct AnchorRefBitsKey {
-        [[nodiscard, gnu::always_inline]]
-        inline std::uint64_t operator()(const Anchor& anchor) const noexcept {
-            return anchor.ref_bits();
-        }
-    };
-    bioseq::sorting::radix_sort(
-        anchors_out.data(),
-        anchors_out.data() + anchors_out.size(),
-        AnchorRefBitsKey{});
+    if (anchors_out.size() < 2u) return;
+    (void)::bioseq::chaining::sort_canonical_anchors(
+        std::span<Anchor>{anchors_out.data(), anchors_out.size()});
 }
 
 /**
@@ -890,8 +881,10 @@ void collect_seed_hits(
     }
     }  // end target_index_lookup scope
 
-    // Sort by reference position (ref_bits field), exact port of
-    // minimap2's `radix_sort_128x(a, a + n_a)` from misc.c. The
+    // Establish the canonical `(ref_bits, query_bits, full query_position)`
+    // order. The primary reference-key pass remains the exact port of
+    // minimap2's `radix_sort_128x(a, a + n_a)` from misc.c; equal-reference
+    // runs are then comparison-sorted by `sort_seed_hits`. The
     // 8-bit-per-pass MSD radix sort is faster than libc++ pdqsort by
     // ~3-5x at the anchor populations we see (50 k - 1 M+ at LONG/XL/XXL)
     // because it bypasses the comparison-based branch-predictor
@@ -917,87 +910,6 @@ void collect_seed_hits(
                 anchors_out.size(), query_minimizers.size(),
                 bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                 bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-    });
-}
-
-/// MPF-native seed collection.  Unlike the ordinary per-hash lookup shape,
-/// this asks each persisted fragment index to stream its own matching packed
-/// positions directly into the query's anchor slab.  The only sort is the
-/// normal post-seed anchor ordering required by chaining; postings themselves
-/// are never concatenated, merged, or sorted across fragments.
-template <class MinimizerT, FragmentNativeMinimizerSeedIndex IndexT>
-requires std::same_as<
-    std::remove_cv_t<MinimizerT>,
-    MinimapSketchData>
-void collect_seed_hits(
-    std::span<const MinimizerT> query_minimizers,
-    const IndexT& target_index,
-    sequence_size_t query_len,
-    int32_t max_occ,
-    int32_t kmer_size,
-    ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
-{
-    static const auto* _seed_hits_desc =
-        bioseq::instr::register_region_static("collect_seed_hits");
-    auto _seed_hits_scope = bioseq::instr::region(_seed_hits_desc);
-    anchors_out.reserve(query_minimizers.size() * 2);
-    if (max_occ < 0) [[unlikely]] {
-        throw std::invalid_argument(
-            "collect_seed_hits requires a nonnegative max_occ");
-    }
-
-    static const auto* _idx_lookup_desc =
-        bioseq::instr::register_region_static("target_index_lookup");
-    {
-        auto _idx_lookup_scope = bioseq::instr::region(_idx_lookup_desc);
-        const std::uint32_t query_span_value =
-            static_cast<std::uint32_t>(kmer_size);
-        const sequence_size_t reverse_pos_base =
-            query_len - 2 + query_span_value;
-        target_index.for_each_fragment_seed_hit(
-            std::span<const MinimapSketchData>{
-                query_minimizers.data(), query_minimizers.size()},
-            max_occ,
-            [&](const std::uint64_t target_hit,
-                const MinimapSketchData& query_minimizer) {
-                const sequence_size_t ref_position =
-                    static_cast<sequence_size_t>(target_hit >> 1u);
-                const std::uint32_t target_strand_bit =
-                    static_cast<std::uint32_t>(target_hit & 1u);
-                const std::uint64_t query_pos_encoded =
-                    query_minimizer.pos_strand_encoded();
-                const std::uint32_t query_strand_bit =
-                    static_cast<std::uint32_t>(
-                        query_pos_encoded & 1u);
-                const sequence_size_t forward_query_pos =
-                    static_cast<sequence_size_t>(
-                        query_pos_encoded >> 1u);
-                const std::uint32_t is_reverse_bit =
-                    target_strand_bit ^ query_strand_bit;
-                const sequence_size_t reverse_query_pos =
-                    reverse_pos_base - forward_query_pos;
-
-                Anchor anchor;
-                anchor.ref_position = ref_position;
-                anchor.is_reverse = is_reverse_bit;
-                anchor.query_position = is_reverse_bit
-                    ? reverse_query_pos : forward_query_pos;
-                anchor.query_span =
-                    static_cast<std::uint8_t>(query_span_value);
-                anchor.flags = 0;
-                anchor.segment_id = 0;
-                anchors_out.push_back(anchor);
-            });
-    }
-
-    sort_seed_hits(anchors_out);
-    bioseq_log_lazy<DBG>([&] {
-        bioseq_log_progress<DBG>(
-            "[minimap_port] Collected {} fragment-native seed anchors from {} "
-            "query minimizers | footprint={}MB avail={}MB",
-            anchors_out.size(), query_minimizers.size(),
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
     });
 }
 
@@ -3761,6 +3673,8 @@ struct MatchResultCollection {
     SneakySnakePrefilterExecutionProof
         sneaky_snake_prefilter_execution_proof{};
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
+    bioseq::indexing::PreparedFragmentAnchorBatchEvidence
+        fragment_native_query_evidence{};
     bool exact_simd_query_execution_proof_present = false;
     bool exact_simd_target_execution_proof_present = false;
     bool paper_nthash_query_execution_proof_present = false;
@@ -3770,6 +3684,7 @@ struct MatchResultCollection {
     bool scalar_pipeline_execution_proof_present = false;
     bool ksw2_batched_execution_proof_present = false;
     bool sneaky_snake_prefilter_execution_proof_present = false;
+    bool fragment_native_query_evidence_present = false;
     // Operation-local CPU/SIMD wall clocks. These travel with the result so
     // parallel rows never update shared statement statistics. The PostgreSQL
     // dispatch boundary consumes them exactly once into the existing stable
@@ -3864,6 +3779,13 @@ struct MatchResultCollection {
     void record_partial_vulkan_execution_proof(
             const PartialVulkanExecutionProof& proof) noexcept {
         partial_vulkan_execution_proof.combine(proof);
+    }
+
+    void record_fragment_native_query_evidence(
+            const bioseq::indexing::PreparedFragmentAnchorBatchEvidence&
+                evidence) noexcept {
+        fragment_native_query_evidence.merge(evidence);
+        fragment_native_query_evidence_present = true;
     }
 
     void record_host_stage_time(
@@ -3996,6 +3918,10 @@ struct MatchResultCollection {
         }
         partial_vulkan_execution_proof.combine(
             other.partial_vulkan_execution_proof);
+        if (other.fragment_native_query_evidence_present) {
+            record_fragment_native_query_evidence(
+                other.fragment_native_query_evidence);
+        }
         record_query_sketch_host_time(other.query_sketch_host_wall_ns);
         record_persisted_index_decode_host_time(
             other.persisted_index_decode_host_wall_ns);

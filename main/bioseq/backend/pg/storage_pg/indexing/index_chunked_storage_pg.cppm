@@ -3595,6 +3595,20 @@ inline constexpr std::uint64_t kMagic =
     UINT64_C(0x42354d5046494d47); // "B5MPFIMG"
 inline constexpr std::uint32_t kVersion = 1u;
 inline constexpr std::uint32_t kHeaderBytes = 4096u;
+inline constexpr std::uint32_t kIndexKindMpf = 1u;
+inline constexpr std::uint32_t kIndexKindMps = 2u;
+
+[[nodiscard]] inline std::uint32_t index_kind(
+        const Rev3IndexAdministrationIdentity& identity) {
+    if (identity.index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
+        return kIndexKindMpf;
+    }
+    if (identity.index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
+        return kIndexKindMps;
+    }
+    rev3_storage_error_as_cpp(
+        "Format-5 mapped image index identity is unsupported");
+}
 
 struct Header {
     std::uint64_t magic = 0;
@@ -3615,7 +3629,7 @@ struct Header {
     std::uint64_t target_length = 0;
     std::uint64_t position_segment_span_bp = 0;
     std::uint32_t position_segment_count = 0;
-    std::uint32_t reserved_zero = 0;
+    std::uint32_t index_kind = 0;
     std::uint64_t directory_bytes = 0;
     std::uint64_t directory_checksum = 0;
     std::uint64_t payload_bytes = 0;
@@ -3651,13 +3665,14 @@ static_assert(sizeof(Header) <= kHeaderBytes);
         std::uint64_t query_key,
         std::uint64_t generation_id) {
     return fmt::format(
-        "{}/{}_{}_{}_{}_{}_{}_{}.mpf5",
+        "{}/{}_{}_{}_{}_{}_{}_{}_{}.mpf5",
         directory_path(),
         static_cast<unsigned>(identity.database_oid),
         static_cast<unsigned>(identity.tablespace_oid),
         static_cast<unsigned>(identity.main_relfilenode),
         static_cast<unsigned>(identity.user_relid),
         static_cast<int>(identity.column_attno),
+        static_cast<unsigned>(index_kind(identity)),
         static_cast<unsigned long long>(query_key),
         static_cast<unsigned long long>(generation_id));
 }
@@ -3725,6 +3740,10 @@ public:
               identity, query_key, generation_id)),
           temporary_path_(fmt::format(
               "{}.tmp.{}", final_path_, static_cast<int>(MyProcPid))) {
+        if (identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
+            rev3_storage_error_as_cpp(
+                "Format-5 mapped image publication is restricted to minimizers_per_fragment");
+        }
         ensure_directory();
         (void)unlink(temporary_path_.c_str());
         fd_ = OpenTransientFilePerm(
@@ -3768,6 +3787,8 @@ public:
             const MinimizerGenerationHead& head,
             const MinimizerGenerationManifest& manifest) {
         if (published_ || fd_ < 0
+            || identity.index_name
+                != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
             || manifest.wire_format
                 != bioseq::indexing::MinimizerGenerationWireFormat::
                     grouped_shape_soa_segment_local
@@ -3801,6 +3822,7 @@ public:
             .position_segment_span_bp =
                 manifest.position_segment_span_bp,
             .position_segment_count = manifest.position_segment_count,
+            .index_kind = mpf_format5_image_detail::index_kind(identity),
             .directory_bytes = manifest.directory_bytes,
             .directory_checksum = manifest.directory_checksum,
             .payload_bytes = manifest.payload_bytes,
@@ -3940,8 +3962,12 @@ open_exact_minimizer_format5_image_pg(
         const MinimizerGenerationHead& head,
         const MinimizerGenerationManifest& manifest) {
     using namespace mpf_format5_image_detail;
+    if (identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
+        rev3_storage_error_as_cpp(
+            "Format-5 mapped image open is restricted to minimizers_per_fragment");
+    }
+    const std::uint32_t expected_index_kind = index_kind(identity);
     if (identity.database_oid != MyDatabaseId
-        || identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
         || manifest.wire_format
             != bioseq::indexing::MinimizerGenerationWireFormat::
                 grouped_shape_soa_segment_local
@@ -4005,7 +4031,7 @@ open_exact_minimizer_format5_image_pg(
             == manifest.position_segment_span_bp
         && header->position_segment_count
             == manifest.position_segment_count
-        && header->reserved_zero == 0u
+        && header->index_kind == expected_index_kind
         && header->directory_bytes == manifest.directory_bytes
         && header->directory_checksum == manifest.directory_checksum
         && header->payload_bytes == manifest.payload_bytes
@@ -4586,9 +4612,12 @@ public:
             const bool format5 = generation.manifest.wire_format
                 == bioseq::indexing::MinimizerGenerationWireFormat::
                     grouped_shape_soa_segment_local;
+            const bool format5_mpf_image = format5
+                && identity_.index_name
+                    == MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
             std::unique_ptr<mpf_format5_image_detail::Writer>
                 format5_image_writer;
-            if (format5) {
+            if (format5_mpf_image) {
                 format5_image_writer =
                     std::make_unique<mpf_format5_image_detail::Writer>(
                         identity_, query_key_, generation_id_);

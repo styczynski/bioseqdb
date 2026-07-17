@@ -56,6 +56,7 @@ import bioseq.indexing.type;                 // canonical minimizer index names
 import bioseq.indexing.minimizer_hashmap;    // exact-SIMD sketch proof + rev3 sizing constants
 import bioseq.parallelism.memory_admission;  // bounded prototype-owned routing state
 import bioseq.sequences.kmers;               // sketch_collector / MinimapSketchData
+import bioseq.sequences.chaining.utils;      // Anchor exact-final-byte equation
 import bioseq.sequences.pipe;                // canonical execution-stage matrix
 
 #ifndef BIOSEQ_E2E_REPORT_DIR
@@ -371,6 +372,46 @@ struct E2eOutput {
     std::int64_t format5_reader_exact_position_image_failures = -1;
     std::int64_t format5_reader_retained_layout_checks = -1;
     std::int64_t format5_reader_retained_layout_failures = -1;
+    std::int64_t fragment_native_waves = -1;
+    std::int64_t fragment_native_queries = -1;
+    std::int64_t fragment_native_occurrence_fill_ns = -1;
+    std::int64_t fragment_native_occurrence_radix_ns = -1;
+    std::int64_t fragment_native_unique_plan_build_ns = -1;
+    std::int64_t fragment_native_query_plan_radix_fill_ns = -1;
+    std::int64_t fragment_native_control_count_pass_ns = -1;
+    std::int64_t fragment_native_rejected_control_validation_ns = -1;
+    std::int64_t fragment_native_orientation_layout_ns = -1;
+    std::int64_t fragment_native_direct_emission_ns = -1;
+    std::int64_t fragment_native_local_sort_ns = -1;
+    std::int64_t fragment_native_tie_normalization_ns = -1;
+    std::int64_t fragment_native_control_count_bytes = -1;
+    std::int64_t fragment_native_rejected_control_validation_bytes = -1;
+    std::int64_t fragment_native_pass2_position_bytes = -1;
+    std::int64_t fragment_native_pass3_position_bytes = -1;
+    std::int64_t fragment_native_anchors_constructed = -1;
+    std::int64_t fragment_native_local_sort_bytes = -1;
+    std::int64_t fragment_native_tie_normalization_bytes = -1;
+    std::int64_t fragment_native_exact_final_bytes = -1;
+    std::int64_t fragment_native_peak_exact_final_bytes = -1;
+    std::int64_t fragment_native_global_sort_calls_invoked = -1;
+    std::int64_t fragment_native_global_sort_calls_skipped = -1;
+    std::int64_t fragment_native_candidate_anchor_bytes = -1;
+    std::int64_t fragment_native_plan_ordinal_bytes = -1;
+    std::int64_t fragment_native_compaction_bytes = -1;
+    std::int64_t fragment_native_final_copy_bytes = -1;
+    std::int64_t fragment_native_peak_occurrence_capacity_bytes = -1;
+    std::int64_t fragment_native_peak_query_plan_capacity_bytes = -1;
+    std::int64_t fragment_native_peak_query_radix_capacity_bytes = -1;
+    std::int64_t fragment_native_peak_occurrence_count_capacity_bytes = -1;
+    std::int64_t fragment_native_peak_block_layout_capacity_bytes = -1;
+    std::int64_t fragment_native_peak_block_evidence_capacity_bytes = -1;
+    std::int64_t fragment_native_occurrence_allocations = -1;
+    std::int64_t fragment_native_query_plan_allocations = -1;
+    std::int64_t fragment_native_query_radix_allocations = -1;
+    std::int64_t fragment_native_occurrence_count_allocations = -1;
+    std::int64_t fragment_native_block_layout_allocations = -1;
+    std::int64_t fragment_native_block_evidence_allocations = -1;
+    std::int64_t fragment_native_evidence_saturated = -1;
     std::int64_t format5_reader_memory_evidence_saturated = -1;
     nlohmann::json format5_reader_memory_evidence = nullptr;
     std::int64_t format6_directory_rows = -1;
@@ -2112,9 +2153,91 @@ inline constexpr auto kFormat5ReaderMemoryEvidenceKeys =
         "format5_reader_exact_position_image_failures",
         "format5_reader_retained_layout_checks",
         "format5_reader_retained_layout_failures",
+        "fragment_native_waves", "fragment_native_queries",
+        "fragment_native_occurrence_fill_ns",
+        "fragment_native_occurrence_radix_ns",
+        "fragment_native_unique_plan_build_ns",
+        "fragment_native_query_plan_radix_fill_ns",
+        "fragment_native_control_count_pass_ns",
+        "fragment_native_rejected_control_validation_ns",
+        "fragment_native_orientation_layout_ns",
+        "fragment_native_direct_emission_ns",
+        "fragment_native_local_sort_ns",
+        "fragment_native_tie_normalization_ns",
+        "fragment_native_control_count_bytes",
+        "fragment_native_rejected_control_validation_bytes",
+        "fragment_native_pass2_position_bytes",
+        "fragment_native_pass3_position_bytes",
+        "fragment_native_anchors_constructed",
+        "fragment_native_local_sort_bytes",
+        "fragment_native_tie_normalization_bytes",
+        "fragment_native_exact_final_bytes",
+        "fragment_native_peak_exact_final_bytes",
+        "fragment_native_global_sort_calls_invoked",
+        "fragment_native_global_sort_calls_skipped",
+        "fragment_native_candidate_anchor_bytes",
+        "fragment_native_plan_ordinal_bytes",
+        "fragment_native_compaction_bytes",
+        "fragment_native_final_copy_bytes",
+        "fragment_native_peak_occurrence_capacity_bytes",
+        "fragment_native_peak_query_plan_capacity_bytes",
+        "fragment_native_peak_query_radix_capacity_bytes",
+        "fragment_native_peak_occurrence_count_capacity_bytes",
+        "fragment_native_peak_block_layout_capacity_bytes",
+        "fragment_native_peak_block_evidence_capacity_bytes",
+        "fragment_native_occurrence_allocations",
+        "fragment_native_query_plan_allocations",
+        "fragment_native_query_radix_allocations",
+        "fragment_native_occurrence_count_allocations",
+        "fragment_native_block_layout_allocations",
+        "fragment_native_block_evidence_allocations",
+        "fragment_native_evidence_saturated",
         "format5_reader_memory_evidence_saturated", "stats_saturated",
     });
-static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 27);
+static_assert(kFormat5ReaderMemoryEvidenceKeys.size() == 67);
+
+inline constexpr auto kFragmentNativeEvidenceCounterKeys =
+    std::to_array<std::string_view>({
+        "fragment_native_waves", "fragment_native_queries",
+        "fragment_native_occurrence_fill_ns",
+        "fragment_native_occurrence_radix_ns",
+        "fragment_native_unique_plan_build_ns",
+        "fragment_native_query_plan_radix_fill_ns",
+        "fragment_native_control_count_pass_ns",
+        "fragment_native_rejected_control_validation_ns",
+        "fragment_native_orientation_layout_ns",
+        "fragment_native_direct_emission_ns",
+        "fragment_native_local_sort_ns",
+        "fragment_native_tie_normalization_ns",
+        "fragment_native_control_count_bytes",
+        "fragment_native_rejected_control_validation_bytes",
+        "fragment_native_pass2_position_bytes",
+        "fragment_native_pass3_position_bytes",
+        "fragment_native_anchors_constructed",
+        "fragment_native_local_sort_bytes",
+        "fragment_native_tie_normalization_bytes",
+        "fragment_native_exact_final_bytes",
+        "fragment_native_peak_exact_final_bytes",
+        "fragment_native_global_sort_calls_invoked",
+        "fragment_native_global_sort_calls_skipped",
+        "fragment_native_candidate_anchor_bytes",
+        "fragment_native_plan_ordinal_bytes",
+        "fragment_native_compaction_bytes",
+        "fragment_native_final_copy_bytes",
+        "fragment_native_peak_occurrence_capacity_bytes",
+        "fragment_native_peak_query_plan_capacity_bytes",
+        "fragment_native_peak_query_radix_capacity_bytes",
+        "fragment_native_peak_occurrence_count_capacity_bytes",
+        "fragment_native_peak_block_layout_capacity_bytes",
+        "fragment_native_peak_block_evidence_capacity_bytes",
+        "fragment_native_occurrence_allocations",
+        "fragment_native_query_plan_allocations",
+        "fragment_native_query_radix_allocations",
+        "fragment_native_occurrence_count_allocations",
+        "fragment_native_block_layout_allocations",
+        "fragment_native_block_evidence_allocations",
+    });
+static_assert(kFragmentNativeEvidenceCounterKeys.size() == 39);
 
 inline constexpr auto kFormat6ReaderEvidenceKeys =
     std::to_array<std::string_view>({
@@ -2628,7 +2751,7 @@ void capture_format5_reader_memory_evidence(
         E2eOutput& out) {
     const it::row_t row = it::query_one(
         connection,
-        "SELECT bioseq.last_alignment_format5_reader_memory_evidence_v2();");
+        "SELECT bioseq.last_alignment_format5_reader_memory_evidence_v3();");
     if (row.size() != 1) {
         abort_pipeline_proof_capture(
             "Format-5 reader memory evidence has an invalid scalar shape");
@@ -2640,12 +2763,16 @@ void capture_format5_reader_memory_evidence(
         && evidence["schema"].is_string()
         && evidence["schema"] == "bioseq.format5_reader_memory_evidence"
         && evidence["version"].is_number_integer()
-        && evidence["version"] == 2
+        && evidence["version"] == 3
+        && evidence["fragment_native_evidence_saturated"].is_boolean()
         && evidence["format5_reader_memory_evidence_saturated"].is_boolean()
         && evidence["stats_saturated"].is_boolean();
     if (!header_valid) {
         abort_pipeline_proof_capture(
             "Format-5 reader memory evidence has the wrong exact schema or types");
+    }
+    for (const std::string_view key : kFragmentNativeEvidenceCounterKeys) {
+        (void)required_json_counter(evidence, key);
     }
 
     const std::int64_t execution_id =
@@ -2660,7 +2787,7 @@ void capture_format5_reader_memory_evidence(
         || evidence["stats_saturated"].get<bool>()
             != (out.stats_saturated != 0)) {
         abort_pipeline_proof_capture(
-            "Format-5 reader memory evidence identity/saturation does not match v2");
+            "Format-5 reader memory evidence identity/saturation does not match v3");
     }
 
     out.format5_reader_capacity_accounting_passes = required_json_counter(
@@ -2711,6 +2838,92 @@ void capture_format5_reader_memory_evidence(
         evidence, "format5_reader_retained_layout_checks");
     out.format5_reader_retained_layout_failures = required_json_counter(
         evidence, "format5_reader_retained_layout_failures");
+    out.fragment_native_waves = required_json_counter(
+        evidence, "fragment_native_waves");
+    out.fragment_native_queries = required_json_counter(
+        evidence, "fragment_native_queries");
+    out.fragment_native_occurrence_fill_ns = required_json_counter(
+        evidence, "fragment_native_occurrence_fill_ns");
+    out.fragment_native_occurrence_radix_ns = required_json_counter(
+        evidence, "fragment_native_occurrence_radix_ns");
+    out.fragment_native_unique_plan_build_ns = required_json_counter(
+        evidence, "fragment_native_unique_plan_build_ns");
+    out.fragment_native_query_plan_radix_fill_ns = required_json_counter(
+        evidence, "fragment_native_query_plan_radix_fill_ns");
+    out.fragment_native_control_count_pass_ns = required_json_counter(
+        evidence, "fragment_native_control_count_pass_ns");
+    out.fragment_native_rejected_control_validation_ns =
+        required_json_counter(
+            evidence, "fragment_native_rejected_control_validation_ns");
+    out.fragment_native_orientation_layout_ns = required_json_counter(
+        evidence, "fragment_native_orientation_layout_ns");
+    out.fragment_native_direct_emission_ns = required_json_counter(
+        evidence, "fragment_native_direct_emission_ns");
+    out.fragment_native_local_sort_ns = required_json_counter(
+        evidence, "fragment_native_local_sort_ns");
+    out.fragment_native_tie_normalization_ns = required_json_counter(
+        evidence, "fragment_native_tie_normalization_ns");
+    out.fragment_native_control_count_bytes = required_json_counter(
+        evidence, "fragment_native_control_count_bytes");
+    out.fragment_native_rejected_control_validation_bytes =
+        required_json_counter(
+            evidence, "fragment_native_rejected_control_validation_bytes");
+    out.fragment_native_pass2_position_bytes = required_json_counter(
+        evidence, "fragment_native_pass2_position_bytes");
+    out.fragment_native_pass3_position_bytes = required_json_counter(
+        evidence, "fragment_native_pass3_position_bytes");
+    out.fragment_native_anchors_constructed = required_json_counter(
+        evidence, "fragment_native_anchors_constructed");
+    out.fragment_native_local_sort_bytes = required_json_counter(
+        evidence, "fragment_native_local_sort_bytes");
+    out.fragment_native_tie_normalization_bytes = required_json_counter(
+        evidence, "fragment_native_tie_normalization_bytes");
+    out.fragment_native_exact_final_bytes = required_json_counter(
+        evidence, "fragment_native_exact_final_bytes");
+    out.fragment_native_peak_exact_final_bytes = required_json_counter(
+        evidence, "fragment_native_peak_exact_final_bytes");
+    out.fragment_native_global_sort_calls_invoked = required_json_counter(
+        evidence, "fragment_native_global_sort_calls_invoked");
+    out.fragment_native_global_sort_calls_skipped = required_json_counter(
+        evidence, "fragment_native_global_sort_calls_skipped");
+    out.fragment_native_candidate_anchor_bytes = required_json_counter(
+        evidence, "fragment_native_candidate_anchor_bytes");
+    out.fragment_native_plan_ordinal_bytes = required_json_counter(
+        evidence, "fragment_native_plan_ordinal_bytes");
+    out.fragment_native_compaction_bytes = required_json_counter(
+        evidence, "fragment_native_compaction_bytes");
+    out.fragment_native_final_copy_bytes = required_json_counter(
+        evidence, "fragment_native_final_copy_bytes");
+    out.fragment_native_peak_occurrence_capacity_bytes = required_json_counter(
+        evidence, "fragment_native_peak_occurrence_capacity_bytes");
+    out.fragment_native_peak_query_plan_capacity_bytes = required_json_counter(
+        evidence, "fragment_native_peak_query_plan_capacity_bytes");
+    out.fragment_native_peak_query_radix_capacity_bytes = required_json_counter(
+        evidence, "fragment_native_peak_query_radix_capacity_bytes");
+    out.fragment_native_peak_occurrence_count_capacity_bytes =
+        required_json_counter(
+            evidence,
+            "fragment_native_peak_occurrence_count_capacity_bytes");
+    out.fragment_native_peak_block_layout_capacity_bytes =
+        required_json_counter(
+            evidence, "fragment_native_peak_block_layout_capacity_bytes");
+    out.fragment_native_peak_block_evidence_capacity_bytes =
+        required_json_counter(
+            evidence, "fragment_native_peak_block_evidence_capacity_bytes");
+    out.fragment_native_occurrence_allocations = required_json_counter(
+        evidence, "fragment_native_occurrence_allocations");
+    out.fragment_native_query_plan_allocations = required_json_counter(
+        evidence, "fragment_native_query_plan_allocations");
+    out.fragment_native_query_radix_allocations = required_json_counter(
+        evidence, "fragment_native_query_radix_allocations");
+    out.fragment_native_occurrence_count_allocations = required_json_counter(
+        evidence, "fragment_native_occurrence_count_allocations");
+    out.fragment_native_block_layout_allocations = required_json_counter(
+        evidence, "fragment_native_block_layout_allocations");
+    out.fragment_native_block_evidence_allocations = required_json_counter(
+        evidence, "fragment_native_block_evidence_allocations");
+    out.fragment_native_evidence_saturated =
+        evidence["fragment_native_evidence_saturated"].get<bool>() ? 1 : 0;
     out.format5_reader_memory_evidence_saturated =
         evidence["format5_reader_memory_evidence_saturated"].get<bool>()
             ? 1 : 0;
@@ -4581,6 +4794,70 @@ inline void require_pipeline_execution_proof(
             out.format5_reader_global_position_capacity_bytes)
         + static_cast<__int128>(
             out.format5_reader_control_payload_capacity_bytes);
+    const auto fragment_native = [&out](const std::string_view key) {
+        return required_json_counter(
+            out.format5_reader_memory_evidence, key);
+    };
+    const bool no_fragment_native_query_evidence =
+        std::ranges::all_of(
+            kFragmentNativeEvidenceCounterKeys,
+            [&fragment_native](const std::string_view key) {
+                return fragment_native(key) == 0;
+            })
+        && !out.format5_reader_memory_evidence[
+            "fragment_native_evidence_saturated"].get<bool>();
+    const bool fragment_native_query_gate = expect_format5 && !expect_gpu
+        ? fragment_native("fragment_native_waves") > 0
+            && fragment_native("fragment_native_queries")
+                == expectation.attempted_alignment_jobs
+            && fragment_native("fragment_native_queries")
+                == fragment_native(
+                    "fragment_native_global_sort_calls_skipped")
+            && fragment_native(
+                    "fragment_native_global_sort_calls_invoked") == 0
+            && fragment_native("fragment_native_control_count_bytes") > 0
+            && fragment_native("fragment_native_pass2_position_bytes") > 0
+            && fragment_native("fragment_native_pass2_position_bytes")
+                == fragment_native("fragment_native_pass3_position_bytes")
+            && fragment_native("fragment_native_anchors_constructed") > 0
+            && static_cast<__int128>(
+                    fragment_native("fragment_native_exact_final_bytes"))
+                == static_cast<__int128>(
+                    fragment_native("fragment_native_anchors_constructed"))
+                    * static_cast<__int128>(sizeof(bioseq::chaining::Anchor))
+            && fragment_native("fragment_native_peak_exact_final_bytes") > 0
+            && fragment_native("fragment_native_peak_exact_final_bytes")
+                <= fragment_native("fragment_native_exact_final_bytes")
+            && fragment_native("fragment_native_local_sort_bytes") > 0
+            && fragment_native("fragment_native_candidate_anchor_bytes") == 0
+            && fragment_native("fragment_native_plan_ordinal_bytes") == 0
+            && fragment_native("fragment_native_compaction_bytes") == 0
+            && fragment_native("fragment_native_final_copy_bytes") == 0
+            && fragment_native("fragment_native_occurrence_fill_ns") > 0
+            && fragment_native("fragment_native_occurrence_radix_ns") > 0
+            && fragment_native("fragment_native_unique_plan_build_ns") > 0
+            && fragment_native(
+                    "fragment_native_query_plan_radix_fill_ns") > 0
+            && fragment_native("fragment_native_control_count_pass_ns") > 0
+            && fragment_native("fragment_native_orientation_layout_ns") > 0
+            && fragment_native("fragment_native_direct_emission_ns") > 0
+            && fragment_native("fragment_native_local_sort_ns") > 0
+            && fragment_native("fragment_native_tie_normalization_ns") > 0
+            && fragment_native(
+                    "fragment_native_peak_occurrence_capacity_bytes") > 0
+            && fragment_native(
+                    "fragment_native_peak_query_plan_capacity_bytes") > 0
+            && fragment_native(
+                    "fragment_native_peak_query_radix_capacity_bytes") > 0
+            && fragment_native(
+                    "fragment_native_peak_occurrence_count_capacity_bytes") > 0
+            && fragment_native(
+                    "fragment_native_peak_block_layout_capacity_bytes") > 0
+            && fragment_native(
+                    "fragment_native_peak_block_evidence_capacity_bytes") > 0
+            && !out.format5_reader_memory_evidence[
+                "fragment_native_evidence_saturated"].get<bool>()
+        : no_fragment_native_query_evidence;
     const bool format5_reader_memory_gate = expect_format5 && !expect_gpu
         ? out.format5_reader_global_position_storage_preparations == 0
             && out.format5_reader_global_position_storage_allocations == 0
@@ -4608,8 +4885,10 @@ inline void require_pipeline_execution_proof(
             && out.format5_reader_current_selected_control_capacity_bytes == 0
             && out.format5_reader_control_payload_capacity_bytes == 0
             && format5_reader_accounting_shape
+            && fragment_native_query_gate
             && out.format5_reader_memory_evidence_saturated == 0
-        : no_format5_reader_memory_evidence;
+        : no_format5_reader_memory_evidence
+            && fragment_native_query_gate;
     // Format 5 is consumed directly from the authenticated persisted reader.
     // That path prepares a key set and matching reader checksum, but it does
     // not construct or reuse the legacy in-memory target-index hashmap.
@@ -7716,6 +7995,46 @@ void load_e2e_query_table(const it::connection_test_context& c,
         {"format5_reader_exact_position_image_failures", static_cast<double>(o.format5_reader_exact_position_image_failures)},
         {"format5_reader_retained_layout_checks", static_cast<double>(o.format5_reader_retained_layout_checks)},
         {"format5_reader_retained_layout_failures", static_cast<double>(o.format5_reader_retained_layout_failures)},
+        {"fragment_native_waves", static_cast<double>(o.fragment_native_waves)},
+        {"fragment_native_queries", static_cast<double>(o.fragment_native_queries)},
+        {"fragment_native_occurrence_fill_ns", static_cast<double>(o.fragment_native_occurrence_fill_ns)},
+        {"fragment_native_occurrence_radix_ns", static_cast<double>(o.fragment_native_occurrence_radix_ns)},
+        {"fragment_native_unique_plan_build_ns", static_cast<double>(o.fragment_native_unique_plan_build_ns)},
+        {"fragment_native_query_plan_radix_fill_ns", static_cast<double>(o.fragment_native_query_plan_radix_fill_ns)},
+        {"fragment_native_control_count_pass_ns", static_cast<double>(o.fragment_native_control_count_pass_ns)},
+        {"fragment_native_rejected_control_validation_ns", static_cast<double>(o.fragment_native_rejected_control_validation_ns)},
+        {"fragment_native_orientation_layout_ns", static_cast<double>(o.fragment_native_orientation_layout_ns)},
+        {"fragment_native_direct_emission_ns", static_cast<double>(o.fragment_native_direct_emission_ns)},
+        {"fragment_native_local_sort_ns", static_cast<double>(o.fragment_native_local_sort_ns)},
+        {"fragment_native_tie_normalization_ns", static_cast<double>(o.fragment_native_tie_normalization_ns)},
+        {"fragment_native_control_count_bytes", static_cast<double>(o.fragment_native_control_count_bytes)},
+        {"fragment_native_rejected_control_validation_bytes", static_cast<double>(o.fragment_native_rejected_control_validation_bytes)},
+        {"fragment_native_pass2_position_bytes", static_cast<double>(o.fragment_native_pass2_position_bytes)},
+        {"fragment_native_pass3_position_bytes", static_cast<double>(o.fragment_native_pass3_position_bytes)},
+        {"fragment_native_anchors_constructed", static_cast<double>(o.fragment_native_anchors_constructed)},
+        {"fragment_native_local_sort_bytes", static_cast<double>(o.fragment_native_local_sort_bytes)},
+        {"fragment_native_tie_normalization_bytes", static_cast<double>(o.fragment_native_tie_normalization_bytes)},
+        {"fragment_native_exact_final_bytes", static_cast<double>(o.fragment_native_exact_final_bytes)},
+        {"fragment_native_peak_exact_final_bytes", static_cast<double>(o.fragment_native_peak_exact_final_bytes)},
+        {"fragment_native_global_sort_calls_invoked", static_cast<double>(o.fragment_native_global_sort_calls_invoked)},
+        {"fragment_native_global_sort_calls_skipped", static_cast<double>(o.fragment_native_global_sort_calls_skipped)},
+        {"fragment_native_candidate_anchor_bytes", static_cast<double>(o.fragment_native_candidate_anchor_bytes)},
+        {"fragment_native_plan_ordinal_bytes", static_cast<double>(o.fragment_native_plan_ordinal_bytes)},
+        {"fragment_native_compaction_bytes", static_cast<double>(o.fragment_native_compaction_bytes)},
+        {"fragment_native_final_copy_bytes", static_cast<double>(o.fragment_native_final_copy_bytes)},
+        {"fragment_native_peak_occurrence_capacity_bytes", static_cast<double>(o.fragment_native_peak_occurrence_capacity_bytes)},
+        {"fragment_native_peak_query_plan_capacity_bytes", static_cast<double>(o.fragment_native_peak_query_plan_capacity_bytes)},
+        {"fragment_native_peak_query_radix_capacity_bytes", static_cast<double>(o.fragment_native_peak_query_radix_capacity_bytes)},
+        {"fragment_native_peak_occurrence_count_capacity_bytes", static_cast<double>(o.fragment_native_peak_occurrence_count_capacity_bytes)},
+        {"fragment_native_peak_block_layout_capacity_bytes", static_cast<double>(o.fragment_native_peak_block_layout_capacity_bytes)},
+        {"fragment_native_peak_block_evidence_capacity_bytes", static_cast<double>(o.fragment_native_peak_block_evidence_capacity_bytes)},
+        {"fragment_native_occurrence_allocations", static_cast<double>(o.fragment_native_occurrence_allocations)},
+        {"fragment_native_query_plan_allocations", static_cast<double>(o.fragment_native_query_plan_allocations)},
+        {"fragment_native_query_radix_allocations", static_cast<double>(o.fragment_native_query_radix_allocations)},
+        {"fragment_native_occurrence_count_allocations", static_cast<double>(o.fragment_native_occurrence_count_allocations)},
+        {"fragment_native_block_layout_allocations", static_cast<double>(o.fragment_native_block_layout_allocations)},
+        {"fragment_native_block_evidence_allocations", static_cast<double>(o.fragment_native_block_evidence_allocations)},
+        {"fragment_native_evidence_saturated", static_cast<double>(o.fragment_native_evidence_saturated)},
         {"format5_reader_memory_evidence_saturated", static_cast<double>(o.format5_reader_memory_evidence_saturated)},
         {"persisted_format_version", static_cast<double>(o.persisted_format_version)},
         {"persisted_format6_contract_valid", static_cast<double>(o.persisted_format6_contract_valid)},
@@ -7938,17 +8257,17 @@ void load_e2e_query_table(const it::connection_test_context& c,
         abort_raw_evidence_serialization(
             "PostgreSQL sample is missing versioned GPU operation evidence");
     }
-    const bool format5_memory_v2_valid = json_has_exact_keys(
+    const bool format5_memory_v3_valid = json_has_exact_keys(
             out.format5_reader_memory_evidence,
             kFormat5ReaderMemoryEvidenceKeys)
         && out.format5_reader_memory_evidence["schema"].is_string()
         && out.format5_reader_memory_evidence["schema"]
             == "bioseq.format5_reader_memory_evidence"
         && out.format5_reader_memory_evidence["version"].is_number_integer()
-        && out.format5_reader_memory_evidence["version"] == 2;
-    if (postgres_sample && !format5_memory_v2_valid) {
+        && out.format5_reader_memory_evidence["version"] == 3;
+    if (postgres_sample && !format5_memory_v3_valid) {
         abort_raw_evidence_serialization(
-            "PostgreSQL sample is missing exact Format-5 memory evidence v2");
+            "PostgreSQL sample is missing exact Format-5 memory evidence v3");
     }
     const bool format6_reader_v1_valid = json_has_exact_keys(
             out.format6_reader_evidence,

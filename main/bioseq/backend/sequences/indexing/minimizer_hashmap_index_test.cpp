@@ -21,6 +21,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <ranges>
@@ -32,11 +33,14 @@
 #include <vector>
 
 import bioseq.common.mlogging;
+import bioseq.common.context;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.chaining.utils;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.mm_sketch_baseline;
+import bioseq.sequences.minimap_port;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
@@ -664,6 +668,90 @@ struct BoundaryIdentityDriftingProducer {
     return bytes;
 }
 
+[[nodiscard]] std::shared_ptr<std::vector<std::byte>>
+make_shape_v5_mapped_payload(
+        const bioseq::indexing::EncodedMinimizerGeneration& generation,
+        std::span<const CollectedMinimizerRow> rows) {
+    auto payload = std::make_shared<std::vector<std::byte>>();
+    payload->reserve(static_cast<std::size_t>(
+        generation.manifest.payload_bytes));
+    for (const auto& entry : generation.directory.entries()) {
+        const auto controls = collect_encoded_extent(rows, entry, true);
+        payload->insert(
+            payload->end(), controls.begin(), controls.end());
+    }
+    for (const auto& entry : generation.directory.entries()) {
+        const auto positions = collect_encoded_extent(rows, entry, false);
+        payload->insert(
+            payload->end(), positions.begin(), positions.end());
+    }
+    REQUIRE(payload->size() == generation.manifest.payload_bytes);
+    return payload;
+}
+
+[[nodiscard]] std::expected<
+    bioseq::indexing::PreparedShapeV5FragmentQueryReader,
+    bioseq::indexing::MinimizerGenerationWireError>
+open_shape_v5_fragment_query_reader(
+        bioseq::parallelism::MemoryAdmissionController& admission,
+        const bioseq::indexing::EncodedMinimizerGeneration& generation,
+        std::span<const CollectedMinimizerRow> rows,
+        std::uint64_t max_occ) {
+    REQUIRE(generation.manifest.shape_v5.has_value());
+    auto payload = make_shape_v5_mapped_payload(generation, rows);
+    std::shared_ptr<const void> payload_owner = payload;
+    return bioseq::indexing::PreparedShapeV5FragmentQueryReader::open(
+        admission,
+        generation.head,
+        generation.manifest,
+        test_shape_v5_expected_compatibility(
+            generation.manifest.shape_v5->max_occ_cap),
+        generation.directory.encoded_bytes(),
+        max_occ,
+        std::move(payload_owner),
+        std::span<const std::byte>{payload->data(), payload->size()});
+}
+
+[[nodiscard]] std::vector<bioseq::chaining::Anchor>
+ordinary_seed_anchors(
+        std::span<const std::pair<std::uint64_t, std::uint64_t>> pairs,
+        std::uint64_t target_length,
+        std::span<const MinimapSketchData> query_minimizers,
+        bioseq::storage::sequence_size_t query_length,
+        std::int32_t max_occ,
+        std::int32_t kmer_size) {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> owned_pairs{
+        pairs.begin(), pairs.end()};
+    bioseq::indexing::MinimizerHashmapFragmentIndex index;
+    index.build_from_pairs(owned_pairs, target_length);
+
+    context::context ctx;
+    context::installed_context_scope installed{ctx};
+    auto scope = ctx.push<context::Arena::Chain>();
+    auto anchors = bioseq::chaining::make_arena_slab<
+        bioseq::chaining::Anchor>();
+    collect_seed_hits(
+        query_minimizers,
+        index,
+        query_length,
+        max_occ,
+        kmer_size,
+        anchors);
+    if (anchors.size() == 0u) return {};
+    return std::vector<bioseq::chaining::Anchor>{
+        anchors.data(), anchors.data() + anchors.size()};
+}
+
+void require_anchor_bytes_equal(
+        std::span<const bioseq::chaining::Anchor> actual,
+        std::span<const bioseq::chaining::Anchor> expected) {
+    REQUIRE(actual.size() == expected.size());
+    REQUIRE(std::ranges::equal(
+        std::as_bytes(actual), std::as_bytes(expected)));
+    REQUIRE(std::ranges::is_sorted(
+        actual, bioseq::chaining::CanonicalAnchorLess{}));
+}
+
 void require_encoded_generations_equal_normalized(
         const bioseq::indexing::EncodedMinimizerGeneration& lhs,
         std::span<const CollectedMinimizerRow> lhs_rows,
@@ -891,7 +979,8 @@ struct RebuiltGenerationMetadata {
     auto manifest = original.manifest;
     manifest.directory_bytes = directory_bytes->size();
     manifest.directory_checksum = crc64_ecma182(*directory_bytes);
-    const auto manifest_bytes = encode_minimizer_generation_manifest(manifest);
+    const auto manifest_bytes =
+        encode_minimizer_generation_manifest_record(manifest);
     REQUIRE(manifest_bytes.has_value());
     auto head = original.head;
     head.compatibility_checksum =
@@ -9029,8 +9118,12 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
         <= evidence.query_route_control_lookups * 5u);
     REQUIRE(evidence.retained_selected_control_records == query_count);
     REQUIRE(evidence.selected_control_size_bytes == 8u);
+    // The decoded wire record is eight bytes, but this fixture's immutable
+    // segment geometry permits the retained position ends to narrow to u16.
+    // The final SoA therefore owns one u16 end plus one u32 dense route per
+    // selected query; it does not retain the decoded u64 control image.
     REQUIRE(evidence.retained_selected_control_capacity_bytes
-        == query_count * (sizeof(std::uint64_t) + sizeof(std::uint32_t)));
+        == query_count * (sizeof(std::uint16_t) + sizeof(std::uint32_t)));
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(evidence.global_position_capacity_bytes
         == evidence.retained_position_capacity * sizeof(std::uint64_t));
@@ -9104,7 +9197,7 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.retained_selected_control_records
         == sparse_evidence.decoded_control_records);
     REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
-        == sparse_evidence.decoded_control_records * sizeof(std::uint64_t)
+        == sparse_evidence.decoded_control_records * sizeof(std::uint16_t)
             + sizeof(std::uint32_t) * 2u);
     REQUIRE(sparse_evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(sparse_evidence.retained_layout_equation_holds());
@@ -9455,7 +9548,7 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     const auto evidence = reader->memory_evidence();
     REQUIRE(evidence.decoded_control_records == 3u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
-        == 3u * sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
+        == 3u * sizeof(std::uint16_t) + 2u * sizeof(std::uint32_t));
 }
 
 TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",
@@ -9831,6 +9924,870 @@ TEST_CASE("DOC0373 Format-5 reader releases admission on every terminal path",
         REQUIRE(made->failed());
         REQUIRE(admission.reserved_bytes() == 0u);
     }
+}
+
+TEST_CASE("DOC0383 canonical anchor sort preserves the 63-bit reference boundary",
+          "[indexing][minimizer-hashmap][doc0383][anchors]"
+          "[canonical-order][boundary]") {
+    constexpr std::uint64_t max_reference =
+        (std::uint64_t{1} << 63u) - 1u;
+    constexpr std::uint64_t low_query_position = 7u;
+    constexpr std::uint64_t high_query_position =
+        (std::uint64_t{1} << 32u) + low_query_position;
+    context::context ctx;
+    context::installed_context_scope installed{ctx};
+    auto scope = ctx.push<context::Arena::Chain>();
+    auto anchors = bioseq::chaining::make_arena_slab<
+        bioseq::chaining::Anchor>();
+    anchors.push_back(bioseq::chaining::Anchor{
+        .ref_position = max_reference,
+        .query_position = high_query_position,
+        .is_reverse = 0u,
+        .query_span = 15u,
+        .flags = 0u,
+        .segment_id = 0u,
+    });
+    anchors.push_back(bioseq::chaining::Anchor{
+        .ref_position = 0u,
+        .query_position = 1u,
+        .is_reverse = 1u,
+        .query_span = 15u,
+        .flags = 0u,
+        .segment_id = 0u,
+    });
+    anchors.push_back(bioseq::chaining::Anchor{
+        .ref_position = max_reference,
+        .query_position = low_query_position,
+        .is_reverse = 0u,
+        .query_span = 15u,
+        .flags = 0u,
+        .segment_id = 0u,
+    });
+    anchors.push_back(bioseq::chaining::Anchor{
+        .ref_position = max_reference - 1u,
+        .query_position = 99u,
+        .is_reverse = 0u,
+        .query_span = 15u,
+        .flags = 0u,
+        .segment_id = 0u,
+    });
+
+    sort_seed_hits(anchors);
+    REQUIRE(anchors.size() == 4u);
+    REQUIRE(anchors.data()[0].ref_position == max_reference - 1u);
+    REQUIRE(anchors.data()[1].ref_position == max_reference);
+    REQUIRE(anchors.data()[1].query_position == low_query_position);
+    REQUIRE(anchors.data()[2].ref_position == max_reference);
+    REQUIRE(anchors.data()[2].query_position == high_query_position);
+    REQUIRE(anchors.data()[1].query_bits()
+        == anchors.data()[2].query_bits());
+    REQUIRE(anchors.data()[3].is_reverse == 1u);
+    REQUIRE(std::ranges::is_sorted(
+        std::span<const bioseq::chaining::Anchor>{
+            anchors.data(), anchors.size()},
+        bioseq::chaining::CanonicalAnchorLess{}));
+}
+
+TEST_CASE("DOC0383 fragment-native anchors are canonical and match ordinary lookup",
+          "[indexing][minimizer-hashmap][wire][v5][fragment-native]"
+          "[doc0383][anchors][parity][max-occ]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t segment_span =
+        kMinimizerPreferredSegmentSpanBp;
+    // Format-5 directory segments use an int32 ordinal, so a mapped reader
+    // fixture cannot encode the synthetic 2^63 boundary above. This position
+    // is still well beyond 32 bits and leaves a large run of empty segments.
+    constexpr std::uint64_t high_reference_position =
+        (std::uint64_t{1} << 40u) + 19u;
+    constexpr auto packed = [](
+            std::uint64_t position, std::uint64_t strand) {
+        return (position << 1u) | strand;
+    };
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
+        {7u, packed(10u, 0u)},
+        {7u, packed(10u, 1u)},
+        {7u, packed(segment_span + 3u, 0u)},
+        {7u, packed(high_reference_position, 1u)},
+        {9u, packed(21u, 0u)},
+    };
+    constexpr std::uint64_t target_length =
+        high_reference_position + 100u;
+    VectorReplayMinimizerProducer producer{pairs};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(target_length, 10u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.position_segment_count > 2u);
+
+    const std::vector<MinimapSketchData> query{
+        MinimapSketchData{/*kmer=*/7u, /*pos=*/20u, /*strand=*/0u},
+        // The duplicate produces byte-identical equal canonical keys.
+        MinimapSketchData{/*kmer=*/7u, /*pos=*/20u, /*strand=*/0u},
+        MinimapSketchData{/*kmer=*/7u, /*pos=*/33u, /*strand=*/1u},
+        MinimapSketchData{/*kmer=*/9u, /*pos=*/44u, /*strand=*/0u},
+    };
+    constexpr bioseq::storage::sequence_size_t query_length = 100u;
+    constexpr std::int32_t kmer_size = 15;
+
+    SECTION("accepted cross-segment positions are byte-identical") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        auto reader = open_shape_v5_fragment_query_reader(
+            admission, *generation, sink.rows, 4u);
+        REQUIRE(reader.has_value());
+        auto scratch = QueryWaveScratch::create(admission);
+        REQUIRE(scratch.has_value());
+        const std::array queries{
+            FragmentSeedQuery{
+                .minimizers = std::span<const MinimapSketchData>{query},
+                .query_length = query_length,
+                .kmer_size = kmer_size,
+            },
+        };
+        const auto expected = ordinary_seed_anchors(
+            pairs, target_length, query, query_length, 4, kmer_size);
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, queries, 4, *scratch);
+        REQUIRE(batch.query_count() == 1u);
+        REQUIRE(batch.admitted_bytes() > 0u);
+        REQUIRE(scratch->wave_outstanding());
+        const auto actual = batch.query_view(0u).
+            ordered_fragment_seed_anchors(
+                query, query_length, 4, kmer_size);
+        require_anchor_bytes_equal(actual, expected);
+        REQUIRE(std::ranges::any_of(actual, [](const auto& anchor) {
+            return anchor.is_reverse == 0u;
+        }));
+        REQUIRE(std::ranges::any_of(actual, [](const auto& anchor) {
+            return anchor.is_reverse == 1u;
+        }));
+        REQUIRE(std::ranges::any_of(actual, [](const auto& anchor) {
+            return anchor.ref_position == high_reference_position;
+        }));
+        bool observed_equal_key_duplicate = false;
+        for (std::size_t ordinal = 1u; ordinal < actual.size(); ++ordinal) {
+            if (std::ranges::equal(
+                    std::as_bytes(actual.subspan(ordinal - 1u, 1u)),
+                    std::as_bytes(actual.subspan(ordinal, 1u)))) {
+                observed_equal_key_duplicate = true;
+                break;
+            }
+        }
+        REQUIRE(observed_equal_key_duplicate);
+        const PreparedFragmentAnchorBatchEvidence& evidence = batch.evidence();
+        REQUIRE(evidence.waves == 1u);
+        REQUIRE(evidence.queries == queries.size());
+        REQUIRE(evidence.occurrence_fill_ns > 0u);
+        REQUIRE(evidence.occurrence_radix_ns > 0u);
+        REQUIRE(evidence.control_count_pass_ns > 0u);
+        REQUIRE(evidence.orientation_layout_ns > 0u);
+        REQUIRE(evidence.direct_emission_ns > 0u);
+        REQUIRE(evidence.local_sort_ns > 0u);
+        REQUIRE(evidence.tie_normalization_ns > 0u);
+        REQUIRE(evidence.control_count_bytes > 0u);
+        REQUIRE(evidence.pass2_position_bytes > 0u);
+        REQUIRE(evidence.pass2_position_bytes
+            == evidence.pass3_position_bytes);
+        REQUIRE(evidence.anchors_constructed == actual.size());
+        REQUIRE(evidence.local_sort_bytes > 0u);
+        REQUIRE(evidence.tie_normalization_bytes > 0u);
+        REQUIRE(evidence.exact_final_bytes == actual.size_bytes());
+        REQUIRE(batch.admitted_bytes()
+            == evidence.exact_final_bytes
+                + queries.size() * sizeof(PreparedQueryAnchors));
+        REQUIRE(evidence.peak_exact_final_bytes
+            == evidence.exact_final_bytes);
+        REQUIRE(evidence.global_sort_calls_invoked == 0u);
+        REQUIRE(evidence.global_sort_calls_skipped == queries.size());
+        REQUIRE(evidence.forbidden_buffers_are_zero());
+        REQUIRE(evidence.peak_occurrence_capacity_bytes > 0u);
+        REQUIRE(evidence.peak_query_plan_capacity_bytes > 0u);
+        REQUIRE(evidence.peak_query_radix_capacity_bytes > 0u);
+        REQUIRE(evidence.peak_occurrence_count_capacity_bytes > 0u);
+        REQUIRE(evidence.peak_block_layout_capacity_bytes > 0u);
+        REQUIRE(evidence.peak_block_evidence_capacity_bytes > 0u);
+        REQUIRE_FALSE(evidence.saturated);
+        scratch->complete_wave_after_join();
+        REQUIRE_FALSE(scratch->wave_outstanding());
+    }
+
+    SECTION("late cross-segment max-occ rejection drops only the heavy hash") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        auto reader = open_shape_v5_fragment_query_reader(
+            admission, *generation, sink.rows, 3u);
+        REQUIRE(reader.has_value());
+        auto scratch = QueryWaveScratch::create(admission);
+        REQUIRE(scratch.has_value());
+        const std::array queries{
+            FragmentSeedQuery{
+                .minimizers = std::span<const MinimapSketchData>{query},
+                .query_length = query_length,
+                .kmer_size = kmer_size,
+            },
+        };
+        const auto expected = ordinary_seed_anchors(
+            pairs, target_length, query, query_length, 3, kmer_size);
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, queries, 3, *scratch);
+        const auto actual = batch.query_view(0u).
+            ordered_fragment_seed_anchors(
+                query, query_length, 3, kmer_size);
+        require_anchor_bytes_equal(actual, expected);
+        REQUIRE(actual.size() == 1u);
+        REQUIRE(actual.front().ref_position == 21u);
+        const PreparedFragmentAnchorBatchEvidence& evidence = batch.evidence();
+        REQUIRE(evidence.pass2_position_bytes > 0u);
+        REQUIRE(evidence.pass2_position_bytes
+            == evidence.pass3_position_bytes);
+        REQUIRE(evidence.anchors_constructed == actual.size());
+        REQUIRE(evidence.global_sort_calls_invoked == 0u);
+        REQUIRE(evidence.global_sort_calls_skipped == 1u);
+        REQUIRE(evidence.forbidden_buffers_are_zero());
+        scratch->complete_wave_after_join();
+    }
+
+    SECTION("all-heavy rejection attributes validation without layout work") {
+        bioseq::parallelism::MemoryAdmissionController admission;
+        auto reader = open_shape_v5_fragment_query_reader(
+            admission, *generation, sink.rows, 3u);
+        REQUIRE(reader.has_value());
+        auto scratch = QueryWaveScratch::create(admission);
+        REQUIRE(scratch.has_value());
+        const auto heavy_query =
+            std::span<const MinimapSketchData>{query}.first(3u);
+        const std::array queries{
+            FragmentSeedQuery{
+                .minimizers = heavy_query,
+                .query_length = query_length,
+                .kmer_size = kmer_size,
+            },
+        };
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, queries, 3, *scratch);
+        const auto actual = batch.query_view(0u).
+            ordered_fragment_seed_anchors(
+                heavy_query, query_length, 3, kmer_size);
+        REQUIRE(actual.empty());
+
+        const PreparedFragmentAnchorBatchEvidence& evidence = batch.evidence();
+        REQUIRE(evidence.waves == 1u);
+        REQUIRE(evidence.queries == queries.size());
+        REQUIRE(evidence.control_count_bytes > 0u);
+        REQUIRE(evidence.rejected_control_validation_ns > 0u);
+        REQUIRE(evidence.rejected_control_validation_bytes
+            > evidence.control_count_bytes);
+        REQUIRE(evidence.orientation_layout_ns == 0u);
+        REQUIRE(evidence.direct_emission_ns == 0u);
+        REQUIRE(evidence.local_sort_ns == 0u);
+        REQUIRE(evidence.tie_normalization_ns == 0u);
+        REQUIRE(evidence.pass2_position_bytes == 0u);
+        REQUIRE(evidence.pass3_position_bytes == 0u);
+        REQUIRE(evidence.anchors_constructed == 0u);
+        REQUIRE(evidence.exact_final_bytes == 0u);
+        REQUIRE(evidence.peak_exact_final_bytes == 0u);
+        REQUIRE(batch.admitted_bytes()
+            == queries.size() * sizeof(PreparedQueryAnchors));
+        REQUIRE(evidence.global_sort_calls_invoked == 0u);
+        REQUIRE(evidence.global_sort_calls_skipped == queries.size());
+        REQUIRE(evidence.forbidden_buffers_are_zero());
+        REQUIRE_FALSE(evidence.saturated);
+        scratch->complete_wave_after_join();
+    }
+}
+
+TEST_CASE("DOC0383 fragment blocks preserve segment runs beyond ordinal 128",
+          "[indexing][minimizer-hashmap][wire][v5][fragment-native]"
+          "[doc0383][anchors][block-plan][boundary][parity][max-occ]") {
+    using namespace bioseq::indexing;
+    constexpr std::uint64_t segment_span =
+        kMinimizerPreferredSegmentSpanBp;
+    constexpr auto packed = [](
+            std::uint64_t position, std::uint64_t strand) {
+        return (position << 1u) | strand;
+    };
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs;
+    pairs.reserve(132u);
+    for (std::uint64_t hash = 1u; hash <= 130u; ++hash) {
+        pairs.emplace_back(hash, packed(hash + 1u, 0u));
+    }
+    // Hash 1 straddles the oversized segment-0 block and the block after the
+    // empty segment-1 gap. max_occ therefore has to be reduced globally.
+    pairs.emplace_back(1u, packed(2u * segment_span + 4u, 0u));
+    pairs.emplace_back(500u, packed(2u * segment_span + 5u, 1u));
+
+    // The planner's fixed-width limit shrinks physical segment geometry; it
+    // does not split one segment into directory entries. Build the exact valid
+    // wire image here so the reader really sees an equal-segment run crossing
+    // its 128-entry block target.
+    VectorReplayMinimizerProducer producer{pairs};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(
+            2u * segment_span + 100u, 10u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->manifest.position_segment_span_bp == segment_span);
+    const auto profile = generation->directory.profile();
+    REQUIRE(profile.shape_v5.has_value());
+    REQUIRE(profile.shape_v5->hash_width == MinimizerScalarWidth::u32);
+    REQUIRE(profile.shape_v5->position_width == MinimizerScalarWidth::u32);
+    REQUIRE(profile.shape_v5->count_width == MinimizerScalarWidth::u16);
+    constexpr MinimizerScalarWidth offset_width =
+        MinimizerScalarWidth::u16;
+    const auto control_layout = minimizer_shape_v5_control_layout(
+        1u,
+        profile.shape_v5->hash_width,
+        offset_width,
+        profile.shape_v5->count_width);
+    REQUIRE(control_layout.has_value());
+
+    std::vector<MinimizerBucketDirEntry> manual_entries;
+    std::vector<std::byte> control_image;
+    std::vector<std::byte> position_image;
+    std::vector<std::uint64_t> control_row_checksums;
+    std::vector<std::uint64_t> position_row_checksums;
+    manual_entries.reserve(pairs.size());
+    control_image.reserve(
+        pairs.size() * static_cast<std::size_t>(
+            control_layout->encoded_bytes));
+    position_image.reserve(pairs.size() * sizeof(std::uint32_t));
+    control_row_checksums.reserve(pairs.size());
+    position_row_checksums.reserve(pairs.size());
+
+    const auto append_manual_entry = [&](
+            std::int32_t position_segment,
+            std::uint64_t hash,
+            std::uint64_t global_packed_position) {
+        const auto core = minimizer_position_segment_core(
+            generation->manifest,
+            static_cast<std::uint32_t>(position_segment));
+        REQUIRE(core.has_value());
+        const std::uint64_t global_position =
+            global_packed_position >> 1u;
+        REQUIRE(global_position >= core->begin_bp);
+        REQUIRE(global_position < core->end_bp);
+        const std::uint64_t local_packed_position =
+            ((global_position - core->begin_bp) << 1u)
+            | (global_packed_position & 1u);
+        REQUIRE(local_packed_position
+            <= (std::numeric_limits<std::uint32_t>::max)());
+
+        std::vector<std::byte> controls(
+            static_cast<std::size_t>(control_layout->encoded_bytes));
+        test_write_le<std::uint32_t>(
+            controls,
+            static_cast<std::size_t>(control_layout->hash_offset),
+            static_cast<std::uint32_t>(hash));
+        test_write_le<std::uint16_t>(
+            controls,
+            static_cast<std::size_t>(control_layout->prefix_offset),
+            0u);
+        test_write_le<std::uint16_t>(
+            controls,
+            static_cast<std::size_t>(control_layout->prefix_offset)
+                + sizeof(std::uint16_t),
+            1u);
+        test_write_le<std::uint16_t>(
+            controls,
+            static_cast<std::size_t>(control_layout->count_offset),
+            1u);
+        std::vector<std::byte> positions(sizeof(std::uint32_t));
+        test_write_le<std::uint32_t>(
+            positions,
+            0u,
+            static_cast<std::uint32_t>(local_packed_position));
+
+        const auto partition = static_cast<std::uint32_t>(
+            manual_entries.size());
+        MinimizerBucketDirEntry entry{
+            .partition_id = partition,
+            .position_segment = position_segment,
+            .lo_hash = hash,
+            .hi_hash = hash,
+            .sub_key = static_cast<index_sub_key_t>(partition),
+            .control_first_chunk = 0u,
+            .control_chunk_count = 1u,
+            .position_first_chunk = 0u,
+            .position_chunk_count = 1u,
+            .control_element_count = 1u,
+            .position_element_count = 1u,
+            .control_encoded_bytes = controls.size(),
+            .position_encoded_bytes = positions.size(),
+            .control_checksum = crc64_ecma182(controls),
+            .position_checksum = crc64_ecma182(positions),
+            .shape_offset_width = offset_width,
+        };
+        const auto position_sub_key =
+            derive_minimizer_position_extent_sub_key(entry.sub_key);
+        REQUIRE(position_sub_key.has_value());
+        control_row_checksums.push_back(crc64_index_chunk_row(
+            generation->manifest.generation_id,
+            position_segment,
+            entry.sub_key,
+            0u,
+            static_cast<std::uint32_t>(controls.size()),
+            controls));
+        position_row_checksums.push_back(crc64_index_chunk_row(
+            generation->manifest.generation_id,
+            position_segment,
+            *position_sub_key,
+            0u,
+            static_cast<std::uint32_t>(positions.size()),
+            positions));
+        control_image.insert(
+            control_image.end(), controls.begin(), controls.end());
+        position_image.insert(
+            position_image.end(), positions.begin(), positions.end());
+        manual_entries.push_back(entry);
+    };
+    for (std::uint64_t hash = 1u; hash <= 130u; ++hash) {
+        append_manual_entry(0, hash, packed(hash + 1u, 0u));
+    }
+    append_manual_entry(2, 1u, packed(2u * segment_span + 4u, 0u));
+    append_manual_entry(2, 500u, packed(2u * segment_span + 5u, 1u));
+
+    Crc64Ecma182 payload_checksum;
+    for (const std::uint64_t checksum : control_row_checksums) {
+        payload_checksum.update_little_endian(checksum);
+    }
+    for (const std::uint64_t checksum : position_row_checksums) {
+        payload_checksum.update_little_endian(checksum);
+    }
+    auto adjusted_generation = *generation;
+    adjusted_generation.manifest.control_count = manual_entries.size();
+    adjusted_generation.manifest.position_count = manual_entries.size();
+    adjusted_generation.manifest.payload_bytes =
+        control_image.size() + position_image.size();
+    adjusted_generation.manifest.payload_checksum =
+        payload_checksum.checksum();
+    adjusted_generation.manifest.extent_count =
+        static_cast<std::uint32_t>(manual_entries.size() * 2u);
+    const std::uint64_t directory_bytes = manual_entries.size()
+        * minimizer_directory_entry_encoded_bytes(profile);
+    adjusted_generation.manifest.directory_chunk_count =
+        static_cast<std::uint32_t>(
+            directory_bytes / kMinimizerFormat5ExtentPayloadBytes
+            + (directory_bytes % kMinimizerFormat5ExtentPayloadBytes != 0u
+                ? 1u : 0u));
+    const auto metadata = rebuild_generation_metadata(
+        adjusted_generation, manual_entries);
+    const auto directory = DirView::decode(
+        metadata.directory_bytes, profile);
+    REQUIRE(directory.has_value());
+    REQUIRE(validate_minimizer_generation_metadata(
+        metadata.head, metadata.manifest, *directory).has_value());
+    auto mapped_payload = std::make_shared<std::vector<std::byte>>();
+    mapped_payload->reserve(
+        control_image.size() + position_image.size());
+    mapped_payload->insert(
+        mapped_payload->end(), control_image.begin(), control_image.end());
+    mapped_payload->insert(
+        mapped_payload->end(), position_image.begin(), position_image.end());
+    REQUIRE(mapped_payload->size() == metadata.manifest.payload_bytes);
+
+    const auto entries = directory->entries();
+    REQUIRE(entries.size() == pairs.size());
+    REQUIRE(entries.size() > 128u);
+    REQUIRE(entries[127].position_segment == 0);
+    REQUIRE(entries[128].position_segment == 0);
+    REQUIRE(entries[129].position_segment == 0);
+    REQUIRE(entries[130].position_segment == 2);
+    REQUIRE(std::ranges::count_if(entries, [](const auto& entry) {
+        return entry.position_segment == 0;
+    }) == 130);
+    REQUIRE(std::ranges::count_if(entries, [](const auto& entry) {
+        return entry.position_segment == 1;
+    }) == 0);
+    REQUIRE(std::ranges::count_if(entries, [](const auto& entry) {
+        return entry.position_segment == 2;
+    }) == 2);
+
+    const std::vector<MinimapSketchData> query{
+        MinimapSketchData{1u, 14u, 0u},
+        MinimapSketchData{127u, 15u, 0u},
+        MinimapSketchData{128u, 16u, 0u},
+        MinimapSketchData{129u, 17u, 0u},
+        MinimapSketchData{130u, 18u, 0u},
+        MinimapSketchData{500u, 19u, 0u},
+    };
+    constexpr bioseq::storage::sequence_size_t query_length = 100u;
+    constexpr std::int32_t kmer_size = 15;
+    bioseq::parallelism::MemoryAdmissionController admission;
+    std::shared_ptr<const void> payload_owner = mapped_payload;
+    auto reader = PreparedShapeV5FragmentQueryReader::open(
+        admission,
+        metadata.head,
+        metadata.manifest,
+        test_shape_v5_expected_compatibility(10u),
+        metadata.directory_bytes,
+        1u,
+        std::move(payload_owner),
+        std::span<const std::byte>{
+            mapped_payload->data(), mapped_payload->size()});
+    REQUIRE(reader.has_value());
+    auto scratch = QueryWaveScratch::create(admission);
+    REQUIRE(scratch.has_value());
+    const std::array queries{
+        FragmentSeedQuery{
+            .minimizers = std::span<const MinimapSketchData>{query},
+            .query_length = query_length,
+            .kmer_size = kmer_size,
+        },
+    };
+    const auto expected = ordinary_seed_anchors(
+        pairs,
+        2u * segment_span + 100u,
+        query,
+        query_length,
+        1,
+        kmer_size);
+    auto batch = reader->prepare_fragment_anchor_batch(
+        admission, queries, 1, *scratch);
+    const auto actual = batch.query_view(0u).
+        ordered_fragment_seed_anchors(
+            query, query_length, 1, kmer_size);
+    require_anchor_bytes_equal(actual, expected);
+    REQUIRE(actual.size() == query.size() - 1u);
+    REQUIRE(std::ranges::none_of(actual, [segment_span](const auto& anchor) {
+        return anchor.ref_position == 2u
+            || anchor.ref_position == 2u * segment_span + 4u;
+    }));
+    REQUIRE(actual.back().ref_position == 2u * segment_span + 5u);
+    REQUIRE(actual.back().is_reverse == 1u);
+    scratch->complete_wave_after_join();
+}
+
+TEST_CASE("DOC0383 query-wave scratch recycles without stale anchors",
+          "[indexing][minimizer-hashmap][wire][v5][fragment-native]"
+          "[doc0383][anchors][scratch][recycle][identity]") {
+    using namespace bioseq::indexing;
+    constexpr auto packed = [](
+            std::uint64_t position, std::uint64_t strand) {
+        return (position << 1u) | strand;
+    };
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
+        {7u, packed(10u, 0u)},
+        {7u, packed(20u, 1u)},
+        {8u, packed(30u, 0u)},
+    };
+    VectorReplayMinimizerProducer producer{pairs};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(100u, 10u));
+    REQUIRE(generation.has_value());
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    auto reader = open_shape_v5_fragment_query_reader(
+        admission, *generation, sink.rows, 2u);
+    REQUIRE(reader.has_value());
+    auto scratch = QueryWaveScratch::create(admission);
+    REQUIRE(scratch.has_value());
+    const std::vector<MinimapSketchData> first_query{
+        MinimapSketchData{7u, 20u, 0u},
+        MinimapSketchData{7u, 25u, 1u},
+    };
+    const std::vector<MinimapSketchData> empty_query{};
+    const std::vector<MinimapSketchData> third_query{
+        MinimapSketchData{8u, 30u, 0u},
+    };
+    constexpr bioseq::storage::sequence_size_t query_length = 100u;
+    constexpr std::int32_t kmer_size = 15;
+
+    {
+        const std::array queries{
+            FragmentSeedQuery{
+                std::span<const MinimapSketchData>{first_query},
+                query_length,
+                kmer_size},
+            FragmentSeedQuery{
+                std::span<const MinimapSketchData>{empty_query},
+                query_length,
+                kmer_size},
+            FragmentSeedQuery{
+                std::span<const MinimapSketchData>{third_query},
+                query_length,
+                kmer_size},
+        };
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, queries, 2, *scratch);
+        REQUIRE(batch.query_count() == queries.size());
+        const auto first_expected = ordinary_seed_anchors(
+            pairs, 100u, first_query, query_length, 2, kmer_size);
+        const auto third_expected = ordinary_seed_anchors(
+            pairs, 100u, third_query, query_length, 2, kmer_size);
+        require_anchor_bytes_equal(
+            batch.query_view(0u).ordered_fragment_seed_anchors(
+                first_query, query_length, 2, kmer_size),
+            first_expected);
+        REQUIRE(batch.query_view(1u).ordered_fragment_seed_anchors(
+            empty_query, query_length, 2, kmer_size).empty());
+        require_anchor_bytes_equal(
+            batch.query_view(2u).ordered_fragment_seed_anchors(
+                third_query, query_length, 2, kmer_size),
+            third_expected);
+        scratch->complete_wave_after_join();
+    }
+    const std::uint64_t retained_after_first_wave =
+        scratch->admitted_bytes();
+    REQUIRE(retained_after_first_wave > 0u);
+
+    const std::vector<MinimapSketchData> last_query{
+        MinimapSketchData{8u, 14u, 0u},
+    };
+    {
+        const std::array queries{
+            FragmentSeedQuery{
+                std::span<const MinimapSketchData>{last_query},
+                query_length,
+                kmer_size},
+        };
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, queries, 2, *scratch);
+        const auto view = batch.query_view(0u);
+        const auto actual = view.ordered_fragment_seed_anchors(
+            last_query, query_length, 2, kmer_size);
+        const auto expected = ordinary_seed_anchors(
+            pairs, 100u, last_query, query_length, 2, kmer_size);
+        require_anchor_bytes_equal(actual, expected);
+        REQUIRE(actual.size() == 1u);
+
+        const std::vector<MinimapSketchData> copied_query = last_query;
+        REQUIRE_THROWS_AS(
+            view.ordered_fragment_seed_anchors(
+                copied_query, query_length, 2, kmer_size),
+            PersistedMinimizerLookupError);
+        REQUIRE_THROWS_AS(
+            view.ordered_fragment_seed_anchors(
+                last_query, query_length + 1u, 2, kmer_size),
+            PersistedMinimizerLookupError);
+        REQUIRE_THROWS_AS(
+            view.ordered_fragment_seed_anchors(
+                last_query, query_length, 1, kmer_size),
+            PersistedMinimizerLookupError);
+        REQUIRE_THROWS_AS(
+            view.ordered_fragment_seed_anchors(
+                last_query, query_length, 2, kmer_size + 1),
+            PersistedMinimizerLookupError);
+        scratch->complete_wave_after_join();
+    }
+    REQUIRE(scratch->admitted_bytes() == retained_after_first_wave);
+
+    {
+        const std::array<FragmentSeedQuery, 0u> empty_wave{};
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, empty_wave, 2, *scratch);
+        REQUIRE(batch.query_count() == 0u);
+        scratch->complete_wave_after_join();
+        REQUIRE_FALSE(scratch->wave_outstanding());
+    }
+
+    constexpr bioseq::storage::sequence_size_t packed_query_limit =
+        bioseq::storage::sequence_size_t{1} << 28u;
+    const std::vector<MinimapSketchData> boundary_query{
+        MinimapSketchData{
+            8u,
+            static_cast<std::uint32_t>(packed_query_limit - 1u),
+            0u},
+    };
+    {
+        const std::array queries{
+            FragmentSeedQuery{
+                std::span<const MinimapSketchData>{boundary_query},
+                packed_query_limit,
+                kmer_size},
+        };
+        auto batch = reader->prepare_fragment_anchor_batch(
+            admission, queries, 2, *scratch);
+        const auto actual = batch.query_view(0u).
+            ordered_fragment_seed_anchors(
+                boundary_query,
+                packed_query_limit,
+                2,
+                kmer_size);
+        const auto expected = ordinary_seed_anchors(
+            pairs,
+            100u,
+            boundary_query,
+            packed_query_limit,
+            2,
+            kmer_size);
+        require_anchor_bytes_equal(actual, expected);
+        scratch->complete_wave_after_join();
+    }
+    const std::array oversized_query{
+        FragmentSeedQuery{
+            std::span<const MinimapSketchData>{boundary_query},
+            packed_query_limit + 1u,
+            kmer_size},
+    };
+    REQUIRE_THROWS_AS(
+        reader->prepare_fragment_anchor_batch(
+            admission, oversized_query, 2, *scratch),
+        PersistedMinimizerLookupError);
+    REQUIRE_FALSE(scratch->wave_outstanding());
+
+    const std::array mismatched_kmer_query{
+        FragmentSeedQuery{
+            std::span<const MinimapSketchData>{last_query},
+            query_length,
+            kmer_size + 1},
+    };
+    REQUIRE_THROWS_AS(
+        reader->prepare_fragment_anchor_batch(
+            admission, mismatched_kmer_query, 2, *scratch),
+        PersistedMinimizerLookupError);
+    REQUIRE_FALSE(scratch->wave_outstanding());
+
+    const std::vector<MinimapSketchData> out_of_profile_hash_query{
+        MinimapSketchData{
+            static_cast<std::uint64_t>(kLegacyMinimapK15MaxHash) + 1u,
+            14u,
+            0u},
+    };
+    const std::array out_of_profile_hash_queries{
+        FragmentSeedQuery{
+            std::span<const MinimapSketchData>{
+                out_of_profile_hash_query},
+            query_length,
+            kmer_size},
+    };
+    REQUIRE_THROWS_AS(
+        reader->prepare_fragment_anchor_batch(
+            admission, out_of_profile_hash_queries, 2, *scratch),
+        PersistedMinimizerLookupError);
+    REQUIRE_FALSE(scratch->wave_outstanding());
+}
+
+TEST_CASE("DOC0383 fragment anchor admission failure leaves reusable owners exact",
+          "[indexing][minimizer-hashmap][wire][v5][fragment-native]"
+          "[doc0383][anchors][admission][cleanup]") {
+    using namespace bioseq::indexing;
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
+        {7u, 20u},
+        {7u, 40u},
+    };
+    VectorReplayMinimizerProducer producer{pairs};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(100u, 10u));
+    REQUIRE(generation.has_value());
+    const std::vector<MinimapSketchData> query{
+        MinimapSketchData{7u, 20u, 0u},
+    };
+    constexpr bioseq::storage::sequence_size_t query_length = 100u;
+    constexpr std::int32_t kmer_size = 15;
+    const std::array queries{
+        FragmentSeedQuery{
+            std::span<const MinimapSketchData>{query},
+            query_length,
+            kmer_size},
+    };
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    {
+        auto reader = open_shape_v5_fragment_query_reader(
+            admission, *generation, sink.rows, 2u);
+        REQUIRE(reader.has_value());
+        auto scratch = QueryWaveScratch::create(admission);
+        REQUIRE(scratch.has_value());
+        {
+            auto warm = reader->prepare_fragment_anchor_batch(
+                admission, queries, 2, *scratch);
+            REQUIRE(warm.admitted_bytes() > 0u);
+            REQUIRE_FALSE(warm.query_view(0u).
+                ordered_fragment_seed_anchors(
+                    query, query_length, 2, kmer_size).empty());
+            scratch->complete_wave_after_join();
+        }
+        const std::uint64_t retained_without_batch =
+            admission.reserved_bytes();
+        REQUIRE(retained_without_batch
+            == reader->admitted_bytes() + scratch->admitted_bytes());
+        REQUIRE(scratch->admitted_bytes() > 0u);
+        admission.set_index_memory_cap_bytes(
+            retained_without_batch + sizeof(PreparedQueryAnchors));
+
+        REQUIRE_THROWS_AS(
+            reader->prepare_fragment_anchor_batch(
+                admission, queries, 2, *scratch),
+            PersistedMinimizerLookupError);
+        REQUIRE_FALSE(scratch->wave_outstanding());
+        REQUIRE(admission.reserved_bytes() == retained_without_batch);
+        scratch->release_retained_capacity();
+        REQUIRE(scratch->admitted_bytes() == 0u);
+        REQUIRE(admission.reserved_bytes() == reader->admitted_bytes());
+    }
+    REQUIRE(admission.reserved_bytes() == 0u);
+}
+
+TEST_CASE("DOC0383 fragment anchor preparation rejects trusted payload corruption",
+          "[indexing][minimizer-hashmap][wire][v5][fragment-native]"
+          "[doc0383][anchors][corruption][cleanup]") {
+    using namespace bioseq::indexing;
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>> pairs{
+        {7u, 20u},
+        {7u, 40u},
+    };
+    VectorReplayMinimizerProducer producer{pairs};
+    CollectingMinimizerRowSink sink;
+    const auto generation = encode_minimizer_generation(
+        producer,
+        sink,
+        test_shape_v5_generation_options(100u, 10u));
+    REQUIRE(generation.has_value());
+    REQUIRE(generation->directory.entries().size() == 1u);
+    auto payload = make_shape_v5_mapped_payload(*generation, sink.rows);
+    const auto& entry = generation->directory.entries().front();
+    const auto layout = minimizer_shape_v5_control_layout(
+        entry.control_element_count,
+        generation->directory.profile().shape_v5->hash_width,
+        entry.shape_offset_width,
+        generation->directory.profile().shape_v5->count_width);
+    REQUIRE(layout.has_value());
+    REQUIRE(generation->directory.profile().shape_v5->count_width
+        == MinimizerScalarWidth::u16);
+    test_write_le<std::uint16_t>(
+        std::span<std::byte>{payload->data(), payload->size()},
+        static_cast<std::size_t>(layout->count_offset),
+        3u);
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    {
+        std::shared_ptr<const void> payload_owner = payload;
+        auto reader = PreparedShapeV5FragmentQueryReader::open(
+            admission,
+            generation->head,
+            generation->manifest,
+            test_shape_v5_expected_compatibility(10u),
+            generation->directory.encoded_bytes(),
+            1u,
+            std::move(payload_owner),
+            std::span<const std::byte>{payload->data(), payload->size()});
+        REQUIRE(reader.has_value());
+        auto scratch = QueryWaveScratch::create(admission);
+        REQUIRE(scratch.has_value());
+        const std::vector<MinimapSketchData> query{
+            MinimapSketchData{7u, 20u, 0u},
+        };
+        const std::array queries{
+            FragmentSeedQuery{
+                std::span<const MinimapSketchData>{query}, 100u, 15},
+        };
+        REQUIRE_THROWS_AS(
+            reader->prepare_fragment_anchor_batch(
+                admission, queries, 1, *scratch),
+            PersistedMinimizerLookupError);
+        REQUIRE_FALSE(scratch->wave_outstanding());
+        scratch->release_retained_capacity();
+        REQUIRE(admission.reserved_bytes() == reader->admitted_bytes());
+    }
+    REQUIRE(admission.reserved_bytes() == 0u);
 }
 
 TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
@@ -10942,7 +11899,7 @@ TEST_CASE("Format-6 selective reader requests only authorized postings and match
         REQUIRE(spans.well_formed());
         const auto expected = baseline.lookup(hash);
         REQUIRE(std::ranges::equal(
-            spans.contiguous_positions(), expected));
+            spans.contiguous_positions32(), expected));
     }
     REQUIRE_THROWS_AS(
         reader->lookup_spans(20u), PersistedMinimizerLookupError);
@@ -10966,11 +11923,11 @@ TEST_CASE("Format-6 selective reader requests only authorized postings and match
             scalar_reader->memory_evidence().
                 generic_source_fallback_calls > 0u);
         REQUIRE(std::ranges::equal(
-            scalar_reader->lookup_spans(10u).contiguous_positions(),
-            std::array<std::uint64_t, 2>{2u, 4u}));
+            scalar_reader->lookup_spans(10u).contiguous_positions32(),
+            std::array<std::uint32_t, 2>{2u, 4u}));
         REQUIRE(std::ranges::equal(
-            scalar_reader->lookup_spans(30u).contiguous_positions(),
-            std::array<std::uint64_t, 2>{20u, 21u}));
+            scalar_reader->lookup_spans(30u).contiguous_positions32(),
+            std::array<std::uint32_t, 2>{20u, 21u}));
     }
 }
 
@@ -11142,8 +12099,8 @@ TEST_CASE("Format-6 admission is exact at every pre-I/O phase barrier",
         REQUIRE(moved.admitted_bytes() == retained_bytes);
         REQUIRE(admission.reserved_bytes() == retained_bytes);
         REQUIRE(std::ranges::equal(
-            moved.lookup_spans(10u).contiguous_positions(),
-            std::array<std::uint64_t, 2>{2u, 4u}));
+            moved.lookup_spans(10u).contiguous_positions32(),
+            std::array<std::uint32_t, 2>{2u, 4u}));
     }
 }
 
@@ -11364,8 +12321,10 @@ TEST_CASE("Format-6 posting-width and target-length boundaries are exact",
             format6_query_view(query, options.compatibility),
             1u);
         REQUIRE(reader.has_value());
-        REQUIRE(reader->lookup_spans(7u).contiguous_positions().front()
-            == positions.front());
+        const auto retained =
+            reader->lookup_spans(7u).contiguous_positions32();
+        REQUIRE(retained.size() == 1u);
+        REQUIRE(retained.front() == positions.front());
     }
 
     SECTION("2^31+1 target requires u64") {
@@ -11397,8 +12356,10 @@ TEST_CASE("Format-6 posting-width and target-length boundaries are exact",
             format6_query_view(query, options.compatibility),
             1u);
         REQUIRE(reader.has_value());
-        REQUIRE(reader->lookup_spans(7u).contiguous_positions().front()
-            == positions.front());
+        const auto retained =
+            reader->lookup_spans(7u).contiguous_positions();
+        REQUIRE(retained.size() == 1u);
+        REQUIRE(retained.front() == positions.front());
 
         constexpr std::uint64_t invalid_target = target_length + 1u;
         const auto invalid_options = format6_test_options(invalid_target);

@@ -742,6 +742,8 @@ struct PipelineOperationalStats {
     std::uint64_t format5_reader_retained_layout_checks = 0;
     std::uint64_t format5_reader_retained_layout_failures = 0;
     bool format5_reader_memory_evidence_saturated = false;
+    bioseq::indexing::PreparedFragmentAnchorBatchEvidence
+        fragment_native_query_evidence{};
     Format6ReaderOperationalEvidence format6_reader_evidence{};
     // Continuation-kernel vector batches and resident vector_stream calls are
     // distinct execution units. Keep both truthful; callers that only need an
@@ -1027,6 +1029,9 @@ struct PipelineOperationalStats {
         format5_reader_memory_evidence_saturated =
             format5_reader_memory_evidence_saturated
             || rhs.format5_reader_memory_evidence_saturated;
+        fragment_native_query_evidence.merge(
+            rhs.fragment_native_query_evidence);
+        saturated = fragment_native_query_evidence.saturated || saturated;
         saturated = format6_reader_evidence.merge(
             rhs.format6_reader_evidence,
             operational_identity_conflict) || saturated;
@@ -4956,7 +4961,7 @@ inline constexpr sequence_size_t kVulkanSegmentTargetBp = 76'000'000ull;  // tar
 inline constexpr sequence_size_t kVulkanSegmentCollectedMaxBp =
     96'000'000ull;
 static_assert(kSegmentCoreMaxBp + 2 * kSegmentOverlapMaxBp <=
-                  static_cast<sequence_size_t>(MinimapSketchData::pos_field_mask),
+                  minimizer_max_sequence_length_v<MinimapSketchData>,
               "segment collected span (core + 2*overlap) must fit "
               "MinimapSketchData's 28-bit position field");
 
@@ -5820,6 +5825,12 @@ struct MinimizerStage
             ? static_cast<std::size_t>(runtime_k)
             : Cep::kmer_len;
 
+        // Validate the zero-based position domain before any scalar, SIMD, or
+        // Vulkan kernel can construct a masked MinimizerRepr. A query shorter
+        // than k is valid and naturally emits an empty minimizer batch.
+        require_representable_minimizer_query_length<MinimizerT>(
+            query_seq_->bp_size());
+
         // DOC0307 §5.1 — device-minimizer path: only the Vulkan kernel exposes
         // `call_result`. When it returns a result, copy the host minimizers into
         // the arena slab and forward the resident device span as stage-local
@@ -6148,16 +6159,6 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         auto sketch_span = sketch_span_of<MinimizerT>(sketches);
         auto device_span = device_span_of<MinimizerT>(sketches);
 
-        // Pre-size the slab from the tight per-query estimate
-        // (DOC0249 §21.4 `estimated_anchor_count`); growth past the estimate
-        // doubles the slab inside the same Arena::Chain scope.
-        auto anchors_slab = make_arena_slab<Anchor>();
-        anchors_slab.reserve(detail::estimated_anchor_count(
-            sketch_span.size(),
-            static_cast<std::size_t>(query_len),
-            static_cast<std::size_t>(target_index_ref.target_length()),
-            kmer_size));
-
         // DOC0307 §5.2 — run the selected GPU seed-hit lookup before the CPU
         // path. If it declines, the selected Vulkan pipeline fails loudly.
         // Only the concrete MinimizerHashmapFragmentIndex carries the GPU view.
@@ -6173,6 +6174,15 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             };
             if constexpr (std::same_as<std::remove_cvref_t<IndexT>,
                           bioseq::indexing::MinimizerHashmapFragmentIndex>) {
+                // Strict Vulkan selection owns its anchor allocation. A
+                // prepared fragment view has no resident GPU index and reaches
+                // the fail-closed decline below without allocating CPU output.
+                auto anchors_slab = make_arena_slab<Anchor>();
+                anchors_slab.reserve(detail::estimated_anchor_count(
+                    sketch_span.size(),
+                    static_cast<std::size_t>(query_len),
+                    static_cast<std::size_t>(target_index_ref.target_length()),
+                    kmer_size));
                 auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
                 if (bioseq::gpu::vulkan::hardware_device_available(runtime)) {
                     auto key = bioseq::indexing::make_gpu_index_cache_key(
@@ -6330,43 +6340,70 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
             }
         }
 
-        collect_seed_hits<MinimizerT>(
-            sketch_span,
-            target_index_ref,
-            query_len, params.max_occ, kmer_size,
-            anchors_slab);
+        MatchResultCollection* const cpu_seed_proof_dst = proof_dst;
+        PostSeedOwnedLifetime* const cpu_seed_owned_lifetime =
+            post_seed_owned_lifetime;
+        MatchResultCollection* const cpu_seed_host_timing_dst =
+            host_timing_dst;
+        const auto record_cpu_seed_completion =
+            [cpu_seed_proof_dst, sketch_span, cpu_seed_owned_lifetime,
+             cpu_seed_host_timing_dst, host_stage_started] {
+            // A successful strict Vulkan lookup returned above, so this proof
+            // can only describe a real CPU seed operation.
+            if (cpu_seed_proof_dst == nullptr) {
+                bioseq_log<ERR>("CPU seed stage has no execution-proof sink");
+                std::abort();
+            }
+            ScalarPipelineExecutionProof proof{};
+            proof.record_seed_lookup(
+                static_cast<std::uint64_t>(sketch_span.size()));
+            cpu_seed_proof_dst->record_scalar_pipeline_execution_proof(proof);
 
-        // Every route that reaches this point executed the CPU seed-lookup
-        // operation successfully. Vulkan seed lookup returns from its success
-        // branch above and therefore cannot manufacture this CPU evidence.
-        if (proof_dst == nullptr) {
-            bioseq_log<ERR>(
-                "CPU seed stage has no execution-proof sink");
-            std::abort();
+            if (cpu_seed_owned_lifetime != nullptr) {
+                // CPU-index retirement is lifetime evidence, not Vulkan
+                // execution evidence. Prepared fragment batches are normally
+                // externally owned and leave this pointer null.
+                (void)cpu_seed_owned_lifetime->complete_seed_user();
+            }
+            if (cpu_seed_host_timing_dst != nullptr) {
+                cpu_seed_host_timing_dst->record_seed_lookup_host_time(
+                    elapsed_host_stage_ns(host_stage_started));
+            }
+        };
+
+        if constexpr (bioseq::indexing::PreparedFragmentAnchorQueryIndex<
+                          std::remove_cvref_t<IndexT>>) {
+            static_assert(std::same_as<MinimizerT, MinimapSketchData>,
+                "prepared fragment anchors require canonical query minimizers");
+            const std::span<const Anchor> ordered_anchors =
+                target_index_ref.ordered_fragment_seed_anchors(
+                    std::span<const MinimapSketchData>{
+                        sketch_span.data(), sketch_span.size()},
+                    query_len,
+                    params.max_occ,
+                    kmer_size);
+            record_cpu_seed_completion();
+            // The owning PreparedFragmentAnchorBatch outlives this synchronous
+            // pipeline call. Emit its already-canonical span directly: no
+            // ArenaSlab allocation, anchor copy, or global MPF sort.
+            return std::move(token).emit_batch(ordered_anchors);
+        } else {
+            // Ordinary per-hash lookup retains the arena-producing kernel.
+            auto anchors_slab = make_arena_slab<Anchor>();
+            anchors_slab.reserve(detail::estimated_anchor_count(
+                sketch_span.size(),
+                static_cast<std::size_t>(query_len),
+                static_cast<std::size_t>(target_index_ref.target_length()),
+                kmer_size));
+            collect_seed_hits<MinimizerT>(
+                sketch_span,
+                target_index_ref,
+                query_len, params.max_occ, kmer_size,
+                anchors_slab);
+            record_cpu_seed_completion();
+            return std::move(token).emit_batch(
+                std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
         }
-        ScalarPipelineExecutionProof proof{};
-        proof.record_seed_lookup(
-            static_cast<std::uint64_t>(sketch_span.size()));
-        proof_dst->record_scalar_pipeline_execution_proof(proof);
-
-        if (post_seed_owned_lifetime != nullptr) {
-            // This is the ordinary CPU seed path.  Its transient CPU-index
-            // retirement is a lifetime event, not Vulkan execution evidence;
-            // putting it in PartialVulkanExecutionProof makes a genuine SIMD
-            // route look like hidden GPU work.  A selected Vulkan seed route
-            // cannot reach here: any decline throws above, and its successful
-            // branch records both the operation proof and owned releases
-            // before returning.
-            (void)post_seed_owned_lifetime->complete_seed_user();
-        }
-
-        if (host_timing_dst != nullptr) {
-            host_timing_dst->record_seed_lookup_host_time(
-                elapsed_host_stage_ns(host_stage_started));
-        }
-
-        return std::move(token).emit_batch(
-            std::span<Anchor>{anchors_slab.data(), anchors_slab.size()});
     }
 
     template <is_constexpr_aligner_params Cep>
@@ -6374,7 +6411,7 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
         StageAlgorithmDescription algo;
-        algo.name = "Seed hits + radix sort";
+        algo.name = "Seed hits + canonical CPU ordering";
         algo.parameters.push_back({"max_occ", std::to_string(params.max_occ)});
         algo.parameters.push_back({"query_len", std::to_string(query_len)});
         desc.algorithm = std::move(algo);
@@ -9912,6 +9949,8 @@ template <class MinimizerT, class QuerySeq>
 [[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
     QuerySeq& query_seq, const Minimap2Params& params, std::size_t w, std::size_t k)
 {
+    require_representable_minimizer_query_length<MinimizerT>(
+        query_seq.bp_size());
     if (params.minimizer_algorithm == MinimizerAlgorithmType::VULKAN_MINIMAP_INT)
     {
         if (!params.vulkan_enabled) {
@@ -10026,7 +10065,7 @@ template <supports_compact_sequence_range QueryRange,
         };
     };
 
-    // (1) Sketch the query ONCE as MinimapSketchData (query < 2^28 bp; its
+    // (1) Sketch the query ONCE as MinimapSketchData (query <= 2^28 bp; its
     //     positions fit the 28-bit field). Same kmer hashing as the target, so
     //     `collect_seed_hits` matches identically. DOC0307 §5.3 — the helper
     //     sketches on the GPU when VULKAN_MINIMAP_INT is selected (byte-identical

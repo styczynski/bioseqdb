@@ -12,6 +12,7 @@ module;
 #include <limits>
 #include <new>
 #include <ranges>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -363,6 +364,51 @@ struct MinimizerRepr<MaxSeqLog2, KmerLen, true> {
 // (`minimap_port`) entry separately dispatches on size buckets and may
 // instantiate other `MinimizerRepr<...>` shapes.
 using MinimapSketchData = MinimizerRepr<28u, 15u>;
+
+/// Maximum sequence length whose zero-based minimizer positions fit in a
+/// representation.  A length of exactly `2^pos_bits` is valid because its
+/// final position is `2^pos_bits - 1`; the next base would be truncated by
+/// `MinimizerRepr`'s constructor mask.
+template <class MinimizerT>
+inline constexpr bioseq::storage::sequence_size_t
+minimizer_max_sequence_length_v = []() constexpr {
+    constexpr auto mask = static_cast<bioseq::storage::sequence_size_t>(
+        MinimizerT::pos_field_mask);
+    if constexpr (mask
+            == (std::numeric_limits<
+                bioseq::storage::sequence_size_t>::max)()) {
+        return mask;
+    } else {
+        return static_cast<bioseq::storage::sequence_size_t>(mask + 1u);
+    }
+}();
+
+template <class MinimizerT>
+[[nodiscard]] inline constexpr bool minimizer_query_length_is_representable(
+        bioseq::storage::sequence_size_t query_length) noexcept {
+    return query_length <= minimizer_max_sequence_length_v<MinimizerT>;
+}
+
+/// Fail before any minimizer constructor can mask an out-of-range query
+/// position.  Short queries, including `query_length < k`, deliberately pass;
+/// sketch kernels return the valid empty minimizer set for that shape.
+template <class MinimizerT>
+inline void require_representable_minimizer_query_length(
+        bioseq::storage::sequence_size_t query_length) {
+    if (!minimizer_query_length_is_representable<MinimizerT>(query_length)) {
+        throw std::length_error(
+            "query length exceeds the selected minimizer position field");
+    }
+}
+
+static_assert(
+    minimizer_max_sequence_length_v<MinimapSketchData>
+        == (bioseq::storage::sequence_size_t{1u} << 28u),
+    "MinimapSketchData must accept 2^28 bases and reject 2^28 + 1");
+static_assert(minimizer_query_length_is_representable<MinimapSketchData>(
+    bioseq::storage::sequence_size_t{1u} << 28u));
+static_assert(!minimizer_query_length_is_representable<MinimapSketchData>(
+    (bioseq::storage::sequence_size_t{1u} << 28u) + 1u));
 
 static_assert(sizeof(MinimapSketchData) == 8,
               "Canonical MinimapSketchData must remain a single uint64_t");
@@ -1009,7 +1055,7 @@ template <class MinimizerT>
 [[nodiscard]] inline bool collected_span_fits_minimizer_pos_field(
     bioseq::storage::sequence_size_t collected_bp) noexcept
 {
-    return collected_bp <= minimizer_pos_field_mask_v<MinimizerT>;
+    return collected_bp <= minimizer_max_sequence_length_v<MinimizerT>;
 }
 // ===== end DOC0345 Patch A =====
 
