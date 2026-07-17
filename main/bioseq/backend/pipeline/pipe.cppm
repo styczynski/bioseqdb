@@ -767,6 +767,9 @@ struct PipelineOperationalStats {
     std::uint64_t simd_chaining_policy_rejections = 0;
     bool simd_chaining_policy_evidence_saturated = false;
     BlockAlignerExecutionEvidence block_aligner_execution_evidence{};
+    ::bioseq::prefilter_stats::PrefilterExecutionProof
+        prefilter_execution_proof{};
+    bool prefilter_execution_proof_present = false;
     std::uint64_t cpu_seed_positions_rejected_outside_collection = 0;
     std::uint64_t gpu_partition_select_dispatches = 0;
     std::uint64_t gpu_partition_anchor_merge_dispatches = 0;
@@ -898,8 +901,45 @@ struct PipelineOperationalStats {
             || nthash_resident_vector_stream_kernel_calls != 0;
     }
 
+    /// Merge one completed operation-local prefilter proof. The authoritative
+    /// proof type owns all counter arithmetic and invariants; the statement
+    /// aggregate only retains its presence and propagates invalidity into the
+    /// existing fail-closed operational saturation signal.
+    void record_prefilter_execution_proof(
+            const ::bioseq::prefilter_stats::PrefilterExecutionProof&
+                proof) noexcept {
+        prefilter_execution_proof.combine(proof);
+        prefilter_execution_proof_present = true;
+        if (!prefilter_execution_proof.valid()) {
+            prefilter_execution_proof.saturated = true;
+            stats_saturated = true;
+        }
+    }
+
     /// Merge one operational delta without multiplying it by logical jobs.
     void merge(const PipelineOperationalStats& rhs) noexcept {
+        using PrefilterProof =
+            ::bioseq::prefilter_stats::PrefilterExecutionProof;
+        const PrefilterProof empty_prefilter_proof{};
+        if (prefilter_execution_proof_present
+            && !prefilter_execution_proof.valid()) {
+            prefilter_execution_proof.saturated = true;
+            stats_saturated = true;
+        } else if (!prefilter_execution_proof_present
+                   && prefilter_execution_proof != empty_prefilter_proof) {
+            prefilter_execution_proof.saturated = true;
+            prefilter_execution_proof_present = true;
+            stats_saturated = true;
+        }
+        if (rhs.prefilter_execution_proof_present) {
+            record_prefilter_execution_proof(
+                rhs.prefilter_execution_proof);
+        } else if (rhs.prefilter_execution_proof
+                   != empty_prefilter_proof) {
+            PrefilterProof malformed = rhs.prefilter_execution_proof;
+            malformed.saturated = true;
+            record_prefilter_execution_proof(malformed);
+        }
         bool saturated = stats_saturated || rhs.stats_saturated;
         operational_identity_conflict = operational_identity_conflict
             || rhs.operational_identity_conflict;
@@ -6713,12 +6753,15 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>,
     }
 };
 
-[[nodiscard]] inline ResolvedPrefilterAlgorithm resolve_prefilter_algorithm(
-    PrefilterBackendType backend,
+[[nodiscard]] inline ::bioseq::prefilter_stats::ResolvedPrefilterAlgorithm
+resolve_prefilter_algorithm(
+    ::bioseq::prefilter_stats::PrefilterBackendType backend,
     std::span<const prefilters::PrefilterJob> jobs) noexcept
 {
-    if (backend != PrefilterBackendType::VULKAN) {
-        return ResolvedPrefilterAlgorithm::sneaky_snake;
+    using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
+    using Algorithm = ::bioseq::prefilter_stats::ResolvedPrefilterAlgorithm;
+    if (backend != Backend::VULKAN) {
+        return Algorithm::sneaky_snake;
     }
     for (const prefilters::PrefilterJob& job : jobs) {
         const bool measured_length = job.query_length == job.target_length
@@ -6726,12 +6769,12 @@ struct DivergenceStage : StageBase<DivergenceStage<MinimizerT, QueryMinimizers>,
         const bool measured_threshold =
             job.max_edits == 2u || job.max_edits == 4u;
         if (!measured_length || !measured_threshold) {
-            return ResolvedPrefilterAlgorithm::sneaky_snake;
+            return Algorithm::sneaky_snake;
         }
     }
     return jobs.empty()
-        ? ResolvedPrefilterAlgorithm::sneaky_snake
-        : ResolvedPrefilterAlgorithm::gatekeeper;
+        ? Algorithm::sneaky_snake
+        : Algorithm::gatekeeper;
 }
 
 /**
@@ -6754,12 +6797,13 @@ struct PrefilterStage
     MatchResultCollection* proof_dst_ = nullptr;
 
     [[nodiscard]] static constexpr std::string_view backend_name(
-        PrefilterBackendType backend) noexcept {
+        ::bioseq::prefilter_stats::PrefilterBackendType backend) noexcept {
+        using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
         switch (backend) {
-            case PrefilterBackendType::AUTO: return "auto";
-            case PrefilterBackendType::SCALAR: return "scalar";
-            case PrefilterBackendType::SIMD: return "highway_simd";
-            case PrefilterBackendType::VULKAN: return "vulkan";
+            case Backend::AUTO: return "auto";
+            case Backend::SCALAR: return "scalar";
+            case Backend::SIMD: return "highway_simd";
+            case Backend::VULKAN: return "vulkan";
         }
         return "unknown";
     }
@@ -6863,22 +6907,24 @@ struct PrefilterStage
             .jobs = jobs,
         };
         std::vector<prefilters::PrefilterResult> results;
-        const PrefilterBackendType selected = params.prefilter_backend
-            == PrefilterBackendType::AUTO
-                ? PrefilterBackendType::SIMD
+        using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
+        using Algorithm = ::bioseq::prefilter_stats::ResolvedPrefilterAlgorithm;
+        const Backend selected = params.prefilter_backend
+            == Backend::AUTO
+                ? Backend::SIMD
                 : params.prefilter_backend;
-        const ResolvedPrefilterAlgorithm algorithm =
+        const Algorithm algorithm =
             resolve_prefilter_algorithm(selected, jobs);
         switch (selected) {
-            case PrefilterBackendType::SCALAR:
+            case Backend::SCALAR:
                 results = sneaky_snake_scalar_batch(input);
                 break;
-            case PrefilterBackendType::SIMD:
-            case PrefilterBackendType::AUTO:
+            case Backend::SIMD:
+            case Backend::AUTO:
                 results = sneaky_snake_simd_batch(input);
                 break;
-            case PrefilterBackendType::VULKAN: {
-                if (algorithm == ResolvedPrefilterAlgorithm::gatekeeper) {
+            case Backend::VULKAN: {
+                if (algorithm == Algorithm::gatekeeper) {
                     results = prefilters::run_gatekeeper_vulkan_batch(
                         query_ranks, target_ranks, jobs);
                 } else {
@@ -6895,6 +6941,7 @@ struct PrefilterStage
 
         const std::size_t input_region_count = regions.size();
         std::uint64_t evaluated_jobs = 0u;
+        std::uint64_t length_64_jobs = 0u;
         std::uint64_t length_difference_jobs = 0u;
         std::uint64_t unsupported_jobs = 0u;
         std::uint64_t rejected_jobs = 0u;
@@ -6910,6 +6957,10 @@ struct PrefilterStage
             switch (static_cast<prefilters::PrefilterStatus>(result.status)) {
                 case prefilters::PrefilterStatus::success:
                     ++evaluated_jobs;
+                    if (jobs[index].query_length == 64u
+                        && jobs[index].target_length == 64u) {
+                        ++length_64_jobs;
+                    }
                     break;
                 case prefilters::PrefilterStatus::conservative_unequal:
                     ++length_difference_jobs;
@@ -6921,7 +6972,7 @@ struct PrefilterStage
                     throw std::runtime_error(
                         "rank prefilter backend returned an unknown status");
             }
-            if (algorithm == ResolvedPrefilterAlgorithm::gatekeeper) {
+            if (algorithm == Algorithm::gatekeeper) {
                 mask_rejection_candidates +=
                     prefilters::gatekeeper_mask_rejection_candidate(result)
                         ? 1u : 0u;
@@ -6960,7 +7011,7 @@ struct PrefilterStage
             throw std::logic_error(
                 "rank prefilter stage has no execution-proof sink");
         }
-        PrefilterExecutionProof call_proof{};
+        ::bioseq::prefilter_stats::PrefilterExecutionProof call_proof{};
         call_proof.record_batch(
             algorithm,
             selected,
@@ -6974,7 +7025,8 @@ struct PrefilterStage
             mask_rejection_candidates,
             exact_guard_activations,
             guard_confirmed_rejections,
-            hamming_exact_rejections);
+            hamming_exact_rejections,
+            length_64_jobs);
         proof_dst_->record_prefilter_execution_proof(call_proof);
         return std::move(token).emit_batch_pair(
             std::span<AlignRegion>{regions.data(), output_size},
@@ -6983,6 +7035,7 @@ struct PrefilterStage
 
     template <is_constexpr_aligner_params Cep>
     [[nodiscard]] StageDescription describe() const {
+        using Backend = ::bioseq::prefilter_stats::PrefilterBackendType;
         StageDescription desc;
         desc.stage_name = std::string{stage_name};
         if (params.prefilter_enabled) {
@@ -6992,7 +7045,7 @@ struct PrefilterStage
                 "backend", std::string{backend_name(params.prefilter_backend)}});
             algorithm.parameters.push_back({
                 "algorithm",
-                params.prefilter_backend == PrefilterBackendType::VULKAN
+                params.prefilter_backend == Backend::VULKAN
                     ? "batch_resolved_gatekeeper_or_sneaky_snake"
                     : "sneaky_snake"});
             algorithm.parameters.push_back({
@@ -7019,7 +7072,7 @@ struct PrefilterStage
  * before the final primary/secondary and MAPQ pass.  Consequently a candidate
  * that does not satisfy the SQL predicate cannot influence the classification
  * or mapping-quality metadata of a candidate that does.  The earlier
- * SneakySnake stage remains only a conservative work-avoidance gate.
+ * rank-prefilter stage remains only a conservative work-avoidance gate.
  */
 struct ExactEditFilterStage
     : StageBase<ExactEditFilterStage, AlignRegion> {
@@ -7464,7 +7517,7 @@ template <is_constexpr_aligner_params Cep,
         || params.vulkan_extend_enabled
         || (params.prefilter_enabled
             && params.prefilter_backend ==
-               ::bioseq::simd::HWY_NAMESPACE::PrefilterBackendType::VULKAN)
+               ::bioseq::prefilter_stats::PrefilterBackendType::VULKAN)
         || params.minimizer_algorithm ==
                ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType::
                    VULKAN_MINIMAP_INT

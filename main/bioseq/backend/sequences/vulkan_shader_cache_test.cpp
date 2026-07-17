@@ -1411,7 +1411,7 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         keys.push_back(key);
     });
 
-    REQUIRE(keys.size() == 40);
+    REQUIRE(keys.size() == 44);
     auto sorted = keys;
     std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
         return gv::cache_file_stem(a) < gv::cache_file_stem(b);
@@ -1447,6 +1447,14 @@ TEST_CASE("DOC0341 shader variants enumerate the runtime AOT set",
         gv::ShaderKind::sneaky_snake_rank_batch, 384u, 64u, 512u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::gatekeeper_rank_batch, 384u, 64u, 128u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::gatekeeper_rank_batch_l32_e2, 384u, 64u, 128u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::gatekeeper_rank_batch_l32_e4, 384u, 64u, 128u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::gatekeeper_rank_batch_l64_e2, 384u, 64u, 128u)));
+    CHECK(contains_key(keys, gv::make_shader_key(
+        gv::ShaderKind::gatekeeper_rank_batch_l64_e4, 384u, 64u, 128u)));
     CHECK(contains_key(keys, gv::make_shader_key(
         gv::ShaderKind::generate_units, 384u, 256u, 64u)));
     CHECK(contains_key(keys, gv::make_shader_key(
@@ -3802,7 +3810,7 @@ TEST_CASE("SneakySnake rank batch has an exact provider-compatible ABI",
     CHECK(msl->wg_z == 1u);
 }
 
-TEST_CASE("GateKeeper rank batch has one bounds-aware static shader ABI",
+TEST_CASE("GateKeeper generic and production shaders share one bounds-aware ABI",
           "[shader_cache][gatekeeper][reflection][no-fallback]") {
     STATIC_REQUIRE(gv::k_gpu_gatekeeper_max_length == 128u);
     STATIC_REQUIRE(gv::k_gpu_gatekeeper_max_edits == 8u);
@@ -3828,6 +3836,176 @@ TEST_CASE("GateKeeper rank batch has one bounds-aware static shader ABI",
     REQUIRE(gv::push_constant_size(key.to_request().kind) == 16u);
     REQUIRE(gv::expected_shader_workgroup_size(key)
             == (gv::ShaderWorkgroupSize{64u, 1u, 1u}));
+
+    struct ProductionRouteExpectation {
+        gv::ShaderKind kind;
+        std::uint32_t length;
+        std::uint32_t max_edits;
+        std::size_t replay_index;
+    };
+    const std::array production_routes{
+        ProductionRouteExpectation{
+            gv::ShaderKind::gatekeeper_rank_batch_l32_e2, 32u, 2u, 3u},
+        ProductionRouteExpectation{
+            gv::ShaderKind::gatekeeper_rank_batch_l32_e4, 32u, 4u, 4u},
+        ProductionRouteExpectation{
+            gv::ShaderKind::gatekeeper_rank_batch_l64_e2, 64u, 2u, 5u},
+        ProductionRouteExpectation{
+            gv::ShaderKind::gatekeeper_rank_batch_l64_e4, 64u, 4u, 6u},
+    };
+
+    std::array<bool, gv::k_rank_prefilter_replay_route_count>
+        observed_replay_indices{};
+    const auto check_replay_route = [
+        &observed_replay_indices](
+            gv::ShaderKind kind,
+            std::uint32_t push_mode,
+            std::size_t expected_index) {
+        const std::optional<std::size_t> replay_index =
+            gv::rank_prefilter_replay_index(kind, push_mode);
+        REQUIRE(replay_index);
+        REQUIRE(*replay_index < observed_replay_indices.size());
+        CHECK(*replay_index == expected_index);
+        CHECK_FALSE(observed_replay_indices[*replay_index]);
+        observed_replay_indices[*replay_index] = true;
+    };
+    check_replay_route(
+        gv::ShaderKind::sneaky_snake_rank_batch, 1u, 0u);
+    check_replay_route(
+        gv::ShaderKind::sneaky_snake_rank_batch, 8u, 1u);
+    check_replay_route(
+        gv::ShaderKind::gatekeeper_rank_batch, 0u, 2u);
+
+    const gv::GatekeeperRankBatchRoute empty_route =
+        gv::resolve_gatekeeper_rank_batch_route(
+            std::span<const pf::PrefilterJob>{});
+    CHECK(empty_route.kind == gv::ShaderKind::gatekeeper_rank_batch);
+    CHECK(empty_route.replay_index == 2u);
+
+    std::vector<std::string> rank_prefilter_cache_stems{
+        gv::cache_file_stem(key)};
+    for (const ProductionRouteExpectation& production_route
+         : production_routes) {
+        const gv::ShaderKind production_kind = production_route.kind;
+        const auto production_key = gv::make_shader_key(
+            production_kind, 384u, 64u, 128u);
+        const std::string production_cache_stem =
+            gv::cache_file_stem(production_key);
+        CAPTURE(production_cache_stem);
+        CHECK(std::find(
+            rank_prefilter_cache_stems.begin(),
+            rank_prefilter_cache_stems.end(),
+            production_cache_stem) == rank_prefilter_cache_stems.end());
+        rank_prefilter_cache_stems.push_back(production_cache_stem);
+        REQUIRE(gv::valid_shader_variant_key(production_key));
+        REQUIRE(gv::descriptor_layout_for(production_kind)
+                == gv::DescriptorLayoutKind::align_extension);
+        REQUIRE(gv::push_constant_size(production_kind) == 16u);
+        check_replay_route(
+            production_kind, 0u, production_route.replay_index);
+
+        const std::array production_jobs{
+            pf::PrefilterJob{
+                .query_offset = 0u,
+                .target_offset = 0u,
+                .query_length = production_route.length,
+                .target_length = production_route.length,
+                .max_edits = production_route.max_edits,
+            },
+            pf::PrefilterJob{
+                .query_offset = production_route.length,
+                .target_offset = production_route.length,
+                .query_length = production_route.length,
+                .target_length = production_route.length,
+                .max_edits = production_route.max_edits,
+            },
+        };
+        const gv::GatekeeperRankBatchRoute resolved_route =
+            gv::resolve_gatekeeper_rank_batch_route(production_jobs);
+        CHECK(resolved_route.kind == production_kind);
+        CHECK(resolved_route.replay_index == production_route.replay_index);
+
+        const std::string production_body =
+            gv::shader_body_for_digest(production_kind);
+        CHECK(production_body.find(
+            "#define GATEKEEPER_SPECIALIZED_LENGTH "
+            + std::to_string(production_route.length))
+              != std::string::npos);
+        CHECK(production_body.find(
+            "#define GATEKEEPER_SPECIALIZED_EDITS "
+            + std::to_string(production_route.max_edits))
+              != std::string::npos);
+
+        const auto production_spirv =
+            gv::compile_shader_spirv(production_key.to_request());
+        REQUIRE_FALSE(production_spirv.empty());
+        const auto production_scan =
+            gv::scan_spirv_layout(production_spirv);
+        CHECK(production_scan.has_binding_array_stride(0u, 0u, 4u));
+        CHECK(production_scan.has_binding_array_stride(0u, 1u, 4u));
+        CHECK(production_scan.has_binding_array_stride(0u, 2u, 20u));
+        CHECK(production_scan.has_binding_struct_offsets(
+            0u, 2u,
+            std::array<std::uint32_t, 5>{0u, 4u, 8u, 12u, 16u}));
+        CHECK(production_scan.has_binding_array_stride(0u, 3u, 16u));
+        CHECK(production_scan.has_binding_struct_offsets(
+            0u, 3u,
+            std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
+        CHECK(production_scan.has_push_constant_offsets(
+            std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
+        REQUIRE(gv::validate_spirv_layout(
+            production_key, production_spirv));
+
+        const auto production_msl = gv::spirv_to_msl(
+            production_spirv, production_key, gv::MslVersion{});
+        REQUIRE(production_msl);
+        CHECK(production_msl->wg_x == 64u);
+        CHECK(production_msl->wg_y == 1u);
+        CHECK(production_msl->wg_z == 1u);
+    }
+    CHECK(std::all_of(
+        observed_replay_indices.begin(),
+        observed_replay_indices.end(),
+        [](bool observed) { return observed; }));
+    CHECK_FALSE(gv::rank_prefilter_replay_index(
+        gv::ShaderKind::sneaky_snake_rank_batch, 0u));
+    CHECK_FALSE(gv::rank_prefilter_replay_index(
+        gv::ShaderKind::gatekeeper_rank_batch, 1u));
+
+    const std::array mixed_production_jobs{
+        pf::PrefilterJob{
+            .query_offset = 0u,
+            .target_offset = 0u,
+            .query_length = 32u,
+            .target_length = 32u,
+            .max_edits = 2u,
+        },
+        pf::PrefilterJob{
+            .query_offset = 32u,
+            .target_offset = 32u,
+            .query_length = 64u,
+            .target_length = 64u,
+            .max_edits = 2u,
+        },
+    };
+    const gv::GatekeeperRankBatchRoute mixed_route =
+        gv::resolve_gatekeeper_rank_batch_route(mixed_production_jobs);
+    CHECK(mixed_route.kind == gv::ShaderKind::gatekeeper_rank_batch);
+    CHECK(mixed_route.replay_index == 2u);
+
+    const std::array unaligned_production_job{
+        pf::PrefilterJob{
+            .query_offset = 1u,
+            .target_offset = 0u,
+            .query_length = 32u,
+            .target_length = 32u,
+            .max_edits = 2u,
+        },
+    };
+    const gv::GatekeeperRankBatchRoute unaligned_route =
+        gv::resolve_gatekeeper_rank_batch_route(unaligned_production_job);
+    CHECK(unaligned_route.kind == gv::ShaderKind::gatekeeper_rank_batch);
+    CHECK(unaligned_route.replay_index == 2u);
 
     const std::string body = gv::shader_body_for_digest(
         gv::ShaderKind::gatekeeper_rank_batch);

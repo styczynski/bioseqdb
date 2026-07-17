@@ -12,6 +12,7 @@
  */
 #include "common_simd.h"
 #include "common.h"
+#include "prefilter_small_seed_keys.hpp"
 #include "SneakySnake.h"
 
 #include <simdjson.h>
@@ -147,13 +148,10 @@ struct PrefilterOutput {
 [[nodiscard]] std::uint32_t max_edits_from_tuple(
     const bioseq::bench_framework::ResolvedExecutionTuple& tuple) noexcept
 {
-    if (tuple.algorithm_name == "sneakysnake_vulkan_e2"
-        || tuple.algorithm_name == "gatekeeper_vulkan_e2") {
-        return 2u;
-    }
-    if (tuple.algorithm_name == "sneakysnake_vulkan_e4"
-        || tuple.algorithm_name == "gatekeeper_vulkan_e4") {
-        return 4u;
+    if (const auto fixed = small_seed::fixed_max_edits_for_algorithm(
+            tuple.algorithm_name);
+        fixed.has_value()) {
+        return *fixed;
     }
     return max_edits_from_params(tuple.params);
 }
@@ -162,13 +160,10 @@ struct PrefilterOutput {
     std::string_view algorithm,
     const ParamMap& params) noexcept
 {
-    if (algorithm == "sneakysnake_vulkan_e2"
-        || algorithm == "gatekeeper_vulkan_e2") {
-        return 2u;
-    }
-    if (algorithm == "sneakysnake_vulkan_e4"
-        || algorithm == "gatekeeper_vulkan_e4") {
-        return 4u;
+    if (const auto fixed = small_seed::fixed_max_edits_for_algorithm(
+            algorithm);
+        fixed.has_value()) {
+        return *fixed;
     }
     return max_edits_from_params(params);
 }
@@ -176,16 +171,13 @@ struct PrefilterOutput {
 [[nodiscard]] constexpr bool is_gatekeeper_algorithm(
     std::string_view algorithm) noexcept
 {
-    return algorithm == "gatekeeper_vulkan_e2"
-        || algorithm == "gatekeeper_vulkan_e4";
+    return small_seed::is_gatekeeper_algorithm(algorithm);
 }
 
 [[nodiscard]] constexpr bool is_small_seed_algorithm(
     std::string_view algorithm) noexcept
 {
-    return is_gatekeeper_algorithm(algorithm)
-        || algorithm == "sneakysnake_vulkan_e2"
-        || algorithm == "sneakysnake_vulkan_e4";
+    return small_seed::is_algorithm(algorithm);
 }
 
 [[nodiscard]] constexpr bool is_sneaky_vulkan_algorithm(
@@ -712,10 +704,14 @@ void validate_available_backend(
         is_gatekeeper_algorithm(algorithm) && output.backend_available
             ? 1.0 : 0.0);
     if (is_small_seed_algorithm(algorithm)
-        && (!input.valid || !output.backend_available
-            || !output.runtime_validation_performed
-            || !output.runtime_validation_passed
-            || output.accepted.size() != input.queries.size())) {
+        && !small_seed::has_required_hardware_validation({
+            .input_valid = input.valid,
+            .backend_available = output.backend_available,
+            .validation_performed = output.runtime_validation_performed,
+            .validation_passed = output.runtime_validation_passed,
+            .result_count = output.accepted.size(),
+            .expected_result_count = input.queries.size(),
+        })) {
         throw std::runtime_error(
             "small-seed prefilter row lacks required hardware validation");
     }

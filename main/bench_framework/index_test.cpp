@@ -25,6 +25,7 @@
  */
 #include "common_tests.h"
 #include "common.h"
+#include "../bench/prefilter_small_seed_keys.hpp"
 
 #include <simdjson.h>
 
@@ -54,6 +55,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -3554,7 +3556,491 @@ inline constexpr std::array<MetricSpecLite, 1> kFilterMetrics{{
     {"sum_value", "evaluation", "", "", "[]"},
 }};
 
+inline constexpr char kSmallSeedBenchmarkKey[] =
+    "bench_prefilter_small_seeds";
+
+[[nodiscard]] inline std::filesystem::path production_bench_v10_config_path()
+{
+    const auto source_path = std::filesystem::path{__FILE__};
+    auto config_path = source_path.parent_path().parent_path()
+        / "bench" / "bench_v10_configuration.json";
+    if (!std::filesystem::exists(config_path)) {
+        config_path = std::filesystem::current_path()
+            / "main" / "bench" / "bench_v10_configuration.json";
+    }
+    return config_path;
+}
+
+[[nodiscard]] inline nlohmann::json load_production_bench_v10_config()
+{
+    std::ifstream config_stream{production_bench_v10_config_path()};
+    if (!config_stream.good()) return nlohmann::json::object();
+    auto config = nlohmann::json::parse(
+        config_stream, nullptr, /*allow_exceptions=*/false);
+    if (config.is_discarded()) return nlohmann::json::object();
+    return config;
+}
+
+/// Retain the production small-seed benchmark block and only the parameter /
+/// test-case declarations reachable from its matrix. This keeps black-box
+/// runs fast while exercising the real selectors, comparators, and repeat
+/// counts rather than a hand-copied test configuration.
+[[nodiscard]] inline nlohmann::json small_seed_only_config(
+    const nlohmann::json& production_config)
+{
+    const auto& benchmark = production_config.at(kSmallSeedBenchmarkKey);
+    const auto& matrix = benchmark.at("matrix");
+
+    nlohmann::json config = nlohmann::json::object();
+    config["params"] = nlohmann::json::object();
+    for (const auto& [algorithm, ignored] : matrix.at("over").items()) {
+        (void)ignored;
+        config["params"][algorithm] =
+            production_config.at("params").at(algorithm);
+    }
+    config["test_cases"] = nlohmann::json::object();
+    for (const auto& [test_case, ignored] : matrix.at("for").items()) {
+        (void)ignored;
+        config["test_cases"][test_case] =
+            production_config.at("test_cases").at(test_case);
+    }
+    config[kSmallSeedBenchmarkKey] = benchmark;
+    return config;
+}
+
+struct SmallSeedRuleSource {
+    std::string algorithm;
+    std::string test_case;
+
+    [[nodiscard]] bool operator<(
+        const SmallSeedRuleSource& other) const noexcept
+    {
+        return std::tie(algorithm, test_case)
+            < std::tie(other.algorithm, other.test_case);
+    }
+
+    [[nodiscard]] bool operator==(
+        const SmallSeedRuleSource& other) const noexcept = default;
+};
+
+enum class SmallSeedRuleFault {
+    none,
+    unavailable_backend,
+    nonfinite_metric,
+    incomplete_metric,
+};
+
+struct SmallSeedRuleFixture {
+    std::map<SmallSeedRuleSource, double> source_values;
+    std::vector<std::string> evaluation_metrics;
+    std::optional<SmallSeedRuleSource> fault_source;
+    std::size_t rule_count = 0u;
+    SmallSeedRuleFault fault = SmallSeedRuleFault::none;
+};
+
+[[nodiscard]] inline SmallSeedRuleSource small_seed_rule_source(
+    const nlohmann::json& selector)
+{
+    return {
+        .algorithm = selector.at("key").get<std::string>(),
+        .test_case = selector.at("test_case").get<std::string>(),
+    };
+}
+
+/// Build synthetic timing sources directly from the production rule array.
+/// Every configured LHS receives `gatekeeper_value`; every configured RHS
+/// receives 100.0, so no algorithm or fixture selector is duplicated here.
+[[nodiscard]] inline SmallSeedRuleFixture make_small_seed_rule_fixture(
+    const nlohmann::json& small_seed_config,
+    double gatekeeper_value,
+    SmallSeedRuleFault fault = SmallSeedRuleFault::none)
+{
+    const auto& rules = small_seed_config.at(kSmallSeedBenchmarkKey)
+        .at("matrix").at("metrics").at("backend_batch_ns").at("rules");
+    SmallSeedRuleFixture fixture;
+    fixture.rule_count = rules.size();
+    fixture.fault = fault;
+    for (const auto& [metric_name, metric] :
+         small_seed_config.at(kSmallSeedBenchmarkKey)
+             .at("matrix").at("metrics").items()) {
+        if (metric.value("type", std::string{"builtin"}) == "evaluation") {
+            fixture.evaluation_metrics.push_back(metric_name);
+        }
+    }
+    for (const auto& rule : rules) {
+        const SmallSeedRuleSource lhs = small_seed_rule_source(rule.at(1));
+        const SmallSeedRuleSource rhs = small_seed_rule_source(rule.at(3));
+        fixture.source_values.insert_or_assign(lhs, gatekeeper_value);
+        fixture.source_values.insert_or_assign(rhs, 100.0);
+        if (!fixture.fault_source.has_value()) fixture.fault_source = lhs;
+    }
+    return fixture;
+}
+
+struct SmallSeedRuleInput {
+    std::string test_case;
+};
+
+struct SmallSeedRuleOutput {
+    std::size_t source_ordinal = 0u;
+};
+
+/// Execute the public benchmark framework over the production small-seed
+/// block while substituting deterministic timing evidence for GPU work.
+[[nodiscard]] inline ErasedBenchmark make_small_seed_rule_bench(
+    const std::string& config_path,
+    SmallSeedRuleFixture fixture)
+{
+    using InputFn = std::function<SmallSeedRuleInput(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const RunConstraints&)>;
+    using RunFn = std::function<SmallSeedRuleOutput(
+        std::string_view, const ParamMap&, const SmallSeedRuleInput&)>;
+    using EvalFn = std::function<std::map<std::string, double>(
+        std::string_view, const ParamMap&, const SmallSeedRuleInput&,
+        const SmallSeedRuleOutput&)>;
+    using CleanupFn = std::function<void(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const SmallSeedRuleInput&)>;
+
+    Estimator estimate = [](
+        std::string_view, std::string_view,
+        simdjson::dom::element) noexcept {
+        return RunConstraints{};
+    };
+    InputFn input = [](
+        std::string_view, std::string_view test_case,
+        simdjson::dom::element, const RunConstraints&) {
+        return SmallSeedRuleInput{.test_case = std::string{test_case}};
+    };
+    auto source_ordinals = std::make_shared<
+        std::map<SmallSeedRuleSource, std::size_t>>();
+    RunFn run_fn = [source_ordinals](
+        std::string_view algorithm, const ParamMap&,
+        const SmallSeedRuleInput& input_value) {
+        SmallSeedRuleSource source{
+            .algorithm = std::string{algorithm},
+            .test_case = input_value.test_case,
+        };
+        auto& ordinal = (*source_ordinals)[source];
+        return SmallSeedRuleOutput{.source_ordinal = ordinal++};
+    };
+    EvalFn evaluate = [fixture = std::move(fixture)](
+        std::string_view algorithm, const ParamMap&,
+        const SmallSeedRuleInput& input_value,
+        const SmallSeedRuleOutput& output) {
+        const SmallSeedRuleSource source{
+            .algorithm = std::string{algorithm},
+            .test_case = input_value.test_case,
+        };
+        const bool faulted = fixture.fault_source.has_value()
+            && source == *fixture.fault_source;
+        const bool unavailable = faulted
+            && fixture.fault == SmallSeedRuleFault::unavailable_backend;
+
+        std::map<std::string, double> metrics;
+        for (const auto& metric : fixture.evaluation_metrics) {
+            metrics.emplace(metric, 1.0);
+        }
+        metrics.insert_or_assign(
+            "backend_available", unavailable ? 0.0 : 1.0);
+        if (unavailable) {
+            metrics.erase("backend_batch_ns");
+            return metrics;
+        }
+        if (faulted
+            && fixture.fault == SmallSeedRuleFault::incomplete_metric
+            && output.source_ordinal == 4u) {
+            metrics.erase("backend_batch_ns");
+            return metrics;
+        }
+
+        double backend_batch_ns = fixture.source_values.at(source);
+        if (faulted
+            && fixture.fault == SmallSeedRuleFault::nonfinite_metric
+            && output.source_ordinal == 4u) {
+            backend_batch_ns =
+                std::numeric_limits<double>::quiet_NaN();
+        }
+        metrics.insert_or_assign("backend_batch_ns", backend_batch_ns);
+        return metrics;
+    };
+
+    return create_benchmark<SmallSeedRuleInput, SmallSeedRuleOutput>(
+        "GateKeeper small-seed rule regression fixture",
+        std::string{kSmallSeedBenchmarkKey}, config_path,
+        std::move(estimate), std::move(input), std::move(run_fn),
+        std::move(evaluate), CleanupFn{});
+}
+
 }  // namespace
+
+TEST_CASE("GateKeeper small-seed config binds fixed keys to E and exact rules",
+          "[bench_framework][prefilter][gatekeeper][configuration]") {
+    const auto config_path = production_bench_v10_config_path();
+    REQUIRE(std::filesystem::exists(config_path));
+    const nlohmann::json production_config =
+        load_production_bench_v10_config();
+    REQUIRE(production_config.contains(kSmallSeedBenchmarkKey));
+
+    const auto& benchmark = production_config.at(kSmallSeedBenchmarkKey);
+    const auto& matrix = benchmark.at("matrix");
+    REQUIRE(benchmark.at("concurrency").at("bench_lock") == true);
+    REQUIRE(benchmark.at("concurrency").at("concurrency") == false);
+    REQUIRE(matrix.at("for").size() == 4u);
+    REQUIRE(matrix.at("over").size() == 4u);
+
+    for (const auto& [test_case, repeats] : matrix.at("for").items()) {
+        CAPTURE(test_case);
+        REQUIRE(repeats.get<std::size_t>() == 5u);
+    }
+
+    const std::map<std::string, std::uint32_t> expected_gatekeeper_edits{
+        {"gatekeeper_vulkan_e2", 2u},
+        {"gatekeeper_vulkan_e4", 4u},
+    };
+    std::map<std::string, std::uint32_t> configured_gatekeeper_edits;
+    for (const auto& [algorithm, ignored] : matrix.at("over").items()) {
+        (void)ignored;
+        if (!bioseq::bench_prefilters::small_seed::
+                is_gatekeeper_algorithm(algorithm)) {
+            continue;
+        }
+        const auto max_edits = bioseq::bench_prefilters::small_seed::
+            fixed_max_edits_for_algorithm(algorithm);
+        REQUIRE(max_edits.has_value());
+        configured_gatekeeper_edits.emplace(algorithm, *max_edits);
+    }
+    REQUIRE(configured_gatekeeper_edits == expected_gatekeeper_edits);
+    REQUIRE_FALSE(bioseq::bench_prefilters::small_seed::
+        fixed_max_edits_for_algorithm("gatekeeper_vulkan").has_value());
+
+    using bioseq::bench_prefilters::small_seed::HardwareValidationEvidence;
+    const HardwareValidationEvidence valid_hardware_evidence{
+        .input_valid = true,
+        .backend_available = true,
+        .validation_performed = true,
+        .validation_passed = true,
+        .result_count = 4'096u,
+        .expected_result_count = 4'096u,
+    };
+    REQUIRE(bioseq::bench_prefilters::small_seed::
+        has_required_hardware_validation(valid_hardware_evidence));
+    auto unavailable_hardware_evidence = valid_hardware_evidence;
+    unavailable_hardware_evidence.backend_available = false;
+    REQUIRE_FALSE(bioseq::bench_prefilters::small_seed::
+        has_required_hardware_validation(unavailable_hardware_evidence));
+
+    const auto& rules = matrix.at("metrics")
+        .at("backend_batch_ns").at("rules");
+    REQUIRE(rules.size()
+            == matrix.at("for").size()
+                * expected_gatekeeper_edits.size());
+    std::set<SmallSeedRuleSource> configured_lhs_sources;
+    for (const auto& rule : rules) {
+        REQUIRE(rule.size() == 4u);
+        const auto& lhs_selector = rule.at(1);
+        const auto& comparator = rule.at(2);
+        const auto& rhs_selector = rule.at(3);
+        const SmallSeedRuleSource lhs =
+            small_seed_rule_source(lhs_selector);
+        const SmallSeedRuleSource rhs =
+            small_seed_rule_source(rhs_selector);
+        CAPTURE(lhs.algorithm, lhs.test_case, rhs.algorithm, rhs.test_case);
+
+        REQUIRE(matrix.at("for").contains(lhs.test_case));
+        REQUIRE(lhs.test_case == rhs.test_case);
+        const auto lhs_edits = bioseq::bench_prefilters::small_seed::
+            fixed_max_edits_for_algorithm(lhs.algorithm);
+        const auto rhs_edits = bioseq::bench_prefilters::small_seed::
+            fixed_max_edits_for_algorithm(rhs.algorithm);
+        REQUIRE(lhs_edits.has_value());
+        REQUIRE(rhs_edits.has_value());
+        REQUIRE(*lhs_edits == *rhs_edits);
+        REQUIRE(bioseq::bench_prefilters::small_seed::
+            is_gatekeeper_algorithm(lhs.algorithm));
+        REQUIRE_FALSE(bioseq::bench_prefilters::small_seed::
+            is_gatekeeper_algorithm(rhs.algorithm));
+
+        REQUIRE(comparator.at("compare") == "<");
+        REQUIRE(comparator.at("threshold%") == 10);
+        REQUIRE(comparator.at("tolerance%") == 0);
+        REQUIRE(comparator.at("aggregate") == "p50");
+        REQUIRE(comparator.at("pairing") == "independent");
+        REQUIRE(comparator.at("blocking") == true);
+        REQUIRE(configured_lhs_sources.insert(lhs).second);
+    }
+}
+
+TEST_CASE("production small-seed rules enforce the strict 0.900 ratio boundary",
+          "[bench_framework][prefilter][gatekeeper][rules]") {
+    TestLogSilencer silence_mlogging;
+    const nlohmann::json production_config =
+        load_production_bench_v10_config();
+    REQUIRE(production_config.contains(kSmallSeedBenchmarkKey));
+    const nlohmann::json config =
+        small_seed_only_config(production_config);
+
+    const auto execute = [&config](SmallSeedRuleFixture fixture) {
+        TempReportDir report_dir;
+        const std::string config_path = write_config_file(
+            report_dir, config.dump());
+        return run_with_args(
+            report_dir, std::span<const std::string>{},
+            make_small_seed_rule_bench(config_path, std::move(fixture)));
+    };
+
+    const auto exact_fixture = make_small_seed_rule_fixture(config, 90.0);
+    const std::size_t rule_count = exact_fixture.rule_count;
+    const auto exact_boundary = execute(exact_fixture);
+    REQUIRE(exact_boundary.exit_code == 1);
+    REQUIRE(exact_boundary.report.at("rule_violations").size()
+            == rule_count);
+    for (const auto& violation :
+         exact_boundary.report.at("rule_violations")) {
+        REQUIRE(violation.at("blocking") == true);
+        REQUIRE(violation.at("args_present")
+                == nlohmann::json::array({true, true}));
+        REQUIRE(violation.at("args").at(0).get<double>() == 90.0);
+        REQUIRE(violation.at("args").at(1).get<double>() == 100.0);
+    }
+
+    const double immediately_below_boundary = std::nextafter(90.0, 0.0);
+    REQUIRE(immediately_below_boundary / 100.0 < 0.900);
+    const auto below_boundary = execute(make_small_seed_rule_fixture(
+        config, immediately_below_boundary));
+    REQUIRE(below_boundary.exit_code == 0);
+    REQUIRE(below_boundary.report.at("rule_violations").empty());
+}
+
+TEST_CASE("production small-seed selectors reject wrong keys and fixtures",
+          "[bench_framework][prefilter][gatekeeper][rules][fail-closed]") {
+    TestLogSilencer silence_mlogging;
+    const nlohmann::json production_config =
+        load_production_bench_v10_config();
+    REQUIRE(production_config.contains(kSmallSeedBenchmarkKey));
+    const nlohmann::json original_config =
+        small_seed_only_config(production_config);
+
+    const auto execute = [](const nlohmann::json& config) {
+        TempReportDir report_dir;
+        const std::string config_path = write_config_file(
+            report_dir, config.dump());
+        return run_with_args(
+            report_dir, std::span<const std::string>{},
+            make_small_seed_rule_bench(
+                config_path, make_small_seed_rule_fixture(config, 89.0)));
+    };
+
+    SECTION("unknown algorithm key") {
+        nlohmann::json config = original_config;
+        auto& selector = config[kSmallSeedBenchmarkKey]["matrix"]
+            ["metrics"]["backend_batch_ns"]["rules"][0][1];
+        selector["key"] =
+            selector.at("key").get<std::string>() + "_wrong";
+        const auto outcome = execute(config);
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "unknown_algorithm"));
+    }
+
+    SECTION("unknown fixture key") {
+        nlohmann::json config = original_config;
+        auto& selector = config[kSmallSeedBenchmarkKey]["matrix"]
+            ["metrics"]["backend_batch_ns"]["rules"][0][1];
+        selector["test_case"] =
+            selector.at("test_case").get<std::string>() + "_wrong";
+        const auto outcome = execute(config);
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "unknown_rule_test_case"));
+    }
+}
+
+TEST_CASE("production small-seed rules reject unavailable nonfinite and incomplete evidence",
+          "[bench_framework][prefilter][gatekeeper][rules][fail-closed]") {
+    TestLogSilencer silence_mlogging;
+    const nlohmann::json production_config =
+        load_production_bench_v10_config();
+    REQUIRE(production_config.contains(kSmallSeedBenchmarkKey));
+    const nlohmann::json config =
+        small_seed_only_config(production_config);
+    const auto& rules = config.at(kSmallSeedBenchmarkKey)
+        .at("matrix").at("metrics").at("backend_batch_ns").at("rules");
+    REQUIRE_FALSE(rules.empty());
+    const std::string expected_rule_name =
+        rules.at(0).at(0).get<std::string>();
+    const SmallSeedRuleSource fault_source =
+        small_seed_rule_source(rules.at(0).at(1));
+
+    const auto execute = [&config](SmallSeedRuleFault fault) {
+        TempReportDir report_dir;
+        const std::string config_path = write_config_file(
+            report_dir, config.dump());
+        return run_with_args(
+            report_dir, std::span<const std::string>{},
+            make_small_seed_rule_bench(
+                config_path,
+                make_small_seed_rule_fixture(config, 89.0, fault)));
+    };
+    const auto require_single_missing_lhs = [
+        &expected_rule_name](const RunOutcome& outcome) {
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(outcome.report.at("rule_violations").size() == 1u);
+        const auto& violation =
+            outcome.report.at("rule_violations").at(0);
+        REQUIRE(violation.at("rule_name") == expected_rule_name);
+        REQUIRE(violation.at("blocking") == true);
+        REQUIRE(violation.at("args_present")
+                == nlohmann::json::array({false, true}));
+    };
+
+    SECTION("backend unavailable") {
+        const auto outcome = execute(
+            SmallSeedRuleFault::unavailable_backend);
+        require_single_missing_lhs(outcome);
+        const auto metric = aggregate_at(
+            outcome.report, kSmallSeedBenchmarkKey,
+            fault_source.algorithm, fault_source.test_case,
+            "all_regions", "backend_batch_ns");
+        REQUIRE_FALSE(metric.has_value());
+        REQUIRE(stat_at(
+            outcome.report, kSmallSeedBenchmarkKey,
+            fault_source.algorithm, fault_source.test_case,
+            "all_regions", "backend_available", "max") == 0.0);
+    }
+
+    SECTION("one non-finite timing sample") {
+        const auto outcome = execute(
+            SmallSeedRuleFault::nonfinite_metric);
+        require_single_missing_lhs(outcome);
+        const auto metric = aggregate_at(
+            outcome.report, kSmallSeedBenchmarkKey,
+            fault_source.algorithm, fault_source.test_case,
+            "all_regions", "backend_batch_ns");
+        REQUIRE(metric.has_value());
+        REQUIRE(metric->at("samples_count") == 5u);
+        REQUIRE(metric->at("k-best").at("top10").size() == 4u);
+        REQUIRE(stat_at(
+            outcome.report, kSmallSeedBenchmarkKey,
+            fault_source.algorithm, fault_source.test_case,
+            "all_regions", "backend_available", "min") == 1.0);
+    }
+
+    SECTION("only four of five timing samples") {
+        const auto outcome = execute(
+            SmallSeedRuleFault::incomplete_metric);
+        require_single_missing_lhs(outcome);
+        REQUIRE(samples_count_at(
+            outcome.report, kSmallSeedBenchmarkKey,
+            fault_source.algorithm, fault_source.test_case,
+            "all_regions", "backend_batch_ns") == 4u);
+        REQUIRE(samples_count_at(
+            outcome.report, kSmallSeedBenchmarkKey,
+            fault_source.algorithm, fault_source.test_case,
+            "all_regions", "backend_available") == 5u);
+    }
+}
 
 TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
           "[bench_framework][xxl-relative][configuration]") {

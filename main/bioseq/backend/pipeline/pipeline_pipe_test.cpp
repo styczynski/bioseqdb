@@ -18,9 +18,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -4341,10 +4343,105 @@ using range_t  = compact_sequence_range<dna4_u64>;
 
 }  // namespace doc0307_e2e
 
+TEST_CASE("Prefilter proof aggregation preserves runtime identity and fails closed on overflow",
+          "[pipe][prefilter][proof][pipeline-stats]") {
+    using bioseq::pipeline_stats::PipelineExecutionStats;
+    using bioseq::pipeline_stats::PipelineOperationalStats;
+    using bioseq::prefilter_stats::PrefilterBackendType;
+    using bioseq::prefilter_stats::PrefilterExecutionProof;
+    using bioseq::prefilter_stats::ResolvedPrefilterAlgorithm;
+
+    PipelineExecutionStats aggregate{};
+    for (std::uint64_t index = 0u; index < 3u; ++index) {
+        PipelineOperationalStats batch{};
+        PrefilterExecutionProof proof{};
+        const bool rejected = index == 2u;
+        proof.record_batch(
+            ResolvedPrefilterAlgorithm::gatekeeper,
+            PrefilterBackendType::VULKAN,
+            1u, 1u, 0u, 0u,
+            rejected ? 1u : 0u,
+            rejected ? 1u : 0u,
+            rejected ? 0u : 1u,
+            rejected ? 1u : 0u,
+            rejected ? 1u : 0u,
+            rejected ? 1u : 0u,
+            0u,
+            1u);
+        batch.record_prefilter_execution_proof(proof);
+        aggregate.merge_operational(batch);
+    }
+
+    REQUIRE(aggregate.operational.prefilter_execution_proof_present);
+    const auto& proof = aggregate.operational.prefilter_execution_proof;
+    CHECK(proof.dispatches == 3u);
+    CHECK(proof.gatekeeper_dispatches == 3u);
+    CHECK(proof.vulkan_dispatches == 3u);
+    CHECK(proof.jobs == 3u);
+    CHECK(proof.evaluated_jobs == 3u);
+    CHECK(proof.length_64_jobs == 3u);
+    CHECK(proof.rejected_jobs == 1u);
+    CHECK(proof.rejected_regions == 1u);
+    CHECK(proof.surviving_regions == 2u);
+    CHECK(proof.mask_rejection_candidates == 1u);
+    CHECK(proof.exact_guard_activations == 1u);
+    CHECK(proof.guard_confirmed_rejections == 1u);
+    CHECK(proof.hamming_exact_rejections == 0u);
+    CHECK(proof.valid());
+    CHECK(std::string_view{proof.resolved_algorithm_name()} == "gatekeeper");
+    CHECK(std::string_view{proof.resolved_backend_name()} == "vulkan");
+    CHECK_FALSE(aggregate.operational.stats_saturated);
+
+    PipelineOperationalStats valid_then_malformed{};
+    PrefilterExecutionProof valid_single_batch{};
+    valid_single_batch.record_batch(
+        ResolvedPrefilterAlgorithm::gatekeeper,
+        PrefilterBackendType::VULKAN,
+        1u, 1u, 0u, 0u, 0u, 0u, 1u,
+        0u, 0u, 0u, 0u, 1u);
+    valid_then_malformed.record_prefilter_execution_proof(
+        valid_single_batch);
+    REQUIRE(valid_then_malformed.prefilter_execution_proof.valid());
+    valid_then_malformed.record_prefilter_execution_proof(
+        PrefilterExecutionProof{});
+    CHECK(valid_then_malformed.prefilter_execution_proof.saturated);
+    CHECK_FALSE(valid_then_malformed.prefilter_execution_proof.valid());
+    CHECK(valid_then_malformed.stats_saturated);
+
+    PipelineExecutionStats at_limit{};
+    PipelineOperationalStats maximum_batch{};
+    PrefilterExecutionProof maximum{};
+    maximum.record_batch(
+        ResolvedPrefilterAlgorithm::gatekeeper,
+        PrefilterBackendType::VULKAN,
+        (std::numeric_limits<std::uint64_t>::max)(),
+        (std::numeric_limits<std::uint64_t>::max)(),
+        0u, 0u, 0u, 0u, 1u,
+        0u, 0u, 0u, 0u,
+        (std::numeric_limits<std::uint64_t>::max)());
+    maximum_batch.record_prefilter_execution_proof(maximum);
+    at_limit.merge_operational(maximum_batch);
+    PipelineExecutionStats increment{};
+    PipelineOperationalStats increment_batch{};
+    PrefilterExecutionProof one_more{};
+    one_more.record_batch(
+        ResolvedPrefilterAlgorithm::gatekeeper,
+        PrefilterBackendType::VULKAN,
+        1u, 1u, 0u, 0u, 0u, 0u, 1u,
+        0u, 0u, 0u, 0u, 1u);
+    increment_batch.record_prefilter_execution_proof(one_more);
+    increment.merge_operational(increment_batch);
+    at_limit.merge(increment);
+    CHECK(at_limit.operational.prefilter_execution_proof.saturated);
+    CHECK_FALSE(at_limit.operational.prefilter_execution_proof.valid());
+    CHECK(at_limit.operational.stats_saturated);
+}
+
 TEST_CASE("Prefilter algorithm resolver admits only the measured Vulkan matrix",
           "[pipe][prefilter][gatekeeper][resolver]") {
+    using bioseq::prefilter_stats::PrefilterBackendType;
+    using bioseq::prefilter_stats::ResolvedPrefilterAlgorithm;
     using bioseq::sequences::prefilters::PrefilterJob;
-    using bioseq::simd::HWY_NAMESPACE::ResolvedPrefilterAlgorithm;
 
     const std::array<PrefilterJob, 2u> measured{
         PrefilterJob{.query_length = 32u, .target_length = 32u,
@@ -4373,6 +4470,7 @@ TEST_CASE("Prefilter algorithm resolver admits only the measured Vulkan matrix",
 
 TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable routes",
           "[pipe][sneaky-snake][prefilter][composition]") {
+    using bioseq::prefilter_stats::PrefilterBackendType;
     using Cep = ConstexprAlignerParams<10u, 15u, 28u>;
     using ::bioseq::chaining::Anchor;
     using doc0307_e2e::dna4_u64;

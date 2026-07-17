@@ -9,13 +9,16 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <vector>
 
 import bioseq.common.sequan_compat;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;
+import bioseq.sequences.edit_distance_threshold;
 import bioseq.sequences.prefilters.gatekeeper;
 import bioseq.sequences.prefilters.gatekeeper_vulkan;
 import bioseq.sequences.prefilters.prefilter_types;
@@ -230,6 +233,165 @@ inline void check_supported_diagnostics(
     if (gatekeeper_mask_rejection_candidate(result)) {
         REQUIRE(max_edits > 0u);
         REQUIRE(gatekeeper_diagnostic_estimate(result) == max_edits + 1u);
+    }
+}
+
+class DeterministicGatekeeperRanks {
+public:
+    explicit constexpr DeterministicGatekeeperRanks(
+        std::uint32_t seed) noexcept
+        : state_(seed)
+    {}
+
+    [[nodiscard]] std::uint32_t next() noexcept
+    {
+        state_ ^= state_ << 13u;
+        state_ ^= state_ >> 17u;
+        state_ ^= state_ << 5u;
+        return state_;
+    }
+
+    [[nodiscard]] std::uint8_t rank(std::uint32_t rank_count) noexcept
+    {
+        return static_cast<std::uint8_t>(next() % rank_count);
+    }
+
+private:
+    std::uint32_t state_;
+};
+
+[[nodiscard]] std::vector<std::uint8_t> randomized_rank_sequence(
+    std::size_t length,
+    std::uint32_t rank_count,
+    DeterministicGatekeeperRanks& ranks)
+{
+    std::vector<std::uint8_t> sequence(length);
+    for (std::uint8_t& rank : sequence) {
+        rank = ranks.rank(rank_count);
+    }
+    return sequence;
+}
+
+void apply_randomized_substitutions(
+    std::vector<std::uint8_t>& target,
+    std::uint32_t rank_count,
+    std::size_t substitution_count,
+    DeterministicGatekeeperRanks& ranks)
+{
+    if (target.empty()) return;
+    substitution_count = std::min(substitution_count, target.size());
+    const std::size_t start = ranks.next() % target.size();
+    for (std::size_t edit = 0u; edit < substitution_count; ++edit) {
+        const std::size_t position = (start + edit) % target.size();
+        const std::uint32_t delta =
+            1u + ranks.next() % (rank_count - 1u);
+        target[position] = static_cast<std::uint8_t>(
+            (static_cast<std::uint32_t>(target[position]) + delta)
+            % rank_count);
+    }
+}
+
+[[nodiscard]] std::vector<std::uint8_t> randomized_target_sequence(
+    std::span<const std::uint8_t> query,
+    std::uint32_t rank_count,
+    std::uint32_t max_edits,
+    std::uint32_t variant,
+    DeterministicGatekeeperRanks& ranks)
+{
+    std::vector<std::uint8_t> target(query.begin(), query.end());
+    switch (variant % 5u) {
+    case 0u:
+        break;
+    case 1u:
+        apply_randomized_substitutions(
+            target, rank_count, max_edits, ranks);
+        break;
+    case 2u:
+        apply_randomized_substitutions(
+            target,
+            rank_count,
+            static_cast<std::size_t>(max_edits) + 1u,
+            ranks);
+        break;
+    case 3u:
+        if (target.size() > 1u) {
+            std::rotate(
+                target.begin(), target.end() - 1, target.end());
+        } else {
+            apply_randomized_substitutions(
+                target, rank_count, 1u, ranks);
+        }
+        break;
+    default:
+        target = randomized_rank_sequence(
+            query.size(), rank_count, ranks);
+        break;
+    }
+    return target;
+}
+
+template <typename Alphabet>
+[[nodiscard]] std::vector<Alphabet> alphabet_sequence_from_ranks(
+    std::span<const std::uint8_t> ranks)
+{
+    std::vector<Alphabet> sequence;
+    sequence.reserve(ranks.size());
+    for (const std::uint8_t rank : ranks) {
+        Alphabet letter{};
+        letter.assign_rank(
+            static_cast<decltype(letter.to_rank())>(rank));
+        sequence.push_back(letter);
+    }
+    return sequence;
+}
+
+inline void check_randomized_gatekeeper_result(
+    std::span<const std::uint8_t> query,
+    std::span<const std::uint8_t> target,
+    std::uint32_t max_edits,
+    const PrefilterResult& result)
+{
+    const std::uint32_t distance = exact_levenshtein(query, target);
+    const bool exact_within_threshold =
+        bioseq::sequences::edit_distance_within_threshold(
+            query, target, max_edits);
+    const std::uint32_t expected_estimate =
+        diagnostic_estimate_oracle(query, target, max_edits);
+    const bool expected_guard_activation =
+        max_edits > 0u && expected_estimate > max_edits;
+    const bool expected_rejection =
+        max_edits == 0u
+            ? distance > 0u
+            : expected_guard_activation && distance > max_edits;
+    CAPTURE(
+        query.size(),
+        max_edits,
+        distance,
+        exact_within_threshold,
+        expected_estimate,
+        result.lower_bound,
+        result.reserved);
+
+    REQUIRE(prefilter_evaluated(result));
+    REQUIRE(exact_within_threshold == (distance <= max_edits));
+    REQUIRE(result.lower_bound <= distance);
+    check_supported_diagnostics(result, max_edits);
+    REQUIRE(gatekeeper_diagnostic_estimate(result) == expected_estimate);
+    REQUIRE(gatekeeper_mask_rejection_candidate(result)
+            == expected_guard_activation);
+    REQUIRE(gatekeeper_exact_guard_activated(result)
+            == expected_guard_activation);
+    REQUIRE(gatekeeper_guard_confirmed_rejection(result)
+            == (expected_guard_activation && distance > max_edits));
+    REQUIRE(gatekeeper_hamming_exact_rejection(result)
+            == (max_edits == 0u && distance > 0u));
+    REQUIRE(prefilter_accepted(result) == !expected_rejection);
+    if (exact_within_threshold) {
+        REQUIRE(prefilter_accepted(result));
+    }
+    if (!prefilter_accepted(result)) {
+        REQUIRE(distance > max_edits);
+        REQUIRE(result.lower_bound == max_edits + 1u);
     }
 }
 
@@ -804,6 +966,252 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "GateKeeper Vulkan E2 E4 wavefront guard handles boundaries and replay",
+    "[gatekeeper][prefilter][vulkan][hardware][differential][wavefront][replay]")
+{
+    namespace gv = bioseq::gpu::vulkan;
+    if (!vulkan_gatekeeper_supported()) {
+        SKIP("hardware Vulkan device unavailable");
+    }
+
+    auto& runtime = gv::Runtime::instance();
+    const std::uint64_t dispatches_before =
+        runtime.gatekeeper_dispatch_count();
+    std::uint64_t expected_dispatches = 0u;
+
+    for (const std::uint32_t length : {32u, 64u}) {
+        for (const std::uint32_t max_edits : {2u, 4u}) {
+            std::vector<std::uint8_t> query_ranks;
+            std::vector<std::uint8_t> target_ranks;
+            std::vector<PrefilterJob> jobs;
+            std::vector<std::uint32_t> exact_distances;
+            std::vector<std::uint32_t> hamming_distances;
+            std::vector<bool> expected_guard_rejections;
+            const auto append_case = [
+                &query_ranks,
+                &target_ranks,
+                &jobs,
+                &exact_distances,
+                &hamming_distances,
+                &expected_guard_rejections,
+                max_edits](
+                    const std::vector<std::uint8_t>& query,
+                    const std::vector<std::uint8_t>& target,
+                    bool expect_guard_rejection) {
+                REQUIRE(query.size() == target.size());
+                while ((query_ranks.size() & 3u) != 0u) {
+                    query_ranks.push_back(static_cast<std::uint8_t>(
+                        0xD0u + jobs.size()));
+                }
+                while ((target_ranks.size() & 3u) != 0u) {
+                    target_ranks.push_back(static_cast<std::uint8_t>(
+                        0x70u + jobs.size()));
+                }
+                const std::uint32_t query_offset =
+                    static_cast<std::uint32_t>(query_ranks.size());
+                const std::uint32_t target_offset =
+                    static_cast<std::uint32_t>(target_ranks.size());
+                REQUIRE((query_offset & 3u) == 0u);
+                REQUIRE((target_offset & 3u) == 0u);
+
+                query_ranks.insert(
+                    query_ranks.end(), query.begin(), query.end());
+                target_ranks.insert(
+                    target_ranks.end(), target.begin(), target.end());
+                // Retain poison after each logical slice. The next job pads
+                // independently back to an aligned offset before packed loads.
+                query_ranks.push_back(static_cast<std::uint8_t>(
+                    0xE0u + jobs.size()));
+                target_ranks.push_back(static_cast<std::uint8_t>(
+                    0x60u + jobs.size()));
+                jobs.push_back(PrefilterJob{
+                    .query_offset = query_offset,
+                    .target_offset = target_offset,
+                    .query_length = static_cast<std::uint32_t>(query.size()),
+                    .target_length = static_cast<std::uint32_t>(target.size()),
+                    .max_edits = max_edits,
+                });
+                exact_distances.push_back(exact_levenshtein(query, target));
+                hamming_distances.push_back(static_cast<std::uint32_t>(
+                    std::inner_product(
+                        query.begin(),
+                        query.end(),
+                        target.begin(),
+                        std::uint32_t{0u},
+                        std::plus<>{},
+                        std::not_equal_to<>{})));
+                expected_guard_rejections.push_back(expect_guard_rejection);
+            };
+
+            const std::uint32_t boundary = length / 2u;
+            // A terminal rotation of three-symbol runs has edit distance two
+            // but high Hamming distance. It exercises the fast production
+            // mask without allowing the Hamming shortcut to hide the path.
+            std::vector<std::uint8_t> repeated_query(length);
+            for (std::uint32_t position = 0u; position < length; ++position) {
+                repeated_query[position] = static_cast<std::uint8_t>(
+                    (position / 3u) % 11u);
+            }
+            std::vector<std::uint8_t> terminal_rotation(length);
+            terminal_rotation[0] = repeated_query.back();
+            std::copy_n(
+                repeated_query.begin(),
+                length - 1u,
+                terminal_rotation.begin() + 1u);
+            append_case(
+                repeated_query,
+                terminal_rotation,
+                false);
+
+            // Move one unique rank across the 32-bit mask boundary at L=64;
+            // L=32 uses the central nibble boundary and ends exactly at a
+            // packed-word boundary. The two-edit path crosses many bytes.
+            std::vector<std::uint8_t> boundary_query(length);
+            for (std::uint32_t position = 0u; position < length; ++position) {
+                boundary_query[position] = static_cast<std::uint8_t>(
+                    position * 73u + 19u);
+            }
+            std::vector<std::uint8_t> boundary_move = boundary_query;
+            const std::uint32_t move_from = boundary - 5u;
+            const std::uint32_t move_to = boundary + 5u;
+            const std::uint8_t moved = boundary_move[move_from];
+            boundary_move.erase(
+                boundary_move.begin()
+                + static_cast<std::ptrdiff_t>(move_from));
+            boundary_move.insert(
+                boundary_move.begin()
+                + static_cast<std::ptrdiff_t>(move_to),
+                moved);
+            append_case(
+                boundary_query,
+                boundary_move,
+                false);
+
+            // A two-symbol match run straddles the central boundary and is
+            // surrounded by mismatches. Amendment must cross the 32-bit word
+            // seam for L=64 before the exact wavefront confirms rejection.
+            std::vector<std::uint8_t> boundary_rejection(length);
+            for (std::uint32_t position = 0u; position < length; ++position) {
+                boundary_rejection[position] = static_cast<std::uint8_t>(
+                    boundary_query[position] ^ 0xffu);
+            }
+            boundary_rejection[boundary - 1u] =
+                boundary_query[boundary - 1u];
+            boundary_rejection[boundary] = boundary_query[boundary];
+            append_case(
+                boundary_query,
+                boundary_rejection,
+                true);
+
+            // The same bounded two-match run at the logical tail must not be
+            // treated as an internal run by amendment. The remaining high-
+            // error body still has to activate and fail the exact guard.
+            std::vector<std::uint8_t> terminal_rejection(length);
+            for (std::uint32_t position = 0u; position < length; ++position) {
+                terminal_rejection[position] = static_cast<std::uint8_t>(
+                    repeated_query[position] + 127u);
+            }
+            terminal_rejection[length - 2u] = repeated_query[length - 2u];
+            terminal_rejection[length - 1u] = repeated_query[length - 1u];
+            append_case(
+                repeated_query,
+                terminal_rejection,
+                true);
+
+            REQUIRE_FALSE(jobs.empty());
+            for (const PrefilterJob& job : jobs) {
+                REQUIRE(job.query_length == length);
+                REQUIRE(job.target_length == length);
+                REQUIRE(job.max_edits == max_edits);
+                REQUIRE((job.query_offset & 3u) == 0u);
+                REQUIRE((job.target_offset & 3u) == 0u);
+            }
+            const PrefilterBatchInput input{
+                .query_ranks = query_ranks,
+                .target_ranks = target_ranks,
+                .jobs = jobs,
+            };
+            const auto scalar = gatekeeper_scalar_batch(input);
+            REQUIRE(scalar.size() == jobs.size());
+            for (std::size_t index = 0u; index < scalar.size(); ++index) {
+                CAPTURE(
+                    index,
+                    length,
+                    max_edits,
+                    exact_distances[index],
+                    hamming_distances[index],
+                    scalar[index].lower_bound,
+                    scalar[index].reserved);
+                REQUIRE(hamming_distances[index] > max_edits);
+                if (expected_guard_rejections[index]) {
+                    REQUIRE(exact_distances[index] > max_edits);
+                    REQUIRE_FALSE(prefilter_accepted(scalar[index]));
+                    REQUIRE(gatekeeper_mask_rejection_candidate(scalar[index]));
+                    REQUIRE(gatekeeper_exact_guard_activated(scalar[index]));
+                    REQUIRE(gatekeeper_guard_confirmed_rejection(scalar[index]));
+                } else {
+                    REQUIRE(exact_distances[index] <= max_edits);
+                    REQUIRE(prefilter_accepted(scalar[index]));
+                }
+            }
+
+            const auto gpu = run_gatekeeper_vulkan_batch(
+                query_ranks, target_ranks, jobs);
+            ++expected_dispatches;
+            REQUIRE(gpu.size() == scalar.size());
+            for (std::size_t index = 0u; index < scalar.size(); ++index) {
+                CAPTURE(
+                    index,
+                    length,
+                    max_edits,
+                    scalar[index].reserved,
+                    gpu[index].reserved);
+                CHECK(same_result(gpu[index], scalar[index]));
+                check_supported_diagnostics(gpu[index], max_edits);
+            }
+
+            // Keep the specialized replay key identical while replacing all
+            // target slices with fresh exact-match bytes. This exercises
+            // command replay and mapped-buffer visibility for every L/E key.
+            std::vector<std::uint8_t> replay_targets = target_ranks;
+            for (const PrefilterJob& job : jobs) {
+                std::copy_n(
+                    query_ranks.begin() + job.query_offset,
+                    job.query_length,
+                    replay_targets.begin() + job.target_offset);
+            }
+            const PrefilterBatchInput replay_input{
+                .query_ranks = query_ranks,
+                .target_ranks = replay_targets,
+                .jobs = jobs,
+            };
+            const auto replay_scalar = gatekeeper_scalar_batch(replay_input);
+            const auto replayed = run_gatekeeper_vulkan_batch(
+                query_ranks, replay_targets, jobs);
+            ++expected_dispatches;
+
+            REQUIRE(replayed.size() == replay_scalar.size());
+            bool observed_changed_result = false;
+            for (std::size_t index = 0u;
+                 index < replay_scalar.size();
+                 ++index) {
+                CAPTURE(index, length, max_edits);
+                CHECK(same_result(replayed[index], replay_scalar[index]));
+                CHECK(prefilter_accepted(replayed[index]));
+                CHECK(replayed[index].lower_bound == 0u);
+                CHECK(gatekeeper_diagnostic_estimate(replayed[index]) == 0u);
+                observed_changed_result |=
+                    !same_result(scalar[index], replay_scalar[index]);
+            }
+            CHECK(observed_changed_result);
+        }
+    }
+    CHECK(expected_dispatches == 8u);
+    CHECK(runtime.gatekeeper_dispatch_count()
+          == dispatches_before + expected_dispatches);
+}
+
+TEST_CASE(
     "GateKeeper compact adapter preserves dna4 dna5 and aa27 ranks",
     "[gatekeeper][prefilter][compact][alphabet-generic]")
 {
@@ -854,6 +1262,212 @@ TEST_CASE(
     const PrefilterResult rank_result = gatekeeper_scalar(
         amino_query_ranks, amino_target_ranks, 1u);
     REQUIRE(same_result(amino_result, rank_result));
+}
+
+TEST_CASE(
+    "GateKeeper randomized packed compact adapters match exact distance",
+    "[gatekeeper][prefilter][compact][alphabet-generic][randomized]"
+    "[edit-distance-threshold]")
+{
+    constexpr std::array<std::size_t, 14u> lengths{
+        0u, 1u, 2u, 15u, 16u, 17u, 31u,
+        32u, 33u, 63u, 64u, 65u, 127u, 128u};
+    constexpr std::uint32_t variants_per_cell = 5u;
+
+    const auto check_alphabet = [
+        &lengths]<typename Alphabet>(
+            std::uint32_t rank_count,
+            std::uint32_t seed,
+            std::uint32_t alphabet_tag) {
+        using packed_storage =
+            sequence_custom_alphabet<Alphabet, std::uint64_t>;
+        DeterministicGatekeeperRanks ranks{seed};
+        std::size_t checked_cases = 0u;
+        for (const std::size_t length : lengths) {
+            for (std::uint32_t max_edits = 0u;
+                 max_edits <= 8u;
+                 ++max_edits) {
+                for (std::uint32_t variant = 0u;
+                     variant < variants_per_cell;
+                     ++variant) {
+                    const std::vector<std::uint8_t> query_ranks =
+                        randomized_rank_sequence(
+                            length, rank_count, ranks);
+                    const std::vector<std::uint8_t> target_ranks =
+                        randomized_target_sequence(
+                            query_ranks,
+                            rank_count,
+                            max_edits,
+                            variant,
+                            ranks);
+                    std::vector<Alphabet> query_letters =
+                        alphabet_sequence_from_ranks<Alphabet>(query_ranks);
+                    std::vector<Alphabet> target_letters =
+                        alphabet_sequence_from_ranks<Alphabet>(target_ranks);
+
+                    compact_sequence_range<packed_storage> query_compact{
+                        query_letters};
+                    compact_sequence_range<packed_storage> target_compact{
+                        target_letters};
+                    const std::vector<std::uint8_t> encoded_query =
+                        query_compact.to_encoded_vector();
+                    const std::vector<std::uint8_t> encoded_target =
+                        target_compact.to_encoded_vector();
+                    CAPTURE(
+                        alphabet_tag,
+                        length,
+                        max_edits,
+                        variant);
+                    REQUIRE(encoded_query == query_ranks);
+                    REQUIRE(encoded_target == target_ranks);
+
+                    const PrefilterResult compact_result =
+                        gatekeeper_scalar_compact(
+                            query_compact,
+                            target_compact,
+                            max_edits);
+                    const PrefilterResult rank_result = gatekeeper_scalar(
+                        encoded_query,
+                        encoded_target,
+                        max_edits);
+                    REQUIRE(same_result(compact_result, rank_result));
+                    check_randomized_gatekeeper_result(
+                        encoded_query,
+                        encoded_target,
+                        max_edits,
+                        compact_result);
+                    ++checked_cases;
+                }
+            }
+        }
+        REQUIRE(checked_cases
+                == lengths.size() * 9u * variants_per_cell);
+    };
+
+    check_alphabet.template operator()<seq::dna4>(
+        4u, 0xD4A40001u, 4u);
+    check_alphabet.template operator()<seq::dna5>(
+        5u, 0xD5A50001u, 5u);
+    check_alphabet.template operator()<seq::aa27>(
+        27u, 0xAA270001u, 27u);
+}
+
+TEST_CASE(
+    "GateKeeper randomized arbitrary rank batches match exact distance",
+    "[gatekeeper][prefilter][batch][randomized][alphabet-generic]"
+    "[edit-distance-threshold]")
+{
+    constexpr std::array<std::size_t, 14u> lengths{
+        0u, 1u, 2u, 15u, 16u, 17u, 31u,
+        32u, 33u, 63u, 64u, 65u, 127u, 128u};
+    constexpr std::uint32_t variants_per_cell = 5u;
+    struct RandomizedCase {
+        std::size_t length;
+        std::uint32_t max_edits;
+        std::uint32_t variant;
+    };
+
+    DeterministicGatekeeperRanks ranks{0xB17ECA5Eu};
+    std::vector<std::uint8_t> query_ranks;
+    std::vector<std::uint8_t> target_ranks;
+    std::vector<PrefilterJob> jobs;
+    std::vector<RandomizedCase> cases;
+    bool observed_rank_outside_biological_alphabets = false;
+    for (const std::size_t length : lengths) {
+        for (std::uint32_t max_edits = 0u;
+             max_edits <= 8u;
+             ++max_edits) {
+            for (std::uint32_t variant = 0u;
+                 variant < variants_per_cell;
+                 ++variant) {
+                const std::vector<std::uint8_t> query =
+                    randomized_rank_sequence(length, 256u, ranks);
+                const std::vector<std::uint8_t> target =
+                    randomized_target_sequence(
+                        query,
+                        256u,
+                        max_edits,
+                        variant,
+                        ranks);
+                observed_rank_outside_biological_alphabets |=
+                    std::any_of(
+                        query.begin(),
+                        query.end(),
+                        [](std::uint8_t rank) { return rank > 26u; })
+                    || std::any_of(
+                        target.begin(),
+                        target.end(),
+                        [](std::uint8_t rank) { return rank > 26u; });
+
+                const std::size_t query_prefix =
+                    1u + ranks.next() % 3u;
+                const std::size_t target_prefix =
+                    1u + ranks.next() % 3u;
+                const std::uint8_t query_poison = ranks.rank(256u);
+                const std::uint8_t target_poison = ranks.rank(256u);
+                query_ranks.insert(
+                    query_ranks.end(), query_prefix, query_poison);
+                target_ranks.insert(
+                    target_ranks.end(), target_prefix, target_poison);
+                const std::uint32_t query_offset =
+                    static_cast<std::uint32_t>(query_ranks.size());
+                const std::uint32_t target_offset =
+                    static_cast<std::uint32_t>(target_ranks.size());
+                query_ranks.insert(
+                    query_ranks.end(), query.begin(), query.end());
+                target_ranks.insert(
+                    target_ranks.end(), target.begin(), target.end());
+                query_ranks.push_back(ranks.rank(256u));
+                target_ranks.push_back(ranks.rank(256u));
+                jobs.push_back(PrefilterJob{
+                    .query_offset = query_offset,
+                    .target_offset = target_offset,
+                    .query_length = static_cast<std::uint32_t>(length),
+                    .target_length = static_cast<std::uint32_t>(length),
+                    .max_edits = max_edits,
+                });
+                cases.push_back(RandomizedCase{
+                    .length = length,
+                    .max_edits = max_edits,
+                    .variant = variant,
+                });
+            }
+        }
+    }
+
+    const PrefilterBatchInput input{
+        .query_ranks = query_ranks,
+        .target_ranks = target_ranks,
+        .jobs = jobs,
+    };
+    REQUIRE(jobs.size() == lengths.size() * 9u * variants_per_cell);
+    REQUIRE(observed_rank_outside_biological_alphabets);
+    const std::vector<PrefilterResult> results =
+        gatekeeper_scalar_batch(input);
+    REQUIRE(results.size() == jobs.size());
+    REQUIRE(cases.size() == jobs.size());
+    for (std::size_t index = 0u; index < jobs.size(); ++index) {
+        const PrefilterJob& job = jobs[index];
+        const std::span<const std::uint8_t> query =
+            std::span<const std::uint8_t>{query_ranks}.subspan(
+                job.query_offset, job.query_length);
+        const std::span<const std::uint8_t> target =
+            std::span<const std::uint8_t>{target_ranks}.subspan(
+                job.target_offset, job.target_length);
+        CAPTURE(
+            index,
+            cases[index].length,
+            cases[index].max_edits,
+            cases[index].variant,
+            job.query_offset,
+            job.target_offset);
+        REQUIRE(prefilter_job_in_bounds(input, job));
+        REQUIRE(same_result(
+            results[index],
+            gatekeeper_scalar(query, target, job.max_edits)));
+        check_randomized_gatekeeper_result(
+            query, target, job.max_edits, results[index]);
+    }
 }
 
 } // namespace

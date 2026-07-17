@@ -6446,10 +6446,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			|| aligner_params.vulkan_gpu_index_build_enabled
 			|| aligner_params.vulkan_extend_enabled;
 		aligner_params.prefilter_backend = existing_vulkan_route
-			? bioseq::simd::active_target::PrefilterBackendType::VULKAN
+			? bioseq::prefilter_stats::PrefilterBackendType::VULKAN
 			: (bioseq_enable_vectorization
-				? bioseq::simd::active_target::PrefilterBackendType::SIMD
-				: bioseq::simd::active_target::PrefilterBackendType::SCALAR);
+				? bioseq::prefilter_stats::PrefilterBackendType::SIMD
+				: bioseq::prefilter_stats::PrefilterBackendType::SCALAR);
 	}
 	const bool selected_vulkan =
 		bioseq::simd::active_target::pipe::vulkan_components_requested(
@@ -9602,6 +9602,65 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 
 
 static void
+ExplainPrefilterExecutionProof(
+	const bioseq::pipeline_stats::PipelineOperationalStats& operational,
+	ExplainState* es)
+{
+	if (!operational.prefilter_execution_proof_present) return;
+	const auto& proof = operational.prefilter_execution_proof;
+	ExplainPropertyBool("Prefilter Proof Present", true, es);
+	ExplainPropertyText(
+		"Prefilter Resolved Algorithm", proof.resolved_algorithm_name(), es);
+	ExplainPropertyText(
+		"Prefilter Resolved Backend", proof.resolved_backend_name(), es);
+	ExplainPropertyUInteger(
+		"Prefilter Dispatches", nullptr, proof.dispatches, es);
+	ExplainPropertyUInteger(
+		"Prefilter SneakySnake Dispatches", nullptr,
+		proof.sneaky_snake_dispatches, es);
+	ExplainPropertyUInteger(
+		"Prefilter GateKeeper Dispatches", nullptr,
+		proof.gatekeeper_dispatches, es);
+	ExplainPropertyUInteger(
+		"Prefilter Scalar Dispatches", nullptr, proof.scalar_dispatches, es);
+	ExplainPropertyUInteger(
+		"Prefilter SIMD Dispatches", nullptr, proof.simd_dispatches, es);
+	ExplainPropertyUInteger(
+		"Prefilter Vulkan Dispatches", nullptr, proof.vulkan_dispatches, es);
+	ExplainPropertyUInteger("Prefilter Jobs", nullptr, proof.jobs, es);
+	ExplainPropertyUInteger(
+		"Prefilter Evaluated Jobs", nullptr, proof.evaluated_jobs, es);
+	ExplainPropertyUInteger(
+		"Prefilter Length 64 Jobs", nullptr, proof.length_64_jobs, es);
+	ExplainPropertyUInteger(
+		"Prefilter Unequal-Length Jobs", nullptr,
+		proof.length_difference_jobs, es);
+	ExplainPropertyUInteger(
+		"Prefilter Unsupported Jobs", nullptr, proof.unsupported_jobs, es);
+	ExplainPropertyUInteger(
+		"Prefilter Rejected Jobs", nullptr, proof.rejected_jobs, es);
+	ExplainPropertyUInteger(
+		"Prefilter Rejected Regions", nullptr, proof.rejected_regions, es);
+	ExplainPropertyUInteger(
+		"Prefilter Surviving Regions", nullptr, proof.surviving_regions, es);
+	ExplainPropertyUInteger(
+		"Prefilter Mask Rejection Candidates", nullptr,
+		proof.mask_rejection_candidates, es);
+	ExplainPropertyUInteger(
+		"Prefilter Exact Guard Activations", nullptr,
+		proof.exact_guard_activations, es);
+	ExplainPropertyUInteger(
+		"Prefilter Guard Confirmed Rejections", nullptr,
+		proof.guard_confirmed_rejections, es);
+	ExplainPropertyUInteger(
+		"Prefilter Hamming Exact Rejections", nullptr,
+		proof.hamming_exact_rejections, es);
+	ExplainPropertyBool(
+		"Prefilter Proof Saturated", proof.saturated, es);
+	ExplainPropertyBool("Prefilter Proof Valid", proof.valid(), es);
+}
+
+static void
 ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es)
@@ -9707,6 +9766,7 @@ ExplainPipelineExecutionStats(
 				operational.host_alignment_job_classification_calls),
 			static_cast<unsigned long long>(
 				operational.host_cigar_construction_calls));
+		ExplainPrefilterExecutionProof(operational, es);
 		return;
 	}
 
@@ -9776,6 +9836,7 @@ ExplainPipelineExecutionStats(
 		operational.host_alignment_job_classification_calls, es);
 	ExplainPropertyUInteger("Host CIGAR Construction Calls", nullptr,
 		operational.host_cigar_construction_calls, es);
+	ExplainPrefilterExecutionProof(operational, es);
 	ExplainCloseGroup(
 		"Bioseq Execution Proof", "Bioseq Execution Proof", true, es);
 }

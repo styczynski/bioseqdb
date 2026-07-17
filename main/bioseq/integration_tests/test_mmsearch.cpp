@@ -19,11 +19,14 @@
 #include "common_tests_integration.h"
 import bioseq.integration_tests.common;
 
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstdint>
 #include <libpq-fe.h>
 #include <set>
+#include <span>
+#include <string_view>
 #include <thread>
 
 using namespace bioseq_int_tests;
@@ -36,6 +39,7 @@ constexpr std::string_view kMissingIndex = "mmsearch_missing_index_int";
 constexpr std::string_view kBatchJoinTarget = "mmsearch_batch_join_target_int";
 constexpr std::string_view kBatchJoinQueries = "mmsearch_batch_join_queries_int";
 constexpr std::string_view kSneakySnakeEdits = "mmsearch_sneaky_snake_edits_int";
+constexpr std::string_view kGatekeeperEdits = "gatekeeper_edits";
 constexpr std::string_view kAsyncMpsWorkerLeaves =
 	"mmsearch_async_mps_worker_leaves_int";
 
@@ -193,6 +197,90 @@ public:
         ctx,
         "SELECT (NOT available) OR software_device "
         "FROM bioseq.vulkan_runtime_status();") == "t";
+}
+
+void require_gatekeeper_edit_rows(const rowset_t& rows) {
+    constexpr std::array<std::string_view, 2u> expected_pks{"1", "2"};
+    constexpr std::array<std::string_view, 2u> expected_edits{"0", "4"};
+    REQUIRE(rows.size() == expected_pks.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        const auto& row = rows[index];
+        REQUIRE(row.size() == 4u);
+        REQUIRE(row[0].has_value());
+        REQUIRE(*row[0] == expected_pks[index]);
+        REQUIRE(row[1].has_value());
+        REQUIRE(*row[1] == expected_edits[index]);
+        REQUIRE(row[2].has_value());
+        const long long query_start = std::stoll(*row[2]);
+        REQUIRE(query_start >= 0);
+        REQUIRE(query_start < 64);
+        REQUIRE(row[3].has_value());
+        REQUIRE_FALSE(row[3]->empty());
+        REQUIRE(is_valid_cigar(*row[3]));
+    }
+}
+
+void require_explain_property_value(
+        std::span<const std::string> plan,
+        const std::string_view key,
+        const std::string_view expected) {
+    const auto value = find_explain_property(plan, key);
+    REQUIRE(value.has_value());
+    REQUIRE(*value == expected);
+}
+
+void require_explain_property_uint(
+        std::span<const std::string> plan,
+        const std::string_view key,
+        const std::uint64_t expected) {
+    const auto value = find_explain_property(plan, key);
+    REQUIRE(value.has_value());
+    REQUIRE(std::stoull(*value) == expected);
+}
+
+void require_gatekeeper_explain_proof(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    require_explain_property_value(
+        plan, "Prefilter Proof Present", "true");
+    require_explain_property_value(
+        plan, "Prefilter Resolved Algorithm", "gatekeeper");
+    require_explain_property_value(
+        plan, "Prefilter Resolved Backend", "vulkan");
+    require_explain_property_uint(plan, "Prefilter Dispatches", 3u);
+    require_explain_property_uint(
+        plan, "Prefilter SneakySnake Dispatches", 0u);
+    require_explain_property_uint(
+        plan, "Prefilter GateKeeper Dispatches", 3u);
+    require_explain_property_uint(
+        plan, "Prefilter Scalar Dispatches", 0u);
+    require_explain_property_uint(
+        plan, "Prefilter SIMD Dispatches", 0u);
+    require_explain_property_uint(
+        plan, "Prefilter Vulkan Dispatches", 3u);
+    require_explain_property_uint(plan, "Prefilter Jobs", 3u);
+    require_explain_property_uint(plan, "Prefilter Evaluated Jobs", 3u);
+    require_explain_property_uint(plan, "Prefilter Length 64 Jobs", 3u);
+    require_explain_property_uint(
+        plan, "Prefilter Unequal-Length Jobs", 0u);
+    require_explain_property_uint(plan, "Prefilter Unsupported Jobs", 0u);
+    require_explain_property_uint(plan, "Prefilter Rejected Jobs", 1u);
+    require_explain_property_uint(plan, "Prefilter Rejected Regions", 1u);
+    require_explain_property_uint(plan, "Prefilter Surviving Regions", 2u);
+    require_explain_property_uint(
+        plan, "Prefilter Mask Rejection Candidates", 1u);
+    require_explain_property_uint(
+        plan, "Prefilter Exact Guard Activations", 1u);
+    require_explain_property_uint(
+        plan, "Prefilter Guard Confirmed Rejections", 1u);
+    require_explain_property_uint(
+        plan, "Prefilter Hamming Exact Rejections", 0u);
+    require_explain_property_value(
+        plan, "Prefilter Proof Saturated", "false");
+    require_explain_property_value(
+        plan, "Prefilter Proof Valid", "true");
 }
 
 [[nodiscard]] std::string index_requirement_sql(
@@ -2660,6 +2748,116 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
     REQUIRE(wrapped_wrong_projection.sqlstate == "0A000");
     REQUIRE(wrapped_wrong_projection.contains(
         "bioseq.edit projection must reference the mmsearch target column"));
+}
+
+TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
+          "[mmsearch][gatekeeper][edit][integration]") {
+    auto ctx = fresh_context({kGatekeeperEdits});
+    constexpr std::string_view query =
+        "CGGCTTATCAGATAATGGCTTGAGACGGCAGGTCTGGGGTCTCAGCCGTAGCCATATCCAAAGA";
+    constexpr std::string_view four_edits =
+        "CGGCTTATCAGATAATGGCTTGAGAGGGCCGGTGTGGTGTCTCAGCCGTAGCCATATCCAAAGA";
+    constexpr std::string_view thirteen_edits =
+        "CGGCTTATCAGATAATGGCTTGATCGTTGCTTAGATTTTAGTCAGCCGTAGCCATATCCAAAGA";
+    static_assert(query.size() == 64u);
+    static_assert(four_edits.size() == 64u);
+    static_assert(thirteen_edits.size() == 64u);
+
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kGatekeeperEdits},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {
+            seq_row{.pk = 1, .sequences = {std::string{query}}},
+            seq_row{.pk = 2, .sequences = {std::string{four_edits}}},
+            seq_row{.pk = 3, .sequences = {std::string{thirteen_edits}}},
+        });
+
+    exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';");
+    exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'vulkan_minimap_int';");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 10;");
+
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+    const std::string active_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
+        "       bioseq.cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "                      min_chain_score => 1, best_n => 0, "
+        "                      minimizer_algorithm => 3, "
+        "                      vulkan_enabled => true)) "
+        "  AND bioseq.edit(seq0) < 5 "
+        "ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+    const std::string baseline_sql = fmt::format(
+        "WITH candidates AS MATERIALIZED ("
+        "  SELECT pk, bioseq.edit(seq0) AS ed, "
+        "         bioseq.query_start(seq0) AS qs, "
+        "         bioseq.cigar(seq0) AS cigar "
+        "  FROM {} "
+        "  WHERE mmsearch(seq0, {}, "
+        "        aligner_options(kmer_size => 7, window_size => 1, "
+        "                        min_chain_score => 1, best_n => 0, "
+        "                        minimizer_algorithm => 3, "
+        "                        vulkan_enabled => true))"
+        ") "
+        "SELECT pk, ed, qs, cigar "
+        "FROM candidates WHERE ed < 5 ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+
+    if (selected_vulkan_runtime_untrusted(ctx)) {
+        exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+        const auto error = sql_error(ctx, active_sql);
+        REQUIRE(error.sqlstate == "XX000");
+        REQUIRE(error.contains("Vulkan aligner execution failed"));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        return;
+    }
+
+    rowset_t reference_active;
+    rowset_t reference_baseline;
+    bool reference_recorded = false;
+    for (const std::string_view vectorization : {"on", "off"}) {
+        CAPTURE(vectorization);
+        exec_sql(ctx, fmt::format(
+            "SET bioseq.enable_vectorization = {};", vectorization));
+
+        const auto active_rows = query_rows(ctx, active_sql);
+        require_gatekeeper_edit_rows(active_rows);
+        const auto active_plan = explain_text<true>(ctx, active_sql);
+        require_gatekeeper_explain_proof(active_plan);
+
+        const auto baseline_rows = query_rows(ctx, baseline_sql);
+        require_gatekeeper_edit_rows(baseline_rows);
+        REQUIRE(active_rows == baseline_rows);
+        const auto baseline_plan = explain_text<true>(ctx, baseline_sql);
+        REQUIRE(plan_contains(baseline_plan, "Custom Scan (BioseqScan)"));
+        REQUIRE_FALSE(plan_contains(baseline_plan, "PrefilterStage"));
+        REQUIRE_FALSE(plan_contains(
+            baseline_plan, "Rank edit-distance prefilter"));
+        REQUIRE_FALSE(find_explain_property(
+            baseline_plan, "Prefilter Proof Present").has_value());
+        REQUIRE_FALSE(find_explain_property(
+            baseline_plan, "Prefilter Dispatches").has_value());
+
+        if (!reference_recorded) {
+            reference_active = active_rows;
+            reference_baseline = baseline_rows;
+            reference_recorded = true;
+        } else {
+            REQUIRE(active_rows == reference_active);
+            REQUIRE(baseline_rows == reference_baseline);
+        }
+    }
 }
 
 TEST_CASE("bioseq.edit rejects unsupported predicate shapes",

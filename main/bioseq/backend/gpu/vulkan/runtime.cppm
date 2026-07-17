@@ -104,6 +104,95 @@ struct VulkanFeatureSet {
     std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
 
+inline constexpr std::size_t k_rank_prefilter_replay_route_count = 7u;
+
+/// Resolve the fixed recorded-command slot for one rank-prefilter shader and
+/// push mode. Keeping this mapping pure makes the seven non-aliasing replay
+/// identities independently testable without a Vulkan device.
+[[nodiscard]] constexpr std::optional<std::size_t>
+rank_prefilter_replay_index(
+    ShaderKind kind,
+    std::uint32_t push_mode) noexcept
+{
+    if (kind == ShaderKind::sneaky_snake_rank_batch) {
+        if (push_mode == 1u) return 0u;
+        if (push_mode == 8u) return 1u;
+        return std::nullopt;
+    }
+    if (push_mode != 0u) return std::nullopt;
+    switch (kind) {
+    case ShaderKind::gatekeeper_rank_batch:
+        return 2u;
+    case ShaderKind::gatekeeper_rank_batch_l32_e2:
+        return 3u;
+    case ShaderKind::gatekeeper_rank_batch_l32_e4:
+        return 4u;
+    case ShaderKind::gatekeeper_rank_batch_l64_e2:
+        return 5u;
+    case ShaderKind::gatekeeper_rank_batch_l64_e4:
+        return 6u;
+    default:
+        return std::nullopt;
+    }
+}
+
+struct GatekeeperRankBatchRoute {
+    ShaderKind kind = ShaderKind::gatekeeper_rank_batch;
+    std::size_t replay_index = 2u;
+
+    constexpr bool operator==(const GatekeeperRankBatchRoute&) const noexcept =
+        default;
+};
+
+/// Select a specialized GateKeeper shader only for a homogeneous, word-aligned
+/// production batch. Every other shape deliberately retains the generic key.
+[[nodiscard]] inline GatekeeperRankBatchRoute
+resolve_gatekeeper_rank_batch_route(
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs) noexcept
+{
+    if (jobs.empty()) return {};
+
+    const std::uint32_t length = jobs.front().query_length;
+    const std::uint32_t max_edits = jobs.front().max_edits;
+    bool homogeneous_aligned_production =
+        jobs.front().target_length == length
+        && (length == 32u || length == 64u)
+        && (max_edits == 2u || max_edits == 4u);
+    for (const auto& job : jobs) {
+        homogeneous_aligned_production =
+            homogeneous_aligned_production
+            && job.query_length == length
+            && job.target_length == length
+            && job.max_edits == max_edits
+            && (job.query_offset & 3u) == 0u
+            && (job.target_offset & 3u) == 0u;
+    }
+    if (!homogeneous_aligned_production) return {};
+
+    if (length == 32u && max_edits == 2u) {
+        return {
+            .kind = ShaderKind::gatekeeper_rank_batch_l32_e2,
+            .replay_index = 3u,
+        };
+    }
+    if (length == 32u) {
+        return {
+            .kind = ShaderKind::gatekeeper_rank_batch_l32_e4,
+            .replay_index = 4u,
+        };
+    }
+    if (max_edits == 2u) {
+        return {
+            .kind = ShaderKind::gatekeeper_rank_batch_l64_e2,
+            .replay_index = 5u,
+        };
+    }
+    return {
+        .kind = ShaderKind::gatekeeper_rank_batch_l64_e4,
+        .replay_index = 6u,
+    };
+}
+
 /// Canonical allocation-free Vulkan driver identity used by SQL/report proof.
 /// Numeric fields avoid unstable marketing strings and preserve the exact
 /// pipeline-cache compatibility UUID byte order reported by Vulkan.
@@ -5242,7 +5331,11 @@ private:
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
-    std::array<PrefilterRecordedCommand, 3>
+    // Two SneakySnake routes, one generic GateKeeper route, and four
+    // homogeneous LxE GateKeeper production routes each retain an independent
+    // replay identity so interleaved benchmark/production batches do not
+    // re-record command buffers when their specialization changes.
+    std::array<PrefilterRecordedCommand, k_rank_prefilter_replay_route_count>
         prefilter_recorded_commands_{};
     VkFence fence_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
@@ -5259,7 +5352,7 @@ private:
     std::optional<GpuArena> phase_c_arena_;  // DOC0310 §7 — lazily created.
     // High-water mapped workspace shared by the synchronous rank-prefilter
     // APIs. Queue access is serialized by mu_, so one runtime-owned set is
-    // sufficient for both algorithms and all three replay modes.
+    // sufficient for both algorithms and all seven fixed replay routes.
     // Declared before the buffers so reverse destruction order releases every
     // admitted allocation before returning its reservation.
     bioseq::parallelism::MemoryPermit prefilter_workspace_permit_;
@@ -8987,7 +9080,9 @@ void Runtime::init() {
     check_vk(vkCreateCommandPool(device_, &pool_info, nullptr, &command_pool_),
              "vkCreateCommandPool");
 
-    std::array<VkCommandBuffer, 4> command_buffers{};
+    std::array<
+        VkCommandBuffer,
+        k_rank_prefilter_replay_route_count + 1u> command_buffers{};
     VkCommandBufferAllocateInfo cmd_alloc{};
     cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cmd_alloc.commandPool = command_pool_;
@@ -8998,9 +9093,12 @@ void Runtime::init() {
                  device_, &cmd_alloc, command_buffers.data()),
              "vkAllocateCommandBuffers");
     command_buffer_ = command_buffers[0];
-    prefilter_recorded_commands_[0].command_buffer = command_buffers[1];
-    prefilter_recorded_commands_[1].command_buffer = command_buffers[2];
-    prefilter_recorded_commands_[2].command_buffer = command_buffers[3];
+    for (std::size_t replay_index = 0u;
+         replay_index < prefilter_recorded_commands_.size();
+         ++replay_index) {
+        prefilter_recorded_commands_[replay_index].command_buffer =
+            command_buffers[replay_index + 1u];
+    }
 
     VkFenceCreateInfo fence_info{};
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -10885,7 +10983,7 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
             throw VulkanRuntimeError("SPIR-V alignment CIGAR extension layout mismatch");
         }
         if ((kind == ShaderKind::sneaky_snake_rank_batch
-             || kind == ShaderKind::gatekeeper_rank_batch) &&
+             || is_gatekeeper_rank_batch_kind(kind)) &&
             (!scan.has_binding_array_stride(0u, 0u, 4u) ||
              !scan.has_binding_array_stride(0u, 1u, 4u) ||
              !scan.has_binding_array_stride(0u, 2u, 20u) ||
@@ -14348,11 +14446,17 @@ Runtime::run_sneaky_snake_rank_batch_roundtrip(
         }
     }
     const std::uint32_t push_mode = use_parallel_teams ? 8u : 1u;
+    const std::optional<std::size_t> replay_index =
+        rank_prefilter_replay_index(
+            ShaderKind::sneaky_snake_rank_batch, push_mode);
+    if (!replay_index) {
+        throw VulkanRuntimeError("invalid SneakySnake replay route");
+    }
     std::vector<bioseq::sequences::prefilters::PrefilterResult> results =
         run_rank_prefilter_batch_roundtrip_locked(
             ShaderKind::sneaky_snake_rank_batch,
             push_mode,
-            use_parallel_teams ? 1u : 0u,
+            *replay_index,
             query_ranks,
             target_ranks,
             jobs);
@@ -14370,11 +14474,13 @@ Runtime::run_gatekeeper_rank_batch_roundtrip(
     std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs)
 {
     std::lock_guard<std::mutex> guard(mu_);
+    const GatekeeperRankBatchRoute route =
+        resolve_gatekeeper_rank_batch_route(jobs);
     std::vector<bioseq::sequences::prefilters::PrefilterResult> results =
         run_rank_prefilter_batch_roundtrip_locked(
-            ShaderKind::gatekeeper_rank_batch,
+            route.kind,
             0u,
-            2u,
+            route.replay_index,
             query_ranks,
             target_ranks,
             jobs);
@@ -14395,12 +14501,13 @@ Runtime::run_rank_prefilter_batch_roundtrip_locked(
     std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs)
 {
     const bool sneaky = kind == ShaderKind::sneaky_snake_rank_batch;
-    const bool gatekeeper = kind == ShaderKind::gatekeeper_rank_batch;
+    const bool gatekeeper = is_gatekeeper_rank_batch_kind(kind);
+    const std::optional<std::size_t> expected_replay_index =
+        rank_prefilter_replay_index(kind, push_mode);
     if ((!sneaky && !gatekeeper)
         || replay_index >= prefilter_recorded_commands_.size()
-        || (sneaky && push_mode == 1u && replay_index != 0u)
-        || (sneaky && push_mode == 8u && replay_index != 1u)
-        || (gatekeeper && replay_index != 2u)) {
+        || !expected_replay_index
+        || replay_index != *expected_replay_index) {
         throw VulkanRuntimeError("invalid rank-prefilter dispatch route");
     }
     const char* algorithm = sneaky ? "SneakySnake" : "GateKeeper";

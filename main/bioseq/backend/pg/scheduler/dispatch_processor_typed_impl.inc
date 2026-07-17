@@ -683,6 +683,17 @@ inline void record_unattested_job(
         const bool consumed_shared_cached_query_proof,
         bool& cached_query_minimizer_proof_operation_accounted) noexcept {
     if (execution_proof != nullptr) {
+        if (execution_proof->prefilter_execution_proof_present) {
+            stats.operational.record_prefilter_execution_proof(
+                execution_proof->prefilter_execution_proof);
+        } else if (execution_proof->prefilter_execution_proof
+                   != decltype(execution_proof->prefilter_execution_proof){}) {
+            auto malformed_prefilter_proof =
+                execution_proof->prefilter_execution_proof;
+            malformed_prefilter_proof.saturated = true;
+            stats.operational.record_prefilter_execution_proof(
+                malformed_prefilter_proof);
+        }
         // CPU/SIMD stages write into the operation-local result collection;
         // consume that delta once here, after any parallel row has joined.
         // ChainStage is intentionally inclusive, so chain_backtrack remains
