@@ -21,7 +21,7 @@
 {% block head_extra %}{% endblock %}
 </head>
 <body id="page-top" class="{% block body_class %}docs-page{% endblock %}">
-<a class="skip-link" href="#main">Skip to main content</a>
+{% block skip_link %}<a class="skip-link" href="#main">Skip to main content</a>{% endblock %}
 {% block header %}
 <header class="site-header docs-header">
   <nav class="site-nav" aria-label="Primary">
@@ -73,6 +73,7 @@
   <p class="search-fallback"><a href="{{ nav.reference }}">Browse the full reference index</a></p>
 </dialog>
 <div class="layout{% if page.doc_nav %} layout-doc{% endif %}">
+  {% block breadcrumb %}
   {% if page.breadcrumb %}
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <ol>
@@ -82,6 +83,8 @@
     </ol>
   </nav>
   {% endif %}
+  {% endblock %}
+  {% block doc_navigation %}
   {% if page.doc_nav %}
   <aside class="doc-nav" aria-label="Documentation navigation">
     <nav>
@@ -96,9 +99,11 @@
     </nav>
   </aside>
   {% endif %}
+  {% endblock %}
   <main id="main">
 {% block main %}{% endblock %}
   </main>
+  {% block doc_toc %}
   {% if page.on_this_page %}
   <aside class="doc-toc" aria-label="On this page">
     <p class="doc-toc-title">On this page</p>
@@ -109,6 +114,7 @@
     </ul>
   </aside>
   {% endif %}
+  {% endblock %}
 </div>
 {% block footer %}
 <footer class="site-footer">

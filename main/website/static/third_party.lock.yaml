@@ -64,8 +64,11 @@ fonts:
       license_sha256: 7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da
       files:
         - { path: fonts/ibm-plex-mono-400.woff2, weight: "400", sha256: 08949f728dc52d528e69b1667d15c89a5686a4ee9a296ff90983985f99c380f7 }
+        - { path: fonts/ibm-plex-mono-400-latin-ext.woff2, weight: "400 latin-ext", sha256: 6bc0f226a5b7884a8170e3f62c63d7675609d4631bdc5931b5cdab81821f00eb }
         - { path: fonts/ibm-plex-mono-500.woff2, weight: "500", sha256: 01d285447409c8a588692162439a038b8cbd7871309ee20267b0d2d91c6e8e22 }
+        - { path: fonts/ibm-plex-mono-500-latin-ext.woff2, weight: "500 latin-ext", sha256: 6bb06407c97584b0867a959e05e8874693bfeb8c317de190811c51598f2d99ea }
         - { path: fonts/ibm-plex-mono-600.woff2, weight: "600", sha256: 0d1f0b8d0722224e32e9f28261bdc86c79115be73444ae5eceb73976a1bcdf83 }
+        - { path: fonts/ibm-plex-mono-600-latin-ext.woff2, weight: "600 latin-ext", sha256: 32057cf50dd14bdb21a2c93766c4a2c43e4abe688ea3922df3203cac7751a98b }
 
 # Social share cards referenced by site.yaml default_social_image and tutorial
 # frontmatter (§15.5). First-party project assets (no upstream); listed here so the
@@ -77,4 +80,4 @@ media:
     - { path: media/sequence_column_type.png, sha256: dfaf4cd117ac78fd5a01401812db457dffdcb2348069bac2e2f1f4c7fca91322 }
     - { path: media/cinematic_band.mp4, sha256: 89890c8476f08f06ae289fdb3392ce938591b8b4d3a9ae8ecc3bb62d6189d5b0 }
     - { path: media/small_vid.mp4, sha256: 89890c8476f08f06ae289fdb3392ce938591b8b4d3a9ae8ecc3bb62d6189d5b0 }
-    - { path: media/vials.mp4, sha256: ece0916379e5539b6c7e4fc14cf4ee606731a75de79bb98045a6038c88f51512 }
+    - { path: media/vials.mp4, sha256: cab280d2d62ec7f62af4b8bf0e18c18e8dfea4bbf7e7fdf4f04a0b66437c5ba7 }

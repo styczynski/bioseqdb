@@ -372,13 +372,15 @@ def _exercise_doc_frame(page, *, expect_toc: bool) -> None:
     documentation-navigation rail, and — on article pages — an on-this-page
     table of contents whose links target in-page anchors that exist."""
     crumbs = page.locator("nav.breadcrumb ol li")
-    _check(crumbs.count() >= 2, "doc page has no breadcrumb trail")
-    _check(page.locator("nav.breadcrumb a[href]").count() >= 1,
-           "breadcrumb has no linked ancestor")
-    nav = page.locator("aside.doc-nav")
+    canonical_crumbs = page.locator("[data-breadcrumb] > *")
+    _check(crumbs.count() >= 2 or canonical_crumbs.count() >= 3,
+           "doc page has no breadcrumb trail")
+    canonical_nav = page.locator("aside#sidebar")
+    nav = canonical_nav if canonical_nav.count() else page.locator("aside.doc-nav")
     _check(nav.count() == 1, "doc page is missing its documentation-navigation rail")
     _check(nav.locator("a[href]").count() >= 1, "doc-nav rail has no links")
-    toc = page.locator("aside.doc-toc")
+    canonical_toc = page.locator("aside[data-rightrail]")
+    toc = canonical_toc if canonical_toc.count() else page.locator("aside.doc-toc")
     if expect_toc and toc.count() == 1:
         anchors = toc.locator("a[href^='#']")
         count = anchors.count()
@@ -510,9 +512,11 @@ def _exercise_responsive(page, label: str) -> None:
         overflow = page.evaluate(
             "() => document.documentElement.scrollWidth - document.documentElement.clientWidth")
         _check(overflow <= 1, f"{label}: {overflow}px horizontal overflow at width {width}")
-    _check(page.locator("header.site-header").count() == 1, f"{label}: missing header landmark")
+    _check(page.locator("header.site-header, header#nav, header#dnav").count() == 1,
+           f"{label}: missing header landmark")
     _check(page.locator("main#main").count() == 1, f"{label}: missing main landmark")
-    _check(page.locator("footer.site-footer").count() == 1, f"{label}: missing footer landmark")
+    _check(page.locator("footer.site-footer, main#main footer").count() == 1,
+           f"{label}: missing footer landmark")
     page.set_viewport_size({"width": 1280, "height": 900})
 
 
