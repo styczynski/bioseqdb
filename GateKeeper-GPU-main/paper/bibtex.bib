@@ -1,0 +1,550 @@
+%Standard Bibtex file 
+
+@IEEEtranBSTCTL{IEEEexample:BSTcontrol,
+  CTLdash_repeated_names = "no"
+}
+
+@Article{Alser2017,
+  author       = {Alser, Mohammed and Hassan, Hasan and Xin, Hongyi and Ergin, Oguz and Mutlu, Onur and Alkan, Can},
+  title        = {{GateKeeper: a New Hardware Architecture for Accelerating Pre-Alignment in {DNA} Short Read Mapping}},
+  journal      = {Bioinformatics},
+  year         = {2017},
+  volume       = {33},
+  issue        = {21},
+  month        = nov,
+  pages        = {3355--3363},
+  issn         = {1367-4811},
+  doi          = {10.1093/bioinformatics/btx342},
+  abstract     = {High throughput DNA sequencing (HTS) technologies generate an excessive number of small DNA segments -called short reads- that cause significant computational burden. To analyze the entire genome, each of the billions of short reads must be mapped to a reference genome based on the similarity between a read and 'candidate' locations in that reference genome. The similarity measurement, called alignment, formulated as an approximate string matching problem, is the computational bottleneck because: (i) it is implemented using quadratic-time dynamic programming algorithms and (ii) the majority of candidate locations in the reference genome do not align with a given read due to high dissimilarity. Calculating the alignment of such incorrect candidate locations consumes an overwhelming majority of a modern read mapper's execution time. Therefore, it is crucial to develop a fast and effective filter that can detect incorrect candidate locations and eliminate them before invoking computationally costly alignment algorithms. We propose GateKeeper, a new hardware accelerator that functions as a pre-alignment step that quickly filters out most incorrect candidate locations. GateKeeper is the first design to accelerate pre-alignment using Field-Programmable Gate Arrays (FPGAs), which can perform pre-alignment much faster than software. When implemented on a single FPGA chip, GateKeeper maintains high accuracy (on average >96\%) while providing, on average, 90-fold and 130-fold speedup over the state-of-the-art software pre-alignment techniques, Adjacency Filter and Shifted Hamming Distance (SHD), respectively. The addition of GateKeeper as a pre-alignment step can reduce the verification time of the mrFAST mapper by a factor of 10. https://github.com/BilkentCompGen/GateKeeper. mohammedalser@bilkent.edu.tr or onur.mutlu@inf.ethz.ch or calkan@cs.bilkent.edu.tr. Supplementary data are available at Bioinformatics online.},
+  country      = {England},
+  created      = {2017-06-02},
+  file         = {main:Alser2017.pdf:PDF},
+  issn-linking = {1367-4803},
+  nlm-id       = {9808944},
+  owner        = {NLM},
+  pii          = {3859176},
+  pmid         = {28575161},
+  pubmodel     = {Print},
+  pubstatus    = {publish},
+  revised      = {2017-10-27},
+  timestamp    = {2017.10.30},
+}
+
+@Article{Smith1981,
+  Title                    = {{Identification of Common Molecular Subsequences}},
+  Author                   = {Smith, T. F. and Waterman, M. S.},
+  Journal                  = {J Mol Biol},
+  Year                     = {1981},
+
+  Month                    = {Mar},
+  Number                   = {1},
+  Pages                    = {195--197},
+  Volume                   = {147},
+
+  Keywords                 = {Base Sequence; Models, Chemical},
+  Language                 = {eng},
+  Medline-pst              = {ppublish},
+  Owner                    = {calkan},
+  Pii                      = {0022-2836(81)90087-5},
+  Pmid                     = {7265238},
+  Timestamp                = {2014.04.19}
+}
+
+@article{xin2015shifted,
+  title={{Shifted Hamming Distance: a Fast and Accurate SIMD-Friendly Filter to Accelerate Alignment Verification in Read Mapping}},
+  author={Xin, Hongyi and Greth, John and Emmons, John and Pekhimenko, Gennady and Kingsford, Carl and Alkan, Can and Mutlu, Onur},
+  journal={Bioinformatics},
+  volume={31},
+  number={10},
+  pages={1553--1560},
+  year={2015},
+  publisher={Oxford University Press}
+}
+
+@article{soon2013high,
+  title={{High-Throughput Sequencing for Biology and Medicine}},
+  author={Soon, Wendy Weijia and Hariharan, Manoj and Snyder, Michael P},
+  journal={Molecular systems biology},
+  volume={9},
+  number={1},
+  year={2013},
+  publisher={John Wiley \& Sons, Ltd}
+}
+
+@article{arram2017leveraging,
+  title={{Leveraging FPGAs for Accelerating Short Read Alignment}},
+  author={Arram, James and Kaplan, Thomas and Luk, Wayne and Jiang, Peiyong},
+  journal={IEEE/ACM Transactions on Computational Biology and Bioinformatics (TCBB)},
+  volume={14},
+  number={3},
+  pages={668--677},
+  year={2017},
+  publisher={IEEE Computer Society Press}
+}
+
+@inproceedings{xin2013accelerating,
+  title={{Accelerating Read Mapping with FastHASH}},
+  author={Xin, Hongyi and Lee, Donghyuk and Hormozdiari, Farhad and Yedkar, Samihan and Mutlu, Onur and Alkan, Can},
+  booktitle={BMC Genomics},
+  volume={14},
+  number={1},
+  pages={S13},
+  year={2013},
+  organization={BioMed Central}
+}
+
+@article{firtina2020apollo,
+  title={{Apollo: a Sequencing-Technology-Independent, Scalable and Accurate Assembly Polishing Algorithm}},
+  author={Firtina, Can and Kim, Jeremie S and Alser, Mohammed and Senol Cali, Damla and Cicek, A Ercument and Alkan, Can and Mutlu, Onur},
+  journal={Bioinformatics},
+  volume={36},
+  number={12},
+  pages={3669--3679},
+  year={2020},
+  publisher={Oxford University Press}
+}
+
+@article{ruffalo2011comparative,
+  title={{Comparative Analysis of Algorithms for Next-Generation Sequencing Read Alignment}},
+  author={Ruffalo, Matthew and LaFramboise, Thomas and Koyut{\"u}rk, Mehmet},
+  journal={Bioinformatics},
+  volume={27},
+  number={20},
+  pages={2790--2796},
+  year={2011},
+  publisher={Oxford University Press}
+}
+
+@article{quail2012tale,
+  title={{A Tale of Three Next Generation Sequencing Platforms: Comparison of Ion Torrent, Pacific Biosciences and Illumina MiSeq Sequencers}},
+  author={Quail, Michael A and Smith, Miriam and Coupland, Paul and Otto, Thomas D and Harris, Simon R and Connor, Thomas R and Bertoni, Anna and Swerdlow, Harold P and Gu, Yong},
+  journal={BMC genomics},
+  volume={13},
+  number={1},
+  pages={341},
+  year={2012},
+  publisher={BioMed Central}
+}
+
+@article{altschul1990basic,
+  title={{Basic Local Alignment Search Tool}},
+  author={Altschul, Stephen F and Gish, Warren and Miller, Webb and Myers, Eugene W and Lipman, David J},
+  journal={Journal of Molecular Biology},
+  volume={215},
+  number={3},
+  pages={403--410},
+  year={1990},
+  publisher={Elsevier}
+}
+
+@inproceedings{ahmed2016comparison,
+  title={{A Comparison of Seed-and-Extend Techniques in Modern DNA Read Alignment Algorithms}},
+  author={Ahmed, Nauman and Bertels, Koen and Al-Ars, Zaid},
+  booktitle={2016 IEEE International Conference on Bioinformatics and Biomedicine (BIBM)},
+  pages={1421--1428},
+  year={2016},
+  organization={IEEE}
+}
+
+@article{needleman1970general,
+  title={{A General Method Applicable to the Search for Similarities in the Amino Acid Sequence of Two Proteins}},
+  author={Needleman, Saul B and Wunsch, Christian D},
+  journal={Journal of Molecular Biology},
+  volume={48},
+  number={3},
+  pages={443--453},
+  year={1970},
+  publisher={Academic Press}
+}
+
+@article{flores2013p4,
+  title={{P4 Medicine: How Systems Medicine Will Transform the Healthcare Sector and Society}},
+  author={Flores, Mauricio and Glusman, Gustavo and Brogaard, Kristin and Price, Nathan D and Hood, Leroy},
+  journal={Personalized medicine},
+  volume={10},
+  number={6},
+  pages={565--576},
+  year={2013},
+  publisher={Future Medicine}
+}
+
+@article{alkan2009personalized,
+  title={{Personalized Copy Number and Segmental Duplication Maps Using Next-Generation Sequencing}},
+  author={Alkan, Can and Kidd, Jeffrey M and Marques-Bonet, Tomas and Aksay, Gozde and Antonacci, Francesca and Hormozdiari, Fereydoun and Kitzman, Jacob O and Baker, Carl and Malig, Maika and Mutlu, Onur and others},
+  journal={Nature genetics},
+  volume={41},
+  number={10},
+  pages={1061},
+  year={2009},
+  publisher={Nature Publishing Group}
+}
+
+@article{mittal2015survey,
+  title={{A survey of CPU-GPU heterogeneous computing techniques}},
+  author={Mittal, Sparsh and Vetter, Jeffrey S},
+  journal={ACM Computing Surveys (CSUR)},
+  volume={47},
+  number={4},
+  pages={1--35},
+  year={2015},
+  publisher={ACM New York, NY, USA}
+}
+
+@misc{harris_2018_unified, 
+title={{Unified Memory in CUDA 6}},  
+howpublished = {\url{https://devblogs.nvidia.com/unified-memory-in-cuda-6/}}, 
+journal={NVIDIA Developer Blog}, 
+author={Harris, Mark}, 
+year={2018}, month={Apr}}
+
+@misc{harris_2018_pinned, 
+title={{How to Optimize Data Transfers in CUDA C/C }}, howpublished = {\url{https://devblogs.nvidia.com/how-optimize-data-transfers-cuda-cc/}}, 
+journal={NVIDIA Developer Blog}, 
+author={Harris, Mark}, 
+year={2018}, month={May}}
+
+@misc{programmingGuide,
+author={{NVIDIA Corp.}},
+title={{CUDA C Programming Guide}},
+ year={2020}, 
+ howpublished = {\url{https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html}}, 
+ journal={NVIDIA Developer Documentation}}
+
+@inproceedings{chien2019performance,
+  title={{Performance Evaluation of Advanced Features in CUDA Unified Memory}},
+  author={Chien, Steven and Peng, Ivy and Markidis, Stefano},
+  booktitle={2019 IEEE/ACM Workshop on Memory Centric High Performance Computing (MCHPC)},
+  pages={50--57},
+  year={2019},
+  organization={IEEE}
+}
+
+@article{stephens2015big,
+  title={{Big data: Astronomical or Genomical?}},
+  author={Stephens, Zachary D and Lee, Skylar Y and Faghri, Faraz and Campbell, Roy H and Zhai, Chengxiang and Efron, Miles J and Iyer, Ravishankar and Schatz, Michael C and Sinha, Saurabh and Robinson, Gene E},
+  journal={PLoS Biology},
+  volume={13},
+  number={7},
+  pages={e1002195},
+  year={2015},
+  publisher={Public Library of Science San Francisco, CA USA}
+}
+
+@inproceedings{levenshtein1966binary,
+  title={{Binary Codes Capable of Correcting Deletions, Insertions, and Reversals}},
+  author={Levenshtein, Vladimir I},
+  booktitle={Soviet Physics Doklady},
+  volume={10},
+  number={8},
+  pages={707--710},
+  year={1966}
+}
+
+@article{fox2014accuracy,
+  title={{Accuracy of Next Generation Sequencing Platforms}},
+  author={Fox, Edward J and Reid-Bayliss, Kate S and Emond, Mary J and Loeb, Lawrence A},
+  journal={Next Generation, Sequencing \& Applications},
+  volume={1},
+  year={2014},
+  publisher={NIH Public Access}
+}
+
+@article{vsovsic2017edlib,
+  title={{Edlib: a C/C++ Library for Fast, Exact Sequence Alignment Using Edit Distance}},
+  author={{\v{S}}o{\v{s}}i{\'c}, Martin and {\v{S}}iki{\'c}, Mile},
+  journal={Bioinformatics},
+  volume={33},
+  number={9},
+  pages={1394--1395},
+  year={2017},
+  publisher={Oxford University Press}
+}
+
+@article{li2018minimap2,
+  title={{Minimap2: Pairwise Alignment for Nucleotide Sequences}},
+  author={Li, Heng},
+  journal={Bioinformatics},
+  volume={34},
+  number={18},
+  pages={3094--3100},
+  year={2018},
+  publisher={Oxford University Press}
+}
+
+@article{li2013aligning,
+  title={{Aligning Sequence Reads, Clone Sequences and Assembly Contigs with BWA-MEM}},
+  author={Li, Heng},
+  journal={arXiv preprint arXiv:1303.3997},
+  year={2013}
+}
+
+@misc{holtgrewe2010mason,
+    howpublished = {\url{http://packages.seqan.de/mason/}},
+  title={{Mason: a Read Simulator for Second Generation Sequencing Data}},
+  author={Holtgrewe, Manuel},
+  year={2010}
+}
+
+@article{10002015global,
+  title={{A Global Reference for Human Genetic Variation}},
+  author={{1000 Genomes Project Consortium}},
+  journal={Nature},
+  volume={526},
+  number={7571},
+  pages={68--74},
+  year={2015},
+  publisher={Nature Publishing Group}
+}
+
+@article{alser2017magnet,
+  title={{MAGNET: Understanding and Improving the Accuracy of Genome Pre-Alignment Filtering}},
+  author={Alser, Mohammed and Mutlu, Onur and Alkan, Can},
+  journal={arXiv preprint arXiv:1707.01631},
+  year={2017}
+}
+
+@article{alser2019shouji,
+  title={{Shouji: a Fast and Efficient Pre-Alignment Filter for Sequence Alignment}},
+  author={Alser, Mohammed and Hassan, Hasan and Kumar, Akash and Mutlu, Onur and Alkan, Can},
+  journal={Bioinformatics},
+  volume={35},
+  number={21},
+  pages={4255--4263},
+  year={2019},
+  publisher={Oxford University Press}
+}
+
+@article{alser2020sneakysnake,
+  title={{SneakySnake: a fast and accurate universal genome pre-alignment filter for CPUs, GPUs and FPGAs}},
+  author={Alser, Mohammed and Shahroodi, Taha and G{\'o}mez-Luna, Juan and Alkan, Can and Mutlu, Onur},
+  journal={Bioinformatics},
+  volume={36},
+  number={22-23},
+  pages={5282--5290},
+  year={2020},
+  publisher={Oxford University Press}
+}
+
+@misc{achieved_occupancy,
+    title={{Achieved Occupancy}},
+    author={{NVIDIA Corp.}},
+    year={2015},
+    howpublished = {\url{https://docs.nvidia.com/gameworks/content/developertools/desktop/analysis/report/cudaexperiments/kernellevel/achievedoccupancy.htm}}
+}
+
+@misc{nvprof,
+  title={{NVIDIA: nvprof}},
+  author={{NVIDIA Corp.}},
+  year={2019},
+   howpublished = {\url{https://docs.nvidia.com/cuda/profiler-users-guide/index.html}}
+}
+
+@article{myers1999fast,
+  title={{A Fast Bit-Vector Algorithm for Approximate String Matching Based on Dynamic Programming}},
+  author={Myers, Gene},
+  journal={Journal of the ACM (JACM)},
+  volume={46},
+  number={3},
+  pages={395--415},
+  year={1999},
+  publisher={ACM New York, NY, USA}
+}
+
+@article{lee1976use,
+  title={{Use of Steiner's Problem in Suboptimal Routing in Rectilinear Metric}},
+  author={Lee, J and Bose, N and Hwang, F},
+  journal={IEEE Transactions on Circuits and Systems},
+  volume={23},
+  number={7},
+  pages={470--476},
+  year={1976},
+  publisher={IEEE}
+}
+
+@article{10002012integrated,
+  title={{An Integrated Map of Genetic Variation from 1,092 Human Genomes}},
+  author={{1000 Genomes Project Consortium}},
+  journal={Nature},
+  volume={491},
+  number={7422},
+  pages={56--65},
+  year={2012},
+  publisher={Nature Publishing Group}
+}
+
+@incollection{brown2002human,
+  title={{The Human Genome}},
+  author={Brown, Terence A},
+  booktitle={Genomes. 2nd edition},
+  year={2002},
+  publisher={Wiley-Liss}
+}
+
+@article{alser2021technology,
+  title={{Technology dictates algorithms: recent developments in read alignment}},
+  author={Alser, Mohammed and Rotman, Jeremy and Deshpande, Dhrithi and Taraszka, Kodi and Shi, Huwenbo and Baykal, Pelin Icer and Yang, Harry Taegyun and Xue, Victor and Knyazev, Sergey and Singer, Benjamin D and others},
+  journal={Genome Biology},
+  volume={22},
+  number={1},
+  pages={249},
+  year={2021},
+  publisher={Springer}
+}
+
+@article{junemann2013updating,
+  title={{Updating Benchtop Sequencing Performance comparison}},
+  author={J{\"u}nemann, Sebastian and Sedlazeck, Fritz Joachim and Prior, Karola and Albersmeier, Andreas and John, Uwe and Kalinowski, J{\"o}rn and Mellmann, Alexander and Goesmann, Alexander and Von Haeseler, Arndt and Stoye, Jens and others},
+  journal={Nature biotechnology},
+  volume={31},
+  number={4},
+  pages={294--296},
+  year={2013},
+  publisher={Nature Publishing Group}
+}
+
+@article{trapnell2009map,
+  title={{How to Map Billions of Short Reads Onto Genomes}},
+  author={Trapnell, Cole and Salzberg, Steven L},
+  journal={Nature biotechnology},
+  volume={27},
+  number={5},
+  pages={455--457},
+  year={2009},
+  publisher={Nature Publishing Group}
+}
+
+@inproceedings{cali2020genasm,
+  title={{GenASM: A High-Performance, Low-Power Approximate String Matching Acceleration Framework for Genome Sequence Analysis}},
+  author={Senol Cali, Damla and Kalsi, Gurpreet S and Bing{\"o}l, Z{\"u}lal and Firtina, Can and Subramanian, Lavanya and Kim, Jeremie S and Ausavarungnirun, Rachata and Alser, Mohammed and Gomez-Luna, Juan and Boroumand, Amirali and others},
+  booktitle={2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO)},
+  pages={951--966},
+  year={2020},
+  organization={IEEE}
+}
+
+@article{baeza1992new,
+  title={{A New Approach To Text Searching}},
+  author={Baeza-Yates, Ricardo and Gonnet, Gaston H},
+  journal={Communications of the ACM},
+  volume={35},
+  number={10},
+  pages={74--82},
+  year={1992},
+  publisher={ACM New York, NY, USA}
+}
+
+@article{wu1992fast,
+  title={{Fast Text Searching: Allowing Errors}},
+  author={Wu, Sun and Manber, Udi},
+  journal={Communications of the ACM},
+  volume={35},
+  number={10},
+  pages={83--91},
+  year={1992},
+  publisher={ACM New York, NY, USA}
+}
+
+
+@Article{Treangen2012,
+  Title                    = {Repetitive {DNA} and next-generation sequencing: computational challenges and solutions},
+  Author                   = {Treangen, Todd J. and Salzberg, Steven L.},
+  Journal                  = {Nat Rev Genet},
+  Year                     = {2012},
+
+  Month                    = {Jan},
+  Number                   = {1},
+  Pages                    = {36--46},
+  Volume                   = {13},
+
+  Abstract                 = {Repetitive DNA sequences are abundant in a broad range of species, from bacteria to mammals, and they cover nearly half of the human genome. Repeats have always presented technical challenges for sequence alignment and assembly programs. Next-generation sequencing projects, with their short read lengths and high data volumes, have made these challenges more difficult. From a computational perspective, repeats create ambiguities in alignment and assembly, which, in turn, can produce biases and errors when interpreting results. Simply ignoring repeats is not an option, as this creates problems of its own and may mean that important biological phenomena are missed. We discuss the computational problems surrounding repeats and describe strategies used by current bioinformatics systems to solve them.},
+  Doi                      = {10.1038/nrg3117},
+  Institution              = {McKusick-Nathans Institute for Genetic Medicine, Johns Hopkins University School of Medicine, Baltimore, Maryland 21205, USA.},
+  Keywords                 = {Algorithms; Animals; Computational Biology, methods; DNA, genetics; Genome, genetics; Humans; Molecular Sequence Data; Plants; RNA, genetics; Repetitive Sequences, Nucleic Acid, genetics; Reproducibility of Results; Sequence Alignment, methods; Sequence Analysis, DNA, methods/trends; Sequence Analysis, RNA, methods/trends; Software},
+  Language                 = {eng},
+  Medline-pst              = {epublish},
+  Owner                    = {calkan},
+  Pii                      = {nrg3117},
+  Pmid                     = {22124482},
+  Timestamp                = {2014.05.22},
+  Url                      = {http://dx.doi.org/10.1038/nrg3117}
+}
+
+@misc{cudaoccupancycalculator,
+author={{NVIDIA Corp.}},
+title={{CUDA Occupancy Calculator}},
+ year={2020}, 
+ howpublished = {\url{https://docs.nvidia.com/cuda/cuda-occupancy-calculator/index.html}}, 
+ journal={NVIDIA Developer Documentation}}
+
+@article{alser2020accelerating,
+  title={{Accelerating Genome Analysis: A Primer on an Ongoing Journey}},
+  author={Alser, Mohammed and Bing{\"o}l, Z{\"u}lal and Senol Cali, Damla and Kim, Jeremie and Ghose, Saugata and Alkan, Can and Mutlu, Onur},
+  journal={IEEE Micro},
+  volume={40},
+  number={5},
+  pages={65--75},
+  year={2020},
+  publisher={IEEE}
+}
+
+@article{hamming1950error,
+  title={{Error Detecting and Error Correcting Codes}},
+  author={Hamming, Richard W},
+  journal={{The Bell System Technical Journal}},
+  volume={29},
+  number={2},
+  pages={147--160},
+  year={1950},
+  publisher={Nokia Bell Labs}
+}
+
+@article{knuth1977fast,
+  title={{Fast Pattern Matching in Strings}},
+  author={Knuth, Donald E and Morris, Jr, James H and Pratt, Vaughan R},
+  journal={{SIAM Journal on Computing}},
+  volume={6},
+  number={2},
+  pages={323--350},
+  year={1977},
+  publisher={SIAM}
+}
+
+@article{shendure2008next,
+  title={{Next-Generation DNA Sequencing}},
+  author={Shendure, Jay and Ji, Hanlee},
+  journal={{Nature Biotechnology}},
+  volume={26},
+  number={10},
+  pages={1135--1145},
+  year={2008},
+  publisher={Nature Publishing Group}
+}
+
+@article{zhang2000greedy,
+  title={{A Greedy Algorithm for Aligning DNA Sequences}},
+  author={Zhang, Zheng and Schwartz, Scott and Wagner, Lukas and Miller, Webb},
+  journal={{Journal of Computational Biology}},
+  volume={7},
+  number={1-2},
+  pages={203--214},
+  year={2000},
+  publisher={Mary Ann Liebert, Inc.}
+}
+
+@misc{cudacores, 
+title={{Specifications}},  
+howpublished = {\url{https://www.geforce.com/hardware/desktop-gpus/geforce-gtx-1080-ti/specifications}}, 
+journal={{GeForce GTX 1080 Ti}}, 
+author={{NVIDIA Corp.}}, 
+year={2020}}
+
+@article{chaisson2015genetic,
+  title={{Genetic Variation and The De Novo Assembly of Human Genomes}},
+  author={Chaisson, Mark JP and Wilson, Richard K and Eichler, Evan E},
+  journal={{Nature Reviews Genetics}},
+  volume={16},
+  number={11},
+  pages={627--640},
+  year={2015},
+  publisher={Nature Publishing Group}
+}
