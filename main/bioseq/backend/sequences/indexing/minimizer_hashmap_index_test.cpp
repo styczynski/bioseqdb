@@ -9030,7 +9030,8 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(evidence.retained_selected_control_records == query_count);
     REQUIRE(evidence.selected_control_size_bytes == 8u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
-        == query_count * (sizeof(std::uint64_t) + sizeof(std::uint32_t)));
+        == query_count
+            * (sizeof(std::uint16_t) + sizeof(std::uint32_t)));
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(evidence.global_position_capacity_bytes
         == evidence.retained_position_capacity * sizeof(std::uint64_t));
@@ -9104,7 +9105,7 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     REQUIRE(sparse_evidence.retained_selected_control_records
         == sparse_evidence.decoded_control_records);
     REQUIRE(sparse_evidence.retained_selected_control_capacity_bytes
-        == sparse_evidence.decoded_control_records * sizeof(std::uint64_t)
+        == sparse_evidence.decoded_control_records * sizeof(std::uint16_t)
             + sizeof(std::uint32_t) * 2u);
     REQUIRE(sparse_evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(sparse_evidence.retained_layout_equation_holds());
@@ -9455,7 +9456,7 @@ TEST_CASE("DOC0373 wire format selects its exact immutable row quantum",
     const auto evidence = reader->memory_evidence();
     REQUIRE(evidence.decoded_control_records == 3u);
     REQUIRE(evidence.retained_selected_control_capacity_bytes
-        == 3u * sizeof(std::uint64_t) + 2u * sizeof(std::uint32_t));
+        == 3u * sizeof(std::uint16_t) + 2u * sizeof(std::uint32_t));
 }
 
 TEST_CASE("DOC0373 Format-5 narrows positions only with a narrow immutable span",
@@ -10942,7 +10943,7 @@ TEST_CASE("Format-6 selective reader requests only authorized postings and match
         REQUIRE(spans.well_formed());
         const auto expected = baseline.lookup(hash);
         REQUIRE(std::ranges::equal(
-            spans.contiguous_positions(), expected));
+            spans.contiguous_positions32(), expected));
     }
     REQUIRE_THROWS_AS(
         reader->lookup_spans(20u), PersistedMinimizerLookupError);
@@ -10966,11 +10967,11 @@ TEST_CASE("Format-6 selective reader requests only authorized postings and match
             scalar_reader->memory_evidence().
                 generic_source_fallback_calls > 0u);
         REQUIRE(std::ranges::equal(
-            scalar_reader->lookup_spans(10u).contiguous_positions(),
-            std::array<std::uint64_t, 2>{2u, 4u}));
+            scalar_reader->lookup_spans(10u).contiguous_positions32(),
+            std::array<std::uint32_t, 2>{2u, 4u}));
         REQUIRE(std::ranges::equal(
-            scalar_reader->lookup_spans(30u).contiguous_positions(),
-            std::array<std::uint64_t, 2>{20u, 21u}));
+            scalar_reader->lookup_spans(30u).contiguous_positions32(),
+            std::array<std::uint32_t, 2>{20u, 21u}));
     }
 }
 
@@ -11142,8 +11143,8 @@ TEST_CASE("Format-6 admission is exact at every pre-I/O phase barrier",
         REQUIRE(moved.admitted_bytes() == retained_bytes);
         REQUIRE(admission.reserved_bytes() == retained_bytes);
         REQUIRE(std::ranges::equal(
-            moved.lookup_spans(10u).contiguous_positions(),
-            std::array<std::uint64_t, 2>{2u, 4u}));
+            moved.lookup_spans(10u).contiguous_positions32(),
+            std::array<std::uint32_t, 2>{2u, 4u}));
     }
 }
 
@@ -11364,7 +11365,7 @@ TEST_CASE("Format-6 posting-width and target-length boundaries are exact",
             format6_query_view(query, options.compatibility),
             1u);
         REQUIRE(reader.has_value());
-        REQUIRE(reader->lookup_spans(7u).contiguous_positions().front()
+        REQUIRE(reader->lookup_spans(7u).contiguous_positions32().front()
             == positions.front());
     }
 

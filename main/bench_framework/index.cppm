@@ -25,7 +25,6 @@ module;
 #include <nlohmann/json-schema.hpp>
 
 #include <oneapi/tbb/global_control.h>
-#include <oneapi/tbb/parallel_for_each.h>
 #include <oneapi/tbb/task_arena.h>
 #include <oneapi/tbb/task_group.h>
 
@@ -243,9 +242,10 @@ struct ErasedBenchmark {
     std::string benchmark_key;
     std::string config_path;
     bool raw_samples_enabled = false;
-    /// Owns the typed lambdas + iteration loop. Invoked once by `run()`
-    /// after concurrency arbitration.
-    std::function<void(struct BenchmarkContext&)> execute;
+    /// Owns the typed lambdas + iteration loop. The first call prepares and
+    /// enqueues this benchmark without blocking a oneTBB worker; the returned
+    /// closure joins its batches and publishes the completed report state.
+    std::function<std::function<void()>(struct BenchmarkContext&)> execute;
 };
 
 /// Test-only process-local fault seam for the durable raw-evidence syscalls.
@@ -1013,9 +1013,9 @@ struct CaseDebugProgress {
 
 /// Pinned (move + copy deleted) — `simdjson::dom::element` views handed to
 /// the user reference `parser`, and any move would invalidate them. The
-/// owning slot is `std::unique_ptr<BenchmarkExecutionState>` inside
-/// `BenchmarkContext::reports`; the unique_ptr moves freely because it
-/// only relocates an 8-byte heap pointer.
+/// owning slot is `std::shared_ptr<BenchmarkExecutionState>` inside
+/// `BenchmarkContext::reports`; the shared_ptr lets the non-blocking prepare
+/// phase and its later finalizer retain the same stable heap allocation.
 struct BenchmarkExecutionState {
     /// User-facing title from `create_benchmark`, copied here so the report
     /// writer doesn't need a separate channel.
@@ -1267,10 +1267,10 @@ struct BenchmarkContext {
     std::vector<detail::Violation>*                 violations = nullptr;
     std::mutex*                                     reports_mu = nullptr;
     /// Map from benchmark_key to the per-benchmark execution state. The
-    /// value is `unique_ptr` because `BenchmarkExecutionState` is pinned
-    /// (the simdjson parser inside is non-movable). A unique_ptr moves
-    /// freely (8-byte pointer relocation) so it composes with std::map.
-    std::map<std::string, std::unique_ptr<detail::BenchmarkExecutionState>>* reports = nullptr;
+    /// value is `shared_ptr` because `BenchmarkExecutionState` is pinned
+    /// (the simdjson parser inside is non-movable) and must remain alive from
+    /// the non-blocking prepare phase through the later finalizer.
+    std::map<std::string, std::shared_ptr<detail::BenchmarkExecutionState>>* reports = nullptr;
     /// Aggregated validation diagnostics across all benchmarks. Each
     /// benchmark's closure appends its schema + semantic findings under
     /// `diagnostics_mu`; `run_impl` prints them and uses the error count
@@ -1283,9 +1283,9 @@ struct BenchmarkContext {
     /// skip parsing.
     std::mutex*                                     regression_rules_mu = nullptr;
     detail::RegressionRulesByConfig*                regression_rules_by_config = nullptr;
-    /// V16: process-wide batch scheduler. The per-benchmark closure
-    /// enqueues batches into this scheduler and waits for them to
-    /// drain before returning, so captured state (`Cell::samples`,
+    /// V16: process-wide batch scheduler. The per-benchmark prepare phase
+    /// enqueues batches into this scheduler; its returned finalizer drains
+    /// them before publishing results, so captured state (`Cell::samples`,
     /// `BenchmarkExecutionState`, etc.) outlives the bodies. The
     /// scheduler also owns a non-owning reference to the host's
     /// `MemoryBudget` — callers that need budget metadata go through
@@ -1643,11 +1643,11 @@ struct ProgressState {
 // ----------------- BatchScheduler -----------------
 
 /// One pending or running batch, type-erased. Owned by the scheduler.
-/// The body is constructed by `run_typed_benchmark` and captures
+/// The body is constructed by `prepare_typed_benchmark` and captures
 /// references back into the per-benchmark `BenchmarkExecutionState` —
 /// so the scheduler must guarantee the body has run to completion
-/// before the closure that built it returns. `wait_for_benchmark`
-/// enforces that contract.
+/// before the returned finalizer releases that state.
+/// `wait_for_benchmark` enforces that contract.
 struct ScheduledBatch {
     std::size_t      scheduler_id      = 0;
     std::size_t      benchmark_index   = 0;
@@ -2387,7 +2387,17 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "properties": {
             "mode": { "type": "string", "enum": ["item_major", "interleaved_seeded"] },
             "seed": { "type": "integer", "minimum": 0 }
-          }
+          },
+          "oneOf": [
+            {
+              "properties": { "mode": { "const": "item_major" } },
+              "not": { "required": ["seed"] }
+            },
+            {
+              "required": ["seed"],
+              "properties": { "mode": { "const": "interleaved_seeded" } }
+            }
+          ]
         },
         "matrix": { "$ref": "#/definitions/matrix" }
       },
@@ -4489,7 +4499,23 @@ struct ConfigParseOutcome {
             regression_rules_array, config_path, parse_ok);
     }
 
-    if (!parse_ok) outcome.ok = false;
+    if (!parse_ok) {
+        outcome.ok = false;
+        const bool already_has_error = std::any_of(
+            outcome.diagnostics.begin(), outcome.diagnostics.end(),
+            [](const ValidationDiag& diagnostic) {
+                return diagnostic.severity
+                    == ValidationDiag::Severity::Error;
+            });
+        if (!already_has_error) {
+            outcome.diagnostics.push_back({
+                ValidationDiag::Severity::Error,
+                "structural_parse_failed",
+                std::string{config_path} + ":" + benchmark_key,
+                "configuration failed structural parsing"
+            });
+        }
+    }
     return outcome;
 }
 
@@ -5431,7 +5457,7 @@ struct ConfigParseOutcome {
 ///     the syntactic case at parse time.
 [[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_regression_rules(
     const RegressionRulesByConfig& regression_rules_by_config,
-    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports) noexcept
+    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports) noexcept
 {
     std::vector<ValidationDiag> diagnostics;
     auto error = [&](std::string code, std::string location, std::string message) {
@@ -6585,7 +6611,7 @@ inline void cleanup_with_retry(BenchmarkContext& context,
     progress_clear_retry_failure(context, batch, RetryKind::Cleanup);
 }
 
-// `run_typed_benchmark` was relocated below (just before write_report) so its
+// `prepare_typed_benchmark` was relocated below (just before write_report) so its
 // per-case `--debug` hooks can call DebugReportSink, whose CASE_RESULTS
 // serializer reuses emit_execution_tuple_record + the aggregation helpers
 // defined further down. See the run_unit driver section there.
@@ -8528,7 +8554,7 @@ struct HistoricalReportCache {
 /// the framework's exit code. The list is sorted alphabetically by
 /// metric name for diff-friendly output.
 [[nodiscard]] inline std::vector<SanityWarning> evaluate_sanity_warnings(
-    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports,
     const ReportMeta&            current_meta,
     std::size_t                  current_index,
     HistoricalReportCache&       history_cache) noexcept
@@ -8671,7 +8697,7 @@ struct HistoricalReportCache {
 /// sanity-warning pass can reuse the parsed report bodies.
 [[nodiscard]] inline std::vector<RegressionEntry> evaluate_regressions(
     const RegressionRulesByConfig& regression_rules_by_config,
-    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports,
     const ReportMeta&              current_meta,
     std::size_t                    current_index,
     HistoricalReportCache&         history_cache,
@@ -9766,7 +9792,7 @@ public:
 
     [[nodiscard]] bool seal_and_validate(
         const std::map<std::string,
-            std::unique_ptr<BenchmarkExecutionState>>& reports) {
+            std::shared_ptr<BenchmarkExecutionState>>& reports) {
         std::lock_guard<std::mutex> guard(mu_);
         if (sealed_) return manifest_.value("complete", false);
         bool valid = !poisoned_ && fd_ >= 0;
@@ -10497,7 +10523,7 @@ inline void debug_finish_cell(BenchmarkContext& context,
 }
 
 template<typename Input, typename Output>
-inline void run_typed_benchmark(
+[[nodiscard]] inline std::function<void()> prepare_typed_benchmark(
     BenchmarkExecutionState& state,
     BenchmarkContext& context,
     const std::function<RunConstraints(std::string_view, std::string_view, simdjson::dom::element)>& on_estimate_resources,
@@ -10536,7 +10562,7 @@ inline void run_typed_benchmark(
     // Pre-built batch list: one batch per (test_case, group). Items
     // inside a batch run sequentially against one cached Input.
     auto batches = build_work_batches(state);
-    if (batches.empty()) return;
+    if (batches.empty()) return [] {};
 
     // --debug: count cells per case (algorithm name). The map is fully shaped
     // here (single-threaded, before enqueue); thereafter only the per-node
@@ -10551,23 +10577,29 @@ inline void run_typed_benchmark(
     DEBUG_ASSERT(scheduler != nullptr,
         "BenchmarkContext::scheduler must be set by run_impl");
 
-    /// Heap-owned cache of per-batch input/constraint slots. The bodies
-    /// enqueued into the scheduler reference the slots by index;
-    /// lifetime extends through `wait_for_benchmark` (called below)
-    /// which blocks until every body has finished.
+    /// Heap-owned cache of per-batch input/constraint slots. Preparation
+    /// returns before the bodies finish, so every object referenced by an
+    /// enqueued body lives in this shared run state until finalization joins
+    /// the benchmark.
     struct GroupSlot {
         std::optional<Input> input{};
         RunConstraints       constraints{};
     };
-    auto group_slots = std::make_unique<std::vector<GroupSlot>>(batches.size());
-    auto batches_ptr = std::make_unique<std::vector<WorkBatch>>(std::move(batches));
+    struct TypedRunState {
+        std::vector<GroupSlot> group_slots{};
+        std::vector<WorkBatch> batches{};
+        std::function<void(WorkBatch&)> run_batch{};
+    };
+    auto run_state = std::make_shared<TypedRunState>();
+    run_state->group_slots.resize(batches.size());
+    run_state->batches = std::move(batches);
 
     /// Run exactly one iteration of one cell against `input`. Hot path.
     auto run_one_iteration = [&context, &state, by_regions,
                                 track_named_region_iteration_sample_counts,
                                 track_paired_named_stage_evidence,
                                 paired_schedule_evidence_fault,
-                                &counter_handles,
+                                counter_handles,
                                 &on_run, &on_evaluate,
                                 &serialize_raw_sample_payload](Cell& cell,
                                                                const Input& input,
@@ -10707,14 +10739,15 @@ inline void run_typed_benchmark(
     /// V16 batch body — no memory acquire/release, no cross_bench_mu.
     /// Called from TBB worker after the scheduler has admitted the
     /// batch. The reservation lives entirely scheduler-side.
-    auto run_one_batch_unblocked = [&context, &state,
-                                       &on_input, &on_cleanup,
-                                       &data_dir, &group_slots,
-                                       run_item_iterations,
-                                       run_one_iteration](WorkBatch& batch)
+    auto* const run_state_ptr = run_state.get();
+    run_state->run_batch = [&context, &state,
+                            &on_input, &on_cleanup,
+                            data_dir, run_state_ptr,
+                            run_item_iterations,
+                            run_one_iteration](WorkBatch& batch)
     {
         const auto& spec = state.test_cases[batch.test_case_index];
-        auto& slot = (*group_slots)[batch.batch_index];
+        auto& slot = run_state_ptr->group_slots[batch.batch_index];
         const auto location_str = runtime_location(
             state.config.config_path, state.config.benchmark_key,
             spec.name, batch.group_index);
@@ -10857,7 +10890,7 @@ inline void run_typed_benchmark(
     const auto cap_at_enqueue = MemoryBudget::cap_for(
         sys_at_enqueue.total_bytes, scheduler->memory_buffer_pct());
 
-    for (auto& batch : *batches_ptr) {
+    for (auto& batch : run_state->batches) {
         const auto& spec = state.test_cases[batch.test_case_index];
         auto constraints = on_estimate_resources(
             data_dir, spec.name, spec.data);
@@ -10871,7 +10904,7 @@ inline void run_typed_benchmark(
                 .params = item.tuple->params,
             });
         }
-        auto& slot = (*group_slots)[batch.batch_index];
+        auto& slot = run_state->group_slots[batch.batch_index];
         slot.constraints = constraints;
         const bool total_overflow = constraints.extra_memory
             > (std::numeric_limits<std::size_t>::max)()
@@ -10940,36 +10973,40 @@ inline void run_typed_benchmark(
         sb.test_case_index    = batch.test_case_index;
         sb.group_index        = batch.group_index;
         sb.context            = &context;
-        sb.body = [&run_one_batch_unblocked, &batch] {
-            run_one_batch_unblocked(batch);
+        WorkBatch* const batch_ptr = &batch;
+        sb.body = [run_state, batch_ptr] {
+            run_state->run_batch(*batch_ptr);
         };
         scheduler->enqueue_batch(std::move(sb));
     }
 
-    // Block until every batch under this benchmark_index has finished
-    // or aborted. Required to keep `state`, `*group_slots`, and the
-    // captured references alive through every enqueued body's
-    // execution. See main/DOCS/BENCHMARK_FRAMEWORK/BENCH_V16_IMPL_PLAN__DOC0233.md §3.6.
-    scheduler->wait_for_benchmark(context.benchmark_index);
+    // Return a caller-thread finalizer instead of waiting from a oneTBB
+    // driver task. All selected benchmarks finish preparation first, so the
+    // scheduler can arbitrate their batches together. The shared run state
+    // keeps every body capture alive until this join completes.
+    const std::size_t benchmark_index = context.benchmark_index;
+    return [scheduler, benchmark_index,
+            context_ptr = &context, state_ptr = &state,
+            run_state] {
+        scheduler->wait_for_benchmark(benchmark_index);
 
-    // --debug end-of-benchmark sweep: flush any started-but-unemitted case
-    // (counter never hit 0 because some of its batches aborted / were skipped /
-    // idle-timed-out). Single-threaded here — all bodies have joined, so no
-    // concurrent emit races this sweep. The `emitted` exchange dedups vs the
-    // incremental path (a fully-completed case was already claimed there). A
-    // case that never started (started==false) is skipped: no work ⇒ no result.
-    if (context.debug_sink != nullptr) {
-        for (auto& [case_name, cp] : state.case_debug_progress) {
-            if (cp.started.load(std::memory_order_relaxed)
-                && !cp.emitted.exchange(true, std::memory_order_acq_rel))
-                context.debug_sink->emit_case_results(state.config.benchmark_key,
-                                                      case_name, state);
+        // --debug end-of-benchmark sweep: flush any started-but-unemitted
+        // case (counter never hit 0 because some batches aborted / skipped /
+        // idle-timed-out). All bodies have joined, so this is race-free.
+        if (context_ptr->debug_sink != nullptr) {
+            for (auto& [case_name, cp] : state_ptr->case_debug_progress) {
+                if (cp.started.load(std::memory_order_relaxed)
+                    && !cp.emitted.exchange(true, std::memory_order_acq_rel)) {
+                    context_ptr->debug_sink->emit_case_results(
+                        state_ptr->config.benchmark_key, case_name, *state_ptr);
+                }
+            }
         }
-    }
 
-    // After wait_for_benchmark returns, all bodies have finished.
-    // batches_ptr / group_slots are still owned by `run_typed_benchmark`'s
-    // stack, so unique_ptr destructors run on the way out.
+        run_state->run_batch = {};
+        run_state->batches.clear();
+        run_state->group_slots.clear();
+    };
 }
 
 /// Serialise the per-benchmark execution state map plus the global
@@ -10982,7 +11019,7 @@ inline void run_typed_benchmark(
 [[nodiscard]] inline std::string write_report(
     const std::filesystem::path& output_path,
     const ReportMeta& meta,
-    const std::map<std::string, std::unique_ptr<BenchmarkExecutionState>>& reports,
+    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports,
     const std::vector<Violation>& violations,
     const std::vector<RegressionEntry>& regressions,
     const std::vector<SanityWarning>& sanity_warnings,
@@ -13395,7 +13432,7 @@ struct BenchmarkFilterMetadata {
     std::mutex        regression_rules_mu;
     std::vector<Violation> violations;
     std::vector<ValidationDiag> diagnostics;
-    std::map<std::string, std::unique_ptr<BenchmarkExecutionState>> reports;
+    std::map<std::string, std::shared_ptr<BenchmarkExecutionState>> reports;
     RegressionRulesByConfig regression_rules_by_config;
 
     // ---- --filter / --debug pre-pass: validate, select, prune. ----
@@ -13633,84 +13670,49 @@ struct BenchmarkFilterMetadata {
 
     std::thread progress_thread{[&progress] { render_progress_loop(progress); }};
 
-    std::vector<std::size_t> benchmark_indices;
-    benchmark_indices.reserve(selected.size());
-    for (std::size_t index = 0; index < selected.size(); ++index) {
-        benchmark_indices.push_back(index);
+    // Two-phase driver protocol. Preparation parses/configures and enqueues
+    // every selected benchmark from the caller thread without waiting. Only
+    // after all work is visible to the shared scheduler do caller-thread
+    // finalizers join and publish results. This retains cross-benchmark
+    // admission while preventing a TBB driver from blocking a worker that a
+    // nested process-wide global_control may leave as the sole worker slot.
+    std::vector<std::unique_ptr<BenchmarkContext>> benchmark_contexts;
+    benchmark_contexts.reserve(selected.size());
+    std::vector<std::function<void()>> benchmark_finalizers;
+    benchmark_finalizers.reserve(selected.size());
+
+    for (std::size_t benchmark_index = 0;
+         benchmark_index < selected.size(); ++benchmark_index) {
+        benchmark_contexts.push_back(std::make_unique<BenchmarkContext>());
+        auto& context = *benchmark_contexts.back();
+        context.data_dir                  = data_dir;
+        context.report_dir                = report_dir;
+        context.fast_filter               = cli.fast_filter;
+        context.progress                  = &progress;
+        context.benchmark_index           = benchmark_index;
+        context.violations_mu             = &violations_mu;
+        context.violations                = &violations;
+        context.reports_mu                = &reports_mu;
+        context.reports                   = &reports;
+        context.diagnostics_mu            = &diagnostics_mu;
+        context.diagnostics               = &diagnostics;
+        context.regression_rules_mu       = &regression_rules_mu;
+        context.regression_rules_by_config = &regression_rules_by_config;
+        context.scheduler                  = &scheduler;
+        context.filter_cases = case_allow_list ? &*case_allow_list : nullptr;
+        context.debug_sink   = debug_sink_ptr;
+        context.raw_evidence_sink = raw_evidence_sink_ptr;
+
+        benchmark_finalizers.push_back(
+            selected[benchmark_index].execute(context));
     }
-    const unsigned max_driver_concurrency =
-        thread_count > 1 ? std::max(1u, thread_count / 2u) : 1u;
-    const unsigned driver_concurrency = std::max(
-        1u,
-        std::min<unsigned>(
-            static_cast<unsigned>(benchmark_indices.size()),
-            max_driver_concurrency));
-    oneapi::tbb::task_arena driver_arena(static_cast<int>(driver_concurrency));
-    driver_arena.execute(
-        [&benchmark_indices,
-         &selected,
-         &data_dir,
-         &report_dir,
-         &cli,
-         &progress,
-         &violations_mu,
-         &violations,
-         &reports_mu,
-         &reports,
-         &diagnostics_mu,
-         &diagnostics,
-         &regression_rules_mu,
-         &regression_rules_by_config,
-         &scheduler,
-         &case_allow_list,
-         &debug_sink_ptr,
-         &raw_evidence_sink_ptr] {
-            oneapi::tbb::parallel_for_each(
-                benchmark_indices.begin(),
-                benchmark_indices.end(),
-                [&selected,
-                 &data_dir,
-                 &report_dir,
-                 &cli,
-                 &progress,
-                 &violations_mu,
-                 &violations,
-                 &reports_mu,
-                 &reports,
-                 &diagnostics_mu,
-                 &diagnostics,
-                 &regression_rules_mu,
-                 &regression_rules_by_config,
-                 &scheduler,
-                 &case_allow_list,
-                 &debug_sink_ptr,
-                 &raw_evidence_sink_ptr](std::size_t benchmark_index) {
-                    ErasedBenchmark& erased = selected[benchmark_index];
-                    BenchmarkContext context;
-                    context.data_dir                  = data_dir;
-                    context.report_dir                = report_dir;
-                    context.fast_filter               = cli.fast_filter;
-                    context.progress                  = &progress;
-                    context.benchmark_index           = benchmark_index;
-                    context.violations_mu             = &violations_mu;
-                    context.violations                = &violations;
-                    context.reports_mu                = &reports_mu;
-                    context.reports                   = &reports;
-                    context.diagnostics_mu            = &diagnostics_mu;
-                    context.diagnostics               = &diagnostics;
-                    context.regression_rules_mu       = &regression_rules_mu;
-                    context.regression_rules_by_config = &regression_rules_by_config;
-                    context.scheduler                  = &scheduler;
-                    context.filter_cases = case_allow_list ? &*case_allow_list : nullptr;
-                    context.debug_sink   = debug_sink_ptr;
-                    context.raw_evidence_sink = raw_evidence_sink_ptr;
 
-                    erased.execute(context);
-                });
-        });
+    for (auto& finalize_benchmark : benchmark_finalizers) {
+        finalize_benchmark();
+    }
 
-    // Defence-in-depth: every closure already drains its own batches via
-    // `wait_for_benchmark` before returning. This explicit, non-noexcept join
+    // Defence-in-depth: every finalizer drains its own batches via
+    // `wait_for_benchmark`. This explicit, non-noexcept global join
     // is also the ownership boundary for exceptions captured from TBB worker
     // bodies. Keep the exception until after the progress thread joins, then
     // turn it into a blocking diagnostic so completed samples still produce a
@@ -13893,8 +13895,11 @@ template<typename Input, typename Output>
                        captured_on_evaluate      = std::move(on_evaluate),
                        captured_on_cleanup       = std::move(on_cleanup),
                        captured_raw_serializer   = std::move(serialize_raw_sample_payload)
-                      ](BenchmarkContext& context) {
-        auto state_holder = std::make_unique<detail::BenchmarkExecutionState>();
+                      ](BenchmarkContext& context) -> std::function<void()> {
+        const auto no_op_finalizer = [] {
+            return std::function<void()>{[] {}};
+        };
+        auto state_holder = std::make_shared<detail::BenchmarkExecutionState>();
         auto& state = *state_holder;
         state.title = erased_title;
         state.raw_samples_enabled = static_cast<bool>(captured_raw_serializer);
@@ -13930,7 +13935,7 @@ template<typename Input, typename Output>
         if (parse_failed) {
             bioseq_log<ERR>("[bench_framework] benchmark '{}' aborted (parse / schema failure)",
                  erased_benchmark_key);
-            return;
+            return no_op_finalizer();
         }
 
         // 1a. Register regression rules in the global registry. The first
@@ -13959,7 +13964,7 @@ template<typename Input, typename Output>
         if (semantic_failed) {
             bioseq_log<ERR>("[bench_framework] benchmark '{}' aborted (semantic validation failure)",
                  erased_benchmark_key);
-            return;
+            return no_op_finalizer();
         }
 
         // 3. --fast filter: skip if the user requested fast mode but this
@@ -13967,7 +13972,7 @@ template<typename Input, typename Output>
         if (context.fast_filter && !state.config.fast) {
             bioseq_log<INF>("[bench_framework] skipping '{}' under --fast (fast=false)",
                  erased_benchmark_key);
-            return;
+            return no_op_finalizer();
         }
 
         bool expansion_ok = true;
@@ -13975,7 +13980,7 @@ template<typename Input, typename Output>
         if (!expansion_ok) {
             bioseq_log<ERR>("[bench_framework] benchmark '{}' matrix expansion failed",
                  erased_benchmark_key);
-            return;
+            return no_op_finalizer();
         }
         // Apply `--filter cases=`: keep only allow-listed over-keys (algorithm names).
         if (context.filter_cases != nullptr) {
@@ -13988,12 +13993,12 @@ template<typename Input, typename Output>
                 // config edited between pre-pass and parse could differ. Skip.
                 bioseq_log<INF>("[bench_framework] '{}' has no cases matching --filter cases=; skipping",
                                 erased_benchmark_key);
-                return;
+                return no_op_finalizer();
             }
         } else if (state.execution_tuples.empty()) {
             bioseq_log<ERR>("[bench_framework] benchmark '{}' produced no execution tuples",
                  erased_benchmark_key);
-            return;
+            return no_op_finalizer();
         }
         state.cells = detail::build_cells(state);
 
@@ -14046,7 +14051,7 @@ template<typename Input, typename Output>
             }
             // V13: publish setup_done IMMEDIATELY after the writes so the
             // `progress_*` helpers (and the renderer) start observing
-            // tuple/group counters as `run_typed_benchmark` progresses.
+            // tuple/group counters as `prepare_typed_benchmark` progresses.
             // PublishOnExit still fires on every closure exit and is
             // idempotent — its second store is a no-op. (V12 left
             // setup_done false until the closure returned, so every
@@ -14056,11 +14061,10 @@ template<typename Input, typename Output>
             per.setup_done.store(true, std::memory_order_release);
         }
 
-        // V16: bench-lock + serial-concurrency exclusion are enforced
-        // by the BatchScheduler's admission predicates. The closure
-        // body just hands off to `run_typed_benchmark`, which enqueues
-        // batches into the scheduler and blocks via
-        // `wait_for_benchmark` before returning.
+        // Bench-lock + serial-concurrency exclusion are enforced by the
+        // BatchScheduler's admission predicates. Preparation enqueues this
+        // benchmark and returns a caller-thread finalizer; no oneTBB driver
+        // worker blocks while the scheduler still needs workers for bodies.
 
         // --debug: BENCHMARK_STARTED — emitted single-threaded before any
         // CASE_* event for this benchmark (only when it actually has cells).
@@ -14068,39 +14072,57 @@ template<typename Input, typename Output>
             context.debug_sink->emit_benchmark_started(erased_benchmark_key);
         }
 
-        detail::run_typed_benchmark<Input, Output>(state, context,
-                                                    captured_on_estimate,
-                                                    captured_on_input,
-                                                    captured_on_run,
-                                                    captured_on_evaluate,
-                                                    captured_on_cleanup,
-                                                    captured_raw_serializer);
+        auto typed_finalizer =
+            detail::prepare_typed_benchmark<Input, Output>(
+                state, context,
+                captured_on_estimate,
+                captured_on_input,
+                captured_on_run,
+                captured_on_evaluate,
+                captured_on_cleanup,
+                captured_raw_serializer);
 
-        // 4. Post-run validation: missing-evaluation-metric check.
-        auto post_run_diagnostics = detail::semantic_validate_post_run(state);
-        detail::drain_diagnostics_to_context(context, post_run_diagnostics);
+        return [typed_finalizer = std::move(typed_finalizer),
+                state_holder,
+                context_ptr = &context,
+                benchmark_key = erased_benchmark_key]() mutable {
+            typed_finalizer();
 
-        // 5. Evaluate rules and stash this benchmark's report data.
-        std::vector<detail::Violation> local_violations;
-        detail::evaluate_rules(
-            state, local_violations, state.paired_rule_evidence);
+            auto& final_state = *state_holder;
+            auto& final_context = *context_ptr;
 
-        if (context.debug_sink != nullptr) {
-            for (const auto& evidence : state.paired_rule_evidence) {
-                context.debug_sink->emit_paired_rule_evidence(evidence);
+            // 4. Post-run validation: missing-evaluation-metric check.
+            auto post_run_diagnostics =
+                detail::semantic_validate_post_run(final_state);
+            detail::drain_diagnostics_to_context(
+                final_context, post_run_diagnostics);
+
+            // 5. Evaluate rules and stash this benchmark's report data.
+            std::vector<detail::Violation> local_violations;
+            detail::evaluate_rules(
+                final_state, local_violations,
+                final_state.paired_rule_evidence);
+
+            if (final_context.debug_sink != nullptr) {
+                for (const auto& evidence : final_state.paired_rule_evidence) {
+                    final_context.debug_sink->emit_paired_rule_evidence(evidence);
+                }
             }
-        }
 
-        if (context.violations != nullptr && context.violations_mu != nullptr) {
-            std::lock_guard<std::mutex> guard(*context.violations_mu);
-            for (auto& violation : local_violations) {
-                context.violations->push_back(std::move(violation));
+            if (final_context.violations != nullptr
+                && final_context.violations_mu != nullptr) {
+                std::lock_guard<std::mutex> guard(
+                    *final_context.violations_mu);
+                for (auto& violation : local_violations) {
+                    final_context.violations->push_back(std::move(violation));
+                }
             }
-        }
-        if (context.reports != nullptr && context.reports_mu != nullptr) {
-            std::lock_guard<std::mutex> guard(*context.reports_mu);
-            context.reports->emplace(erased_benchmark_key, std::move(state_holder));
-        }
+            if (final_context.reports != nullptr
+                && final_context.reports_mu != nullptr) {
+                std::lock_guard<std::mutex> guard(*final_context.reports_mu);
+                final_context.reports->emplace(benchmark_key, state_holder);
+            }
+        };
     };
 
     return erased;

@@ -523,7 +523,9 @@ static_assert(
     E2eOutput::kAlignmentSnapshotColumnCount
     == E2eOutput::kAlignmentSnapshotV1ColumnCount + 1);
 
-[[nodiscard]] bool e2e_expects_format6(const E2eInput& in) noexcept;
+[[nodiscard]] bool e2e_expects_format6(
+    const E2eInput& in,
+    std::string_view minimizer_index) noexcept;
 [[nodiscard]] nlohmann::json capture_format6_ready_audit(
     const it::connection_test_context& connection,
     const std::string& table,
@@ -4013,7 +4015,8 @@ inline void require_pipeline_execution_proof(
         std::string_view algo,
         const E2eInput& in,
         E2eOutput& out,
-        const PipelineProofExpectation& expectation) {
+        const PipelineProofExpectation& expectation,
+        std::string_view minimizer_index) {
     const bool expect_gpu =
         algo.find("_gpu_") != std::string_view::npos
         || algo.find("_vulkan_") != std::string_view::npos;
@@ -4101,7 +4104,7 @@ inline void require_pipeline_execution_proof(
             == static_cast<__int128>(count) * static_cast<__int128>(width);
     };
     const bool expect_format6 =
-        expect_persisted && e2e_expects_format6(in);
+        expect_persisted && e2e_expects_format6(in, minimizer_index);
     const bool expect_format5 =
         expect_persisted && !expect_format6;
     out.persisted_format_version = expect_format6
@@ -4131,14 +4134,21 @@ inline void require_pipeline_execution_proof(
             == out.cold_index_payload_bytes_delivered
         && out.cold_index_payload_bytes_scanned
             >= out.cold_index_payload_bytes_delivered;
+    const bool mapped_format5_cold_route =
+        expect_format5
+        && out.cold_index_route_empty == 0
+        && out.cold_index_route_selective == 0
+        && out.cold_index_route_full == 0;
     const bool one_cold_route =
-        out.cold_index_route_empty >= 0
+        mapped_format5_cold_route
+        || (!expect_format5
+        && out.cold_index_route_empty >= 0
         && out.cold_index_route_selective >= 0
         && out.cold_index_route_full >= 0
         && static_cast<__int128>(out.cold_index_route_empty)
                 + static_cast<__int128>(out.cold_index_route_selective)
                 + static_cast<__int128>(out.cold_index_route_full)
-            == static_cast<__int128>(1);
+            == static_cast<__int128>(1));
     const bool selective_read_gate =
         out.cold_index_route_selective == 1
         && out.cold_index_route_empty == 0
@@ -4176,10 +4186,27 @@ inline void require_pipeline_execution_proof(
         && out.extent_crc_combine_rows
             == out.cold_index_payload_rows_delivered
         && counter(80) == 1;
+    const bool format5_mapped_image_read_gate =
+        out.cold_index_schema_valid == 1
+        && out.cold_index_route_empty == 0
+        && out.cold_index_route_selective == 0
+        && out.cold_index_route_full == 0
+        && out.cold_index_route_candidate_rows == 0
+        && out.cold_index_route_full_rows > 0
+        && out.cold_index_route_candidate_bytes == 0
+        && out.cold_index_route_full_bytes > 0
+        && out.cold_index_route_selective_cost == 0
+        && out.cold_index_route_full_cost > 0
+        && out.cold_index_payload_rows_requested == 0
+        && out.cold_index_payload_rows_delivered == 0
+        && out.cold_index_payload_rows_scanned == 0
+        && out.cold_index_payload_rows_skipped == 0
+        && out.cold_index_payload_bytes_requested == 0
+        && out.cold_index_payload_bytes_delivered == 0
+        && out.cold_index_payload_bytes_scanned == 0;
     const bool format5_persisted_read_gate = expect_format5
         ? out.cold_index_schema_valid == 1
-            && one_cold_route
-            && (selective_read_gate || full_read_gate)
+            && format5_mapped_image_read_gate
             && cold_payload_equations
             && out.persisted_generation_read_sessions == 1
             && out.persisted_generation_read_sessions == out.target_rows
@@ -4204,31 +4231,33 @@ inline void require_pipeline_execution_proof(
                 == static_cast<__int128>(counter(53))
                     + static_cast<__int128>(counter(56))
                     + static_cast<__int128>(counter(58))
-            && counter(62) == out.cold_index_payload_rows_delivered
-            && counter(63) == out.cold_index_payload_bytes_delivered
-            && counter(63) > 0
+            && counter(62) == 0
+            && counter(63) == 0
+            && counter(64) == counter(60)
+            && counter(67) == counter(61)
             && counter(67) > 0
-            && counter(68) > 0
-            && counter(68) == counter(69)
-            && counter(70) > 0
-            && counter(70) == counter(74)
-            && counter(71) > 0
-            && counter(71) == counter(75)
-            && counter(76) > 0
-            && counter(77) >= 1
+            && counter(68) == 0
+            && counter(69) == 0
+            && counter(70) == 0
+            && counter(71) == 0
+            && counter(72) == 0
+            && counter(73) == 0
+            && counter(74) == 0
+            && counter(75) == 0
+            && counter(76) == 0
+            && counter(77) == 0
+            && counter(78) == 0
+            && counter(79) == 0
+            && counter(80) == 0
+            && counter(81) == 0
             && static_cast<__int128>(out.persisted_index_scans)
                 == static_cast<__int128>(counter(51))
                     + static_cast<__int128>(counter(54))
-                    + static_cast<__int128>(counter(80))
             && sum_equal(counter(64), counter(60), counter(62))
-            // persisted_bytes_read is the authenticated payload delivered to
-            // the reader, not metadata+payload physical I/O. Metadata remains
-            // accounted independently by counter(61).
-            && counter(76) == out.cold_index_payload_bytes_delivered
             && counter(65) == 0
             && counter(66) == 0
-            && counter(73) == 0
             && counter(82) == 0
+            && counter(83) == 0
             && counter(84) == 0
             && counter(85) == 0
         : true;
@@ -4255,10 +4284,13 @@ inline void require_pipeline_execution_proof(
     // failed cold-reader proof identify its exact class of disagreement
     // without another opaque E2E run.
     const bool persisted_read_route_proof =
-        out.cold_index_schema_valid == 1
-        && one_cold_route
-        && (selective_read_gate || full_read_gate)
-        && cold_payload_equations;
+        expect_format5
+            ? format5_mapped_image_read_gate
+                && cold_payload_equations
+            : out.cold_index_schema_valid == 1
+                && one_cold_route
+                && (selective_read_gate || full_read_gate)
+                && cold_payload_equations;
     const bool persisted_read_session_proof =
         out.persisted_generation_read_sessions == 1
         && out.persisted_generation_read_sessions == out.target_rows
@@ -4287,24 +4319,34 @@ inline void require_pipeline_execution_proof(
                 + static_cast<__int128>(counter(56))
                 + static_cast<__int128>(counter(58));
     const bool persisted_read_payload_proof =
-        counter(62) == out.cold_index_payload_rows_delivered
-        && counter(63) == out.cold_index_payload_bytes_delivered
-        && counter(63) > 0
-        && counter(67) > 0
-        && counter(68) > 0
-        && counter(68) == counter(69)
-        && counter(70) > 0
-        && counter(70) == counter(74)
-        && counter(71) > 0
-        && counter(71) == counter(75)
-        && counter(76) > 0
-        && counter(77) >= 1
-        && (out.cold_index_route_full != 1
-            || (out.extent_crc_raw_bytes_hashed == 0
-                && out.extent_crc_combined_bytes
-                    == out.cold_index_payload_bytes_delivered
-                && out.extent_crc_combine_rows
-                    == out.cold_index_payload_rows_delivered));
+        expect_format5
+            ? counter(62) == 0
+                && counter(63) == 0
+                && counter(67) == counter(61)
+                && std::all_of(
+                    out.alignment_snapshot_numeric_columns.begin() + 68,
+                    out.alignment_snapshot_numeric_columns.begin() + 82,
+                    [](const std::int64_t value) noexcept {
+                        return value == 0;
+                    })
+            : counter(62) == out.cold_index_payload_rows_delivered
+                && counter(63) == out.cold_index_payload_bytes_delivered
+                && counter(63) > 0
+                && counter(67) > 0
+                && counter(68) > 0
+                && counter(68) == counter(69)
+                && counter(70) > 0
+                && counter(70) == counter(74)
+                && counter(71) > 0
+                && counter(71) == counter(75)
+                && counter(76) > 0
+                && counter(77) >= 1
+                && (out.cold_index_route_full != 1
+                    || (out.extent_crc_raw_bytes_hashed == 0
+                        && out.extent_crc_combined_bytes
+                            == out.cold_index_payload_bytes_delivered
+                        && out.extent_crc_combine_rows
+                            == out.cold_index_payload_rows_delivered));
     const bool persisted_read_scan_equations =
         static_cast<__int128>(out.persisted_index_scans)
             == static_cast<__int128>(counter(51))
@@ -4518,12 +4560,12 @@ inline void require_pipeline_execution_proof(
         static_cast<__int128>(out.persisted_generation_read_sessions);
     const __int128 format5_reader_passes = static_cast<__int128>(
         out.format5_reader_capacity_accounting_passes);
-    /* Format 5 now performs four fixed barrier audits per reader. Per-extent
-     * ownership is cached while the image is read and does not rescan the
-     * accumulated reader state. */
+    /* Direct MPF performs one fixed accounting pass. Fragment payload stays
+     * mmap-backed; reader open owns only the directory/address plan and no
+     * posting, query-route, or cross-fragment occurrence owner. */
     const bool format5_reader_accounting_shape =
         format5_reader_sessions > 0
-        && format5_reader_passes == 4 * format5_reader_sessions;
+        && format5_reader_passes == format5_reader_sessions;
     const __int128 format5_reader_exact_position_bytes =
         static_cast<__int128>(out.format5_reader_retained_position_count)
             * static_cast<__int128>(sizeof(std::uint64_t));
@@ -4540,17 +4582,13 @@ inline void require_pipeline_execution_proof(
         + static_cast<__int128>(
             out.format5_reader_control_payload_capacity_bytes);
     const bool format5_reader_memory_gate = expect_format5 && !expect_gpu
-        ? out.format5_reader_global_position_storage_preparations
-                == out.persisted_generation_read_sessions
-            && out.format5_reader_global_position_storage_allocations
-                == out.persisted_generation_read_sessions
+        ? out.format5_reader_global_position_storage_preparations == 0
+            && out.format5_reader_global_position_storage_allocations == 0
             && out.format5_reader_position_append_growth_reservations == 0
-            && out.format5_reader_retained_position_count > 0
-            && out.format5_reader_retained_position_capacity
-                == out.format5_reader_retained_position_count
-            && static_cast<__int128>(
-                    out.format5_reader_global_position_capacity_bytes)
-                == format5_reader_exact_position_bytes
+            && out.format5_reader_retained_position_count == 0
+            && out.format5_reader_retained_position_capacity == 0
+            && out.format5_reader_global_position_capacity_bytes == 0
+            && format5_reader_exact_position_bytes == 0
             && out.format5_reader_exact_position_image_checks
                 == out.persisted_generation_read_sessions
             && out.format5_reader_exact_position_image_failures == 0
@@ -4563,10 +4601,10 @@ inline void require_pipeline_execution_proof(
             && out.format5_reader_owned_capacity_bytes
                 == out.format5_reader_admitted_bytes
             && out.format5_reader_directory_capacity_bytes > 0
-            && out.format5_reader_query_record_capacity_bytes > 0
+            && out.format5_reader_query_record_capacity_bytes == 0
             && out.format5_reader_ordinal_route_capacity_bytes > 0
-            && out.format5_reader_selected_extent_capacity_bytes > 0
-            && out.format5_reader_query_hash_capacity_bytes > 0
+            && out.format5_reader_selected_extent_capacity_bytes == 0
+            && out.format5_reader_query_hash_capacity_bytes == 0
             && out.format5_reader_current_selected_control_capacity_bytes == 0
             && out.format5_reader_control_payload_capacity_bytes == 0
             && format5_reader_accounting_shape
@@ -6350,7 +6388,7 @@ template <sequence_alphabet A>
                     index_name);
                 std::abort();
             }
-            if (!e2e_expects_format6(in)) {
+            if (!e2e_expects_format6(in, index_name)) {
             const std::string audit_sql = fmt::format(
                 "SELECT current_setting('bioseq.aligner.minimizer_algorithm'), "
                 "current_setting('bioseq.aligner.vulkan_enabled'), "
@@ -6555,8 +6593,11 @@ struct ColdRestartProof {
     PostmasterIdentity after{};
 };
 
-[[nodiscard]] bool e2e_expects_format6(const E2eInput& in) noexcept {
-    return in.alphabet == "dna4"
+[[nodiscard]] bool e2e_expects_format6(
+        const E2eInput& in,
+        std::string_view minimizer_index) noexcept {
+    return minimizer_index == "minimizers_per_sequence"
+        && in.alphabet == "dna4"
         && in.kmer_size == 15
         && in.window_size == 10;
 }
@@ -6844,7 +6885,7 @@ void capture_pre_restart_persisted_audit(
         const std::int64_t sequence_rowno,
         const E2eInput& in,
         E2eOutput& out) {
-    if (!e2e_expects_format6(in)) {
+    if (!e2e_expects_format6(in, minimizer_index)) {
         capture_pre_restart_persisted_identity(
             connection, table, minimizer_index, sequence_rowno, out);
         return;
@@ -6869,7 +6910,7 @@ void capture_post_restart_persisted_audit(
         const std::int64_t sequence_rowno,
         const E2eInput& in,
         E2eOutput& out) {
-    if (!e2e_expects_format6(in)) {
+    if (!e2e_expects_format6(in, minimizer_index)) {
         out.post_restart_persisted_format_version = 5;
         return;
     }
@@ -7145,7 +7186,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
-            pipeline_proof_expectation(in, true, fair_workers));
+            pipeline_proof_expectation(in, true, fair_workers),
+            minimizer_index);
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
         log_measured_case(
@@ -7190,7 +7232,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
-            pipeline_proof_expectation(in, true, fair_workers));
+            pipeline_proof_expectation(in, true, fair_workers),
+            minimizer_index);
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
         log_measured_case(
@@ -7245,7 +7288,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         finalize_post_measure_persisted_policy_audit(minimizer_index, out);
         require_pipeline_execution_proof(
             algo, in, out,
-            pipeline_proof_expectation(in, true, fair_workers));
+            pipeline_proof_expectation(in, true, fair_workers),
+            minimizer_index);
         require_mapped(algo, in, out);
         capture_mps_build_stats(*in.conn, out);
         log_measured_case(algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
@@ -7299,7 +7343,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         require_cold_no_index_lifecycle(out);
         require_pipeline_execution_proof(
             algo, in, out,
-            pipeline_proof_expectation(in, false, fair_workers));
+            pipeline_proof_expectation(in, false, fair_workers),
+            minimizer_index);
         require_mapped(algo, in, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out,
@@ -7352,7 +7397,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         require_cold_no_index_lifecycle(out);
         require_pipeline_execution_proof(
             algo, in, out,
-            pipeline_proof_expectation(in, false, fair_workers));
+            pipeline_proof_expectation(in, false, fair_workers),
+            minimizer_index);
         require_mapped(algo, in, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);
@@ -7410,7 +7456,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
         require_cold_no_index_lifecycle(out);
         require_pipeline_execution_proof(
             algo, in, out,
-            pipeline_proof_expectation(in, false, fair_workers));
+            pipeline_proof_expectation(in, false, fair_workers),
+            minimizer_index);
         require_mapped(algo, in, out);
         log_measured_case(
             algo, pipeline_mode, minimap_threads, in, out, minimizer_index);

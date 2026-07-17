@@ -903,7 +903,8 @@ private:
     std::vector<std::uint16_t> primary_counts_{};
     std::vector<ExactGlobalCountException> count_exceptions_{};
     std::vector<std::uint64_t> query_offsets_{};
-    std::unique_ptr<std::uint64_t[]> retained_positions_{};
+    std::unique_ptr<std::uint32_t[]> retained_positions32_{};
+    std::unique_ptr<std::uint64_t[]> retained_positions64_{};
     std::size_t retained_position_count_ = 0u;
     std::vector<std::uint32_t> canonical_radix_prefix_{};
     MinimizerFormat6MemoryEvidence memory_evidence_{};
@@ -932,7 +933,9 @@ private:
             || !vector_capacity_bytes_(count_exceptions_, bytes) || !add(bytes)
             || !vector_capacity_bytes_(query_offsets_, bytes) || !add(bytes)
             || !checked_multiply(
-                retained_position_count_, sizeof(std::uint64_t), bytes)
+                retained_position_count_,
+                manifest_.compatibility.stored_posting_width_bytes,
+                bytes)
             || !add(bytes)
             || !vector_capacity_bytes_(canonical_radix_prefix_, bytes)
             || !add(bytes)) {
@@ -1299,13 +1302,31 @@ private:
                 context.error = MinimizerFormat6Error::posting;
                 return false;
             }
-            bool have_previous = posting_ordinal != 0u;
-            std::uint64_t previous_position = have_previous
-                ? context.reader->retained_positions_[
-                    static_cast<std::size_t>(destination - 1u)]
-                : 0u;
             const auto decode_segment =
-                [&]<class StoredPosition>() noexcept -> bool {
+                [&context,
+                 &bytes,
+                 chunk_byte_cursor,
+                 destination,
+                 destination_end,
+                 posting_ordinal]<class StoredPosition>() noexcept -> bool {
+                    StoredPosition* const retained_positions =
+                        [](
+                                MinimizerFormat6SelectiveReader&
+                                    reader) noexcept -> StoredPosition* {
+                            if constexpr (std::is_same_v<
+                                    StoredPosition, std::uint32_t>) {
+                                return reader.retained_positions32_.get();
+                            } else {
+                                return reader.retained_positions64_.get();
+                            }
+                        }(*context.reader);
+                    bool have_previous = posting_ordinal != 0u;
+                    std::uint64_t previous_position = have_previous
+                        ? static_cast<std::uint64_t>(
+                            retained_positions[
+                                static_cast<std::size_t>(
+                                    destination - 1u)])
+                        : 0u;
                     std::size_t input_offset = chunk_byte_cursor;
                     std::size_t output_index =
                         static_cast<std::size_t>(destination);
@@ -1326,8 +1347,8 @@ private:
                                 : MinimizerFormat6Error::order;
                             return false;
                         }
-                        context.reader->retained_positions_[output_index] =
-                            position;
+                        retained_positions[output_index] =
+                            static_cast<StoredPosition>(position);
                         previous_position = position;
                         have_previous = true;
                     }
@@ -1407,7 +1428,8 @@ public:
           primary_counts_(std::move(other.primary_counts_)),
           count_exceptions_(std::move(other.count_exceptions_)),
           query_offsets_(std::move(other.query_offsets_)),
-          retained_positions_(std::move(other.retained_positions_)),
+          retained_positions32_(std::move(other.retained_positions32_)),
+          retained_positions64_(std::move(other.retained_positions64_)),
           retained_position_count_(
               std::exchange(other.retained_position_count_, 0u)),
           canonical_radix_prefix_(
@@ -2020,7 +2042,7 @@ public:
         std::uint64_t posting_requested = 0u;
         if (!checked_multiply(
                 retained_count,
-                sizeof(std::uint64_t),
+                manifest->compatibility.stored_posting_width_bytes,
                 retained_logical_bytes)
             || !checked_multiply(
                 requested_wave_capacity,
@@ -2048,9 +2070,16 @@ public:
         }
         try {
             if (retained_count != 0u) {
-                reader.retained_positions_ =
-                    std::make_unique_for_overwrite<std::uint64_t[]>(
-                        static_cast<std::size_t>(retained_count));
+                if (manifest->compatibility.stored_posting_width_bytes
+                        == sizeof(std::uint32_t)) {
+                    reader.retained_positions32_ =
+                        std::make_unique_for_overwrite<std::uint32_t[]>(
+                            static_cast<std::size_t>(retained_count));
+                } else {
+                    reader.retained_positions64_ =
+                        std::make_unique_for_overwrite<std::uint64_t[]>(
+                            static_cast<std::size_t>(retained_count));
+                }
             }
             reader.retained_position_count_ =
                 static_cast<std::size_t>(retained_count);
@@ -2406,7 +2435,7 @@ public:
         }
         const std::uint16_t primary = primary_counts_[query_ordinal];
         if (primary == 0u) {
-            return MinimizerLookupSpans::contiguous({});
+            return {};
         }
         const std::uint64_t count = exact_count_(query_ordinal);
         if (count == 0u) {
@@ -2423,23 +2452,41 @@ public:
             throw PersistedMinimizerLookupError{
                 "Format-6 retained-position offset is inconsistent"};
         }
+        const std::size_t position_offset =
+            static_cast<std::size_t>(offset);
+        const std::size_t position_count =
+            static_cast<std::size_t>(count);
+        if (manifest_.compatibility.stored_posting_width_bytes
+                == sizeof(std::uint32_t)) {
+            return MinimizerLookupSpans::contiguous(
+                std::span<const std::uint32_t>{
+                    retained_positions32_.get(),
+                    retained_position_count_}.subspan(
+                    position_offset, position_count));
+        }
         return MinimizerLookupSpans::contiguous(
             std::span<const std::uint64_t>{
-                retained_positions_.get(),
+                retained_positions64_.get(),
                 retained_position_count_}.subspan(
-                static_cast<std::size_t>(offset),
-                static_cast<std::size_t>(count)));
+                position_offset, position_count));
     }
 
     [[nodiscard]] std::uint64_t target_length() const noexcept {
         return manifest_.target_length;
     }
 
-    [[nodiscard]] std::span<const std::uint64_t>
-    retained_positions() const noexcept {
+    [[nodiscard]] std::span<const std::uint32_t>
+    retained_positions32() const noexcept {
         return {
-            retained_positions_.get(),
-            retained_position_count_};
+            retained_positions32_.get(),
+            retained_positions32_ ? retained_position_count_ : 0u};
+    }
+
+    [[nodiscard]] std::span<const std::uint64_t>
+    retained_positions64() const noexcept {
+        return {
+            retained_positions64_.get(),
+            retained_positions64_ ? retained_position_count_ : 0u};
     }
 
     [[nodiscard]] std::span<const ExactGlobalCountException>

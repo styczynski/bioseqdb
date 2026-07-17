@@ -164,6 +164,8 @@ struct KswAlignResult {
     int32_t mte_q     = -1;
     bool    zdropped  = false;
     bool    reach_end = false;
+    std::uint64_t edit_distance = 0;
+    bool edit_distance_valid = false;
     std::vector<uint32_t> cigar;
 };
 

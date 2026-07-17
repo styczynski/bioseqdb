@@ -32,6 +32,7 @@ module;
 #include <tuple>
 #include <string>
 #include <string_view>
+#include <utility>
 
 export module bioseq.alignment.block_aligner;
 
@@ -480,6 +481,7 @@ private:
 struct BlockDiagonalCertificate {
     bool certified = false;
     int32_t score = 0;
+    std::uint64_t edit_distance = 0;
     std::uint64_t vector_batches = 0;
     std::uint64_t symbols = 0;
 };
@@ -1549,11 +1551,68 @@ void ba_align_core(
 // Traceback — CIGAR generation from recorded trace data
 // =============================================================================
 
-void ba_cigar_core(
+struct BlockTracebackResult {
+    std::vector<std::uint32_t> cigar;
+    std::uint64_t edit_distance = 0;
+};
+
+/**
+ * Account for the exact unit-cost edit represented by one traceback step.
+ *
+ * Traceback coordinates are one-based sequence positions because index zero
+ * in each BlockPaddedBytes is the DP sentinel. Reversed left extensions need
+ * no special handling: both padded inputs and the trace use the same reversed
+ * orientation, and edit distance is invariant when both strings are reversed.
+ */
+template <bool compute_edit_distance>
+HWY_INLINE void ba_record_traceback_edit(
+    BlockTracebackResult& result,
+    BlockCigarOp operation,
+    size_t query_position,
+    size_t reference_position,
+    const BlockPaddedBytes& query,
+    const BlockPaddedBytes& reference)
+{
+    if constexpr (!compute_edit_distance) {
+        return;
+    }
+    switch (operation) {
+        case BlockCigarOp::M:
+            if (query_position == 0 || query_position > query.len()
+                || reference_position == 0
+                || reference_position > reference.len()) {
+                block_aligner_invariant_failure(
+                    "traceback diagonal edit coordinate exceeded input");
+            }
+            result.edit_distance +=
+                query.get(query_position) != reference.get(reference_position);
+            break;
+        case BlockCigarOp::Eq:
+            break;
+        case BlockCigarOp::X:
+        case BlockCigarOp::I:
+        case BlockCigarOp::D:
+            ++result.edit_distance;
+            break;
+        case BlockCigarOp::Sentinel:
+            block_aligner_invariant_failure(
+                "traceback emitted a sentinel operation");
+    }
+}
+
+/**
+ * Materialize the packed CIGAR and, when requested, derive exact edit
+ * accounting during the same traceback walk over resident padded ranks.
+ */
+template <bool compute_edit_distance>
+[[nodiscard]] BlockTracebackResult ba_cigar_core(
     const BlockTrace& trace,
     size_t end_i, size_t end_j,
-    std::vector<uint32_t>& cigar)
+    const BlockPaddedBytes& query,
+    const BlockPaddedBytes& reference)
 {
+    BlockTracebackResult result;
+    auto& cigar = result.cigar;
     cigar.clear();
     if (end_i > (std::numeric_limits<size_t>::max)() - end_j) {
         block_aligner_invariant_failure("traceback CIGAR capacity overflow");
@@ -1572,7 +1631,7 @@ void ba_cigar_core(
     // operations locally and materialize only one packed entry per run.
     BlockCigarOp pending_op = BlockCigarOp::Sentinel;
     size_t pending_len = 0;
-    const auto flush_pending = [&]() {
+    const auto flush_pending = [&cigar, &pending_op, &pending_len]() {
         if (pending_len == 0) return;
 
         uint32_t opcode = CIGAR_MATCH;
@@ -1590,7 +1649,8 @@ void ba_cigar_core(
         push_packed_cigar(
             cigar, opcode, static_cast<uint32_t>(pending_len));
     };
-    const auto add_op = [&](BlockCigarOp op) {
+    const auto add_op = [&flush_pending, &pending_op, &pending_len](
+            BlockCigarOp op) {
         if (op == pending_op) {
             ++pending_len;
             return;
@@ -1663,6 +1723,8 @@ void ba_cigar_core(
                                | static_cast<size_t>(table);
                 const auto& entry = lut[lut_idx];
 
+                ba_record_traceback_edit<compute_edit_distance>(
+                    result, entry.op, i, j, query, reference);
                 i -= entry.di;
                 j -= entry.dj;
                 table = entry.next_table;
@@ -1689,6 +1751,8 @@ void ba_cigar_core(
                                | static_cast<size_t>(table);
                 const auto& entry = lut[lut_idx];
 
+                ba_record_traceback_edit<compute_edit_distance>(
+                    result, entry.op, i, j, query, reference);
                 i -= entry.di;
                 j -= entry.dj;
                 table = entry.next_table;
@@ -1698,6 +1762,7 @@ void ba_cigar_core(
     }
     flush_pending();
     std::reverse(cigar.begin(), cigar.end());
+    return result;
 }
 
 // =============================================================================
@@ -1714,6 +1779,7 @@ struct BlockAlignerParams {
     BlockInputOrder input_order = BlockInputOrder::Forward;
     BlockAlignerPhase phase = BlockAlignerPhase::GapExtension;
     bool trace = true;
+    bool compute_edit_distance = false;
 };
 
 enum class BlockPackedCertificateDecision : std::uint8_t {
@@ -1749,6 +1815,7 @@ enum class BlockAlignerContractError : std::uint8_t {
     LaneShape,
     Coordinates,
     ScoringMatrix,
+    TraceAccounting,
 };
 
 [[nodiscard]] constexpr bool block_aligner_lane_shape_supported(
@@ -1790,6 +1857,9 @@ enum class BlockAlignerContractError : std::uint8_t {
             && params.input_order == BlockInputOrder::Forward);
     if (!phase_mode_valid) {
         return BlockAlignerContractError::PhaseMode;
+    }
+    if (params.compute_edit_distance && !params.trace) {
+        return BlockAlignerContractError::TraceAccounting;
     }
     return BlockAlignerContractError::None;
 }
@@ -2032,6 +2102,7 @@ ba_try_global_diagonal_certificate(
 
     result.certified = true;
     result.score = static_cast<int32_t>(diagonal_score);
+    result.edit_distance = unequal_symbols;
     result.symbols = n;
     return result;
 }
@@ -2172,6 +2243,7 @@ ba_try_packed_global_gap_certificate(
         attempt.decision = BlockPackedCertificateDecision::Certified;
         attempt.certificate.certified = true;
         attempt.certificate.score = static_cast<std::int32_t>(diagonal_score);
+        attempt.certificate.edit_distance = mismatch_symbols;
         attempt.certificate.symbols = query_len;
         return attempt;
     }
@@ -2195,6 +2267,7 @@ ba_try_packed_global_gap_certificate(
     mix(static_cast<std::uint8_t>(params.input_order));
     mix(static_cast<std::uint8_t>(params.phase));
     mix(params.trace);
+    mix(params.compute_edit_distance);
     mix(scoring_identity);
     mix(strand_reversed);
     return hash;
@@ -2360,7 +2433,8 @@ public:
             BlockAlignerExecutionProof* execution_proof) noexcept {
         if (execution_proof == nullptr) return;
         if (!certificate.certified || certificate.symbols == 0u
-            || certificate.vector_batches == 0u) {
+            || certificate.vector_batches == 0u
+            || certificate.edit_distance > certificate.symbols) {
             block_aligner_invariant_failure(
                 "attempted to record an invalid packed gap certificate");
         }
@@ -2509,6 +2583,10 @@ public:
                     *execution_proof, params, L, true, BlockCoreMetrics{},
                     config_identity);
             }
+            if (params.compute_edit_distance) {
+                result.edit_distance = std::max(query_len, target_len);
+                result.edit_distance_valid = true;
+            }
             return result;
         }
 
@@ -2535,6 +2613,10 @@ public:
                     result.cigar.push_back(
                         (static_cast<std::uint32_t>(query_len) << 4u)
                         | CIGAR_MATCH);
+                }
+                if (params.compute_edit_distance) {
+                    result.edit_distance = certificate.edit_distance;
+                    result.edit_distance_valid = true;
                 }
                 metrics.diagonal_certified = true;
                 metrics.diagonal_certificate_vector_batches =
@@ -2665,10 +2747,21 @@ public:
 
         // Build CIGAR via traceback
         if (do_trace) {
-            ba_cigar_core(
-                scratch.trace, out_qi, out_ri, result.cigar);
+            BlockTracebackResult traceback_result =
+                params.compute_edit_distance
+                ? ba_cigar_core<true>(
+                    scratch.trace, out_qi, out_ri,
+                    query_padded, ref_padded)
+                : ba_cigar_core<false>(
+                    scratch.trace, out_qi, out_ri,
+                    query_padded, ref_padded);
+            result.cigar = std::move(traceback_result.cigar);
             if (params.input_order == BlockInputOrder::Reversed) {
                 std::reverse(result.cigar.begin(), result.cigar.end());
+            }
+            if (params.compute_edit_distance) {
+                result.edit_distance = traceback_result.edit_distance;
+                result.edit_distance_valid = true;
             }
         }
 

@@ -22,6 +22,7 @@ extern "C" {
 #include "access/xact.h"
 #include "catalog/indexing.h"
 #include "commands/sequence.h"
+#include "miscadmin.h"
 #include "catalog/namespace.h"   // RelnameGetRelid
 #include "catalog/pg_am_d.h"
 #include "catalog/pg_class.h"
@@ -47,10 +48,14 @@ extern "C" {
 }
 
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cerrno>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -61,6 +66,7 @@ extern "C" {
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <queue>
 #include <new>
@@ -87,6 +93,9 @@ import bioseq.types.pg_compact_sequence;  // pgseq_t, dispatch_instance
 import bioseq.sequences;               // compact_sequence_range
 import bioseq.sequences.simd;          // canonical bounded base decoding for source proof
 import bioseq.parallelism.memory_admission;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.pool;
 import bioseq.storage.indexing_pg.residency;
 import bioseq.storage.indexing_pg.sorted_runs;
 import bioseq.instr;
@@ -3457,6 +3466,111 @@ next_rev3_pinned_projected_pg_row_batch_or_error(
     };
 }
 
+using Rev3ValidatedPgRowReceiptBatch = std::array<
+    std::optional<ValidatedMinimizerGenerationRowReceipt>,
+    kRev3FullGenerationPinnedBatchRows>;
+
+inline constexpr std::size_t kRev3ParallelRowAuthenticationMinRows = 32u;
+inline constexpr std::size_t kRev3ParallelRowAuthenticationGrainRows = 8u;
+
+/// Destroy every row authority before its pinned slot can be advanced.
+inline void clear_rev3_validated_pg_row_receipt_batch(
+        Rev3ValidatedPgRowReceiptBatch& receipts) noexcept {
+    for (auto& receipt : receipts) {
+        receipt.reset();
+    }
+}
+
+/// Authenticate one already-projected pinned batch. Only immutable payload
+/// spans and storage-neutral CRC code enter TBB; no PostgreSQL API or callback
+/// is invoked off the backend thread. The call joins before returning, so all
+/// borrowed spans remain inside the lifetime of their pinned tuple slots.
+inline void authenticate_rev3_projected_pg_row_batch(
+        const Rev3PinnedProjectedPgRowBatch& batch,
+        Rev3ValidatedPgRowReceiptBatch& receipts) {
+    clear_rev3_validated_pg_row_receipt_batch(receipts);
+    const auto authenticate_range =
+        [&batch, &receipts](
+                std::size_t begin,
+                std::size_t end) noexcept {
+            for (std::size_t ordinal = begin;
+                 ordinal < end; ++ordinal) {
+                const Rev3ProjectedPgRow& projected =
+                    batch.rows[ordinal].projected;
+                if (projected.error != nullptr) continue;
+                auto validated =
+                    bioseq::indexing::
+                        validate_minimizer_generation_row_receipt(
+                            MinimizerGenerationRowView{
+                                .address = projected.address,
+                                .bytes = projected.bytes,
+                                .row_checksum = projected.checksum,
+                            });
+                if (validated) {
+                    receipts[ordinal].emplace(
+                        std::move(*validated));
+                }
+            }
+        };
+
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    const bool use_parallel_authentication =
+        batch.size >= kRev3ParallelRowAuthenticationMinRows
+        && pool.active()
+        && bioseq::parallelism::task_parallel(pool.mode())
+        && pool.max_concurrency() > 1u;
+    if (use_parallel_authentication) {
+        pool.parallel_for(
+            0u, batch.size,
+            kRev3ParallelRowAuthenticationGrainRows,
+            bioseq::parallelism::range_body{
+                authenticate_range});
+    } else {
+        authenticate_range(0u, batch.size);
+    }
+}
+
+/// Transfer one pre-authenticated row authority into the callback-scoped
+/// loaded-row form without repeating its address-bound CRC pass.
+[[nodiscard]] inline Rev3LoadedPgRow
+load_rev3_authenticated_projected_pg_row_or_error(
+        const Rev3ProjectedPgRow& projected,
+        std::optional<ValidatedMinimizerGenerationRowReceipt>&
+            validated_receipt) {
+    if (projected.error != nullptr) {
+        rev3_storage_error_as_cpp(projected.error);
+    }
+    if (!validated_receipt) {
+        rev3_storage_error_as_cpp("row checksum disagrees");
+    }
+    bool exact_authority = false;
+    const bool visited =
+        bioseq::indexing::visit_validated_minimizer_generation_row(
+            *validated_receipt,
+            [&projected, &exact_authority](
+                    const IndexChunkAddress& address,
+                    std::span<const std::byte> bytes,
+                    std::uint64_t row_checksum) noexcept {
+                exact_authority =
+                    address == projected.address
+                    && bytes.data() == projected.bytes.data()
+                    && bytes.size() == projected.bytes.size()
+                    && row_checksum == projected.checksum;
+            });
+    if (!visited || !exact_authority) {
+        rev3_storage_error_as_cpp(
+            "row checksum authority disagrees");
+    }
+    return Rev3LoadedPgRow{
+        .query_key = projected.query_key,
+        .address = projected.address,
+        .chunk_bytes = projected.chunk_bytes,
+        .checksum = projected.checksum,
+        .bytes = projected.bytes,
+        .validated_receipt = std::move(*validated_receipt),
+    };
+}
+
 /// Decode all eight non-NULL fields and validate PLAIN storage, byte count and
 /// the address-bound row checksum before any caller observes the payload.
 [[nodiscard]] inline Rev3LoadedPgRow load_rev3_deformed_pg_row_or_error(
@@ -3473,6 +3587,446 @@ next_rev3_pinned_projected_pg_row_batch_or_error(
     const Rev3DeformedPgRow deformed =
         deform_rev3_pg_row_or_error(relation, tuple);
     return load_rev3_deformed_pg_row_or_error(deformed);
+}
+
+namespace mpf_format5_image_detail {
+
+inline constexpr std::uint64_t kMagic =
+    UINT64_C(0x42354d5046494d47); // "B5MPFIMG"
+inline constexpr std::uint32_t kVersion = 1u;
+inline constexpr std::uint32_t kHeaderBytes = 4096u;
+
+struct Header {
+    std::uint64_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t header_bytes = 0;
+    std::uint32_t database_oid = 0;
+    std::uint32_t tablespace_oid = 0;
+    std::uint32_t main_relfilenode = 0;
+    std::uint32_t user_relid = 0;
+    std::int32_t column_attno = 0;
+    std::uint32_t wire_format = 0;
+    std::uint64_t query_key = 0;
+    std::uint64_t generation_id = 0;
+    std::uint64_t manifest_checksum = 0;
+    std::uint64_t source_identity = 0;
+    std::uint64_t source_content_checksum = 0;
+    std::uint64_t compatibility_checksum = 0;
+    std::uint64_t target_length = 0;
+    std::uint64_t position_segment_span_bp = 0;
+    std::uint32_t position_segment_count = 0;
+    std::uint32_t reserved_zero = 0;
+    std::uint64_t directory_bytes = 0;
+    std::uint64_t directory_checksum = 0;
+    std::uint64_t payload_bytes = 0;
+    std::uint64_t payload_row_checksum = 0;
+    std::uint64_t payload_raw_checksum = 0;
+    std::uint64_t image_bytes = 0;
+    std::uint64_t header_checksum = 0;
+};
+
+static_assert(std::is_trivially_copyable_v<Header>);
+static_assert(std::is_standard_layout_v<Header>);
+static_assert(sizeof(Header) <= kHeaderBytes);
+
+[[nodiscard]] inline std::uint64_t header_checksum(
+        const Header& header) noexcept {
+    Header copy = header;
+    copy.header_checksum = 0;
+    Crc64Ecma182 crc{};
+    crc.update(std::as_bytes(std::span{&copy, std::size_t{1}}));
+    return crc.checksum();
+}
+
+[[nodiscard]] inline std::string directory_path() {
+    if (DataDir == nullptr || DataDir[0] == '\0') {
+        rev3_storage_error_as_cpp(
+            "MPF Format-5 image has no PostgreSQL data directory");
+    }
+    return fmt::format("{}/bioseq_mpf5", DataDir);
+}
+
+[[nodiscard]] inline std::string final_path(
+        const Rev3IndexAdministrationIdentity& identity,
+        std::uint64_t query_key,
+        std::uint64_t generation_id) {
+    return fmt::format(
+        "{}/{}_{}_{}_{}_{}_{}_{}.mpf5",
+        directory_path(),
+        static_cast<unsigned>(identity.database_oid),
+        static_cast<unsigned>(identity.tablespace_oid),
+        static_cast<unsigned>(identity.main_relfilenode),
+        static_cast<unsigned>(identity.user_relid),
+        static_cast<int>(identity.column_attno),
+        static_cast<unsigned long long>(query_key),
+        static_cast<unsigned long long>(generation_id));
+}
+
+inline void ensure_directory() {
+    const std::string path = directory_path();
+    if (MakePGDirectory(path.c_str()) != 0 && errno != EEXIST) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "MPF Format-5 image directory creation failed: errno={}",
+            errno));
+    }
+}
+
+inline void pwrite_all(
+        int fd,
+        std::span<const std::byte> bytes,
+        std::uint64_t offset) {
+    std::size_t written = 0;
+    while (written < bytes.size()) {
+        const std::uint64_t current = offset + written;
+        if (current > static_cast<std::uint64_t>(
+                (std::numeric_limits<off_t>::max)())) {
+            rev3_storage_error_as_cpp(
+                "MPF Format-5 image offset exceeds off_t");
+        }
+        const ssize_t result = pg_pwrite(
+            fd,
+            bytes.data() + static_cast<std::ptrdiff_t>(written),
+            bytes.size() - written,
+            static_cast<off_t>(current));
+        if (result < 0 && errno == EINTR) continue;
+        if (result <= 0) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "MPF Format-5 image write failed: errno={}", errno));
+        }
+        written += static_cast<std::size_t>(result);
+    }
+}
+
+class Writer {
+private:
+    std::string temporary_path_;
+    std::string final_path_;
+    int fd_ = -1;
+    std::uint64_t payload_bytes_ = 0;
+    Crc64Ecma182 payload_checksum_{};
+    bool published_ = false;
+
+    void cleanup_noexcept_() noexcept {
+        if (fd_ >= 0) {
+            (void)CloseTransientFile(fd_);
+            fd_ = -1;
+        }
+        if (!published_ && !temporary_path_.empty()) {
+            (void)unlink(temporary_path_.c_str());
+        }
+    }
+
+public:
+    Writer(
+            const Rev3IndexAdministrationIdentity& identity,
+            std::uint64_t query_key,
+            std::uint64_t generation_id)
+        : final_path_(mpf_format5_image_detail::final_path(
+              identity, query_key, generation_id)),
+          temporary_path_(fmt::format(
+              "{}.tmp.{}", final_path_, static_cast<int>(MyProcPid))) {
+        ensure_directory();
+        (void)unlink(temporary_path_.c_str());
+        fd_ = OpenTransientFilePerm(
+            temporary_path_.c_str(),
+            O_CREAT | O_EXCL | O_RDWR | PG_BINARY,
+            S_IRUSR | S_IWUSR);
+        if (fd_ < 0) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "MPF Format-5 image open failed: errno={}", errno));
+        }
+    }
+
+    Writer(const Writer&) = delete;
+    Writer& operator=(const Writer&) = delete;
+    Writer(Writer&&) = delete;
+    Writer& operator=(Writer&&) = delete;
+
+    ~Writer() {
+        cleanup_noexcept_();
+    }
+
+    void append(std::span<const std::byte> bytes) {
+        if (published_ || fd_ < 0
+            || bytes.size()
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - payload_bytes_
+            || payload_bytes_
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - kHeaderBytes) {
+            rev3_storage_error_as_cpp(
+                "MPF Format-5 image append state/size is invalid");
+        }
+        pwrite_all(fd_, bytes, kHeaderBytes + payload_bytes_);
+        payload_checksum_.update(bytes);
+        payload_bytes_ += bytes.size();
+    }
+
+    void publish(
+            const Rev3IndexAdministrationIdentity& identity,
+            std::uint64_t query_key,
+            const MinimizerGenerationHead& head,
+            const MinimizerGenerationManifest& manifest) {
+        if (published_ || fd_ < 0
+            || manifest.wire_format
+                != bioseq::indexing::MinimizerGenerationWireFormat::
+                    grouped_shape_soa_segment_local
+            || payload_bytes_ != manifest.payload_bytes
+            || manifest.generation_id != head.generation_id
+            || manifest.generation_id == 0u
+            || payload_bytes_
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - kHeaderBytes) {
+            rev3_storage_error_as_cpp(
+                "MPF Format-5 image publication identity/size is invalid");
+        }
+        Header header{
+            .magic = kMagic,
+            .version = kVersion,
+            .header_bytes = kHeaderBytes,
+            .database_oid = identity.database_oid,
+            .tablespace_oid = identity.tablespace_oid,
+            .main_relfilenode = identity.main_relfilenode,
+            .user_relid = identity.user_relid,
+            .column_attno = identity.column_attno,
+            .wire_format = static_cast<std::uint32_t>(
+                manifest.wire_format),
+            .query_key = query_key,
+            .generation_id = manifest.generation_id,
+            .manifest_checksum = head.manifest_checksum,
+            .source_identity = head.source_identity,
+            .source_content_checksum = head.source_content_checksum,
+            .compatibility_checksum = head.compatibility_checksum,
+            .target_length = manifest.target_length,
+            .position_segment_span_bp =
+                manifest.position_segment_span_bp,
+            .position_segment_count = manifest.position_segment_count,
+            .directory_bytes = manifest.directory_bytes,
+            .directory_checksum = manifest.directory_checksum,
+            .payload_bytes = manifest.payload_bytes,
+            .payload_row_checksum = manifest.payload_checksum,
+            .payload_raw_checksum = payload_checksum_.checksum(),
+            .image_bytes = kHeaderBytes + payload_bytes_,
+        };
+        header.header_checksum =
+            mpf_format5_image_detail::header_checksum(header);
+        std::array<std::byte, kHeaderBytes> encoded_header{};
+        std::memcpy(
+            encoded_header.data(), &header, sizeof(header));
+        pwrite_all(fd_, encoded_header, 0u);
+        if (pg_fsync(fd_) != 0) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "MPF Format-5 image fsync failed: errno={}", errno));
+        }
+        if (CloseTransientFile(fd_) != 0) {
+            fd_ = -1;
+            rev3_storage_error_as_cpp(fmt::format(
+                "MPF Format-5 image close failed: errno={}", errno));
+        }
+        fd_ = -1;
+        bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            if (durable_rename(
+                    temporary_path_.c_str(),
+                    final_path_.c_str(),
+                    ERROR) != 0) {
+                ereport(ERROR,
+                    (errcode_for_file_access(),
+                     errmsg("could not publish bioseq MPF Format-5 image")));
+            }
+        });
+        published_ = true;
+        temporary_path_.clear();
+    }
+};
+
+} // namespace mpf_format5_image_detail
+
+class MappedMinimizerFormat5ImagePg {
+private:
+    int fd_ = -1;
+    void* mapping_ = MAP_FAILED;
+    std::size_t mapping_bytes_ = 0;
+    const mpf_format5_image_detail::Header* header_ = nullptr;
+
+    void release_() noexcept {
+        header_ = nullptr;
+        if (mapping_ != MAP_FAILED) {
+            (void)munmap(mapping_, mapping_bytes_);
+            mapping_ = MAP_FAILED;
+            mapping_bytes_ = 0;
+        }
+        if (fd_ >= 0) {
+            (void)CloseTransientFile(fd_);
+            fd_ = -1;
+        }
+    }
+
+public:
+    MappedMinimizerFormat5ImagePg() = default;
+    MappedMinimizerFormat5ImagePg(
+            const MappedMinimizerFormat5ImagePg&) = delete;
+    MappedMinimizerFormat5ImagePg& operator=(
+            const MappedMinimizerFormat5ImagePg&) = delete;
+    MappedMinimizerFormat5ImagePg(
+            MappedMinimizerFormat5ImagePg&& other) noexcept
+        : fd_(std::exchange(other.fd_, -1)),
+          mapping_(std::exchange(other.mapping_, MAP_FAILED)),
+          mapping_bytes_(std::exchange(other.mapping_bytes_, 0)),
+          header_(std::exchange(other.header_, nullptr)) {}
+    MappedMinimizerFormat5ImagePg& operator=(
+            MappedMinimizerFormat5ImagePg&&) = delete;
+    ~MappedMinimizerFormat5ImagePg() {
+        release_();
+    }
+
+    [[nodiscard]] std::span<const std::byte> payload() const noexcept {
+        if (mapping_ == MAP_FAILED || header_ == nullptr
+            || mapping_bytes_ < header_->header_bytes
+            || header_->payload_bytes
+                > mapping_bytes_ - header_->header_bytes) {
+            return {};
+        }
+        return std::span<const std::byte>{
+            static_cast<const std::byte*>(mapping_)
+                + header_->header_bytes,
+            static_cast<std::size_t>(header_->payload_bytes)};
+    }
+
+    [[nodiscard]] std::uint64_t payload_raw_checksum() const noexcept {
+        return header_ == nullptr ? 0u : header_->payload_raw_checksum;
+    }
+
+    /// Transfer the mmap lifetime into a backend-independent shared owner.
+    /// The payload span obtained before this call remains valid until the last
+    /// owner is destroyed.  This lets the fragment-native seed reader probe
+    /// the immutable PostgreSQL generation directly throughout mapping
+    /// without copying any posting payload into a target-wide runtime index.
+    [[nodiscard]] std::shared_ptr<const void>
+    release_mapping_owner() && {
+        if (mapping_ == MAP_FAILED || mapping_bytes_ == 0u) {
+            return {};
+        }
+        void* const mapping =
+            std::exchange(mapping_, MAP_FAILED);
+        const std::size_t mapping_bytes =
+            std::exchange(mapping_bytes_, 0u);
+        const int fd = std::exchange(fd_, -1);
+        header_ = nullptr;
+        return std::shared_ptr<const void>{
+            mapping,
+            [mapping_bytes, fd](const void* address) noexcept {
+                if (address != nullptr && address != MAP_FAILED) {
+                    (void)munmap(
+                        const_cast<void*>(address), mapping_bytes);
+                }
+                if (fd >= 0) {
+                    (void)CloseTransientFile(fd);
+                }
+            }};
+    }
+
+    friend MappedMinimizerFormat5ImagePg
+    open_exact_minimizer_format5_image_pg(
+        const Rev3IndexAdministrationIdentity&,
+        std::uint64_t,
+        const MinimizerGenerationHead&,
+        const MinimizerGenerationManifest&);
+};
+
+[[nodiscard]] inline MappedMinimizerFormat5ImagePg
+open_exact_minimizer_format5_image_pg(
+        const Rev3IndexAdministrationIdentity& identity,
+        std::uint64_t query_key,
+        const MinimizerGenerationHead& head,
+        const MinimizerGenerationManifest& manifest) {
+    using namespace mpf_format5_image_detail;
+    if (identity.database_oid != MyDatabaseId
+        || identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        || manifest.wire_format
+            != bioseq::indexing::MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local
+        || head.generation_id == 0u
+        || head.generation_id != manifest.generation_id) {
+        rev3_storage_error_as_cpp(
+            "MPF Format-5 mapped-image binding is invalid");
+    }
+    const std::string path = final_path(
+        identity, query_key, manifest.generation_id);
+    const int fd = OpenTransientFile(
+        path.c_str(), O_RDONLY | PG_BINARY);
+    if (fd < 0) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "MPF Format-5 mapped image is missing: errno={}", errno));
+    }
+    struct stat stat_buffer{};
+    if (fstat(fd, &stat_buffer) != 0
+        || stat_buffer.st_size
+            < static_cast<off_t>(kHeaderBytes)
+        || static_cast<std::uint64_t>(stat_buffer.st_size)
+            > (std::numeric_limits<std::size_t>::max)()) {
+        (void)CloseTransientFile(fd);
+        rev3_storage_error_as_cpp(
+            "MPF Format-5 mapped image size is invalid");
+    }
+    const std::size_t bytes =
+        static_cast<std::size_t>(stat_buffer.st_size);
+    void* mapping = mmap(
+        nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (mapping == MAP_FAILED) {
+        const int saved_errno = errno;
+        (void)CloseTransientFile(fd);
+        rev3_storage_error_as_cpp(fmt::format(
+            "MPF Format-5 image mmap failed: errno={}",
+            saved_errno));
+    }
+    const auto* header =
+        static_cast<const Header*>(mapping);
+    const bool valid =
+        header->magic == kMagic
+        && header->version == kVersion
+        && header->header_bytes == kHeaderBytes
+        && header->database_oid == identity.database_oid
+        && header->tablespace_oid == identity.tablespace_oid
+        && header->main_relfilenode == identity.main_relfilenode
+        && header->user_relid == identity.user_relid
+        && header->column_attno == identity.column_attno
+        && header->wire_format
+            == static_cast<std::uint32_t>(manifest.wire_format)
+        && header->query_key == query_key
+        && header->generation_id == manifest.generation_id
+        && header->manifest_checksum == head.manifest_checksum
+        && header->source_identity == head.source_identity
+        && header->source_content_checksum
+            == head.source_content_checksum
+        && header->compatibility_checksum
+            == head.compatibility_checksum
+        && header->target_length == manifest.target_length
+        && header->position_segment_span_bp
+            == manifest.position_segment_span_bp
+        && header->position_segment_count
+            == manifest.position_segment_count
+        && header->reserved_zero == 0u
+        && header->directory_bytes == manifest.directory_bytes
+        && header->directory_checksum == manifest.directory_checksum
+        && header->payload_bytes == manifest.payload_bytes
+        && header->payload_row_checksum == manifest.payload_checksum
+        && header->image_bytes == bytes
+        && header->image_bytes
+            == static_cast<std::uint64_t>(kHeaderBytes)
+                + manifest.payload_bytes
+        && header->header_checksum == header_checksum(*header);
+    if (!valid) {
+        (void)munmap(mapping, bytes);
+        (void)CloseTransientFile(fd);
+        rev3_storage_error_as_cpp(
+            "MPF Format-5 mapped image identity/header is invalid");
+    }
+    MappedMinimizerFormat5ImagePg result;
+    result.fd_ = fd;
+    result.mapping_ = mapping;
+    result.mapping_bytes_ = bytes;
+    result.header_ = header;
+    return result;
 }
 
 /// Relation-owning sink factory target used directly by the existing common
@@ -4032,6 +4586,20 @@ public:
             const bool format5 = generation.manifest.wire_format
                 == bioseq::indexing::MinimizerGenerationWireFormat::
                     grouped_shape_soa_segment_local;
+			const bool mapped_mpf_format5 = format5
+				&& identity_.index_name
+					== MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
+            std::unique_ptr<mpf_format5_image_detail::Writer>
+                format5_image_writer;
+			/* The sidecar path/header intentionally encode the MPF source
+			 * identity, not a logical-index discriminator.  MPS Format-5 keeps
+			 * the authoritative PostgreSQL payload route and therefore must not
+			 * create or overwrite this MPF-only image. */
+            if (mapped_mpf_format5) {
+                format5_image_writer =
+                    std::make_unique<mpf_format5_image_detail::Writer>(
+                        identity_, query_key_, generation_id_);
+            }
             if ((format5 && !global_payload_order_possible_)
                 || (!format5 && !legacy_payload_order_possible_)) {
                 rev3_storage_error(
@@ -4393,6 +4961,9 @@ public:
                     payload_row.release();
                     rev3_storage_error("READY payload reread counters overflow");
                 }
+                if (format5_image_writer) {
+                    format5_image_writer->append(payload_row.bytes);
+                }
                 payload_row.release();
                 ++entry_chunk;
                 if (entry_chunk == extent_chunk_count) {
@@ -4432,6 +5003,11 @@ public:
                 || reread_payload_bytes != generation.manifest.payload_bytes) {
                 rev3_storage_error(
                     "READY complete payload aggregate reread disagrees");
+            }
+            if (format5_image_writer) {
+                format5_image_writer->publish(
+                    identity_, query_key_, generation.head,
+                    generation.manifest);
             }
 
             bioseq::pg_utils::invoke_pg_as_cpp(
@@ -7583,6 +8159,70 @@ public:
         }
     }
 
+    /// Finish a Format-5 read whose immutable payload was consumed from the
+    /// exact generation-bound mmap image. PostgreSQL remains the authority for
+    /// the active head, manifest, directory and source attestation; the image
+    /// itself was created only by the complete authenticated READY reread and
+    /// was fsynced and durably renamed before publication.
+    [[nodiscard]] MinimizerGenerationReadStats
+    finish_mapped_format5_payload() {
+        try {
+            if (state_ != State::metadata_ready
+                || !catalog_source_attested_
+                || !head_ || !metadata_
+                || metadata_->manifest.wire_format
+                    != bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local
+                || active_scan_ != nullptr || heap_relation_ == nullptr
+                || primary_index_relation_ == nullptr || snapshot_ == nullptr
+                || next_group_ != 0 || !planned_groups_.empty()
+                || !runtime_requests_.empty() || plan_permit_
+                || runtime_permit_ || control_authorization_permit_
+                || !authorized_position_ordinals_.empty()
+                || stats_.payload_heap_rows_read != 0
+                || stats_.payload_bytes_read != 0
+                || stats_.bulk_read_calls != 0
+                || stats_.range_scan_calls != 0
+                || stats_.full_generation.scan_calls != 0) {
+                fail_(
+                    "mapped Format-5 generation read closed in an invalid state");
+            }
+            const std::uint64_t expected_metadata_rows =
+                stats_.head_rows_read + stats_.manifest_rows_read
+                + stats_.directory_chunks_read;
+            const std::uint64_t expected_metadata_bytes =
+                stats_.head_bytes_read + stats_.manifest_bytes_read
+                + stats_.directory_bytes_read;
+            if (stats_.relation_opens != 1
+                || stats_.head_scans != 1
+                || stats_.manifest_directory_scans != 1
+                || stats_.index_scans != 2
+                || stats_.metadata_heap_rows_read != expected_metadata_rows
+                || stats_.metadata_bytes_read != expected_metadata_bytes
+                || stats_.source_parent_rows_read != 1
+                || stats_.source_catalog_rows_read != 1
+                || stats_.source_catalog_index_scans != 1
+                || stats_.source_fragment_rows_read != 0
+                || stats_.source_decoded_bp != 0
+                || stats_.source_storage_incarnations_checked < 1
+                || stats_.source_storage_incarnations_checked > 2) {
+                fail_("mapped Format-5 metadata/source proof disagrees");
+            }
+            stats_.total_heap_rows_read = stats_.metadata_heap_rows_read;
+            stats_.total_bytes_read = stats_.metadata_bytes_read;
+            stats_.cold.add(
+                stats_.cold.toast_values, stats_.toast_values_read);
+            stats_.cold.add(
+                stats_.cold.detoast_bytes, stats_.detoast_bytes);
+            state_ = State::finished;
+            close_relations_checked_();
+            return stats_;
+        } catch (...) {
+            state_ = State::failed;
+            throw;
+        }
+    }
+
     /// Checked success close for callers that intentionally validate only the
     /// immutable head/manifest/directory contract and do not enter payload
     /// phases. Borrowed snapshots remain caller-owned.
@@ -10565,10 +11205,13 @@ private:
         ++stats_.range_scan_calls;
         stats_.cold.add(stats_.cold.payload_range_scans, 1u);
         Rev3PinnedProjectedPgRowBatch batch{};
+        Rev3ValidatedPgRowReceiptBatch validated_receipts{};
         std::size_t batch_ordinal = 0u;
         while (accepted && expected_row <= last_row) {
             if (batch_ordinal == batch.size) {
                 if (batch.eof) break;
+                clear_rev3_validated_pg_row_receipt_batch(
+                    validated_receipts);
                 batch =
                     next_rev3_pinned_projected_pg_row_batch_or_error(
                         heap_relation_, active_scan_,
@@ -10578,12 +11221,16 @@ private:
                     if (batch.eof) break;
                     fail_("Format-6 batched stream scan made no progress");
                 }
+                authenticate_rev3_projected_pg_row_batch(
+                    batch, validated_receipts);
             }
             const Rev3PinnedProjectedPgRow& pinned =
-                batch.rows[batch_ordinal++];
+                batch.rows[batch_ordinal];
             Rev3LoadedPgRow row =
-                load_rev3_projected_pg_row_or_error(
-                    pinned.projected);
+                load_rev3_authenticated_projected_pg_row_or_error(
+                    pinned.projected,
+                    validated_receipts[batch_ordinal]);
+            ++batch_ordinal;
             if (row.query_key != query_key_
                 || row.address != IndexChunkAddress{
                     .generation_id = manifest_->generation_id,
@@ -10625,6 +11272,8 @@ private:
             }
             ++expected_row;
         }
+        clear_rev3_validated_pg_row_receipt_batch(
+            validated_receipts);
         if (cached_boundary_row_valid_) {
             clear_row_batch_slots_except_checked_(
                 cached_boundary_slot_ordinal_);

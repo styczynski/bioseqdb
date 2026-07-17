@@ -1,6 +1,6 @@
 /**
  * @file bench_prefilters.cpp
- * @brief Stand-alone SneakySnake prefilter benchmark registered in bioseq_bench.
+ * @brief Stand-alone rank-prefilter benchmarks registered in bioseq_bench.
  *
  * Dataset parsing, byte-rank materialisation, the bundled-source oracle, and
  * thresholded edit-distance truth are prepared in on_input.  The measured
@@ -12,8 +12,8 @@
  */
 #include "common_simd.h"
 #include "common.h"
+#include "prefilter_small_seed_keys.hpp"
 #include "SneakySnake.h"
-#include "prefilter_pipeline_truth.hpp"
 
 #include <simdjson.h>
 
@@ -35,8 +35,13 @@
 
 import bench_framework;
 import bioseq.instr;
+import bioseq.sequences.edit_distance_threshold;
+import bioseq.sequences.prefilters.prefilter_types;
+import bioseq.sequences.prefilters.gatekeeper;
+import bioseq.sequences.prefilters.gatekeeper_vulkan;
 import bioseq.sequences.prefilters.sneaky_snake;
 import bioseq.sequences.prefilters.sneaky_snake_vulkan;
+import bioseq.gpu.vulkan.phase_c_abi;
 
 HWY_BEFORE_NAMESPACE();
 
@@ -45,11 +50,11 @@ namespace {
 
 using bioseq::bench_framework::ParamMap;
 using bioseq::bench_framework::RunConstraints;
-using bioseq::simd::HWY_NAMESPACE::SneakySnakeBatchInput;
-using bioseq::simd::HWY_NAMESPACE::SneakySnakeJob;
-using bioseq::simd::HWY_NAMESPACE::SneakySnakeResult;
-using bioseq::simd::HWY_NAMESPACE::SneakySnakeStatus;
 namespace vulkan_prefilter = bioseq::sequences::prefilters;
+using bioseq::sequences::prefilters::PrefilterBatchInput;
+using bioseq::sequences::prefilters::PrefilterJob;
+using bioseq::sequences::prefilters::PrefilterResult;
+using bioseq::sequences::prefilters::PrefilterStatus;
 
 constexpr std::uint32_t kDefaultMaxEdits = 8u;
 constexpr std::size_t kDefaultPairLimit = 1'024u;
@@ -57,9 +62,9 @@ constexpr std::uint32_t kVulkanMaxEdits =
     bioseq::gpu::vulkan::k_gpu_sneaky_snake_max_edits;
 
 struct PreparedThreshold {
-    std::vector<SneakySnakeJob> cpu_jobs;
-    std::vector<vulkan_prefilter::SneakySnakeVulkanJob> vulkan_jobs;
-    std::vector<SneakySnakeResult> scalar_oracle_results;
+    std::vector<PrefilterJob> jobs;
+    std::vector<PrefilterResult> scalar_oracle_results;
+    std::vector<PrefilterResult> gatekeeper_oracle_results;
     std::vector<std::uint8_t> reference_accepted;
     std::vector<std::uint8_t> truth_within_threshold;
 };
@@ -75,6 +80,7 @@ struct PrefilterInput {
     /// any one algorithm/threshold callback.
     std::uint64_t input_preparation_ns = 0u;
     std::uint64_t oracle_preparation_ns = 0u;
+    bool require_gatekeeper_rejection_diagnostics = false;
     bool valid = false;
     std::string error;
 };
@@ -83,6 +89,7 @@ struct PrefilterOutput {
     std::vector<std::uint8_t> accepted;
     std::vector<std::uint32_t> lower_bounds;
     std::vector<std::uint32_t> statuses;
+    std::vector<std::uint32_t> diagnostics;
     /// Complete selected batch API call. For Vulkan this deliberately includes
     /// upload, dispatch, synchronization, and result readback.
     std::uint64_t backend_batch_ns = 0u;
@@ -141,7 +148,44 @@ struct PrefilterOutput {
 [[nodiscard]] std::uint32_t max_edits_from_tuple(
     const bioseq::bench_framework::ResolvedExecutionTuple& tuple) noexcept
 {
+    if (const auto fixed = small_seed::fixed_max_edits_for_algorithm(
+            tuple.algorithm_name);
+        fixed.has_value()) {
+        return *fixed;
+    }
     return max_edits_from_params(tuple.params);
+}
+
+[[nodiscard]] std::uint32_t max_edits_for_algorithm(
+    std::string_view algorithm,
+    const ParamMap& params) noexcept
+{
+    if (const auto fixed = small_seed::fixed_max_edits_for_algorithm(
+            algorithm);
+        fixed.has_value()) {
+        return *fixed;
+    }
+    return max_edits_from_params(params);
+}
+
+[[nodiscard]] constexpr bool is_gatekeeper_algorithm(
+    std::string_view algorithm) noexcept
+{
+    return small_seed::is_gatekeeper_algorithm(algorithm);
+}
+
+[[nodiscard]] constexpr bool is_small_seed_algorithm(
+    std::string_view algorithm) noexcept
+{
+    return small_seed::is_algorithm(algorithm);
+}
+
+[[nodiscard]] constexpr bool is_sneaky_vulkan_algorithm(
+    std::string_view algorithm) noexcept
+{
+    return algorithm == "sneakysnake_vulkan"
+        || algorithm == "sneakysnake_vulkan_e2"
+        || algorithm == "sneakysnake_vulkan_e4";
 }
 
 [[nodiscard]] RunConstraints estimate_prefilter_resources(
@@ -178,12 +222,15 @@ void append_rank_bytes(
 
 [[nodiscard]] PrefilterInput build_prefilter_input(
     std::string_view data_dir,
-    std::string_view /*test_case_name*/,
+    std::string_view test_case_name,
     simdjson::dom::element data,
     const RunConstraints& constraints)
 {
     PrefilterInput input;
     try {
+        input.require_gatekeeper_rejection_diagnostics =
+            test_case_name == "PREFILTER_SMALL_ERR_E40_32BP"
+            || test_case_name == "PREFILTER_SMALL_ERR_E40_64BP";
         const auto input_preparation_start = std::chrono::steady_clock::now();
         const std::string relative_path = read_string_field(data, "path", {});
         if (relative_path.empty()) {
@@ -194,6 +241,10 @@ void append_rank_bytes(
             data, "pair_limit", static_cast<std::int64_t>(kDefaultPairLimit));
         const std::size_t pair_limit = raw_limit > 0
             ? static_cast<std::size_t>(raw_limit) : kDefaultPairLimit;
+        const std::int64_t raw_prefix = read_int_field(
+            data, "sequence_prefix_length", 0);
+        const std::size_t sequence_prefix_length = raw_prefix > 0
+            ? static_cast<std::size_t>(raw_prefix) : 0u;
         const std::filesystem::path dataset_path =
             std::filesystem::path{std::string{data_dir}} / relative_path;
         std::ifstream dataset{dataset_path};
@@ -218,6 +269,15 @@ void append_rank_bytes(
             }
             std::string query = line.substr(0u, separator);
             std::string target = line.substr(separator + 1u);
+            if (sequence_prefix_length != 0u) {
+                if (query.size() < sequence_prefix_length
+                    || target.size() < sequence_prefix_length) {
+                    throw std::runtime_error(
+                        "prefilter dataset row is shorter than sequence_prefix_length");
+                }
+                query.resize(sequence_prefix_length);
+                target.resize(sequence_prefix_length);
+            }
             if (query.empty() || query.size() != target.size()) {
                 throw std::runtime_error(
                     "SneakySnake benchmark requires non-empty equal-length pairs");
@@ -239,8 +299,11 @@ void append_rank_bytes(
 
         std::vector<std::uint32_t> thresholds;
         thresholds.reserve(constraints.execution_tuples.size());
+        bool prepare_gatekeeper_oracle = false;
         for (const auto& tuple : constraints.execution_tuples) {
             thresholds.push_back(max_edits_from_tuple(tuple));
+            prepare_gatekeeper_oracle = prepare_gatekeeper_oracle
+                || is_gatekeeper_algorithm(tuple.algorithm_name);
         }
         if (thresholds.empty()) {
             thresholds.push_back(kDefaultMaxEdits);
@@ -252,28 +315,19 @@ void append_rank_bytes(
 
         for (const std::uint32_t threshold : thresholds) {
             PreparedThreshold prepared;
-            prepared.cpu_jobs.reserve(input.queries.size());
-            prepared.vulkan_jobs.reserve(input.queries.size());
+            prepared.jobs.reserve(input.queries.size());
             std::uint32_t query_offset = 0u;
             std::uint32_t target_offset = 0u;
             for (std::size_t index = 0u; index < input.queries.size(); ++index) {
                 const auto length = static_cast<std::uint32_t>(
                     input.queries[index].size());
-                prepared.cpu_jobs.push_back(SneakySnakeJob{
+                prepared.jobs.push_back(PrefilterJob{
                     .query_offset = query_offset,
                     .target_offset = target_offset,
                     .query_length = length,
                     .target_length = length,
                     .max_edits = threshold,
                 });
-                prepared.vulkan_jobs.push_back(
-                    vulkan_prefilter::SneakySnakeVulkanJob{
-                        .query_offset = query_offset,
-                        .target_offset = target_offset,
-                        .query_length = length,
-                        .target_length = length,
-                        .max_edits = threshold,
-                    });
                 if ((std::numeric_limits<std::uint32_t>::max)() - query_offset
                         < length
                     || (std::numeric_limits<std::uint32_t>::max)() - target_offset
@@ -295,15 +349,30 @@ void append_rank_bytes(
         for (auto& [threshold, prepared] : input.prepared) {
             prepared.scalar_oracle_results =
                 bioseq::simd::HWY_NAMESPACE::sneaky_snake_scalar_batch(
-                    SneakySnakeBatchInput{
+                    PrefilterBatchInput{
                         .query_ranks = input.query_ranks,
                         .target_ranks = input.target_ranks,
-                        .jobs = prepared.cpu_jobs,
+                        .jobs = prepared.jobs,
                     });
+            if (prepare_gatekeeper_oracle) {
+                prepared.gatekeeper_oracle_results =
+                    vulkan_prefilter::gatekeeper_scalar_batch(
+                        PrefilterBatchInput{
+                            .query_ranks = input.query_ranks,
+                            .target_ranks = input.target_ranks,
+                            .jobs = prepared.jobs,
+                        });
+            }
             if (prepared.scalar_oracle_results.size()
                 != input.queries.size()) {
                 throw std::runtime_error(
                     "SneakySnake scalar oracle returned the wrong result count");
+            }
+            if (prepare_gatekeeper_oracle
+                && prepared.gatekeeper_oracle_results.size()
+                    != input.queries.size()) {
+                throw std::runtime_error(
+                    "GateKeeper scalar oracle returned the wrong result count");
             }
             prepared.reference_accepted.resize(input.queries.size());
             prepared.truth_within_threshold.resize(input.queries.size());
@@ -322,8 +391,14 @@ void append_rank_bytes(
                     geometry);
                 prepared.reference_accepted[index] = accepted != 0 ? 1u : 0u;
                 prepared.truth_within_threshold[index] =
-                    bioseq::bench_prefilter_truth::edit_distance_within(
-                        input.queries[index], input.targets[index], threshold)
+                    bioseq::sequences::edit_distance_within_threshold(
+                        std::span<const char>{
+                            input.queries[index].data(),
+                            input.queries[index].size()},
+                        std::span<const char>{
+                            input.targets[index].data(),
+                            input.targets[index].size()},
+                        threshold)
                     ? 1u : 0u;
             }
         }
@@ -335,7 +410,7 @@ void append_rank_bytes(
     } catch (const std::exception& exception) {
         input.error = exception.what();
     } catch (...) {
-        input.error = "unknown SneakySnake input-preparation failure";
+        input.error = "unknown prefilter input-preparation failure";
     }
     return input;
 }
@@ -347,7 +422,7 @@ void append_rank_bytes(
     std::string_view reason)
 {
     throw std::runtime_error(
-        "SneakySnake runtime validation failed for algorithm='"
+        "prefilter runtime validation failed for algorithm='"
         + std::string{algorithm}
         + "' E=" + std::to_string(threshold)
         + " pair=" + std::to_string(index)
@@ -355,8 +430,8 @@ void append_rank_bytes(
 }
 
 [[nodiscard]] constexpr bool same_result(
-    const SneakySnakeResult& lhs,
-    const SneakySnakeResult& rhs) noexcept
+    const PrefilterResult& lhs,
+    const PrefilterResult& rhs) noexcept
 {
     return lhs.lower_bound == rhs.lower_bound
         && lhs.status == rhs.status
@@ -369,8 +444,8 @@ void validate_available_backend(
     std::uint32_t threshold,
     const PrefilterInput& input,
     const PreparedThreshold& prepared,
-    const std::vector<SneakySnakeResult>& cpu_results,
-    const std::vector<vulkan_prefilter::SneakySnakeVulkanResult>& vulkan_results,
+    const std::vector<PrefilterResult>& cpu_results,
+    const std::vector<PrefilterResult>& vulkan_results,
     const PrefilterOutput& output)
 {
     const std::size_t expected_count = input.queries.size();
@@ -396,7 +471,7 @@ void validate_available_backend(
                     "lower-bound/status/decision differs from scalar oracle");
             }
         }
-    } else if (algorithm == "sneakysnake_vulkan") {
+    } else if (is_sneaky_vulkan_algorithm(algorithm)) {
         if (threshold > kVulkanMaxEdits) {
             throw_validation_failure(
                 algorithm, threshold, 0u,
@@ -419,17 +494,40 @@ void validate_available_backend(
                     "Vulkan lower-bound/status/decision differs from scalar oracle");
             }
             if (actual.status != static_cast<std::uint32_t>(
-                    SneakySnakeStatus::success)) {
+                    PrefilterStatus::success)) {
                 throw_validation_failure(
                     algorithm, threshold, index,
                     "Vulkan row did not execute the evaluated maze path");
+            }
+        }
+    } else if (is_gatekeeper_algorithm(algorithm)) {
+        if (vulkan_results.size()
+            != prepared.gatekeeper_oracle_results.size()) {
+            throw_validation_failure(
+                algorithm, threshold, vulkan_results.size(),
+                "Vulkan result count differs from the GateKeeper scalar oracle");
+        }
+        for (std::size_t index = 0u; index < vulkan_results.size(); ++index) {
+            if (!same_result(
+                    vulkan_results[index],
+                    prepared.gatekeeper_oracle_results[index])) {
+                throw_validation_failure(
+                    algorithm, threshold, index,
+                    "GateKeeper Vulkan result differs from its CPU oracle");
+            }
+            if (!vulkan_prefilter::gatekeeper_geometry_supported(
+                    prepared.jobs[index])) {
+                throw_validation_failure(
+                    algorithm, threshold, index,
+                    "small-seed GateKeeper job is outside direct support");
             }
         }
     }
 
     for (std::size_t index = 0u; index < expected_count; ++index) {
         const bool accepted = output.accepted[index] != 0u;
-        if (accepted != (prepared.reference_accepted[index] != 0u)) {
+        if (!is_gatekeeper_algorithm(algorithm)
+            && accepted != (prepared.reference_accepted[index] != 0u)) {
             throw_validation_failure(
                 algorithm, threshold, index,
                 "decision differs from the bundled-source compatible fixture oracle");
@@ -449,30 +547,36 @@ void validate_available_backend(
 {
     const auto callback_start = std::chrono::steady_clock::now();
     if (!input.valid) {
-        throw std::runtime_error("invalid SneakySnake benchmark input: " + input.error);
+        throw std::runtime_error("invalid prefilter benchmark input: " + input.error);
     }
-    const std::uint32_t threshold = max_edits_from_params(params);
+    const std::uint32_t threshold = max_edits_for_algorithm(algorithm, params);
     const auto prepared_it = input.prepared.find(threshold);
     if (prepared_it == input.prepared.end()) {
         throw std::logic_error(
-            "SneakySnake threshold was not prepared by on_input");
+            "prefilter threshold was not prepared by on_input");
     }
     const PreparedThreshold& prepared = prepared_it->second;
     PrefilterOutput output;
     output.accepted.resize(input.queries.size());
 
-    if (algorithm == "sneakysnake_vulkan"
+    if (is_sneaky_vulkan_algorithm(algorithm)
         && !vulkan_prefilter::vulkan_sneaky_snake_supported()) {
+        output.backend_available = false;
+        output.accepted.clear();
+        return output;
+    }
+    if (is_gatekeeper_algorithm(algorithm)
+        && !vulkan_prefilter::vulkan_gatekeeper_supported()) {
         output.backend_available = false;
         output.accepted.clear();
         return output;
     }
 
     static const auto* backend_batch_region =
-        bioseq::instr::register_region_static("sneaky_snake_backend_batch");
+        bioseq::instr::register_region_static("prefilter_backend_batch");
     const auto backend_batch_start = std::chrono::steady_clock::now();
-    std::vector<SneakySnakeResult> cpu_results;
-    std::vector<vulkan_prefilter::SneakySnakeVulkanResult> vulkan_results;
+    std::vector<PrefilterResult> cpu_results;
+    std::vector<PrefilterResult> vulkan_results;
     {
         auto backend_batch_scope = bioseq::instr::region(backend_batch_region);
         if (algorithm == "sneakysnake_original") {
@@ -489,26 +593,31 @@ void validate_available_backend(
             }
         } else if (algorithm == "sneakysnake_scalar") {
             cpu_results = bioseq::simd::HWY_NAMESPACE::sneaky_snake_scalar_batch(
-                SneakySnakeBatchInput{
+                PrefilterBatchInput{
                     .query_ranks = input.query_ranks,
                     .target_ranks = input.target_ranks,
-                    .jobs = prepared.cpu_jobs,
+                    .jobs = prepared.jobs,
                 });
         } else if (algorithm == "sneakysnake_simd") {
             cpu_results = bioseq::simd::HWY_NAMESPACE::sneaky_snake_simd_batch(
-                SneakySnakeBatchInput{
+                PrefilterBatchInput{
                     .query_ranks = input.query_ranks,
                     .target_ranks = input.target_ranks,
-                    .jobs = prepared.cpu_jobs,
+                    .jobs = prepared.jobs,
                 });
-        } else if (algorithm == "sneakysnake_vulkan") {
+        } else if (is_sneaky_vulkan_algorithm(algorithm)) {
             vulkan_results = vulkan_prefilter::run_sneaky_snake_vulkan_batch(
                 input.query_ranks,
                 input.target_ranks,
-                prepared.vulkan_jobs);
+                prepared.jobs);
+        } else if (is_gatekeeper_algorithm(algorithm)) {
+            vulkan_results = vulkan_prefilter::run_gatekeeper_vulkan_batch(
+                input.query_ranks,
+                input.target_ranks,
+                prepared.jobs);
         } else {
             throw std::invalid_argument(
-                "unknown SneakySnake benchmark algorithm: "
+                "unknown prefilter benchmark algorithm: "
                 + std::string{algorithm});
         }
     }
@@ -522,22 +631,26 @@ void validate_available_backend(
         output.accepted.resize(cpu_results.size());
         output.lower_bounds.resize(cpu_results.size());
         output.statuses.resize(cpu_results.size());
+        output.diagnostics.resize(cpu_results.size());
         for (std::size_t index = 0u; index < cpu_results.size(); ++index) {
             output.accepted[index] =
-                bioseq::simd::HWY_NAMESPACE::sneaky_snake_accepted(
+                vulkan_prefilter::prefilter_accepted(
                     cpu_results[index]) ? 1u : 0u;
             output.lower_bounds[index] = cpu_results[index].lower_bound;
             output.statuses[index] = cpu_results[index].status;
+            output.diagnostics[index] = cpu_results[index].reserved;
         }
     } else if (!vulkan_results.empty()) {
         output.lower_bounds_available = true;
         output.accepted.resize(vulkan_results.size());
         output.lower_bounds.resize(vulkan_results.size());
         output.statuses.resize(vulkan_results.size());
+        output.diagnostics.resize(vulkan_results.size());
         for (std::size_t index = 0u; index < vulkan_results.size(); ++index) {
             output.accepted[index] = vulkan_results[index].accepted != 0u ? 1u : 0u;
             output.lower_bounds[index] = vulkan_results[index].lower_bound;
             output.statuses[index] = vulkan_results[index].status;
+            output.diagnostics[index] = vulkan_results[index].reserved;
         }
     }
     const auto validation_start = std::chrono::steady_clock::now();
@@ -583,8 +696,25 @@ void validate_available_backend(
             ? (output.runtime_validation_passed ? 1.0 : 0.0)
             : not_measured);
     metrics.emplace("vulkan_validation_required",
-        algorithm == "sneakysnake_vulkan" && output.backend_available
+        (is_sneaky_vulkan_algorithm(algorithm)
+         || is_gatekeeper_algorithm(algorithm))
+            && output.backend_available
             ? 1.0 : 0.0);
+    metrics.emplace("gatekeeper_validation_required",
+        is_gatekeeper_algorithm(algorithm) && output.backend_available
+            ? 1.0 : 0.0);
+    if (is_small_seed_algorithm(algorithm)
+        && !small_seed::has_required_hardware_validation({
+            .input_valid = input.valid,
+            .backend_available = output.backend_available,
+            .validation_performed = output.runtime_validation_performed,
+            .validation_passed = output.runtime_validation_passed,
+            .result_count = output.accepted.size(),
+            .expected_result_count = input.queries.size(),
+        })) {
+        throw std::runtime_error(
+            "small-seed prefilter row lacks required hardware validation");
+    }
     if (!output.backend_available) {
         for (std::string_view name : {
                  "backend_batch_ns", "callback_non_backend_ns",
@@ -597,13 +727,18 @@ void validate_available_backend(
                  "false_reject_rate", "backend_pairs_per_second",
                  "backend_bases_per_second", "callback_pairs_per_second",
                  "callback_bases_per_second", "lower_bound_sum",
-                 "lower_bound_max"}) {
+                 "lower_bound_max", "supported_job_count",
+                 "gatekeeper_estimate_sum",
+                 "gatekeeper_mask_rejection_candidate_count",
+                 "gatekeeper_exact_guard_activation_count",
+                 "gatekeeper_guard_confirmed_rejection_count",
+                 "gatekeeper_final_rejection_count"}) {
             metrics.emplace(std::string{name}, not_measured);
         }
         return metrics;
     }
 
-    const std::uint32_t threshold = max_edits_from_params(params);
+    const std::uint32_t threshold = max_edits_for_algorithm(algorithm, params);
     const PreparedThreshold& prepared = input.prepared.at(threshold);
     const bool result_count_valid = output.accepted.size() == input.queries.size();
     std::uint64_t accepted_count = 0u;
@@ -615,6 +750,11 @@ void validate_available_backend(
     std::uint64_t false_accepts = 0u;
     std::uint64_t false_rejects = 0u;
     std::uint64_t lower_bound_sum = 0u;
+    std::uint64_t gatekeeper_estimate_sum = 0u;
+    std::uint64_t gatekeeper_mask_rejection_candidates = 0u;
+    std::uint64_t gatekeeper_exact_guard_activations = 0u;
+    std::uint64_t gatekeeper_guard_confirmed_rejections = 0u;
+    std::uint64_t supported_job_count = 0u;
     std::uint32_t lower_bound_maximum = 0u;
 
     const std::size_t comparable_count = std::min(
@@ -624,24 +764,49 @@ void validate_available_backend(
         const bool similar = prepared.truth_within_threshold[index] != 0u;
         accepted_count += accepted ? 1u : 0u;
         rejected_count += accepted ? 0u : 1u;
-        reference_mismatches += accepted
-                != (prepared.reference_accepted[index] != 0u)
+        const bool oracle_accepted = is_gatekeeper_algorithm(algorithm)
+            ? prepared.gatekeeper_oracle_results[index].accepted != 0u
+            : prepared.reference_accepted[index] != 0u;
+        reference_mismatches += accepted != oracle_accepted
             ? 1u : 0u;
         true_similar += similar ? 1u : 0u;
         true_dissimilar += similar ? 0u : 1u;
         false_rejects += !accepted && similar ? 1u : 0u;
         false_accepts += accepted && !similar ? 1u : 0u;
         if (index < output.statuses.size()) {
-            evaluated_count += output.statuses[index]
-                    == static_cast<std::uint32_t>(SneakySnakeStatus::success)
-                ? 1u : 0u;
+            const bool evaluated = output.statuses[index]
+                == static_cast<std::uint32_t>(PrefilterStatus::success);
+            evaluated_count += evaluated ? 1u : 0u;
+            supported_job_count += evaluated ? 1u : 0u;
         } else {
             ++evaluated_count;
+            ++supported_job_count;
         }
         if (index < output.lower_bounds.size()) {
             lower_bound_sum += output.lower_bounds[index];
             lower_bound_maximum = std::max(
                 lower_bound_maximum, output.lower_bounds[index]);
+        }
+        if (is_gatekeeper_algorithm(algorithm)
+            && index < output.diagnostics.size()) {
+            const std::uint32_t diagnostic = output.diagnostics[index];
+            gatekeeper_estimate_sum += diagnostic
+                & vulkan_prefilter::gatekeeper_estimate_mask;
+            gatekeeper_mask_rejection_candidates +=
+                (diagnostic
+                    & vulkan_prefilter::gatekeeper_mask_rejection_candidate_mask)
+                    != 0u
+                ? 1u : 0u;
+            gatekeeper_exact_guard_activations +=
+                (diagnostic
+                    & vulkan_prefilter::gatekeeper_exact_guard_activated_mask)
+                    != 0u
+                ? 1u : 0u;
+            gatekeeper_guard_confirmed_rejections +=
+                (diagnostic
+                    & vulkan_prefilter::gatekeeper_guard_confirmed_rejection_mask)
+                    != 0u
+                ? 1u : 0u;
         }
     }
 
@@ -692,6 +857,40 @@ void validate_available_backend(
         ? static_cast<double>(lower_bound_sum) : not_measured);
     metrics.emplace("lower_bound_max", output.lower_bounds_available
         ? static_cast<double>(lower_bound_maximum) : not_measured);
+    metrics.emplace("supported_job_count",
+        static_cast<double>(supported_job_count));
+    metrics.emplace("gatekeeper_estimate_sum",
+        is_gatekeeper_algorithm(algorithm)
+            ? static_cast<double>(gatekeeper_estimate_sum) : 0.0);
+    metrics.emplace("gatekeeper_mask_rejection_candidate_count",
+        is_gatekeeper_algorithm(algorithm)
+            ? static_cast<double>(gatekeeper_mask_rejection_candidates) : 0.0);
+    metrics.emplace("gatekeeper_exact_guard_activation_count",
+        is_gatekeeper_algorithm(algorithm)
+            ? static_cast<double>(gatekeeper_exact_guard_activations) : 0.0);
+    metrics.emplace("gatekeeper_guard_confirmed_rejection_count",
+        is_gatekeeper_algorithm(algorithm)
+            ? static_cast<double>(gatekeeper_guard_confirmed_rejections) : 0.0);
+    metrics.emplace("gatekeeper_final_rejection_count",
+        is_gatekeeper_algorithm(algorithm)
+            ? static_cast<double>(rejected_count) : 0.0);
+    if (is_small_seed_algorithm(algorithm)
+        && (!result_count_valid
+            || supported_job_count != input.queries.size()
+            || false_rejects != 0u)) {
+        throw std::runtime_error(
+            "small-seed prefilter acceptance gate failed");
+    }
+    if (is_gatekeeper_algorithm(algorithm)
+        && input.require_gatekeeper_rejection_diagnostics
+        && (gatekeeper_mask_rejection_candidates == 0u
+            || gatekeeper_exact_guard_activations == 0u
+            || gatekeeper_guard_confirmed_rejections == 0u
+            || rejected_count == 0u)) {
+        throw std::runtime_error(
+            "high-error GateKeeper row did not exercise every required "
+            "rejection diagnostic");
+    }
     return metrics;
 }
 
@@ -716,6 +915,32 @@ make_prefilter_kernel_benchmark(std::string config_path)
     return create_benchmark<PrefilterInput, PrefilterOutput>(
         "SneakySnake prefilter kernels (original/scalar/SIMD/Vulkan)",
         "bench_prefilter_kernels",
+        std::move(config_path),
+        std::move(estimate),
+        std::move(build),
+        std::move(run),
+        std::move(evaluate));
+}
+
+[[nodiscard]] bioseq::bench_framework::ErasedBenchmark
+make_prefilter_small_seed_benchmark(std::string config_path)
+{
+    using bioseq::bench_framework::create_benchmark;
+    auto estimate = std::function<RunConstraints(
+        std::string_view, std::string_view, simdjson::dom::element)>{
+            estimate_prefilter_resources};
+    auto build = std::function<PrefilterInput(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const RunConstraints&)>{build_prefilter_input};
+    auto run = std::function<PrefilterOutput(
+        std::string_view, const ParamMap&, const PrefilterInput&)>{
+            run_prefilter};
+    auto evaluate = std::function<std::map<std::string, double>(
+        std::string_view, const ParamMap&, const PrefilterInput&,
+        const PrefilterOutput&)>{evaluate_prefilter};
+    return create_benchmark<PrefilterInput, PrefilterOutput>(
+        "GateKeeper versus SneakySnake Vulkan small-seed prefilters",
+        "bench_prefilter_small_seeds",
         std::move(config_path),
         std::move(estimate),
         std::move(build),

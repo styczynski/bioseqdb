@@ -48,6 +48,7 @@ import bioseq.storage.manager;             // DOC0264 §7.9 — seq_caches + ope
 import bioseq.storage.scanner;     // DOC0263 §3.4 — is_valid/active_sequence_scanner concept
 import bioseq.storage.lazy;        // DOC0264 §9.1 — lazy_compact_sequence + with_lazy_postgres
 import bioseq.storage.size;        // sequence_size_t
+import bioseq.storage.metadata;    // StripeMetadata/FindStripeByRowNumber
 import bioseq.sequences;           // compact_sequence_range, compact_sequence_stdc_instance
 import bioseq.types.pg_compact_sequence;
 import bioseq.table.io;            // BioseqColumnBeginRead/BioseqColumnReadRowByRowNumber
@@ -169,6 +170,18 @@ struct sequence_scanner_pg final {
 
     [[nodiscard]] [[gnu::always_inline]]
     base_container read_fragment(std::size_t fragment_no) const;
+
+    /**
+     * Copy the complete packed sequence into caller-owned resident storage.
+     *
+     * The PostgreSQL-backed route opens one dedicated sequential column reader,
+     * seeks it to the stripe containing the locator's first row, and copies
+     * visible contiguous fragment rows directly into `destination`. This avoids
+     * one random-access lookup, one checked PostgreSQL boundary and one scanner
+     * slot copy for every 8 KiB fragment when a large target is admitted for
+     * query/segment workers.
+     */
+    void copy_packed_to(std::span<storage_unit> destination) const;
 
     [[gnu::always_inline]]
     void release_fragment(std::size_t fragment_no) const noexcept;
@@ -402,6 +415,18 @@ private:
     // allocate_slot_for_; the Phase-B wrapper typically drives
     // release_fragment so the ring is rarely full. Used only in PG-backed mode.
     mutable std::array<slot_t, 16>                       slots_{};
+
+    enum class bulk_copy_status : std::uint8_t {
+        ok,
+        missing_start_stripe,
+        missing_fragment,
+        noncontiguous_fragment,
+        null_fragment,
+        stub_fragment,
+        payload_header_invalid,
+        payload_too_large,
+        destination_geometry_invalid,
+    };
 
     [[nodiscard]] slot_t* find_slot_(std::size_t fragment_no) const noexcept {
         for (auto& slot : slots_) {
@@ -647,6 +672,222 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     slot->fragment_no = fragment_no;
     poisoned_ = false;
     return base_container(dst, fragment_storage_units);
+}
+
+template <class StdcInstance>
+inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
+    std::span<storage_unit> destination) const
+{
+    const std::size_t required_units = static_cast<std::size_t>(total_size());
+    if (destination.size() != required_units) {
+        bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            bioseq_log<ERR, PG>(
+                "sequence_scanner_pg: resident destination has {} packed units, "
+                "expected {}",
+                destination.size(), required_units);
+        });
+    }
+    if (destination.empty()) {
+        return;
+    }
+
+    std::fill(destination.begin(), destination.end(), storage_unit{});
+    if (is_in_memory_mode()) {
+        if (in_memory_data_.size() < destination.size()) {
+            bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                bioseq_log<ERR, PG>(
+                    "sequence_scanner_pg in-memory: backing span has {} packed "
+                    "units, expected at least {}",
+                    in_memory_data_.size(), destination.size());
+            });
+        }
+        std::copy_n(
+            in_memory_data_.data(), destination.size(), destination.data());
+        return;
+    }
+    if (poisoned_) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                (errcode(ERRCODE_IN_FAILED_SQL_TRANSACTION),
+                 errmsg("sequence_scanner_pg cannot be reused after a PostgreSQL read error")));
+        });
+    }
+
+    struct bulk_copy_state {
+        storage_unit* destination = nullptr;
+        std::size_t destination_bytes = 0;
+        std::size_t copied_fragments = 0;
+        std::uint64_t expected_row = 0;
+        std::uint64_t observed_row = 0;
+        std::size_t observed_payload_bytes = 0;
+        bulk_copy_status status = bulk_copy_status::ok;
+    } state{
+        .destination = destination.data(),
+        .destination_bytes = destination.size_bytes(),
+        .expected_row = locator_.first_sub_row_no,
+    };
+
+    /*
+     * Keep this as one checked PostgreSQL leaf. The callback owns only POD
+     * state and raw pointers; the caller-owned resident vector remains outside
+     * the PG_TRY frame. A PostgreSQL ERROR therefore returns through the C++
+     * ABI without skipping a vector destructor, while the hot path pays one
+     * sigsetjmp instead of one per fragment.
+     */
+    poisoned_ = true;
+    bioseq::pg_utils::invoke_pg_as_cpp([this, &state] {
+        Relation shard = open_sub_table_for_locator(
+            db_oid_, tablespace_oid_, main_relfilenode_, column_attno_,
+            locator_, AccessShareLock, caches_);
+        const std::uint64_t cache_key = seq_caches::key_for(
+            column_attno_,
+            static_cast<std::int16_t>(locator_.bucket_idx),
+            static_cast<std::int32_t>(locator_.shard_idx));
+        seq_caches::entry& entry = caches_->entries[cache_key];
+        entry.rel = shard;
+
+        MemoryContext previous = MemoryContextSwitchTo(mctx_);
+        TupleDesc td = RelationGetDescr(shard);
+        List* projected_attributes = list_make1_int(1);
+        BioseqColumnReadState* read_state = BioseqColumnBeginRead(
+            shard, td, projected_attributes,
+            /*whereClauseList=*/NIL, mctx_, snapshot_,
+            /*randomAccess=*/true, nullptr);
+        BioseqColumnReadFlushPendingWrites(read_state);
+
+        StripeMetadata* first_stripe = FindStripeByRowNumber(
+            shard, locator_.first_sub_row_no, read_state->snapshot);
+        if (first_stripe == nullptr
+            || !BioseqColumnSetStripeReadState(read_state, first_stripe)) {
+            state.status = bulk_copy_status::missing_start_stripe;
+        }
+
+        constexpr std::size_t fragment_bytes =
+            fragment_storage_units * sizeof(storage_unit);
+        while (state.status == bulk_copy_status::ok
+               && state.copied_fragments < num_fragments_) {
+            if ((state.copied_fragments & std::size_t{0x3ff}) == 0) {
+                CHECK_FOR_INTERRUPTS();
+            }
+
+            Datum values[1] = {0};
+            bool nulls[1] = {true};
+            std::uint64_t row_no = 0;
+            if (!BioseqColumnReadNextRow(
+                    read_state, values, nulls, &row_no)) {
+                state.status = bulk_copy_status::missing_fragment;
+                break;
+            }
+            if (row_no < state.expected_row) {
+                continue;
+            }
+            state.observed_row = row_no;
+            if (row_no != state.expected_row) {
+                state.status =
+                    bulk_copy_status::noncontiguous_fragment;
+                break;
+            }
+            if (nulls[0]) {
+                state.status = bulk_copy_status::null_fragment;
+                break;
+            }
+
+            pgseq_t* raw = reinterpret_cast<pgseq_t*>(
+                PG_DETOAST_DATUM(values[0]));
+            if (is_locator_stub(raw)) {
+                state.status = bulk_copy_status::stub_fragment;
+                break;
+            }
+            const std::size_t raw_total_bytes =
+                static_cast<std::size_t>(VARSIZE(raw));
+            if (raw_total_bytes < pgseq_t::header_bytes()) {
+                state.status =
+                    bulk_copy_status::payload_header_invalid;
+                break;
+            }
+            const std::size_t raw_payload_bytes =
+                raw_total_bytes - pgseq_t::header_bytes();
+            state.observed_payload_bytes = raw_payload_bytes;
+            if (raw_payload_bytes > fragment_bytes) {
+                state.status = bulk_copy_status::payload_too_large;
+                break;
+            }
+
+            const std::size_t destination_offset =
+                state.copied_fragments * fragment_bytes;
+            if (destination_offset > state.destination_bytes) {
+                state.status =
+                    bulk_copy_status::destination_geometry_invalid;
+                break;
+            }
+            const std::size_t remaining_bytes =
+                state.destination_bytes - destination_offset;
+            const std::size_t copy_bytes =
+                std::min(raw_payload_bytes, remaining_bytes);
+            if (copy_bytes != 0) {
+                std::memcpy(
+                    reinterpret_cast<std::byte*>(state.destination)
+                        + destination_offset,
+                    raw->data,
+                    copy_bytes);
+            }
+            ++state.copied_fragments;
+            ++state.expected_row;
+        }
+
+        BioseqColumnEndRead(read_state);
+        MemoryContextSwitchTo(previous);
+    });
+
+    if (state.status != bulk_copy_status::ok
+        || state.copied_fragments != num_fragments_) {
+        bioseq::pg_utils::invoke_pg_as_cpp([this, &state] {
+            const char* reason = "unknown";
+            switch (state.status) {
+                case bulk_copy_status::ok:
+                    reason = "incomplete fragment sequence";
+                    break;
+                case bulk_copy_status::missing_start_stripe:
+                    reason = "missing start stripe";
+                    break;
+                case bulk_copy_status::missing_fragment:
+                    reason = "missing fragment";
+                    break;
+                case bulk_copy_status::noncontiguous_fragment:
+                    reason = "non-contiguous fragment row";
+                    break;
+                case bulk_copy_status::null_fragment:
+                    reason = "NULL fragment";
+                    break;
+                case bulk_copy_status::stub_fragment:
+                    reason = "fragment row is a locator stub";
+                    break;
+                case bulk_copy_status::payload_header_invalid:
+                    reason = "fragment payload is shorter than the sequence header";
+                    break;
+                case bulk_copy_status::payload_too_large:
+                    reason = "fragment payload exceeds fixed fragment size";
+                    break;
+                case bulk_copy_status::destination_geometry_invalid:
+                    reason = "fragment locator exceeds resident destination geometry";
+                    break;
+            }
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("sequence_scanner_pg bulk resident copy failed"),
+                 errdetail(
+                    "reason=%s expected_row=%llu observed_row=%llu "
+                    "copied_fragments=%zu expected_fragments=%zu "
+                    "payload_bytes=%zu",
+                    reason,
+                    static_cast<unsigned long long>(state.expected_row),
+                    static_cast<unsigned long long>(state.observed_row),
+                    state.copied_fragments,
+                    num_fragments_,
+                    state.observed_payload_bytes)));
+        });
+    }
+    poisoned_ = false;
 }
 
 template <class StdcInstance>

@@ -110,7 +110,32 @@ enum class ShaderKind : std::uint8_t {
     // Rank-buffer SneakySnake prefilter. Appended to preserve every existing
     // ShaderKind cache ordinal.
     sneaky_snake_rank_batch,
+    // Rank-buffer GateKeeper threshold prefilter. Appended to preserve every
+    // established ShaderKind cache ordinal.
+    gatekeeper_rank_batch,
+    // Compile-time production geometries. The generic kind above remains the
+    // direct L<=128/E<=8 fallback; these appended ordinals remove its fixed-DP
+    // and cross-geometry register footprint from homogeneous small-seed runs.
+    gatekeeper_rank_batch_l32_e2,
+    gatekeeper_rank_batch_l32_e4,
+    gatekeeper_rank_batch_l64_e2,
+    gatekeeper_rank_batch_l64_e4,
 };
+
+[[nodiscard]] inline constexpr bool is_gatekeeper_rank_batch_kind(
+    ShaderKind kind) noexcept
+{
+    switch (kind) {
+        case ShaderKind::gatekeeper_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch_l32_e2:
+        case ShaderKind::gatekeeper_rank_batch_l32_e4:
+        case ShaderKind::gatekeeper_rank_batch_l64_e2:
+        case ShaderKind::gatekeeper_rank_batch_l64_e4:
+            return true;
+        default:
+            return false;
+    }
+}
 
 /// The descriptor-set layout each shader needs. The runtime keeps one cached
 /// layout per kind (DOC0307 §4.5).
@@ -242,7 +267,13 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return DescriptorLayoutKind::seq_sort;
         case ShaderKind::align_extend_banded_affine:  return DescriptorLayoutKind::align_extension;
         case ShaderKind::align_extend_simple_cigar:   return DescriptorLayoutKind::align_extension_cigar;
-        case ShaderKind::sneaky_snake_rank_batch:     return DescriptorLayoutKind::align_extension;
+        case ShaderKind::sneaky_snake_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch_l32_e2:
+        case ShaderKind::gatekeeper_rank_batch_l32_e4:
+        case ShaderKind::gatekeeper_rank_batch_l64_e2:
+        case ShaderKind::gatekeeper_rank_batch_l64_e4:
+            return DescriptorLayoutKind::align_extension;
     }
     return DescriptorLayoutKind::chain_tiled_dp;
 }
@@ -313,7 +344,13 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return 40;  // SeqSortPush (10 × u32)
         case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
         case ShaderKind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
-        case ShaderKind::sneaky_snake_rank_batch:     return 4;   // GpuSneakySnakePush
+        case ShaderKind::sneaky_snake_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch:
+        case ShaderKind::gatekeeper_rank_batch_l32_e2:
+        case ShaderKind::gatekeeper_rank_batch_l32_e4:
+        case ShaderKind::gatekeeper_rank_batch_l64_e2:
+        case ShaderKind::gatekeeper_rank_batch_l64_e4:
+            return 16;  // GpuPrefilterPush
     }
     return 0;
 }
@@ -5282,19 +5319,18 @@ void main() {
 }
 )GLSL";
 
-/// Rank-buffer SneakySnake lower-bound filter. One invocation owns one job and
-/// grid-strides over the batch. Equal-length inputs are evaluated in bounded
-/// MAX_SPAN-symbol submazes; unequal and unsupported valid shapes are retained
-/// conservatively without subgroup collectives or atomics.
-constexpr std::string_view kSneakySnakeRankBatchBody = R"GLSL(
+/// Shared rank-prefilter GLSL ABI. Both algorithms consume byte-rank streams,
+/// the canonical 20-byte job/16-byte result records, and the same bounds-aware
+/// 16-byte push block. Every load helper checks the exact logical byte count;
+/// algorithm bodies still reject a malformed job before making any load.
+constexpr std::string_view kRankPrefilterPreamble = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
-const uint MAX_SUPPORTED_EDITS = 31u;
 const uint STATUS_OK = 0u;
 const uint STATUS_LENGTH_DIFFERENCE_ONLY = 1u;
 const uint STATUS_UNSUPPORTED = 2u;
 
-struct SneakySnakeJob {
+struct PrefilterJob {
     uint query_offset;
     uint target_offset;
     uint query_length;
@@ -5302,7 +5338,7 @@ struct SneakySnakeJob {
     uint max_edits;
 };
 
-struct SneakySnakeResult {
+struct PrefilterResult {
     uint lower_bound;
     uint status;
     uint accepted;
@@ -5310,42 +5346,174 @@ struct SneakySnakeResult {
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer QueryRanks {
-    uint query_ranks[];
+    uint query_rank_words[];
 };
 layout(std430, set = 0, binding = 1) readonly buffer TargetRanks {
-    uint target_ranks[];
+    uint target_rank_words[];
 };
 layout(std430, set = 0, binding = 2) readonly buffer Jobs {
-    SneakySnakeJob jobs[];
+    PrefilterJob jobs[];
 };
 layout(std430, set = 0, binding = 3) buffer Results {
-    SneakySnakeResult results[];
+    PrefilterResult results[];
 };
 
 layout(push_constant) uniform Params {
     uint job_count;
+    uint mode;
+    uint query_rank_count;
+    uint target_rank_count;
 } pc;
 
-uint matching_run(
-    SneakySnakeJob job,
-    uint position,
-    uint submaze_end,
-    int diagonal)
-{
-    int64_t query_position = int64_t(position) + int64_t(diagonal);
-    if (query_position < 0
-        || query_position >= int64_t(job.query_length)) {
+bool rank_slice_is_in_bounds(uint offset, uint length, uint rank_count) {
+    return offset <= rank_count && length <= rank_count - offset;
+}
+
+bool prefilter_job_is_in_bounds(PrefilterJob job) {
+    return rank_slice_is_in_bounds(
+               job.query_offset, job.query_length, pc.query_rank_count)
+        && rank_slice_is_in_bounds(
+               job.target_offset, job.target_length, pc.target_rank_count);
+}
+
+uint query_rank(uint rank_index) {
+    if (rank_index >= pc.query_rank_count) return 0u;
+    uint word = query_rank_words[rank_index >> 2u];
+    return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
+}
+
+uint target_rank(uint rank_index) {
+    if (rank_index >= pc.target_rank_count) return 0u;
+    uint word = target_rank_words[rank_index >> 2u];
+    return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
+}
+
+// These unchecked readers are only used after prefilter_job_is_in_bounds has
+// accepted the complete slice and an algorithm has proved its relative index
+// is inside that slice. Keeping that proof at the job boundary avoids repeating
+// four push-constant comparisons for every byte/quad in short hot kernels.
+uint query_rank_unchecked(uint rank_index) {
+    uint word = query_rank_words[rank_index >> 2u];
+    return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
+}
+
+uint target_rank_unchecked(uint rank_index) {
+    uint word = target_rank_words[rank_index >> 2u];
+    return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
+}
+
+uint query_rank_quad_unchecked(uint rank_index) {
+    uint word_index = rank_index >> 2u;
+    uint bit_offset = (rank_index & 3u) << 3u;
+    uint word = query_rank_words[word_index] >> bit_offset;
+    if (bit_offset != 0u) {
+        word |= query_rank_words[word_index + 1u] << (32u - bit_offset);
+    }
+    return word;
+}
+
+uint target_rank_quad_unchecked(uint rank_index) {
+    uint word_index = rank_index >> 2u;
+    uint bit_offset = (rank_index & 3u) << 3u;
+    uint word = target_rank_words[word_index] >> bit_offset;
+    if (bit_offset != 0u) {
+        word |= target_rank_words[word_index + 1u] << (32u - bit_offset);
+    }
+    return word;
+}
+
+uint query_rank_quad(uint rank_index) {
+    if (rank_index > pc.query_rank_count
+        || 4u > pc.query_rank_count - rank_index) {
         return 0u;
     }
+    uint word_index = rank_index >> 2u;
+    uint bit_offset = (rank_index & 3u) << 3u;
+    uint word = query_rank_words[word_index] >> bit_offset;
+    if (bit_offset != 0u) {
+        word |= query_rank_words[word_index + 1u] << (32u - bit_offset);
+    }
+    return word;
+}
 
-    uint query_cursor = uint(query_position);
+uint target_rank_quad(uint rank_index) {
+    if (rank_index > pc.target_rank_count
+        || 4u > pc.target_rank_count - rank_index) {
+        return 0u;
+    }
+    uint word_index = rank_index >> 2u;
+    uint bit_offset = (rank_index & 3u) << 3u;
+    uint word = target_rank_words[word_index] >> bit_offset;
+    if (bit_offset != 0u) {
+        word |= target_rank_words[word_index + 1u] << (32u - bit_offset);
+    }
+    return word;
+}
+
+void write_prefilter_result(
+    uint job_index,
+    uint lower_bound,
+    uint status,
+    bool accepted,
+    uint diagnostic)
+{
+    results[job_index].lower_bound = lower_bound;
+    results[job_index].status = status;
+    results[job_index].accepted = accepted ? 1u : 0u;
+    results[job_index].reserved = diagnostic;
+}
+)GLSL";
+
+/// Rank-buffer SneakySnake lower-bound filter. A uniform push-constant mode
+/// keeps low-edit batches on independent scalar invocations and assigns high-
+/// edit batches to fixed eight-lane logical teams. Equal-length inputs use
+/// bounded MAX_SPAN-symbol submazes; unequal and unsupported shapes remain
+/// conservative. Team-mode barriers are uniform and the implementation has no
+/// subgroup-size assumption or atomics.
+constexpr std::string_view kSneakySnakeRankBatchBody = R"GLSL(
+const uint MAX_SUPPORTED_EDITS = 31u;
+const uint TEAM_SIZE = 8u;
+const uint TEAM_COUNT = LOCAL_SIZE_X / TEAM_SIZE;
+shared PrefilterJob sh_job[TEAM_COUNT];
+shared uint sh_position[TEAM_COUNT];
+shared uint sh_submaze_end[TEAM_COUNT];
+shared uint sh_escape_round[TEAM_COUNT];
+shared uint sh_lower_bound[TEAM_COUNT];
+shared uint sh_active[TEAM_COUNT];
+shared uint sh_lane_best[LOCAL_SIZE_X];
+shared uint sh_any_active;
+
+uint matching_run(
+    PrefilterJob job,
+    uint position,
+    uint submaze_end,
+    uint query_cursor)
+{
     uint run_limit = min(
         submaze_end - position,
         job.query_length - query_cursor);
     uint run = 0u;
+    uint target_start = job.target_offset + position;
+    uint query_start = job.query_offset + query_cursor;
+    while (run < run_limit && ((target_start + run) & 3u) != 0u) {
+        if (target_rank(target_start + run)
+            != query_rank(query_start + run)) {
+            return run;
+        }
+        ++run;
+    }
+    while (run_limit - run >= 4u) {
+        uint query_word = query_rank_quad(query_start + run);
+        uint target_word = target_rank_words[(target_start + run) >> 2u];
+        uint different = query_word ^ target_word;
+        if (different != 0u) {
+            return run + (uint(findLSB(different)) >> 3u);
+        }
+        run += 4u;
+    }
     while (run < run_limit) {
-        if (target_ranks[job.target_offset + position + run]
-            != query_ranks[job.query_offset + query_cursor + run]) {
+        if (target_rank(target_start + run)
+            != query_rank(query_start + run)) {
             break;
         }
         ++run;
@@ -5359,15 +5527,14 @@ void write_result(
     uint status,
     bool accepted)
 {
-    results[job_index].lower_bound = lower_bound;
-    results[job_index].status = status;
-    results[job_index].accepted = accepted ? 1u : 0u;
-    results[job_index].reserved = 0u;
+    write_prefilter_result(
+        job_index, lower_bound, status, accepted, 0u);
 }
 
-void solve_job(uint job_index) {
-    SneakySnakeJob job = jobs[job_index];
-    if (job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
+void solve_job_scalar(uint job_index) {
+    PrefilterJob job = jobs[job_index];
+    if (!prefilter_job_is_in_bounds(job)
+        || job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
         write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
         return;
     }
@@ -5387,35 +5554,38 @@ void solve_job(uint job_index) {
     uint lower_bound = 0u;
     uint submaze_begin = 0u;
     while (submaze_begin < job.query_length) {
-        uint remaining = job.query_length - submaze_begin;
-        uint submaze_length = min(uint(MAX_SPAN), remaining);
-        uint submaze_end = submaze_begin + submaze_length;
+        uint submaze_end = submaze_begin + min(
+            uint(MAX_SPAN), job.query_length - submaze_begin);
         uint position = submaze_begin;
         uint escape_round = 0u;
 
         while (position < submaze_end && escape_round < uint(MAX_SPAN)) {
             uint remaining_in_submaze = submaze_end - position;
             uint best_run = matching_run(
-                job, position, submaze_end, 0);
+                job, position, submaze_end, position);
             uint max_shift = min(job.max_edits, job.query_length);
             for (uint shift = 1u;
                  shift <= max_shift && best_run < remaining_in_submaze;
                  ++shift) {
-                best_run = max(
-                    best_run,
-                    matching_run(
-                        job,
-                        position,
-                        submaze_end,
-                        -int(shift)));
+                if (shift <= position) {
+                    best_run = max(
+                        best_run,
+                        matching_run(
+                            job,
+                            position,
+                            submaze_end,
+                            position - shift));
+                }
                 if (best_run == remaining_in_submaze) break;
-                best_run = max(
-                    best_run,
-                    matching_run(
-                        job,
-                        position,
-                        submaze_end,
-                        int(shift)));
+                if (shift < job.query_length - position) {
+                    best_run = max(
+                        best_run,
+                        matching_run(
+                            job,
+                            position,
+                            submaze_end,
+                            position + shift));
+                }
             }
 
             if (best_run == remaining_in_submaze) {
@@ -5438,13 +5608,1104 @@ void solve_job(uint job_index) {
 }
 
 void main() {
+    if (pc.mode != TEAM_SIZE) {
+        uint64_t stride = uint64_t(gl_NumWorkGroups.x)
+            * uint64_t(gl_WorkGroupSize.x);
+        if (stride == uint64_t(0)) return;
+        for (uint64_t job_index = uint64_t(gl_GlobalInvocationID.x);
+             job_index < uint64_t(pc.job_count);
+             job_index += stride) {
+            solve_job_scalar(uint(job_index));
+        }
+        return;
+    }
+
+    uint lane = gl_LocalInvocationID.x;
+    uint team = lane / TEAM_SIZE;
+    uint team_lane = lane & (TEAM_SIZE - 1u);
+    uint64_t block_stride = uint64_t(gl_NumWorkGroups.x)
+        * uint64_t(TEAM_COUNT);
+    if (block_stride == uint64_t(0)) return;
+
+    for (uint64_t block = uint64_t(gl_WorkGroupID.x)
+             * uint64_t(TEAM_COUNT);
+         block < uint64_t(pc.job_count);
+         block += block_stride) {
+        uint64_t job_wide = block + uint64_t(team);
+        bool team_has_job = job_wide < uint64_t(pc.job_count);
+        uint job_index = uint(job_wide);
+
+        if (team_lane == 0u) {
+            sh_active[team] = 0u;
+            if (team_has_job) {
+                PrefilterJob job = jobs[job_index];
+                sh_job[team] = job;
+                if (!prefilter_job_is_in_bounds(job)
+                    || job.max_edits > MAX_SUPPORTED_EDITS
+                    || MAX_SPAN == 0) {
+                    write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
+                } else if (job.query_length != job.target_length) {
+                    uint length_difference = job.query_length > job.target_length
+                        ? job.query_length - job.target_length
+                        : job.target_length - job.query_length;
+                    write_result(
+                        job_index,
+                        length_difference,
+                        STATUS_LENGTH_DIFFERENCE_ONLY,
+                        length_difference <= job.max_edits);
+                } else if (job.query_length == 0u) {
+                    write_result(job_index, 0u, STATUS_OK, true);
+                } else {
+                    sh_position[team] = 0u;
+                    sh_submaze_end[team] = min(
+                        uint(MAX_SPAN), job.query_length);
+                    sh_escape_round[team] = 0u;
+                    sh_lower_bound[team] = 0u;
+                    sh_active[team] = 1u;
+                }
+            }
+        }
+        barrier();
+
+        while (true) {
+            if (lane == 0u) {
+                sh_any_active = 0u;
+                for (uint slot = 0u; slot < TEAM_COUNT; ++slot) {
+                    sh_any_active |= sh_active[slot];
+                }
+            }
+            barrier();
+            if (sh_any_active == 0u) break;
+
+            uint local_best = 0u;
+            if (sh_active[team] != 0u) {
+                PrefilterJob job = sh_job[team];
+                uint position = sh_position[team];
+                uint submaze_end = sh_submaze_end[team];
+                uint diagonal_count = 2u * job.max_edits + 1u;
+                for (uint ordinal = team_lane;
+                     ordinal < diagonal_count;
+                     ordinal += TEAM_SIZE) {
+                    uint query_cursor = position;
+                    bool valid = true;
+                    if (ordinal != 0u) {
+                        uint shift = (ordinal + 1u) >> 1u;
+                        bool before = (ordinal & 1u) != 0u;
+                        if (before) {
+                            if (shift > position) {
+                                valid = false;
+                            } else {
+                                query_cursor = position - shift;
+                            }
+                        } else {
+                            if (shift >= job.query_length - position) {
+                                valid = false;
+                            } else {
+                                query_cursor = position + shift;
+                            }
+                        }
+                    }
+                    if (valid) {
+                        local_best = max(
+                            local_best,
+                            matching_run(
+                                job,
+                                position,
+                                submaze_end,
+                                query_cursor));
+                    }
+                }
+            }
+            sh_lane_best[lane] = local_best;
+            barrier();
+
+            if (team_lane == 0u && sh_active[team] != 0u) {
+                uint best_run = 0u;
+                uint first_lane = team * TEAM_SIZE;
+                for (uint offset = 0u; offset < TEAM_SIZE; ++offset) {
+                    best_run = max(
+                        best_run,
+                        sh_lane_best[first_lane + offset]);
+                }
+
+                PrefilterJob job = sh_job[team];
+                uint position = sh_position[team];
+                uint submaze_end = sh_submaze_end[team];
+                uint remaining_in_submaze = submaze_end - position;
+                if (best_run == remaining_in_submaze) {
+                    sh_position[team] = submaze_end;
+                } else {
+                    uint lower_bound = sh_lower_bound[team] + 1u;
+                    sh_lower_bound[team] = lower_bound;
+                    if (lower_bound > job.max_edits) {
+                        write_result(
+                            job_index, lower_bound, STATUS_OK, false);
+                        sh_active[team] = 0u;
+                    } else {
+                        sh_position[team] = position + best_run + 1u;
+                        sh_escape_round[team] += 1u;
+                    }
+                }
+
+                if (sh_active[team] != 0u
+                    && (sh_position[team] >= submaze_end
+                        || sh_escape_round[team] >= uint(MAX_SPAN))) {
+                    uint next_begin = submaze_end;
+                    if (next_begin >= job.query_length) {
+                        write_result(
+                            job_index,
+                            sh_lower_bound[team],
+                            STATUS_OK,
+                            true);
+                        sh_active[team] = 0u;
+                    } else {
+                        sh_position[team] = next_begin;
+                        sh_submaze_end[team] = next_begin + min(
+                            uint(MAX_SPAN),
+                            job.query_length - next_begin);
+                        sh_escape_round[team] = 0u;
+                    }
+                }
+            }
+            barrier();
+        }
+    }
+}
+)GLSL";
+
+/// Clean-room GateKeeper threshold filter over caller-normalised rank bytes.
+/// One invocation owns one job. Mismatch masks stream through four uint words;
+/// a mask rejection is authoritative only after the exact fixed-band guard.
+constexpr std::string_view kGatekeeperRankBatchBody = R"GLSL(
+const uint MAX_GATEKEEPER_LENGTH = 128u;
+const uint MAX_GATEKEEPER_EDITS = 8u;
+const uint MASK_REJECTION_CANDIDATE_MASK = 0x00010000u;
+const uint EXACT_GUARD_ACTIVATED_MASK = 0x00020000u;
+const uint GUARD_CONFIRMED_REJECTION_MASK = 0x00040000u;
+const uint HAMMING_EXACT_REJECTION_MASK = 0x00080000u;
+
+uint packed_byte_mismatch_bits(uint difference) {
+    // Fold every byte independently to its low bit, then compact byte-low bits
+    // 0/8/16/24 into result bits 0/1/2/3. The largest cumulative right shift
+    // is seven, so a set bit never crosses a byte boundary while folding.
+    difference |= difference >> 4u;
+    difference |= difference >> 2u;
+    difference |= difference >> 1u;
+    uint byte_low_bits = difference & 0x01010101u;
+    return (byte_low_bits & 0x1u)
+        | ((byte_low_bits >> 7u) & 0x2u)
+        | ((byte_low_bits >> 14u) & 0x4u)
+        | ((byte_low_bits >> 21u) & 0x8u);
+}
+
+void set_mask_bit(inout uvec4 mask, uint position) {
+    mask[position >> 5u] |= 1u << (position & 31u);
+}
+
+void append_mismatch_quad(
+    inout uvec4 mask,
+    uint output_position,
+    uint mismatch_bits)
+{
+    uint word_index = output_position >> 5u;
+    uint word_shift = output_position & 31u;
+    mask[word_index] |= mismatch_bits << word_shift;
+    if (word_shift > 28u && word_index + 1u < 4u) {
+        mask[word_index + 1u] |= mismatch_bits >> (32u - word_shift);
+    }
+}
+
+uvec4 mismatch_mask_segment(
+    PrefilterJob job,
+    uint query_relative,
+    uint target_relative,
+    uint count,
+    uint output_position)
+{
+    uvec4 mask = uvec4(0u);
+    uint position = 0u;
+    while (count - position >= 4u) {
+        uint query_word = query_rank_quad_unchecked(
+            job.query_offset + query_relative + position);
+        uint target_word = target_rank_quad_unchecked(
+            job.target_offset + target_relative + position);
+        append_mismatch_quad(
+            mask,
+            output_position + position,
+            packed_byte_mismatch_bits(query_word ^ target_word));
+        position += 4u;
+    }
+    while (position < count) {
+        if (query_rank_unchecked(
+                job.query_offset + query_relative + position)
+            != target_rank_unchecked(
+                job.target_offset + target_relative + position)) {
+            set_mask_bit(mask, output_position + position);
+        }
+        ++position;
+    }
+    return mask;
+}
+
+// Aligned production jobs load each rank word exactly once. Diagonal masks are
+// then formed from register-resident packed bytes in four-word vectors. This
+// replaces 5/9 complete SSBO rereads for E2/E4 with 16/32 total scalar loads.
+// Unaligned direct-API jobs retain the generic bounds-aware path below.
+struct PackedRanks32 {
+    uvec4 first;
+    uvec4 second;
+};
+
+struct PackedRanks64 {
+    uvec4 first;
+    uvec4 second;
+    uvec4 third;
+    uvec4 fourth;
+};
+
+// Raw (unamended, boundary-free) mismatch masks indexed by exact wavefront
+// diagonal k=query_position-target_position. L32 uses only the low component.
+struct ExactDiagonalMasks {
+    uvec2 negative_two;
+    uvec2 negative_one;
+    uvec2 zero;
+    uvec2 positive_one;
+    uvec2 positive_two;
+};
+
+uvec4 compact_mismatch_nibbles(uvec4 difference) {
+    difference |= difference >> 4u;
+    difference |= difference >> 2u;
+    difference |= difference >> 1u;
+    uvec4 byte_low_bits = difference & uvec4(0x01010101u);
+    return (byte_low_bits & uvec4(0x1u))
+        | ((byte_low_bits >> 7u) & uvec4(0x2u))
+        | ((byte_low_bits >> 14u) & uvec4(0x4u))
+        | ((byte_low_bits >> 21u) & uvec4(0x8u));
+}
+
+uint pack_mismatch_nibbles(uvec4 nibbles) {
+    return nibbles.x | (nibbles.y << 4u)
+        | (nibbles.z << 8u) | (nibbles.w << 12u);
+}
+
+PackedRanks32 load_query_ranks_32(PrefilterJob job) {
+    uint base = job.query_offset >> 2u;
+    PackedRanks32 ranks;
+    ranks.first = uvec4(
+        query_rank_words[base], query_rank_words[base + 1u],
+        query_rank_words[base + 2u], query_rank_words[base + 3u]);
+    ranks.second = uvec4(
+        query_rank_words[base + 4u], query_rank_words[base + 5u],
+        query_rank_words[base + 6u], query_rank_words[base + 7u]);
+    return ranks;
+}
+
+PackedRanks32 load_target_ranks_32(PrefilterJob job) {
+    uint base = job.target_offset >> 2u;
+    PackedRanks32 ranks;
+    ranks.first = uvec4(
+        target_rank_words[base], target_rank_words[base + 1u],
+        target_rank_words[base + 2u], target_rank_words[base + 3u]);
+    ranks.second = uvec4(
+        target_rank_words[base + 4u], target_rank_words[base + 5u],
+        target_rank_words[base + 6u], target_rank_words[base + 7u]);
+    return ranks;
+}
+
+PackedRanks64 load_query_ranks_64(PrefilterJob job) {
+    uint base = job.query_offset >> 2u;
+    PackedRanks64 ranks;
+    ranks.first = uvec4(
+        query_rank_words[base], query_rank_words[base + 1u],
+        query_rank_words[base + 2u], query_rank_words[base + 3u]);
+    ranks.second = uvec4(
+        query_rank_words[base + 4u], query_rank_words[base + 5u],
+        query_rank_words[base + 6u], query_rank_words[base + 7u]);
+    ranks.third = uvec4(
+        query_rank_words[base + 8u], query_rank_words[base + 9u],
+        query_rank_words[base + 10u], query_rank_words[base + 11u]);
+    ranks.fourth = uvec4(
+        query_rank_words[base + 12u], query_rank_words[base + 13u],
+        query_rank_words[base + 14u], query_rank_words[base + 15u]);
+    return ranks;
+}
+
+PackedRanks64 load_target_ranks_64(PrefilterJob job) {
+    uint base = job.target_offset >> 2u;
+    PackedRanks64 ranks;
+    ranks.first = uvec4(
+        target_rank_words[base], target_rank_words[base + 1u],
+        target_rank_words[base + 2u], target_rank_words[base + 3u]);
+    ranks.second = uvec4(
+        target_rank_words[base + 4u], target_rank_words[base + 5u],
+        target_rank_words[base + 6u], target_rank_words[base + 7u]);
+    ranks.third = uvec4(
+        target_rank_words[base + 8u], target_rank_words[base + 9u],
+        target_rank_words[base + 10u], target_rank_words[base + 11u]);
+    ranks.fourth = uvec4(
+        target_rank_words[base + 12u], target_rank_words[base + 13u],
+        target_rank_words[base + 14u], target_rank_words[base + 15u]);
+    return ranks;
+}
+
+PackedRanks32 shift_rank_bytes_32(PackedRanks32 ranks, uint shift) {
+    PackedRanks32 next_words;
+    next_words.first = uvec4(
+        ranks.first.y, ranks.first.z, ranks.first.w, ranks.second.x);
+    next_words.second = uvec4(
+        ranks.second.y, ranks.second.z, ranks.second.w, 0u);
+    if (shift == 4u) return next_words;
+    uint bits = shift << 3u;
+    PackedRanks32 shifted;
+    shifted.first = (ranks.first >> bits)
+        | (next_words.first << (32u - bits));
+    shifted.second = (ranks.second >> bits)
+        | (next_words.second << (32u - bits));
+    return shifted;
+}
+
+PackedRanks64 shift_rank_bytes_64(PackedRanks64 ranks, uint shift) {
+    PackedRanks64 next_words;
+    next_words.first = uvec4(
+        ranks.first.y, ranks.first.z, ranks.first.w, ranks.second.x);
+    next_words.second = uvec4(
+        ranks.second.y, ranks.second.z, ranks.second.w, ranks.third.x);
+    next_words.third = uvec4(
+        ranks.third.y, ranks.third.z, ranks.third.w, ranks.fourth.x);
+    next_words.fourth = uvec4(
+        ranks.fourth.y, ranks.fourth.z, ranks.fourth.w, 0u);
+    if (shift == 4u) return next_words;
+    uint bits = shift << 3u;
+    PackedRanks64 shifted;
+    shifted.first = (ranks.first >> bits)
+        | (next_words.first << (32u - bits));
+    shifted.second = (ranks.second >> bits)
+        | (next_words.second << (32u - bits));
+    shifted.third = (ranks.third >> bits)
+        | (next_words.third << (32u - bits));
+    shifted.fourth = (ranks.fourth >> bits)
+        | (next_words.fourth << (32u - bits));
+    return shifted;
+}
+
+uint mismatch_mask_32(PackedRanks32 query, PackedRanks32 target) {
+    uvec4 first = compact_mismatch_nibbles(query.first ^ target.first);
+    uvec4 second = compact_mismatch_nibbles(query.second ^ target.second);
+    return pack_mismatch_nibbles(first)
+        | (pack_mismatch_nibbles(second) << 16u);
+}
+
+uvec2 mismatch_mask_64(PackedRanks64 query, PackedRanks64 target) {
+    uvec4 first = compact_mismatch_nibbles(query.first ^ target.first);
+    uvec4 second = compact_mismatch_nibbles(query.second ^ target.second);
+    uvec4 third = compact_mismatch_nibbles(query.third ^ target.third);
+    uvec4 fourth = compact_mismatch_nibbles(query.fourth ^ target.fourth);
+    return uvec2(
+        pack_mismatch_nibbles(first)
+            | (pack_mismatch_nibbles(second) << 16u),
+        pack_mismatch_nibbles(third)
+            | (pack_mismatch_nibbles(fourth) << 16u));
+}
+
+uvec2 shift_left_64(uvec2 value, uint shift);
+
+uint diagonal_mismatch_mask_32(
+    PackedRanks32 query,
+    PackedRanks32 target,
+    uint shift,
+    bool shift_target)
+{
+    uint mismatch = shift_target
+        ? mismatch_mask_32(query, shift_rank_bytes_32(target, shift))
+        : mismatch_mask_32(shift_rank_bytes_32(query, shift), target);
+    mismatch &= 0xffffffffu >> shift;
+    return shift_target ? mismatch << shift : mismatch;
+}
+
+uvec2 diagonal_mismatch_mask_64(
+    PackedRanks64 query,
+    PackedRanks64 target,
+    uint shift,
+    bool shift_target)
+{
+    uvec2 mismatch = shift_target
+        ? mismatch_mask_64(query, shift_rank_bytes_64(target, shift))
+        : mismatch_mask_64(shift_rank_bytes_64(query, shift), target);
+    mismatch.y &= 0xffffffffu >> shift;
+    return shift_target ? shift_left_64(mismatch, shift) : mismatch;
+}
+
+void set_mask_bit_64(inout uvec2 mask, uint position) {
+    if (position < 32u) {
+        mask.x |= 1u << position;
+    } else {
+        mask.y |= 1u << (position - 32u);
+    }
+}
+
+uint amend_internal_short_zero_runs_32(uint mismatch) {
+    uint left_one = mismatch << 1u;
+    uint right_one = mismatch >> 1u;
+    uint right_two = mismatch >> 2u;
+    uint single = (~mismatch) & left_one & right_one;
+    uint pair_start = (~mismatch) & (~right_one) & left_one & right_two;
+    return mismatch | single | pair_start | (pair_start << 1u);
+}
+
+uvec2 shift_left_64(uvec2 value, uint shift) {
+    return uvec2(
+        value.x << shift,
+        (value.y << shift) | (value.x >> (32u - shift)));
+}
+
+uvec2 shift_right_64(uvec2 value, uint shift) {
+    return uvec2(
+        (value.x >> shift) | (value.y << (32u - shift)),
+        value.y >> shift);
+}
+
+uvec2 amend_internal_short_zero_runs_64(uvec2 mismatch) {
+    uvec2 left_one = shift_left_64(mismatch, 1u);
+    uvec2 right_one = shift_right_64(mismatch, 1u);
+    uvec2 right_two = shift_right_64(mismatch, 2u);
+    uvec2 single = (~mismatch) & left_one & right_one;
+    uvec2 pair_start = (~mismatch) & (~right_one) & left_one & right_two;
+    return mismatch | single | pair_start | shift_left_64(pair_start, 1u);
+}
+
+void intersect_shift_32(
+    PackedRanks32 query,
+    PackedRanks32 target,
+    uint shift,
+    out uint negative_raw,
+    out uint positive_raw,
+    inout uint final_mask)
+{
+    negative_raw = diagonal_mismatch_mask_32(
+        query, target, shift, true);
+    uint shifted_mask = amend_internal_short_zero_runs_32(negative_raw);
+    shifted_mask |= 1u << (shift - 1u);
+    final_mask &= shifted_mask;
+
+    positive_raw = diagonal_mismatch_mask_32(
+        query, target, shift, false);
+    shifted_mask = amend_internal_short_zero_runs_32(positive_raw);
+    shifted_mask |= 1u << (32u - shift);
+    final_mask &= shifted_mask;
+}
+
+void intersect_shift_64(
+    PackedRanks64 query,
+    PackedRanks64 target,
+    uint shift,
+    out uvec2 negative_raw,
+    out uvec2 positive_raw,
+    inout uvec2 final_mask)
+{
+    negative_raw = diagonal_mismatch_mask_64(
+        query, target, shift, true);
+    uvec2 shifted_mask = amend_internal_short_zero_runs_64(negative_raw);
+    set_mask_bit_64(shifted_mask, shift - 1u);
+    final_mask &= shifted_mask;
+
+    positive_raw = diagonal_mismatch_mask_64(
+        query, target, shift, false);
+    shifted_mask = amend_internal_short_zero_runs_64(positive_raw);
+    set_mask_bit_64(shifted_mask, 64u - shift);
+    final_mask &= shifted_mask;
+}
+
+uvec4 valid_mask(uint length) {
+    uvec4 mask = uvec4(0u);
+    uint full_words = length >> 5u;
+    uint tail_bits = length & 31u;
+    for (uint word_index = 0u; word_index < 4u; ++word_index) {
+        if (word_index < full_words) {
+            mask[word_index] = 0xffffffffu;
+        } else if (word_index == full_words && tail_bits != 0u) {
+            mask[word_index] = (1u << tail_bits) - 1u;
+        }
+    }
+    return mask;
+}
+
+uvec4 mask_shift_left(uvec4 value, uint shift) {
+    uvec4 shifted = uvec4(0u);
+    for (uint word_index = 0u; word_index < 4u; ++word_index) {
+        shifted[word_index] = value[word_index] << shift;
+        if (word_index != 0u) {
+            shifted[word_index] |= value[word_index - 1u] >> (32u - shift);
+        }
+    }
+    return shifted;
+}
+
+uvec4 mask_shift_right(uvec4 value, uint shift) {
+    uvec4 shifted = uvec4(0u);
+    for (uint word_index = 0u; word_index < 4u; ++word_index) {
+        shifted[word_index] = value[word_index] >> shift;
+        if (word_index + 1u < 4u) {
+            shifted[word_index] |= value[word_index + 1u] << (32u - shift);
+        }
+    }
+    return shifted;
+}
+
+uvec4 amend_internal_short_zero_runs(uvec4 mismatch, uint length) {
+    uvec4 left_one = mask_shift_left(mismatch, 1u);
+    uvec4 right_one = mask_shift_right(mismatch, 1u);
+    uvec4 right_two = mask_shift_right(mismatch, 2u);
+    uvec4 single = (~mismatch) & left_one & right_one;
+    uvec4 pair_start = (~mismatch) & (~right_one) & left_one & right_two;
+    return (mismatch | single | pair_start
+            | mask_shift_left(pair_start, 1u))
+        & valid_mask(length);
+}
+
+uint mask_popcount(uvec4 mask) {
+    return uint(bitCount(mask.x) + bitCount(mask.y)
+        + bitCount(mask.z) + bitCount(mask.w));
+}
+
+uint nibble_cost(uint nibble) {
+    if (nibble == 0u) return 0u;
+    if (nibble == 0x5u || nibble == 0x6u || nibble == 0x9u
+        || nibble == 0xau || nibble == 0xbu || nibble == 0xdu) {
+        return 2u;
+    }
+    return 1u;
+}
+
+uint capped_word_estimate(
+    uint word,
+    uint estimate,
+    uint max_edits)
+{
+    for (uint nibble_index = 0u; nibble_index < 8u; ++nibble_index) {
+        estimate += nibble_cost(word & 0xfu);
+        if (estimate > max_edits) return max_edits + 1u;
+        word >>= 4u;
+    }
+    return estimate;
+}
+
+uint capped_mask_estimate_32(uint mask, uint max_edits) {
+    return capped_word_estimate(mask, 0u, max_edits);
+}
+
+uint capped_mask_estimate_64(uvec2 mask, uint max_edits) {
+    uint estimate = capped_word_estimate(mask.x, 0u, max_edits);
+    if (estimate > max_edits) return max_edits + 1u;
+    return capped_word_estimate(mask.y, estimate, max_edits);
+}
+
+uint gatekeeper_mask_estimate_32(
+    PrefilterJob job,
+    out uint hamming_distance,
+    out ExactDiagonalMasks exact_masks)
+{
+#ifdef GATEKEEPER_SPECIALIZED_EDITS
+    const uint active_max_edits = uint(GATEKEEPER_SPECIALIZED_EDITS);
+#else
+    uint active_max_edits = job.max_edits;
+#endif
+    PackedRanks32 query = load_query_ranks_32(job);
+    PackedRanks32 target = load_target_ranks_32(job);
+    uint hamming = mismatch_mask_32(query, target);
+    exact_masks.zero = uvec2(hamming, 0u);
+    hamming_distance = uint(bitCount(hamming));
+    if (hamming_distance <= active_max_edits) return hamming_distance;
+
+    uint final_mask = amend_internal_short_zero_runs_32(hamming);
+    uint negative_raw = 0u;
+    uint positive_raw = 0u;
+    intersect_shift_32(
+        query, target, 1u, negative_raw, positive_raw, final_mask);
+    exact_masks.negative_one = uvec2(negative_raw, 0u);
+    exact_masks.positive_one = uvec2(positive_raw, 0u);
+    intersect_shift_32(
+        query, target, 2u, negative_raw, positive_raw, final_mask);
+    exact_masks.negative_two = uvec2(negative_raw, 0u);
+    exact_masks.positive_two = uvec2(positive_raw, 0u);
+#ifdef GATEKEEPER_SPECIALIZED_EDITS
+#if GATEKEEPER_SPECIALIZED_EDITS == 4
+    intersect_shift_32(
+        query, target, 3u, negative_raw, positive_raw, final_mask);
+    intersect_shift_32(
+        query, target, 4u, negative_raw, positive_raw, final_mask);
+#endif
+#else
+    if (active_max_edits == 4u) {
+        intersect_shift_32(
+            query, target, 3u, negative_raw, positive_raw, final_mask);
+        intersect_shift_32(
+            query, target, 4u, negative_raw, positive_raw, final_mask);
+    }
+#endif
+    return capped_mask_estimate_32(final_mask, active_max_edits);
+}
+
+uint gatekeeper_mask_estimate_64(
+    PrefilterJob job,
+    out uint hamming_distance,
+    out ExactDiagonalMasks exact_masks)
+{
+#ifdef GATEKEEPER_SPECIALIZED_EDITS
+    const uint active_max_edits = uint(GATEKEEPER_SPECIALIZED_EDITS);
+#else
+    uint active_max_edits = job.max_edits;
+#endif
+    PackedRanks64 query = load_query_ranks_64(job);
+    PackedRanks64 target = load_target_ranks_64(job);
+    uvec2 hamming = mismatch_mask_64(query, target);
+    exact_masks.zero = hamming;
+    hamming_distance = uint(bitCount(hamming.x) + bitCount(hamming.y));
+    if (hamming_distance <= active_max_edits) return hamming_distance;
+
+    uvec2 final_mask = amend_internal_short_zero_runs_64(hamming);
+    uvec2 negative_raw = uvec2(0u);
+    uvec2 positive_raw = uvec2(0u);
+    intersect_shift_64(
+        query, target, 1u, negative_raw, positive_raw, final_mask);
+    exact_masks.negative_one = negative_raw;
+    exact_masks.positive_one = positive_raw;
+    intersect_shift_64(
+        query, target, 2u, negative_raw, positive_raw, final_mask);
+    exact_masks.negative_two = negative_raw;
+    exact_masks.positive_two = positive_raw;
+#ifdef GATEKEEPER_SPECIALIZED_EDITS
+#if GATEKEEPER_SPECIALIZED_EDITS == 4
+    intersect_shift_64(
+        query, target, 3u, negative_raw, positive_raw, final_mask);
+    intersect_shift_64(
+        query, target, 4u, negative_raw, positive_raw, final_mask);
+#endif
+#else
+    if (active_max_edits == 4u) {
+        intersect_shift_64(
+            query, target, 3u, negative_raw, positive_raw, final_mask);
+        intersect_shift_64(
+            query, target, 4u, negative_raw, positive_raw, final_mask);
+    }
+#endif
+    return capped_mask_estimate_64(final_mask, active_max_edits);
+}
+
+uint capped_mask_estimate(uvec4 mask, uint length, uint max_edits) {
+    uint estimate = 0u;
+    uint word_count = (length + 31u) >> 5u;
+    for (uint word_index = 0u; word_index < word_count; ++word_index) {
+        uint word = mask[word_index];
+        for (uint nibble_index = 0u; nibble_index < 8u; ++nibble_index) {
+            estimate += nibble_cost((word >> (4u * nibble_index)) & 0xfu);
+            if (estimate > max_edits) return max_edits + 1u;
+        }
+    }
+    return estimate;
+}
+
+#ifndef GATEKEEPER_SPECIALIZED_LENGTH
+uint saturated_increment(uint value, uint cap) {
+    return value >= cap ? cap : value + 1u;
+}
+#endif
+
+uvec2 exact_mask_for_diagonal(
+    ExactDiagonalMasks masks,
+    int diagonal)
+{
+    if (diagonal <= -2) return masks.negative_two;
+    if (diagonal == -1) return masks.negative_one;
+    if (diagonal == 0) return masks.zero;
+    if (diagonal == 1) return masks.positive_one;
+    return masks.positive_two;
+}
+
+uint mismatch_distance_from_target_position(
+    uvec2 mismatch,
+    uint target_position,
+    uint remaining)
+{
+    if (remaining == 0u || target_position >= 64u) return 0u;
+    if (target_position < 32u) {
+        uint low_suffix = mismatch.x >> target_position;
+        if (low_suffix != 0u) {
+            return min(remaining, uint(findLSB(low_suffix)));
+        }
+        uint high_distance = 32u - target_position;
+        if (mismatch.y != 0u) {
+            high_distance += uint(findLSB(mismatch.y));
+        } else {
+            high_distance = remaining;
+        }
+        return min(remaining, high_distance);
+    }
+    uint high_suffix = mismatch.y >> (target_position - 32u);
+    return high_suffix == 0u
+        ? remaining
+        : min(remaining, uint(findLSB(high_suffix)));
+}
+
+uint exact_matching_run_from_masks(
+    PrefilterJob job,
+    ExactDiagonalMasks masks,
+    uint query_position,
+    uint target_position)
+{
+    uint remaining = min(
+        job.query_length - query_position,
+        job.target_length - target_position);
+    int diagonal = int(query_position) - int(target_position);
+    return mismatch_distance_from_target_position(
+        exact_mask_for_diagonal(masks, diagonal),
+        target_position,
+        remaining);
+}
+
+int bounded_wavefront_position(
+    PrefilterJob job,
+    int diagonal,
+    int query_position)
+{
+    if (query_position < 0 || query_position > int(job.query_length)) {
+        return -1;
+    }
+    int target_position = query_position - diagonal;
+    if (target_position < 0 || target_position > int(job.target_length)) {
+        return -1;
+    }
+    return query_position;
+}
+
+int extend_wavefront_position(
+    PrefilterJob job,
+    ExactDiagonalMasks masks,
+    int diagonal,
+    int query_position)
+{
+    query_position = bounded_wavefront_position(
+        job, diagonal, query_position);
+    if (query_position < 0) return -1;
+    uint target_position = uint(query_position - diagonal);
+    return query_position + int(exact_matching_run_from_masks(
+        job, masks, uint(query_position), target_position));
+}
+
+// Advance one exact Levenshtein wavefront cell. Diagonal k is
+// query_position-target_position. The three predecessors are substitution on
+// k, query deletion on k-1, and target insertion on k+1. For one score layer,
+// the farthest valid query position dominates every shorter path on that same
+// diagonal before a packed exact-match extension.
+int next_wavefront_position(
+    PrefilterJob job,
+    ExactDiagonalMasks masks,
+    int diagonal,
+    int substitution,
+    int deletion,
+    int insertion)
+{
+    int best = -1;
+    if (substitution >= 0) {
+        best = max(best, bounded_wavefront_position(
+            job, diagonal, substitution + 1));
+    }
+    if (deletion >= 0) {
+        best = max(best, bounded_wavefront_position(
+            job, diagonal, deletion + 1));
+    }
+    if (insertion >= 0) {
+        best = max(best, bounded_wavefront_position(
+            job, diagonal, insertion));
+    }
+    return extend_wavefront_position(job, masks, diagonal, best);
+}
+
+// The production E2/E4 guard is an exact scalar-specialised wavefront. It has
+// no private arrays or dynamic diagonal indexing. Diagonals that cannot return
+// to the equal-length final diagonal with the remaining score are pruned, so
+// E2 evaluates four non-initial cells and E4 evaluates twelve. The generic API
+// retains the fixed-band DP
+// below for E1/E3/E5..E8.
+bool exact_edit_distance_e2_or_e4_is_above_threshold(
+    PrefilterJob job,
+    ExactDiagonalMasks masks)
+{
+    const int invalid = -1;
+    const int length = int(job.query_length);
+
+    int score0_0 = extend_wavefront_position(job, masks, 0, 0);
+    if (score0_0 >= length) return false;
+
+    int score1_m1 = next_wavefront_position(
+        job, masks, -1, invalid, invalid, score0_0);
+    int score1_0 = next_wavefront_position(
+        job, masks, 0, score0_0, invalid, invalid);
+    int score1_p1 = next_wavefront_position(
+        job, masks, 1, invalid, score0_0, invalid);
+    if (score1_0 >= length) return false;
+
+    int score2_0 = next_wavefront_position(
+        job, masks, 0, score1_0, score1_m1, score1_p1);
+#if defined(GATEKEEPER_SPECIALIZED_EDITS) \
+    && GATEKEEPER_SPECIALIZED_EDITS == 2
+    return score2_0 < length;
+#else
+    if (score2_0 >= length) return false;
+#ifndef GATEKEEPER_SPECIALIZED_EDITS
+    if (job.max_edits == 2u) {
+        return score2_0 < length;
+    }
+#endif
+
+    int score2_m2 = next_wavefront_position(
+        job, masks, -2, invalid, invalid, score1_m1);
+    int score2_m1 = next_wavefront_position(
+        job, masks, -1, score1_m1, invalid, score1_0);
+    int score2_p1 = next_wavefront_position(
+        job, masks, 1, score1_p1, score1_0, invalid);
+    int score2_p2 = next_wavefront_position(
+        job, masks, 2, invalid, score1_p1, invalid);
+    int score3_m1 = next_wavefront_position(
+        job, masks, -1, score2_m1, score2_m2, score2_0);
+    int score3_0 = next_wavefront_position(
+        job, masks, 0, score2_0, score2_m1, score2_p1);
+    int score3_p1 = next_wavefront_position(
+        job, masks, 1, score2_p1, score2_0, score2_p2);
+    if (score3_0 >= length) return false;
+
+    int score4_0 = next_wavefront_position(
+        job, masks, 0, score3_0, score3_m1, score3_p1);
+    return score4_0 < length;
+#endif
+}
+
+#ifndef GATEKEEPER_SPECIALIZED_LENGTH
+bool exact_edit_distance_is_above_threshold(PrefilterJob job) {
+    uint query_length = job.query_length;
+    uint target_length = job.target_length;
+    uint max_edits = job.max_edits;
+    uint length_difference = query_length > target_length
+        ? query_length - target_length
+        : target_length - query_length;
+    if (length_difference > max_edits) return true;
+    if (max_edits >= max(query_length, target_length)) return false;
+
+    uint cap = max_edits + 1u;
+    uint center = max_edits + 1u;
+    uint width = 2u * max_edits + 3u;
+    uint previous[19];
+    uint current[19];
+    for (uint slot = 0u; slot < 19u; ++slot) previous[slot] = cap;
+    for (uint column = 0u; column <= min(target_length, max_edits);
+         ++column) {
+        previous[center + column] = column;
+    }
+
+    for (uint row = 1u; row <= query_length; ++row) {
+        for (uint slot = 0u; slot < 19u; ++slot) current[slot] = cap;
+        uint column_begin = row > max_edits ? row - max_edits : 0u;
+        uint column_end = min(target_length, row + max_edits);
+        for (uint column = column_begin; column <= column_end; ++column) {
+            int diagonal = int(column) - int(row);
+            uint slot = uint(int(center) + diagonal);
+            if (column == 0u) {
+                current[slot] = min(row, cap);
+            } else {
+                uint deletion = saturated_increment(previous[slot + 1u], cap);
+                uint insertion = saturated_increment(current[slot - 1u], cap);
+                uint substitution = previous[slot];
+                if (query_rank(job.query_offset + row - 1u)
+                    != target_rank(job.target_offset + column - 1u)) {
+                    substitution = saturated_increment(substitution, cap);
+                }
+                current[slot] = min(deletion, min(insertion, substitution));
+            }
+        }
+        for (uint slot = 0u; slot < width; ++slot) {
+            previous[slot] = current[slot];
+        }
+    }
+
+    uint final_slot = uint(
+        int(center) + int(target_length) - int(query_length));
+    return previous[final_slot] > max_edits;
+}
+#endif
+
+#ifndef GATEKEEPER_SPECIALIZED_LENGTH
+void solve_gatekeeper_job(uint job_index) {
+    PrefilterJob job = jobs[job_index];
+    if (!prefilter_job_is_in_bounds(job)) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+        return;
+    }
+    if (job.query_length != job.target_length) {
+        uint length_difference = job.query_length > job.target_length
+            ? job.query_length - job.target_length
+            : job.target_length - job.query_length;
+        write_prefilter_result(
+            job_index,
+            length_difference,
+            STATUS_LENGTH_DIFFERENCE_ONLY,
+            length_difference <= job.max_edits,
+            0u);
+        return;
+    }
+    if (job.query_length == 0u) {
+        write_prefilter_result(job_index, 0u, STATUS_OK, true, 0u);
+        return;
+    }
+    if (pc.mode != 0u || uint(MAX_SPAN) != MAX_GATEKEEPER_LENGTH
+        || job.query_length > MAX_GATEKEEPER_LENGTH
+        || job.max_edits > MAX_GATEKEEPER_EDITS) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+        return;
+    }
+
+    uint length = job.query_length;
+    uvec4 hamming = mismatch_mask_segment(job, 0u, 0u, length, 0u)
+        & valid_mask(length);
+    uint hamming_distance = mask_popcount(hamming);
+    if (hamming_distance <= job.max_edits) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_OK, true, hamming_distance);
+        return;
+    }
+    if (job.max_edits == 0u) {
+        write_prefilter_result(
+            job_index,
+            1u,
+            STATUS_OK,
+            false,
+            1u | HAMMING_EXACT_REJECTION_MASK);
+        return;
+    }
+
+    uvec4 final_mask = amend_internal_short_zero_runs(hamming, length);
+    for (uint shift = 1u; shift <= job.max_edits; ++shift) {
+        if (shift >= length) break;
+        uint compared_length = length - shift;
+
+        uvec4 shifted_mask = mismatch_mask_segment(
+            job, 0u, shift, compared_length, shift);
+        shifted_mask = amend_internal_short_zero_runs(
+            shifted_mask, length);
+        set_mask_bit(shifted_mask, shift - 1u);
+        final_mask &= shifted_mask;
+
+        shifted_mask = mismatch_mask_segment(
+            job, shift, 0u, compared_length, 0u);
+        shifted_mask = amend_internal_short_zero_runs(
+            shifted_mask, length);
+        set_mask_bit(shifted_mask, length - shift);
+        final_mask &= shifted_mask;
+    }
+    final_mask &= valid_mask(length);
+    uint estimate = capped_mask_estimate(
+        final_mask, length, job.max_edits);
+    if (estimate <= job.max_edits) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_OK, true, estimate);
+        return;
+    }
+
+    uint diagnostic = estimate | MASK_REJECTION_CANDIDATE_MASK
+        | EXACT_GUARD_ACTIVATED_MASK;
+    if (exact_edit_distance_is_above_threshold(job)) {
+        write_prefilter_result(
+            job_index,
+            job.max_edits + 1u,
+            STATUS_OK,
+            false,
+            diagnostic | GUARD_CONFIRMED_REJECTION_MASK);
+        return;
+    }
+    write_prefilter_result(
+        job_index, 0u, STATUS_OK, true, diagnostic);
+}
+#else
+void solve_gatekeeper_job(uint job_index) {
+    PrefilterJob job = jobs[job_index];
+    if (!prefilter_job_is_in_bounds(job)) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+        return;
+    }
+    if (job.query_length != job.target_length) {
+        uint length_difference = job.query_length > job.target_length
+            ? job.query_length - job.target_length
+            : job.target_length - job.query_length;
+        write_prefilter_result(
+            job_index,
+            length_difference,
+            STATUS_LENGTH_DIFFERENCE_ONLY,
+            length_difference <= job.max_edits,
+            0u);
+        return;
+    }
+    if (job.query_length == 0u) {
+        write_prefilter_result(job_index, 0u, STATUS_OK, true, 0u);
+        return;
+    }
+    if (pc.mode != 0u || uint(MAX_SPAN) != MAX_GATEKEEPER_LENGTH
+        || job.query_length != uint(GATEKEEPER_SPECIALIZED_LENGTH)
+        || job.max_edits != uint(GATEKEEPER_SPECIALIZED_EDITS)
+        || (job.query_offset & 3u) != 0u
+        || (job.target_offset & 3u) != 0u) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_UNSUPPORTED, true, 0u);
+        return;
+    }
+
+    const uint active_max_edits = uint(GATEKEEPER_SPECIALIZED_EDITS);
+    uint hamming_distance = 0u;
+    ExactDiagonalMasks exact_masks;
+#if GATEKEEPER_SPECIALIZED_LENGTH == 32
+    uint estimate = gatekeeper_mask_estimate_32(
+        job, hamming_distance, exact_masks);
+#else
+    uint estimate = gatekeeper_mask_estimate_64(
+        job, hamming_distance, exact_masks);
+#endif
+    if (hamming_distance <= active_max_edits) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_OK, true, hamming_distance);
+        return;
+    }
+    if (estimate <= active_max_edits) {
+        write_prefilter_result(
+            job_index, 0u, STATUS_OK, true, estimate);
+        return;
+    }
+
+    uint diagnostic = estimate | MASK_REJECTION_CANDIDATE_MASK
+        | EXACT_GUARD_ACTIVATED_MASK;
+    if (exact_edit_distance_e2_or_e4_is_above_threshold(
+            job, exact_masks)) {
+        write_prefilter_result(
+            job_index,
+            active_max_edits + 1u,
+            STATUS_OK,
+            false,
+            diagnostic | GUARD_CONFIRMED_REJECTION_MASK);
+        return;
+    }
+    write_prefilter_result(
+        job_index, 0u, STATUS_OK, true, diagnostic);
+}
+#endif
+
+void main() {
     uint64_t stride = uint64_t(gl_NumWorkGroups.x)
         * uint64_t(gl_WorkGroupSize.x);
     if (stride == uint64_t(0)) return;
     for (uint64_t job_index = uint64_t(gl_GlobalInvocationID.x);
          job_index < uint64_t(pc.job_count);
          job_index += stride) {
-        solve_job(uint(job_index));
+        solve_gatekeeper_job(uint(job_index));
     }
 }
 )GLSL";
@@ -7251,6 +8512,34 @@ enum class SeqSortStage : std::uint8_t {
     prefix_check,
 };
 
+/// Compose one rank-prefilter shader from the single bounds-aware wire/load
+/// preamble and its algorithm-specific body.
+[[nodiscard]] std::string rank_prefilter_body(std::string_view algorithm_body)
+{
+    std::string body;
+    body.reserve(kRankPrefilterPreamble.size() + algorithm_body.size());
+    body += kRankPrefilterPreamble;
+    body += algorithm_body;
+    return body;
+}
+
+[[nodiscard]] std::string specialised_gatekeeper_body(
+    std::uint32_t length,
+    std::uint32_t max_edits)
+{
+    std::string body;
+    body.reserve(
+        kRankPrefilterPreamble.size() + kGatekeeperRankBatchBody.size() + 96u);
+    body += kRankPrefilterPreamble;
+    body += fmt::format(
+        "#define GATEKEEPER_SPECIALIZED_LENGTH {}\n"
+        "#define GATEKEEPER_SPECIALIZED_EDITS {}\n",
+        length,
+        max_edits);
+    body += kGatekeeperRankBatchBody;
+    return body;
+}
+
 /// Compose a seq-sort kind's full body from the shared snippets. Order matters:
 /// push -> readers/low_symbol_mask -> canon (defines lpu/unit_bits/canon) ->
 /// key/compare (uses canon) -> stage main.
@@ -7388,7 +8677,17 @@ enum class SeqSortStage : std::uint8_t {
         case ShaderKind::align_extend_simple_cigar:
             return std::string{kAlignmentExtensionSimpleCigarBody};
         case ShaderKind::sneaky_snake_rank_batch:
-            return std::string{kSneakySnakeRankBatchBody};
+            return rank_prefilter_body(kSneakySnakeRankBatchBody);
+        case ShaderKind::gatekeeper_rank_batch:
+            return rank_prefilter_body(kGatekeeperRankBatchBody);
+        case ShaderKind::gatekeeper_rank_batch_l32_e2:
+            return specialised_gatekeeper_body(32u, 2u);
+        case ShaderKind::gatekeeper_rank_batch_l32_e4:
+            return specialised_gatekeeper_body(32u, 4u);
+        case ShaderKind::gatekeeper_rank_batch_l64_e2:
+            return specialised_gatekeeper_body(64u, 2u);
+        case ShaderKind::gatekeeper_rank_batch_l64_e4:
+            return specialised_gatekeeper_body(64u, 4u);
     }
     throw ShaderCompileError("compile_shader_spirv: unknown ShaderKind");
 }
@@ -7542,6 +8841,14 @@ std::vector<std::uint32_t> compile_shader_spirv(const ShaderCompileRequest& requ
         throw ShaderCompileError(fmt::format(
             "compile_shader_spirv: SneakySnake submaze span {} must be 512",
             request.max_span));
+    }
+    if (is_gatekeeper_rank_batch_kind(request.kind)
+        && (request.tile_size != 384u || request.local_size != 64u
+            || request.max_span != 128u)) {
+        throw ShaderCompileError(fmt::format(
+            "compile_shader_spirv: GateKeeper key ({}, {}, {}) must be "
+            "(384, 64, 128)",
+            request.tile_size, request.local_size, request.max_span));
     }
 
     ensure_glslang_initialized();

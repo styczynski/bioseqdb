@@ -356,8 +356,8 @@ TEST_CASE("bioseq.load: index parity (on builds index visible same-statement; of
     }
 }
 
-TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
-          "[load][integration][doc0371][rev4][guc]") {
+TEST_CASE("bioseq.load: MPS Format-6 uses the post-load locator rebuild path",
+          "[load][integration][doc0371][rev4][guc][mps][format6]") {
     constexpr std::string_view table = "load_grouped32_ready";
     constexpr std::string_view rollback_table = "load_grouped32_rollback";
     it::connection_test_context ctx;
@@ -370,6 +370,14 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
     it::exec_sqlf(ctx,
         "CREATE TABLE {} "
         "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        table);
+    it::exec_sqlf(ctx,
+        "SELECT bioseq.set_index_policy('{}'::regclass, "
+        "'minimizers_per_fragment', 'UPDATE_MANUALLY');",
+        table);
+    it::exec_sqlf(ctx,
+        "SELECT bioseq.set_index_policy('{}'::regclass, "
+        "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
         table);
     it::exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
     // The compatibility GUC retains its historical grouped32 name; the
@@ -398,7 +406,7 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
     const auto inspected = it::query_one(ctx, fmt::format(
         "WITH inspected AS ("
         " SELECT bioseq.inspect_ready_minimizer_format6_generation("
-        "  '{}'::regclass,'minimizers_per_fragment',{}) AS j"
+        "  '{}'::regclass,'minimizers_per_sequence',{}) AS j"
         ") "
         "SELECT "
         " j->>'format_version',"
@@ -496,6 +504,8 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
     REQUIRE(inspected[8].value() == "1");
     REQUIRE(inspected[9].value() == "1");
     REQUIRE(inspected[10].value() == "1");
+    REQUIRE(it::index_table_row_count(
+        ctx, "minimizers_per_fragment", table) == 0);
 
     // A requested post-load index is part of load's atomic success contract.
     // Re-enable a forbidden async writer: update_index must fail through SPI,
@@ -504,6 +514,14 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
     it::exec_sqlf(ctx,
         "CREATE TABLE {} "
         "(header text, seq bioseq.seq('dna4', 64)) USING bioseq;",
+        rollback_table);
+    it::exec_sqlf(ctx,
+        "SELECT bioseq.set_index_policy('{}'::regclass, "
+        "'minimizers_per_fragment', 'UPDATE_MANUALLY');",
+        rollback_table);
+    it::exec_sqlf(ctx,
+        "SELECT bioseq.set_index_policy('{}'::regclass, "
+        "'minimizers_per_sequence', 'UPDATE_ON_INSERT');",
         rollback_table);
     const long long rollback_relfilenode = it::query_scalar_int(ctx, fmt::format(
         "SELECT pg_relation_filenode('{}'::regclass)::bigint;",
@@ -546,7 +564,7 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
         return it::query_scalar_int(ctx,
             "SELECT count(*) FROM pg_class "
             "WHERE relnamespace='bioseq_internal'::regnamespace "
-            "AND relname LIKE 'seqidx_mpf_%';");
+            "AND relname LIKE 'seqidx_mps_%';");
     };
     const long long parent_rows_before = it::query_scalar_int(ctx, fmt::format(
         "SELECT count(*) FROM {};", rollback_table));
@@ -558,7 +576,7 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
     const long long metadata_age_before = metadata_age_count();
     const long long generation_relations_before = generation_relation_count();
     const long long index_rows_before = it::index_table_row_count(
-        ctx, "minimizers_per_fragment", rollback_table);
+        ctx, "minimizers_per_sequence", rollback_table);
     it::exec_sql(ctx, "SET bioseq.index_async_persist = on;");
     const auto load_error = it::sql_error(ctx, fmt::format(
         "SELECT bioseq.load('{}'::regclass, '{}');",
@@ -576,7 +594,7 @@ TEST_CASE("bioseq.load: Format-6 uses the post-load locator rebuild path",
     REQUIRE(metadata_age_count() == metadata_age_before);
     REQUIRE(generation_relation_count() == generation_relations_before);
     REQUIRE(it::index_table_row_count(
-        ctx, "minimizers_per_fragment", rollback_table) == index_rows_before);
+        ctx, "minimizers_per_sequence", rollback_table) == index_rows_before);
 }
 
 TEST_CASE("bioseq.load: column-rule + malformed-file errors", "[load][integration]") {

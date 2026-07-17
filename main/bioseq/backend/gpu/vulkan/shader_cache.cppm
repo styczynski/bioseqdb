@@ -1507,15 +1507,16 @@ public:
         return std::unexpected(
             "SPIR-V alignment CIGAR extension layout mismatch");
     }
-    if (kind == ShaderKind::sneaky_snake_rank_batch
+    if ((kind == ShaderKind::sneaky_snake_rank_batch
+         || is_gatekeeper_rank_batch_kind(kind))
         && (!binding_scalar(0u, 4u)
             || !binding_scalar(1u, 4u)
             || !binding_struct(2u, 20u, {0u, 4u, 8u, 12u, 16u})
             || !binding_struct(3u, 16u, {0u, 4u, 8u, 12u})
             || !scan.has_push_constant_offsets(
-                std::array<std::uint32_t, 1>{0u}))) {
+                std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}))) {
         return std::unexpected(
-            "SPIR-V SneakySnake rank-batch layout mismatch");
+            "SPIR-V rank-prefilter batch layout mismatch");
     }
     return {};
 }

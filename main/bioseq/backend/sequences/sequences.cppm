@@ -1292,6 +1292,10 @@ struct compact_sequence_range_base {
      */
     [[nodiscard]] std::vector<uint8_t> to_encoded_vector() const {
         const size_t sequence_length = bp_size();
+        // iterable<BP>() constructs both endpoint iterators through iter(),
+        // whose legacy representation dereferences the underlying iterator.
+        // Avoid forming those iterators for an empty packed range.
+        if (sequence_length == 0u) return {};
         std::vector<uint8_t> encoded_ranks;
         encoded_ranks.reserve(sequence_length);
         for (const auto& base_pair_rank : iterable<BP>()) {
