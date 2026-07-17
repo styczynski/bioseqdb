@@ -2220,6 +2220,7 @@ public:
 				for (const auto& group : join_cpu_prepared_target.groups) {
 					if (!group.persisted_grouped32_reader
 						&& !group.persisted_shape_v5_reader
+						&& !group.persisted_mps_shape_v5_reader
 						&& !group.persisted_format6_reader) continue;
 					const auto& read = group.persisted_read_stats;
 					::bioseq::pipeline_stats::PipelineOperationalStats read_delta{};
@@ -2293,9 +2294,10 @@ public:
 					read_delta.persisted_source_decoded_bp =
 						read.source_decoded_bp;
 					map_format6_read_evidence(read_delta, read);
-					if (group.persisted_shape_v5_reader) {
+					const auto record_format5_memory_evidence =
+						[&read_delta](const auto& format5_reader) {
 						const auto memory_evidence =
-							group.persisted_shape_v5_reader->memory_evidence();
+							format5_reader.memory_evidence();
 						const std::uint64_t exact_position_bytes =
 							bioseq::parallelism::saturating_mul(
 								memory_evidence.retained_position_count,
@@ -2310,7 +2312,7 @@ public:
 						const bool retained_layout =
 							memory_evidence.retained_layout_equation_holds()
 							&& memory_evidence.owned_capacity_bytes
-								== group.persisted_shape_v5_reader->admitted_bytes();
+								== format5_reader.admitted_bytes();
 						read_delta.format5_reader_capacity_accounting_passes =
 							memory_evidence.capacity_accounting_passes;
 						read_delta.
@@ -2346,7 +2348,7 @@ public:
 						read_delta.format5_reader_owned_capacity_bytes =
 							memory_evidence.owned_capacity_bytes;
 						read_delta.format5_reader_admitted_bytes =
-							group.persisted_shape_v5_reader->admitted_bytes();
+							format5_reader.admitted_bytes();
 						read_delta.format5_reader_exact_position_image_checks = 1;
 						read_delta.format5_reader_exact_position_image_failures =
 							exact_position_image ? 0 : 1;
@@ -2357,6 +2359,13 @@ public:
 							memory_evidence.saturated
 							|| exact_position_bytes
 								== (std::numeric_limits<std::uint64_t>::max)();
+					};
+					if (group.persisted_shape_v5_reader) {
+						record_format5_memory_evidence(
+							*group.persisted_shape_v5_reader);
+					} else if (group.persisted_mps_shape_v5_reader) {
+						record_format5_memory_evidence(
+							*group.persisted_mps_shape_v5_reader);
 					}
 					operational.merge(read_delta);
 					merge_cold_index_preparation_stats(
@@ -2399,6 +2408,7 @@ public:
 						return (group.target_index != nullptr
 								|| group.persisted_grouped32_reader.has_value()
 								|| group.persisted_shape_v5_reader.has_value()
+								|| group.persisted_mps_shape_v5_reader.has_value()
 								|| group.persisted_format6_reader.has_value())
 							&& group.build_set_checksum_present
 							&& group.build_set_checksum

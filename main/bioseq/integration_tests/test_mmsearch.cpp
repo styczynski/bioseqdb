@@ -23,6 +23,7 @@ import bioseq.integration_tests.common;
 #include <bit>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <libpq-fe.h>
 #include <set>
 #include <span>
@@ -1455,9 +1456,9 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
 
-TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and selective query unions",
-				  "[mmsearch][batch-join][just-index][rev3][format5][simd]"
-				  "[cold-route][full][empty][selective][zero-work-authenticity]") {
+TEST_CASE("ordinal-2 BatchJoin executes MPF mmap and MPS full-read Format-5 routes",
+				  "[mmsearch][batch-join][just-index][rev3][format5][mpf][mps][simd]"
+				  "[mapped][cold-route][full][empty][selective][zero-work-authenticity]") {
 	struct RouteCase {
 		std::string_view name;
 		std::string query;
@@ -1505,6 +1506,33 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 					"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
 					"FROM {} ORDER BY pk LIMIT 1;",
 					kBatchJoinTarget, kBatchJoinTarget)));
+			const auto count_mpf_format5_images = [&ctx] {
+				const row_t data_directory = query_one(ctx, "SHOW data_directory;");
+				REQUIRE(data_directory.size() == 1u);
+				REQUIRE(data_directory[0].has_value());
+				const std::filesystem::path image_directory =
+					std::filesystem::path{data_directory[0].value()}
+					/ "bioseq_mpf5";
+				std::error_code error;
+				if (!std::filesystem::exists(image_directory, error)) {
+					REQUIRE_FALSE(error);
+					return std::size_t{0};
+				}
+				std::size_t count = 0;
+				for (std::filesystem::directory_iterator iterator{
+						 image_directory, error}, end;
+					 !error && iterator != end;
+					 iterator.increment(error)) {
+					if (iterator->is_regular_file(error)
+						&& iterator->path().extension() == ".mpf5") {
+						++count;
+					}
+				}
+				REQUIRE_FALSE(error);
+				return count;
+			};
+			const std::size_t mpf_images_before =
+				count_mpf_format5_images();
 			if (index_name == "minimizers_per_sequence") {
 				exec_sqlf(ctx,
 					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
@@ -1516,16 +1544,19 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
 				kBatchJoinTarget, index_name, rowno));
 			REQUIRE(publication.size() > 25u);
-			/* The production fixture now publishes Format 5 / ABI 3.  Format 5
-			 * currently authenticates and streams the complete payload in one
-			 * PostgreSQL index scan for every query union; it does not use the
-			 * Format-4 compatibility path's two-phase selective reader. */
+			/* The production fixture publishes Format 5 / ABI 3. MPF binds its
+			 * exact immutable mmap image after two PostgreSQL metadata scans;
+			 * MPS retains the sequence-wide full PostgreSQL payload scan. */
 			REQUIRE(publication[7].value_or("") == "5");
 			REQUIRE(publication[19].value_or("") == "3");
 			REQUIRE(publication[8].value_or("") == "t");
 			REQUIRE(publication[9].value_or("") == "t");
 			REQUIRE(std::stoull(publication[14].value()) == target.size());
 			REQUIRE(std::stoull(publication[24].value()) > 10u);
+			if (index_name == "minimizers_per_sequence") {
+				/* MPS has no authority to create the MPF-only mmap artifact. */
+				REQUIRE(count_mpf_format5_images() == mpf_images_before);
+			}
 
 			for (const RouteCase& route : routes) {
 				INFO(fmt::format(
@@ -1606,23 +1637,78 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 				}
 				REQUIRE(number(8) == 1);
 				REQUIRE(number(9) == 1);
-				REQUIRE(number(10) == 3);
-				REQUIRE(number(11) == 1);
-				REQUIRE(number(12) == 1);
-				REQUIRE(number(13) == 1);
-				REQUIRE(number(14) == 1);
-				REQUIRE(number(15) == 0);
-				REQUIRE(number(16) == 0);
-				REQUIRE(number(17) == 1);
-				REQUIRE(number(18) == 0);
-				REQUIRE(number(19) > 0);
-				REQUIRE(number(20) == 0);
-				REQUIRE(number(21) > 0);
-				REQUIRE(number(22) == 0);
-				REQUIRE(number(23) > number(19));
-				REQUIRE(number(24) == number(19));
-				REQUIRE(number(25) == number(21));
+				if (index_name == "minimizers_per_fragment") {
+					REQUIRE(number(10) == 2);
+					for (const std::size_t zero : {
+							11u, 12u, 13u, 14u, 15u, 16u, 17u, 18u,
+							20u, 22u, 24u, 25u}) {
+						REQUIRE(number(zero) == 0);
+					}
+					/* Policy discovery still publishes the authenticated full
+					 * generation dimensions/cost.  No route is selected and no
+					 * PostgreSQL payload row or byte is requested. */
+					REQUIRE(number(19) > 0);
+					REQUIRE(number(21) > 0);
+					REQUIRE(number(23) > number(19));
+				} else {
+					REQUIRE(number(10) == 3);
+					REQUIRE(number(11) == 1);
+					REQUIRE(number(12) == 1);
+					REQUIRE(number(13) == 1);
+					REQUIRE(number(14) == 1);
+					REQUIRE(number(15) == 0);
+					REQUIRE(number(16) == 0);
+					REQUIRE(number(17) == 1);
+					REQUIRE(number(18) == 0);
+					REQUIRE(number(19) > 0);
+					REQUIRE(number(20) == 0);
+					REQUIRE(number(21) > 0);
+					REQUIRE(number(22) == 0);
+					REQUIRE(number(23) > number(19));
+					REQUIRE(number(24) == number(19));
+					REQUIRE(number(25) == number(21));
+				}
 				REQUIRE(proof[26].value() == "t");
+
+				const row_t reader_memory = query_one(ctx,
+					"WITH evidence AS MATERIALIZED ("
+					" SELECT bioseq."
+					"last_alignment_format5_reader_memory_evidence_v2() AS j"
+					") SELECT "
+					"j->>'format5_reader_capacity_accounting_passes',"
+					"j->>'format5_reader_exact_position_image_checks',"
+					"j->>'format5_reader_exact_position_image_failures',"
+					"j->>'format5_reader_retained_layout_checks',"
+					"j->>'format5_reader_retained_layout_failures',"
+					"((j->>'format5_reader_owned_capacity_bytes')::bigint="
+					" (j->>'format5_reader_admitted_bytes')::bigint)::text,"
+					"(NOT (j->>'format5_reader_memory_evidence_saturated')"
+					"::boolean)::text,"
+					"j->>'format5_reader_retained_position_count',"
+					"j->>'format5_reader_directory_capacity_bytes',"
+					"j->>'format5_reader_ordinal_route_capacity_bytes',"
+					"j->>'format5_reader_global_position_capacity_bytes' "
+					"FROM evidence;");
+				REQUIRE(reader_memory.size() == 11u);
+				for (const auto& field : reader_memory) {
+					REQUIRE(field.has_value());
+				}
+				REQUIRE(std::stoll(reader_memory[0].value()) > 0);
+				REQUIRE(std::stoll(reader_memory[1].value()) > 0);
+				REQUIRE(reader_memory[2].value() == "0");
+				REQUIRE(std::stoll(reader_memory[3].value()) > 0);
+				REQUIRE(reader_memory[4].value() == "0");
+				REQUIRE(reader_memory[5].value() == "true");
+				REQUIRE(reader_memory[6].value() == "true");
+				REQUIRE(std::stoll(reader_memory[8].value()) > 0);
+				if (index_name == "minimizers_per_fragment") {
+					REQUIRE(reader_memory[7].value() == "0");
+					REQUIRE(std::stoll(reader_memory[9].value()) > 0);
+					REQUIRE(reader_memory[10].value() == "0");
+				} else if (!route.empty) {
+					REQUIRE(std::stoll(reader_memory[7].value()) > 0);
+					REQUIRE(std::stoll(reader_memory[10].value()) > 0);
+				}
 
 				if (route.empty) {
 					for (const std::size_t zero : {28u, 29u, 30u, 31u}) {
@@ -1680,11 +1766,10 @@ TEST_CASE("ordinal-2 BatchJoin executes Format-5 full cold reads for empty and s
 	}
 }
 
-TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPF and MPS",
+TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPS",
 			  "[mmsearch][batch-join][just-index][format6][simd]"
 			  "[generation-publication][one-open][cold-route][selective]") {
 	for (const std::string_view index_name : {
-			std::string_view{"minimizers_per_fragment"},
 			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
@@ -1713,11 +1798,9 @@ TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPF and 
 					"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
 					"FROM {} ORDER BY pk LIMIT 1;",
 					kBatchJoinTarget, kBatchJoinTarget)));
-			if (index_name == "minimizers_per_sequence") {
-				exec_sqlf(ctx,
-					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
-					kBatchJoinTarget, index_name);
-			}
+			exec_sqlf(ctx,
+				"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+				kBatchJoinTarget, index_name);
 			REQUIRE(query_scalar_int(ctx, fmt::format(
 				"SELECT bioseq.update_index('{}'::regclass, '{}');",
 				kBatchJoinTarget, index_name)) == 1);
@@ -2311,7 +2394,7 @@ TEST_CASE("ordinal-2 BatchJoin LIMIT cleans up an undrained 8193-query reader",
 	REQUIRE(stats_bool(stats.front(), 14));
 	REQUIRE_FALSE(stats_bool(stats.front(), 15));
 	REQUIRE(stats_i64(stats.front(), 49) == 1);
-	REQUIRE(stats_i64(stats.front(), 50) == 3);
+	REQUIRE(stats_i64(stats.front(), 50) == 2);
 }
 
 TEST_CASE("BatchJoin LIMIT is partial and empty query child is fully drained",

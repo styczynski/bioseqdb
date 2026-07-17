@@ -3153,6 +3153,7 @@ try_materialize_target_for_segment_workers(
     if (!group.persisted_format6_reader.has_value()
         || group.persisted_grouped32_reader.has_value()
         || group.persisted_shape_v5_reader.has_value()
+		|| group.persisted_mps_shape_v5_reader.has_value()
         || group.target_index
         || group.target_index_source
             != ::bioseq::pipeline_stats::TargetIndexSource::persisted
@@ -3219,6 +3220,7 @@ try_materialize_target_for_segment_workers(
         const std::uint64_t target_bp_size) noexcept {
     if (!group.persisted_shape_v5_reader.has_value()
         || group.persisted_grouped32_reader.has_value()
+		|| group.persisted_mps_shape_v5_reader.has_value()
         || group.persisted_format6_reader.has_value()
         || group.target_index
         || group.target_index_source
@@ -3562,6 +3564,9 @@ template <class S>
 					&& prepared_group->persisted_grouped32_reader.has_value();
 				const bool has_shape_v5_reader = prepared_group != nullptr
 					&& prepared_group->persisted_shape_v5_reader.has_value();
+				const bool has_mps_shape_v5_reader = prepared_group != nullptr
+					&& prepared_group->
+						persisted_mps_shape_v5_reader.has_value();
 				const bool has_format6_reader = prepared_group != nullptr
 					&& prepared_group->persisted_format6_reader.has_value();
 				const bool has_full_format6_source_identity =
@@ -3583,6 +3588,7 @@ template <class S>
 				const bool canonical_owner_exclusive =
 					prepared_group == nullptr
 					|| (has_format6_reader || has_shape_v5_reader
+						|| has_mps_shape_v5_reader
 						? prepared_group->query_hash_union.capacity() == 0u
 						: prepared_group->
 							canonical_query_hash_union_u32.capacity() == 0u);
@@ -3639,13 +3645,17 @@ template <class S>
 				}
 				if (prepared_group == nullptr
 					|| !BatchProcessor::exactly_one_native_persisted_reader(
-						has_grouped32_reader,
-						has_shape_v5_reader,
-						has_format6_reader)
+							has_grouped32_reader,
+							has_shape_v5_reader,
+							has_mps_shape_v5_reader,
+							has_format6_reader)
 					|| (has_grouped32_reader
 						&& !prepared_group->persisted_grouped32_reader->ready())
 					|| (has_shape_v5_reader
 						&& !prepared_group->persisted_shape_v5_reader->ready())
+					|| (has_mps_shape_v5_reader
+						&& !prepared_group->
+							persisted_mps_shape_v5_reader->ready())
 					|| prepared_group->target_index
 					|| prepared_group->target_index_source
 						!= ::bioseq::pipeline_stats::TargetIndexSource::persisted
@@ -3660,7 +3670,8 @@ template <class S>
 						"the exact READY native persisted reader is absent, incomplete, duplicated, or "
 						"mixed with a legacy assembled index");
 					}
-						if (has_format6_reader || has_shape_v5_reader) {
+						if (has_format6_reader || has_shape_v5_reader
+							|| has_mps_shape_v5_reader) {
 							if (scanner_pg_ctx->explicit_query_ordinals) {
 								retained_prepared_query_sketch =
 									prepared_group->find_retained_query_sketch(
@@ -3702,7 +3713,7 @@ template <class S>
 								idx_params,
 								/*gpu_index_cache=*/nullptr,
 								bioseq::indexing::GpuIndexCacheIdentity{});
-							} else {
+							} else if (has_shape_v5_reader) {
 							collection = minimap2_port_with_index_pg_checked(
 								fq_pg,
 								ft_pg,
@@ -3711,18 +3722,33 @@ template <class S>
 								idx_params,
 								/*gpu_index_cache=*/nullptr,
 								bioseq::indexing::GpuIndexCacheIdentity{});
+							} else {
+							collection = minimap2_port_with_index_pg_checked(
+								fq_pg,
+								ft_pg,
+								alignment_query_minimizers,
+								*prepared_group->
+									persisted_mps_shape_v5_reader,
+								idx_params,
+								/*gpu_index_cache=*/nullptr,
+								bioseq::indexing::GpuIndexCacheIdentity{});
 							}
 						} else {
 						ensure_q();
-						collection = minimap2_port_with_index_pg_checked(
-							fq_pg,
-							ft_pg,
-							*query_minimizers,
-							*prepared_group->persisted_grouped32_reader,
-							idx_params,
-							/*gpu_index_cache=*/nullptr,
-							bioseq::indexing::GpuIndexCacheIdentity{});
+							collection = minimap2_port_with_index_pg_checked(
+								fq_pg,
+								ft_pg,
+								*query_minimizers,
+								*prepared_group->persisted_grouped32_reader,
+								idx_params,
+								/*gpu_index_cache=*/nullptr,
+								bioseq::indexing::GpuIndexCacheIdentity{});
 					}
+				if (prepared_group->persisted_reader_queries == 0u
+					&& prepared_group->persisted_reader_load_host_wall_ns != 0u) {
+					collection.record_persisted_index_decode_host_time(
+						prepared_group->persisted_reader_load_host_wall_ns);
+				}
 				++prepared_group->persisted_reader_queries;
 				assembled = true;
 				scanner_pg_ctx->target_index_sources[i] =

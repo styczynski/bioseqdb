@@ -299,6 +299,12 @@ public:
 		std::optional<
 			bioseq::indexing::PreparedShapeV5FragmentQueryReader>
 			persisted_shape_v5_reader{};
+		/* MPS Format-5 retains its sequence-wide query-selected image.  It is
+		 * deliberately separate from the MPF mmap reader above: MPS consumes
+		 * the authenticated PostgreSQL payload scan and must never borrow the
+		 * MPF-only sidecar or fragment-native ownership proof. */
+		std::optional<bioseq::indexing::PreparedShapeV5QueryReader>
+			persisted_mps_shape_v5_reader{};
 		std::optional<bioseq::indexing::MinimizerFormat6SelectiveReader>
 			persisted_format6_reader{};
 		::bioseq::pipeline_stats::TargetIndexSource target_index_source =
@@ -602,9 +608,11 @@ public:
 	exactly_one_native_persisted_reader(
 			const bool grouped32,
 			const bool shape_v5,
+			const bool mps_shape_v5,
 			const bool format6) noexcept {
 		return static_cast<unsigned>(grouped32)
 			+ static_cast<unsigned>(shape_v5)
+			+ static_cast<unsigned>(mps_shape_v5)
 			+ static_cast<unsigned>(format6) == 1u;
 	}
 
@@ -775,21 +783,29 @@ public:
 };
 
 static_assert(BatchProcessor::exactly_one_native_persisted_reader(
-	true, false, false));
+	true, false, false, false));
 static_assert(BatchProcessor::exactly_one_native_persisted_reader(
-	false, true, false));
+	false, true, false, false));
 static_assert(BatchProcessor::exactly_one_native_persisted_reader(
-	false, false, true));
+	false, false, true, false));
+static_assert(BatchProcessor::exactly_one_native_persisted_reader(
+	false, false, false, true));
 static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
-	false, false, false));
+	false, false, false, false));
 static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
-	true, true, false));
+	true, true, false, false));
 static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
-	true, false, true));
+	true, false, true, false));
 static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
-	false, true, true));
+	true, false, false, true));
 static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
-	true, true, true));
+	false, true, true, false));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	false, true, false, true));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	false, false, true, true));
+static_assert(!BatchProcessor::exactly_one_native_persisted_reader(
+	true, true, true, true));
 static_assert(BatchProcessor::format6_f5_fallback_allowed(
 	true, false, false));
 static_assert(BatchProcessor::format6_f5_fallback_allowed(

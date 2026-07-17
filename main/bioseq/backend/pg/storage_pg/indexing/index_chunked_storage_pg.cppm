@@ -4586,9 +4586,16 @@ public:
             const bool format5 = generation.manifest.wire_format
                 == bioseq::indexing::MinimizerGenerationWireFormat::
                     grouped_shape_soa_segment_local;
+			const bool mapped_mpf_format5 = format5
+				&& identity_.index_name
+					== MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
             std::unique_ptr<mpf_format5_image_detail::Writer>
                 format5_image_writer;
-            if (format5) {
+			/* The sidecar path/header intentionally encode the MPF source
+			 * identity, not a logical-index discriminator.  MPS Format-5 keeps
+			 * the authoritative PostgreSQL payload route and therefore must not
+			 * create or overwrite this MPF-only image. */
+            if (mapped_mpf_format5) {
                 format5_image_writer =
                     std::make_unique<mpf_format5_image_detail::Writer>(
                         identity_, query_key_, generation_id_);

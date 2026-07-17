@@ -234,6 +234,43 @@ constexpr std::string_view kTable = "test_index_admin_t";
     return generation_id;
 }
 
+[[nodiscard]] long long require_ready_format5_metadata(
+        const connection_test_context& ctx,
+        std::string_view table,
+        std::string_view index_name,
+        long long sequence_rowno,
+        long long target_bp,
+        long long expected_position_segment_span_bp,
+        long long expected_position_segment_count) {
+    const row_t inspected = query_one(ctx, fmt::format(
+        "SELECT generation_id::text, sequence_rowno::text,"
+        "total_bp_size::text, kmer_size::text, window_size::text,"
+        "gpu_abi_version::text, segment_geometry_version::text,"
+        "position_segment_span_bp::text, position_segment_count::text "
+        "FROM bioseq.inspect_ready_minimizer_generation("
+        "'{}'::regclass, '{}', {});",
+        table, index_name, sequence_rowno));
+    REQUIRE(inspected.size() == 9u);
+    for (const auto& field : inspected) {
+        REQUIRE(field.has_value());
+    }
+    const long long generation_id = std::stoll(inspected[0].value());
+    REQUIRE(generation_id > 0);
+    REQUIRE(inspected[1].value() == std::to_string(sequence_rowno));
+    REQUIRE(inspected[2].value() == std::to_string(target_bp));
+    REQUIRE(inspected[3].value() == "15");
+    REQUIRE(inspected[4].value() == "10");
+    // GPU ABI 3 and segment geometry 2 uniquely identify the frozen
+    // grouped-shape Format-5 wire image accepted by this inspector.
+    REQUIRE(inspected[5].value() == "3");
+    REQUIRE(inspected[6].value() == "2");
+    REQUIRE(inspected[7].value()
+            == std::to_string(expected_position_segment_span_bp));
+    REQUIRE(inspected[8].value()
+            == std::to_string(expected_position_segment_count));
+    return generation_id;
+}
+
 void require_bioseq_shared_preload(const connection_test_context& ctx) {
     const auto proof = query_one(ctx,
         "SELECT EXISTS ("
@@ -3074,8 +3111,8 @@ TEST_CASE("DOC0371 revision-3 read session fails closed and restores backend res
     exec_sqlf(ctx, "DROP TABLE bioseq_internal.{};", sidecar);
 }
 
-TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopenable Format 6",
-		  "[index_admin][update][format6][locator][reopen]"
+TEST_CASE("ordinary update_index publishes MPF Format-5 metadata and reopenable MPS Format 6",
+		  "[index_admin][update][format5][format6][mpf][mps][locator]"
 		  "[generation-publication]") {
     constexpr std::array<std::pair<std::string_view, std::string_view>, 2>
         cases{{
@@ -3109,15 +3146,23 @@ TEST_CASE("ordinary update_index publishes locator-backed MPF and MPS as reopena
             "SELECT bioseq.update_index('{}'::regclass, '{}');",
             table, index_name)) == 1);
 
-        // A distinct backend reopens the generation from PostgreSQL and
-        // validates the exact Format-6 identity, metadata and three stream
-        // equations without inheriting writer memory.
+        // A distinct backend authenticates the published metadata without
+        // inheriting writer memory.  MPF live mmap execution is covered by the
+        // ordinal-2 Format-5 test; only the sequence-wide MPS branch below
+        // claims a complete Format-6 reopen.
         connection_test_context reopened;
-        REQUIRE(require_ready_format6_generation(
-            reopened, table, index_name, rowno, 65'565,
-            /*expected_scheme_id=*/0,
-            /*expected_scheme_version=*/0,
-            /*expected_producer_id=*/1) > 0);
+        if (index_name == "minimizers_per_fragment") {
+            REQUIRE(require_ready_format5_metadata(
+                reopened, table, index_name, rowno, 65'565,
+                /*expected_position_segment_span_bp=*/32'768,
+                /*expected_position_segment_count=*/3) > 0);
+        } else {
+            REQUIRE(require_ready_format6_generation(
+                reopened, table, index_name, rowno, 65'565,
+                /*expected_scheme_id=*/0,
+                /*expected_scheme_version=*/0,
+                /*expected_producer_id=*/1) > 0);
+        }
         REQUIRE(index_table_row_count(reopened, index_name, table) > 1);
     }
 }
@@ -3146,10 +3191,10 @@ TEST_CASE("Format-6 core parallel heap scan matches the serial receipt",
     const auto rowno = only_column_row_number(ctx, table);
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
-        "'minimizers_per_fragment');",
+        "'minimizers_per_sequence');",
         table)) == 1);
     REQUIRE(require_ready_format6_generation(
-        ctx, table, "minimizers_per_fragment", rowno, 65'565,
+        ctx, table, "minimizers_per_sequence", rowno, 65'565,
         /*expected_scheme_id=*/0,
         /*expected_scheme_version=*/0,
         /*expected_producer_id=*/1) > 0);
@@ -3163,10 +3208,10 @@ TEST_CASE("Format-6 core parallel heap scan matches the serial receipt",
     const row_t proof = query_one(ctx, fmt::format(
         "WITH serial AS MATERIALIZED ("
         " SELECT bioseq_internal.format6_parallel_scan_probe("
-        "  '{}'::regclass,'minimizers_per_fragment',{},0) AS j"
+        "  '{}'::regclass,'minimizers_per_sequence',{},0) AS j"
         "), parallel AS MATERIALIZED ("
         " SELECT bioseq_internal.format6_parallel_scan_probe("
-        "  '{}'::regclass,'minimizers_per_fragment',{}, {}) AS j"
+        "  '{}'::regclass,'minimizers_per_sequence',{}, {}) AS j"
         ") "
         "SELECT "
         " serial.j->>'schema',"
@@ -3235,10 +3280,10 @@ TEST_CASE("Format-6 replacement reuses its sidecar and retains the replaced gene
     const auto rebuild = [&] {
         REQUIRE(query_scalar_int(ctx, fmt::format(
             "SELECT bioseq.update_index('{}'::regclass, "
-            "'minimizers_per_fragment');",
+            "'minimizers_per_sequence');",
             table)) == 1);
         return require_ready_format6_generation(
-            ctx, table, "minimizers_per_fragment", rowno, 65'565,
+            ctx, table, "minimizers_per_sequence", rowno, 65'565,
             /*expected_scheme_id=*/0,
             /*expected_scheme_version=*/0,
             /*expected_producer_id=*/1);
@@ -3252,7 +3297,7 @@ TEST_CASE("Format-6 replacement reuses its sidecar and retains the replaced gene
         "JOIN pg_namespace n ON n.oid=c.relnamespace "
         "JOIN pg_index i ON i.indrelid=c.oid AND i.indisprimary "
         "WHERE n.nspname='bioseq_internal' AND c.relkind='r' "
-        "AND c.relname LIKE 'seqidx_mpf_%' "
+        "AND c.relname LIKE 'seqidx_mps_%' "
         "AND EXISTS (SELECT 1 FROM pg_attribute a "
         "WHERE a.attrelid=c.oid AND a.attname='generation_id' "
         "AND a.attnum>0 AND NOT a.attisdropped) "
@@ -3315,17 +3360,17 @@ TEST_CASE("ordinary locator-backed Paper update publishes proof-bound Format 6 w
     // runs, so SQL success is itself a no-fallback route proof.
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
-        "'minimizers_per_fragment');",
+        "'minimizers_per_sequence');",
         table)) == 1);
     REQUIRE(require_ready_format6_generation(
-        ctx, table, "minimizers_per_fragment", rowno, 65'565,
+        ctx, table, "minimizers_per_sequence", rowno, 65'565,
         /*expected_scheme_id=*/1,
         /*expected_scheme_version=*/1,
         /*expected_producer_id=*/3) > 0);
 	exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'scalar';");
 	const auto wrong_backend = sql_error(ctx, fmt::format(
 		"SELECT bioseq.inspect_ready_minimizer_format6_generation("
-		"'{}'::regclass,'minimizers_per_fragment',{});",
+		"'{}'::regclass,'minimizers_per_sequence',{});",
 		table, rowno));
 	REQUIRE(wrong_backend.contains(
 		"bioseq Format-6 inspection source/profile identity disagrees"));
@@ -3334,7 +3379,7 @@ TEST_CASE("ordinary locator-backed Paper update publishes proof-bound Format 6 w
 		"SET bioseq.aligner.minimizer_algorithm = 'paper_nthash_simd';");
 	REQUIRE(query_scalar_int(ctx, fmt::format(
 		"SELECT count(bioseq.inspect_ready_minimizer_format6_generation("
-		"'{}'::regclass,'minimizers_per_fragment',{}));",
+		"'{}'::regclass,'minimizers_per_sequence',{}));",
 		table, rowno)) == 1);
 }
 
@@ -3412,10 +3457,10 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
     const auto rowno = only_column_row_number(ctx, table);
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
-        "'minimizers_per_fragment');",
+        "'minimizers_per_sequence');",
         table)) == 1);
     REQUIRE(require_ready_format6_generation(
-        ctx, table, "minimizers_per_fragment", rowno, 65'565,
+        ctx, table, "minimizers_per_sequence", rowno, 65'565,
         /*expected_scheme_id=*/0,
         /*expected_scheme_version=*/0,
         /*expected_producer_id=*/1) > 0);
@@ -3423,7 +3468,7 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
         "SELECT c.relname, c.oid::text FROM pg_class c "
         "JOIN pg_namespace n ON n.oid=c.relnamespace "
         "WHERE n.nspname='bioseq_internal' AND c.relkind='r' "
-        "AND c.relname LIKE 'seqidx_mpf_%' "
+        "AND c.relname LIKE 'seqidx_mps_%' "
         "AND EXISTS (SELECT 1 FROM pg_attribute a "
         "WHERE a.attrelid=c.oid AND a.attname='generation_id' "
         "AND a.attnum>0 AND NOT a.attisdropped) "
@@ -3484,12 +3529,12 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
     // previously committed READY generation must remain byte-exact.
     exec_sql(ctx, fmt::format(
         "SELECT bioseq_internal.rev3_test_remove_source_fragment("
-        "'{}'::regclass, 'minimizers_per_fragment', {}, 2);",
+        "'{}'::regclass, 'minimizers_per_sequence', {}, 2);",
         table, rowno));
 
     const auto error = sql_error(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
-        "'minimizers_per_fragment');",
+        "'minimizers_per_sequence');",
         table));
     REQUIRE(error.contains("catalog"));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
