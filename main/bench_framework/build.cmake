@@ -72,6 +72,13 @@ AddCommonTargetX(
     nlohmann_json_schema_validator::validator
     TBB::tbb
     lfreist-hwinfo::hwinfo
+    # The shared no-PG module set contains the Vulkan shader compiler. Keep
+    # this test/demo target aligned with bioseq_bench so importing production
+    # parallelism modules cannot leave glslang symbols unresolved.
+    Vulkan::Vulkan
+    Vulkan::glslang
+    spirv-cross-msl
+    Vulkan::LayerSettings
   SHARED_MODULE_LIBS
     bioseq_modules_nopg
   SOURCES

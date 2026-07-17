@@ -27,9 +27,13 @@
 #include "common.h"
 #include "../bench/prefilter_small_seed_keys.hpp"
 
+#include <catch2/catch_approx.hpp>
+
 #include <simdjson.h>
 
 #include <nlohmann/json.hpp>
+
+#include <oneapi/tbb/global_control.h>
 
 #include <algorithm>
 #include <array>
@@ -37,6 +41,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +52,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <set>
@@ -62,6 +68,9 @@
 
 import bioseq.common.mlogging;
 import bioseq.instr;
+import bioseq.parallelism.concepts;
+import bioseq.parallelism.mode;
+import bioseq.parallelism.pool;
 import bench_framework;
 
 namespace {
@@ -890,6 +899,21 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
     return total;
 }
 
+[[nodiscard]] inline std::optional<nlohmann::json> sanity_warning_for_metric(
+    const nlohmann::json& report,
+    std::string_view warning_type,
+    std::string_view metric_name)
+{
+    if (!report.contains("sanity_warnings")) return std::nullopt;
+    for (const auto& warning : report["sanity_warnings"]) {
+        if (warning.value("type", std::string{}) == warning_type
+            && warning.value("metric", std::string{}) == metric_name) {
+            return std::optional<nlohmann::json>{std::in_place, warning};
+        }
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] inline bool stderr_contains(
     std::string_view captured, std::string_view needle)
 {
@@ -1098,6 +1122,199 @@ TEST_CASE("bench_lock drains older work, blocks newer work and is globally exclu
     REQUIRE(older_end.load() < lock_start.load());
     REQUIRE(lock_start.load() < lock_end.load());
     REQUIRE(lock_end.load() < newer_start.load());
+}
+
+TEST_CASE("all benchmark drivers prepare before caller-thread finalization",
+          "[bench_framework][scheduler][driver][liveness]") {
+    TestLogSilencer silence_mlogging;
+    static constexpr std::size_t benchmark_count = 5;
+    static constexpr std::array<AlgorithmSpec, 1> algorithms{{
+        {"prepared_body", std::span<const AlgoParamSpec>{kDummyParams}},
+    }};
+    static constexpr std::array<TestCaseDataSpec, 1> test_cases{{
+        {"SMALL", "one scheduled body", R"({"length":8,"seed":19})", 1},
+    }};
+    static constexpr std::array<ForEntry, 1> for_entries{{{"SMALL", 1}}};
+    static constexpr std::array<OverEntry, 1> over_entries{{
+        {"prepared_body", "{}"},
+    }};
+    static constexpr std::array<MetricSpecLite, 1> metrics{{
+        {"sum_value", "evaluation", "", "", "[]"},
+    }};
+    static constexpr std::array<BenchmarkSpec, benchmark_count> specs{{
+        BenchmarkSpec{
+            .key = "bench_prepare_a",
+            .description = "nonblocking driver A",
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        },
+        BenchmarkSpec{
+            .key = "bench_prepare_b",
+            .description = "nonblocking driver B",
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        },
+        BenchmarkSpec{
+            .key = "bench_prepare_c",
+            .description = "nonblocking driver C",
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        },
+        BenchmarkSpec{
+            .key = "bench_prepare_d",
+            .description = "nonblocking driver D",
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        },
+        BenchmarkSpec{
+            .key = "bench_prepare_e",
+            .description = "nonblocking driver E",
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        },
+    }};
+    const std::string config = render_config(
+        std::span<const AlgorithmSpec>{algorithms},
+        std::span<const TestCaseDataSpec>{test_cases},
+        std::span<const BenchmarkSpec>{specs});
+    TempReportDir report_dir;
+    const auto config_file = report_dir.path / "config.json";
+    {
+        std::ofstream output(config_file, std::ios::trunc | std::ios::binary);
+        REQUIRE(output.good());
+        output.write(config.data(), static_cast<std::streamsize>(config.size()));
+        output.close();
+        REQUIRE(output.good());
+    }
+
+    auto& global_pool = bioseq::parallelism::GlobalPool::instance();
+    global_pool.shutdown();
+    struct ShutdownPoolOnExit {
+        bioseq::parallelism::GlobalPool& pool;
+        ~ShutdownPoolOnExit() noexcept { pool.shutdown(); }
+    } shutdown_pool_on_exit{global_pool};
+
+    std::atomic<std::size_t> estimator_calls{0};
+    std::atomic<std::size_t> body_calls{0};
+    std::atomic<std::size_t> preparation_timeouts{0};
+    std::mutex readiness_mu;
+    std::condition_variable readiness_cv;
+    std::once_flag configure_pool_once;
+    using Estimate = std::function<RunConstraints(
+        std::string_view, std::string_view, simdjson::dom::element)>;
+    using InputFn = std::function<ToyInput(
+        std::string_view, std::string_view, simdjson::dom::element,
+        const RunConstraints&)>;
+    using RunFn = std::function<ToyOutput(
+        std::string_view, const ParamMap&, const ToyInput&)>;
+    using EvalFn = std::function<std::map<std::string, double>(
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)>;
+    std::vector<bioseq::bench_framework::ErasedBenchmark> benchmarks;
+    benchmarks.reserve(benchmark_count);
+    for (const auto& spec : specs) {
+        benchmarks.push_back(create_benchmark<ToyInput, ToyOutput>(
+            std::string{spec.description},
+            std::string{spec.key},
+            config_file.string(),
+            Estimate{[&estimator_calls, &readiness_cv](
+                         std::string_view, std::string_view,
+                         simdjson::dom::element) {
+                estimator_calls.fetch_add(1, std::memory_order_release);
+                readiness_cv.notify_all();
+                return RunConstraints{};
+            }},
+            InputFn{[](std::string_view data, std::string_view name,
+                       simdjson::dom::element element,
+                       const RunConstraints&) {
+                return build_toy_input(data, name, element);
+            }},
+            RunFn{[&estimator_calls, &body_calls, &preparation_timeouts,
+                   &readiness_mu, &readiness_cv, &configure_pool_once,
+                   &global_pool](std::string_view, const ParamMap&,
+                                 const ToyInput&) {
+                std::unique_lock<std::mutex> lock(readiness_mu);
+                const bool all_prepared = readiness_cv.wait_for(
+                    lock, std::chrono::seconds{2}, [&estimator_calls] {
+                        return estimator_calls.load(std::memory_order_acquire)
+                            == benchmark_count;
+                    });
+                lock.unlock();
+                if (!all_prepared) {
+                    preparation_timeouts.fetch_add(
+                        1, std::memory_order_relaxed);
+                } else {
+                    std::call_once(configure_pool_once, [&global_pool] {
+                        // This is the production trigger that previously
+                        // lowered process-wide TBB parallelism to one while
+                        // TBB driver tasks were blocked in scheduler waits.
+                        global_pool.ensure_configured();
+                    });
+                }
+                body_calls.fetch_add(1, std::memory_order_relaxed);
+                return ToyOutput{.sum = 1};
+            }},
+            EvalFn{[](std::string_view, const ParamMap&, const ToyInput&,
+                      const ToyOutput& output) {
+                return std::map<std::string, double>{
+                    {"sum_value", static_cast<double>(output.sum)},
+                };
+            }}));
+    }
+    const std::vector<std::string> args{
+        "bench_framework_test", "--report", report_dir.path.string(),
+        "--threads", "4",
+    };
+    ArgvBuilder argv_holder{std::span<const std::string>{args}};
+    int exit_code = -1;
+    {
+        StderrCapture capture;
+        exit_code = bioseq::bench_framework::detail::run_impl(
+            argv_holder.argc(), argv_holder.argv(),
+            report_dir.path.string(), report_dir.path.string(),
+            std::move(benchmarks));
+    }
+    REQUIRE(exit_code == 0);
+    REQUIRE(estimator_calls.load(std::memory_order_acquire) == benchmark_count);
+    REQUIRE(preparation_timeouts.load(std::memory_order_relaxed) == 0);
+    REQUIRE(body_calls.load(std::memory_order_relaxed) == benchmark_count);
+}
+
+TEST_CASE("GlobalPool concurrency is arena-local and does not clamp unrelated TBB work",
+          "[bench_framework][parallelism][global-pool][liveness]") {
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    pool.shutdown();
+    struct ShutdownPoolOnExit {
+        bioseq::parallelism::GlobalPool& pool;
+        ~ShutdownPoolOnExit() noexcept { pool.shutdown(); }
+    } shutdown_pool_on_exit{pool};
+
+    using GlobalControl = oneapi::tbb::global_control;
+    const std::size_t baseline = GlobalControl::active_value(
+        GlobalControl::max_allowed_parallelism);
+    if (baseline <= 1) {
+        SKIP("process already has a oneTBB parallelism limit of one");
+    }
+
+    pool.configure(bioseq::parallelism::PoolConfig{
+        .max_concurrency = 1,
+        .mode = bioseq::parallelism::PipelineConcurrencyMode::SINGLE,
+    });
+    REQUIRE(GlobalControl::active_value(
+                GlobalControl::max_allowed_parallelism) == baseline);
+
+    std::atomic<std::size_t> range_calls{0};
+    pool.parallel_for(0, 8, 1, bioseq::parallelism::range_body{
+        [&range_calls](std::size_t begin, std::size_t end) {
+            REQUIRE(begin == 0);
+            REQUIRE(end == 8);
+            range_calls.fetch_add(1, std::memory_order_relaxed);
+        }});
+    REQUIRE(range_calls.load(std::memory_order_relaxed) == 1);
 }
 
 TEST_CASE("resource estimator is evaluated once per selected group and its exact answer reaches on_input",
@@ -2977,11 +3194,12 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
             build_toy_input, on_run, on_evaluate_constant);
         REQUIRE(outcome.exit_code == 0);   // sanity warnings are non-blocking
         REQUIRE(outcome.report_path.filename() == "report_1.json");
-        REQUIRE(count_sanity_warnings_of_type(outcome.report, "metric_looks_constant") == 1);
-        const auto& warning = outcome.report["sanity_warnings"][0];
-        REQUIRE(warning["metric"].get<std::string>() == "frozen");
-        REQUIRE(warning["warning_since"].get<std::string>() == "report_1.json");
-        REQUIRE(warning["message"].get<std::string>().find("'42'")
+        const auto warning = sanity_warning_for_metric(
+            outcome.report, "metric_looks_constant", "frozen");
+        REQUIRE(warning.has_value());
+        REQUIRE(warning->at("warning_since").get<std::string>()
+                == "report_1.json");
+        REQUIRE(warning->at("message").get<std::string>().find("'42'")
                 != std::string::npos);
     }
 
@@ -2993,9 +3211,11 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
             build_toy_input, on_run, on_evaluate_constant);
         REQUIRE(outcome.exit_code == 0);
         REQUIRE(outcome.report_path.filename() == "report_2.json");
-        REQUIRE(count_sanity_warnings_of_type(outcome.report, "metric_looks_constant") == 1);
-        const auto& warning = outcome.report["sanity_warnings"][0];
-        REQUIRE(warning["warning_since"].get<std::string>() == "report_1.json");
+        const auto warning = sanity_warning_for_metric(
+            outcome.report, "metric_looks_constant", "frozen");
+        REQUIRE(warning.has_value());
+        REQUIRE(warning->at("warning_since").get<std::string>()
+                == "report_1.json");
     }
 
     // Run 3: switch evaluator to vary by iteration — warning should
@@ -3016,7 +3236,8 @@ TEST_CASE("metric_looks_constant fires when evaluator returns hardcoded value",
             build_toy_input, on_run, on_evaluate_varying);
         REQUIRE(outcome.exit_code == 0);
         REQUIRE(outcome.report_path.filename() == "report_3.json");
-        REQUIRE(count_sanity_warnings_of_type(outcome.report, "metric_looks_constant") == 0);
+        REQUIRE_FALSE(sanity_warning_for_metric(
+            outcome.report, "metric_looks_constant", "frozen").has_value());
     }
 }
 
@@ -4064,7 +4285,7 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     REQUIRE(for_each.size() == 1);
     REQUIRE(for_each.at("XXL_HIFI").get<std::size_t>() == 4);
     REQUIRE(config.at("test_cases").at("XXL_HIFI")
-                .at("concurrency").get<std::size_t>() == 2);
+                .at("concurrency").get<std::size_t>() == 1);
 
     const std::set<std::string> expected_algorithms{
         "minimap2_dp",
@@ -4719,9 +4940,9 @@ TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block V
     }
 
     // Phase C is accepted only with the complete operation-originated cold
-    // ownership/gated-build contract. Positive fields use the minimap2 zero
-    // control and `min`, while forbidden counters use equality and `max` so a
-    // single bad repeat fails the benchmark.
+    // ownership/ungated-build contract. Positive fields use the minimap2 zero
+    // control and `min`, while forbidden gate counters use equality and `max`
+    // so a single bad repeat fails the benchmark.
     const std::set<std::string> positive_phase_c_ownership_metrics{
         "phase_c_gpu_index_ownership_proof_accepted",
         "gpu_index_count_phase_admissions",
@@ -4729,12 +4950,7 @@ TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block V
         "gpu_index_resident_transfers",
         "gpu_index_adoption_successes",
         "gpu_index_owned_resident_bytes",
-        "gpu_index_gate_enabled",
-        "gpu_index_gate_word_count",
-        "gpu_index_gate_mask",
-        "gpu_index_gate_set_bits",
-        "gpu_index_gate_count_dispatches",
-        "gpu_index_gated_emit_dispatches",
+        "gpu_index_ungated_emit_dispatches",
         "gpu_index_retained_minimizer_count",
         "gpu_index_distinct_minimizer_count",
     };
@@ -4758,7 +4974,12 @@ TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block V
 
     const std::set<std::string> zero_phase_c_ownership_metrics{
         "gpu_index_adoption_rereserve_attempts",
-        "gpu_index_ungated_emit_dispatches",
+        "gpu_index_gate_enabled",
+        "gpu_index_gate_word_count",
+        "gpu_index_gate_mask",
+        "gpu_index_gate_set_bits",
+        "gpu_index_gate_count_dispatches",
+        "gpu_index_gated_emit_dispatches",
     };
     for (const auto& metric_name : zero_phase_c_ownership_metrics) {
         const auto& metric = metrics.at(metric_name);

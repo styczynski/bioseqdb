@@ -58,6 +58,16 @@ class UnitIntegrationQualificationTests(unittest.TestCase):
             [command[0] for command in mode.commands],
         )
 
+    def test_builder_builds_and_runs_benchmark_framework_contracts(self):
+        mode = server.MODES["unit+integration"]
+
+        self.assertIn(
+            "bioseq_bench_framework_example_tests_exec", mode.targets)
+        self.assertIn(
+            "bioseq_bench_framework_example_tests_exec",
+            [command[0] for command in mode.commands],
+        )
+
     def test_focused_filter_allows_zero_matches_in_every_binary(self):
         test_flags, error = server._unit_test_filter_to_cli_args(
             {"tags": ["[format5]"]})
@@ -77,7 +87,7 @@ class UnitIntegrationQualificationTests(unittest.TestCase):
             )
             for command in server.MODES["unit+integration"].commands
         ]
-        self.assertEqual(len(resolved_commands), 3)
+        self.assertEqual(len(resolved_commands), 4)
         for command in resolved_commands:
             self.assertEqual(command[-2:], test_flags)
 
