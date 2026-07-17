@@ -5160,6 +5160,13 @@ private:
     std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags flags) const;
     [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(
         std::uint64_t bytes, VkBufferUsageFlags usage) const;
+    [[nodiscard]] std::uint64_t
+    sneaky_snake_workspace_allocation_bytes_locked() const noexcept;
+    void ensure_sneaky_snake_workspace_buffer_locked(
+        Buffer& buffer,
+        std::uint64_t bytes,
+        VkBufferUsageFlags usage);
+    void release_sneaky_snake_workspace_locked() noexcept;
     [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked()
         const noexcept;
     void admit_pipeline_cache_growth_locked(
@@ -5188,6 +5195,16 @@ private:
             "Vulkan operation proof identity space exhausted");
     }
 
+    struct SneakySnakeRecordedCommand {
+        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        GpuSneakySnakePush push{};
+        std::uint32_t groups = 0u;
+        bool recorded = false;
+    };
+
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
@@ -5195,6 +5212,8 @@ private:
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
+    std::array<SneakySnakeRecordedCommand, 2>
+        sneaky_snake_recorded_commands_{};
     VkFence fence_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
@@ -5208,6 +5227,17 @@ private:
     bool seed_metrics_claimed_ = false;
     std::uint32_t gpu_anchor_sort_capacity_ = 0;
     std::optional<GpuArena> phase_c_arena_;  // DOC0310 §7 — lazily created.
+    // High-water mapped workspace for the synchronous SneakySnake batch API.
+    // Queue access is serialized by mu_, so one runtime-owned set is enough.
+    // Declared before the buffers so reverse destruction order releases every
+    // admitted allocation before returning its reservation.
+    bioseq::parallelism::MemoryPermit sneaky_snake_workspace_permit_;
+    Buffer sneaky_snake_query_buffer_;
+    Buffer sneaky_snake_target_buffer_;
+    Buffer sneaky_snake_jobs_buffer_;
+    Buffer sneaky_snake_results_buffer_;
+    std::array<VkBuffer, 4> sneaky_snake_descriptor_buffers_{};
+    VkDescriptorSet sneaky_snake_descriptor_set_ = VK_NULL_HANDLE;
     VkDescriptorPool phase_c_pool_ = VK_NULL_HANDLE;  // DOC0310 — fresh-set pool.
     using PFN_vkSetWorkgroupSizeMVK_Bioseq =
         void (VKAPI_PTR*)(VkShaderModule module, std::uint32_t x, std::uint32_t y, std::uint32_t z);
@@ -8922,13 +8952,19 @@ void Runtime::init() {
     check_vk(vkCreateCommandPool(device_, &pool_info, nullptr, &command_pool_),
              "vkCreateCommandPool");
 
+    std::array<VkCommandBuffer, 3> command_buffers{};
     VkCommandBufferAllocateInfo cmd_alloc{};
     cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cmd_alloc.commandPool = command_pool_;
     cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_alloc.commandBufferCount = 1;
-    check_vk(vkAllocateCommandBuffers(device_, &cmd_alloc, &command_buffer_),
+    cmd_alloc.commandBufferCount = static_cast<std::uint32_t>(
+        command_buffers.size());
+    check_vk(vkAllocateCommandBuffers(
+                 device_, &cmd_alloc, command_buffers.data()),
              "vkAllocateCommandBuffers");
+    command_buffer_ = command_buffers[0];
+    sneaky_snake_recorded_commands_[0].command_buffer = command_buffers[1];
+    sneaky_snake_recorded_commands_[1].command_buffer = command_buffers[2];
 
     VkFenceCreateInfo fence_info{};
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -9017,6 +9053,7 @@ void Runtime::init() {
 void Runtime::shutdown() noexcept {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
+        release_sneaky_snake_workspace_locked();
         // DOC0310 — release arena buffers (host-visible, owned via Buffer RAII)
         // and the Phase C descriptor pool before the device goes away.
         phase_c_arena_.reset();
@@ -9043,6 +9080,7 @@ void Runtime::shutdown() noexcept {
     descriptor_set_layout_ = VK_NULL_HANDLE;
     fence_ = VK_NULL_HANDLE;
     command_buffer_ = VK_NULL_HANDLE;
+    sneaky_snake_recorded_commands_ = {};
     command_pool_ = VK_NULL_HANDLE;
     queue_ = VK_NULL_HANDLE;
     device_ = VK_NULL_HANDLE;
@@ -9151,6 +9189,100 @@ std::uint64_t Runtime::buffer_memory_requirement_locked(
     vkGetBufferMemoryRequirements(device_, buffer, &requirements);
     vkDestroyBuffer(device_, buffer, nullptr);
     return requirements.size;
+}
+
+std::uint64_t
+Runtime::sneaky_snake_workspace_allocation_bytes_locked() const noexcept
+{
+    using bioseq::parallelism::saturating_add;
+    return saturating_add(
+        sneaky_snake_query_buffer_.allocation_bytes,
+        saturating_add(
+            sneaky_snake_target_buffer_.allocation_bytes,
+            saturating_add(
+                sneaky_snake_jobs_buffer_.allocation_bytes,
+                sneaky_snake_results_buffer_.allocation_bytes)));
+}
+
+void Runtime::release_sneaky_snake_workspace_locked() noexcept
+{
+    sneaky_snake_results_buffer_.reset();
+    sneaky_snake_jobs_buffer_.reset();
+    sneaky_snake_target_buffer_.reset();
+    sneaky_snake_query_buffer_.reset();
+    sneaky_snake_descriptor_buffers_ = {};
+    sneaky_snake_descriptor_set_ = VK_NULL_HANDLE;
+    sneaky_snake_workspace_permit_.release();
+}
+
+void Runtime::ensure_sneaky_snake_workspace_buffer_locked(
+    Buffer& buffer,
+    std::uint64_t bytes,
+    VkBufferUsageFlags usage)
+{
+    if (buffer.valid() && buffer.bytes >= bytes) return;
+
+    using bioseq::parallelism::saturating_add;
+    const std::uint64_t allocation_requirement =
+        buffer_memory_requirement_locked(bytes, usage);
+    const std::uint64_t peak = saturating_add(
+        sneaky_snake_workspace_allocation_bytes_locked(),
+        allocation_requirement);
+    if (peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        throw VulkanRuntimeError(
+            "SneakySnake workspace admission estimate saturated");
+    }
+
+    bioseq::parallelism::MemoryAdmissionFailure failure{};
+    if (!sneaky_snake_workspace_permit_) {
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(fmt::format(
+                "SneakySnake workspace admission denied: reason={} requested={}",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                failure.requested_bytes));
+        }
+        sneaky_snake_workspace_permit_ = std::move(*permit);
+    } else if (!sneaky_snake_workspace_permit_.grow_to(peak, &failure)) {
+        throw VulkanRuntimeError(fmt::format(
+            "SneakySnake workspace growth denied: reason={} requested={}",
+            bioseq::parallelism::memory_admission_failure_reason_name(
+                failure.reason),
+            failure.requested_bytes));
+    }
+
+    try {
+        Buffer replacement = create_device_buffer(bytes, usage);
+        if (replacement.mapped == nullptr) {
+            throw VulkanRuntimeError(
+                "SneakySnake workspace allocation is not host-mapped");
+        }
+        if (replacement.allocation_bytes != allocation_requirement) {
+            throw VulkanRuntimeError(
+                "SneakySnake workspace allocation requirement changed");
+        }
+        buffer = std::move(replacement);
+    } catch (...) {
+        const std::uint64_t retained =
+            sneaky_snake_workspace_allocation_bytes_locked();
+        if (retained <= sneaky_snake_workspace_permit_.bytes()) {
+            sneaky_snake_workspace_permit_.shrink_to(retained);
+            if (retained == 0u) sneaky_snake_workspace_permit_.release();
+        }
+        throw;
+    }
+
+    const std::uint64_t retained =
+        sneaky_snake_workspace_allocation_bytes_locked();
+    if (retained == (std::numeric_limits<std::uint64_t>::max)()
+        || retained > sneaky_snake_workspace_permit_.bytes()) {
+        release_sneaky_snake_workspace_locked();
+        throw VulkanRuntimeError(
+            "SneakySnake workspace exceeded admitted allocation");
+    }
+    sneaky_snake_workspace_permit_.shrink_to(retained);
 }
 
 std::uint64_t Runtime::phase_c_arena_allocation_requirement(
@@ -10611,7 +10743,7 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
                  0u, 3u,
                  std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}) ||
              !scan.has_push_constant_offsets(
-                 std::array<std::uint32_t, 1>{0u}))) {
+                 std::array<std::uint32_t, 2>{0u, 4u}))) {
             throw VulkanRuntimeError(
                 "SPIR-V SneakySnake rank-batch layout mismatch");
         }
@@ -12350,21 +12482,42 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
 
 namespace {
 
-/// Submit the currently-recorded command buffer and wait. Centralises the
-/// begin/end/submit/wait/reset boilerplate for the Phase C multi-submit ops.
-void submit_and_wait(VkDevice device, VkQueue queue, VkCommandBuffer cmd, VkFence fence,
-                     const char* what,
-                     RuntimePipelineUseCollector* collector = nullptr) {
-    check_vk(vkEndCommandBuffer(cmd), what);
+/// Submit an executable command buffer and wait for the synchronous runtime
+/// contract. The command buffer remains executable and may be submitted again.
+void submit_executable_and_wait(
+    VkDevice device,
+    VkQueue queue,
+    VkCommandBuffer cmd,
+    VkFence fence,
+    const char* what,
+    RuntimePipelineUseCollector* collector = nullptr)
+{
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
     check_vk(vkQueueSubmit(queue, 1, &submit, fence), what);
     check_vk(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), what);
-    require_immutable_metal_policy_live(what);
     check_vk(vkResetFences(device, 1, &fence), what);
+    // Restore the shared fence before any policy check can throw so the next
+    // synchronous operation never inherits a signalled fence.
+    require_immutable_metal_policy_live(what);
     if (collector != nullptr) collector->commit(cmd);
+}
+
+/// End the currently-recording command buffer, submit it, and wait. This keeps
+/// the established helper contract for Phase C's multi-submit operations.
+void submit_and_wait(
+    VkDevice device,
+    VkQueue queue,
+    VkCommandBuffer cmd,
+    VkFence fence,
+    const char* what,
+    RuntimePipelineUseCollector* collector = nullptr)
+{
+    check_vk(vkEndCommandBuffer(cmd), what);
+    submit_executable_and_wait(
+        device, queue, cmd, fence, what, collector);
 }
 
 }  // namespace
@@ -14043,18 +14196,19 @@ Runtime::run_sneaky_snake_rank_batch_roundtrip(
     }
 
     constexpr std::uint32_t kSneakySnakeLocal = 64u;
+    constexpr std::uint32_t kSneakySnakeTeam = 8u;
+    constexpr std::uint32_t kSneakySnakeParallelThreshold = 16u;
+    constexpr std::uint64_t kRetainedWorkspaceBytes = 64u * 1024u * 1024u;
     const PhaseBPipeline pipe = get_phase_b_pipeline_locked(
         ShaderKind::sneaky_snake_rank_batch,
         kSneakySnakeLocal,
         k_gpu_sneaky_snake_submaze_length);
 
     const std::uint64_t query_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(query_ranks.size())
-            * sizeof(std::uint32_t),
+        ((static_cast<std::uint64_t>(query_ranks.size()) + 3u) / 4u) * 4u,
         sizeof(std::uint32_t));
     const std::uint64_t target_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(target_ranks.size())
-            * sizeof(std::uint32_t),
+        ((static_cast<std::uint64_t>(target_ranks.size()) + 3u) / 4u) * 4u,
         sizeof(std::uint32_t));
     const std::uint64_t job_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(jobs.size())
@@ -14076,46 +14230,130 @@ Runtime::run_sneaky_snake_rank_batch_roundtrip(
         }
     }
 
-    Buffer query_buf = create_device_buffer(query_bytes, kPhaseBBufferUsage);
-    Buffer target_buf = create_device_buffer(target_bytes, kPhaseBBufferUsage);
-    Buffer jobs_buf = create_device_buffer(job_bytes, kPhaseBBufferUsage);
-    Buffer results_buf = create_device_buffer(result_bytes, kPhaseBBufferUsage);
-    if (query_buf.mapped == nullptr || target_buf.mapped == nullptr
-        || jobs_buf.mapped == nullptr || results_buf.mapped == nullptr) {
+    std::vector<GpuSneakySnakeResultWire> results;
+    try {
+    ensure_sneaky_snake_workspace_buffer_locked(
+        sneaky_snake_query_buffer_, query_bytes, kPhaseBBufferUsage);
+    ensure_sneaky_snake_workspace_buffer_locked(
+        sneaky_snake_target_buffer_, target_bytes, kPhaseBBufferUsage);
+    ensure_sneaky_snake_workspace_buffer_locked(
+        sneaky_snake_jobs_buffer_, job_bytes, kPhaseBBufferUsage);
+    ensure_sneaky_snake_workspace_buffer_locked(
+        sneaky_snake_results_buffer_, result_bytes, kPhaseBBufferUsage);
+    if (sneaky_snake_query_buffer_.mapped == nullptr
+        || sneaky_snake_target_buffer_.mapped == nullptr
+        || sneaky_snake_jobs_buffer_.mapped == nullptr
+        || sneaky_snake_results_buffer_.mapped == nullptr) {
         throw VulkanRuntimeError(
             "run_sneaky_snake_rank_batch_roundtrip: device buffer alloc failed");
     }
 
-    auto* query_words = static_cast<std::uint32_t*>(query_buf.mapped);
-    for (std::size_t i = 0; i < query_ranks.size(); ++i) {
-        query_words[i] = query_ranks[i];
+    if constexpr (std::endian::native == std::endian::little) {
+        if (!query_ranks.empty()) {
+            std::memcpy(
+                sneaky_snake_query_buffer_.mapped,
+                query_ranks.data(),
+                query_ranks.size());
+        }
+        if (!target_ranks.empty()) {
+            std::memcpy(
+                sneaky_snake_target_buffer_.mapped,
+                target_ranks.data(),
+                target_ranks.size());
+        }
+        const std::size_t query_tail = query_ranks.size() & 3u;
+        if (query_tail != 0u || query_ranks.empty()) {
+            std::memset(
+                static_cast<std::byte*>(sneaky_snake_query_buffer_.mapped)
+                    + query_ranks.size(),
+                0,
+                query_ranks.empty() ? sizeof(std::uint32_t) : 4u - query_tail);
+        }
+        const std::size_t target_tail = target_ranks.size() & 3u;
+        if (target_tail != 0u || target_ranks.empty()) {
+            std::memset(
+                static_cast<std::byte*>(sneaky_snake_target_buffer_.mapped)
+                    + target_ranks.size(),
+                0,
+                target_ranks.empty() ? sizeof(std::uint32_t) : 4u - target_tail);
+        }
+    } else {
+        std::memset(
+            sneaky_snake_query_buffer_.mapped,
+            0,
+            static_cast<std::size_t>(query_bytes));
+        for (std::size_t base = 0u; base < query_ranks.size(); base += 4u) {
+            std::uint32_t packed = 0u;
+            const std::size_t count =
+                std::min<std::size_t>(4u, query_ranks.size() - base);
+            for (std::size_t lane = 0u; lane < count; ++lane) {
+                packed |= static_cast<std::uint32_t>(query_ranks[base + lane])
+                    << (lane * 8u);
+            }
+            std::memcpy(
+                static_cast<std::byte*>(sneaky_snake_query_buffer_.mapped)
+                    + base,
+                &packed,
+                sizeof(packed));
+        }
+        std::memset(
+            sneaky_snake_target_buffer_.mapped,
+            0,
+            static_cast<std::size_t>(target_bytes));
+        for (std::size_t base = 0u; base < target_ranks.size(); base += 4u) {
+            std::uint32_t packed = 0u;
+            const std::size_t count =
+                std::min<std::size_t>(4u, target_ranks.size() - base);
+            for (std::size_t lane = 0u; lane < count; ++lane) {
+                packed |= static_cast<std::uint32_t>(target_ranks[base + lane])
+                    << (lane * 8u);
+            }
+            std::memcpy(
+                static_cast<std::byte*>(sneaky_snake_target_buffer_.mapped)
+                    + base,
+                &packed,
+                sizeof(packed));
+        }
     }
-    if (query_ranks.empty()) query_words[0] = 0u;
-    auto* target_words = static_cast<std::uint32_t*>(target_buf.mapped);
-    for (std::size_t i = 0; i < target_ranks.size(); ++i) {
-        target_words[i] = target_ranks[i];
-    }
-    if (target_ranks.empty()) target_words[0] = 0u;
     std::memcpy(
-        jobs_buf.mapped,
+        sneaky_snake_jobs_buffer_.mapped,
         jobs.data(),
         jobs.size() * sizeof(GpuSneakySnakeJobWire));
-    std::memset(
-        results_buf.mapped,
-        0,
-        static_cast<std::size_t>(result_bytes));
 
-    const std::array<VkDescriptorBufferInfo, 4> infos{{
-        {query_buf.buffer, 0, query_buf.bytes},
-        {target_buf.buffer, 0, target_buf.bytes},
-        {jobs_buf.buffer, 0, jobs_buf.bytes},
-        {results_buf.buffer, 0, results_buf.bytes},
+    const std::array<VkBuffer, 4> descriptor_buffers{{
+        sneaky_snake_query_buffer_.buffer,
+        sneaky_snake_target_buffer_.buffer,
+        sneaky_snake_jobs_buffer_.buffer,
+        sneaky_snake_results_buffer_.buffer,
     }};
+    if (descriptor_buffers != sneaky_snake_descriptor_buffers_
+        || pipe.descriptor_set != sneaky_snake_descriptor_set_) {
+        bind_phase_b_descriptors_locked(pipe, descriptor_buffers);
+        sneaky_snake_descriptor_buffers_ = descriptor_buffers;
+        sneaky_snake_descriptor_set_ = pipe.descriptor_set;
+    }
+    bool use_parallel_teams = false;
+    for (const GpuSneakySnakeJobWire& job : jobs) {
+        if (job.max_edits >= kSneakySnakeParallelThreshold
+            && job.max_edits <= k_gpu_sneaky_snake_max_edits
+            && job.query_length == job.target_length
+            && job.query_length != 0u) {
+            use_parallel_teams = true;
+            break;
+        }
+    }
+    const std::uint32_t team_size = use_parallel_teams
+        ? kSneakySnakeTeam
+        : 1u;
+    const std::uint32_t jobs_per_workgroup =
+        kSneakySnakeLocal / team_size;
     const GpuSneakySnakePush push{
-        static_cast<std::uint32_t>(jobs.size())};
+        static_cast<std::uint32_t>(jobs.size()),
+        team_size};
     const std::uint64_t groups_needed =
-        (static_cast<std::uint64_t>(jobs.size()) + kSneakySnakeLocal - 1u)
-        / kSneakySnakeLocal;
+        (static_cast<std::uint64_t>(jobs.size())
+            + jobs_per_workgroup - 1u)
+        / jobs_per_workgroup;
     const std::uint32_t groups = static_cast<std::uint32_t>(
         std::min(
             groups_needed,
@@ -14125,30 +14363,86 @@ Runtime::run_sneaky_snake_rank_batch_roundtrip(
             "SneakySnake grid-stride dispatch has zero workgroups");
     }
 
-    reset_phase_c_pool_locked();
-    check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(sneaky_snake)");
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check_vk(
-        vkBeginCommandBuffer(command_buffer_, &begin),
-        "begin(sneaky_snake)");
-    record_host_to_shader(command_buffer_);
-    record_phase_c_dispatch_locked(
-        command_buffer_, pipe, infos, &push, sizeof(push), groups);
-    record_shader_to_host(command_buffer_);
-    submit_and_wait(
-        device_, queue_, command_buffer_, fence_, "submit(sneaky_snake)");
-    check_vk(
-        vkResetCommandBuffer(command_buffer_, 0),
-        "reset(sneaky_snake_post)");
+    SneakySnakeRecordedCommand& recorded =
+        sneaky_snake_recorded_commands_[use_parallel_teams ? 1u : 0u];
+    const bool command_matches = recorded.recorded
+        && recorded.pipeline == pipe.pipeline
+        && recorded.pipeline_layout == pipe.pipeline_layout
+        && recorded.descriptor_set == pipe.descriptor_set
+        && recorded.push.job_count == push.job_count
+        && recorded.push.team_size == push.team_size
+        && recorded.groups == groups;
+    if (!command_matches) {
+        recorded.recorded = false;
+        check_vk(
+            vkResetCommandBuffer(recorded.command_buffer, 0),
+            "reset(sneaky_snake_cached)");
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        check_vk(
+            vkBeginCommandBuffer(recorded.command_buffer, &begin),
+            "begin(sneaky_snake_cached)");
+        record_host_to_shader(recorded.command_buffer);
+        vkCmdBindPipeline(
+            recorded.command_buffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipe.pipeline);
+        vkCmdBindDescriptorSets(
+            recorded.command_buffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipe.pipeline_layout,
+            0,
+            1,
+            &pipe.descriptor_set,
+            0,
+            nullptr);
+        vkCmdPushConstants(
+            recorded.command_buffer,
+            pipe.pipeline_layout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(push),
+            &push);
+        vkCmdDispatch(recorded.command_buffer, groups, 1u, 1u);
+        record_shader_to_host(recorded.command_buffer);
+        check_vk(
+            vkEndCommandBuffer(recorded.command_buffer),
+            "end(sneaky_snake_cached)");
+        recorded.pipeline = pipe.pipeline;
+        recorded.pipeline_layout = pipe.pipeline_layout;
+        recorded.descriptor_set = pipe.descriptor_set;
+        recorded.push = push;
+        recorded.groups = groups;
+        recorded.recorded = true;
+    }
+    submit_executable_and_wait(
+        device_, queue_, recorded.command_buffer, fence_,
+        "submit(sneaky_snake_cached)");
 
-    std::vector<GpuSneakySnakeResultWire> results(jobs.size());
+    results.resize(jobs.size());
     std::memcpy(
         results.data(),
-        results_buf.mapped,
-        static_cast<std::size_t>(result_bytes));
+        sneaky_snake_results_buffer_.mapped,
+        jobs.size() * sizeof(GpuSneakySnakeResultWire));
     validate_sneaky_snake_results(jobs, results);
+    } catch (...) {
+        if (sneaky_snake_workspace_allocation_bytes_locked()
+            > kRetainedWorkspaceBytes) {
+            // A submit may have succeeded before a wait failed. Do not destroy
+            // mapped buffers until the device is known idle (or lost, which
+            // also guarantees that no work can continue using them).
+            const VkResult idle_result = vkDeviceWaitIdle(device_);
+            if (idle_result == VK_SUCCESS
+                || idle_result == VK_ERROR_DEVICE_LOST) {
+                release_sneaky_snake_workspace_locked();
+            }
+        }
+        throw;
+    }
+    if (sneaky_snake_workspace_allocation_bytes_locked()
+        > kRetainedWorkspaceBytes) {
+        release_sneaky_snake_workspace_locked();
+    }
     sneaky_snake_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return results;
 }

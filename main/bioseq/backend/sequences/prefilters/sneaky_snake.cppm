@@ -14,8 +14,10 @@ module;
 #include "common.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <span>
 #include <type_traits>
@@ -143,21 +145,13 @@ namespace sneaky_snake_detail {
         && length_size <= ranks.size() - offset_size;
 }
 
-[[nodiscard]] inline std::uint32_t diagonal_run(
+[[nodiscard]] inline std::uint32_t diagonal_run_scalar(
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t position,
     std::uint32_t submaze_end,
-    std::int64_t diagonal) noexcept
+    std::uint32_t query_index) noexcept
 {
-    const std::int64_t query_start = static_cast<std::int64_t>(position)
-        + diagonal;
-    if (query_start < 0
-        || static_cast<std::uint64_t>(query_start) >= query.size()) {
-        return 0u;
-    }
-
-    const auto query_index = static_cast<std::uint32_t>(query_start);
     const std::uint32_t target_remaining = submaze_end - position;
     const std::uint32_t query_remaining = static_cast<std::uint32_t>(
         query.size() - static_cast<std::size_t>(query_index));
@@ -165,16 +159,183 @@ namespace sneaky_snake_detail {
         target_remaining,
         query_remaining);
 
-    std::uint32_t run = 0u;
+    const std::uint8_t* const query_data = query.data() + query_index;
+    const std::uint8_t* const target_data = target.data() + position;
+    if (run_limit == 0u || target_data[0] != query_data[0]) {
+        return 0u;
+    }
+
+    std::uint32_t run = 1u;
+    constexpr std::uint32_t word_bytes = sizeof(std::uint64_t);
+    while (run_limit - run >= 2u * word_bytes) {
+        std::uint64_t query_word = 0u;
+        std::uint64_t target_word = 0u;
+        std::memcpy(&query_word, query_data + run, word_bytes);
+        std::memcpy(&target_word, target_data + run, word_bytes);
+        const std::uint64_t different = query_word ^ target_word;
+        if (different != 0u) {
+            if constexpr (std::endian::native == std::endian::little) {
+                return run + static_cast<std::uint32_t>(
+                    std::countr_zero(different) / 8u);
+            } else if constexpr (std::endian::native == std::endian::big) {
+                return run + static_cast<std::uint32_t>(
+                    std::countl_zero(different) / 8u);
+            } else {
+                break;
+            }
+        }
+
+        std::memcpy(&query_word, query_data + run + word_bytes, word_bytes);
+        std::memcpy(&target_word, target_data + run + word_bytes, word_bytes);
+        const std::uint64_t second_different = query_word ^ target_word;
+        if (second_different != 0u) {
+            if constexpr (std::endian::native == std::endian::little) {
+                return run + word_bytes + static_cast<std::uint32_t>(
+                    std::countr_zero(second_different) / 8u);
+            } else if constexpr (std::endian::native == std::endian::big) {
+                return run + word_bytes + static_cast<std::uint32_t>(
+                    std::countl_zero(second_different) / 8u);
+            } else {
+                break;
+            }
+        }
+        run += 2u * word_bytes;
+    }
+    while (run_limit - run >= word_bytes) {
+        std::uint64_t query_word = 0u;
+        std::uint64_t target_word = 0u;
+        std::memcpy(&query_word, query_data + run, word_bytes);
+        std::memcpy(&target_word, target_data + run, word_bytes);
+        const std::uint64_t different = query_word ^ target_word;
+        if (different != 0u) {
+            if constexpr (std::endian::native == std::endian::little) {
+                return run + static_cast<std::uint32_t>(
+                    std::countr_zero(different) / 8u);
+            } else if constexpr (std::endian::native == std::endian::big) {
+                return run + static_cast<std::uint32_t>(
+                    std::countl_zero(different) / 8u);
+            } else {
+                break;
+            }
+        }
+        run += word_bytes;
+    }
     while (run < run_limit
-           && target[static_cast<std::size_t>(position) + run]
-               == query[static_cast<std::size_t>(query_index) + run]) {
+           && target_data[run] == query_data[run]) {
         ++run;
     }
     return run;
 }
 
-[[nodiscard]] inline std::uint32_t longest_diagonal_run(
+template <class D>
+[[nodiscard]] inline std::uint32_t diagonal_run_highway(
+    D d,
+    std::span<const std::uint8_t> query,
+    std::span<const std::uint8_t> target,
+    std::uint32_t position,
+    std::uint32_t submaze_end,
+    std::uint32_t query_index) noexcept
+{
+    const hn::Repartition<std::uint8_t, D> byte_d;
+    const std::uint32_t target_remaining = submaze_end - position;
+    const std::uint32_t query_remaining = static_cast<std::uint32_t>(
+        query.size() - static_cast<std::size_t>(query_index));
+    const std::uint32_t run_limit = std::min(
+        target_remaining,
+        query_remaining);
+
+    const std::uint8_t* const query_data = query.data() + query_index;
+    const std::uint8_t* const target_data = target.data() + position;
+    if (run_limit == 0u || target_data[0] != query_data[0]) {
+        return 0u;
+    }
+
+    const std::uint32_t lanes = static_cast<std::uint32_t>(
+        hn::Lanes(byte_d));
+    std::uint32_t run = 1u;
+    while (run_limit - run >= 2u * lanes) {
+        const auto query_0 = hn::LoadU(byte_d, query_data + run);
+        const auto target_0 = hn::LoadU(byte_d, target_data + run);
+        const auto query_1 = hn::LoadU(byte_d, query_data + run + lanes);
+        const auto target_1 = hn::LoadU(byte_d, target_data + run + lanes);
+        const auto mismatch_0 = hn::Ne(query_0, target_0);
+        const auto mismatch_1 = hn::Ne(query_1, target_1);
+        if (!hn::AllFalse(byte_d, mismatch_0)) {
+            return run + static_cast<std::uint32_t>(
+                hn::FindFirstTrue(byte_d, mismatch_0));
+        }
+        if (!hn::AllFalse(byte_d, mismatch_1)) {
+            return run + lanes + static_cast<std::uint32_t>(
+                hn::FindFirstTrue(byte_d, mismatch_1));
+        }
+        run += 2u * lanes;
+    }
+    while (run_limit - run >= lanes) {
+        const auto mismatch = hn::Ne(
+            hn::LoadU(byte_d, query_data + run),
+            hn::LoadU(byte_d, target_data + run));
+        if (!hn::AllFalse(byte_d, mismatch)) {
+            return run + static_cast<std::uint32_t>(
+                hn::FindFirstTrue(byte_d, mismatch));
+        }
+        run += lanes;
+    }
+    while (run < run_limit
+           && target_data[run] == query_data[run]) {
+        ++run;
+    }
+    return run;
+}
+
+enum class CpuTraversal : std::uint8_t {
+    scalar,
+    highway,
+};
+
+template <CpuTraversal traversal, class D>
+[[nodiscard]] inline std::uint32_t diagonal_run_for(
+    D d,
+    std::span<const std::uint8_t> query,
+    std::span<const std::uint8_t> target,
+    std::uint32_t position,
+    std::uint32_t submaze_end,
+    std::uint32_t query_index) noexcept
+{
+    if constexpr (traversal == CpuTraversal::scalar) {
+        static_cast<void>(d);
+        return diagonal_run_scalar(
+            query, target, position, submaze_end, query_index);
+    } else {
+        return diagonal_run_highway(
+            d, query, target, position, submaze_end, query_index);
+    }
+}
+
+template <CpuTraversal traversal, class D>
+[[nodiscard]] inline bool improve_diagonal_candidate(
+    D d,
+    std::span<const std::uint8_t> query,
+    std::span<const std::uint8_t> target,
+    std::uint32_t position,
+    std::uint32_t submaze_end,
+    std::uint32_t query_start,
+    std::uint32_t& best) noexcept
+{
+    const std::uint32_t remaining = submaze_end - position;
+    const std::uint32_t length = static_cast<std::uint32_t>(query.size());
+    const std::uint32_t run_limit = std::min(
+        remaining,
+        length - query_start);
+    if (run_limit <= best) return false;
+
+    best = std::max(best, diagonal_run_for<traversal>(
+        d, query, target, position, submaze_end, query_start));
+    return best == remaining;
+}
+
+template <CpuTraversal traversal, class D>
+[[nodiscard]] inline std::uint32_t longest_diagonal_run_for(
+    D d,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t position,
@@ -182,39 +343,87 @@ namespace sneaky_snake_detail {
     std::uint32_t max_edits) noexcept
 {
     const std::uint32_t remaining = submaze_end - position;
-    std::uint32_t best = diagonal_run(
-        query, target, position, submaze_end, 0);
+    std::uint32_t best = diagonal_run_for<traversal>(
+        d, query, target, position, submaze_end, position);
     if (best == remaining) {
         return best;
     }
 
-    const std::uint32_t max_shift = std::min(
+    const std::uint32_t length = static_cast<std::uint32_t>(query.size());
+    // Freeze the current best as an exact candidate filter. Any diagonal that
+    // can improve the maximum must match at this offset. Scanning the clipped
+    // start window contiguously is therefore order-independent and exact.
+    const std::uint32_t filter_offset = best;
+    const std::uint8_t filter_rank =
+        target[static_cast<std::size_t>(position) + filter_offset];
+    const std::uint32_t left = std::min(max_edits, position);
+    const std::uint32_t right = std::min(
         max_edits,
-        static_cast<std::uint32_t>(query.size()));
-    for (std::uint64_t shift = 1u; shift <= max_shift; ++shift) {
-        best = std::max(best, diagonal_run(
-            query,
-            target,
-            position,
-            submaze_end,
-            -static_cast<std::int64_t>(shift)));
-        if (best == remaining) {
-            break;
+        length - position - 1u);
+    const std::uint32_t lower = position - left;
+    const std::uint32_t upper = std::min(
+        position + right,
+        length - filter_offset - 1u);
+    std::uint32_t candidate = lower;
+
+    if constexpr (traversal == CpuTraversal::highway) {
+        using ByteD = hn::Repartition<std::uint8_t, D>;
+        const ByteD byte_d;
+        static_assert(hn::MaxLanes(ByteD{}) <= 64u);
+        const std::uint32_t lanes = static_cast<std::uint32_t>(
+            hn::Lanes(byte_d));
+        const auto wanted = hn::Set(byte_d, filter_rank);
+        while (candidate <= upper
+               && upper - candidate + 1u >= lanes) {
+            std::uint64_t matches = hn::BitsFromMask(
+                byte_d,
+                hn::Eq(
+                    hn::LoadU(
+                        byte_d,
+                        query.data() + candidate + filter_offset),
+                    wanted));
+            while (matches != 0u) {
+                const std::uint32_t lane = static_cast<std::uint32_t>(
+                    std::countr_zero(matches));
+                const std::uint32_t query_start = candidate + lane;
+                if (query_start != position
+                    && improve_diagonal_candidate<traversal>(
+                        d,
+                        query,
+                        target,
+                        position,
+                        submaze_end,
+                        query_start,
+                        best)) {
+                    return remaining;
+                }
+                matches &= matches - 1u;
+            }
+            candidate += lanes;
         }
-        best = std::max(best, diagonal_run(
-            query,
-            target,
-            position,
-            submaze_end,
-            static_cast<std::int64_t>(shift)));
-        if (best == remaining) {
-            break;
+    }
+
+    for (; candidate <= upper; ++candidate) {
+        if (candidate != position
+            && query[static_cast<std::size_t>(candidate) + filter_offset]
+                == filter_rank
+            && improve_diagonal_candidate<traversal>(
+                d,
+                query,
+                target,
+                position,
+                submaze_end,
+                candidate,
+                best)) {
+            return remaining;
         }
     }
     return best;
 }
 
-[[nodiscard]] inline SneakySnakeResult equal_length_scalar(
+template <CpuTraversal traversal, class D>
+[[nodiscard]] inline SneakySnakeResult equal_length_for(
+    D d,
     std::span<const std::uint8_t> query,
     std::span<const std::uint8_t> target,
     std::uint32_t max_edits,
@@ -239,8 +448,8 @@ namespace sneaky_snake_detail {
         std::uint32_t escapes = 0u;
 
         while (position < end && escapes < escape_limit) {
-            const std::uint32_t best = longest_diagonal_run(
-                query, target, position, end, max_edits);
+            const std::uint32_t best = longest_diagonal_run_for<traversal>(
+                d, query, target, position, end, max_edits);
             if (best == end - position) {
                 position = end;
                 break;
@@ -264,144 +473,40 @@ namespace sneaky_snake_detail {
         lower_bound <= max_edits);
 }
 
-template <class D>
-inline void longest_diagonal_runs_simd(
+/// Evaluate one already-size-checked rank pair without repeating span limits.
+template <CpuTraversal traversal, class D>
+[[nodiscard]] inline SneakySnakeResult bounded_for(
     D d,
-    std::span<const std::uint8_t> query_ranks,
-    std::span<const std::uint8_t> target_ranks,
-    const SneakySnakeJob* jobs,
-    std::size_t lane_count,
-    const std::uint32_t* positions,
-    const std::uint32_t* submaze_ends,
-    const std::uint32_t* active,
-    std::uint32_t* best_runs) noexcept
+    std::span<const std::uint8_t> query,
+    std::span<const std::uint8_t> target,
+    std::uint32_t max_edits,
+    SneakySnakeOptions options) noexcept
 {
-    constexpr std::size_t max_lanes = hn::MaxLanes(D{});
-    const auto one = hn::Set(d, 1u);
-
-    std::uint32_t max_shift = 0u;
-    for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-        best_runs[lane] = 0u;
-        if (active[lane] != 0u) {
-            max_shift = std::max(
-                max_shift,
-                std::min(jobs[lane].max_edits, jobs[lane].query_length));
-        }
-    }
-    for (std::size_t lane = lane_count; lane < max_lanes; ++lane) {
-        best_runs[lane] = 0u;
+    const std::uint32_t query_length = static_cast<std::uint32_t>(query.size());
+    const std::uint32_t target_length = static_cast<std::uint32_t>(target.size());
+    if (query_length != target_length) {
+        const std::uint32_t difference = query_length > target_length
+            ? query_length - target_length
+            : target_length - query_length;
+        return make_result(
+            difference,
+            SneakySnakeStatus::conservative_unequal,
+            difference <= max_edits);
     }
 
-    const auto scan_diagonal = [
-        d,
-        query_ranks,
-        target_ranks,
-        jobs,
-        lane_count,
-        positions,
-        submaze_ends,
-        active,
-        best_runs,
-        max_lanes,
-        one](std::uint32_t shift, bool subtract_shift) {
-        HWY_ALIGN std::uint32_t run_lanes[max_lanes]{};
-        HWY_ALIGN std::uint32_t query_rank_lanes[max_lanes]{};
-        HWY_ALIGN std::uint32_t target_rank_lanes[max_lanes]{};
-        HWY_ALIGN std::uint32_t matched_lanes[max_lanes]{};
-        bool alive[max_lanes]{};
-        auto run_vector = hn::Zero(d);
+    return equal_length_for<traversal>(
+        d, query, target, max_edits, options);
+}
 
-        for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-            alive[lane] = active[lane] != 0u
-                && shift <= jobs[lane].max_edits
-                && best_runs[lane] < submaze_ends[lane] - positions[lane];
-        }
-
-        while (true) {
-            bool any_alive = false;
-            for (std::size_t lane = 0u; lane < max_lanes; ++lane) {
-                // Values outside the uint8 rank domain force inactive lanes to
-                // compare unequal without requiring a masked gather.
-                query_rank_lanes[lane] = 256u;
-                target_rank_lanes[lane] = 257u;
-                if (lane >= lane_count || !alive[lane]) {
-                    continue;
-                }
-
-                const SneakySnakeJob& job = jobs[lane];
-                const std::uint64_t target_local
-                    = static_cast<std::uint64_t>(positions[lane])
-                    + run_lanes[lane];
-                const std::int64_t query_local
-                    = static_cast<std::int64_t>(positions[lane])
-                    + static_cast<std::int64_t>(run_lanes[lane])
-                    + (subtract_shift
-                        ? -static_cast<std::int64_t>(shift)
-                        : static_cast<std::int64_t>(shift));
-
-                if (target_local >= submaze_ends[lane]
-                    || query_local < 0
-                    || static_cast<std::uint64_t>(query_local)
-                        >= job.query_length) {
-                    alive[lane] = false;
-                    continue;
-                }
-
-                const std::size_t query_index
-                    = static_cast<std::size_t>(job.query_offset)
-                    + static_cast<std::size_t>(query_local);
-                const std::size_t target_index
-                    = static_cast<std::size_t>(job.target_offset)
-                    + static_cast<std::size_t>(target_local);
-                query_rank_lanes[lane] = query_ranks[query_index];
-                target_rank_lanes[lane] = target_ranks[target_index];
-                any_alive = true;
-            }
-
-            if (!any_alive) {
-                break;
-            }
-
-            const auto equal = hn::Eq(
-                hn::Load(d, query_rank_lanes),
-                hn::Load(d, target_rank_lanes));
-            run_vector = hn::IfThenElse(
-                equal,
-                hn::Add(run_vector, one),
-                run_vector);
-            hn::Store(run_vector, d, run_lanes);
-            hn::Store(hn::VecFromMask(d, equal), d, matched_lanes);
-
-            for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-                alive[lane] = alive[lane] && matched_lanes[lane] != 0u;
-            }
-        }
-
-        hn::Store(
-            hn::Max(hn::Load(d, best_runs), run_vector),
-            d,
-            best_runs);
-    };
-
-    for (std::uint64_t shift_wide = 0u; shift_wide <= max_shift;
-         ++shift_wide) {
-        const auto shift = static_cast<std::uint32_t>(shift_wide);
-        scan_diagonal(shift, false);
-        if (shift != 0u) {
-            scan_diagonal(shift, true);
-        }
-
-        bool any_incomplete = false;
-        for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-            any_incomplete = any_incomplete
-                || (active[lane] != 0u
-                    && best_runs[lane]
-                        < submaze_ends[lane] - positions[lane]);
-        }
-        if (!any_incomplete) {
-            break;
-        }
-    }
+/// Scalar traversal wrapper used by both public scalar entry points.
+[[nodiscard]] inline SneakySnakeResult bounded_scalar(
+    std::span<const std::uint8_t> query,
+    std::span<const std::uint8_t> target,
+    std::uint32_t max_edits,
+    SneakySnakeOptions options) noexcept
+{
+    return bounded_for<CpuTraversal::scalar>(
+        nullptr, query, target, max_edits, options);
 }
 
 } // namespace sneaky_snake_detail
@@ -429,19 +534,7 @@ inline void longest_diagonal_runs_simd(
             0u, SneakySnakeStatus::unsupported_conservative, true);
     }
 
-    const std::uint32_t query_length = static_cast<std::uint32_t>(query.size());
-    const std::uint32_t target_length = static_cast<std::uint32_t>(target.size());
-    if (query_length != target_length) {
-        const std::uint32_t difference = query_length > target_length
-            ? query_length - target_length
-            : target_length - query_length;
-        return sneaky_snake_detail::make_result(
-            difference,
-            SneakySnakeStatus::conservative_unequal,
-            difference <= max_edits);
-    }
-
-    return sneaky_snake_detail::equal_length_scalar(
+    return sneaky_snake_detail::bounded_scalar(
         query, target, max_edits, options);
 }
 
@@ -450,24 +543,24 @@ inline void longest_diagonal_runs_simd(
     const SneakySnakeBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    std::vector<SneakySnakeResult> results;
-    results.reserve(input.jobs.size());
-    for (const SneakySnakeJob& job : input.jobs) {
+    std::vector<SneakySnakeResult> results(input.jobs.size());
+    for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
+        const SneakySnakeJob& job = input.jobs[index];
         if (!sneaky_snake_job_in_bounds(input, job)) {
-            results.push_back(sneaky_snake_detail::make_result(
-                0u, SneakySnakeStatus::unsupported_conservative, true));
+            results[index] = sneaky_snake_detail::make_result(
+                0u, SneakySnakeStatus::unsupported_conservative, true);
             continue;
         }
-        results.push_back(sneaky_snake_scalar(
+        results[index] = sneaky_snake_detail::bounded_scalar(
             input.query_ranks.subspan(job.query_offset, job.query_length),
             input.target_ranks.subspan(job.target_offset, job.target_length),
             job.max_edits,
-            options));
+            options);
     }
     return results;
 }
 
-/// Highway lane-parallel batch implementation. Each SIMD lane owns one job.
+/// Highway batch implementation with contiguous byte-vector scans per job.
 template <class D>
 [[nodiscard]] inline std::vector<SneakySnakeResult>
 sneaky_snake_simd_batch_for(
@@ -475,155 +568,24 @@ sneaky_snake_simd_batch_for(
     const SneakySnakeBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    constexpr std::size_t max_lanes = hn::MaxLanes(D{});
-    const std::size_t lanes = hn::Lanes(d);
-    const std::uint32_t width = sneaky_snake_detail::effective_width(options);
-    const std::uint32_t escape_limit
-        = sneaky_snake_detail::effective_escape_limit(options, width);
     std::vector<SneakySnakeResult> results(input.jobs.size());
-
-    for (std::size_t first = 0u; first < input.jobs.size(); first += lanes) {
-        const std::size_t lane_count = std::min(lanes, input.jobs.size() - first);
-        HWY_ALIGN SneakySnakeJob jobs[max_lanes]{};
-        HWY_ALIGN std::uint32_t query_lengths[max_lanes]{};
-        HWY_ALIGN std::uint32_t target_lengths[max_lanes]{};
-        HWY_ALIGN std::uint32_t differences[max_lanes]{};
-        HWY_ALIGN std::uint32_t positions[max_lanes]{};
-        HWY_ALIGN std::uint32_t submaze_ends[max_lanes]{};
-        HWY_ALIGN std::uint32_t escapes[max_lanes]{};
-        HWY_ALIGN std::uint32_t lower_bounds[max_lanes]{};
-        HWY_ALIGN std::uint32_t max_edits[max_lanes]{};
-        HWY_ALIGN std::uint32_t active[max_lanes]{};
-        HWY_ALIGN std::uint32_t best_runs[max_lanes]{};
-        HWY_ALIGN std::uint32_t remaining[max_lanes]{};
-
-        for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-            jobs[lane] = input.jobs[first + lane];
-            query_lengths[lane] = jobs[lane].query_length;
-            target_lengths[lane] = jobs[lane].target_length;
-            max_edits[lane] = jobs[lane].max_edits;
+    for (std::size_t index = 0u; index < input.jobs.size(); ++index) {
+        const SneakySnakeJob& job = input.jobs[index];
+        if (!sneaky_snake_job_in_bounds(input, job)) {
+            results[index] = sneaky_snake_detail::make_result(
+                0u, SneakySnakeStatus::unsupported_conservative, true);
+            continue;
         }
-
-        const auto query_vector = hn::Load(d, query_lengths);
-        const auto target_vector = hn::Load(d, target_lengths);
-        hn::Store(
-            hn::Sub(
-                hn::Max(query_vector, target_vector),
-                hn::Min(query_vector, target_vector)),
-            d,
-            differences);
-
-        for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-            SneakySnakeResult& result = results[first + lane];
-            if (!sneaky_snake_job_in_bounds(input, jobs[lane])) {
-                result = sneaky_snake_detail::make_result(
-                    0u, SneakySnakeStatus::unsupported_conservative, true);
-            } else if (differences[lane] != 0u) {
-                result = sneaky_snake_detail::make_result(
-                    differences[lane],
-                    SneakySnakeStatus::conservative_unequal,
-                    differences[lane] <= jobs[lane].max_edits);
-            } else if (jobs[lane].query_length == 0u) {
-                result = sneaky_snake_detail::make_result(
-                    0u, SneakySnakeStatus::success, true);
-            } else {
-                result = sneaky_snake_detail::make_result(
-                    0u, SneakySnakeStatus::success, true);
-                active[lane] = 1u;
-                submaze_ends[lane] = std::min(
-                    jobs[lane].query_length,
-                    width);
-            }
-        }
-
-        while (true) {
-            bool any_active = false;
-            for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-                any_active = any_active || active[lane] != 0u;
-            }
-            if (!any_active) {
-                break;
-            }
-
-            sneaky_snake_detail::longest_diagonal_runs_simd(
+        results[index] = sneaky_snake_detail::bounded_for<
+            sneaky_snake_detail::CpuTraversal::highway>(
                 d,
-                input.query_ranks,
-                input.target_ranks,
-                jobs,
-                lane_count,
-                positions,
-                submaze_ends,
-                active,
-                best_runs);
-
-            for (std::size_t lane = 0u; lane < max_lanes; ++lane) {
-                remaining[lane] = active[lane] != 0u
-                    ? submaze_ends[lane] - positions[lane]
-                    : 0u;
-            }
-
-            const auto obstacle = hn::Gt(
-                hn::Load(d, remaining),
-                hn::Load(d, best_runs));
-            const auto obstacle_increment = hn::IfThenElse(
-                obstacle,
-                hn::Set(d, 1u),
-                hn::Zero(d));
-            const auto updated_lower_bounds = hn::Add(
-                hn::Load(d, lower_bounds),
-                obstacle_increment);
-            const auto updated_positions = hn::IfThenElse(
-                obstacle,
-                hn::Add(
-                    hn::Load(d, positions),
-                    hn::Add(hn::Load(d, best_runs), hn::Set(d, 1u))),
-                hn::Load(d, submaze_ends));
-            const auto updated_escapes = hn::Add(
-                hn::Load(d, escapes),
-                obstacle_increment);
-            hn::Store(updated_lower_bounds, d, lower_bounds);
-            hn::Store(updated_positions, d, positions);
-            hn::Store(updated_escapes, d, escapes);
-
-            for (std::size_t lane = 0u; lane < lane_count; ++lane) {
-                if (active[lane] == 0u) {
-                    continue;
-                }
-
-                const bool crossed_obstacle = best_runs[lane] < remaining[lane];
-                SneakySnakeResult& result = results[first + lane];
-                result.lower_bound = lower_bounds[lane];
-                if (lower_bounds[lane] > jobs[lane].max_edits) {
-                    result.accepted = 0u;
-                    active[lane] = 0u;
-                    continue;
-                }
-
-                if (crossed_obstacle
-                    && escapes[lane] >= escape_limit
-                    && positions[lane] < submaze_ends[lane]) {
-                    positions[lane] = submaze_ends[lane];
-                }
-
-                if (positions[lane] >= submaze_ends[lane]) {
-                    if (submaze_ends[lane] >= jobs[lane].query_length) {
-                        result.accepted = 1u;
-                        active[lane] = 0u;
-                    } else {
-                        positions[lane] = submaze_ends[lane];
-                        submaze_ends[lane] = static_cast<std::uint32_t>(
-                            std::min(
-                                static_cast<std::uint64_t>(
-                                    jobs[lane].query_length),
-                                static_cast<std::uint64_t>(positions[lane])
-                                    + width));
-                        escapes[lane] = 0u;
-                    }
-                }
-            }
-        }
+                input.query_ranks.subspan(
+                    job.query_offset, job.query_length),
+                input.target_ranks.subspan(
+                    job.target_offset, job.target_length),
+                job.max_edits,
+                options);
     }
-
     return results;
 }
 
@@ -632,7 +594,7 @@ sneaky_snake_simd_batch_for(
     const SneakySnakeBatchInput& input,
     SneakySnakeOptions options = {})
 {
-    const hn::ScalableTag<std::uint32_t> d;
+    const hn::ScalableTag<std::uint8_t> d;
     return sneaky_snake_simd_batch_for(d, input, options);
 }
 

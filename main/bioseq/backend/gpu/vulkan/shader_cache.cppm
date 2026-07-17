@@ -1513,7 +1513,7 @@ public:
             || !binding_struct(2u, 20u, {0u, 4u, 8u, 12u, 16u})
             || !binding_struct(3u, 16u, {0u, 4u, 8u, 12u})
             || !scan.has_push_constant_offsets(
-                std::array<std::uint32_t, 1>{0u}))) {
+                std::array<std::uint32_t, 2>{0u, 4u}))) {
         return std::unexpected(
             "SPIR-V SneakySnake rank-batch layout mismatch");
     }

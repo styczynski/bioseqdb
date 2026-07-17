@@ -1926,6 +1926,9 @@ struct GpuSneakySnakeResultWire {
 /// Push constants for one grid-strided SneakySnake batch dispatch.
 struct GpuSneakySnakePush {
     std::uint32_t job_count = 0;
+    /// Uniform dispatch mode: 1 keeps one independent job per invocation;
+    /// 8 assigns one job to each fixed eight-lane logical team.
+    std::uint32_t team_size = 1;
 };
 
 /// CIGAR-capable extension job ABI (DOC0354 Part 2). This exact-match first
@@ -2064,8 +2067,9 @@ static_assert(offsetof(GpuSneakySnakeResultWire, status) == 4);
 static_assert(offsetof(GpuSneakySnakeResultWire, accepted) == 8);
 static_assert(offsetof(GpuSneakySnakeResultWire, reserved) == 12);
 static_assert(std::is_standard_layout_v<GpuSneakySnakePush>);
-static_assert(sizeof(GpuSneakySnakePush) == 4);
+static_assert(sizeof(GpuSneakySnakePush) == 8);
 static_assert(offsetof(GpuSneakySnakePush, job_count) == 0);
+static_assert(offsetof(GpuSneakySnakePush, team_size) == 4);
 static_assert(std::is_standard_layout_v<GpuAlignmentCigarJobWire>);
 static_assert(sizeof(GpuAlignmentCigarJobWire) == 48);
 static_assert(offsetof(GpuAlignmentCigarJobWire, query_symbol_offset) == 0);

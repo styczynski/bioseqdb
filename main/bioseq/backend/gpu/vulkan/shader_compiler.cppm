@@ -313,7 +313,7 @@ enum class DescriptorLayoutKind : std::uint8_t {
             return 40;  // SeqSortPush (10 × u32)
         case ShaderKind::align_extend_banded_affine:  return 44;  // AlignmentExtensionPush
         case ShaderKind::align_extend_simple_cigar:   return 60;  // AlignmentCigarPush
-        case ShaderKind::sneaky_snake_rank_batch:     return 4;   // GpuSneakySnakePush
+        case ShaderKind::sneaky_snake_rank_batch:     return 8;   // GpuSneakySnakePush
     }
     return 0;
 }
@@ -5282,10 +5282,12 @@ void main() {
 }
 )GLSL";
 
-/// Rank-buffer SneakySnake lower-bound filter. One invocation owns one job and
-/// grid-strides over the batch. Equal-length inputs are evaluated in bounded
-/// MAX_SPAN-symbol submazes; unequal and unsupported valid shapes are retained
-/// conservatively without subgroup collectives or atomics.
+/// Rank-buffer SneakySnake lower-bound filter. A uniform push-constant mode
+/// keeps low-edit batches on independent scalar invocations and assigns high-
+/// edit batches to fixed eight-lane logical teams. Equal-length inputs use
+/// bounded MAX_SPAN-symbol submazes; unequal and unsupported shapes remain
+/// conservative. Team-mode barriers are uniform and the implementation has no
+/// subgroup-size assumption or atomics.
 constexpr std::string_view kSneakySnakeRankBatchBody = R"GLSL(
 layout(local_size_x = LOCAL_SIZE_X, local_size_y = 1, local_size_z = 1) in;
 
@@ -5310,10 +5312,10 @@ struct SneakySnakeResult {
 };
 
 layout(std430, set = 0, binding = 0) readonly buffer QueryRanks {
-    uint query_ranks[];
+    uint query_rank_words[];
 };
 layout(std430, set = 0, binding = 1) readonly buffer TargetRanks {
-    uint target_ranks[];
+    uint target_rank_words[];
 };
 layout(std430, set = 0, binding = 2) readonly buffer Jobs {
     SneakySnakeJob jobs[];
@@ -5324,28 +5326,71 @@ layout(std430, set = 0, binding = 3) buffer Results {
 
 layout(push_constant) uniform Params {
     uint job_count;
+    uint team_size;
 } pc;
+
+const uint TEAM_SIZE = 8u;
+const uint TEAM_COUNT = LOCAL_SIZE_X / TEAM_SIZE;
+shared SneakySnakeJob sh_job[TEAM_COUNT];
+shared uint sh_position[TEAM_COUNT];
+shared uint sh_submaze_end[TEAM_COUNT];
+shared uint sh_escape_round[TEAM_COUNT];
+shared uint sh_lower_bound[TEAM_COUNT];
+shared uint sh_active[TEAM_COUNT];
+shared uint sh_lane_best[LOCAL_SIZE_X];
+shared uint sh_any_active;
+
+uint query_rank(uint rank_index) {
+    uint word = query_rank_words[rank_index >> 2u];
+    return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
+}
+
+uint target_rank(uint rank_index) {
+    uint word = target_rank_words[rank_index >> 2u];
+    return (word >> ((rank_index & 3u) << 3u)) & 0xffu;
+}
+
+uint query_rank_quad(uint rank_index) {
+    uint word_index = rank_index >> 2u;
+    uint bit_offset = (rank_index & 3u) << 3u;
+    uint word = query_rank_words[word_index] >> bit_offset;
+    if (bit_offset != 0u) {
+        word |= query_rank_words[word_index + 1u] << (32u - bit_offset);
+    }
+    return word;
+}
 
 uint matching_run(
     SneakySnakeJob job,
     uint position,
     uint submaze_end,
-    int diagonal)
+    uint query_cursor)
 {
-    int64_t query_position = int64_t(position) + int64_t(diagonal);
-    if (query_position < 0
-        || query_position >= int64_t(job.query_length)) {
-        return 0u;
-    }
-
-    uint query_cursor = uint(query_position);
     uint run_limit = min(
         submaze_end - position,
         job.query_length - query_cursor);
     uint run = 0u;
+    uint target_start = job.target_offset + position;
+    uint query_start = job.query_offset + query_cursor;
+    while (run < run_limit && ((target_start + run) & 3u) != 0u) {
+        if (target_rank(target_start + run)
+            != query_rank(query_start + run)) {
+            return run;
+        }
+        ++run;
+    }
+    while (run_limit - run >= 4u) {
+        uint query_word = query_rank_quad(query_start + run);
+        uint target_word = target_rank_words[(target_start + run) >> 2u];
+        uint different = query_word ^ target_word;
+        if (different != 0u) {
+            return run + (uint(findLSB(different)) >> 3u);
+        }
+        run += 4u;
+    }
     while (run < run_limit) {
-        if (target_ranks[job.target_offset + position + run]
-            != query_ranks[job.query_offset + query_cursor + run]) {
+        if (target_rank(target_start + run)
+            != query_rank(query_start + run)) {
             break;
         }
         ++run;
@@ -5365,7 +5410,7 @@ void write_result(
     results[job_index].reserved = 0u;
 }
 
-void solve_job(uint job_index) {
+void solve_job_scalar(uint job_index) {
     SneakySnakeJob job = jobs[job_index];
     if (job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
         write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
@@ -5387,35 +5432,38 @@ void solve_job(uint job_index) {
     uint lower_bound = 0u;
     uint submaze_begin = 0u;
     while (submaze_begin < job.query_length) {
-        uint remaining = job.query_length - submaze_begin;
-        uint submaze_length = min(uint(MAX_SPAN), remaining);
-        uint submaze_end = submaze_begin + submaze_length;
+        uint submaze_end = submaze_begin + min(
+            uint(MAX_SPAN), job.query_length - submaze_begin);
         uint position = submaze_begin;
         uint escape_round = 0u;
 
         while (position < submaze_end && escape_round < uint(MAX_SPAN)) {
             uint remaining_in_submaze = submaze_end - position;
             uint best_run = matching_run(
-                job, position, submaze_end, 0);
+                job, position, submaze_end, position);
             uint max_shift = min(job.max_edits, job.query_length);
             for (uint shift = 1u;
                  shift <= max_shift && best_run < remaining_in_submaze;
                  ++shift) {
-                best_run = max(
-                    best_run,
-                    matching_run(
-                        job,
-                        position,
-                        submaze_end,
-                        -int(shift)));
+                if (shift <= position) {
+                    best_run = max(
+                        best_run,
+                        matching_run(
+                            job,
+                            position,
+                            submaze_end,
+                            position - shift));
+                }
                 if (best_run == remaining_in_submaze) break;
-                best_run = max(
-                    best_run,
-                    matching_run(
-                        job,
-                        position,
-                        submaze_end,
-                        int(shift)));
+                if (shift < job.query_length - position) {
+                    best_run = max(
+                        best_run,
+                        matching_run(
+                            job,
+                            position,
+                            submaze_end,
+                            position + shift));
+                }
             }
 
             if (best_run == remaining_in_submaze) {
@@ -5438,13 +5486,165 @@ void solve_job(uint job_index) {
 }
 
 void main() {
-    uint64_t stride = uint64_t(gl_NumWorkGroups.x)
-        * uint64_t(gl_WorkGroupSize.x);
-    if (stride == uint64_t(0)) return;
-    for (uint64_t job_index = uint64_t(gl_GlobalInvocationID.x);
-         job_index < uint64_t(pc.job_count);
-         job_index += stride) {
-        solve_job(uint(job_index));
+    if (pc.team_size != TEAM_SIZE) {
+        uint64_t stride = uint64_t(gl_NumWorkGroups.x)
+            * uint64_t(gl_WorkGroupSize.x);
+        if (stride == uint64_t(0)) return;
+        for (uint64_t job_index = uint64_t(gl_GlobalInvocationID.x);
+             job_index < uint64_t(pc.job_count);
+             job_index += stride) {
+            solve_job_scalar(uint(job_index));
+        }
+        return;
+    }
+
+    uint lane = gl_LocalInvocationID.x;
+    uint team = lane / TEAM_SIZE;
+    uint team_lane = lane & (TEAM_SIZE - 1u);
+    uint64_t block_stride = uint64_t(gl_NumWorkGroups.x)
+        * uint64_t(TEAM_COUNT);
+    if (block_stride == uint64_t(0)) return;
+
+    for (uint64_t block = uint64_t(gl_WorkGroupID.x)
+             * uint64_t(TEAM_COUNT);
+         block < uint64_t(pc.job_count);
+         block += block_stride) {
+        uint64_t job_wide = block + uint64_t(team);
+        bool team_has_job = job_wide < uint64_t(pc.job_count);
+        uint job_index = uint(job_wide);
+
+        if (team_lane == 0u) {
+            sh_active[team] = 0u;
+            if (team_has_job) {
+                SneakySnakeJob job = jobs[job_index];
+                sh_job[team] = job;
+                if (job.max_edits > MAX_SUPPORTED_EDITS || MAX_SPAN == 0) {
+                    write_result(job_index, 0u, STATUS_UNSUPPORTED, true);
+                } else if (job.query_length != job.target_length) {
+                    uint length_difference = job.query_length > job.target_length
+                        ? job.query_length - job.target_length
+                        : job.target_length - job.query_length;
+                    write_result(
+                        job_index,
+                        length_difference,
+                        STATUS_LENGTH_DIFFERENCE_ONLY,
+                        length_difference <= job.max_edits);
+                } else if (job.query_length == 0u) {
+                    write_result(job_index, 0u, STATUS_OK, true);
+                } else {
+                    sh_position[team] = 0u;
+                    sh_submaze_end[team] = min(
+                        uint(MAX_SPAN), job.query_length);
+                    sh_escape_round[team] = 0u;
+                    sh_lower_bound[team] = 0u;
+                    sh_active[team] = 1u;
+                }
+            }
+        }
+        barrier();
+
+        while (true) {
+            if (lane == 0u) {
+                sh_any_active = 0u;
+                for (uint slot = 0u; slot < TEAM_COUNT; ++slot) {
+                    sh_any_active |= sh_active[slot];
+                }
+            }
+            barrier();
+            if (sh_any_active == 0u) break;
+
+            uint local_best = 0u;
+            if (sh_active[team] != 0u) {
+                SneakySnakeJob job = sh_job[team];
+                uint position = sh_position[team];
+                uint submaze_end = sh_submaze_end[team];
+                uint diagonal_count = 2u * job.max_edits + 1u;
+                for (uint ordinal = team_lane;
+                     ordinal < diagonal_count;
+                     ordinal += TEAM_SIZE) {
+                    uint query_cursor = position;
+                    bool valid = true;
+                    if (ordinal != 0u) {
+                        uint shift = (ordinal + 1u) >> 1u;
+                        bool before = (ordinal & 1u) != 0u;
+                        if (before) {
+                            if (shift > position) {
+                                valid = false;
+                            } else {
+                                query_cursor = position - shift;
+                            }
+                        } else {
+                            if (shift >= job.query_length - position) {
+                                valid = false;
+                            } else {
+                                query_cursor = position + shift;
+                            }
+                        }
+                    }
+                    if (valid) {
+                        local_best = max(
+                            local_best,
+                            matching_run(
+                                job,
+                                position,
+                                submaze_end,
+                                query_cursor));
+                    }
+                }
+            }
+            sh_lane_best[lane] = local_best;
+            barrier();
+
+            if (team_lane == 0u && sh_active[team] != 0u) {
+                uint best_run = 0u;
+                uint first_lane = team * TEAM_SIZE;
+                for (uint offset = 0u; offset < TEAM_SIZE; ++offset) {
+                    best_run = max(
+                        best_run,
+                        sh_lane_best[first_lane + offset]);
+                }
+
+                SneakySnakeJob job = sh_job[team];
+                uint position = sh_position[team];
+                uint submaze_end = sh_submaze_end[team];
+                uint remaining_in_submaze = submaze_end - position;
+                if (best_run == remaining_in_submaze) {
+                    sh_position[team] = submaze_end;
+                } else {
+                    uint lower_bound = sh_lower_bound[team] + 1u;
+                    sh_lower_bound[team] = lower_bound;
+                    if (lower_bound > job.max_edits) {
+                        write_result(
+                            job_index, lower_bound, STATUS_OK, false);
+                        sh_active[team] = 0u;
+                    } else {
+                        sh_position[team] = position + best_run + 1u;
+                        sh_escape_round[team] += 1u;
+                    }
+                }
+
+                if (sh_active[team] != 0u
+                    && (sh_position[team] >= submaze_end
+                        || sh_escape_round[team] >= uint(MAX_SPAN))) {
+                    uint next_begin = submaze_end;
+                    if (next_begin >= job.query_length) {
+                        write_result(
+                            job_index,
+                            sh_lower_bound[team],
+                            STATUS_OK,
+                            true);
+                        sh_active[team] = 0u;
+                    } else {
+                        sh_position[team] = next_begin;
+                        sh_submaze_end[team] = next_begin + min(
+                            uint(MAX_SPAN),
+                            job.query_length - next_begin);
+                        sh_escape_round[team] = 0u;
+                    }
+                }
+            }
+            barrier();
+        }
     }
 }
 )GLSL";

@@ -3741,7 +3741,8 @@ TEST_CASE("SneakySnake rank batch has an exact provider-compatible ABI",
     STATIC_REQUIRE(sizeof(gv::GpuSneakySnakeResultWire) == 16u);
     STATIC_REQUIRE(alignof(gv::GpuSneakySnakeResultWire) == 4u);
     STATIC_REQUIRE(offsetof(gv::GpuSneakySnakeResultWire, accepted) == 8u);
-    STATIC_REQUIRE(sizeof(gv::GpuSneakySnakePush) == 4u);
+    STATIC_REQUIRE(sizeof(gv::GpuSneakySnakePush) == 8u);
+    STATIC_REQUIRE(offsetof(gv::GpuSneakySnakePush, team_size) == 4u);
 
     const auto key = gv::make_shader_key(
         gv::ShaderKind::sneaky_snake_rank_batch, 384u, 64u, 512u);
@@ -3756,7 +3757,7 @@ TEST_CASE("SneakySnake rank batch has an exact provider-compatible ABI",
             == gv::DescriptorLayoutKind::align_extension);
     REQUIRE(gv::descriptor_binding_count(
         gv::descriptor_layout_for(key.to_request().kind)) == 4u);
-    REQUIRE(gv::push_constant_size(key.to_request().kind) == 4u);
+    REQUIRE(gv::push_constant_size(key.to_request().kind) == 8u);
     REQUIRE(gv::expected_shader_workgroup_size(key)
             == (gv::ShaderWorkgroupSize{64u, 1u, 1u}));
 
@@ -3780,7 +3781,7 @@ TEST_CASE("SneakySnake rank batch has an exact provider-compatible ABI",
         0u, 3u,
         std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}));
     CHECK(scan.has_push_constant_offsets(
-        std::array<std::uint32_t, 1>{0u}));
+        std::array<std::uint32_t, 2>{0u, 4u}));
     REQUIRE(gv::validate_spirv_layout(key, spirv));
 
     const auto msl = gv::spirv_to_msl(spirv, key, gv::MslVersion{});

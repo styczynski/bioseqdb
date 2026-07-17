@@ -340,45 +340,282 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "SneakySnake hardware Vulkan batch matches scalar across submaze boundaries",
-    "[sneaky_snake][prefilter][vulkan][hardware]")
+    "SneakySnake Highway scans full vectors and exact mismatch boundaries",
+    "[sneaky_snake][prefilter][simd]")
 {
-    namespace vp = bioseq::sequences::prefilters;
-    if (!vp::vulkan_sneaky_snake_supported()) {
-        SKIP("hardware Vulkan device unavailable");
-    }
+    const hn::ScalableTag<std::uint32_t> d;
+    const hn::ScalableTag<std::uint8_t> byte_d;
+    const std::uint32_t lanes = static_cast<std::uint32_t>(
+        hn::Lanes(byte_d));
+    const std::uint32_t length = 3u * lanes + 5u;
+    std::vector<std::uint32_t> mismatch_positions{
+        1u,
+        lanes - 1u,
+        lanes,
+        lanes + 1u,
+        2u * lanes - 1u,
+        2u * lanes,
+        2u * lanes + 1u,
+        length - 1u,
+        length,
+    };
+    std::sort(mismatch_positions.begin(), mismatch_positions.end());
+    mismatch_positions.erase(
+        std::unique(mismatch_positions.begin(), mismatch_positions.end()),
+        mismatch_positions.end());
 
-    BatchFixture fixture = random_batch(12u);
-    std::vector<vp::SneakySnakeVulkanJob> gpu_jobs;
-    gpu_jobs.reserve(fixture.jobs.size());
-    for (const SneakySnakeJob& job : fixture.jobs) {
-        gpu_jobs.push_back(vp::SneakySnakeVulkanJob{
-            .query_offset = job.query_offset,
-            .target_offset = job.target_offset,
-            .query_length = job.query_length,
-            .target_length = job.target_length,
-            .max_edits = job.max_edits,
+    std::vector<std::uint8_t> query_ranks;
+    std::vector<std::uint8_t> target_ranks;
+    std::vector<SneakySnakeJob> jobs;
+    for (const std::uint32_t mismatch : mismatch_positions) {
+        query_ranks.push_back(17u);
+        target_ranks.push_back(19u);
+        const std::uint32_t query_offset = static_cast<std::uint32_t>(
+            query_ranks.size());
+        const std::uint32_t target_offset = static_cast<std::uint32_t>(
+            target_ranks.size());
+        query_ranks.insert(query_ranks.end(), length, 255u);
+        target_ranks.insert(target_ranks.end(), length, 255u);
+        if (mismatch < length) {
+            target_ranks[static_cast<std::size_t>(target_offset) + mismatch]
+                = 0u;
+        }
+        query_ranks.push_back(23u);
+        target_ranks.push_back(29u);
+        jobs.push_back(SneakySnakeJob{
+            .query_offset = query_offset,
+            .target_offset = target_offset,
+            .query_length = length,
+            .target_length = length,
+            .max_edits = 0u,
         });
     }
 
     const SneakySnakeBatchInput input{
-        .query_ranks = fixture.query_ranks,
-        .target_ranks = fixture.target_ranks,
-        .jobs = fixture.jobs,
+        .query_ranks = query_ranks,
+        .target_ranks = target_ranks,
+        .jobs = jobs,
     };
     const auto scalar = sneaky_snake_scalar_batch(input);
-    const auto gpu = vp::run_sneaky_snake_vulkan_batch(
-        fixture.query_ranks, fixture.target_ranks, gpu_jobs);
-    REQUIRE(gpu.size() == scalar.size());
+    const auto simd = sneaky_snake_simd_batch_for(d, input);
+    const auto active_target = sneaky_snake_simd_batch(input);
+    REQUIRE(simd.size() == scalar.size());
+    REQUIRE(active_target.size() == scalar.size());
     for (std::size_t index = 0u; index < scalar.size(); ++index) {
-        CAPTURE(index, fixture.jobs[index].query_length,
-                fixture.jobs[index].target_length,
-                fixture.jobs[index].max_edits);
-        CHECK(gpu[index].lower_bound == scalar[index].lower_bound);
-        CHECK(gpu[index].status == scalar[index].status);
-        CHECK(gpu[index].accepted == scalar[index].accepted);
-        CHECK(gpu[index].reserved == scalar[index].reserved);
+        CAPTURE(index, mismatch_positions[index], lanes, length);
+        REQUIRE(same_result(simd[index], scalar[index]));
+        REQUIRE(same_result(active_target[index], scalar[index]));
+        if (mismatch_positions[index] < length) {
+            REQUIRE(scalar[index].lower_bound == 1u);
+            REQUIRE_FALSE(sneaky_snake_accepted(scalar[index]));
+        } else {
+            REQUIRE(scalar[index].lower_bound == 0u);
+            REQUIRE(sneaky_snake_accepted(scalar[index]));
+        }
     }
+}
+
+TEST_CASE(
+    "SneakySnake Highway candidate mask preserves the exact longest diagonal",
+    "[sneaky_snake][prefilter][simd]")
+{
+    const hn::ScalableTag<std::uint32_t> d;
+    const hn::ScalableTag<std::uint8_t> byte_d;
+    const std::uint32_t lanes = static_cast<std::uint32_t>(
+        hn::Lanes(byte_d));
+    const std::uint32_t length = 8u * lanes + 64u;
+    const std::uint32_t position = 3u * lanes + 10u;
+    const std::uint32_t max_edits = 2u * lanes + 3u;
+    const std::uint32_t lower = position - max_edits;
+    const std::uint32_t winning_start = position + lanes;
+    const std::uint32_t expected_run = length - winning_start;
+    constexpr std::uint32_t main_run = 3u;
+
+    std::vector<std::uint8_t> query(length, 255u);
+    std::vector<std::uint8_t> target(length, 254u);
+    for (std::uint32_t index = position; index < length; ++index) {
+        target[index] = static_cast<std::uint8_t>(
+            ((index - position) * 73u + 11u) % 251u);
+    }
+
+    const std::uint8_t filter_rank = target[position + main_run];
+    query[lower + main_run] = filter_rank;
+    query[lower + lanes - 1u + main_run] = filter_rank;
+    query[lower + lanes + main_run] = filter_rank;
+    for (std::uint32_t index = 0u; index < expected_run; ++index) {
+        query[winning_start + index] = target[position + index];
+    }
+    for (std::uint32_t index = 0u; index < main_run; ++index) {
+        query[position + index] = target[position + index];
+    }
+    query[position + main_run] = 252u;
+
+    const std::uint32_t scalar_best = sneaky_snake_detail::
+        longest_diagonal_run_for<sneaky_snake_detail::CpuTraversal::scalar>(
+            nullptr,
+            query,
+            target,
+            position,
+            length,
+            max_edits);
+    const std::uint32_t simd_best = sneaky_snake_detail::
+        longest_diagonal_run_for<sneaky_snake_detail::CpuTraversal::highway>(
+            d,
+            query,
+            target,
+            position,
+            length,
+            max_edits);
+    REQUIRE(scalar_best == expected_run);
+    REQUIRE(simd_best == expected_run);
+}
+
+TEST_CASE(
+    "SneakySnake hardware Vulkan batch matches scalar across submaze boundaries",
+    "[sneaky_snake][prefilter][vulkan][hardware]")
+{
+    namespace vp = bioseq::sequences::prefilters;
+    namespace gv = bioseq::gpu::vulkan;
+    if (!vp::vulkan_sneaky_snake_supported()) {
+        SKIP("hardware Vulkan device unavailable");
+    }
+
+    const auto require_gpu_parity = [](const BatchFixture& fixture) {
+        std::vector<vp::SneakySnakeVulkanJob> gpu_jobs;
+        gpu_jobs.reserve(fixture.jobs.size());
+        for (const SneakySnakeJob& job : fixture.jobs) {
+            gpu_jobs.push_back(vp::SneakySnakeVulkanJob{
+                .query_offset = job.query_offset,
+                .target_offset = job.target_offset,
+                .query_length = job.query_length,
+                .target_length = job.target_length,
+                .max_edits = job.max_edits,
+            });
+        }
+
+        const SneakySnakeBatchInput input{
+            .query_ranks = fixture.query_ranks,
+            .target_ranks = fixture.target_ranks,
+            .jobs = fixture.jobs,
+        };
+        const auto scalar = sneaky_snake_scalar_batch(input);
+        const auto gpu = vp::run_sneaky_snake_vulkan_batch(
+            fixture.query_ranks, fixture.target_ranks, gpu_jobs);
+
+        // Keep the recorded-command key identical while changing mapped input
+        // bytes. Equal supported jobs become exact matches, which proves that
+        // replay executes and observes fresh host writes rather than returning
+        // the first submission's result buffer.
+        std::vector<std::uint8_t> replay_targets = fixture.target_ranks;
+        for (const SneakySnakeJob& job : fixture.jobs) {
+            if (job.query_length == job.target_length
+                && job.query_length != 0u
+                && job.max_edits <= gv::k_gpu_sneaky_snake_max_edits) {
+                std::copy_n(
+                    fixture.query_ranks.begin() + job.query_offset,
+                    job.query_length,
+                    replay_targets.begin() + job.target_offset);
+            }
+        }
+        const SneakySnakeBatchInput replay_input{
+            .query_ranks = fixture.query_ranks,
+            .target_ranks = replay_targets,
+            .jobs = fixture.jobs,
+        };
+        const auto replay_scalar = sneaky_snake_scalar_batch(replay_input);
+        const auto replayed = vp::run_sneaky_snake_vulkan_batch(
+            fixture.query_ranks, replay_targets, gpu_jobs);
+        REQUIRE(gpu.size() == scalar.size());
+        REQUIRE(replayed.size() == gpu.size());
+        bool observed_changed_result = false;
+        for (std::size_t index = 0u; index < scalar.size(); ++index) {
+            CAPTURE(index, fixture.jobs[index].query_length,
+                    fixture.jobs[index].target_length,
+                    fixture.jobs[index].max_edits);
+            if (fixture.jobs[index].max_edits
+                > gv::k_gpu_sneaky_snake_max_edits) {
+                CHECK(gpu[index].lower_bound == 0u);
+                CHECK(gpu[index].status
+                    == gv::k_gpu_sneaky_snake_status_unsupported);
+                CHECK(gpu[index].accepted == 1u);
+                CHECK(gpu[index].reserved == 0u);
+                CHECK(replayed[index].lower_bound == 0u);
+                CHECK(replayed[index].status
+                    == gv::k_gpu_sneaky_snake_status_unsupported);
+                CHECK(replayed[index].accepted == 1u);
+                CHECK(replayed[index].reserved == 0u);
+                continue;
+            }
+            CHECK(gpu[index].lower_bound == scalar[index].lower_bound);
+            CHECK(gpu[index].status == scalar[index].status);
+            CHECK(gpu[index].accepted == scalar[index].accepted);
+            CHECK(gpu[index].reserved == scalar[index].reserved);
+            CHECK(replayed[index].lower_bound
+                == replay_scalar[index].lower_bound);
+            CHECK(replayed[index].status == replay_scalar[index].status);
+            CHECK(replayed[index].accepted == replay_scalar[index].accepted);
+            CHECK(replayed[index].reserved == replay_scalar[index].reserved);
+            observed_changed_result |=
+                replay_scalar[index].lower_bound != scalar[index].lower_bound
+                || replay_scalar[index].status != scalar[index].status
+                || replay_scalar[index].accepted != scalar[index].accepted;
+        }
+        CHECK(observed_changed_result);
+    };
+
+    // Force the independent-invocation path while retaining offsets, arbitrary
+    // uint8 ranks, partial workgroups, and all submaze boundary lengths.
+    BatchFixture low_edit_fixture = random_batch(12u);
+    for (SneakySnakeJob& job : low_edit_fixture.jobs) {
+        job.max_edits = std::min(job.max_edits, 8u);
+    }
+    require_gpu_parity(low_edit_fixture);
+
+    BatchFixture high_edit_fixture;
+    const auto append_job = [&high_edit_fixture](
+        std::span<const std::uint8_t> query,
+        std::span<const std::uint8_t> target,
+        std::uint32_t max_edits) {
+        high_edit_fixture.query_ranks.push_back(255u);
+        const std::uint32_t query_offset = static_cast<std::uint32_t>(
+            high_edit_fixture.query_ranks.size());
+        high_edit_fixture.query_ranks.insert(
+            high_edit_fixture.query_ranks.end(), query.begin(), query.end());
+        high_edit_fixture.query_ranks.push_back(254u);
+
+        high_edit_fixture.target_ranks.push_back(253u);
+        const std::uint32_t target_offset = static_cast<std::uint32_t>(
+            high_edit_fixture.target_ranks.size());
+        high_edit_fixture.target_ranks.insert(
+            high_edit_fixture.target_ranks.end(), target.begin(), target.end());
+        high_edit_fixture.target_ranks.push_back(252u);
+
+        high_edit_fixture.jobs.push_back(SneakySnakeJob{
+            .query_offset = query_offset,
+            .target_offset = target_offset,
+            .query_length = static_cast<std::uint32_t>(query.size()),
+            .target_length = static_cast<std::uint32_t>(target.size()),
+            .max_edits = max_edits,
+        });
+    };
+
+    std::vector<std::uint8_t> shifted_query(600u);
+    std::vector<std::uint8_t> shifted_target(600u, 251u);
+    for (std::size_t index = 0u; index < shifted_query.size(); ++index) {
+        shifted_query[index] = static_cast<std::uint8_t>(
+            (index * 37u + index / 7u * 11u) % 251u);
+    }
+    constexpr std::size_t kWinningShift = 17u;
+    for (std::size_t index = kWinningShift;
+         index < shifted_target.size(); ++index) {
+        shifted_target[index] = shifted_query[index - kWinningShift];
+    }
+    append_job(shifted_query, shifted_target, 31u);
+    append_job(shifted_query, shifted_target, 32u);
+    append_job({}, {}, 31u);
+    const std::array<std::uint8_t, 1u> one_rank{7u};
+    append_job({}, one_rank, 31u);
+    require_gpu_parity(high_edit_fixture);
 }
 
 TEST_CASE(
