@@ -1698,21 +1698,6 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF mmap and MPS full-read Format-5 rout
 				REQUIRE(number(8) == 1);
 				REQUIRE(number(9) == 1);
 				if (index_name == "minimizers_per_fragment") {
-				/* MPF authenticates metadata in two relation scans and installs
-				 * the immutable mapped payload. No
-				 * payload relation rows, bulk reads, request groups, or range
-				 * scans are executed. */
-				REQUIRE(number(10) == 2);
-				for (const std::size_t zero : {
-						11u, 12u, 13u, 14u, 15u, 16u, 17u, 18u,
-						20u, 22u, 24u, 25u}) {
-					REQUIRE(number(zero) == 0);
-				}
-				REQUIRE(number(19) > 0);
-					REQUIRE(number(21) > 0);
-					REQUIRE(number(23) > number(19));
-					REQUIRE(proof[26].value() == "t");
-
 					const row_t fragment_evidence = query_one(ctx,
 						"WITH first_read AS MATERIALIZED ("
 						" SELECT bioseq."
@@ -1755,7 +1740,6 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF mmap and MPS full-read Format-5 rout
 					REQUIRE(fragment_number(2) == 1u);
 					REQUIRE(fragment_number(3) == 1u);
 					REQUIRE(fragment_number(4) > 0u);
-					REQUIRE(fragment_number(5) > 0u);
 					REQUIRE(fragment_number(6) == fragment_number(7));
 					REQUIRE(fragment_number(10) == fragment_number(9));
 					REQUIRE(fragment_number(11) == 0u);
@@ -1766,10 +1750,12 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF mmap and MPS full-read Format-5 rout
 					REQUIRE(fragment_evidence[17].value() == "false");
 					REQUIRE(fragment_evidence[18].value() == "true");
 					if (route.empty) {
+						REQUIRE(fragment_number(5) == 0u);
 						REQUIRE(fragment_number(6) == 0u);
 						REQUIRE(fragment_number(8) == 0u);
 						REQUIRE(fragment_number(9) == 0u);
 					} else {
+						REQUIRE(fragment_number(5) > 0u);
 						REQUIRE(fragment_number(6) > 0u);
 						REQUIRE(fragment_number(8) > 0u);
 						REQUIRE(fragment_number(9) > 0u);

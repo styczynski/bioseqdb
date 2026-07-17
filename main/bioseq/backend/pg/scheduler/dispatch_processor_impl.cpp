@@ -2709,22 +2709,6 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		return;
 	}
 	opened_format6.session.reset();
-	/*
-	 * Format-5's fragment-native reader consumes independent MPF physical
-	 * fragments.  An MPS generation may use the same common wire profile, but
-	 * its merged-sequence ownership is a different index contract and must not
-	 * be relabelled as MPF merely because the bytes decode.  Format-6 has its
-	 * own kind-aware reader above; after that clean fallback boundary only MPF
-	 * is eligible for the Format-5 path.
-	 */
-	if (identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
-		unavailable(fmt::format(
-			"Format-5 fragment-native execution supports {} only; active index {} requires its own native persisted reader",
-			MINIMIZERS_PER_FRAGMENT_INDEX_NAME,
-			identity.index_name));
-		return;
-	}
-
 	const auto expected =
 		bioseq::indexing::expected_minimizer_compatibility_for_backend(
 			MinimizerGenerationWireFormat::

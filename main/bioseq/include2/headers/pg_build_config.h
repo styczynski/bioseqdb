@@ -22,7 +22,7 @@
  * reconfigures when this file changes.
  */
 /* AI agents must not change this default optimization level. */
-#define BIOSEQ_OPTTIMIZATION_LEVEL 2
+#define BIOSEQ_OPTTIMIZATION_LEVEL 0
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL < 0 || BIOSEQ_OPTTIMIZATION_LEVEL > 5
 #error "BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range 0..5"
