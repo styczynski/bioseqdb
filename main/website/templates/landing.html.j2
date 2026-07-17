@@ -154,18 +154,44 @@
     <p class="section-lede">Select a capability to trace where it runs in the system. Every capability is ordinary SQL on top of a Postgres-native engine.</p>
   </div>
   <div class="capability-tracer" data-capability-tracer>
-    <div class="capability-diagram" aria-hidden="true">
-      <p class="capability-diagram-title">System architecture</p>
-      <div class="arch-flow">
-        <span class="arch-node" data-arch-node="sql">SQL</span>
-        <span class="arch-node" data-arch-node="pg">Postgres</span>
-        <span class="arch-node" data-arch-node="meta">Metadata</span>
-        <span class="arch-node" data-arch-node="index">Index</span>
-        <span class="arch-node" data-arch-node="shard">Columnar shards</span>
-        <span class="arch-node" data-arch-node="engine">Execution engine</span>
-        <span class="arch-node" data-arch-node="cpu">CPU / SIMD</span>
-        <span class="arch-node" data-arch-node="gpu">GPU / Vulkan</span>
+    <div class="capability-diagram">
+      <div class="capability-diagram-head">
+        <p class="capability-diagram-title">System architecture</p>
+        <p>Select a capability below to trace it ↓</p>
       </div>
+      <svg class="architecture-svg" viewBox="0 36 900 226" role="img" aria-label="SQL flows through PostgreSQL storage and indexes into the BioseqDB execution engine, then vectorized CPU or Vulkan GPU paths">
+        <defs>
+          <linearGradient id="architecture-gradient" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#63cdf0"/><stop offset="1" stop-color="#1f86b0"/></linearGradient>
+          <marker id="architecture-arrow" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M.6.6 6 3 .6 5.4" fill="none" stroke="#5a6b7c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></marker>
+        </defs>
+        <g class="architecture-links" fill="none" stroke="#5a6b7c" stroke-width="1.7" marker-end="url(#architecture-arrow)">
+          <path d="M132 150h60"/><path d="M272 150h64"/><path d="M468 150h128" stroke-dasharray="2 6"/><path d="M692 150h22v-30h30"/><path d="M692 150h22v30h30"/>
+        </g>
+        <g class="architecture-file" data-file-node>
+          <path d="M162 44h32v54h-44V56z"/><path d="M150 56h12V44M158 70h28M158 78h28M158 86h20"/><text x="172" y="112">input.fasta</text><path d="M194 68h38v46"/>
+        </g>
+        <g class="architecture-node" data-arch-node="sql" tabindex="0">
+          <rect class="node-fill" x="40" y="108" width="86" height="84" rx="12"/><path d="M40 133h86"/><circle cx="54" cy="120" r="3.3"/><circle cx="66" cy="120" r="3.3"/><circle cx="78" cy="120" r="3.3"/><text x="83" y="171">SQL</text>
+        </g>
+        <g class="architecture-node" data-arch-node="pg" tabindex="0">
+          <path class="node-fill" d="M198 116v68a34 9 0 0 0 68 0v-68"/><ellipse class="node-fill" cx="232" cy="116" rx="34" ry="9"/><ellipse cx="232" cy="140" rx="34" ry="9"/><ellipse cx="232" cy="164" rx="34" ry="9"/>
+        </g>
+        <g class="architecture-storage">
+          <g class="architecture-node" data-arch-node="index" tabindex="0"><rect class="node-fill" x="344" y="95" width="124" height="24" rx="6"/><text x="406" y="111">INDEX</text></g>
+          <path d="M362 119v14M406 119v14M450 119v14"/>
+          <g class="architecture-node" data-arch-node="shard" tabindex="0"><rect x="344" y="133" width="36" height="34" rx="6"/><rect class="node-fill" x="388" y="133" width="36" height="34" rx="6"/><rect x="432" y="133" width="36" height="34" rx="6"/><text x="349" y="146">#1</text><text x="393" y="146">#2</text><text x="437" y="146">#3</text></g>
+          <g class="architecture-node architecture-meta" data-arch-node="meta" tabindex="0"><rect class="node-fill" x="344" y="179" width="124" height="28" rx="6"/><text x="406" y="197">META</text></g>
+        </g>
+        <g class="architecture-node" data-arch-node="engine" tabindex="0">
+          <rect class="node-fill" x="600" y="106" width="92" height="88" rx="16"/><path class="dna" d="M642 120q-10 15 4 30t4 30M650 120q10 15-4 30t-4 30M639 130h14M640 140h12M640 160h12M639 170h14"/><text class="engine-label" x="646" y="216">BioseqDB execution</text><text class="engine-label" x="646" y="232">engine layer</text>
+        </g>
+        <g class="architecture-node processor-node" data-arch-node="cpu" tabindex="0">
+          <rect class="node-fill" x="751" y="104" width="32" height="32" rx="6"/><rect x="759" y="112" width="16" height="16" rx="2.5"/><path d="M746 112h5M746 120h5M746 128h5M783 112h5M783 120h5M783 128h5M759 99v5M767 99v5M775 99v5M759 136v5M767 136v5M775 136v5"/><text x="795" y="126">CPU</text>
+        </g>
+        <g class="architecture-node processor-node" data-arch-node="gpu" tabindex="0">
+          <polygon class="node-fill" points="773,162 754,183 764,183 759,199 780,176 770,176"/><text x="795" y="186">GPU</text>
+        </g>
+      </svg>
     </div>
     <div class="capability-options" role="group" aria-label="Capabilities">
       <button type="button" class="capability-option" data-trace="sql" aria-pressed="false">
@@ -239,12 +265,25 @@
     <p class="section-lede">Vectorized CPU paths, Vulkan-backed GPU acceleration, and parallel scans &#8212; the search runs where the data already lives.</p>
   </div>
   <figure class="media-band" data-reveal>
-    <video class="media-band-video" data-media-band muted loop playsinline controls preload="metadata" width="1280" height="720">
-      <source src="{{ site.assets_base_url }}media/cinematic_band.mp4" type="video/mp4">
+    <video class="media-band-video" data-media-band data-autobg autoplay muted loop playsinline preload="auto" aria-hidden="true" width="1280" height="720">
+      <source src="{{ site.assets_base_url }}media/small_vid.mp4" type="video/mp4">
       <p class="media-band-fallback">A short loop of Bioseq's vectorized and GPU-accelerated search paths. <a href="{{ nav.documentation }}">Read how the engine works</a>.</p>
     </video>
     <figcaption class="media-band-caption">The search runs on vectorized CPU paths, Vulkan-backed GPU paths, and parallel scans, right where the data lives.</figcaption>
   </figure>
+</section>
+
+<section class="landing-section index-explainer" id="index" aria-labelledby="index-heading">
+  <div class="section-head section-head-centered" data-reveal>
+    <p class="eyebrow">How the index works</p>
+    <h2 id="index-heading">From long sequences to small, searchable seeds</h2>
+    <p class="section-lede">Before search runs, BioseqDB turns each sequence into compact seeds. Minimizers, spaced seeds, and strobemers reduce long records to stable lookup keys, which is why search stays fast as collections grow.</p>
+  </div>
+  <ol class="seed-grid" data-reveal>
+    <li class="seed-card"><span class="seed-num">01</span><div><h3>Minimizers</h3><p>Sliding windows keep the lowest-hash k-mer, reducing a long sequence to a compact, stable set of representatives.</p></div><div class="seed-visual" aria-hidden="true"><span>A</span><span>C</span><span>G</span><span class="hot">T</span><span>A</span><span>C</span><span>G</span></div></li>
+    <li class="seed-card seed-card-reverse"><span class="seed-num">02</span><div><h3>Spaced seeds</h3><p>A mask samples selected positions inside each seed, tolerating substitutions without giving up fast indexed lookup.</p></div><div class="seed-visual seed-spaced" aria-hidden="true"><span class="hot">A</span><span>·</span><span class="hot">G</span><span>·</span><span class="hot">A</span><span>·</span><span class="hot">G</span></div></li>
+    <li class="seed-card"><span class="seed-num">03</span><div><h3>Strobemers</h3><p>Distant k-mers are linked into one seed, staying distinctive even when an insertion or deletion shifts the sequence between them.</p></div><div class="seed-visual seed-strobe" aria-hidden="true"><span class="hot">ACG</span><i></i><span class="hot">TGA</span></div></li>
+  </ol>
 </section>
 
 <section class="landing-section" id="scale" aria-labelledby="scale-heading">
@@ -295,13 +334,15 @@
 </section>
 
 <section class="landing-cta" id="cta" aria-labelledby="cta-heading">
+  <div class="cta-grid" id="cta-grid" aria-hidden="true"></div>
+  <div class="cta-vignette" aria-hidden="true"></div>
   <div class="cta-card" data-reveal>
     <h2 id="cta-heading" class="cta-title">Query biological sequences with SQL you already know.</h2>
     <p class="cta-lede">Load your reads and references, keep them beside their metadata, and search everything in one place.</p>
     <p class="cta-actions">
       <a class="button primary" href="{{ nav.documentation }}">Read the docs</a>
-      <a class="button" href="{{ nav.tutorials }}">See the tutorials</a>
       <a class="button" href="{{ site.repository_url }}" rel="noreferrer">View on GitHub</a>
+      {% if site.status_label %}<span class="cta-status"><span class="status-dot" aria-hidden="true"></span>{{ site.status_label }}</span>{% endif %}
     </p>
   </div>
 </section>

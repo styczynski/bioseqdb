@@ -1436,6 +1436,13 @@ void resolve_entity_links(std::vector<document_node>& nodes,
             // spelling become the label (so a resolved route never shows as raw text).
             if (query.label) {
                 node.attributes["entity_label"] = *query.label;
+            } else if (!shorthand
+                       && (node.target.starts_with("sql:")
+                           || node.target.starts_with("cpp:")
+                           || node.target.starts_with("id:"))) {
+                // MD4C exposes the raw wikilink target as display text. Domain
+                // qualifiers are resolver syntax, not user-facing labels.
+                node.attributes["entity_label"] = query.spelling;
             } else if (node.text.empty() && node.children.empty()) {
                 node.attributes["entity_label"] = query.spelling;
             }

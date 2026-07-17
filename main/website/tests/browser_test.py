@@ -234,6 +234,10 @@ def _exercise_code_entities(page) -> None:
     text = code.text_content() or ""
     _check("bioseq.len" in text,
            "decoration altered the code source text (must only wrap, never rewrite)")
+    qualified = code.locator("a.entity-ref", has_text="bioseq.len")
+    if qualified.count() > 0:
+        _check(qualified.first.inner_text() == "bioseq.len",
+               "qualified code entity was split into multiple hover targets")
 
 
 _GOLDEN_TOKENS = Path(_THIS_DIR) / "fixtures" / "search_tokens_golden.json"
@@ -274,11 +278,11 @@ def _exercise_search(page) -> None:
     _check(page.locator("#search-button .search-button-kbd").count() == 1,
            "search button does not expose its keyboard shortcut")
     _check(page.locator("#search-dialog").count() == 1, "search dialog is missing")
-    page.keyboard.press("Control+k")
     inp = page.locator("#search-input")
+    button.click()
     inp.wait_for(state="visible", timeout=4000)
     _check(page.evaluate("() => document.getElementById('search-dialog').open === true"),
-           "Ctrl+K did not open the search dialog")
+           "clicking the search box did not keep the search dialog open")
     inp.fill("sequence")
     first = page.locator("#search-results a.search-result").first
     first.wait_for(state="visible", timeout=4000)
@@ -397,6 +401,8 @@ def _exercise_capability_tracer(page) -> None:
     options = tracer.locator(".capability-option")
     total = options.count()
     _check(total >= 2, "capability tracer has fewer than two options")
+    _check(tracer.locator("svg.architecture-svg").count() == 1,
+           "capability tracer is missing the reference architecture diagram")
     _check(options.first.evaluate("el => el.tagName") == "BUTTON",
            "capability option is not a real <button>")
     _check(tracer.locator(".capability-option[aria-pressed='true']").count() == 1,
@@ -440,21 +446,35 @@ def _exercise_workflow(page) -> None:
 
 
 def _exercise_media_band(page) -> None:
-    """Media band (§15.2): a self-hosted video with controls, muted (no forced
-    audio), no autoplay attribute, and an mp4 source with inline fallback."""
+    """Media band (§15.2): a muted self-hosted decorative background loop with
+    no native player chrome and the reference mp4 source."""
     video = page.locator("video[data-media-band]")
     if video.count() == 0:
         return
     first = video.first
-    _check(first.get_attribute("controls") is not None, "media band video has no controls")
-    _check(first.get_attribute("autoplay") is None,
-           "media band video must not carry the autoplay attribute")
+    _check(first.get_attribute("controls") is None,
+           "decorative media band exposes native player controls")
+    _check(first.get_attribute("autoplay") is not None,
+           "decorative media band is missing autoplay")
     _check(first.get_attribute("muted") is not None,
            "media band video must be muted so it never forces audio")
     source = video.locator("source")
     _check(source.count() >= 1
            and (source.first.get_attribute("src") or "").endswith(".mp4"),
            "media band video has no mp4 <source>")
+    _check((source.first.get_attribute("src") or "").endswith("small_vid.mp4"),
+           "media band does not use the reference small_vid.mp4 asset")
+
+
+def _exercise_cta_grid(page) -> None:
+    """Final CTA reproduces the moving reference DNA tile field."""
+    grid = page.locator("#cta-grid")
+    if grid.count() == 0:
+        return
+    page.locator("#cta").scroll_into_view_if_needed()
+    page.wait_for_timeout(150)
+    _check(grid.locator(".cta-grid-tile").count() >= 12,
+           "CTA DNA tile field was not constructed")
 
 
 def _exercise_reduced_motion(page) -> None:
@@ -547,6 +567,7 @@ def _run_one(api, server: StaticFixtureServer, routes: dict[str, str],
                 _exercise_connectors(page)
                 _exercise_workflow(page)
                 _exercise_media_band(page)
+                _exercise_cta_grid(page)
                 _exercise_reduced_motion(page)
             if label == "tutorial":
                 _exercise_tooltip(page)

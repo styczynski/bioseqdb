@@ -32,38 +32,41 @@ function announce(message) {
 // nodes are touched (never a regex over HTML), and each wrapped span keeps the
 // original text, so copied source / textContent are unchanged (§20.7).
 function wrapEntityRange(code, range) {
-  // A range may span several highlight tokens; wrap the covered segment inside each
-  // text node it touches. textContent is invariant under wrapping, so offsets stay
-  // correct even after earlier ranges split nodes (we re-walk per range).
+  // Prism may split a qualified identifier across several token spans. Build one
+  // DOM Range across all of those nodes and extract it into one anchor, preserving
+  // the Prism spans inside. This keeps `bioseq.len` a single hover/focus target and
+  // a single visual pill instead of three adjacent boxes.
   const end = range.start + range.len;
   const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
-  const segments = [];
+  let startNode = null;
+  let startOffset = 0;
+  let endNode = null;
+  let endOffset = 0;
   let offset = 0;
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
     const nodeEnd = offset + node.data.length;
-    if (offset < end && range.start < nodeEnd) {
-      segments.push({
-        node,
-        from: Math.max(0, range.start - offset),
-        to: Math.min(node.data.length, end - offset),
-      });
+    if (!startNode && range.start >= offset && range.start <= nodeEnd) {
+      startNode = node;
+      startOffset = Math.max(0, range.start - offset);
+    }
+    if (end >= offset && end <= nodeEnd) {
+      endNode = node;
+      endOffset = Math.max(0, end - offset);
+      break;
     }
     offset = nodeEnd;
   }
-  for (const segment of segments) {
-    const data = segment.node.data;
-    const anchor = document.createElement("a");
-    anchor.className = "entity-ref";
-    anchor.setAttribute("href", range.route);
-    anchor.setAttribute("data-entity-id", range.id);
-    if (range.tooltip) anchor.setAttribute("data-entity-data-url", range.tooltip);
-    anchor.textContent = data.slice(segment.from, segment.to);
-    const fragment = document.createDocumentFragment();
-    if (segment.from > 0) fragment.appendChild(document.createTextNode(data.slice(0, segment.from)));
-    fragment.appendChild(anchor);
-    if (segment.to < data.length) fragment.appendChild(document.createTextNode(data.slice(segment.to)));
-    segment.node.replaceWith(fragment);
-  }
+  if (!startNode || !endNode) return;
+  const domRange = document.createRange();
+  domRange.setStart(startNode, startOffset);
+  domRange.setEnd(endNode, endOffset);
+  const anchor = document.createElement("a");
+  anchor.className = "entity-ref code-entity-ref";
+  anchor.setAttribute("href", range.route);
+  anchor.setAttribute("data-entity-id", range.id);
+  if (range.tooltip) anchor.setAttribute("data-entity-data-url", range.tooltip);
+  anchor.appendChild(domRange.extractContents());
+  domRange.insertNode(anchor);
 }
 
 function decorateCode(code) {
@@ -78,7 +81,8 @@ function decorateCode(code) {
   }
   if (!Array.isArray(ranges) || ranges.length === 0) return;
   code.dataset.decorated = "1";
-  // Generator guarantees non-overlapping ranges, so order does not matter.
+  // Work right-to-left so extraction cannot shift the offsets of later ranges.
+  ranges.sort((a, b) => b.start - a.start);
   for (const range of ranges) wrapEntityRange(code, range);
 }
 
