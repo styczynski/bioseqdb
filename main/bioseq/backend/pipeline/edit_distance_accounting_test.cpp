@@ -23,6 +23,7 @@ import bioseq.storage.lazy;
 
 HWY_BEFORE_NAMESPACE();
 namespace bioseq::simd::HWY_NAMESPACE {
+using namespace bioseq::sequences::prefilters;
 
 namespace {
 
@@ -331,10 +332,10 @@ TEST_CASE("Exact mandatory gaps are unbanded before SneakySnake rejection",
 
     const std::vector<std::uint8_t> query_ranks(query_gap_length, 0u);
     const std::vector<std::uint8_t> target_ranks(target_gap_length, 0u);
-    const SneakySnakeResult prefilter = sneaky_snake_scalar(
+    const PrefilterResult prefilter = sneaky_snake_scalar(
         query_ranks, target_ranks, 16u);
     REQUIRE(prefilter.lower_bound == length_difference);
-    REQUIRE_FALSE(sneaky_snake_accepted(prefilter));
+    REQUIRE_FALSE(prefilter_accepted(prefilter));
 
     for (const bool reverse : {false, true}) {
         CAPTURE(reverse);

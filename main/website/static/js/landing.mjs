@@ -187,8 +187,8 @@ function initWorkflowProgress() {
   }
 }
 
-// Decorative media band: a self-hosted, muted, looping video that carries controls
-// and inline fallback content. It never autoplays under reduced motion; otherwise
+// Decorative media band: a self-hosted, muted background loop without player UI.
+// It never autoplays under reduced motion; otherwise
 // it plays only while in view and pauses when scrolled away or the tab is hidden.
 function initMediaBand() {
   const video = document.querySelector("video[data-media-band]");
@@ -196,7 +196,8 @@ function initMediaBand() {
     return;
   }
   if (REDUCE_MOTION || typeof IntersectionObserver === "undefined") {
-    return; // Leave paused; the user can start it with the native controls.
+    video.pause();
+    return;
   }
   const safePlay = () => {
     const attempt = video.play();
@@ -221,6 +222,91 @@ function initMediaBand() {
   });
 }
 
+// Moving DNA tiles behind the final CTA, matching the reference design. Rows
+// drift at different speeds and recycle their leading tile; reduced-motion users
+// receive the same grid as a still composition.
+function initCtaGrid() {
+  const wrap = document.getElementById("cta-grid");
+  if (!wrap) return;
+  const alphabet = "ACGTN";
+  const dark = ["#0c2033", "#0e2739", "#0a1c2e", "#102a3f"];
+  const tileSize = 46;
+  const pitch = 52;
+  let rows = [];
+  let raf = 0;
+  let last = 0;
+  const pick = () => alphabet[(Math.random() * alphabet.length) | 0];
+  const restyle = (tile) => {
+    tile.textContent = pick();
+    const hot = Math.random() < 0.19;
+    tile.classList.toggle("is-hot", hot);
+    tile.style.background = hot ? "#f26522" : dark[(Math.random() * dark.length) | 0];
+  };
+  const build = () => {
+    const width = wrap.clientWidth;
+    const height = wrap.clientHeight;
+    if (!width || !height) return;
+    wrap.replaceChildren();
+    rows = [];
+    const columns = Math.ceil(width / pitch) + 4;
+    const rowCount = Math.ceil(height / pitch) + 1;
+    for (let r = 0; r < rowCount; r += 1) {
+      const row = document.createElement("div");
+      row.className = "cta-grid-row";
+      row.style.top = `${r * pitch}px`;
+      const tiles = [];
+      for (let c = 0; c < columns; c += 1) {
+        const tile = document.createElement("span");
+        tile.className = "cta-grid-tile";
+        tile.style.left = `${(c - 1) * pitch}px`;
+        tile.style.width = `${tileSize}px`;
+        tile.style.height = `${tileSize}px`;
+        restyle(tile);
+        row.appendChild(tile);
+        tiles.push(tile);
+      }
+      wrap.appendChild(row);
+      rows.push({ row, tiles, shift: Math.random() * pitch, speed: 11 + Math.random() * 29 });
+    }
+  };
+  const frame = (time) => {
+    if (!last) last = time;
+    const delta = Math.min(0.08, (time - last) / 1000);
+    last = time;
+    for (const item of rows) {
+      item.shift += item.speed * delta;
+      if (item.shift >= pitch) {
+        item.shift -= pitch;
+        for (let i = item.tiles.length - 1; i > 0; i -= 1) {
+          item.tiles[i].textContent = item.tiles[i - 1].textContent;
+          item.tiles[i].className = item.tiles[i - 1].className;
+          item.tiles[i].style.background = item.tiles[i - 1].style.background;
+        }
+        restyle(item.tiles[0]);
+      }
+      item.row.style.transform = `translate3d(${item.shift.toFixed(2)}px,0,0)`;
+    }
+    raf = requestAnimationFrame(frame);
+  };
+  build();
+  if (!REDUCE_MOTION) raf = requestAnimationFrame(frame);
+  let resizeTimer = 0;
+  window.addEventListener("resize", () => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(build, 160);
+  }, { passive: true });
+  document.addEventListener("visibilitychange", () => {
+    if (REDUCE_MOTION) return;
+    if (document.hidden && raf) {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    } else if (!document.hidden && !raf) {
+      last = 0;
+      raf = requestAnimationFrame(frame);
+    }
+  });
+}
+
 export function initLanding() {
   if (!document.querySelector(".landing-hero")) {
     return;
@@ -230,4 +316,5 @@ export function initLanding() {
   initCapabilityTracer();
   initWorkflowProgress();
   initMediaBand();
+  initCtaGrid();
 }

@@ -62,6 +62,7 @@ export import bioseq.gpu.vulkan.shader_layout;
 export import bioseq.gpu.vulkan.shader_variants;
 export import bioseq.gpu.vulkan.phase_b_abi;
 export import bioseq.gpu.vulkan.phase_c_abi;
+export import bioseq.sequences.prefilters.prefilter_types;
 import bioseq.common.mlogging;
 import bioseq.parallelism.memory_admission;
 import bioseq.gpu.vulkan.shader_compiler;
@@ -102,6 +103,95 @@ struct VulkanFeatureSet {
     std::array<std::uint8_t, VK_UUID_SIZE> pipeline_cache_uuid{};
     std::array<char, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE> device_name{};
 };
+
+inline constexpr std::size_t k_rank_prefilter_replay_route_count = 7u;
+
+/// Resolve the fixed recorded-command slot for one rank-prefilter shader and
+/// push mode. Keeping this mapping pure makes the seven non-aliasing replay
+/// identities independently testable without a Vulkan device.
+[[nodiscard]] constexpr std::optional<std::size_t>
+rank_prefilter_replay_index(
+    ShaderKind kind,
+    std::uint32_t push_mode) noexcept
+{
+    if (kind == ShaderKind::sneaky_snake_rank_batch) {
+        if (push_mode == 1u) return 0u;
+        if (push_mode == 8u) return 1u;
+        return std::nullopt;
+    }
+    if (push_mode != 0u) return std::nullopt;
+    switch (kind) {
+    case ShaderKind::gatekeeper_rank_batch:
+        return 2u;
+    case ShaderKind::gatekeeper_rank_batch_l32_e2:
+        return 3u;
+    case ShaderKind::gatekeeper_rank_batch_l32_e4:
+        return 4u;
+    case ShaderKind::gatekeeper_rank_batch_l64_e2:
+        return 5u;
+    case ShaderKind::gatekeeper_rank_batch_l64_e4:
+        return 6u;
+    default:
+        return std::nullopt;
+    }
+}
+
+struct GatekeeperRankBatchRoute {
+    ShaderKind kind = ShaderKind::gatekeeper_rank_batch;
+    std::size_t replay_index = 2u;
+
+    constexpr bool operator==(const GatekeeperRankBatchRoute&) const noexcept =
+        default;
+};
+
+/// Select a specialized GateKeeper shader only for a homogeneous, word-aligned
+/// production batch. Every other shape deliberately retains the generic key.
+[[nodiscard]] inline GatekeeperRankBatchRoute
+resolve_gatekeeper_rank_batch_route(
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs) noexcept
+{
+    if (jobs.empty()) return {};
+
+    const std::uint32_t length = jobs.front().query_length;
+    const std::uint32_t max_edits = jobs.front().max_edits;
+    bool homogeneous_aligned_production =
+        jobs.front().target_length == length
+        && (length == 32u || length == 64u)
+        && (max_edits == 2u || max_edits == 4u);
+    for (const auto& job : jobs) {
+        homogeneous_aligned_production =
+            homogeneous_aligned_production
+            && job.query_length == length
+            && job.target_length == length
+            && job.max_edits == max_edits
+            && (job.query_offset & 3u) == 0u
+            && (job.target_offset & 3u) == 0u;
+    }
+    if (!homogeneous_aligned_production) return {};
+
+    if (length == 32u && max_edits == 2u) {
+        return {
+            .kind = ShaderKind::gatekeeper_rank_batch_l32_e2,
+            .replay_index = 3u,
+        };
+    }
+    if (length == 32u) {
+        return {
+            .kind = ShaderKind::gatekeeper_rank_batch_l32_e4,
+            .replay_index = 4u,
+        };
+    }
+    if (max_edits == 2u) {
+        return {
+            .kind = ShaderKind::gatekeeper_rank_batch_l64_e2,
+            .replay_index = 5u,
+        };
+    }
+    return {
+        .kind = ShaderKind::gatekeeper_rank_batch_l64_e4,
+        .replay_index = 6u,
+    };
+}
 
 /// Canonical allocation-free Vulkan driver identity used by SQL/report proof.
 /// Numeric fields avoid unstable marketing strings and preserve the exact
@@ -4813,12 +4903,23 @@ public:
 
     /// Rank-buffer SneakySnake lower-bound batch. Valid unequal-length and
     /// unsupported jobs are returned conservatively with an explicit status;
-    /// malformed host ranges fail before dispatch.
-    [[nodiscard]] std::vector<GpuSneakySnakeResultWire>
+    /// representable malformed ranges fail open in the shader before loads.
+    [[nodiscard]] std::vector<
+        bioseq::sequences::prefilters::PrefilterResult>
     run_sneaky_snake_rank_batch_roundtrip(
         std::span<const std::uint8_t> query_ranks,
         std::span<const std::uint8_t> target_ranks,
-        std::span<const GpuSneakySnakeJobWire> jobs);
+        std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs);
+
+    /// Rank-buffer GateKeeper batch. The device treats a mask candidate as a
+    /// rejection only after the exact bounded-distance guard confirms it;
+    /// representable malformed ranges fail open in the shader before loads.
+    [[nodiscard]] std::vector<
+        bioseq::sequences::prefilters::PrefilterResult>
+    run_gatekeeper_rank_batch_roundtrip(
+        std::span<const std::uint8_t> query_ranks,
+        std::span<const std::uint8_t> target_ranks,
+        std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs);
 
     // DOC0354 Part 2 first slice — CIGAR-capable GPU extension ABI. This
     // exact-match implementation writes packed CIGAR ops on device and rejects
@@ -4848,6 +4949,9 @@ public:
     }
     [[nodiscard]] std::uint64_t sneaky_snake_dispatch_count() const noexcept {
         return sneaky_snake_dispatch_count_.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] std::uint64_t gatekeeper_dispatch_count() const noexcept {
+        return gatekeeper_dispatch_count_.load(std::memory_order_relaxed);
     }
 
     // DOC0310 Phase C — GPU seed count + emit + device anchor sort (§14, §13).
@@ -5160,6 +5264,22 @@ private:
     std::uint32_t find_memory_type(std::uint32_t type_bits, VkMemoryPropertyFlags flags) const;
     [[nodiscard]] std::uint64_t buffer_memory_requirement_locked(
         std::uint64_t bytes, VkBufferUsageFlags usage) const;
+    [[nodiscard]] std::uint64_t
+    prefilter_workspace_allocation_bytes_locked() const noexcept;
+    void ensure_prefilter_workspace_buffer_locked(
+        Buffer& buffer,
+        std::uint64_t bytes,
+        VkBufferUsageFlags usage);
+    void release_prefilter_workspace_locked() noexcept;
+    [[nodiscard]] std::vector<
+        bioseq::sequences::prefilters::PrefilterResult>
+    run_rank_prefilter_batch_roundtrip_locked(
+        ShaderKind kind,
+        std::uint32_t push_mode,
+        std::size_t replay_index,
+        std::span<const std::uint8_t> query_ranks,
+        std::span<const std::uint8_t> target_ranks,
+        std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs);
     [[nodiscard]] std::uint64_t pipeline_cache_metadata_bytes_locked()
         const noexcept;
     void admit_pipeline_cache_growth_locked(
@@ -5188,6 +5308,22 @@ private:
             "Vulkan operation proof identity space exhausted");
     }
 
+    struct PrefilterRecordedCommand {
+        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        ShaderKind kind{};
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        GpuPrefilterPush push{};
+        std::uint32_t groups = 0u;
+        bool recorded = false;
+    };
+
+    struct PrefilterDescriptorBindingCache {
+        std::array<VkBuffer, 4> buffers{};
+        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+    };
+
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physical_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
@@ -5195,6 +5331,12 @@ private:
     std::uint32_t queue_family_ = 0;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
+    // Two SneakySnake routes, one generic GateKeeper route, and four
+    // homogeneous LxE GateKeeper production routes each retain an independent
+    // replay identity so interleaved benchmark/production batches do not
+    // re-record command buffers when their specialization changes.
+    std::array<PrefilterRecordedCommand, k_rank_prefilter_replay_route_count>
+        prefilter_recorded_commands_{};
     VkFence fence_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
@@ -5208,6 +5350,21 @@ private:
     bool seed_metrics_claimed_ = false;
     std::uint32_t gpu_anchor_sort_capacity_ = 0;
     std::optional<GpuArena> phase_c_arena_;  // DOC0310 §7 — lazily created.
+    // High-water mapped workspace shared by the synchronous rank-prefilter
+    // APIs. Queue access is serialized by mu_, so one runtime-owned set is
+    // sufficient for both algorithms and all seven fixed replay routes.
+    // Declared before the buffers so reverse destruction order releases every
+    // admitted allocation before returning its reservation.
+    bioseq::parallelism::MemoryPermit prefilter_workspace_permit_;
+    Buffer prefilter_query_buffer_;
+    Buffer prefilter_target_buffer_;
+    Buffer prefilter_jobs_buffer_;
+    Buffer prefilter_results_buffer_;
+    // Index 0 owns SneakySnake's descriptor state (both replay modes); index 1
+    // owns GateKeeper's. Alternating algorithms therefore does not make the
+    // next call pay for an unchanged descriptor-set update.
+    std::array<PrefilterDescriptorBindingCache, 2>
+        prefilter_descriptor_binding_cache_{};
     VkDescriptorPool phase_c_pool_ = VK_NULL_HANDLE;  // DOC0310 — fresh-set pool.
     using PFN_vkSetWorkgroupSizeMVK_Bioseq =
         void (VKAPI_PTR*)(VkShaderModule module, std::uint32_t x, std::uint32_t y, std::uint32_t z);
@@ -5224,6 +5381,7 @@ private:
     std::atomic<std::uint64_t> seq_sort_uploaded_bytes_{0};  // DOC0360 full-payload proof
     std::atomic<std::uint64_t> alignment_extension_dispatch_count_{0};
     std::atomic<std::uint64_t> sneaky_snake_dispatch_count_{0};
+    std::atomic<std::uint64_t> gatekeeper_dispatch_count_{0};
     std::atomic<std::uint64_t> grouped32_stream_identity_{1};
     std::atomic<std::uint64_t> operation_proof_identity_{1};
     std::mutex mu_;
@@ -8922,13 +9080,25 @@ void Runtime::init() {
     check_vk(vkCreateCommandPool(device_, &pool_info, nullptr, &command_pool_),
              "vkCreateCommandPool");
 
+    std::array<
+        VkCommandBuffer,
+        k_rank_prefilter_replay_route_count + 1u> command_buffers{};
     VkCommandBufferAllocateInfo cmd_alloc{};
     cmd_alloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cmd_alloc.commandPool = command_pool_;
     cmd_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cmd_alloc.commandBufferCount = 1;
-    check_vk(vkAllocateCommandBuffers(device_, &cmd_alloc, &command_buffer_),
+    cmd_alloc.commandBufferCount = static_cast<std::uint32_t>(
+        command_buffers.size());
+    check_vk(vkAllocateCommandBuffers(
+                 device_, &cmd_alloc, command_buffers.data()),
              "vkAllocateCommandBuffers");
+    command_buffer_ = command_buffers[0];
+    for (std::size_t replay_index = 0u;
+         replay_index < prefilter_recorded_commands_.size();
+         ++replay_index) {
+        prefilter_recorded_commands_[replay_index].command_buffer =
+            command_buffers[replay_index + 1u];
+    }
 
     VkFenceCreateInfo fence_info{};
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -9017,6 +9187,8 @@ void Runtime::init() {
 void Runtime::shutdown() noexcept {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
+        prefilter_recorded_commands_ = {};
+        release_prefilter_workspace_locked();
         // DOC0310 — release arena buffers (host-visible, owned via Buffer RAII)
         // and the Phase C descriptor pool before the device goes away.
         phase_c_arena_.reset();
@@ -9151,6 +9323,99 @@ std::uint64_t Runtime::buffer_memory_requirement_locked(
     vkGetBufferMemoryRequirements(device_, buffer, &requirements);
     vkDestroyBuffer(device_, buffer, nullptr);
     return requirements.size;
+}
+
+std::uint64_t
+Runtime::prefilter_workspace_allocation_bytes_locked() const noexcept
+{
+    using bioseq::parallelism::saturating_add;
+    return saturating_add(
+        prefilter_query_buffer_.allocation_bytes,
+        saturating_add(
+            prefilter_target_buffer_.allocation_bytes,
+            saturating_add(
+                prefilter_jobs_buffer_.allocation_bytes,
+                prefilter_results_buffer_.allocation_bytes)));
+}
+
+void Runtime::release_prefilter_workspace_locked() noexcept
+{
+    prefilter_results_buffer_.reset();
+    prefilter_jobs_buffer_.reset();
+    prefilter_target_buffer_.reset();
+    prefilter_query_buffer_.reset();
+    prefilter_descriptor_binding_cache_ = {};
+    prefilter_workspace_permit_.release();
+}
+
+void Runtime::ensure_prefilter_workspace_buffer_locked(
+    Buffer& buffer,
+    std::uint64_t bytes,
+    VkBufferUsageFlags usage)
+{
+    if (buffer.valid() && buffer.bytes >= bytes) return;
+
+    using bioseq::parallelism::saturating_add;
+    const std::uint64_t allocation_requirement =
+        buffer_memory_requirement_locked(bytes, usage);
+    const std::uint64_t peak = saturating_add(
+        prefilter_workspace_allocation_bytes_locked(),
+        allocation_requirement);
+    if (peak == (std::numeric_limits<std::uint64_t>::max)()) {
+        throw VulkanRuntimeError(
+            "rank-prefilter workspace admission estimate saturated");
+    }
+
+    bioseq::parallelism::MemoryAdmissionFailure failure{};
+    if (!prefilter_workspace_permit_) {
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(peak, &failure);
+        if (!permit) {
+            throw VulkanRuntimeError(fmt::format(
+                "rank-prefilter workspace admission denied: reason={} requested={}",
+                bioseq::parallelism::memory_admission_failure_reason_name(
+                    failure.reason),
+                failure.requested_bytes));
+        }
+        prefilter_workspace_permit_ = std::move(*permit);
+    } else if (!prefilter_workspace_permit_.grow_to(peak, &failure)) {
+        throw VulkanRuntimeError(fmt::format(
+            "rank-prefilter workspace growth denied: reason={} requested={}",
+            bioseq::parallelism::memory_admission_failure_reason_name(
+                failure.reason),
+            failure.requested_bytes));
+    }
+
+    try {
+        Buffer replacement = create_device_buffer(bytes, usage);
+        if (replacement.mapped == nullptr) {
+            throw VulkanRuntimeError(
+                "rank-prefilter workspace allocation is not host-mapped");
+        }
+        if (replacement.allocation_bytes != allocation_requirement) {
+            throw VulkanRuntimeError(
+                "rank-prefilter workspace allocation requirement changed");
+        }
+        buffer = std::move(replacement);
+    } catch (...) {
+        const std::uint64_t retained =
+            prefilter_workspace_allocation_bytes_locked();
+        if (retained <= prefilter_workspace_permit_.bytes()) {
+            prefilter_workspace_permit_.shrink_to(retained);
+            if (retained == 0u) prefilter_workspace_permit_.release();
+        }
+        throw;
+    }
+
+    const std::uint64_t retained =
+        prefilter_workspace_allocation_bytes_locked();
+    if (retained == (std::numeric_limits<std::uint64_t>::max)()
+        || retained > prefilter_workspace_permit_.bytes()) {
+        release_prefilter_workspace_locked();
+        throw VulkanRuntimeError(
+            "rank-prefilter workspace exceeded admitted allocation");
+    }
+    prefilter_workspace_permit_.shrink_to(retained);
 }
 
 std::uint64_t Runtime::phase_c_arena_allocation_requirement(
@@ -10156,64 +10421,56 @@ void validate_alignment_extension_inputs(
     }
 }
 
-void validate_sneaky_snake_inputs(
+void validate_prefilter_inputs(
+    const char* algorithm,
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
-    std::span<const GpuSneakySnakeJobWire> jobs)
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs)
 {
     if (jobs.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw VulkanRuntimeError("SneakySnake job_count exceeds uint32");
+        throw VulkanRuntimeError(fmt::format(
+            "{} job_count exceeds uint32", algorithm));
     }
     if (query_ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw VulkanRuntimeError(
-            "SneakySnake query rank stream exceeds uint32 offsets");
+        throw VulkanRuntimeError(fmt::format(
+            "{} query rank stream exceeds uint32 offsets", algorithm));
     }
     if (target_ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw VulkanRuntimeError(
-            "SneakySnake target rank stream exceeds uint32 offsets");
+        throw VulkanRuntimeError(fmt::format(
+            "{} target rank stream exceeds uint32 offsets", algorithm));
     }
 
-    for (std::size_t i = 0; i < jobs.size(); ++i) {
-        const GpuSneakySnakeJobWire& job = jobs[i];
-        const std::uint64_t query_end =
-            static_cast<std::uint64_t>(job.query_offset)
-            + static_cast<std::uint64_t>(job.query_length);
-        const std::uint64_t target_end =
-            static_cast<std::uint64_t>(job.target_offset)
-            + static_cast<std::uint64_t>(job.target_length);
-        if (job.query_offset > query_ranks.size()
-            || query_end > query_ranks.size()) {
-            throw VulkanRuntimeError(fmt::format(
-                "SneakySnake job {} query range [{}, {}) exceeds rank count {}",
-                i, job.query_offset, query_end, query_ranks.size()));
-        }
-        if (job.target_offset > target_ranks.size()
-            || target_end > target_ranks.size()) {
-            throw VulkanRuntimeError(fmt::format(
-                "SneakySnake job {} target range [{}, {}) exceeds rank count {}",
-                i, job.target_offset, target_end, target_ranks.size()));
-        }
-    }
 }
 
 void validate_sneaky_snake_results(
-    std::span<const GpuSneakySnakeJobWire> jobs,
-    std::span<const GpuSneakySnakeResultWire> results)
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs,
+    std::span<const bioseq::sequences::prefilters::PrefilterResult> results,
+    std::size_t query_rank_count,
+    std::size_t target_rank_count)
 {
+    using bioseq::sequences::prefilters::PrefilterStatus;
     if (results.size() != jobs.size()) {
         throw VulkanRuntimeError("SneakySnake result count mismatch");
     }
     for (std::size_t i = 0; i < jobs.size(); ++i) {
-        const GpuSneakySnakeJobWire& job = jobs[i];
-        const GpuSneakySnakeResultWire& result = results[i];
+        const bioseq::sequences::prefilters::PrefilterJob& job = jobs[i];
+        const bioseq::sequences::prefilters::PrefilterResult& result =
+            results[i];
+        const bool in_bounds =
+            bioseq::sequences::prefilters::prefilter_slice_in_bounds(
+                query_rank_count, job.query_offset, job.query_length)
+            && bioseq::sequences::prefilters::prefilter_slice_in_bounds(
+                target_rank_count, job.target_offset, job.target_length);
         if (result.accepted > 1u || result.reserved != 0u) {
             throw VulkanRuntimeError(fmt::format(
                 "SneakySnake shader returned malformed flags for job {}",
                 i));
         }
 
-        if (result.status == k_gpu_sneaky_snake_status_unsupported) {
-            if (job.max_edits <= k_gpu_sneaky_snake_max_edits
+        if (result.status == static_cast<std::uint32_t>(
+                PrefilterStatus::unsupported_conservative)) {
+            if ((in_bounds
+                 && job.max_edits <= k_gpu_sneaky_snake_max_edits)
                 || result.lower_bound != 0u || result.accepted != 1u) {
                 throw VulkanRuntimeError(fmt::format(
                     "SneakySnake shader returned invalid unsupported result for job {}",
@@ -10222,12 +10479,13 @@ void validate_sneaky_snake_results(
             continue;
         }
 
-        if (job.max_edits > k_gpu_sneaky_snake_max_edits) {
+        if (!in_bounds || job.max_edits > k_gpu_sneaky_snake_max_edits) {
             throw VulkanRuntimeError(fmt::format(
                 "SneakySnake shader failed to retain unsupported job {}",
                 i));
         }
-        if (result.status == k_gpu_sneaky_snake_status_length_difference_only) {
+        if (result.status == static_cast<std::uint32_t>(
+                PrefilterStatus::conservative_unequal)) {
             if (job.query_length == job.target_length) {
                 throw VulkanRuntimeError(fmt::format(
                     "SneakySnake shader returned unequal-length status for equal job {}",
@@ -10247,7 +10505,8 @@ void validate_sneaky_snake_results(
             }
             continue;
         }
-        if (result.status != k_gpu_sneaky_snake_status_ok
+        if (result.status != static_cast<std::uint32_t>(
+                PrefilterStatus::success)
             || job.query_length != job.target_length) {
             throw VulkanRuntimeError(fmt::format(
                 "SneakySnake shader returned invalid status {} for job {}",
@@ -10259,6 +10518,130 @@ void validate_sneaky_snake_results(
             || result.lower_bound > job.max_edits + 1u) {
             throw VulkanRuntimeError(fmt::format(
                 "SneakySnake shader returned invalid equal-length result for job {}",
+                i));
+        }
+    }
+}
+
+void validate_gatekeeper_results(
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs,
+    std::span<const bioseq::sequences::prefilters::PrefilterResult> results,
+    std::size_t query_rank_count,
+    std::size_t target_rank_count)
+{
+    using bioseq::sequences::prefilters::PrefilterJob;
+    using bioseq::sequences::prefilters::PrefilterResult;
+    using bioseq::sequences::prefilters::PrefilterStatus;
+    using bioseq::sequences::prefilters::gatekeeper_diagnostic_estimate;
+    using bioseq::sequences::prefilters::gatekeeper_diagnostic_valid_mask;
+    using bioseq::sequences::prefilters::gatekeeper_exact_guard_activated;
+    using bioseq::sequences::prefilters::gatekeeper_guard_confirmed_rejection;
+    using bioseq::sequences::prefilters::gatekeeper_hamming_exact_rejection;
+    using bioseq::sequences::prefilters::gatekeeper_mask_rejection_candidate;
+    if (results.size() != jobs.size()) {
+        throw VulkanRuntimeError("GateKeeper result count mismatch");
+    }
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        const PrefilterJob& job = jobs[i];
+        const PrefilterResult& result = results[i];
+        if (result.accepted > 1u
+            || (result.reserved & ~gatekeeper_diagnostic_valid_mask) != 0u) {
+            throw VulkanRuntimeError(fmt::format(
+                "GateKeeper shader returned malformed flags for job {}", i));
+        }
+
+        const std::uint32_t unsupported = static_cast<std::uint32_t>(
+            PrefilterStatus::unsupported_conservative);
+        const std::uint32_t unequal = static_cast<std::uint32_t>(
+            PrefilterStatus::conservative_unequal);
+        const std::uint32_t success = static_cast<std::uint32_t>(
+            PrefilterStatus::success);
+        const bool in_bounds =
+            bioseq::sequences::prefilters::prefilter_slice_in_bounds(
+                query_rank_count, job.query_offset, job.query_length)
+            && bioseq::sequences::prefilters::prefilter_slice_in_bounds(
+                target_rank_count, job.target_offset, job.target_length);
+        if (!in_bounds) {
+            if (result.status != unsupported || result.lower_bound != 0u
+                || result.accepted != 1u || result.reserved != 0u) {
+                throw VulkanRuntimeError(fmt::format(
+                    "GateKeeper shader did not fail open invalid job {}", i));
+            }
+            continue;
+        }
+        if (job.query_length == 0u && job.target_length == 0u) {
+            if (result.status != success || result.lower_bound != 0u
+                || result.accepted != 1u || result.reserved != 0u) {
+                throw VulkanRuntimeError(fmt::format(
+                    "GateKeeper shader returned invalid empty result for job {}",
+                    i));
+            }
+            continue;
+        }
+        if (job.query_length != job.target_length) {
+            const std::uint32_t length_difference =
+                job.query_length > job.target_length
+                ? job.query_length - job.target_length
+                : job.target_length - job.query_length;
+            const std::uint32_t expected_accepted =
+                length_difference <= job.max_edits ? 1u : 0u;
+            if (result.status != unequal
+                || result.lower_bound != length_difference
+                || result.accepted != expected_accepted
+                || result.reserved != 0u) {
+                throw VulkanRuntimeError(fmt::format(
+                    "GateKeeper shader returned invalid unequal-length result for job {}",
+                    i));
+            }
+            continue;
+        }
+
+        const bool supported_geometry =
+            job.query_length <= k_gpu_gatekeeper_max_length
+            && job.max_edits <= k_gpu_gatekeeper_max_edits;
+        if (!supported_geometry) {
+            if (result.status != unsupported || result.lower_bound != 0u
+                || result.accepted != 1u || result.reserved != 0u) {
+                throw VulkanRuntimeError(fmt::format(
+                    "GateKeeper shader returned invalid unsupported result for job {}",
+                    i));
+            }
+            continue;
+        }
+
+        if (result.status != success) {
+            throw VulkanRuntimeError(fmt::format(
+                "GateKeeper shader returned invalid status {} for job {}",
+                result.status, i));
+        }
+
+        const bool candidate = gatekeeper_mask_rejection_candidate(result);
+        const bool guard = gatekeeper_exact_guard_activated(result);
+        const bool confirmed = gatekeeper_guard_confirmed_rejection(result);
+        const bool hamming = gatekeeper_hamming_exact_rejection(result);
+        const std::uint32_t estimate =
+            gatekeeper_diagnostic_estimate(result);
+        if (candidate != guard || (confirmed && !guard)
+            || (hamming && (candidate || guard || confirmed))
+            || estimate > job.max_edits + 1u
+            || ((candidate || hamming)
+                && estimate != job.max_edits + 1u)
+            || (!candidate && !hamming && estimate > job.max_edits)
+            || (hamming && job.max_edits != 0u)) {
+            throw VulkanRuntimeError(fmt::format(
+                "GateKeeper shader returned inconsistent diagnostics for job {}",
+                i));
+        }
+        if (result.accepted != 0u) {
+            if (result.lower_bound != 0u || confirmed || hamming) {
+                throw VulkanRuntimeError(fmt::format(
+                    "GateKeeper shader returned invalid accepted result for job {}",
+                    i));
+            }
+        } else if (result.lower_bound != job.max_edits + 1u
+                   || (!confirmed && !hamming)) {
+            throw VulkanRuntimeError(fmt::format(
+                "GateKeeper shader returned unconfirmed rejection for job {}",
                 i));
         }
     }
@@ -10599,7 +10982,8 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
              !scan.has_array_stride(40) || !scan.has_array_stride(48))) {
             throw VulkanRuntimeError("SPIR-V alignment CIGAR extension layout mismatch");
         }
-        if (kind == ShaderKind::sneaky_snake_rank_batch &&
+        if ((kind == ShaderKind::sneaky_snake_rank_batch
+             || is_gatekeeper_rank_batch_kind(kind)) &&
             (!scan.has_binding_array_stride(0u, 0u, 4u) ||
              !scan.has_binding_array_stride(0u, 1u, 4u) ||
              !scan.has_binding_array_stride(0u, 2u, 20u) ||
@@ -10611,9 +10995,9 @@ Runtime::PhaseBPipeline Runtime::get_phase_b_pipeline_locked(
                  0u, 3u,
                  std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}) ||
              !scan.has_push_constant_offsets(
-                 std::array<std::uint32_t, 1>{0u}))) {
+                 std::array<std::uint32_t, 4>{0u, 4u, 8u, 12u}))) {
             throw VulkanRuntimeError(
-                "SPIR-V SneakySnake rank-batch layout mismatch");
+                "SPIR-V rank-prefilter batch layout mismatch");
         }
 
         VkShaderModuleCreateInfo module_info{};
@@ -12350,21 +12734,42 @@ RuntimeSketchBatchResult Runtime::run_phase_c_sketch_tile_batch_roundtrip(
 
 namespace {
 
-/// Submit the currently-recorded command buffer and wait. Centralises the
-/// begin/end/submit/wait/reset boilerplate for the Phase C multi-submit ops.
-void submit_and_wait(VkDevice device, VkQueue queue, VkCommandBuffer cmd, VkFence fence,
-                     const char* what,
-                     RuntimePipelineUseCollector* collector = nullptr) {
-    check_vk(vkEndCommandBuffer(cmd), what);
+/// Submit an executable command buffer and wait for the synchronous runtime
+/// contract. The command buffer remains executable and may be submitted again.
+void submit_executable_and_wait(
+    VkDevice device,
+    VkQueue queue,
+    VkCommandBuffer cmd,
+    VkFence fence,
+    const char* what,
+    RuntimePipelineUseCollector* collector = nullptr)
+{
     VkSubmitInfo submit{};
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
     check_vk(vkQueueSubmit(queue, 1, &submit, fence), what);
     check_vk(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX), what);
-    require_immutable_metal_policy_live(what);
     check_vk(vkResetFences(device, 1, &fence), what);
+    // Restore the shared fence before any policy check can throw so the next
+    // synchronous operation never inherits a signalled fence.
+    require_immutable_metal_policy_live(what);
     if (collector != nullptr) collector->commit(cmd);
+}
+
+/// End the currently-recording command buffer, submit it, and wait. This keeps
+/// the established helper contract for Phase C's multi-submit operations.
+void submit_and_wait(
+    VkDevice device,
+    VkQueue queue,
+    VkCommandBuffer cmd,
+    VkFence fence,
+    const char* what,
+    RuntimePipelineUseCollector* collector = nullptr)
+{
+    check_vk(vkEndCommandBuffer(cmd), what);
+    submit_executable_and_wait(
+        device, queue, cmd, fence, what, collector);
 }
 
 }  // namespace
@@ -14022,47 +14427,126 @@ std::vector<GpuAlignmentExtensionResultWire> Runtime::run_alignment_extension_ro
     return results;
 }
 
-std::vector<GpuSneakySnakeResultWire>
+std::vector<bioseq::sequences::prefilters::PrefilterResult>
 Runtime::run_sneaky_snake_rank_batch_roundtrip(
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
-    std::span<const GpuSneakySnakeJobWire> jobs)
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs)
 {
     std::lock_guard<std::mutex> guard(mu_);
+    constexpr std::uint32_t kSneakySnakeParallelThreshold = 16u;
+    bool use_parallel_teams = false;
+    for (const bioseq::sequences::prefilters::PrefilterJob& job : jobs) {
+        if (job.max_edits >= kSneakySnakeParallelThreshold
+            && job.max_edits <= k_gpu_sneaky_snake_max_edits
+            && job.query_length == job.target_length
+            && job.query_length != 0u) {
+            use_parallel_teams = true;
+            break;
+        }
+    }
+    const std::uint32_t push_mode = use_parallel_teams ? 8u : 1u;
+    const std::optional<std::size_t> replay_index =
+        rank_prefilter_replay_index(
+            ShaderKind::sneaky_snake_rank_batch, push_mode);
+    if (!replay_index) {
+        throw VulkanRuntimeError("invalid SneakySnake replay route");
+    }
+    std::vector<bioseq::sequences::prefilters::PrefilterResult> results =
+        run_rank_prefilter_batch_roundtrip_locked(
+            ShaderKind::sneaky_snake_rank_batch,
+            push_mode,
+            *replay_index,
+            query_ranks,
+            target_ranks,
+            jobs);
+    if (!jobs.empty()) {
+        sneaky_snake_dispatch_count_.fetch_add(
+            1u, std::memory_order_relaxed);
+    }
+    return results;
+}
+
+std::vector<bioseq::sequences::prefilters::PrefilterResult>
+Runtime::run_gatekeeper_rank_batch_roundtrip(
+    std::span<const std::uint8_t> query_ranks,
+    std::span<const std::uint8_t> target_ranks,
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    const GatekeeperRankBatchRoute route =
+        resolve_gatekeeper_rank_batch_route(jobs);
+    std::vector<bioseq::sequences::prefilters::PrefilterResult> results =
+        run_rank_prefilter_batch_roundtrip_locked(
+            route.kind,
+            0u,
+            route.replay_index,
+            query_ranks,
+            target_ranks,
+            jobs);
+    if (!jobs.empty()) {
+        gatekeeper_dispatch_count_.fetch_add(
+            1u, std::memory_order_relaxed);
+    }
+    return results;
+}
+
+std::vector<bioseq::sequences::prefilters::PrefilterResult>
+Runtime::run_rank_prefilter_batch_roundtrip_locked(
+    ShaderKind kind,
+    std::uint32_t push_mode,
+    std::size_t replay_index,
+    std::span<const std::uint8_t> query_ranks,
+    std::span<const std::uint8_t> target_ranks,
+    std::span<const bioseq::sequences::prefilters::PrefilterJob> jobs)
+{
+    const bool sneaky = kind == ShaderKind::sneaky_snake_rank_batch;
+    const bool gatekeeper = is_gatekeeper_rank_batch_kind(kind);
+    const std::optional<std::size_t> expected_replay_index =
+        rank_prefilter_replay_index(kind, push_mode);
+    if ((!sneaky && !gatekeeper)
+        || replay_index >= prefilter_recorded_commands_.size()
+        || !expected_replay_index
+        || replay_index != *expected_replay_index) {
+        throw VulkanRuntimeError("invalid rank-prefilter dispatch route");
+    }
+    const char* algorithm = sneaky ? "SneakySnake" : "GateKeeper";
     if (!features_.available) {
-        throw VulkanRuntimeError(
-            "run_sneaky_snake_rank_batch_roundtrip on unavailable device");
+        throw VulkanRuntimeError(fmt::format(
+            "run_{}_rank_batch_roundtrip on unavailable device",
+            sneaky ? "sneaky_snake" : "gatekeeper"));
     }
     if (jobs.empty()) {
         return {};
     }
-    validate_sneaky_snake_inputs(query_ranks, target_ranks, jobs);
+    validate_prefilter_inputs(
+        algorithm, query_ranks, target_ranks, jobs);
     if (features_.max_workgroup_count_x == 0u) {
-        throw VulkanRuntimeError(
-            "SneakySnake device reports zero max workgroup count");
+        throw VulkanRuntimeError(fmt::format(
+            "{} device reports zero max workgroup count", algorithm));
     }
 
-    constexpr std::uint32_t kSneakySnakeLocal = 64u;
+    constexpr std::uint32_t kPrefilterLocal = 64u;
+    constexpr std::uint64_t kRetainedWorkspaceBytes = 64u * 1024u * 1024u;
     const PhaseBPipeline pipe = get_phase_b_pipeline_locked(
-        ShaderKind::sneaky_snake_rank_batch,
-        kSneakySnakeLocal,
-        k_gpu_sneaky_snake_submaze_length);
+        kind,
+        kPrefilterLocal,
+        sneaky ? k_gpu_sneaky_snake_submaze_length
+               : k_gpu_gatekeeper_max_length);
 
     const std::uint64_t query_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(query_ranks.size())
-            * sizeof(std::uint32_t),
+        ((static_cast<std::uint64_t>(query_ranks.size()) + 3u) / 4u) * 4u,
         sizeof(std::uint32_t));
     const std::uint64_t target_bytes = std::max<std::uint64_t>(
-        static_cast<std::uint64_t>(target_ranks.size())
-            * sizeof(std::uint32_t),
+        ((static_cast<std::uint64_t>(target_ranks.size()) + 3u) / 4u) * 4u,
         sizeof(std::uint32_t));
     const std::uint64_t job_bytes = std::max<std::uint64_t>(
         static_cast<std::uint64_t>(jobs.size())
-            * sizeof(GpuSneakySnakeJobWire),
+            * sizeof(bioseq::sequences::prefilters::PrefilterJob),
         sizeof(std::uint32_t));
     const std::uint64_t result_bytes =
         static_cast<std::uint64_t>(jobs.size())
-        * sizeof(GpuSneakySnakeResultWire);
+        * sizeof(bioseq::sequences::prefilters::PrefilterResult);
 
     for (const auto [label, bytes] : {
             std::pair{"query ranks", query_bytes},
@@ -14071,85 +14555,238 @@ Runtime::run_sneaky_snake_rank_batch_roundtrip(
             std::pair{"results", result_bytes}}) {
         if (bytes > features_.max_storage_buffer_range) {
             throw VulkanRuntimeError(fmt::format(
-                "SneakySnake {} buffer {} exceeds maxStorageBufferRange {}",
-                label, bytes, features_.max_storage_buffer_range));
+                "{} {} buffer {} exceeds maxStorageBufferRange {}",
+                algorithm, label, bytes,
+                features_.max_storage_buffer_range));
         }
     }
 
-    Buffer query_buf = create_device_buffer(query_bytes, kPhaseBBufferUsage);
-    Buffer target_buf = create_device_buffer(target_bytes, kPhaseBBufferUsage);
-    Buffer jobs_buf = create_device_buffer(job_bytes, kPhaseBBufferUsage);
-    Buffer results_buf = create_device_buffer(result_bytes, kPhaseBBufferUsage);
-    if (query_buf.mapped == nullptr || target_buf.mapped == nullptr
-        || jobs_buf.mapped == nullptr || results_buf.mapped == nullptr) {
-        throw VulkanRuntimeError(
-            "run_sneaky_snake_rank_batch_roundtrip: device buffer alloc failed");
+    std::vector<bioseq::sequences::prefilters::PrefilterResult> results;
+    try {
+    ensure_prefilter_workspace_buffer_locked(
+        prefilter_query_buffer_, query_bytes, kPhaseBBufferUsage);
+    ensure_prefilter_workspace_buffer_locked(
+        prefilter_target_buffer_, target_bytes, kPhaseBBufferUsage);
+    ensure_prefilter_workspace_buffer_locked(
+        prefilter_jobs_buffer_, job_bytes, kPhaseBBufferUsage);
+    ensure_prefilter_workspace_buffer_locked(
+        prefilter_results_buffer_, result_bytes, kPhaseBBufferUsage);
+    if (prefilter_query_buffer_.mapped == nullptr
+        || prefilter_target_buffer_.mapped == nullptr
+        || prefilter_jobs_buffer_.mapped == nullptr
+        || prefilter_results_buffer_.mapped == nullptr) {
+        throw VulkanRuntimeError(fmt::format(
+            "run_{}_rank_batch_roundtrip: device buffer alloc failed",
+            sneaky ? "sneaky_snake" : "gatekeeper"));
     }
 
-    auto* query_words = static_cast<std::uint32_t*>(query_buf.mapped);
-    for (std::size_t i = 0; i < query_ranks.size(); ++i) {
-        query_words[i] = query_ranks[i];
+    if constexpr (std::endian::native == std::endian::little) {
+        if (!query_ranks.empty()) {
+            std::memcpy(
+                prefilter_query_buffer_.mapped,
+                query_ranks.data(),
+                query_ranks.size());
+        }
+        if (!target_ranks.empty()) {
+            std::memcpy(
+                prefilter_target_buffer_.mapped,
+                target_ranks.data(),
+                target_ranks.size());
+        }
+        const std::size_t query_tail = query_ranks.size() & 3u;
+        if (query_tail != 0u || query_ranks.empty()) {
+            std::memset(
+                static_cast<std::byte*>(prefilter_query_buffer_.mapped)
+                    + query_ranks.size(),
+                0,
+                query_ranks.empty() ? sizeof(std::uint32_t) : 4u - query_tail);
+        }
+        const std::size_t target_tail = target_ranks.size() & 3u;
+        if (target_tail != 0u || target_ranks.empty()) {
+            std::memset(
+                static_cast<std::byte*>(prefilter_target_buffer_.mapped)
+                    + target_ranks.size(),
+                0,
+                target_ranks.empty() ? sizeof(std::uint32_t) : 4u - target_tail);
+        }
+    } else {
+        std::memset(
+            prefilter_query_buffer_.mapped,
+            0,
+            static_cast<std::size_t>(query_bytes));
+        for (std::size_t base = 0u; base < query_ranks.size(); base += 4u) {
+            std::uint32_t packed = 0u;
+            const std::size_t count =
+                std::min<std::size_t>(4u, query_ranks.size() - base);
+            for (std::size_t lane = 0u; lane < count; ++lane) {
+                packed |= static_cast<std::uint32_t>(query_ranks[base + lane])
+                    << (lane * 8u);
+            }
+            std::memcpy(
+                static_cast<std::byte*>(prefilter_query_buffer_.mapped)
+                    + base,
+                &packed,
+                sizeof(packed));
+        }
+        std::memset(
+            prefilter_target_buffer_.mapped,
+            0,
+            static_cast<std::size_t>(target_bytes));
+        for (std::size_t base = 0u; base < target_ranks.size(); base += 4u) {
+            std::uint32_t packed = 0u;
+            const std::size_t count =
+                std::min<std::size_t>(4u, target_ranks.size() - base);
+            for (std::size_t lane = 0u; lane < count; ++lane) {
+                packed |= static_cast<std::uint32_t>(target_ranks[base + lane])
+                    << (lane * 8u);
+            }
+            std::memcpy(
+                static_cast<std::byte*>(prefilter_target_buffer_.mapped)
+                    + base,
+                &packed,
+                sizeof(packed));
+        }
     }
-    if (query_ranks.empty()) query_words[0] = 0u;
-    auto* target_words = static_cast<std::uint32_t*>(target_buf.mapped);
-    for (std::size_t i = 0; i < target_ranks.size(); ++i) {
-        target_words[i] = target_ranks[i];
-    }
-    if (target_ranks.empty()) target_words[0] = 0u;
     std::memcpy(
-        jobs_buf.mapped,
+        prefilter_jobs_buffer_.mapped,
         jobs.data(),
-        jobs.size() * sizeof(GpuSneakySnakeJobWire));
-    std::memset(
-        results_buf.mapped,
-        0,
-        static_cast<std::size_t>(result_bytes));
+        jobs.size()
+            * sizeof(bioseq::sequences::prefilters::PrefilterJob));
 
-    const std::array<VkDescriptorBufferInfo, 4> infos{{
-        {query_buf.buffer, 0, query_buf.bytes},
-        {target_buf.buffer, 0, target_buf.bytes},
-        {jobs_buf.buffer, 0, jobs_buf.bytes},
-        {results_buf.buffer, 0, results_buf.bytes},
+    const std::array<VkBuffer, 4> descriptor_buffers{{
+        prefilter_query_buffer_.buffer,
+        prefilter_target_buffer_.buffer,
+        prefilter_jobs_buffer_.buffer,
+        prefilter_results_buffer_.buffer,
     }};
-    const GpuSneakySnakePush push{
-        static_cast<std::uint32_t>(jobs.size())};
+    PrefilterDescriptorBindingCache& descriptor_binding_cache =
+        prefilter_descriptor_binding_cache_[gatekeeper ? 1u : 0u];
+    if (descriptor_buffers != descriptor_binding_cache.buffers
+        || pipe.descriptor_set != descriptor_binding_cache.descriptor_set) {
+        bind_phase_b_descriptors_locked(pipe, descriptor_buffers);
+        descriptor_binding_cache.buffers = descriptor_buffers;
+        descriptor_binding_cache.descriptor_set = pipe.descriptor_set;
+    }
+    if ((sneaky && push_mode != 1u && push_mode != 8u)
+        || (gatekeeper && push_mode != 0u)) {
+        throw VulkanRuntimeError(fmt::format(
+            "{} invalid rank-prefilter push mode {}",
+            algorithm, push_mode));
+    }
+    const std::uint32_t jobs_per_workgroup = sneaky
+        ? kPrefilterLocal / push_mode
+        : kPrefilterLocal;
+    const GpuPrefilterPush push{
+        .job_count = static_cast<std::uint32_t>(jobs.size()),
+        .mode = push_mode,
+        .query_rank_count = static_cast<std::uint32_t>(query_ranks.size()),
+        .target_rank_count = static_cast<std::uint32_t>(target_ranks.size()),
+    };
     const std::uint64_t groups_needed =
-        (static_cast<std::uint64_t>(jobs.size()) + kSneakySnakeLocal - 1u)
-        / kSneakySnakeLocal;
+        (static_cast<std::uint64_t>(jobs.size())
+            + jobs_per_workgroup - 1u)
+        / jobs_per_workgroup;
     const std::uint32_t groups = static_cast<std::uint32_t>(
         std::min(
             groups_needed,
             static_cast<std::uint64_t>(features_.max_workgroup_count_x)));
     if (groups == 0u) {
         throw VulkanRuntimeError(
-            "SneakySnake grid-stride dispatch has zero workgroups");
+            fmt::format(
+                "{} grid-stride dispatch has zero workgroups", algorithm));
     }
 
-    reset_phase_c_pool_locked();
-    check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(sneaky_snake)");
-    VkCommandBufferBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    check_vk(
-        vkBeginCommandBuffer(command_buffer_, &begin),
-        "begin(sneaky_snake)");
-    record_host_to_shader(command_buffer_);
-    record_phase_c_dispatch_locked(
-        command_buffer_, pipe, infos, &push, sizeof(push), groups);
-    record_shader_to_host(command_buffer_);
-    submit_and_wait(
-        device_, queue_, command_buffer_, fence_, "submit(sneaky_snake)");
-    check_vk(
-        vkResetCommandBuffer(command_buffer_, 0),
-        "reset(sneaky_snake_post)");
+    PrefilterRecordedCommand& recorded =
+        prefilter_recorded_commands_[replay_index];
+    const bool command_matches = recorded.recorded
+        && recorded.kind == kind
+        && recorded.pipeline == pipe.pipeline
+        && recorded.pipeline_layout == pipe.pipeline_layout
+        && recorded.descriptor_set == pipe.descriptor_set
+        && recorded.push.job_count == push.job_count
+        && recorded.push.mode == push.mode
+        && recorded.push.query_rank_count == push.query_rank_count
+        && recorded.push.target_rank_count == push.target_rank_count
+        && recorded.groups == groups;
+    if (!command_matches) {
+        recorded.recorded = false;
+        check_vk(
+            vkResetCommandBuffer(recorded.command_buffer, 0),
+            "reset(prefilter_cached)");
+        VkCommandBufferBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        check_vk(
+            vkBeginCommandBuffer(recorded.command_buffer, &begin),
+            "begin(prefilter_cached)");
+        record_host_to_shader(recorded.command_buffer);
+        vkCmdBindPipeline(
+            recorded.command_buffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipe.pipeline);
+        vkCmdBindDescriptorSets(
+            recorded.command_buffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            pipe.pipeline_layout,
+            0,
+            1,
+            &pipe.descriptor_set,
+            0,
+            nullptr);
+        vkCmdPushConstants(
+            recorded.command_buffer,
+            pipe.pipeline_layout,
+            VK_SHADER_STAGE_COMPUTE_BIT,
+            0,
+            sizeof(push),
+            &push);
+        vkCmdDispatch(recorded.command_buffer, groups, 1u, 1u);
+        record_shader_to_host(recorded.command_buffer);
+        check_vk(
+            vkEndCommandBuffer(recorded.command_buffer),
+            "end(prefilter_cached)");
+        recorded.kind = kind;
+        recorded.pipeline = pipe.pipeline;
+        recorded.pipeline_layout = pipe.pipeline_layout;
+        recorded.descriptor_set = pipe.descriptor_set;
+        recorded.push = push;
+        recorded.groups = groups;
+        recorded.recorded = true;
+    }
+    submit_executable_and_wait(
+        device_, queue_, recorded.command_buffer, fence_,
+        "submit(prefilter_cached)");
 
-    std::vector<GpuSneakySnakeResultWire> results(jobs.size());
+    results.resize(jobs.size());
     std::memcpy(
         results.data(),
-        results_buf.mapped,
-        static_cast<std::size_t>(result_bytes));
-    validate_sneaky_snake_results(jobs, results);
-    sneaky_snake_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
+        prefilter_results_buffer_.mapped,
+        jobs.size()
+            * sizeof(bioseq::sequences::prefilters::PrefilterResult));
+    if (sneaky) {
+        validate_sneaky_snake_results(
+            jobs, results, query_ranks.size(), target_ranks.size());
+    } else {
+        validate_gatekeeper_results(
+            jobs, results, query_ranks.size(), target_ranks.size());
+    }
+    } catch (...) {
+        if (prefilter_workspace_allocation_bytes_locked()
+            > kRetainedWorkspaceBytes) {
+            // A submit may have succeeded before a wait failed. Do not destroy
+            // mapped buffers until the device is known idle (or lost, which
+            // also guarantees that no work can continue using them).
+            const VkResult idle_result = vkDeviceWaitIdle(device_);
+            if (idle_result == VK_SUCCESS
+                || idle_result == VK_ERROR_DEVICE_LOST) {
+                release_prefilter_workspace_locked();
+            }
+        }
+        throw;
+    }
+    if (prefilter_workspace_allocation_bytes_locked()
+        > kRetainedWorkspaceBytes) {
+        release_prefilter_workspace_locked();
+    }
     return results;
 }
 

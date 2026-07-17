@@ -59,6 +59,9 @@ private:
 };
 
 struct PoolConfig {
+    /// Local GlobalPool task-arena ceiling. Zero selects oneTBB's runtime
+    /// default. This must not become a process-wide scheduler limit: other
+    /// oneTBB arenas may have an independent concurrency contract.
     unsigned max_concurrency = 1;
     PipelineConcurrencyMode mode = PipelineConcurrencyMode::SINGLE;
 };

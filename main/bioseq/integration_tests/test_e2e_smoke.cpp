@@ -173,8 +173,8 @@ TEST_CASE("E2E smoke: dna5 (with N) load + index + mmsearch == minimap2", "[e2e-
 }
 
 TEST_CASE(
-        "E2E just_index READY proof uses the loaded table-AM row identity",
-        "[e2e-smoke][just-index][row-identity][doc0371]") {
+        "E2E just_index MPS Format-6 READY proof uses the loaded table-AM row identity",
+        "[e2e-smoke][just-index][row-identity][doc0371][mps][format6]") {
     constexpr std::string_view table = "e2e_just_index_row_identity";
     const std::string target_fa =
         "/tmp/e2e_just_index_row_identity_target.fasta";
@@ -224,12 +224,12 @@ TEST_CASE(
 
     REQUIRE(it::query_scalar_int(ctx, fmt::format(
         "SELECT bioseq.update_index('{}'::regclass, "
-        "'minimizers_per_fragment');",
+        "'minimizers_per_sequence');",
         table)) == 1);
     const auto inspected = it::query_one(ctx, fmt::format(
         "WITH inspected AS ("
         " SELECT bioseq.inspect_ready_minimizer_format6_generation("
-        "  '{}'::regclass,'minimizers_per_fragment',{}) AS j"
+        "  '{}'::regclass,'minimizers_per_sequence',{}) AS j"
         ") "
         "SELECT "
         " j->>'format_version',"

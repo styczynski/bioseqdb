@@ -19,11 +19,15 @@
 #include "common_tests_integration.h"
 import bioseq.integration_tests.common;
 
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <libpq-fe.h>
 #include <set>
+#include <span>
+#include <string_view>
 #include <thread>
 
 using namespace bioseq_int_tests;
@@ -36,6 +40,7 @@ constexpr std::string_view kMissingIndex = "mmsearch_missing_index_int";
 constexpr std::string_view kBatchJoinTarget = "mmsearch_batch_join_target_int";
 constexpr std::string_view kBatchJoinQueries = "mmsearch_batch_join_queries_int";
 constexpr std::string_view kSneakySnakeEdits = "mmsearch_sneaky_snake_edits_int";
+constexpr std::string_view kGatekeeperEdits = "gatekeeper_edits";
 constexpr std::string_view kAsyncMpsWorkerLeaves =
 	"mmsearch_async_mps_worker_leaves_int";
 
@@ -193,6 +198,130 @@ public:
         ctx,
         "SELECT (NOT available) OR software_device "
         "FROM bioseq.vulkan_runtime_status();") == "t";
+}
+
+void require_gatekeeper_edit_rows(const rowset_t& rows) {
+    constexpr std::array<std::string_view, 2u> expected_pks{"1", "2"};
+    constexpr std::array<std::string_view, 2u> expected_edits{"0", "4"};
+    REQUIRE(rows.size() == expected_pks.size());
+    for (std::size_t index = 0; index < rows.size(); ++index) {
+        const auto& row = rows[index];
+        REQUIRE(row.size() == 4u);
+        REQUIRE(row[0].has_value());
+        REQUIRE(*row[0] == expected_pks[index]);
+        REQUIRE(row[1].has_value());
+        REQUIRE(*row[1] == expected_edits[index]);
+        REQUIRE(row[2].has_value());
+        const long long query_start = std::stoll(*row[2]);
+        REQUIRE(query_start >= 0);
+        REQUIRE(query_start < 64);
+        REQUIRE(row[3].has_value());
+        REQUIRE_FALSE(row[3]->empty());
+        REQUIRE(is_valid_cigar(*row[3]));
+    }
+}
+
+void require_explain_property_value(
+        std::span<const std::string> plan,
+        const std::string_view key,
+        const std::string_view expected) {
+    const auto value = find_explain_property(plan, key);
+    REQUIRE(value.has_value());
+    REQUIRE(*value == expected);
+}
+
+void require_explain_property_uint(
+        std::span<const std::string> plan,
+        const std::string_view key,
+        const std::uint64_t expected) {
+    const auto value = find_explain_property(plan, key);
+    REQUIRE(value.has_value());
+    REQUIRE(std::stoull(*value) == expected);
+}
+
+void require_gatekeeper_explain_proof(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
+    require_explain_property_value(
+        plan, "Prefilter Proof Present", "true");
+    require_explain_property_value(
+        plan, "Prefilter Resolved Algorithm", "gatekeeper");
+    require_explain_property_value(
+        plan, "Prefilter Resolved Backend", "vulkan");
+    require_explain_property_uint(plan, "Prefilter Dispatches", 3u);
+    require_explain_property_uint(
+        plan, "Prefilter SneakySnake Dispatches", 0u);
+    require_explain_property_uint(
+        plan, "Prefilter GateKeeper Dispatches", 3u);
+    require_explain_property_uint(
+        plan, "Prefilter Scalar Dispatches", 0u);
+    require_explain_property_uint(
+        plan, "Prefilter SIMD Dispatches", 0u);
+    require_explain_property_uint(
+        plan, "Prefilter Vulkan Dispatches", 3u);
+    require_explain_property_uint(plan, "Prefilter Jobs", 3u);
+    require_explain_property_uint(plan, "Prefilter Evaluated Jobs", 3u);
+    require_explain_property_uint(plan, "Prefilter Length 64 Jobs", 3u);
+    require_explain_property_uint(
+        plan, "Prefilter Unequal-Length Jobs", 0u);
+    require_explain_property_uint(plan, "Prefilter Unsupported Jobs", 0u);
+    require_explain_property_uint(plan, "Prefilter Rejected Jobs", 1u);
+    require_explain_property_uint(plan, "Prefilter Rejected Regions", 1u);
+    require_explain_property_uint(plan, "Prefilter Surviving Regions", 2u);
+    require_explain_property_uint(
+        plan, "Prefilter Mask Rejection Candidates", 1u);
+    require_explain_property_uint(
+        plan, "Prefilter Exact Guard Activations", 1u);
+    require_explain_property_uint(
+        plan, "Prefilter Guard Confirmed Rejections", 1u);
+    require_explain_property_uint(
+        plan, "Prefilter Hamming Exact Rejections", 0u);
+    require_explain_property_value(
+        plan, "Prefilter Proof Saturated", "false");
+    require_explain_property_value(
+        plan, "Prefilter Proof Valid", "true");
+}
+
+void require_gatekeeper_explain_selection(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE(plan_contains(plan, "backend: vulkan"));
+    REQUIRE(plan_contains(
+        plan, "algorithm: batch_resolved_gatekeeper_or_sneaky_snake"));
+    REQUIRE(plan_contains(plan, "max_edits: 4"));
+    REQUIRE(plan_contains(
+        plan, "gatekeeper_auto_domain: length in {32,64}, E in {2,4}"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
+}
+
+void require_cpu_prefilter_explain_selection(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE(plan_contains(plan, "backend: highway_simd"));
+    REQUIRE(plan_contains(plan, "algorithm: sneaky_snake"));
+    REQUIRE_FALSE(plan_contains(plan, "backend: vulkan"));
+    REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
+    REQUIRE(plan_contains(plan, "exclusive_upper_bound: 5"));
+}
+
+void require_no_prefilter_explain_selection(
+        std::span<const std::string> plan) {
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "PrefilterStage"));
+    REQUIRE_FALSE(plan_contains(plan, "Rank edit-distance prefilter"));
+    REQUIRE_FALSE(find_explain_property(
+        plan, "Prefilter Proof Present").has_value());
+    REQUIRE_FALSE(find_explain_property(
+        plan, "Prefilter Dispatches").has_value());
 }
 
 [[nodiscard]] std::string index_requirement_sql(
@@ -1380,9 +1509,9 @@ TEST_CASE("plain EXPLAIN exposes live CPU just-index BatchJoin before missing-ge
         ctx, "EXPLAIN (ANALYZE, COSTS OFF) " + sql + ";");
 }
 
-TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and selective query unions",
-				  "[mmsearch][batch-join][just-index][rev3][format5][simd]"
-				  "[cold-route][full][empty][selective][zero-work-authenticity]") {
+TEST_CASE("ordinal-2 BatchJoin executes MPF mmap and MPS full-read Format-5 routes",
+				  "[mmsearch][batch-join][just-index][rev3][format5][mpf][mps][simd]"
+				  "[mapped][cold-route][full][empty][selective][zero-work-authenticity]") {
 	struct RouteCase {
 		std::string_view name;
 		std::string query;
@@ -1412,7 +1541,8 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and 
 	}};
 
 	for (const std::string_view index_name : {
-			std::string_view{"minimizers_per_fragment"}}) {
+			std::string_view{"minimizers_per_fragment"},
+			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
 			exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
@@ -1429,6 +1559,33 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and 
 					"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
 					"FROM {} ORDER BY pk LIMIT 1;",
 					kBatchJoinTarget, kBatchJoinTarget)));
+			const auto count_mpf_format5_images = [&ctx] {
+				const row_t data_directory = query_one(ctx, "SHOW data_directory;");
+				REQUIRE(data_directory.size() == 1u);
+				REQUIRE(data_directory[0].has_value());
+				const std::filesystem::path image_directory =
+					std::filesystem::path{data_directory[0].value()}
+					/ "bioseq_mpf5";
+				std::error_code error;
+				if (!std::filesystem::exists(image_directory, error)) {
+					REQUIRE_FALSE(error);
+					return std::size_t{0};
+				}
+				std::size_t count = 0;
+				for (std::filesystem::directory_iterator iterator{
+						 image_directory, error}, end;
+					 !error && iterator != end;
+					 iterator.increment(error)) {
+					if (iterator->is_regular_file(error)
+						&& iterator->path().extension() == ".mpf5") {
+						++count;
+					}
+				}
+				REQUIRE_FALSE(error);
+				return count;
+			};
+			const std::size_t mpf_images_before =
+				count_mpf_format5_images();
 			if (index_name == "minimizers_per_sequence") {
 				exec_sqlf(ctx,
 					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
@@ -1440,15 +1597,19 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and 
 				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
 				kBatchJoinTarget, index_name, rowno));
 			REQUIRE(publication.size() > 25u);
-			/* The production fixture publishes Format 5 / ABI 3. The reader
-			 * authenticates head, manifest, and directory through PostgreSQL,
-			 * then installs the exact kind-bound immutable mapped payload. */
+			/* The production fixture publishes Format 5 / ABI 3. MPF binds its
+			 * exact immutable mmap image after two PostgreSQL metadata scans;
+			 * MPS retains the sequence-wide full PostgreSQL payload scan. */
 			REQUIRE(publication[7].value_or("") == "5");
 			REQUIRE(publication[19].value_or("") == "3");
 			REQUIRE(publication[8].value_or("") == "t");
 			REQUIRE(publication[9].value_or("") == "t");
 			REQUIRE(std::stoull(publication[14].value()) == target.size());
 			REQUIRE(std::stoull(publication[24].value()) > 10u);
+			if (index_name == "minimizers_per_sequence") {
+				/* MPS has no authority to create the MPF-only mmap artifact. */
+				REQUIRE(count_mpf_format5_images() == mpf_images_before);
+			}
 
 			for (const RouteCase& route : routes) {
 				INFO(fmt::format(
@@ -1536,8 +1697,9 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and 
 				}
 				REQUIRE(number(8) == 1);
 				REQUIRE(number(9) == 1);
-				/* Both Format-5 index kinds authenticate metadata in two
-				 * relation scans and install the immutable mapped payload. No
+				if (index_name == "minimizers_per_fragment") {
+				/* MPF authenticates metadata in two relation scans and installs
+				 * the immutable mapped payload. No
 				 * payload relation rows, bulk reads, request groups, or range
 				 * scans are executed. */
 				REQUIRE(number(10) == 2);
@@ -1613,7 +1775,81 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and 
 						REQUIRE(fragment_number(9) > 0u);
 					}
 
-					if (route.empty) {
+				}
+				if (index_name == "minimizers_per_fragment") {
+					REQUIRE(number(10) == 2);
+					for (const std::size_t zero : {
+							11u, 12u, 13u, 14u, 15u, 16u, 17u, 18u,
+							20u, 22u, 24u, 25u}) {
+						REQUIRE(number(zero) == 0);
+					}
+					/* Policy discovery still publishes the authenticated full
+					 * generation dimensions/cost.  No route is selected and no
+					 * PostgreSQL payload row or byte is requested. */
+					REQUIRE(number(19) > 0);
+					REQUIRE(number(21) > 0);
+					REQUIRE(number(23) > number(19));
+				} else {
+					REQUIRE(number(10) == 3);
+					REQUIRE(number(11) == 1);
+					REQUIRE(number(12) == 1);
+					REQUIRE(number(13) == 1);
+					REQUIRE(number(14) == 1);
+					REQUIRE(number(15) == 0);
+					REQUIRE(number(16) == 0);
+					REQUIRE(number(17) == 1);
+					REQUIRE(number(18) == 0);
+					REQUIRE(number(19) > 0);
+					REQUIRE(number(20) == 0);
+					REQUIRE(number(21) > 0);
+					REQUIRE(number(22) == 0);
+					REQUIRE(number(23) > number(19));
+					REQUIRE(number(24) == number(19));
+					REQUIRE(number(25) == number(21));
+				}
+				REQUIRE(proof[26].value() == "t");
+
+				const row_t reader_memory = query_one(ctx,
+					"WITH evidence AS MATERIALIZED ("
+					" SELECT bioseq."
+					"last_alignment_format5_reader_memory_evidence_v2() AS j"
+					") SELECT "
+					"j->>'format5_reader_capacity_accounting_passes',"
+					"j->>'format5_reader_exact_position_image_checks',"
+					"j->>'format5_reader_exact_position_image_failures',"
+					"j->>'format5_reader_retained_layout_checks',"
+					"j->>'format5_reader_retained_layout_failures',"
+					"((j->>'format5_reader_owned_capacity_bytes')::bigint="
+					" (j->>'format5_reader_admitted_bytes')::bigint)::text,"
+					"(NOT (j->>'format5_reader_memory_evidence_saturated')"
+					"::boolean)::text,"
+					"j->>'format5_reader_retained_position_count',"
+					"j->>'format5_reader_directory_capacity_bytes',"
+					"j->>'format5_reader_ordinal_route_capacity_bytes',"
+					"j->>'format5_reader_global_position_capacity_bytes' "
+					"FROM evidence;");
+				REQUIRE(reader_memory.size() == 11u);
+				for (const auto& field : reader_memory) {
+					REQUIRE(field.has_value());
+				}
+				REQUIRE(std::stoll(reader_memory[0].value()) > 0);
+				REQUIRE(std::stoll(reader_memory[1].value()) > 0);
+				REQUIRE(reader_memory[2].value() == "0");
+				REQUIRE(std::stoll(reader_memory[3].value()) > 0);
+				REQUIRE(reader_memory[4].value() == "0");
+				REQUIRE(reader_memory[5].value() == "true");
+				REQUIRE(reader_memory[6].value() == "true");
+				REQUIRE(std::stoll(reader_memory[8].value()) > 0);
+				if (index_name == "minimizers_per_fragment") {
+					REQUIRE(reader_memory[7].value() == "0");
+					REQUIRE(std::stoll(reader_memory[9].value()) > 0);
+					REQUIRE(reader_memory[10].value() == "0");
+				} else if (!route.empty) {
+					REQUIRE(std::stoll(reader_memory[7].value()) > 0);
+					REQUIRE(std::stoll(reader_memory[10].value()) > 0);
+				}
+
+				if (route.empty) {
 					for (const std::size_t zero : {28u, 29u, 30u, 31u}) {
 						REQUIRE(number(zero) == 0);
 					}
@@ -1669,43 +1905,10 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF Format-5 mapped reads for empty and 
 	}
 }
 
-TEST_CASE("ordinal-2 BatchJoin rejects Format-5 MPS before the MPF reader",
-			  "[mmsearch][batch-join][just-index][rev3][format5][mps]"
-			  "[index-kind][error][doc0383]") {
-	auto ctx = fresh_context({kBatchJoinTarget});
-	exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
-	seed_batch_join_target(ctx, batch_join_wide_target_sequence());
-	exec_sql(ctx, "SET bioseq.update_index_on_insert = on;");
-	exec_sql(ctx, "SET bioseq.index_async_persist = off;");
-	exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
-	exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
-	exec_sqlf(ctx,
-		"SELECT bioseq.set_active_read_index('{}'::regclass, "
-		"'minimizers_per_sequence');",
-		kBatchJoinTarget);
-	const auto rowno = static_cast<std::uint64_t>(query_scalar_int(
-		ctx,
-		fmt::format(
-			"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
-			"FROM {} ORDER BY pk LIMIT 1;",
-			kBatchJoinTarget, kBatchJoinTarget)));
-	const row_t publication = query_one(ctx, fmt::format(
-		"SELECT * FROM bioseq_internal.rev3_test_build_ready_mps_generation("
-		"'{}'::regclass, 'minimizers_per_sequence', {}, 'exact_simd');",
-		kBatchJoinTarget, rowno));
-	REQUIRE(publication.size() > 25u);
-	REQUIRE(publication[7].value_or("") == "5");
-	load_batch_join_query(ctx, std::string(48u, 'A'));
-	require_no_current_compatible_persisted_index(
-		ctx, batch_join_sql(2) + ";");
-	REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
-}
-
-TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPF and MPS",
+TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPS",
 			  "[mmsearch][batch-join][just-index][format6][simd]"
 			  "[generation-publication][one-open][cold-route][selective]") {
 	for (const std::string_view index_name : {
-			std::string_view{"minimizers_per_fragment"},
 			std::string_view{"minimizers_per_sequence"}}) {
 		DYNAMIC_SECTION(index_name) {
 			auto ctx = fresh_context({kBatchJoinTarget});
@@ -1734,11 +1937,9 @@ TEST_CASE("ordinal-2 BatchJoin selectively consumes production Format-6 MPF and 
 					"SELECT bioseq.column_row_number('{}'::regclass, ctid) "
 					"FROM {} ORDER BY pk LIMIT 1;",
 					kBatchJoinTarget, kBatchJoinTarget)));
-			if (index_name == "minimizers_per_sequence") {
-				exec_sqlf(ctx,
-					"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
-					kBatchJoinTarget, index_name);
-			}
+			exec_sqlf(ctx,
+				"SELECT bioseq.set_active_read_index('{}'::regclass, '{}');",
+				kBatchJoinTarget, index_name);
 			REQUIRE(query_scalar_int(ctx, fmt::format(
 				"SELECT bioseq.update_index('{}'::regclass, '{}');",
 				kBatchJoinTarget, index_name)) == 1);
@@ -2332,7 +2533,7 @@ TEST_CASE("ordinal-2 BatchJoin LIMIT cleans up an undrained 8193-query reader",
 	REQUIRE(stats_bool(stats.front(), 14));
 	REQUIRE_FALSE(stats_bool(stats.front(), 15));
 	REQUIRE(stats_i64(stats.front(), 49) == 1);
-	REQUIRE(stats_i64(stats.front(), 50) == 3);
+	REQUIRE(stats_i64(stats.front(), 50) == 2);
 }
 
 TEST_CASE("BatchJoin LIMIT is partial and empty query child is fully drained",
@@ -2751,7 +2952,7 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
     const auto plan = explain_text<true>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
     REQUIRE(plan_contains(plan, "PrefilterStage"));
-    REQUIRE(plan_contains(plan, "SneakySnake edit lower bound"));
+    REQUIRE(plan_contains(plan, "Rank edit-distance prefilter"));
     REQUIRE(plan_contains(plan, "max_edits: 9"));
     REQUIRE(plan_contains(plan, "ExactEditFilterStage"));
     REQUIRE(plan_contains(plan, "exclusive_upper_bound: 10"));
@@ -2809,6 +3010,169 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
     REQUIRE(wrapped_wrong_projection.sqlstate == "0A000");
     REQUIRE(wrapped_wrong_projection.contains(
         "bioseq.edit projection must reference the mmsearch target column"));
+}
+
+TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
+          "[mmsearch][gatekeeper][edit][integration]") {
+    auto ctx = fresh_context({kGatekeeperEdits});
+    constexpr std::string_view query =
+        "CGGCTTATCAGATAATGGCTTGAGACGGCAGGTCTGGGGTCTCAGCCGTAGCCATATCCAAAGA";
+    constexpr std::string_view four_edits =
+        "CGGCTTATCAGATAATGGCTTGAGAGGGCCGGTGTGGTGTCTCAGCCGTAGCCATATCCAAAGA";
+    constexpr std::string_view thirteen_edits =
+        "CGGCTTATCAGATAATGGCTTGATCGTTGCTTAGATTTTAGTCAGCCGTAGCCATATCCAAAGA";
+    static_assert(query.size() == 64u);
+    static_assert(four_edits.size() == 64u);
+    static_assert(thirteen_edits.size() == 64u);
+
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kGatekeeperEdits},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {
+            seq_row{.pk = 1, .sequences = {std::string{query}}},
+            seq_row{.pk = 2, .sequences = {std::string{four_edits}}},
+            seq_row{.pk = 3, .sequences = {std::string{thirteen_edits}}},
+        });
+
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'ksw2';");
+    exec_sql(ctx, "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash';");
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
+    exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 10;");
+
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+    const std::string active_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0), bioseq.query_start(seq0), "
+        "       bioseq.cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "                      min_chain_score => 1, best_n => 0, "
+        "                      vulkan_enabled => true)) "
+        "  AND bioseq.edit(seq0) < 5 "
+        "ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+    const std::string baseline_sql = fmt::format(
+        "WITH candidates AS MATERIALIZED ("
+        "  SELECT pk, bioseq.edit(seq0) AS ed, "
+        "         bioseq.query_start(seq0) AS qs, "
+        "         bioseq.cigar(seq0) AS cigar "
+        "  FROM {} "
+        "  WHERE mmsearch(seq0, {}, "
+        "        aligner_options(kmer_size => 7, window_size => 1, "
+        "                        min_chain_score => 1, best_n => 0, "
+        "                        vulkan_enabled => true))"
+        ") "
+        "SELECT pk, ed, qs, cigar "
+        "FROM candidates WHERE ed < 5 ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+
+    const std::string implicit_vulkan_capability_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0) FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "                      min_chain_score => 1, best_n => 0)) "
+        "  AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+    const std::string explicit_false_sql = fmt::format(
+        "SELECT pk, bioseq.edit(seq0) FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        "      aligner_options(kmer_size => 7, window_size => 1, "
+        "                      min_chain_score => 1, best_n => 0, "
+        "                      vulkan_enabled => false)) "
+        "  AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+        kGatekeeperEdits,
+        query_literal);
+
+    exec_sql(ctx, "SET bioseq.enable_vectorization = on;");
+    const auto selected_plan = explain_text<false>(ctx, active_sql);
+    require_gatekeeper_explain_selection(selected_plan);
+    require_cpu_prefilter_explain_selection(
+        explain_text<false>(ctx, implicit_vulkan_capability_sql));
+    require_cpu_prefilter_explain_selection(
+        explain_text<false>(ctx, explicit_false_sql));
+    require_no_prefilter_explain_selection(
+        explain_text<false>(ctx, baseline_sql));
+
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+    const std::array<std::string, 2u> stacked_explicit_sqls{
+        fmt::format(
+            "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
+            "mmsearch(seq0, {}, aligner_options(vulkan_enabled => true)) "
+            "AND mmsearch(seq0, {}, aligner_options()) "
+            "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+            kGatekeeperEdits, query_literal, query_literal),
+        fmt::format(
+            "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
+            "mmsearch(seq0, {}, aligner_options()) "
+            "AND mmsearch(seq0, {}, aligner_options(vulkan_enabled => true)) "
+            "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+            kGatekeeperEdits, query_literal, query_literal),
+    };
+    for (const auto& stacked_sql : stacked_explicit_sqls) {
+        require_gatekeeper_explain_selection(
+            explain_text<false>(ctx, stacked_sql));
+    }
+    const auto conflicting_vulkan_options = sql_error(ctx, fmt::format(
+        "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
+        "mmsearch(seq0, {}, aligner_options(vulkan_enabled => true)) "
+        "AND mmsearch(seq0, {}, aligner_options(vulkan_enabled => false)) "
+        "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
+        kGatekeeperEdits, query_literal, query_literal));
+    REQUIRE(conflicting_vulkan_options.sqlstate == "22023");
+    REQUIRE(conflicting_vulkan_options.contains("vulkan_enabled conflicts"));
+    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
+
+    if (selected_vulkan_runtime_untrusted(ctx)) {
+        const auto error = sql_error(ctx, active_sql);
+        REQUIRE(error.sqlstate == "XX000");
+        REQUIRE(error.contains("Vulkan aligner execution failed"));
+        REQUIRE((
+            error.contains("requires a usable Vulkan runtime")
+            || error.contains("requires a hardware GPU")));
+        REQUIRE_FALSE(error.contains("complete-tuple admission"));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        SKIP("hardware Vulkan SQL execution is unavailable; route-selection "
+             "and fail-closed detail were verified");
+    }
+
+    rowset_t reference_active;
+    rowset_t reference_baseline;
+    bool reference_recorded = false;
+    for (const std::string_view vectorization : {"on", "off"}) {
+        CAPTURE(vectorization);
+        exec_sql(ctx, fmt::format(
+            "SET bioseq.enable_vectorization = {};", vectorization));
+
+        const auto active_rows = query_rows(ctx, active_sql);
+        require_gatekeeper_edit_rows(active_rows);
+        const auto active_plan = explain_text<true>(ctx, active_sql);
+        require_gatekeeper_explain_proof(active_plan);
+
+        const auto baseline_rows = query_rows(ctx, baseline_sql);
+        require_gatekeeper_edit_rows(baseline_rows);
+        REQUIRE(active_rows == baseline_rows);
+        const auto baseline_plan = explain_text<true>(ctx, baseline_sql);
+        require_no_prefilter_explain_selection(baseline_plan);
+
+        if (!reference_recorded) {
+            reference_active = active_rows;
+            reference_baseline = baseline_rows;
+            reference_recorded = true;
+        } else {
+            REQUIRE(active_rows == reference_active);
+            REQUIRE(baseline_rows == reference_baseline);
+        }
+    }
 }
 
 TEST_CASE("bioseq.edit rejects unsupported predicate shapes",

@@ -2496,6 +2496,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 				|| format6_group.query_hash_union.capacity() != 0u
 				|| format6_group.persisted_grouped32_reader
 				|| format6_group.persisted_shape_v5_reader
+				|| format6_group.persisted_mps_shape_v5_reader
 				|| format6_group.persisted_format6_reader
 				|| format6_group.target_index) {
 				fail("Format-6 canonical query group violates exclusive ownership");
@@ -2788,6 +2789,18 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			*format4_expected);
 	const auto& metadata = session.read_manifest_directory_once(head);
 	const auto manifest = metadata.manifest;
+	const bool format5 = manifest.wire_format
+		== MinimizerGenerationWireFormat::grouped_shape_soa_segment_local;
+	const bool mapped_mpf_format5 = format5
+		&& index_name
+			== bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
+	const bool full_mps_format5 = format5
+		&& index_name
+			== bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+	if (format5 && !mapped_mpf_format5 && !full_mps_format5) {
+		fail("Format-5 READY generation is bound to an unsupported logical index");
+		return;
+	}
 	const auto& selected_expected = manifest.wire_format
 			== MinimizerGenerationWireFormat::
 				grouped_shape_soa_segment_local
@@ -2801,9 +2814,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		query_ordinals,
 		base_params,
 		/*include_persisted_parameter_group=*/true,
-		manifest.wire_format
-				== MinimizerGenerationWireFormat::
-					grouped_shape_soa_segment_local
+		mapped_mpf_format5
 			? CpuQueryUnionStorage::canonical_u32
 			: CpuQueryUnionStorage::minimizer_sketch,
 		prepared_target);
@@ -2816,15 +2827,14 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	if (group.kmer_size != 15 || group.window_size != 10
 		|| group.max_occ < 0
 		|| group.sketch_backend != sketch_backend
-		|| (manifest.wire_format
-				== MinimizerGenerationWireFormat::
-					grouped_shape_soa_segment_local
+		|| (mapped_mpf_format5
 			? (!group.query_hash_union.empty()
 				|| group.query_hash_union.capacity() != 0u)
 			: (!group.canonical_query_hash_union_u32.empty()
 				|| group.canonical_query_hash_union_u32.capacity() != 0u))
 		|| group.persisted_grouped32_reader
 		|| group.persisted_shape_v5_reader
+		|| group.persisted_mps_shape_v5_reader
 		|| group.persisted_format6_reader
 		|| group.target_index) {
 		fail("legacy/F5 parameter group is not the pinned exclusive cold-read shape");
@@ -2836,9 +2846,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	// Cold open checks the exact generation identity and prepares only fragment
 	// address plans. Query-wave max-occ reduction is fused into the parallel
 	// fragment probe; no target-wide posting/count owner is constructed.
-	if (manifest.wire_format
-			== MinimizerGenerationWireFormat::
-				grouped_shape_soa_segment_local) {
+	if (mapped_mpf_format5) {
 		using ShapeReader =
 			bioseq::indexing::PreparedShapeV5FragmentQueryReader;
 		const std::uint64_t shape_v5_load_started_ns =
@@ -2926,6 +2934,136 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		}
 
 		group.persisted_shape_v5_reader.emplace(
+			std::move(*shape_reader));
+		group.target_index_source =
+			::bioseq::pipeline_stats::TargetIndexSource::persisted;
+		group.persisted_generation_id = head.generation_id;
+		group.persisted_source_identity = head.source_identity;
+		group.persisted_read_stats = read_stats;
+		group.persisted_reader_loads = 1;
+		group.build_set_checksum_present = true;
+		group.build_set_checksum = group.key_set_checksum;
+		++prepared_target.physical_target_index_reads;
+		return;
+	}
+
+	/* MPS Format-5 remains a sequence-wide persisted index.  Unlike the MPF
+	 * route above, it has no authority to open the MPF-only mmap sidecar: read
+	 * and authenticate the complete PostgreSQL payload into the established
+	 * query-selected Shape-v5 reader. */
+	if (full_mps_format5) {
+		using ShapeReader = bioseq::indexing::PreparedShapeV5QueryReader;
+		const std::uint64_t shape_v5_load_started_ns =
+			static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+		auto made = ShapeReader::begin(
+			bioseq::parallelism::MemoryAdmissionController::instance(),
+			head, manifest, selected_expected,
+			metadata.directory.encoded_bytes(), group.query_hash_union,
+			static_cast<std::uint64_t>(group.max_occ));
+		if (!made) {
+			fail(fmt::format(
+				"MPS Format-5 reader begin rejected wire_error={}",
+				static_cast<unsigned>(made.error())));
+			return;
+		}
+		std::optional<ShapeReader> shape_reader{
+			std::in_place, std::move(*made)};
+		/* The reader owns the exact compact query-hash image from this point.
+		 * Release the scheduler copy before allocating retained payload state. */
+		if (!prepared_target.release_group_query_hash_union_noexcept(group)) {
+			fail("MPS Format-5 canonical query-union release disagrees with admission ownership");
+			return;
+		}
+
+		std::optional<MinimizerGenerationWireError> callback_error;
+		std::exception_ptr callback_exception;
+		const auto accept = [
+				&callback_error,
+				&callback_exception,
+				&shape_reader](const bioseq::indexing::
+				ValidatedMinimizerGenerationRowReceipt& receipt) noexcept {
+			if (callback_error || callback_exception) return;
+			try {
+				auto accepted = shape_reader->accept(receipt);
+				if (!accepted) callback_error = accepted.error();
+			} catch (...) {
+				callback_exception = std::current_exception();
+			}
+		};
+		(void)session.read_full_generation_payload_once(accept, accept);
+		if (callback_exception) {
+			std::rethrow_exception(callback_exception);
+		}
+		if (callback_error) {
+			fail(fmt::format(
+				"MPS Format-5 payload ingest rejected wire_error={}",
+				static_cast<unsigned>(*callback_error)));
+			return;
+		}
+		if (auto finished = shape_reader->finish(); !finished) {
+			fail(fmt::format(
+				"MPS Format-5 reader final validation rejected wire_error={}",
+				static_cast<unsigned>(finished.error())));
+			return;
+		}
+
+		const MinimizerGenerationReadStats read_stats = session.finish();
+		const std::uint64_t shape_v5_load_finished_ns =
+			static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
+		group.persisted_reader_load_host_wall_ns =
+			shape_v5_load_finished_ns >= shape_v5_load_started_ns
+				? std::max<std::uint64_t>(
+					1u,
+					shape_v5_load_finished_ns - shape_v5_load_started_ns)
+				: 1u;
+		const auto scheme =
+			bioseq::indexing::minimizer_scheme_identity_for_backend(
+				group.sketch_backend);
+		const auto producer_backend =
+			bioseq::indexing::minimizer_producer_backend_identity_for_backend(
+				group.sketch_backend);
+		const bool read_proof_matches =
+			shape_reader->ready()
+			&& shape_reader->target_length()
+				== prepared_target.target_bp_size
+			&& manifest.kmer_size == group.kmer_size
+			&& manifest.window_size == group.window_size
+			&& manifest.minimizer_scheme_id == scheme.id
+			&& manifest.minimizer_scheme_version == scheme.version
+			&& manifest.producer_backend_id == producer_backend.id
+			&& manifest.producer_backend_identity_version
+				== producer_backend.version
+			&& manifest.shape_v5
+			&& manifest.shape_v5->max_occ_cap
+				== bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap
+			&& head.generation_id != 0
+			&& head.source_identity != 0
+			&& read_stats.relation_opens == 1
+			&& read_stats.head_scans == 1
+			&& read_stats.manifest_directory_scans == 1
+			&& read_stats.metadata_repeated_reads == 0
+			&& read_stats.full_generation.scan_calls == 1
+			&& read_stats.bulk_read_calls == 1
+			&& read_stats.range_scan_calls == 1
+			&& read_stats.index_scans == 3
+			&& read_stats.payload.delivered_chunks
+				== read_stats.payload.heap_rows_read
+			&& read_stats.payload.delivered_bytes == manifest.payload_bytes
+			&& read_stats.cold.route_empty == 0
+			&& read_stats.cold.route_selective == 0
+			&& read_stats.cold.route_full == 1
+			&& read_stats.source_parent_rows_read == 1
+			&& read_stats.source_catalog_rows_read == 1
+			&& read_stats.source_catalog_index_scans == 1
+			&& read_stats.source_fragment_rows_read == 0
+			&& read_stats.source_decoded_bp == 0
+			&& source_counters.timed_equation_holds();
+		if (!read_proof_matches) {
+			fail("MPS Format-5 READY identity/backend/scheme/read-work proof disagrees");
+			return;
+		}
+
+		group.persisted_mps_shape_v5_reader.emplace(
 			std::move(*shape_reader));
 		group.target_index_source =
 			::bioseq::pipeline_stats::TargetIndexSource::persisted;

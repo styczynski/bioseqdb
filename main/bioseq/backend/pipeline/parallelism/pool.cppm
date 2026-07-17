@@ -17,7 +17,6 @@ module;
 
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/enumerable_thread_specific.h>
-#include <oneapi/tbb/global_control.h>
 #include <oneapi/tbb/info.h>
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/parallel_sort.h>
@@ -35,7 +34,6 @@ namespace otbb = oneapi::tbb;
 namespace bioseq::parallelism::detail {
 
 struct PoolImpl {
-    std::optional<otbb::global_control> global_limit;
     std::optional<otbb::task_arena> arena;
 };
 
@@ -175,9 +173,6 @@ void GlobalPool::configure(const PoolConfig& config) {
     mode_.store(static_cast<std::uint8_t>(config.mode), std::memory_order_relaxed);
 
     auto impl = std::make_shared<detail::PoolImpl>();
-    impl->global_limit.emplace(
-        otbb::global_control::max_allowed_parallelism,
-        static_cast<std::size_t>(max_concurrency_));
     impl->arena.emplace(static_cast<int>(max_concurrency_));
     impl->arena->initialize();
     impl_ = std::move(impl);

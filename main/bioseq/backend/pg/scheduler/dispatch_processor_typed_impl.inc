@@ -519,6 +519,11 @@ choose_deferred_minimizer_persist_index(
     return pipe::vulkan_components_requested(params);
 }
 
+[[nodiscard]] inline bool selected_vulkan_accelerator(
+        const Minimap2Params& params) noexcept {
+    return pipe::vulkan_accelerator_requested(params);
+}
+
 [[nodiscard]] inline bool selected_vulkan_coordinate_prereqs_active(
         const Minimap2Params& params) noexcept {
     return pipe::complete_all_gpu_tuple_selected(params);
@@ -706,6 +711,17 @@ inline void record_unattested_job(
         const bool consumed_shared_cached_query_proof,
         bool& cached_query_minimizer_proof_operation_accounted) noexcept {
     if (execution_proof != nullptr) {
+        if (execution_proof->prefilter_execution_proof_present) {
+            stats.operational.record_prefilter_execution_proof(
+                execution_proof->prefilter_execution_proof);
+        } else if (execution_proof->prefilter_execution_proof
+                   != decltype(execution_proof->prefilter_execution_proof){}) {
+            auto malformed_prefilter_proof =
+                execution_proof->prefilter_execution_proof;
+            malformed_prefilter_proof.saturated = true;
+            stats.operational.record_prefilter_execution_proof(
+                malformed_prefilter_proof);
+        }
         // CPU/SIMD stages write into the operation-local result collection;
         // consume that delta once here, after any parallel row has joined.
         // ChainStage is intentionally inclusive, so chain_backtrack remains
@@ -3167,6 +3183,7 @@ try_materialize_target_for_segment_workers(
     if (!group.persisted_format6_reader.has_value()
         || group.persisted_grouped32_reader.has_value()
         || group.persisted_shape_v5_reader.has_value()
+		|| group.persisted_mps_shape_v5_reader.has_value()
         || group.target_index
         || group.target_index_source
             != ::bioseq::pipeline_stats::TargetIndexSource::persisted
@@ -3233,6 +3250,7 @@ try_materialize_target_for_segment_workers(
         const std::uint64_t target_bp_size) noexcept {
     if (!group.persisted_shape_v5_reader.has_value()
         || group.persisted_grouped32_reader.has_value()
+		|| group.persisted_mps_shape_v5_reader.has_value()
         || group.persisted_format6_reader.has_value()
         || group.target_index
         || group.target_index_source
@@ -3584,6 +3602,9 @@ template <class S>
 					&& prepared_group->persisted_grouped32_reader.has_value();
 				const bool has_shape_v5_reader = prepared_group != nullptr
 					&& prepared_group->persisted_shape_v5_reader.has_value();
+				const bool has_mps_shape_v5_reader = prepared_group != nullptr
+					&& prepared_group->
+						persisted_mps_shape_v5_reader.has_value();
 				const bool has_format6_reader = prepared_group != nullptr
 					&& prepared_group->persisted_format6_reader.has_value();
 				const bool has_full_format6_source_identity =
@@ -3605,6 +3626,7 @@ template <class S>
 				const bool canonical_owner_exclusive =
 					prepared_group == nullptr
 					|| (has_format6_reader || has_shape_v5_reader
+						|| has_mps_shape_v5_reader
 						? prepared_group->query_hash_union.capacity() == 0u
 						: prepared_group->
 							canonical_query_hash_union_u32.capacity() == 0u);
@@ -3661,13 +3683,17 @@ template <class S>
 				}
 				if (prepared_group == nullptr
 					|| !BatchProcessor::exactly_one_native_persisted_reader(
-						has_grouped32_reader,
-						has_shape_v5_reader,
-						has_format6_reader)
+							has_grouped32_reader,
+							has_shape_v5_reader,
+							has_mps_shape_v5_reader,
+							has_format6_reader)
 					|| (has_grouped32_reader
 						&& !prepared_group->persisted_grouped32_reader->ready())
 					|| (has_shape_v5_reader
 						&& !prepared_group->persisted_shape_v5_reader->ready())
+					|| (has_mps_shape_v5_reader
+						&& !prepared_group->
+							persisted_mps_shape_v5_reader->ready())
 					|| prepared_group->target_index
 					|| prepared_group->target_index_source
 						!= ::bioseq::pipeline_stats::TargetIndexSource::persisted
@@ -3682,7 +3708,8 @@ template <class S>
 						"the exact READY native persisted reader is absent, incomplete, duplicated, or "
 						"mixed with a legacy assembled index");
 					}
-						if (has_format6_reader || has_shape_v5_reader) {
+						if (has_format6_reader || has_shape_v5_reader
+							|| has_mps_shape_v5_reader) {
 							if (scanner_pg_ctx->explicit_query_ordinals) {
 								retained_prepared_query_sketch =
 									prepared_group->find_retained_query_sketch(
@@ -3724,7 +3751,7 @@ template <class S>
 								idx_params,
 								/*gpu_index_cache=*/nullptr,
 								bioseq::indexing::GpuIndexCacheIdentity{});
-							} else {
+							} else if (has_shape_v5_reader) {
 							collection = run_aligner_pg_checked(
 								"fragment-native single-query anchor preparation",
 									[&alignment_query_minimizers, &query_seq,
@@ -3778,18 +3805,33 @@ template <class S>
 											prepared.evidence());
 										return out;
 								});
+							} else {
+							collection = minimap2_port_with_index_pg_checked(
+								fq_pg,
+								ft_pg,
+								alignment_query_minimizers,
+								*prepared_group->
+									persisted_mps_shape_v5_reader,
+								idx_params,
+								/*gpu_index_cache=*/nullptr,
+								bioseq::indexing::GpuIndexCacheIdentity{});
 							}
 						} else {
 						ensure_q();
-						collection = minimap2_port_with_index_pg_checked(
-							fq_pg,
-							ft_pg,
-							*query_minimizers,
-							*prepared_group->persisted_grouped32_reader,
-							idx_params,
-							/*gpu_index_cache=*/nullptr,
-							bioseq::indexing::GpuIndexCacheIdentity{});
+							collection = minimap2_port_with_index_pg_checked(
+								fq_pg,
+								ft_pg,
+								*query_minimizers,
+								*prepared_group->persisted_grouped32_reader,
+								idx_params,
+								/*gpu_index_cache=*/nullptr,
+								bioseq::indexing::GpuIndexCacheIdentity{});
 					}
+				if (prepared_group->persisted_reader_queries == 0u
+					&& prepared_group->persisted_reader_load_host_wall_ns != 0u) {
+					collection.record_persisted_index_decode_host_time(
+						prepared_group->persisted_reader_load_host_wall_ns);
+				}
 				++prepared_group->persisted_reader_queries;
 				assembled = true;
 				scanner_pg_ctx->target_index_sources[i] =
@@ -6684,7 +6726,7 @@ template <class S>
                 && per_row_query_mode
                 && per_row_query_hdrs != nullptr
                 && !dispatch_params.enable_profiling
-                && !selected_vulkan_execution(dispatch_params)
+                && !selected_vulkan_accelerator(dispatch_params)
                 && bioseq::parallelism::task_parallel(pool.mode())
                 && pool.max_concurrency() > 1
                 && batch_size
@@ -7179,7 +7221,7 @@ template <class S>
 
             const bool may_dispatch_parallel =
                 !dispatch_params.enable_profiling
-                && !selected_vulkan_execution(dispatch_params)
+                && !selected_vulkan_accelerator(dispatch_params)
                 && !use_scanner_pg
                 && !chunked_scanner_forced
                 && bioseq::parallelism::dispatch_parallel(pool.mode())

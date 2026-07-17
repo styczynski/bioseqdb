@@ -17,15 +17,10 @@ module;
 
 export module bioseq.sequences.prefilters.sneaky_snake_vulkan;
 
-export import bioseq.gpu.vulkan.phase_c_abi;
+export import bioseq.sequences.prefilters.prefilter_types;
 import bioseq.gpu.vulkan.runtime;
 
 export namespace bioseq::sequences::prefilters {
-
-using SneakySnakeVulkanJob =
-    bioseq::gpu::vulkan::GpuSneakySnakeJobWire;
-using SneakySnakeVulkanResult =
-    bioseq::gpu::vulkan::GpuSneakySnakeResultWire;
 
 /// True only when the shared runtime owns a hardware Vulkan device.
 [[nodiscard]] inline bool vulkan_sneaky_snake_supported() {
@@ -35,11 +30,11 @@ using SneakySnakeVulkanResult =
 
 /// Execute one selected Vulkan SneakySnake batch over flat uint8 rank streams.
 /// Offsets in every job are symbol offsets into these streams.
-[[nodiscard]] inline std::vector<SneakySnakeVulkanResult>
+[[nodiscard]] inline std::vector<PrefilterResult>
 run_sneaky_snake_vulkan_batch(
     std::span<const std::uint8_t> query_ranks,
     std::span<const std::uint8_t> target_ranks,
-    std::span<const SneakySnakeVulkanJob> jobs)
+    std::span<const PrefilterJob> jobs)
 {
     auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
     bioseq::gpu::vulkan::require_hardware_device(

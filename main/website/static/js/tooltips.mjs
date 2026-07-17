@@ -60,8 +60,16 @@ function positionTooltip(tip, anchor) {
 }
 
 let activeAnchor = null;
+let hideTimer = 0;
+
+function kindMeta(kind) {
+  if (kind === "sql_type" || kind === "cpp_type") return { glyph: "T", label: "Type", tone: "type" };
+  if (kind === "sql_function" || kind === "cpp_function") return { glyph: "ƒ", label: "Function", tone: "function" };
+  return { glyph: "◇", label: "Class", tone: "class" };
+}
 
 async function showTooltip(anchor) {
+  window.clearTimeout(hideTimer);
   const id = anchor.dataset.entityId;
   const url = anchor.dataset.entityDataUrl;
   if (!id || !url) return;
@@ -69,7 +77,9 @@ async function showTooltip(anchor) {
   const record = entities[id];
   if (!record) return;
   const tip = ensureTooltip();
+  const meta = kindMeta(record.kind);
   const parts = [
+    `<span class="tt-meta"><span class="tt-kind tt-${meta.tone}"><span aria-hidden="true">${meta.glyph}</span>${meta.label}</span><span class="tt-where">BioseqDB · reference</span></span>`,
     `<span class="tt-title">${escapeHtml(record.qualified_name || record.title || id)}</span>`,
   ];
   if (record.signature) {
@@ -77,6 +87,9 @@ async function showTooltip(anchor) {
   }
   if (record.summary) {
     parts.push(`<span class="tt-summary">${escapeHtml(record.summary)}</span>`);
+  }
+  if (record.route) {
+    parts.push(`<a class="tt-route" href="${escapeHtml(record.route)}">View reference →</a>`);
   }
   tip.innerHTML = parts.join("");
   tip.hidden = false;
@@ -86,10 +99,16 @@ async function showTooltip(anchor) {
 }
 
 function hideTooltip() {
+  window.clearTimeout(hideTimer);
   const tip = document.getElementById("entity-tooltip");
   if (tip) tip.hidden = true;
   if (activeAnchor) activeAnchor.removeAttribute("aria-describedby");
   activeAnchor = null;
+}
+
+function scheduleHide() {
+  window.clearTimeout(hideTimer);
+  hideTimer = window.setTimeout(hideTooltip, 120);
 }
 
 export function initTooltips() {
@@ -99,10 +118,13 @@ export function initTooltips() {
   if (anchors.length === 0) return;
   for (const anchor of anchors) {
     anchor.addEventListener("mouseenter", () => showTooltip(anchor));
-    anchor.addEventListener("mouseleave", hideTooltip);
+    anchor.addEventListener("mouseleave", scheduleHide);
     anchor.addEventListener("focus", () => showTooltip(anchor));
-    anchor.addEventListener("blur", hideTooltip);
+    anchor.addEventListener("blur", scheduleHide);
   }
+  const tip = ensureTooltip();
+  tip.addEventListener("mouseenter", () => window.clearTimeout(hideTimer));
+  tip.addEventListener("mouseleave", scheduleHide);
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") hideTooltip();
   });

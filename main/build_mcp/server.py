@@ -747,7 +747,8 @@ MODES: Dict[str, ModeDefinition] = {
         # stale extension happens to be installed in the server.
         targets=["postgresql_bioseq_cache", "postgresql_bioseq",
                  "bioseq_aligner_tests_exec", "bioseq_aligner_int_tests_exec",
-                 "bioseq_bench_e2e_tests_exec"],
+                 "bioseq_bench_e2e_tests_exec",
+                 "bioseq_bench_framework_example_tests_exec"],
         install_extension=True,
         commands=[
             ["bioseq_aligner_tests_exec",
@@ -755,6 +756,8 @@ MODES: Dict[str, ModeDefinition] = {
             ["bioseq_aligner_int_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
             ["bioseq_bench_e2e_tests_exec",
+             "--reporter", "console::out=-::colour-mode=ansi"],
+            ["bioseq_bench_framework_example_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
         preset_family="test",

@@ -12,6 +12,10 @@
     "sneakysnake_vulkan": {
       "max_edits": {"type": "integer", "default": 8, "description": "Edit threshold for the fail-closed hardware Vulkan batch port"}
     },
+    "sneakysnake_vulkan_e2": {"_": {"type": "integer", "default": 0, "description": "Fixed-E2 SneakySnake Vulkan small-seed comparator"}},
+    "gatekeeper_vulkan_e2": {"_": {"type": "integer", "default": 0, "description": "Fixed-E2 GateKeeper Vulkan small-seed candidate"}},
+    "sneakysnake_vulkan_e4": {"_": {"type": "integer", "default": 0, "description": "Fixed-E4 SneakySnake Vulkan small-seed comparator"}},
+    "gatekeeper_vulkan_e4": {"_": {"type": "integer", "default": 0, "description": "Fixed-E4 GateKeeper Vulkan small-seed candidate"}},
     "bioseq_prefilter_off": {
       "max_edits": {"type": "integer", "default": 16, "description": "Exact edit threshold applied after the common pipeline; lower-bound prefilter disabled"}
     },
@@ -61,6 +65,26 @@
       "concurrency": 1,
       "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 1024, "sequence_length": 100},
       "description": "Deterministic 1024-pair prefix of the upstream 100 bp ERR E40 corpus; source/CPU sweep E=2/8/40/100 and Vulkan sweeps evaluated E=2/8/16/31"
+    },
+    "PREFILTER_SMALL_ERR_E2_32BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 32, "sequence_prefix_length": 32},
+      "description": "Deterministic 4096-pair 32-symbol prefix of the upstream ERR E2 corpus"
+    },
+    "PREFILTER_SMALL_ERR_E40_32BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 32, "sequence_prefix_length": 32},
+      "description": "Deterministic 4096-pair 32-symbol prefix of the upstream ERR E40 corpus"
+    },
+    "PREFILTER_SMALL_ERR_E2_64BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E2_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 64, "sequence_prefix_length": 64},
+      "description": "Deterministic 4096-pair 64-symbol prefix of the upstream ERR E2 corpus"
+    },
+    "PREFILTER_SMALL_ERR_E40_64BP": {
+      "concurrency": 1,
+      "data": {"path": "tool_sneakysnake/Datasets/ERR240727_1_E40_30000Pairs.txt", "pair_limit": 4096, "sequence_length": 64, "sequence_prefix_length": 64},
+      "description": "Deterministic 4096-pair 64-symbol prefix of the upstream ERR E40 corpus"
     },
     "SNEAKYSNAKE_SRR_E8_250BP": {
       "concurrency": 1,
@@ -194,7 +218,7 @@
       "by_regions": true,
       "metrics": {
         "wall_clock_ns": {"rules": []},
-        "region_total_ns": {"type": "region", "region": "sneaky_snake_backend_batch", "rules": []},
+        "region_total_ns": {"type": "region", "region": "prefilter_backend_batch", "rules": []},
         "input_preparation_ns": {"type": "evaluation", "rules": []},
         "oracle_preparation_ns": {"type": "evaluation", "rules": []},
         "backend_batch_ns": {"type": "evaluation", "rules": []},
@@ -230,9 +254,67 @@
       }
     }
   },
+  "bench_prefilter_small_seeds": {
+    "tags": ["prefilter", "gatekeeper", "sneakysnake", "vulkan", "small-seed"],
+    "description": "Blocking hardware-Vulkan comparison of GateKeeper and SneakySnake on deterministic 32/64-symbol prefixes. Each callback times a complete upload/dispatch/wait/readback batch, then requires full CPU-oracle parity, supported geometry, result-count parity, and zero false rejects. Every matched independent P50 GateKeeper cell must be more than 10% faster than SneakySnake.",
+    "fast": true,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "iteration_order": {"mode": "interleaved_seeded", "seed": 5123830},
+    "matrix": {
+      "for": {
+        "PREFILTER_SMALL_ERR_E2_32BP": 5,
+        "PREFILTER_SMALL_ERR_E40_32BP": 5,
+        "PREFILTER_SMALL_ERR_E2_64BP": 5,
+        "PREFILTER_SMALL_ERR_E40_64BP": 5
+      },
+      "over": {
+        "sneakysnake_vulkan_e2": {},
+        "gatekeeper_vulkan_e2": {},
+        "sneakysnake_vulkan_e4": {},
+        "gatekeeper_vulkan_e4": {}
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "region": "prefilter_backend_batch", "rules": []},
+        "backend_batch_ns": {"type": "evaluation", "rules": [
+          ["gatekeeper_e2_err_e2_32_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}],
+          ["gatekeeper_e4_err_e2_32_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_32BP"}],
+          ["gatekeeper_e2_err_e40_32_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}],
+          ["gatekeeper_e4_err_e40_32_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_32BP"}],
+          ["gatekeeper_e2_err_e2_64_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}],
+          ["gatekeeper_e4_err_e2_64_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E2_64BP"}],
+          ["gatekeeper_e2_err_e40_64_gt10pct", {"key": "gatekeeper_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e2", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}],
+          ["gatekeeper_e4_err_e40_64_gt10pct", {"key": "gatekeeper_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}, {"compare": "<", "threshold%": 10, "tolerance%": 0, "aggregate": "p50", "pairing": "independent", "blocking": true}, {"key": "sneakysnake_vulkan_e4", "test_case": "PREFILTER_SMALL_ERR_E40_64BP"}]
+        ]},
+        "input_preparation_ns": {"type": "evaluation", "rules": []},
+        "oracle_preparation_ns": {"type": "evaluation", "rules": []},
+        "callback_non_backend_ns": {"type": "evaluation", "rules": []},
+        "callback_total_ns": {"type": "evaluation", "rules": []},
+        "validation_ns": {"type": "evaluation", "rules": []},
+        "input_valid": {"type": "evaluation", "rules": []},
+        "backend_available": {"type": "evaluation", "rules": []},
+        "runtime_validation_performed": {"type": "evaluation", "rules": []},
+        "runtime_validation_passed": {"type": "evaluation", "rules": []},
+        "vulkan_validation_required": {"type": "evaluation", "rules": []},
+        "gatekeeper_validation_required": {"type": "evaluation", "rules": []},
+        "result_count_valid": {"type": "evaluation", "rules": []},
+        "pair_count": {"type": "evaluation", "rules": []},
+        "base_count": {"type": "evaluation", "rules": []},
+        "supported_job_count": {"type": "evaluation", "rules": []},
+        "false_reject_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_estimate_sum": {"type": "evaluation", "rules": []},
+        "gatekeeper_mask_rejection_candidate_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_exact_guard_activation_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_guard_confirmed_rejection_count": {"type": "evaluation", "rules": []},
+        "gatekeeper_final_rejection_count": {"type": "evaluation", "rules": []},
+        "lower_bound_sum": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
   "bench_prefilter_pipeline": {
     "tags": ["aligner", "prefilter", "sneakysnake", "pipeline"],
-    "description": "Controlled on/off regional-impact benchmark in the existing aligner harness. Every row uses TWO_STACK_NTHASH + bounded SIMD_MM2 + KSW2, computes exact edit distance, and exposes only matches with ED<=16. The varied dimension is prefilter off versus scalar/SIMD/Vulkan. E=16 lies inside the Vulkan kernel's evaluated E<=31 domain, so the GPU row must report evaluated maze jobs and zero status-2 jobs. Named-region output includes sneaky_snake_prefilter and mm_align_skeleton. Operation-originated proof reports actual backend dispatches, status-classified jobs, rejected jobs/regions, survivors, KSW2 calls, and input-cell area; enabled rows fail closed unless proof is present with non-empty work from the selected backend, while the off row requires proof absence. A shared zero-work evaluator ledger records framework-resolved off/Vulkan schedule provenance by threshold, requires an available Vulkan row to have a scheduled same-threshold off row, compares their actual timed match counts as soon as both repeat-zero rows have completed, rejects count changes across repetitions, and never replays either pipeline. Hardware-Vulkan absence reports required/performed/passed=0 without CPU fallback or a blocking comparison.",
+    "description": "Controlled on/off regional-impact benchmark in the existing aligner harness. Every row uses TWO_STACK_NTHASH + bounded SIMD_MM2 + KSW2, computes exact edit distance, and exposes only matches with ED<=16. The varied dimension is prefilter off versus scalar/SIMD/Vulkan. E=16 lies inside the Vulkan kernel's evaluated E<=31 domain, so the GPU row must report evaluated maze jobs and zero status-2 jobs. Named-region output includes prefilter and mm_align_skeleton. Operation-originated proof reports actual backend dispatches, status-classified jobs, rejected jobs/regions, survivors, KSW2 calls, and input-cell area; enabled rows fail closed unless proof is present with non-empty work from the selected backend, while the off row requires proof absence. A shared zero-work evaluator ledger records framework-resolved off/Vulkan schedule provenance by threshold, requires an available Vulkan row to have a scheduled same-threshold off row, compares their actual timed match counts as soon as both repeat-zero rows have completed, rejects count changes across repetitions, and never replays either pipeline. Hardware-Vulkan absence reports required/performed/passed=0 without CPU fallback or a blocking comparison.",
     "fast": true,
     "concurrency": {"bench_lock": true, "concurrency": false},
     "iteration_order": {"mode": "interleaved_seeded", "seed": 5124040},
@@ -263,6 +345,8 @@
         "prefilter_execution_proof_present": {"type": "evaluation", "rules": []},
         "prefilter_execution_proof_accepted": {"type": "evaluation", "rules": []},
         "prefilter_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_sneaky_snake_dispatches": {"type": "evaluation", "rules": []},
+        "prefilter_gatekeeper_dispatches": {"type": "evaluation", "rules": []},
         "prefilter_scalar_dispatches": {"type": "evaluation", "rules": []},
         "prefilter_simd_dispatches": {"type": "evaluation", "rules": []},
         "prefilter_vulkan_dispatches": {"type": "evaluation", "rules": []},
@@ -273,6 +357,10 @@
         "prefilter_rejected_jobs": {"type": "evaluation", "rules": []},
         "prefilter_rejected_regions": {"type": "evaluation", "rules": []},
         "prefilter_surviving_regions": {"type": "evaluation", "rules": []},
+        "prefilter_mask_rejection_candidates": {"type": "evaluation", "rules": []},
+        "prefilter_exact_guard_activations": {"type": "evaluation", "rules": []},
+        "prefilter_guard_confirmed_rejections": {"type": "evaluation", "rules": []},
+        "prefilter_hamming_exact_rejections": {"type": "evaluation", "rules": []},
         "prefilter_execution_proof_saturated": {"type": "evaluation", "rules": []},
         "selected_route_execution_proof_accepted": {"type": "evaluation", "rules": []},
         "ksw2_left_calls": {"type": "evaluation", "rules": []},

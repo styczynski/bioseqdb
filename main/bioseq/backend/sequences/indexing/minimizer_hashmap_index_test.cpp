@@ -9123,7 +9123,8 @@ TEST_CASE("DOC0373 Format-5 cold reader admits retained positions once",
     // The final SoA therefore owns one u16 end plus one u32 dense route per
     // selected query; it does not retain the decoded u64 control image.
     REQUIRE(evidence.retained_selected_control_capacity_bytes
-        == query_count * (sizeof(std::uint16_t) + sizeof(std::uint32_t)));
+        == query_count
+            * (sizeof(std::uint16_t) + sizeof(std::uint32_t)));
     REQUIRE(evidence.current_selected_control_capacity_bytes == 0u);
     REQUIRE(evidence.global_position_capacity_bytes
         == evidence.retained_position_capacity * sizeof(std::uint64_t));
