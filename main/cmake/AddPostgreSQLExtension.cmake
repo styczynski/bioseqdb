@@ -126,8 +126,15 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       # Add extension as a dynamically linked library
       add_library(${LIBRARY_NAME} MODULE ${EXTENSION_SOURCES})
 
-      # Link extension to PostgreSQL
-      target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::PostgreSQL)
+      # Backend modules resolve PostgreSQL server APIs from the hosting
+      # `postgres` executable.  Do not static-link the libpq client target on
+      # Unix: its frontend pgcommon/pgport dependencies can interpose
+      # same-named backend APIs.  Windows still requires the postgres import
+      # library selected by FindPostgreSQL.cmake.
+      target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::ServerHeaders)
+      if(WIN32)
+        target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::PostgreSQL)
+      endif()
 
       # Handle macOS specifics
       if(APPLE)

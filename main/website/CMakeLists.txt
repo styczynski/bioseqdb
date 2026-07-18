@@ -18,7 +18,7 @@ if(NOT BIOSEQ_CODEGEN_EXECUTABLE)
     "BIOSEQ_CODEGEN_EXECUTABLE is unset")
 endif()
 set(_gen "${BIOSEQ_CODEGEN_EXECUTABLE}")
-set(_gen_dep bioseq_codegen_project)
+set(_gen_dep bioseq_codegen_project "${_gen}")
 
 # --- Version / output confinement ---------------------------------------------
 set(_source_dir "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -48,8 +48,10 @@ endif()
 # main/website.
 file(REAL_PATH "${_output_root}" _output_real EXPAND_TILDE)
 file(REAL_PATH "${CMAKE_BINARY_DIR}" _binary_real EXPAND_TILDE)
-string(FIND "${_output_real}" "${_binary_real}" _inside)
-if(NOT _inside EQUAL 0)
+file(RELATIVE_PATH _output_relative "${_binary_real}" "${_output_real}")
+if(IS_ABSOLUTE "${_output_relative}"
+   OR _output_relative STREQUAL ".."
+   OR _output_relative MATCHES "^\\.\\.[/\\\\]")
   message(FATAL_ERROR
     "website: BIOSEQ_WEBSITE_OUTPUT_DIRECTORY must resolve inside the build tree")
 endif()
@@ -139,7 +141,10 @@ endif()
 set(_reachable_units_file "${_output_root}/reachable-units.txt")
 set(_source_universe "${_output_root}/source-universe.json")
 string(REPLACE ";" "\n" _units_lines "${_module_units}")
-file(WRITE "${_reachable_units_file}" "${_units_lines}\n")
+file(CONFIGURE
+  OUTPUT "${_reachable_units_file}"
+  CONTENT "${_units_lines}\n"
+  @ONLY)
 set(_universe_json "{\n  \"schema\": \"source_universe/v1\",\n  \"owner\": \"bioseq_website\",\n  \"units\": [\n")
 set(_first TRUE)
 foreach(_unit ${_module_units})
@@ -151,7 +156,10 @@ foreach(_unit ${_module_units})
   string(APPEND _universe_json "    \"${_unit}\"")
 endforeach()
 string(APPEND _universe_json "\n  ]\n}\n")
-file(WRITE "${_source_universe}" "${_universe_json}")
+file(CONFIGURE
+  OUTPUT "${_source_universe}"
+  CONTENT "${_universe_json}"
+  @ONLY)
 
 # --- Doxygen 1.9.8 (exact) ----------------------------------------------------
 find_package(Doxygen 1.9.8 EXACT REQUIRED)
@@ -170,10 +178,80 @@ set(BIOSEQ_WEBSITE_DOXYGEN_INPUT_INCLUDE "${_doxygen_input_fragment}")
 configure_file("${_source_dir}/Doxyfile.in" "${_output_root}/Doxyfile" @ONLY)
 
 # --- Compile database ---------------------------------------------------------
-set(_compile_db "${CMAKE_BINARY_DIR}/compile_commands.json")
+# CMake rewrites compile_commands.json on every configure even when its bytes are
+# unchanged.  Copy through a restatted output so website analysis reruns only
+# when the compilation database's content actually changes.
+set(_compile_db_source "${CMAKE_BINARY_DIR}/compile_commands.json")
+set(_compile_db "${CMAKE_BINARY_DIR}/compile_commands.stable.json")
+add_custom_command(
+  OUTPUT "${_compile_db}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_compile_db_source}" "${_compile_db}"
+  DEPENDS "${_compile_db_source}"
+  COMMENT "website: stabilize compile database by content"
+  VERBATIM)
 
 # --- Private-runner tests (§17.3) ---------------------------------------------
 find_package(Python3 3.12 COMPONENTS Interpreter REQUIRED)
+
+# --- Supplied-design translation parity --------------------------------------
+# The reference export is the visual source of truth.  The checked-in templates,
+# design CSS and copied assets must be the byte-for-byte output of the mechanical
+# translator before any plan/render/publish step may consume them.  --check
+# regenerates only in a temporary directory and never mutates the source tree.
+set(_design_reference_dir "${CMAKE_SOURCE_DIR}/../website_design")
+set(_design_translator "${_source_dir}/tools/translate_reference_design.py")
+if(NOT EXISTS "${_design_reference_dir}/index.html"
+   OR NOT EXISTS "${_design_reference_dir}/docs.html")
+  message(FATAL_ERROR
+    "website: supplied website_design/index.html and website_design/docs.html "
+    "are required for design-translation parity")
+endif()
+file(GLOB_RECURSE _design_reference_files CONFIGURE_DEPENDS
+  "${_design_reference_dir}/*")
+set(_design_translation_outputs
+  "${_source_dir}/templates/base.html.j2"
+  "${_source_dir}/templates/landing.html.j2"
+  "${_source_dir}/static/css/docs-design.css"
+  "${_source_dir}/static/css/landing-design.css")
+set(_design_translation_inputs)
+foreach(_relative
+    index.html
+    docs.html
+    assets/bioseq-mark.svg
+    assets/logos/bytedance.png
+    assets/logos/ef.png
+    assets/logos/goldman.png
+    assets/logos/google.png
+    assets/logos/sumo.png
+    uploads/small_vid.mp4
+    uploads/vials.mp4)
+  list(APPEND _design_translation_inputs
+    "${_design_reference_dir}/${_relative}")
+  list(APPEND _design_translation_outputs
+    "${_source_dir}/design_source/${_relative}")
+endforeach()
+foreach(_relative
+    bioseq-mark.svg
+    favicon.svg
+    logos/bytedance.png
+    logos/ef.png
+    logos/goldman.png
+    logos/google.png
+    logos/sumo.png
+    media/small_vid.mp4
+    media/vials.mp4)
+  list(APPEND _design_translation_outputs "${_source_dir}/static/${_relative}")
+endforeach()
+set(_design_translation_stamp "${_output_root}/design-translation-check.stamp")
+add_custom_command(
+  OUTPUT "${_design_translation_stamp}"
+  COMMAND "${Python3_EXECUTABLE}" "${_design_translator}" --check
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_design_translation_stamp}"
+  DEPENDS "${_design_translator}" ${_design_translation_inputs}
+          ${_design_translation_outputs}
+  COMMENT "website: verify non-mutating supplied-design translation parity"
+  VERBATIM)
 
 # --- Pinned Python validation environment (§4.4) ------------------------------
 # The independent html5lib validator and the Playwright browser tests run in a
@@ -253,7 +331,8 @@ add_custom_command(
           ${_plan_drafts_flag}
           --output "${_plan_json}"
           --report-dir "${_report_dir}"
-  DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_site_config}" "${_sql_api}"
+  DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
+          "${_site_config}" "${_sql_api}"
           ${_tutorial_md} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
   VERBATIM)
@@ -261,17 +340,33 @@ add_custom_command(
 # --- source_graph (§17.3 step 4) ----------------------------------------------
 # Depends on the reachable universe + compile DB + provider BMIs (postgresql_bioseq).
 set(_source_graph_json "${_output_root}/source-graph.json")
+set(_source_graph_work "${_output_root}/source-graph-work")
+set(_source_graph_raw_json "${_source_graph_work}/source-graph.json")
+set(_reachable_closure_raw "${_source_graph_work}/reachable-interface-units.txt")
+set(_source_graph_run_stamp "${_source_graph_work}/complete.stamp")
 add_custom_command(
-  OUTPUT "${_source_graph_json}" "${_reachable_closure}"
+  OUTPUT "${_source_graph_run_stamp}"
+  BYPRODUCTS "${_source_graph_raw_json}" "${_reachable_closure_raw}"
+  COMMAND "${CMAKE_COMMAND}" -E make_directory "${_source_graph_work}"
   COMMAND "${_gen}" website source_graph
           --reachable-units "${_reachable_units_file}"
           --compile-db "${_compile_db}"
           --site-config "${_site_config}"
-          --output "${_source_graph_json}"
-          --reachable-output "${_reachable_closure}"
+          --output "${_source_graph_raw_json}"
+          --reachable-output "${_reachable_closure_raw}"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_source_graph_run_stamp}"
   DEPENDS ${_gen_dep} postgresql_bioseq "${_source_universe}"
           "${_reachable_units_file}" "${_site_config}" "${_compile_db}"
   COMMENT "website: source_graph (export-import reachable closure)"
+  VERBATIM)
+add_custom_command(
+  OUTPUT "${_source_graph_json}" "${_reachable_closure}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_source_graph_raw_json}" "${_source_graph_json}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+          "${_reachable_closure_raw}" "${_reachable_closure}"
+  DEPENDS "${_source_graph_run_stamp}"
+  COMMENT "website: stabilize source-graph outputs by content"
   VERBATIM)
 
 # --- Doxygen XML (§17.3 step 5) -----------------------------------------------
@@ -314,20 +409,65 @@ add_custom_command(
 # --- Relocatable PostgreSQL stage (§13.2 / §17.3 step 6) ----------------------
 set(_stage_root "${_output_root}/postgres-prefix")
 set(_stage_manifest "${_output_root}/stage-manifest.json")
+set(_stage_extension_hash "${_output_root}/staged-extension.sha256")
+string(REGEX REPLACE "^/+" "" _pg_bindir_rel "${_pg_bindir}")
+set(_staged_bindir "${_stage_root}/${_pg_bindir_rel}")
+get_target_property(
+  _extension_control_file postgresql_bioseq BIOSEQ_EXTENSION_CONTROL_FILE)
+get_target_property(
+  _extension_install_sql postgresql_bioseq BIOSEQ_EXTENSION_INSTALL_SQL)
+if(NOT _extension_control_file OR NOT _extension_install_sql)
+  message(FATAL_ERROR
+    "postgresql_bioseq must publish its generated control and install-SQL paths")
+endif()
 add_custom_command(
-  OUTPUT "${_stage_manifest}"
+  OUTPUT "${_stage_manifest}" "${_stage_extension_hash}"
   COMMAND "${CMAKE_COMMAND}"
           -DPG_CONFIG=${PostgreSQL_CONFIG}
           -DSTAGE_ROOT=${_stage_root}
-          "-DCONTROL_FILE=$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_CONTROL_FILE>"
-          "-DINSTALL_SQL=$<TARGET_PROPERTY:postgresql_bioseq,BIOSEQ_EXTENSION_INSTALL_SQL>"
+          "-DCONTROL_FILE=${_extension_control_file}"
+          "-DINSTALL_SQL=${_extension_install_sql}"
           "-DLIBRARY_FILE=$<TARGET_FILE:postgresql_bioseq>"
           -DEXTENSION_VERSION=${_version}
           -DMANIFEST_OUT=${_stage_manifest}
+          -DHASH_OUT=${_stage_extension_hash}
           -P "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
-  DEPENDS postgresql_bioseq "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
+  DEPENDS postgresql_bioseq
+          "${_extension_control_file}"
+          "${_extension_install_sql}"
+          "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
   COMMENT "website: stage relocatable PostgreSQL + current extension artifacts"
   VERBATIM)
+
+# Exercise the generator's database-per-example security and result projection
+# against a second disposable cluster. This transcript intentionally needs no
+# extension bootstrap: it proves restricted clone ACLs, same-clone type-name
+# lookup (including a clone-local enum), multi-results, PQcmdTuples, teardown,
+# and forced cleanup independently of the authored website examples.
+set(_isolation_tests_stamp "${_output_root}/website-isolation-tests.stamp")
+add_custom_command(
+  OUTPUT "${_isolation_tests_stamp}"
+  COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
+          --pg-bin-dir "${_staged_bindir}"
+          --data-dir-parent "${_output_root}/isolation-tests/cluster"
+          --socket-dir-parent /tmp
+          --log-dir "${_output_root}/isolation-tests/log"
+          --database wtmpl
+          --address-space-limit-mib 4096
+          -- "${Python3_EXECUTABLE}"
+             "${CMAKE_SOURCE_DIR}/cmake/test_website_isolation.py"
+             --generator "${_gen}"
+             --pg-bin-dir "${_staged_bindir}"
+  COMMAND "${CMAKE_COMMAND}" -E touch "${_isolation_tests_stamp}"
+  DEPENDS ${_gen_dep} "${_stage_manifest}" "${_stage_extension_hash}"
+          "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
+          "${CMAKE_SOURCE_DIR}/cmake/private_postgres.py"
+          "${CMAKE_SOURCE_DIR}/cmake/private_postgresql.conf.in"
+          "${CMAKE_SOURCE_DIR}/cmake/test_website_isolation.py"
+  COMMENT "website: isolated SQL executor + result metadata integration tests"
+  USES_TERMINAL VERBATIM)
+add_custom_target(bioseq_website_isolation_tests
+  DEPENDS "${_isolation_tests_stamp}")
 
 # --- catalog + execute on the staged cluster (§17.3 step 7) -------------------
 # One owner process starts the copied server under RLIMIT_AS containment, applies
@@ -336,13 +476,20 @@ add_custom_command(
 # and runs every landing/tutorial runnable example against the live extension and
 # writes the database-independent resolved site model (schema site_model/v1, §180).
 # Nothing after this step needs a cluster.
-string(REGEX REPLACE "^/+" "" _pg_bindir_rel "${_pg_bindir}")
-set(_staged_bindir "${_stage_root}/${_pg_bindir_rel}")
 set(_sql_entities "${_output_root}/sql-entities.json")
 set(_site_model "${_output_root}/site-model.json")
+set(_landing_fasta "${_source_dir}/tests/fixtures/landing_reads.fasta")
+if(NOT EXISTS "${_landing_fasta}")
+  message(FATAL_ERROR "website: real bioseq.load fixture is missing: ${_landing_fasta}")
+endif()
 
-# The private CREATE EXTENSION bootstrap the runner applies (§13.2).
-file(WRITE "${_output_root}/create-extension.sql" "CREATE EXTENSION bioseq;\n")
+# The template owns the extension objects and globally revokes internal routine
+# execution. The executor grants each unique clone owner only the schema/table
+# ACLs needed inside that clone; direct per-clone grants keep PostgreSQL 13
+# compatibility because pg_database_owner exists only in PostgreSQL 14+.
+file(WRITE "${_output_root}/create-extension.sql"
+  "CREATE EXTENSION bioseq;\n"
+  "REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA bioseq_internal FROM PUBLIC;\n")
 
 set(_drafts_flag "")
 if(BIOSEQ_WEBSITE_INCLUDE_DRAFTS)
@@ -353,16 +500,40 @@ file(WRITE "${_cluster_child}"
 "#!/usr/bin/env bash\n"
 "set -euo pipefail\n"
 "CONN=\"host=$PGHOST port=$PGPORT dbname=$PGDATABASE user=$PGUSER\"\n"
+"ADMIN_CONN=\"host=$PGHOST port=$PGPORT dbname=postgres user=$PGUSER\"\n"
+"IFS= read -r STAGED_EXTENSION_SHA256 < '${_stage_extension_hash}'\n"
+"MAX_PREPARED=$(\"${_staged_bindir}/psql\" -tAqX --dbname \"$ADMIN_CONN\" -c 'SHOW max_prepared_transactions')\n"
+"if [[ \"$MAX_PREPARED\" != '0' ]]; then\n"
+"  echo \"website: expected max_prepared_transactions=0, got $MAX_PREPARED\" >&2\n"
+"  exit 1\n"
+"fi\n"
+"PRELOAD=$(\"${_staged_bindir}/psql\" -tAqX --dbname \"$ADMIN_CONN\" -c 'SHOW shared_preload_libraries')\n"
+"if [[ \"$PRELOAD\" != 'bioseq' ]]; then\n"
+"  echo \"website: expected shared_preload_libraries=bioseq, got $PRELOAD\" >&2\n"
+"  exit 1\n"
+"fi\n"
+"\"${CMAKE_COMMAND}\" -E copy_if_different '${_landing_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/landing_reads.fasta\"\n"
 "\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
 "  --schemas 'public,bioseq' --output '${_sql_entities}'\n"
-"exec \"${_gen}\" website execute \\\n"
+"\"${_gen}\" website execute \\\n"
 "  --source '${_source_dir}' --version '${_version}' \\\n"
 "  --site-config '${_site_config}' --sql-api '${_sql_api}' \\\n"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
-"  --conninfo \"$CONN\" ${_drafts_flag} \\\n"
+"  --staged-extension-sha256 \"$STAGED_EXTENSION_SHA256\" \\\n"
+"  --isolated --conninfo \"$CONN\" --admin-conninfo \"$ADMIN_CONN\" \\\n"
+"  --socket-dir \"$PGHOST\" --port \"$PGPORT\" --template-db \"$PGDATABASE\" \\\n"
+"  ${_drafts_flag} \\\n"
 "  --output-model '${_site_model}' \\\n"
-"  --report-dir '${_report_dir}'\n")
+"  --report-dir '${_report_dir}'\n"
+"LEFTOVERS=$(\"${_staged_bindir}/psql\" -tAqX --dbname \"$ADMIN_CONN\" -c \"SELECT \\\n"
+"  (SELECT count(*) FROM pg_database WHERE left(datname, 10) = 'biosite_d_')::text || '|' || \\\n"
+"  (SELECT count(*) FROM pg_roles WHERE left(rolname, 10) IN ('biosite_r_', 'biosite_p_'))::text || '|' || \\\n"
+"  (SELECT count(*) FROM pg_prepared_xacts WHERE left(database::text, 10) = 'biosite_d_')::text\")\n"
+"if [[ \"$LEFTOVERS\" != '0|0|0' ]]; then\n"
+"  echo \"website: isolated executor leaked database|role|prepared-xact counts: $LEFTOVERS\" >&2\n"
+"  exit 1\n"
+"fi\n")
 
 add_custom_command(
   OUTPUT "${_site_model}" "${_sql_entities}"
@@ -373,12 +544,14 @@ add_custom_command(
           --log-dir "${_output_root}/cluster-log"
           --database bioseq_site
           --address-space-limit-mib 4096
+          --preload-library bioseq
+          --disable-prepared-transactions
           --bootstrap "${_output_root}/create-extension.sql"
           -- bash "${_cluster_child}"
-  DEPENDS ${_gen_dep} "${_stage_manifest}" "${_cluster_child}"
-          "${_cpp_entities}" "${_plan_json}" "${_sql_api}"
+  DEPENDS ${_gen_dep} "${_stage_manifest}" "${_stage_extension_hash}" "${_cluster_child}"
+          "${_cpp_entities}" "${_plan_json}" "${_sql_api}" "${_landing_fasta}"
           ${_tutorial_md} ${_template_files} ${_static_files}
-          bioseq_private_postgres_tests
+          bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"
   USES_TERMINAL VERBATIM)
 
@@ -398,7 +571,8 @@ add_custom_command(
           --output "${_staging_dir}"
           --model-validation-stamp "${_model_validation_stamp}"
           --report-dir "${_report_dir}"
-  DEPENDS ${_gen_dep} "${_site_model}" ${_template_files} ${_static_files}
+  DEPENDS ${_gen_dep} "${_site_model}" "${_design_translation_stamp}"
+          ${_template_files} ${_static_files}
   COMMENT "website: render resolved model into owner-marked staging (no database)"
   VERBATIM)
 
@@ -422,14 +596,20 @@ add_custom_command(
 # When enabled, the SAME executed model is re-rendered at base paths / and
 # /bioseqdb/ into private fixture roots, each independently validated, and Playwright
 # runs against staging plus both fixtures. The browser stamp then gates publish.
-# Browser tests degrade cleanly (SKIP) when Chromium is unprovisioned.
+# Because this option requests browser acceptance explicitly, a missing pinned
+# Chromium is fatal instead of silently weakening the publication gate.
 set(_browser_dep "")
 if(BIOSEQ_WEBSITE_BROWSER_TESTS)
   set(_browser_stamp "${_output_root}/browser-validation.stamp")
+  set(_browser_deploy_stamp "${_output_root}/browser-deployment-base.stamp")
+  set(_browser_root_stamp "${_output_root}/browser-root-base.stamp")
+  set(_browser_bioseqdb_stamp "${_output_root}/browser-bioseqdb-base.stamp")
   set(_fixture_root_slash "${_output_root}/fixture-root")
   set(_fixture_root_bioseqdb "${_output_root}/fixture-bioseqdb")
   add_custom_command(
     OUTPUT "${_browser_stamp}"
+    BYPRODUCTS "${_browser_deploy_stamp}" "${_browser_root_stamp}"
+               "${_browser_bioseqdb_stamp}"
     COMMAND "${_gen}" website render --model "${_site_model}"
             --site-config "${_site_config}" --templates "${_templates_dir}"
             --static "${_static_dir}" --base-path "/"
@@ -450,13 +630,41 @@ if(BIOSEQ_WEBSITE_BROWSER_TESTS)
             -DPYTHON=${_venv_python}
             -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
             -DSITE=${_staging_dir} -DBASE_PATH=${_base_path} -DVERSION=${_version}
-            -DSTAMP=${_browser_stamp}
+            -DMODEL=${_site_model}
+            -DDESIGN_SOURCE=${_design_reference_dir}
+            -DARTIFACT_DIR=${_output_root}/browser-artifacts/deployment-base
+            -DSTAMP=${_browser_deploy_stamp}
             -DBROWSERS_PATH=${_output_root}/playwright-browsers
             -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
-    DEPENDS "${_html_validation_stamp}" "${_site_model}" "${_venv_stamp}"
+    COMMAND "${CMAKE_COMMAND}"
+            -DPYTHON=${_venv_python}
+            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
+            -DSITE=${_fixture_root_slash} -DBASE_PATH=/ -DVERSION=${_version}
+            -DMODEL=${_site_model}
+            -DDESIGN_SOURCE=${_design_reference_dir}
+            -DARTIFACT_DIR=${_output_root}/browser-artifacts/root-base
+            -DSTAMP=${_browser_root_stamp}
+            -DBROWSERS_PATH=${_output_root}/playwright-browsers
+            -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+    COMMAND "${CMAKE_COMMAND}"
+            -DPYTHON=${_venv_python}
+            -DBROWSER_TEST=${CMAKE_SOURCE_DIR}/website/tests/browser_test.py
+            -DSITE=${_fixture_root_bioseqdb} -DBASE_PATH=/bioseqdb/
+            -DVERSION=${_version}
+            -DMODEL=${_site_model}
+            -DDESIGN_SOURCE=${_design_reference_dir}
+            -DARTIFACT_DIR=${_output_root}/browser-artifacts/bioseqdb-base
+            -DSTAMP=${_browser_bioseqdb_stamp}
+            -DBROWSERS_PATH=${_output_root}/playwright-browsers
+            -P "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${_browser_stamp}"
+    DEPENDS ${_gen_dep} "${_html_validation_stamp}" "${_site_model}"
+            "${_venv_stamp}"
+            "${_design_translation_stamp}"
             "${CMAKE_SOURCE_DIR}/website/tests/browser_test.py"
             "${CMAKE_SOURCE_DIR}/website/tests/validate_site.py"
             "${CMAKE_SOURCE_DIR}/cmake/run_browser_test.cmake"
+            ${_design_reference_files}
     COMMENT "website: two-base-path render + pinned browser acceptance"
     USES_TERMINAL VERBATIM)
   set(_browser_dep "${_browser_stamp}")
@@ -490,7 +698,8 @@ add_custom_command(
   COMMENT "website: publication success stamp"
   VERBATIM)
 add_custom_target(bioseq_website
-  DEPENDS "${_website_success}" bioseq_private_postgres_tests)
+  DEPENDS "${_website_success}" bioseq_private_postgres_tests
+          bioseq_website_isolation_tests)
 
 # --- assemble (§17.3 step 12) -------------------------------------------------
 if(NOT BIOSEQ_WEBSITE_VERSION_ARTIFACTS STREQUAL "")

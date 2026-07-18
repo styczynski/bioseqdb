@@ -1150,12 +1150,18 @@ CREATE OR REPLACE FUNCTION bioseq.query_start(el ANYELEMENT)
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
+COMMENT ON FUNCTION bioseq.query_start(anyelement) IS
+    'Start offset of the current mmsearch alignment on the query sequence.';
+
 CREATE OR REPLACE FUNCTION bioseq.query_end(el ANYELEMENT)
     RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_query_end_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
+
+COMMENT ON FUNCTION bioseq.query_end(anyelement) IS
+    'End offset of the current mmsearch alignment on the query sequence.';
 
 CREATE OR REPLACE FUNCTION bioseq.target_len(el ANYELEMENT)
     RETURNS BIGINT
@@ -1171,12 +1177,18 @@ CREATE OR REPLACE FUNCTION bioseq.target_start(el ANYELEMENT)
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
 
+COMMENT ON FUNCTION bioseq.target_start(anyelement) IS
+    'Start offset of the current mmsearch alignment on the stored target sequence.';
+
 CREATE OR REPLACE FUNCTION bioseq.target_end(el ANYELEMENT)
     RETURNS BIGINT
     AS 'MODULE_PATHNAME', 'bioseq_target_end_stub'
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
+
+COMMENT ON FUNCTION bioseq.target_end(anyelement) IS
+    'End offset of the current mmsearch alignment on the stored target sequence.';
 
 CREATE OR REPLACE FUNCTION bioseq.num_matches(el ANYELEMENT)
     RETURNS BIGINT
@@ -1274,6 +1286,9 @@ CREATE OR REPLACE FUNCTION bioseq.cigar(el ANYELEMENT)
     LANGUAGE C IMMUTABLE STRICT
     PARALLEL SAFE
     SUPPORT bioseq_placeholder_support;
+
+COMMENT ON FUNCTION bioseq.cigar(anyelement) IS
+    'CIGAR string describing the current mmsearch alignment.';
 
 -- ============================================================================
 -- bioseq.seq -- parameterised compact-sequence type

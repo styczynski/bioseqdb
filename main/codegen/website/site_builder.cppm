@@ -80,6 +80,13 @@ void expect(bool condition, std::string_view detail) {
 
 // Defined after the reference index it exercises; driven by run_website_smoke.
 void run_website_reference_smoke();
+namespace {
+void rewrite_entity_link_routes(
+    std::vector<document_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& identity_by_reference,
+    const std::map<std::string, std::string, std::less<>>& route_by_id,
+    const std::string& tooltip_url);
+}  // namespace
 
 /// @brief Exercises every integrated parser/renderer/serializer once.
 ///
@@ -112,6 +119,37 @@ void run_website_smoke() {
         expect(render_document_html(parsed.children).contains(expected),
                "admonition severity survives render");
     }
+    // Doxygen represents lists inside <para> nodes. The HTML renderer must split
+    // those block children out of <p>, including a mixed text + list + text shape,
+    // or the HTML5 parser implicitly closes the paragraph and rejects our </p>.
+    document_node list_text{
+        .kind = document_node_kind::paragraph,
+        .children = {{.kind = document_node_kind::text, .text = "Zero copy."}}};
+    document_node list_item{
+        .kind = document_node_kind::list_item,
+        .children = {list_text}};
+    document_node unordered{
+        .kind = document_node_kind::unordered_list,
+        .children = {list_item}};
+    document_node mixed_paragraph{
+        .kind = document_node_kind::paragraph,
+        .children = {
+            {.kind = document_node_kind::text, .text = "Wins:"},
+            unordered,
+            {.kind = document_node_kind::text, .text = "Done."}}};
+    expect(render_document_html({mixed_paragraph})
+               == "<p class=\"doc-paragraph\">Wins:</p>"
+                  "<ul><li><p class=\"doc-paragraph\">Zero copy.</p></li></ul>"
+                  "<p class=\"doc-paragraph\">Done.</p>",
+           "mixed Doxygen paragraph renders block list outside p");
+    document_node ordered_list = unordered;
+    ordered_list.kind = document_node_kind::ordered_list;
+    document_node list_only{
+        .kind = document_node_kind::paragraph,
+        .children = {ordered_list}};
+    expect(render_document_html({list_only})
+               == "<ol><li><p class=\"doc-paragraph\">Zero copy.</p></li></ol>",
+           "list-only Doxygen paragraph renders without empty p wrapper");
     const auto reference =
         parse_entity_reference("entity:sql:type:bioseq.seq", source_span{});
     expect(reference.has_value() && reference->domain == entity_query_domain::sql,
@@ -147,6 +185,7 @@ void run_website_smoke() {
         "<ulink url=\"https://bioseq.test/x\">ok</ulink> "
         "<ulink url=\"javascript:alert(1)\">bad</ulink> "
         "range<ndash/>value <mystery>kept-text</mystery>.</para>"
+        "<simplesect kind=\"return\"><para>The decoded value.</para></simplesect>"
         "</detaileddescription>",
         "bioseq::io::seq");
     document_node description_root;
@@ -160,6 +199,10 @@ void run_website_smoke() {
            "doxygen keeps only the safe ulink");
     expect(description.diagnostics.size() == 2,
            "doxygen unsafe-link and unknown-tag diagnostics");
+    const std::string description_html = render_document_html(description.nodes);
+    expect(description_html.find("admonition-note") != std::string::npos
+               && description_html.find("Returns") != std::string::npos,
+           "doxygen return section keeps its semantic callout label");
 
     // entity merge (§11.6): a Clang page-owner is enriched with its unique
     // Doxygen documentation match (rule 1: exact normalized signature).
@@ -289,6 +332,90 @@ void run_website_smoke() {
            "search record carries normalized name tokens");
     const std::string escaped = apply_html_safe_escapes("a<b>&c");
     expect(escaped.find("\\u003c") != std::string::npos, "json html-safe escape");
+
+    // The execute -> render boundary must retain Doxygen's rich entity docs,
+    // parameter docs, and the SQL-to-C++ implementation relationship. These
+    // fields feed the supplied API-page and hover-card designs after the private
+    // site model is reloaded.
+    documented_entity persisted;
+    persisted.canonical_id = "cpp:function:bioseq::demo(int)";
+    persisted.domain = entity_domain::cpp;
+    persisted.kind = entity_kind::function;
+    persisted.qualified_name = "bioseq::demo";
+    persisted.display_name = "demo";
+    persisted.normalized_signature = "int bioseq::demo(int value)";
+    persisted.summary_text = "Demonstrates entity persistence.";
+    document_node detail;
+    detail.kind = document_node_kind::paragraph;
+    detail.children.push_back(document_node{
+        .kind = document_node_kind::text,
+        .text = "Detailed Doxygen prose."});
+    document_node doxygen_reference;
+    doxygen_reference.kind = document_node_kind::entity_link;
+    doxygen_reference.target = "doxygen-ref-demo";
+    doxygen_reference.children.push_back(document_node{
+        .kind = document_node_kind::text,
+        .text = "demo target"});
+    detail.children.push_back(std::move(doxygen_reference));
+    persisted.documentation.push_back(detail);
+    parameter_documentation parameter;
+    parameter.name = "value";
+    parameter.type = "int";
+    parameter.description.push_back(document_node{
+        .kind = document_node_kind::text,
+        .text = "Input value."});
+    persisted.parameters.push_back(parameter);
+    persisted.implementation_entity_id = "cpp:function:bioseq::demo_impl(int)";
+    const std::vector<documented_entity> persisted_round_trip =
+        deserialize_entities(serialize_cpp_entities({persisted}, "22.0.0"));
+    expect(persisted_round_trip.size() == 1
+               && persisted_round_trip.front().documentation.size() == 1
+               && persisted_round_trip.front().documentation.front().children.size() == 2
+               && persisted_round_trip.front().documentation.front().children.front().text
+                      == "Detailed Doxygen prose."
+               && persisted_round_trip.front().parameters.size() == 1
+               && persisted_round_trip.front().parameters.front().description.size() == 1
+               && persisted_round_trip.front().parameters.front().description.front().text
+                      == "Input value."
+               && persisted_round_trip.front().implementation_entity_id
+               == persisted.implementation_entity_id,
+           "entity artifact retains detailed documentation and implementation link");
+    site_model executed_model;
+    executed_model.schema_version = "bioseq.website.site_model/v1";
+    executed_model.parser_version = "self-test";
+    executed_model.binding_schema_version = "self-test";
+    executed_model.version.path_component = "v0.1";
+    executed_model.version.parts = {0, 1};
+    executed_model.cpp_entities.push_back(persisted);
+    const site_model rendered_model =
+        deserialize_site_model(serialize_site_model(executed_model));
+    expect(rendered_model.cpp_entities.size() == 1
+               && render_document_html(rendered_model.cpp_entities.front().documentation)
+                      .find("Detailed Doxygen prose.") != std::string::npos
+               && rendered_model.cpp_entities.front().parameters.front()
+                      .description.front().text == "Input value."
+               && rendered_model.cpp_entities.front().implementation_entity_id
+                      == persisted.implementation_entity_id,
+           "execute site model preserves rich entity documentation for render");
+    std::vector<document_node> routed_doxygen =
+        rendered_model.cpp_entities.front().documentation;
+    const std::map<std::string, std::string, std::less<>> test_reference_ids{
+        {"doxygen-ref-demo", persisted.canonical_id}};
+    const std::map<std::string, std::string, std::less<>> test_routes{
+        {persisted.canonical_id, "/v0.1/reference/cpp/function/demo/"}};
+    rewrite_entity_link_routes(
+        routed_doxygen, test_reference_ids, test_routes,
+        "/v0.1/entities.test.json");
+    const std::string routed_doxygen_html = render_document_html(routed_doxygen);
+    expect(routed_doxygen_html.find(
+               "href=\"/v0.1/reference/cpp/function/demo/\"") != std::string::npos
+               && routed_doxygen_html.find(
+                      "data-entity-id=\"cpp:function:bioseq::demo(int)\"")
+                      != std::string::npos
+               && routed_doxygen_html.find(
+                      "data-entity-data-url=\"/v0.1/entities.test.json\"")
+                      != std::string::npos,
+           "persisted Doxygen refid resolves to a live routed entity tooltip");
 
     // §12.5 shared normalizer golden corpus (mirrors
     // main/website/tests/fixtures/search_tokens_golden.json, also driven against the
@@ -899,9 +1026,17 @@ void write_report_fragment(
                     + outcome.error().code + "] " + outcome.error().message);
             }
             record_example_run("landing:" + example.canonical_id, elapsed, *outcome);
-            if (!outcome->visible_results.empty()) {
-                view.result = outcome->visible_results.front();
-                view.has_result = true;
+            // Landing examples may visibly demonstrate setup commands before
+            // their final SELECT (for example CREATE/SET/load/INSERT). Publish
+            // the last tuple-bearing result, never an earlier command tag or
+            // an intermediate scalar returned by bioseq.load().
+            for (auto result = outcome->visible_results.rbegin();
+                 result != outcome->visible_results.rend(); ++result) {
+            if (result->kind == sql_result_kind::rows) {
+                    view.result = *result;
+                    view.has_result = true;
+                    break;
+                }
             }
         }
         views.push_back(std::move(view));
@@ -1088,7 +1223,14 @@ void write_report_fragment(
             table.attributes.emplace("class", "result-table");
             std::vector<document_node> header_cells;
             for (const sql_column& column : set.columns) {
-                header_cells.push_back(make_cell_node(true, make_text_node(column.name)));
+                document_node header = make_cell_node(true, make_text_node(column.name));
+                header.children.push_back(
+                    document_node{.kind = document_node_kind::line_break});
+                document_node type;
+                type.kind = document_node_kind::code_span;
+                type.text = column.type_name;
+                header.children.push_back(std::move(type));
+                header_cells.push_back(std::move(header));
             }
             table.children.push_back(make_row_node(std::move(header_cells)));
             for (const std::vector<sql_cell>& row : set.rows) {
@@ -1102,7 +1244,14 @@ void write_report_fragment(
             }
             nodes.push_back(std::move(table));
         } else if (set.kind == sql_result_kind::command) {
-            nodes.push_back(make_paragraph_node({make_emphasis_node(set.command_tag)}));
+            std::vector<document_node> command{
+                make_emphasis_node(set.command_tag)};
+            if (set.affected_rows) {
+                command.push_back(make_text_node(
+                    " — " + std::to_string(*set.affected_rows)
+                    + (*set.affected_rows == 1 ? " row affected" : " rows affected")));
+            }
+            nodes.push_back(make_paragraph_node(std::move(command)));
         } else {
             document_node admonition;
             admonition.kind = document_node_kind::admonition;
@@ -1188,7 +1337,11 @@ struct execution_target {
         settings.socket_directory = require_option(options, "socket-dir");
         settings.port = std::stoi(require_option(options, "port"));
         settings.template_database = require_option(options, "template-db");
-        target.probe_conninfo = settings.admin_conninfo;
+        if (const auto found = options.find("conninfo"); found != options.end()) {
+            target.probe_conninfo = found->second;
+        } else {
+            target.probe_conninfo = settings.admin_conninfo;
+        }
         target.isolation = std::move(settings);
     } else if (const auto found = options.find("conninfo"); found != options.end()) {
         target.conninfo = found->second;
@@ -1827,6 +1980,60 @@ void run_website_reference_smoke() {
                && annotated_doc[0].text.substr(folded_start, folded_len)
                       == "bioseq.seq('dna4', 64)",
            "folded annotation carries number/title and a range over the matched source");
+    const std::string annotated_html = render_document_html(annotated_doc);
+    expect(annotated_html.find("data-annotated-type") != std::string::npos
+               && annotated_html.find("data-code") != std::string::npos
+               && annotated_html.find("bioseq.seq") != std::string::npos
+               && annotated_html.find("CREATE TABLE") == std::string::npos
+               && annotated_html.find("data-anno=\"1\"") != std::string::npos
+               && annotated_html.find("data-anno-card=\"1\"") != std::string::npos,
+           "annotated block renders the focused type-anatomy component and paired card");
+    std::vector<document_node> annotated_with_result = annotated_doc;
+    document_node annotated_result;
+    annotated_result.kind = document_node_kind::table;
+    annotated_result.attributes["class"] = "result-table";
+    document_node annotated_result_header;
+    annotated_result_header.kind = document_node_kind::table_row;
+    annotated_result.children.push_back(std::move(annotated_result_header));
+    annotated_with_result.push_back(std::move(annotated_result));
+    const std::string annotated_result_html =
+        render_document_html(annotated_with_result);
+    expect(annotated_result_html.find("data-annotated-type") != std::string::npos
+               && annotated_result_html.find("class=\"result-table\"")
+                      != std::string::npos,
+           "annotated runnable preserves its executed result after the anatomy card");
+
+    document_node terminal_code;
+    terminal_code.kind = document_node_kind::code_block;
+    terminal_code.text = "SELECT 1 AS value;";
+    terminal_code.attributes["language"] = "sql";
+    document_node terminal_table;
+    terminal_table.kind = document_node_kind::table;
+    terminal_table.attributes["class"] = "result-table";
+    for (const auto& [header, text] : {
+             std::pair{true, std::string("value")},
+             std::pair{false, std::string("1")}}) {
+        document_node row;
+        row.kind = document_node_kind::table_row;
+        document_node cell;
+        cell.kind = document_node_kind::table_cell;
+        if (header) {
+            cell.attributes["scope"] = "col";
+        }
+        cell.children.push_back(document_node{
+            .kind = document_node_kind::text,
+            .text = text});
+        row.children.push_back(std::move(cell));
+        terminal_table.children.push_back(std::move(row));
+    }
+    const std::string terminal_html =
+        render_document_html({terminal_code, terminal_table});
+    expect(terminal_html.find("data-term") != std::string::npos
+               && terminal_html.find("data-result") != std::string::npos
+               && terminal_html.find("Result \xC2\xB7 1 row") != std::string::npos
+               && terminal_html.find("<thead>") != std::string::npos
+               && terminal_html.find("<tbody>") != std::string::npos,
+           "ordinary runnable nests a semantic executed-result table in its terminal");
 }
 
 /// @brief Runs `website plan`: validates config, parses tutorials, writes plan.
@@ -2034,7 +2241,8 @@ namespace {
     static constexpr std::string_view value_keys[] = {
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
         "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms"};
-    static constexpr std::string_view flag_keys[] = {"isolated"};
+    static constexpr std::string_view flag_keys[] = {
+        "isolated", "allow-plain-template"};
     const auto options = parse_options(args, value_keys, flag_keys);
 
     sql_example example;
@@ -2066,6 +2274,7 @@ namespace {
         settings.socket_directory = require_option(options, "socket-dir");
         settings.port = std::stoi(require_option(options, "port"));
         settings.template_database = require_option(options, "template-db");
+        settings.require_extension = !options.contains("allow-plain-template");
         private_cluster_executor executor("");
         outcome = executor.execute_isolated(example, settings);
     } else {
@@ -2084,7 +2293,8 @@ namespace {
         } else if (result.kind == sql_result_kind::rows) {
             std::string header;
             for (const sql_column& column : result.columns) {
-                header += (header.empty() ? "" : " | ") + column.name;
+                header += (header.empty() ? "" : " | ") + column.name
+                    + " [" + column.type_name + "]";
             }
             std::println("{}", header);
             for (const std::vector<sql_cell>& row : result.rows) {
@@ -2097,7 +2307,12 @@ namespace {
             }
             std::println("({} rows)", result.rows.size());
         } else {
-            std::println("{}", result.command_tag);
+            if (result.affected_rows) {
+                std::println("{} ({} rows affected)", result.command_tag,
+                             *result.affected_rows);
+            } else {
+                std::println("{}", result.command_tag);
+            }
         }
     }
     for (const sql_notice& notice : outcome->notices) {
@@ -2397,25 +2612,37 @@ struct staging_writer {
 }
 
 // Binds each resolved entity_link to its base-aware route and tooltip data URL
-// (§12.1/§12.4). The resolver (execute) recorded the canonical id on the node; here
-// the render stage maps it to the route it assigned at this base path, so the same
-// model links correctly at more than one base path.
+// (§12.1/§12.4). Tutorial resolution records a canonical id on the node, while
+// Doxygen documentation persists its native refid as the target. The reference
+// alias map normalizes both forms before the render stage applies the route it
+// assigned at this base path, so the same model links correctly at more than one
+// base path.
 void rewrite_entity_link_routes(
     std::vector<document_node>& nodes,
+    const std::map<std::string, std::string, std::less<>>& identity_by_reference,
     const std::map<std::string, std::string, std::less<>>& route_by_id,
     const std::string& tooltip_url) {
     for (document_node& node : nodes) {
         if (node.kind == document_node_kind::entity_link) {
             const auto identity = node.attributes.find("entity_id");
+            std::string canonical_id;
             if (identity != node.attributes.end()) {
-                const auto route = route_by_id.find(identity->second);
+                canonical_id = identity->second;
+            } else if (const auto alias = identity_by_reference.find(node.target);
+                       alias != identity_by_reference.end()) {
+                canonical_id = alias->second;
+                node.attributes["entity_id"] = canonical_id;
+            }
+            if (!canonical_id.empty()) {
+                const auto route = route_by_id.find(canonical_id);
                 if (route != route_by_id.end()) {
                     node.target = route->second;
                     node.attributes["tooltip_url"] = tooltip_url;
                 }
             }
         }
-        rewrite_entity_link_routes(node.children, route_by_id, tooltip_url);
+        rewrite_entity_link_routes(
+            node.children, identity_by_reference, route_by_id, tooltip_url);
     }
 }
 
@@ -2533,6 +2760,9 @@ void decorate_code_entity_ranges(
         }
         return config.canonical_origin + url(trimmed);
     };
+    const std::string first_tutorial_url = model.tutorials.empty()
+        ? url(version + "/")
+        : url(version + "/tutorials/" + model.tutorials.front().metadata.slug + "/");
 
     // Content-address the immutable static bundle and stage it (§16).
     std::string bundle_sha256;
@@ -2571,8 +2801,8 @@ void decorate_code_entity_ranges(
         social_relative.erase(0, std::string_view("static/").size());
     }
     site.social_image_url = config.canonical_origin + url(bundle_prefix + social_relative);
-    site.documentation_url = url(version + "/");
-    site.tutorials_url = url(version + "/tutorials/");
+    site.documentation_url = first_tutorial_url;
+    site.tutorials_url = first_tutorial_url;
     site.reference_url = url(version + "/reference/");
     site.search_index_url = url(version + "/search-index.json");
     site.versions_url = url("versions.json");
@@ -2680,9 +2910,21 @@ void decorate_code_entity_ranges(
     all_entities.insert(all_entities.end(), sql_entities.begin(), sql_entities.end());
     std::map<std::string, std::string, std::less<>> route_by_id;
     std::map<std::string, std::string, std::less<>> qualified_by_id;
+    std::map<std::string, std::string, std::less<>> identity_by_reference;
     for (const documented_entity& entity : all_entities) {
         route_by_id.emplace(entity.canonical_id, entity.route_path);
         qualified_by_id.emplace(entity.canonical_id, entity.qualified_name);
+        identity_by_reference.emplace(entity.canonical_id, entity.canonical_id);
+        if (const auto refid = entity.attributes.find("refid");
+            refid != entity.attributes.end() && !refid->second.empty()) {
+            const auto [existing, inserted] =
+                identity_by_reference.emplace(refid->second, entity.canonical_id);
+            if (!inserted && existing->second != entity.canonical_id) {
+                throw std::runtime_error(
+                    "render: Doxygen refid '" + refid->second
+                    + "' maps to more than one canonical entity");
+            }
+        }
     }
 
     // Bind each overload-group's members to their identity signature + base-aware
@@ -2905,7 +3147,8 @@ void decorate_code_entity_ranges(
     render("error.html", "error.html.j2",
            "{\"title\":" + json_text("Page not found")
                + ",\"description\":" + json_text("The requested page does not exist.")
-               + ",\"canonical\":" + json_text(canonical("error.html")) + "}",
+               + ",\"canonical\":" + json_text(canonical("error.html"))
+               + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
     // Version overview / documentation home, distinct from the landing page.
@@ -2920,35 +3163,31 @@ void decorate_code_entity_ranges(
                + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
 
-    // Tutorials index and one page per published tutorial (§10, §16). Each tutorial's
-    // content already carries its executed result subtrees (§13.6), injected by
-    // execute, so rendering here is database-free.
-    std::string tutorial_cards = "[";
-    for (std::size_t index = 0; index < model.tutorials.size(); ++index) {
-        const tutorial& item = model.tutorials[index];
-        if (index > 0) {
-            tutorial_cards.push_back(',');
+    // One page per published tutorial (§10, §16). Tutorials are discovered directly
+    // in the supplied documentation sidebar; there is intentionally no separate
+    // tutorial-listing route. Executed result subtrees were injected by execute, so
+    // rendering here is database-free.
+    const auto adjacent_tutorial_title = [&](const std::optional<std::string>& slug)
+        -> std::optional<std::string> {
+        if (!slug) {
+            return std::nullopt;
         }
-        tutorial_cards += "{\"route\":"
-            + json_text(url(version + "/tutorials/" + item.metadata.slug + "/"))
-            + ",\"title\":" + json_text(item.metadata.title)
-            + ",\"description\":" + json_text(item.metadata.description) + "}";
-    }
-    tutorial_cards.push_back(']');
-    render(version + "/tutorials/index.html", "tutorials_index.html.j2",
-           "{\"title\":" + json_text("Tutorials")
-               + ",\"description\":" + json_text("Bioseq tutorials for " + version)
-               + ",\"canonical\":"
-               + json_text(canonical(version + "/tutorials/index.html"))
-               + ",\"breadcrumb\":" + breadcrumb_json({{"Home", url("")},
-                     {version, url(version + "/")}, {"Tutorials", url(version + "/tutorials/")}})
-               + ",\"doc_nav\":" + doc_nav + "}",
-           "tutorials", tutorial_cards);
+        const auto found = std::ranges::find_if(
+            model.tutorials, [&](const tutorial& candidate) {
+                return candidate.metadata.slug == *slug;
+            });
+        if (found == model.tutorials.end()) {
+            throw std::runtime_error(
+                "render: tutorial pager references unknown slug '" + *slug + "'");
+        }
+        return found->metadata.title;
+    };
     for (const tutorial& item : model.tutorials) {
         const std::string rel =
             version + "/tutorials/" + item.metadata.slug + "/index.html";
         std::vector<document_node> body_nodes = item.content;
-        rewrite_entity_link_routes(body_nodes, route_by_id, tooltip_url);
+        rewrite_entity_link_routes(
+            body_nodes, identity_by_reference, route_by_id, tooltip_url);
         decorate_code_entity_ranges(body_nodes, route_by_id, qualified_by_id,
                                     tooltip_url, item.metadata.slug);
         const std::string on_this_page = build_on_this_page(body_nodes);
@@ -2960,7 +3199,7 @@ void decorate_code_entity_ranges(
             + ",\"breadcrumb\":" + breadcrumb_json({
                   {"Home", url("")},
                   {version, url(version + "/")},
-                  {"Tutorials", url(version + "/tutorials/")},
+                  {"Tutorials", first_tutorial_url},
                   {item.metadata.title, url(version + "/tutorials/" + item.metadata.slug + "/")}})
             + ",\"doc_nav\":" + doc_nav
             + ",\"on_this_page\":" + on_this_page
@@ -2969,10 +3208,18 @@ void decorate_code_entity_ranges(
         page += item.previous_slug
             ? json_text(url(version + "/tutorials/" + *item.previous_slug + "/"))
             : "null";
+        const std::optional<std::string> previous_title =
+            adjacent_tutorial_title(item.previous_slug);
+        page += ",\"previous_title\":";
+        page += previous_title ? json_text(*previous_title) : "null";
         page += ",\"next_url\":";
         page += item.next_slug
             ? json_text(url(version + "/tutorials/" + *item.next_slug + "/"))
             : "null";
+        const std::optional<std::string> next_title =
+            adjacent_tutorial_title(item.next_slug);
+        page += ",\"next_title\":";
+        page += next_title ? json_text(*next_title) : "null";
         page.push_back('}');
         render(rel, "tutorial.html.j2", page, "", "");
     }
@@ -3037,7 +3284,11 @@ void decorate_code_entity_ranges(
             if (!entity.parameters.empty()) {
                 add_toc("Parameters", "parameters");
             }
-            if (!entity.attributes.empty()) {
+            const bool has_visible_attributes = std::ranges::any_of(
+                entity.attributes, [](const auto& attribute) {
+                    return attribute.first != "refid";
+                });
+            if (has_visible_attributes) {
                 add_toc(entity.domain == entity_domain::sql ? "Attributes" : "Qualifiers",
                         "attributes");
             }
@@ -3052,11 +3303,17 @@ void decorate_code_entity_ranges(
             }
             entity_toc.push_back(']');
             page += ",\"on_this_page\":" + entity_toc;
-            // Detailed documentation body (trusted HTML, §12.3).
+            // Detailed documentation body (trusted HTML, §12.3). Doxygen `<ref>`
+            // nodes carry native refids in the persisted execute model; resolve
+            // them on a render-only copy to the same base-aware routes and tooltip
+            // dataset used by tutorial references.
+            std::vector<document_node> detail_nodes = entity.documentation;
+            rewrite_entity_link_routes(
+                detail_nodes, identity_by_reference, route_by_id, tooltip_url);
             page += ",\"detail_html\":";
-            page += entity.documentation.empty()
+            page += detail_nodes.empty()
                 ? std::string("null")
-                : json_quote(render_document_html(entity.documentation));
+                : json_quote(render_document_html(detail_nodes));
             // C++ source link: repository blob at the configured revision (§12.3).
             if (entity.declaration) {
                 const std::string spath = entity.declaration->path.generic_string();
@@ -3144,7 +3401,8 @@ void decorate_code_entity_ranges(
                + ",\"missing\":" + id_array(model.coverage_missing)
                + ",\"missing_parameters\":" + id_array(model.coverage_missing_parameters)
                + ",\"missing_returns\":" + id_array(model.coverage_missing_returns)
-               + ",\"fatal_missing\":" + id_array(model.coverage_fatal_missing) + "}",
+               + ",\"fatal_missing\":" + id_array(model.coverage_fatal_missing)
+               + ",\"doc_nav\":" + doc_nav + "}",
            "", "");
     writer.emit(route(version + "/documentation-coverage.json"),
                 serialize_coverage(model.coverage_public_total,
@@ -3160,7 +3418,8 @@ void decorate_code_entity_ranges(
     render("versions/index.html", "versions.html.j2",
            "{\"title\":" + json_text("Versions")
                + ",\"description\":" + json_text("Documented Bioseq versions")
-               + ",\"canonical\":" + json_text(canonical("versions/index.html")) + "}",
+               + ",\"canonical\":" + json_text(canonical("versions/index.html"))
+               + ",\"doc_nav\":" + doc_nav + "}",
            "versions",
            "[{\"route\":" + json_text(url(version + "/")) + ",\"label\":"
                + json_text(version) + "}]");
@@ -3203,8 +3462,6 @@ void decorate_code_entity_ranges(
     };
     add_page_entry("page:" + version + ":home", config.title + " " + version, version + "/",
                    config.short_description);
-    add_page_entry("page:" + version + ":tutorials", "Tutorials", version + "/tutorials/",
-                   "Bioseq tutorials for " + version);
     add_page_entry("page:" + version + ":reference", "API Reference", version + "/reference/",
                    "Bioseq C++ and SQL API reference");
     add_page_entry("page:" + version + ":reference-cpp", "C++ Reference",

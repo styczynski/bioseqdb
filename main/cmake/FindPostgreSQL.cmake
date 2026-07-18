@@ -149,6 +149,18 @@ find_package_handle_standard_args(PostgreSQL
 # If the library is available with multiple configurations, the IMPORTED_CONFIGURATIONS target property should also be populated:
 
 if(PostgreSQL_FOUND)
+  # Backend extension modules need PostgreSQL's server headers, but on Unix
+  # their server symbols are resolved from the hosting `postgres` executable
+  # when the module is loaded.  Keep that contract separate from the libpq
+  # client target: static libpq packages may propagate frontend-only
+  # libpgcommon/libpgport archives whose symbols must not enter a backend DSO.
+  if (NOT TARGET PostgreSQL::ServerHeaders)
+    add_library(PostgreSQL::ServerHeaders INTERFACE IMPORTED GLOBAL)
+  endif()
+  set_target_properties(PostgreSQL::ServerHeaders PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${PostgreSQL_INCLUDE_DIRS}"
+  )
+
   # When providing imported targets, these should be namespaced (hence the Foo:: prefix);
   # CMake will recognize that values passed to target_link_libraries() that contain :: in their name
   # are supposed to be imported targets (rather than just library names),

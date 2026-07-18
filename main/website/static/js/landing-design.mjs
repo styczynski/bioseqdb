@@ -1,11 +1,51 @@
-// Vanilla-JS translation of the interactions in bioseqdb-webpage/index.html.
+// Vanilla-JS translation of the interactions in website_design/index.html.
 // Markup and styling are generated mechanically from that canonical export.
 
 const root = document.querySelector('[data-screen-label="BioseqDB landing"]');
+const motionPreference = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+function annotatedQueryHooks() {
+  const code = root?.querySelector("[data-annotated-query]");
+  if (!code) return;
+  const hooks = [
+    ["SELECT", "tok-select"],
+    ["WHERE", "tok-where"],
+    ["'dna4'", "tok-dna4"],
+  ];
+  hooks.forEach(([needle, id]) => {
+    if (document.getElementById(id)) return;
+    const walker = document.createTreeWalker(code, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const index = node.data.indexOf(needle);
+      if (index < 0) continue;
+      const parent = node.parentElement;
+      if (parent && parent !== code && parent.textContent === needle) {
+        parent.id = id;
+      } else {
+        const hook = document.createElement("span");
+        hook.id = id;
+        hook.textContent = needle;
+        node.replaceWith(
+          document.createTextNode(node.data.slice(0, index)),
+          hook,
+          document.createTextNode(node.data.slice(index + needle.length)),
+        );
+      }
+      break;
+    }
+  });
+  if (!code.querySelector("[data-query-cursor]")) {
+    const cursor = document.createElement("span");
+    cursor.dataset.queryCursor = "";
+    cursor.className = "ld-s0063";
+    cursor.setAttribute("aria-hidden", "true");
+    code.appendChild(cursor);
+  }
+}
 
 function reveal() {
   const elements = [...root.querySelectorAll("[data-reveal]")];
-  if (!window.IntersectionObserver) {
+  if (motionPreference.matches || !window.IntersectionObserver) {
     elements.forEach((element) => element.classList.add("rv-in"));
     return;
   }
@@ -37,24 +77,42 @@ function navigation() {
 
 function videos() {
   const kick = (video) => {
+    if (motionPreference.matches) {
+      video.pause();
+      return;
+    }
     const attempt = video.play();
     if (attempt && attempt.catch) attempt.catch(() => {});
   };
-  root.querySelectorAll("video[data-autobg]").forEach((video) => {
+  const backgrounds = [...root.querySelectorAll("video[data-autobg]")];
+  const applyPreference = () => {
+    backgrounds.forEach((video) => {
+      if (motionPreference.matches) video.pause();
+      else if (!document.hidden) kick(video);
+    });
+  };
+  backgrounds.forEach((video) => {
     video.muted = true; video.loop = true; video.playsInline = true; video.setAttribute("loop", "");
     video.addEventListener("ended", () => { try { video.currentTime = 0; } catch {} kick(video); });
-    video.addEventListener("pause", () => { if (!document.hidden) requestAnimationFrame(() => { if (video.paused && !document.hidden) kick(video); }); });
+    video.addEventListener("pause", () => {
+      if (!motionPreference.matches && !document.hidden) {
+        requestAnimationFrame(() => {
+          if (video.paused && !document.hidden) kick(video);
+        });
+      }
+    });
     kick(video);
   });
   window.setInterval(() => {
-    if (document.hidden) return;
-    root.querySelectorAll("video[data-autobg]").forEach((video) => {
+    if (motionPreference.matches || document.hidden) return;
+    backgrounds.forEach((video) => {
       if (video.paused || video.ended) { try { if (video.ended) video.currentTime = 0; } catch {} kick(video); }
     });
   }, 1500);
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) root.querySelectorAll("video[data-autobg]").forEach((video) => kick(video));
+    if (!document.hidden) applyPreference();
   });
+  motionPreference.addEventListener?.("change", applyPreference);
 }
 
 function examples() {
@@ -69,20 +127,55 @@ function examples() {
       if (labels[0]) labels[0].style.color = active ? "#f26522" : "#64798b";
       if (labels[1]) labels[1].style.color = active ? "#f2f7fb" : "#a3b7c9";
       tab.setAttribute("aria-pressed", active ? "true" : "false");
+      tab.tabIndex = active ? 0 : -1;
     });
   };
   tabs.forEach((tab) => tab.addEventListener("click", () => select(Number(tab.dataset.exampleTab))));
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      event.preventDefault();
+      const direction = event.key === "ArrowRight" ? 1 : -1;
+      const next = (index + direction + tabs.length) % tabs.length;
+      tabs[next].focus();
+      select(Number(tabs[next].dataset.exampleTab));
+    });
+  });
   select(0);
   const copy = root.querySelector("[data-copy-install]");
-  if (copy) copy.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText("CREATE EXTENSION bioseq;"); } catch {}
-    copy.querySelector("[data-copy-done]").hidden = false;
-    copy.querySelector("[data-copy-idle]").hidden = true;
-    window.setTimeout(() => {
-      copy.querySelector("[data-copy-done]").hidden = true;
-      copy.querySelector("[data-copy-idle]").hidden = false;
-    }, 1800);
-  });
+  if (copy) {
+    const done = copy.querySelector("[data-copy-done]");
+    const idle = copy.querySelector("[data-copy-idle]");
+    const idleLabel = idle?.querySelector("span") || idle;
+    const original = idleLabel?.textContent || "Copy";
+    let timer = 0;
+    copy.setAttribute("aria-live", "polite");
+    copy.addEventListener("click", async () => {
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText("CREATE EXTENSION bioseq;");
+        copied = true;
+      } catch {
+        const area = document.createElement("textarea");
+        area.value = "CREATE EXTENSION bioseq;";
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        try { copied = document.execCommand("copy"); } catch { copied = false; }
+        area.remove();
+      }
+      window.clearTimeout(timer);
+      if (done) done.hidden = !copied;
+      if (idle) idle.hidden = copied;
+      if (!copied && idleLabel) idleLabel.textContent = "Copy failed";
+      timer = window.setTimeout(() => {
+        if (done) done.hidden = true;
+        if (idle) idle.hidden = false;
+        if (idleLabel) idleLabel.textContent = original;
+      }, 1800);
+    });
+  }
 }
 
 function connectors() {
@@ -96,6 +189,19 @@ function connectors() {
     { tok: "tok-dna4", note: "note-dna4", color: "#74c8a8" },
   ];
   let drawn = false;
+  const animationTimers = new Set();
+  const reduced = () => motionPreference.matches;
+  const clearAnimationTimers = () => {
+    animationTimers.forEach((timer) => window.clearTimeout(timer));
+    animationTimers.clear();
+  };
+  const schedule = (callback, delay) => {
+    const timer = window.setTimeout(() => {
+      animationTimers.delete(timer);
+      callback();
+    }, delay);
+    animationTimers.add(timer);
+  };
   const rounded = (x, y, width, height, radius) => `M ${x + radius} ${y} H ${x + width - radius} A ${radius} ${radius} 0 0 1 ${x + width} ${y + radius} V ${y + height - radius} A ${radius} ${radius} 0 0 1 ${x + width - radius} ${y + height} H ${x + radius} A ${radius} ${radius} 0 0 1 ${x} ${y + height - radius} V ${y + radius} A ${radius} ${radius} 0 0 1 ${x + radius} ${y} Z`;
   const build = () => {
     const wrapBox = wrap.getBoundingClientRect();
@@ -129,40 +235,84 @@ function connectors() {
     svg.querySelectorAll(".cx-rect,.cx-lead").forEach((path) => {
       const length = path.getTotalLength ? path.getTotalLength() : 260;
       path.style.strokeDasharray = length;
-      path.style.strokeDashoffset = drawn ? 0 : length;
-      path.style.transition = "stroke-dashoffset .9s cubic-bezier(.4,.55,.2,1)";
+      path.style.strokeDashoffset = drawn || reduced() ? 0 : length;
+      path.style.transition = reduced() ? "none" :
+        "stroke-dashoffset .9s cubic-bezier(.4,.55,.2,1)";
     });
     svg.querySelectorAll(".cx-arrow,.cx-dash").forEach((path) => {
-      path.style.opacity = drawn ? (path.classList.contains("cx-dash") ? 0.42 : 1) : 0;
-      path.style.transition = "opacity .5s ease";
+      path.style.opacity = drawn || reduced() ?
+        (path.classList.contains("cx-dash") ? 0.42 : 1) : 0;
+      path.style.transition = reduced() ? "none" : "opacity .5s ease";
     });
     svg.querySelectorAll(".cx-dot").forEach((dot) => {
       dot.style.transformBox = "fill-box";
       dot.style.transformOrigin = "center";
-      dot.style.opacity = drawn ? 1 : 0;
-      dot.style.transition = "opacity .5s ease";
-      if (drawn) dot.style.animation = "sqPulse 1.9s ease-in-out infinite";
+      dot.style.opacity = drawn || reduced() ? 1 : 0;
+      dot.style.transition = reduced() ? "none" : "opacity .5s ease";
+      dot.style.animation = drawn && !reduced() ?
+        "sqPulse 1.9s ease-in-out infinite" : "none";
+    });
+  };
+  const finishWithoutMotion = () => {
+    drawn = true;
+    clearAnimationTimers();
+    svg.querySelectorAll(".cx-rect,.cx-lead").forEach((path) => {
+      path.style.transition = "none";
+      path.style.strokeDashoffset = 0;
+    });
+    svg.querySelectorAll(".cx-arrow,.cx-dash,.cx-dot").forEach((path) => {
+      path.style.transition = "none";
+      path.style.opacity = path.classList.contains("cx-dash") ? 0.42 : 1;
+      if (path.classList.contains("cx-dot")) path.style.animation = "none";
+    });
+  };
+  const animate = () => {
+    if (reduced()) {
+      finishWithoutMotion();
+      return;
+    }
+    drawn = true;
+    svg.querySelectorAll(".cx-rect").forEach((path, index) => schedule(() => {
+      path.style.strokeDashoffset = 0;
+    }, index * 150));
+    svg.querySelectorAll(".cx-lead").forEach((path, index) => schedule(() => {
+      path.style.strokeDashoffset = 0;
+    }, 180 + index * 150));
+    svg.querySelectorAll(".cx-arrow,.cx-dash,.cx-dot").forEach((path) => {
+      const index = Number(path.dataset.i || 0);
+      schedule(() => {
+        path.style.opacity = path.classList.contains("cx-dash") ? 0.42 : 1;
+        if (path.classList.contains("cx-dot")) {
+          path.style.animation = "sqPulse 1.9s ease-in-out infinite";
+        }
+      }, 520 + index * 150);
     });
   };
   build();
   window.addEventListener("resize", build, { passive: true });
   if (window.ResizeObserver) new ResizeObserver(build).observe(wrap);
+  let observer = null;
   if (window.IntersectionObserver) {
-    const observer = new IntersectionObserver((entries) => entries.forEach((entry) => {
+    observer = new IntersectionObserver((entries) => entries.forEach((entry) => {
       if (!entry.isIntersecting) return;
-      drawn = true;
-      svg.querySelectorAll(".cx-rect").forEach((path, index) => window.setTimeout(() => { path.style.strokeDashoffset = 0; }, index * 150));
-      svg.querySelectorAll(".cx-lead").forEach((path, index) => window.setTimeout(() => { path.style.strokeDashoffset = 0; }, 180 + index * 150));
-      svg.querySelectorAll(".cx-arrow,.cx-dash,.cx-dot").forEach((path) => {
-        const index = Number(path.dataset.i || 0);
-        window.setTimeout(() => {
-          path.style.opacity = path.classList.contains("cx-dash") ? 0.42 : 1;
-          if (path.classList.contains("cx-dot")) path.style.animation = "sqPulse 1.9s ease-in-out infinite";
-        }, 520 + index * 150);
-      });
+      animate();
       observer.disconnect();
     }), { threshold: 0.2 });
     observer.observe(wrap);
+  } else {
+    animate();
+  }
+  motionPreference.addEventListener?.("change", () => {
+    if (reduced()) {
+      observer?.disconnect();
+      finishWithoutMotion();
+    } else {
+      build();
+    }
+  });
+  if (reduced()) {
+    observer?.disconnect();
+    finishWithoutMotion();
   }
 }
 
@@ -172,6 +322,7 @@ function workflowAndIndex() {
   const cards = grid ? [...grid.querySelectorAll("[data-wf-card]")] : [];
   const blocks = [...root.querySelectorAll("[data-idx-block]")];
   const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+  let updateFrame = 0;
   const fitMedia = () => {
     blocks.forEach((block) => {
       const media = block.querySelector("[data-idx-media]");
@@ -184,19 +335,45 @@ function workflowAndIndex() {
       if (natural > 0 && available > 0) inner.style.zoom = clamp(available / natural, 0.6, 1).toFixed(3);
     });
   };
+  const paintCards = (active) => {
+    cards.forEach((card, index) => {
+      const number = card.querySelector("[data-wf-num]");
+      card.style.background = index === active ? "rgba(242,101,34,0.09)" :
+        index < active ? "rgba(242,101,34,0.035)" : "transparent";
+      card.style.boxShadow = index === active ?
+        "inset 0 0 0 1.5px rgba(242,101,34,0.55)" : "none";
+      if (number) {
+        number.style.color = index === active ? "#f26522" :
+          index < active ? "rgba(242,101,34,0.62)" : "#2ba6d0";
+      }
+    });
+  };
+  const finishWithoutMotion = () => {
+    if (updateFrame) cancelAnimationFrame(updateFrame);
+    updateFrame = 0;
+    if (fill) fill.style.width = "0%";
+    if (cards.length) paintCards(0);
+    blocks.forEach((block) => {
+      const media = block.querySelector("[data-idx-media]");
+      if (media) {
+        media.style.transform = "none";
+        media.style.opacity = "1";
+      }
+    });
+  };
   const update = () => {
+    updateFrame = 0;
+    if (motionPreference.matches) {
+      finishWithoutMotion();
+      return;
+    }
     const viewport = window.innerHeight || 800;
     if (grid && fill && cards.length) {
       const rect = grid.getBoundingClientRect();
       const progress = clamp((viewport * 0.82 - rect.top) / (viewport * 0.52), 0, 1);
       fill.style.width = `${(progress * 100).toFixed(2)}%`;
       const active = clamp(Math.floor(progress * cards.length - 1e-6), 0, cards.length - 1);
-      cards.forEach((card, index) => {
-        const number = card.querySelector("[data-wf-num]");
-        card.style.background = index === active ? "rgba(242,101,34,0.09)" : index < active ? "rgba(242,101,34,0.035)" : "transparent";
-        card.style.boxShadow = index === active ? "inset 0 0 0 1.5px rgba(242,101,34,0.55)" : "none";
-        if (number) number.style.color = index === active ? "#f26522" : index < active ? "rgba(242,101,34,0.62)" : "#2ba6d0";
-      });
+      paintCards(active);
     }
     blocks.forEach((block) => {
       const rect = block.getBoundingClientRect();
@@ -209,20 +386,31 @@ function workflowAndIndex() {
       }
     });
   };
-  window.addEventListener("scroll", () => requestAnimationFrame(update), { passive: true });
-  window.addEventListener("resize", () => { fitMedia(); requestAnimationFrame(update); }, { passive: true });
-  fitMedia(); window.setTimeout(fitMedia, 500); update();
+  const scheduleUpdate = () => {
+    if (motionPreference.matches) {
+      finishWithoutMotion();
+    } else if (!updateFrame) {
+      updateFrame = requestAnimationFrame(update);
+    }
+  };
+  window.addEventListener("scroll", scheduleUpdate, { passive: true });
+  window.addEventListener("resize", () => { fitMedia(); scheduleUpdate(); }, { passive: true });
+  motionPreference.addEventListener?.("change", scheduleUpdate);
+  fitMedia(); window.setTimeout(fitMedia, 500); scheduleUpdate();
 }
 
 function capabilities() {
   const map = { vulkan: "gpu", simd: "cpu", parallel: "engine", columnar: "shard", mmsearch: "sql", seqmeta: "meta", index: "index", load: "pg" };
-  let active = null;
+  const cards = [...root.querySelectorAll("[data-cap-select]")];
+  let active = cards[0]?.dataset.cap || null;
   const sync = () => {
-    root.querySelectorAll("[data-cap]").forEach((card) => {
+    cards.forEach((card) => {
       const on = card.dataset.cap === active;
       card.style.borderColor = on ? "rgba(70,184,222,0.6)" : "rgba(255,255,255,0.08)";
       card.style.background = on ? "rgba(70,184,222,0.08)" : "rgba(255,255,255,0.022)";
       card.style.boxShadow = on ? "0 0 0 1px rgba(70,184,222,0.45), 0 20px 46px -26px rgba(43,166,208,0.7)" : "none";
+      card.setAttribute("aria-pressed", on ? "true" : "false");
+      card.tabIndex = on ? 0 : -1;
     });
     const diagram = active ? map[active] : null;
     root.querySelectorAll("[data-diag]").forEach((group) => {
@@ -235,11 +423,23 @@ function capabilities() {
     const file = document.getElementById("dgFile");
     if (file) file.style.opacity = diagram === "pg" ? "1" : "0";
   };
-  root.querySelectorAll("[data-cap-select]").forEach((card) => {
-    card.setAttribute("role", "button"); card.tabIndex = 0;
-    const choose = () => { active = active === card.dataset.cap ? null : card.dataset.cap; sync(); };
+  cards.forEach((card, index) => {
+    card.setAttribute("role", "button");
+    const choose = () => { active = card.dataset.cap; sync(); };
     card.addEventListener("click", choose);
-    card.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); choose(); } });
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault(); choose();
+      } else if (event.key === "ArrowRight" || event.key === "ArrowDown"
+                 || event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const direction = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
+        const next = cards[(index + direction + cards.length) % cards.length];
+        active = next.dataset.cap;
+        sync();
+        next.focus();
+      }
+    });
   });
   root.querySelector("[data-architecture-click]")?.addEventListener("click", (event) => {
     const node = event.target.closest("[data-click]");
@@ -283,6 +483,10 @@ function ctaGrid() {
   };
   let previous = 0;
   const frame = (time) => {
+    if (motionPreference.matches) {
+      animation = 0;
+      return;
+    }
     const delta = Math.min(0.08, previous ? (time - previous) / 1000 : 0); previous = time;
     rows.forEach((item) => {
       item.shift += item.speed * delta;
@@ -299,11 +503,27 @@ function ctaGrid() {
     });
     animation = requestAnimationFrame(frame);
   };
-  const start = () => { if (!animation) { previous = 0; animation = requestAnimationFrame(frame); } };
+  const start = () => {
+    if (!motionPreference.matches && !animation) {
+      previous = 0;
+      animation = requestAnimationFrame(frame);
+    }
+  };
   const stop = () => { if (animation) { cancelAnimationFrame(animation); animation = 0; } };
-  build(); window.setTimeout(build, 500); start();
+  const applyMotionPreference = () => {
+    if (motionPreference.matches) {
+      stop();
+      rows.forEach((item) => { item.row.style.transform = "none"; });
+    } else {
+      start();
+    }
+  };
+  build(); window.setTimeout(build, 500); applyMotionPreference();
   if (window.IntersectionObserver) {
-    const observer = new IntersectionObserver((entries) => entries.forEach((entry) => { if (entry.isIntersecting) start(); else stop(); }), { threshold: 0, rootMargin: "150px" });
+    const observer = new IntersectionObserver((entries) => entries.forEach((entry) => {
+      if (entry.isIntersecting && !motionPreference.matches) start();
+      else stop();
+    }), { threshold: 0, rootMargin: "150px" });
     observer.observe(wrap);
   }
   let resizeTimer = 0;
@@ -313,6 +533,7 @@ function ctaGrid() {
     let first = true;
     new ResizeObserver(() => { if (first) { first = false; return; } resize(); }).observe(wrap);
   }
+  motionPreference.addEventListener?.("change", applyMotionPreference);
 }
 
 function teamWeb() {
@@ -333,15 +554,38 @@ function teamWeb() {
   let connections = [];
   let lastSignature = "";
   let lastProgress = -1;
+  let revealFrame = 0;
+
+  const finishWithoutMotion = () => {
+    if (revealFrame) cancelAnimationFrame(revealFrame);
+    revealFrame = 0;
+    connections.forEach((connection) => {
+      connection.dots.forEach((dot) => {
+        dot.element.style.transition = "none";
+        dot.element.style.opacity = "1";
+      });
+      connection.end.style.transition = "none";
+      connection.end.style.opacity = "1";
+    });
+    lastProgress = 1;
+  };
 
   const reveal = () => {
     if (!connections.length) return;
+    if (motionPreference.matches) {
+      finishWithoutMotion();
+      return;
+    }
     const viewport = window.innerHeight || 800;
     const top = hub.getBoundingClientRect().top;
     const progress = clamp((viewport * 0.82 - top) / (viewport * 0.82 - viewport * 0.34), 0, 1);
     if (Math.abs(progress - lastProgress) < 0.0015) return;
     lastProgress = progress;
     connections.forEach((connection) => {
+      connection.dots.forEach((dot) => {
+        dot.element.style.transition = "opacity .2s ease";
+      });
+      connection.end.style.transition = "opacity .3s ease";
       const distance = progress * connection.total + 0.5;
       connection.dots.forEach((dot) => { dot.element.style.opacity = dot.distance <= distance ? "1" : "0"; });
       connection.end.style.opacity = progress >= 0.97 ? "1" : "0";
@@ -387,12 +631,15 @@ function teamWeb() {
         const dot = document.createElementNS(namespace, "rect");
         dot.setAttribute("x", (point.x - 1.5).toFixed(2)); dot.setAttribute("y", (point.y - 1.5).toFixed(2));
         dot.setAttribute("width", "3"); dot.setAttribute("height", "3"); dot.setAttribute("fill", accent);
-        dot.style.opacity = "0"; dot.style.transition = "opacity .2s ease";
+        dot.style.opacity = motionPreference.matches ? "1" : "0";
+        dot.style.transition = motionPreference.matches ? "none" : "opacity .2s ease";
         svg.appendChild(dot); dots.push({ element: dot, distance });
       }
       const end = document.createElementNS(namespace, "circle");
       end.setAttribute("cx", item.end.toFixed(2)); end.setAttribute("cy", item.endY.toFixed(2)); end.setAttribute("r", "4.2"); end.setAttribute("fill", accent);
-      end.style.opacity = "0"; end.style.transition = "opacity .3s ease"; end.style.filter = "drop-shadow(0 0 5px rgba(242,101,34,0.75))";
+      end.style.opacity = motionPreference.matches ? "1" : "0";
+      end.style.transition = motionPreference.matches ? "none" : "opacity .3s ease";
+      end.style.filter = "drop-shadow(0 0 5px rgba(242,101,34,0.75))";
       svg.appendChild(end);
       return { dots, end, total };
     });
@@ -400,17 +647,26 @@ function teamWeb() {
     reveal();
   };
 
-  let ticking = false;
   window.addEventListener("scroll", () => {
-    if (ticking) return;
-    ticking = true;
-    requestAnimationFrame(() => { ticking = false; reveal(); });
+    if (motionPreference.matches || revealFrame) return;
+    revealFrame = requestAnimationFrame(() => {
+      revealFrame = 0;
+      reveal();
+    });
   }, { passive: true });
   window.addEventListener("resize", build, { passive: true });
   if (window.ResizeObserver) new ResizeObserver(build).observe(hub);
+  motionPreference.addEventListener?.("change", () => {
+    if (motionPreference.matches) {
+      finishWithoutMotion();
+    } else {
+      lastProgress = -1;
+      reveal();
+    }
+  });
   build(); window.setTimeout(build, 500); reveal();
 }
 
 if (root) {
-  reveal(); navigation(); videos(); examples(); connectors(); workflowAndIndex(); capabilities(); teamWeb(); ctaGrid();
+  annotatedQueryHooks(); reveal(); navigation(); videos(); examples(); connectors(); workflowAndIndex(); capabilities(); teamWeb(); ctaGrid();
 }

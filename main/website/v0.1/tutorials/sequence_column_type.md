@@ -3,42 +3,42 @@ title: The bioseq.seq column type
 slug: sequence_column_type
 description: Store and query biological sequences with the bioseq.seq column type.
 order: 10
-keywords: [bioseq.seq, sequence type, DNA, symbol_count]
+keywords: [bioseq.seq, sequence type, DNA, packed storage]
 draft: false
 ---
 
-# The bioseq.seq column type
-
 Bioseq stores biological sequences in a compact PostgreSQL value called
-[[sql:bioseq.seq|the sequence type]]. The alphabet and maximum length are part of
-the type modifier, so a column declaration records exactly what a column may
-hold. The shorthand `#bioseq.seq` refers to the same type throughout this page.
+[[sql:bioseq.seq|the sequence type]]. Its type modifier records the biological
+alphabet and the width of each packed storage unit. It does not impose a maximum
+sequence length.
 
 > [!NOTE]
-> Sequence length is part of the type modifier. `bioseq.seq('dna4', 64)` stores
-> DNA sequences of up to 64 bases over the four-letter `dna4` alphabet.
+> In `bioseq.seq('dna4', 64)`, `dna4` selects the four-symbol DNA alphabet and
+> `64` selects 64-bit packed storage units. A value may contain more than 64
+> bases.
 
-## Declaring a sequence column
+## Reading the type modifier
 
-A `bioseq.seq` column names its alphabet and maximum length directly in the type
-modifier, exactly like `numeric(precision, scale)` records precision.
+The type modifier names its alphabet and storage-unit width directly:
 
 ```sql id=seq_type_example annotated
-CREATE TABLE reads (sequence bioseq.seq('dna4', 64));
+bioseq.seq('dna4', 64)
 ```
 
-```annotation target=seq_type_example match="bioseq.seq('dna4', 64)" title="The bioseq.seq column type"
-The alphabet and maximum length are encoded in the PostgreSQL type modifier.
+```annotation target=seq_type_example match="'dna4'" title="Alphabet"
+The `'dna4'` modifier selects the four-symbol DNA alphabet: A, C, G, and T.
+```
+
+```annotation target=seq_type_example match="64" title="Storage-unit width"
+The `64` modifier selects 64-bit packed storage units. It does not limit the sequence to 64 bases.
 ```
 
 ## Round-tripping sequence values
 
 The example below creates a small table, inserts two reads, and reads them back
-with their length and a per-symbol count. Use [[sql:bioseq.len]] for
-the length in symbol units and [[sql:bioseq.symbol_count]] to
-count occurrences of one symbol.
+with their length in biological symbols using [[sql:bioseq.len]].
 
-```sql runnable id=sequence_roundtrip timeout=10s entity="sql:function:bioseq.len(bioseq.seq)" entity="sql:function:bioseq.symbol_count(bioseq.seq,text)"
+```sql runnable id=sequence_roundtrip timeout=10s entity="sql:function:bioseq.len(bioseq.seq)"
 -- bioseq:setup
 CREATE TABLE tutorial_reads (
     id integer PRIMARY KEY,
@@ -49,23 +49,20 @@ INSERT INTO tutorial_reads VALUES (1, 'ACGT'), (2, 'TTAA');
 SELECT id,
        sequence::text AS sequence,
        bioseq.len(sequence) AS length
-       -- TEMPORARY: bioseq.symbol_count(sequence, 'A') AS a_count
-       -- aborts the backend (SIGABRT); see COUNT_BUG.md. Restore this
-       -- column once symbol_count is fixed.
 FROM tutorial_reads
 ORDER BY id;
 -- bioseq:teardown
 DROP TABLE tutorial_reads;
 ```
 
-> [!WARNING]
-> This query scans every row. Add a predicate on an indexed column before
-> running it against a large table.
+> [!TIP]
+> Choose the storage-unit width for the packing and execution characteristics
+> you need; do not use it as a sequence-length constraint.
 
-## Ordering by sequence
+## Ordering decoded sequences
 
-Sequence values order lexicographically by their decoded symbols, so an
-`ORDER BY` on a `bioseq.seq` column is stable and deterministic.
+Cast a sequence to `text` when a query needs an explicit lexicographic order by
+decoded symbols.
 
 ```sql runnable id=sequence_ordering timeout=10s
 -- bioseq:setup
@@ -74,7 +71,7 @@ INSERT INTO tutorial_ordered VALUES ('TTAA'), ('ACGT'), ('AAAA');
 -- bioseq:visible
 SELECT sequence::text AS sequence
 FROM tutorial_ordered
-ORDER BY sequence;
+ORDER BY sequence::text;
 -- bioseq:teardown
 DROP TABLE tutorial_ordered;
 ```

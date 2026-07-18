@@ -78,6 +78,7 @@ def test_environment_allowlist(bindir: Path, scratch: Path) -> None:
     for banned in ("PGPASSWORD", "PGSERVICE", "PGHOSTADDR", "PGOPTIONS"):
         assert banned not in env, f"{banned} leaked into child environment"
     assert env["BIOSEQ_TEST_PG_HOST"] == str(cluster.socket_dir)
+    assert env["BIOSEQ_TEST_PG_DATA_DIR"] == str(cluster.data_dir)
 
 
 def test_unique_allocation(bindir: Path, scratch: Path) -> None:

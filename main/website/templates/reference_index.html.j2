@@ -1,10 +1,14 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="reference-index">
-  <h1>API Reference</h1>
-  <ul class="card-grid">
-    <li class="card"><a href="{{ page.cpp_url }}">C++ API</a></li>
-    <li class="card"><a href="{{ page.sql_url }}">SQL API</a></li>
-  </ul>
-</article>
+<section data-page-panel data-screen-label="Docs · API reference" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header">
+    <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb">{% for crumb in page.breadcrumb %}<a href="{{ crumb.url }}">{{ crumb.name }}</a><span class="dd-s0043" aria-hidden="true">/</span>{% endfor %}</nav>
+    <h1 class="dd-s0045">API Reference</h1>
+    <p class="dd-s0046">Generated directly from the public C++ and PostgreSQL interfaces.</p>
+  </header>
+  <div class="design-card-grid design-card-grid-two">
+    <a class="design-route-card dd-h005" href="{{ page.cpp_url }}"><span class="design-route-label">C++ API</span><span>Modules, classes, types, functions, and members.</span></a>
+    <a class="design-route-card dd-h005" href="{{ page.sql_url }}"><span class="design-route-label">SQL API</span><span>Functions, types, overloads, and extension provenance.</span></a>
+  </div>
+</section>
 {% endblock %}

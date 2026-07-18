@@ -1,12 +1,15 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="version-home">
-  <h1>{{ page.title }}</h1>
-  <p>{{ page.description }}</p>
-  <ul class="card-grid">
-    <li class="card"><a href="{{ nav.tutorials }}">Tutorials</a></li>
-    <li class="card"><a href="{{ nav.reference }}">Reference</a></li>
-    <li class="card"><a href="{{ page.coverage_url }}">Documentation coverage</a></li>
-  </ul>
-</article>
+<section data-page-panel data-screen-label="Docs · Home" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header">
+    <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb">{% for crumb in page.breadcrumb %}<a href="{{ crumb.url }}">{{ crumb.name }}</a><span class="dd-s0043" aria-hidden="true">/</span>{% endfor %}</nav>
+    <h1 class="dd-s0045">{{ page.title }}</h1>
+    <p class="dd-s0046">{{ page.description }}</p>
+  </header>
+  <div class="design-card-grid">
+    <a class="design-route-card dd-h005" href="{{ nav.tutorials }}"><span class="design-route-label">Tutorials</span><span>Learn BioseqDB with executable, verified examples.</span></a>
+    <a class="design-route-card dd-h005" href="{{ nav.reference }}"><span class="design-route-label">API reference</span><span>Browse the generated SQL and C++ surface.</span></a>
+    <a class="design-route-card dd-h005" href="{{ page.coverage_url }}"><span class="design-route-label">Documentation coverage</span><span>Inspect the generated public-API coverage report.</span></a>
+  </div>
+</section>
 {% endblock %}
