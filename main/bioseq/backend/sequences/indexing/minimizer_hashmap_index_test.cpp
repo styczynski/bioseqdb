@@ -43,6 +43,7 @@ import bioseq.sequences.chaining.utils;
 import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.mm_sketch_baseline;
+import bioseq.sequences.kmers.vulkan;
 import bioseq.sequences.minimap_port;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
@@ -14842,7 +14843,15 @@ TEST_CASE("transient minimizer index preserves the 128-bit representation kmer d
 }
 
 TEST_CASE("transient minimizer index consumes source and releases storage",
-          "[indexing][minimizer-hashmap][lifetime]") {
+          "[indexing][minimizer-hashmap][lifetime][memory-admission]") {
+    constexpr auto report156_plan =
+        bioseq::indexing::minimizer_hashmap_table_allocation_plan(
+            93'308'896u);
+    STATIC_REQUIRE(report156_plan.valid);
+    STATIC_REQUIRE(report156_plan.group_count == 8'388'608u);
+    STATIC_REQUIRE(report156_plan.capacity == 125'829'119u);
+    STATIC_REQUIRE(report156_plan.allocation_bytes == 2'147'483'648u);
+
     std::vector<MinimapSketchData> sketches{
         MinimapSketchData{/*kmer*/ 100, /*pos*/ 5,  /*strand*/ 0},
         MinimapSketchData{/*kmer*/ 7,   /*pos*/ 2,  /*strand*/ 0},
@@ -14856,12 +14865,110 @@ TEST_CASE("transient minimizer index consumes source and releases storage",
     REQUIRE(idx.lookup(100).size() == 2u);
     REQUIRE(idx.lookup(7).size() == 1u);
     REQUIRE(idx.target_length() == 1000);
+    const auto small_plan =
+        bioseq::indexing::minimizer_hashmap_table_allocation_plan(3u);
+    REQUIRE(small_plan.valid);
+    REQUIRE(small_plan.allocation_bytes == 2'048u);
+    REQUIRE(idx.table_allocation_bytes() == small_plan.allocation_bytes);
+    REQUIRE(idx.table_peak_allocation_bytes() == small_plan.allocation_bytes);
 
     idx.release_storage();
     REQUIRE(idx.table_empty());
+    REQUIRE(idx.table_allocation_bytes() == 0u);
+    REQUIRE(idx.table_peak_allocation_bytes() == 0u);
     REQUIRE(idx.positions.empty());
     REQUIRE(idx.positions.capacity() == 0u);
     REQUIRE(idx.target_length() == 1000);
+}
+
+TEST_CASE("one-shot transient minimizer index stays inside its retained permit",
+          "[indexing][minimizer-hashmap][memory-admission][lifetime]") {
+    constexpr std::size_t count = 4'096u;
+    std::vector<MinimapSketchData> sketches;
+    sketches.reserve(count);
+    for (std::size_t i = 0u; i < count; ++i) {
+        sketches.emplace_back(
+            static_cast<std::uint64_t>(i + 1u),
+            static_cast<std::uint64_t>(i),
+            static_cast<std::uint64_t>(i & 1u));
+    }
+
+    const auto table_plan =
+        bioseq::indexing::minimizer_hashmap_table_allocation_plan(count);
+    REQUIRE(table_plan.valid);
+    const std::uint64_t position_payload =
+        count * sizeof(std::uint64_t);
+    const std::uint64_t position_headroom = bioseq::gpu::vulkan::
+        vulkan_exact_host_allocation_admission_bytes(position_payload);
+    const std::uint64_t table_headroom = bioseq::gpu::vulkan::
+        vulkan_exact_host_allocation_admission_bytes(
+            table_plan.allocation_bytes);
+    const std::uint64_t build_permit_bytes =
+        bioseq::parallelism::saturating_add(
+            position_headroom, table_headroom);
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t value = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(value); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(
+        bioseq::parallelism::saturating_add(
+            baseline, build_permit_bytes + (std::uint64_t{1} << 20u)));
+    auto reserved = admission.try_reserve(build_permit_bytes);
+    REQUIRE(reserved.has_value());
+
+    // Declaration order mirrors the pipeline caller: index storage dies before
+    // the permit can release on implicit unwind.
+    bioseq::parallelism::MemoryPermit permit = std::move(*reserved);
+    bioseq::indexing::MinimizerHashmapFragmentIndex index;
+    index.build_consuming_full_table(
+        std::move(sketches), /*target_length=*/count);
+    REQUIRE(sketches.capacity() == 0u);
+    REQUIRE(index.table_allocation_bytes() == table_plan.allocation_bytes);
+    REQUIRE(index.table_peak_allocation_bytes() == table_plan.allocation_bytes);
+    const std::uint64_t retained_position_bytes =
+        index.positions.capacity() * sizeof(std::uint64_t);
+    REQUIRE(retained_position_bytes <= position_headroom);
+    const std::uint64_t retained_bytes =
+        retained_position_bytes + index.table_allocation_bytes();
+    permit.shrink_to(retained_bytes);
+    REQUIRE(admission.reserved_bytes() == baseline + retained_bytes);
+
+    index.release_storage();
+    REQUIRE(admission.reserved_bytes() == baseline + retained_bytes);
+    permit.release();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("empty one-shot minimizer index has an exact zero-byte plan",
+          "[indexing][minimizer-hashmap][memory-admission][zero-copy][empty]") {
+    constexpr auto empty_plan =
+        bioseq::indexing::minimizer_hashmap_table_allocation_plan(0u);
+    STATIC_REQUIRE(empty_plan.valid);
+    STATIC_REQUIRE(empty_plan.distinct_upper_bound == 0u);
+    STATIC_REQUIRE(empty_plan.requested_slots == 0u);
+    STATIC_REQUIRE(empty_plan.group_count == 0u);
+    STATIC_REQUIRE(empty_plan.capacity == 0u);
+    STATIC_REQUIRE(empty_plan.allocation_bytes == 0u);
+
+    std::vector<MinimapSketchData> empty;
+    empty.reserve(64u);
+    bioseq::indexing::MinimizerHashmapFragmentIndex index;
+    index.build_consuming_full_table(
+        std::move(empty), /*target_length=*/1'000u);
+
+    REQUIRE(empty.capacity() == 0u);
+    REQUIRE(index.positions.empty());
+    REQUIRE(index.positions.capacity() == 0u);
+    REQUIRE(index.table_empty());
+    REQUIRE(index.table_allocation_bytes() == 0u);
+    REQUIRE(index.table_peak_allocation_bytes() == 0u);
+    REQUIRE(index.target_length() == 1'000u);
 }
 
 TEST_CASE("DOC0279 §9 — MinimizerHashmapFragmentIndex serialize/deserialize round-trip",

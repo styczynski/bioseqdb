@@ -967,6 +967,17 @@ struct VulkanDeviceMinimizerSpan {
     }
 };
 
+/// Host-result ownership selected by the caller before dispatch.  The default
+/// collector-compatible route retains geometric-growth headroom because the
+/// collector wrapper duplicates records into a second vector.  The fixed
+/// zero-copy route is intentionally opt-in: its exact allocation admission is
+/// valid only when the caller adopts the returned vector allocation and drops
+/// the device result before constructing the CPU target index.
+enum class VulkanSketchHostOwnershipRoute : std::uint8_t {
+    collector_compatible = 0,
+    fixed_zero_copy_adoption = 1,
+};
+
 /// Operation-originated evidence that the collector-compatible Vulkan sketch
 /// leaf completed its runtime roundtrip. A default token is deliberately
 /// invalid, and route identity is validated before the pipeline may translate
@@ -1107,6 +1118,11 @@ struct VulkanSketchResult {
     std::shared_ptr<VulkanDeviceMinimizerStorage<MinimizerT>> device;
     std::vector<MinimizerT> host_minimizers;
     VulkanSketchDispatchToken dispatch_token{};
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible;
+    bool host_permit_released_to_process_footprint = false;
+    std::uint64_t host_footprint_reflected_delta_bytes = 0u;
+    bool arena_trimmed_before_host_materialization = false;
     bool overflow = false;
 
     [[nodiscard]] VulkanDeviceMinimizerSpan<MinimizerT> device_span() const noexcept {
@@ -1334,7 +1350,9 @@ sketch_uploaded_window_result(
     VulkanSketchQueryGate query_gate = {},
     VulkanSketchDecline* decline_out = nullptr,
     bioseq::parallelism::MemoryPermit* borrowed_dispatch_permit = nullptr,
-    std::uint64_t borrowed_dispatch_budget = 0u)
+    std::uint64_t borrowed_dispatch_budget = 0u,
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible)
 {
     using bioseq::parallelism::MemoryAdmissionController;
     using bioseq::parallelism::saturating_mul;
@@ -1573,6 +1591,10 @@ sketch_uploaded_window_result(
                 query_gate.words,
                 query_gate.mask);
         }
+        if (!raw.arena_trimmed_before_return) {
+            throw VulkanRuntimeError{
+                "Vulkan minimizer roundtrip returned before arena trim"};
+        }
         if (raw.overflow) {
             if (capacity_overflowed != nullptr) {
                 *capacity_overflowed = true;
@@ -1610,9 +1632,14 @@ sketch_uploaded_window_result(
         const std::uint64_t exact_host_size_bytes = saturating_mul(
             raw.count,
             static_cast<std::uint64_t>(sizeof(MinimizerT)));
-        const std::uint64_t exact_host_headroom_bytes = saturating_mul(
-            exact_host_size_bytes,
-            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        const std::uint64_t exact_host_headroom_bytes =
+            host_ownership_route
+                    == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+                ? vulkan_exact_host_allocation_admission_bytes(
+                      exact_host_size_bytes)
+                : saturating_mul(
+                      exact_host_size_bytes,
+                      bioseq::parallelism::kVectorPreallocationHeadroomFactor);
         const std::uint64_t host_materialization_peak_bytes =
             vulkan_sketch_host_materialization_admission_bytes(
                 actual_device_allocation_bytes,
@@ -1668,27 +1695,96 @@ sketch_uploaded_window_result(
             return std::nullopt;
         }
 
+        if (host_ownership_route
+                == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+            && borrowed_dispatch_permit != nullptr) {
+            throw VulkanRuntimeError{
+                "Vulkan fixed zero-copy host adoption requires an owned "
+                "materialization permit"};
+        }
+
         // Reserve once, download once: the former byte-vector staging copy is
         // gone.  Permit declaration precedes vector declaration so reverse
         // destruction always frees vector capacity before returning admission.
-        std::vector<MinimizerT> host_minimizers(
-            static_cast<std::size_t>(raw.count));
-        const std::uint64_t exact_host_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(host_minimizers.capacity()),
-            static_cast<std::uint64_t>(sizeof(MinimizerT)));
-        if (exact_host_capacity_bytes
-                == (std::numeric_limits<std::uint64_t>::max)()
-            || exact_host_capacity_bytes > exact_host_headroom_bytes) {
-            throw VulkanRuntimeError{
-                "Vulkan decoded host minimizer capacity exceeded admission"};
-        }
-        runtime.download_slice(
-            raw.minimizer_words,
-            0u,
-            std::as_writable_bytes(std::span<MinimizerT>{
-                host_minimizers.data(), host_minimizers.size()}));
-        if (owned_host_permit) {
-            owned_host_permit->shrink_to(exact_host_capacity_bytes);
+        std::vector<MinimizerT> host_minimizers;
+        std::uint64_t exact_host_capacity_bytes = 0u;
+        bool host_permit_released_to_process_footprint = false;
+        std::uint64_t host_footprint_reflected_delta_bytes = 0u;
+        const auto allocate_and_download = [&] {
+            host_minimizers.resize(static_cast<std::size_t>(raw.count));
+            exact_host_capacity_bytes = saturating_mul(
+                static_cast<std::uint64_t>(host_minimizers.capacity()),
+                static_cast<std::uint64_t>(sizeof(MinimizerT)));
+            if ((host_ownership_route
+                        == VulkanSketchHostOwnershipRoute::
+                            fixed_zero_copy_adoption
+                    && host_minimizers.size()
+                        != host_minimizers.capacity())
+                || exact_host_capacity_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || exact_host_capacity_bytes > exact_host_headroom_bytes) {
+                throw VulkanRuntimeError{
+                    "Vulkan decoded fixed host minimizer capacity exceeded "
+                    "admission"};
+            }
+            if (owned_host_permit) {
+                owned_host_permit->shrink_to(exact_host_capacity_bytes);
+            }
+            runtime.download_slice(
+                raw.minimizer_words,
+                0u,
+                std::as_writable_bytes(std::span<MinimizerT>{
+                    host_minimizers.data(), host_minimizers.size()}));
+        };
+
+        if (host_ownership_route
+                == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+            && exact_host_size_bytes != 0u) {
+            auto materialization =
+                MemoryAdmissionController::instance().materialize(
+                    *owned_host_permit,
+                    [&]() -> bioseq::parallelism::
+                            MemoryMaterializationEvidence {
+                        allocate_and_download();
+                        return {
+                            .actual_allocation_bytes =
+                                exact_host_capacity_bytes,
+                            .fully_touched_bytes = exact_host_capacity_bytes,
+                            .host_visible = true,
+                            .host_coherent = true,
+                            .process_footprint_reflected = true,
+                        };
+                    });
+            host_permit_released_to_process_footprint =
+                materialization.permit_released;
+            host_footprint_reflected_delta_bytes =
+                materialization.reflected_delta_bytes;
+            if (!materialization.permit_released) {
+                bioseq_log<ERR>(
+                    "[vulkan sketch] fixed host footprint reconciliation "
+                    "failed: actual={} touched={} before={} after={} delta={}",
+                    materialization.evidence.actual_allocation_bytes,
+                    materialization.evidence.fully_touched_bytes,
+                    materialization.footprint_before_bytes,
+                    materialization.footprint_after_bytes,
+                    materialization.reflected_delta_bytes);
+                throw VulkanRuntimeError{
+                    "Vulkan fixed host result was not reflected in process "
+                    "footprint"};
+            }
+            owned_host_permit.reset();
+        } else {
+            allocate_and_download();
+            if (host_ownership_route
+                    == VulkanSketchHostOwnershipRoute::
+                        fixed_zero_copy_adoption) {
+                // Empty vectors own no capacity and need no footprint delta.
+                if (owned_host_permit) {
+                    owned_host_permit->shrink_to(0u);
+                }
+                owned_host_permit.reset();
+                host_permit_released_to_process_footprint = true;
+            }
         }
 
         auto storage = std::make_shared<VulkanDeviceMinimizerStorage<MinimizerT>>();
@@ -1705,6 +1801,13 @@ sketch_uploaded_window_result(
             .host_minimizers = std::move(host_minimizers),
             .dispatch_token = VulkanSketchDispatchToken::
                 completed_collect_minimizers_roundtrip(),
+            .host_ownership_route = host_ownership_route,
+            .host_permit_released_to_process_footprint =
+                host_permit_released_to_process_footprint,
+            .host_footprint_reflected_delta_bytes =
+                host_footprint_reflected_delta_bytes,
+            .arena_trimmed_before_host_materialization =
+                raw.arena_trimmed_before_return,
             .overflow = false,
         };
     } catch (const VulkanRuntimeError&) {
@@ -1994,7 +2097,9 @@ collect_minimizers_vulkan_result(
     const Seq& seq,
     std::size_t window_size,
     std::size_t kmer_size,
-    VulkanSketchDecline* decline_out = nullptr)
+    VulkanSketchDecline* decline_out = nullptr,
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible)
 {
     using bare = std::remove_cvref_t<Seq>;
     if (decline_out != nullptr) {
@@ -2053,7 +2158,10 @@ collect_minimizers_vulkan_result(
                     0u,
                     nullptr,
                     {},
-                    decline_out);
+                    decline_out,
+                    nullptr,
+                    0u,
+                    host_ownership_route);
             }
         }
     } else if constexpr (!vulkan_sketchable_sequence<bare>) {
@@ -2088,7 +2196,10 @@ collect_minimizers_vulkan_result(
                 0u,
                 nullptr,
                 {},
-                decline_out);
+                decline_out,
+                nullptr,
+                0u,
+                host_ownership_route);
         }
     }
 }

@@ -3586,6 +3586,74 @@ plan_minimizer_grouped32_cold_route(
 
 [[noreturn]] [[gnu::cold]] void index_corruption_panic(std::string_view msg);  // bioseq_log<DBG>+abort (NO_POSTGRES-safe)
 
+/// Boost 1.90 FOA allocation geometry used by the transient minimizer table.
+/// One allocation contains 15 value slots plus one 16-byte metadata group per
+/// power-of-two group; with the 16-byte (u64,u64) value this is exactly 256
+/// bytes/group.  The build pre-rehashes once for the full possible-distinct
+/// count, avoiding the former half-size table and its overlapping rehash.
+struct MinimizerHashmapTableAllocationPlan {
+    std::uint64_t distinct_upper_bound = 0u;
+    std::uint64_t requested_slots = 0u;
+    std::uint64_t group_count = 0u;
+    std::uint64_t capacity = 0u;
+    std::uint64_t allocation_bytes = 0u;
+    bool valid = false;
+};
+
+[[nodiscard]] constexpr MinimizerHashmapTableAllocationPlan
+minimizer_hashmap_table_allocation_plan(
+        std::uint64_t possible_distinct) noexcept {
+    using bioseq::parallelism::saturating_add;
+    using bioseq::parallelism::saturating_mul;
+    constexpr std::uint64_t sentinel_margin = 64u;
+    constexpr std::uint64_t load_numerator = 7u;
+    constexpr std::uint64_t load_denominator = 8u;
+    constexpr std::uint64_t slots_per_group = 15u;
+    constexpr std::uint64_t bytes_per_group = 256u;
+    constexpr std::uint64_t max =
+        (std::numeric_limits<std::uint64_t>::max)();
+
+    // An empty sketch builds no table at all.  Keep that real lifetime in the
+    // exact plan instead of charging the non-empty sentinel margin and then
+    // rejecting the builder's zero retained bytes at handoff validation.
+    if (possible_distinct == 0u) {
+        return MinimizerHashmapTableAllocationPlan{.valid = true};
+    }
+
+    const std::uint64_t bounded_distinct =
+        saturating_add(possible_distinct, sentinel_margin);
+    if (bounded_distinct == max) return {};
+    const std::uint64_t quotient = bounded_distinct / load_numerator;
+    const std::uint64_t remainder = bounded_distinct % load_numerator;
+    const std::uint64_t requested_slots = saturating_add(
+        saturating_mul(quotient, load_denominator),
+        (remainder * load_denominator + load_numerator - 1u)
+            / load_numerator);
+    if (requested_slots == max) return {};
+    const std::uint64_t groups_needed =
+        requested_slots / slots_per_group + 1u;
+    std::uint64_t groups = 2u;
+    while (groups < groups_needed) {
+        if (groups > max / 2u) return {};
+        groups *= 2u;
+    }
+    const std::uint64_t capacity = saturating_mul(
+        groups, slots_per_group);
+    const std::uint64_t allocation_bytes = saturating_mul(
+        groups, bytes_per_group);
+    if (capacity == max || allocation_bytes == max || capacity == 0u) {
+        return {};
+    }
+    return MinimizerHashmapTableAllocationPlan{
+        .distinct_upper_bound = bounded_distinct,
+        .requested_slots = requested_slots,
+        .group_count = groups,
+        .capacity = capacity - 1u,
+        .allocation_bytes = allocation_bytes,
+        .valid = true,
+    };
+}
+
 // (1) the lookup structure — the old TargetIndex, renamed & relocated, storage-free
 struct MinimizerHashmapFragmentIndex {
 private:
@@ -3593,23 +3661,13 @@ private:
 
     void clear_table();
     void reserve_table(std::size_t bucket_count);
+    void reserve_table_for_distinct_upper_bound(std::size_t distinct_count);
     void emplace_table(std::uint64_t hash, std::uint64_t packed);
 
     template <class MinimizerT>
-    void build_sorted_in_place(
-            std::vector<MinimizerT>& sorted_minimizers,
-            sequence_size_t target_length) {
-        static const auto* _desc =
-            bioseq::instr::register_region_static("target_index_build");
-        auto _scope = bioseq::instr::region(_desc);
-        target_len = target_length;
-        clear_table();
-        positions.clear();
-
-        const std::size_t total = sorted_minimizers.size();
-        if (total == 0) {
-            return;
-        }
+    static void sort_minimizers_in_place_(
+            std::vector<MinimizerT>& sorted_minimizers) {
+        if (sorted_minimizers.empty()) return;
         // `MinimizerRepr::kmer()` deliberately exposes a uint64_t ABI even
         // when the selected representation carries a much narrower hash.  Do
         // not let that ABI choice force radix_sort through known-zero high
@@ -3639,10 +3697,34 @@ private:
             }
         };
         bioseq::sorting::radix_sort(
-            sorted_minimizers.data(), sorted_minimizers.data() + total, KmerKey{});
+            sorted_minimizers.data(),
+            sorted_minimizers.data() + sorted_minimizers.size(),
+            KmerKey{});
+    }
+
+    template <class MinimizerT>
+    void build_presorted_in_place_(
+            std::vector<MinimizerT>& sorted_minimizers,
+            sequence_size_t target_length,
+            bool reserve_full_table_once) {
+        target_len = target_length;
+        clear_table();
+        positions.clear();
+
+        const std::size_t total = sorted_minimizers.size();
+        if (total == 0u) {
+            return;
+        }
 
         positions.resize(total);
-        reserve_table(total / 2 + 16);
+        if (reserve_full_table_once) {
+            // The admitted Vulkan route reserves for the worst-case D=N once.
+            // This removes the former half-size allocation/rehash overlap.
+            reserve_table_for_distinct_upper_bound(total);
+        } else {
+            // Preserve the legacy policy for every unrelated CPU caller.
+            reserve_table(total / 2u + 16u);
+        }
         std::size_t i = 0;
         while (i < total) {
             const std::uint64_t kmer = sorted_minimizers[i].kmer();
@@ -3656,6 +3738,19 @@ private:
                 | static_cast<std::uint64_t>(static_cast<std::uint32_t>(j - i)));
             i = j;
         }
+    }
+
+    template <class MinimizerT>
+    void build_sorted_in_place(
+            std::vector<MinimizerT>& sorted_minimizers,
+            sequence_size_t target_length,
+            bool reserve_full_table_once = false) {
+        static const auto* _desc =
+            bioseq::instr::register_region_static("target_index_build");
+        auto _scope = bioseq::instr::region(_desc);
+        sort_minimizers_in_place_(sorted_minimizers);
+        build_presorted_in_place_(
+            sorted_minimizers, target_length, reserve_full_table_once);
     }
 
 public:
@@ -3695,6 +3790,8 @@ public:
 
     [[nodiscard]] std::size_t table_size() const noexcept;
     [[nodiscard]] bool table_empty() const noexcept;
+    [[nodiscard]] std::uint64_t table_allocation_bytes() const noexcept;
+    [[nodiscard]] std::uint64_t table_peak_allocation_bytes() const noexcept;
     void for_each_table_entry_erased(
         void* ctx,
         void (*emit)(void* ctx, std::uint64_t hash, std::uint64_t packed)) const;
@@ -3728,6 +3825,20 @@ public:
             std::vector<MinimizerT>&& target_minimizers,
             sequence_size_t target_length) {
         build_sorted_in_place(target_minimizers, target_length);
+        std::vector<MinimizerT>{}.swap(target_minimizers);
+    }
+
+    /// Admitted Vulkan build: reserve one table for worst-case D=N so no FOA
+    /// growth allocation can overlap it. The caller must acquire positions +
+    /// planned-table admission before entering this method.
+    template <class MinimizerT>
+    void build_consuming_full_table(
+            std::vector<MinimizerT>&& target_minimizers,
+            sequence_size_t target_length) {
+        build_sorted_in_place(
+            target_minimizers,
+            target_length,
+            /*reserve_full_table_once=*/true);
         std::vector<MinimizerT>{}.swap(target_minimizers);
     }
 

@@ -32,6 +32,7 @@ import bioseq.sequences.kmers.hashers;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.minimizer_vulkan;
 import bioseq.parallelism.memory_admission;
 import bioseq.storage.scanner;   // DOC0345 §16 — sequence_scanner_test_chunked + SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT
@@ -426,6 +427,84 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
         captured_corrected_required_bytes <=
         captured_report121_allocatable_bytes);
     CHECK(captured_corrected_slack_bytes == 51'415'360u);
+
+}
+
+TEST_CASE("vulkan minimizer: Report156 zero-copy handoff phases fit captured pressure",
+          "[vulkan][phase-c][memory-admission][zero-copy][arithmetic]") {
+    constexpr std::uint64_t emitted_minimizers = 93'308'896u;
+    constexpr std::uint64_t device_output_bytes = 1'200'001'536u;
+    constexpr std::uint64_t persistent_runtime_bytes = 676'076u;
+    constexpr std::uint64_t captured_budget_ceiling = 2'601'156'608u;
+    constexpr std::uint64_t captured_reserved_before_host =
+        device_output_bytes + persistent_runtime_bytes;
+    constexpr std::uint64_t captured_allocatable_before_host =
+        captured_budget_ceiling - captured_reserved_before_host;
+
+    const std::uint64_t host_payload_bytes =
+        emitted_minimizers * sizeof(MinimapSketchData);
+    const std::uint64_t fixed_host_admission =
+        vk::vulkan_exact_host_allocation_admission_bytes(
+            host_payload_bytes);
+    REQUIRE(host_payload_bytes == 746'471'168u);
+    REQUIRE(fixed_host_admission == 746'536'704u);
+    REQUIRE(captured_allocatable_before_host == 1'400'478'996u);
+    REQUIRE(fixed_host_admission <= captured_allocatable_before_host);
+
+    // The opaque Boost FOA geometry is pinned and measured by the index's
+    // allocator. Reserving the full possible-distinct count produces one 2-GiB
+    // table allocation; the former half-size reserve produced a 1-GiB table
+    // and then overlapped it with the 2-GiB growth rehash.
+    const auto table_plan =
+        idx::minimizer_hashmap_table_allocation_plan(emitted_minimizers);
+    REQUIRE(table_plan.valid);
+    REQUIRE(table_plan.group_count == 8'388'608u);
+    REQUIRE(table_plan.capacity == 125'829'119u);
+    REQUIRE(table_plan.allocation_bytes == 2'147'483'648u);
+    const auto former_half_table_plan =
+        idx::minimizer_hashmap_table_allocation_plan(
+            emitted_minimizers / 2u + 16u);
+    REQUIRE(former_half_table_plan.valid);
+    REQUIRE(former_half_table_plan.allocation_bytes == 1'073'741'824u);
+
+    // After download, serialized materialization reconciles the exact host
+    // vector into live RSS and releases its temporary permit. The device owner
+    // is then dropped. A fresh permit covers only allocations not yet present
+    // in that footprint: positions plus the one-shot table.
+    const std::uint64_t position_headroom =
+        vk::vulkan_exact_host_allocation_admission_bytes(
+            emitted_minimizers * sizeof(std::uint64_t));
+    const std::uint64_t table_headroom =
+        vk::vulkan_exact_host_allocation_admission_bytes(
+            table_plan.allocation_bytes);
+    const std::uint64_t target_index_build_permit =
+        bioseq::parallelism::saturating_add(
+            position_headroom,
+            table_headroom);
+    REQUIRE(target_index_build_permit == 2'894'085'888u);
+
+    // Reconcile the captured pressure sample by subtracting the newly-live host
+    // footprint, adding the released device allocation, and adding the arena
+    // high-water now physically trimmed before host materialization.
+    constexpr std::uint64_t captured_arena_high_water_bytes = 187'533'824u;
+    const std::uint64_t reconciled_build_ceiling =
+        captured_budget_ceiling
+        - host_payload_bytes
+        + device_output_bytes
+        + captured_arena_high_water_bytes;
+    REQUIRE(reconciled_build_ceiling == 3'242'220'800u);
+    REQUIRE(target_index_build_permit + persistent_runtime_bytes
+            <= reconciled_build_ceiling);
+    REQUIRE(reconciled_build_ceiling
+                - target_index_build_permit - persistent_runtime_bytes
+            == 347'458'836u);
+
+    const std::uint64_t retained_index_bytes =
+        host_payload_bytes + table_plan.allocation_bytes;
+    REQUIRE(retained_index_bytes == 2'893'954'816u);
+    REQUIRE(target_index_build_permit
+            < target_index_build_permit
+                + former_half_table_plan.allocation_bytes);
 }
 
 TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak",
@@ -633,6 +712,10 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
     REQUIRE(calibration->device != nullptr);
     REQUIRE(calibration->host_permit.has_value());
     REQUIRE_FALSE(calibration->host_minimizers.empty());
+    REQUIRE(calibration->arena_trimmed_before_host_materialization);
+    REQUIRE_FALSE(runtime.phase_c_arena().device_buffer().valid());
+    REQUIRE_FALSE(runtime.phase_c_arena().upload_buffer().valid());
+    REQUIRE_FALSE(runtime.phase_c_arena().download_buffer().valid());
 
     const std::uint64_t actual_device_allocation_bytes =
         calibration->device->words.allocation_bytes;
@@ -657,8 +740,9 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
                 baseline, cache_metadata_delta));
     const std::uint64_t operation_baseline = admission.reserved_bytes();
 
-    // Recompute after calibration because the persistent Vulkan arena may have
-    // established a new physical high-water allocation.
+    // Recompute after calibration so pipeline-cache metadata and allocator
+    // requirements reflect the live runtime. The request-scoped Vulkan arena
+    // itself must already be physically empty.
     const std::uint64_t dispatch_peak = dispatch_admission_bytes();
     const std::uint64_t host_materialization_peak =
         vk::vulkan_sketch_host_materialization_admission_bytes(
@@ -699,6 +783,10 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
     REQUIRE(result->dispatch_token.accepted());
     REQUIRE(result->device != nullptr);
     REQUIRE(result->host_permit.has_value());
+    REQUIRE(result->arena_trimmed_before_host_materialization);
+    REQUIRE_FALSE(runtime.phase_c_arena().device_buffer().valid());
+    REQUIRE_FALSE(runtime.phase_c_arena().upload_buffer().valid());
+    REQUIRE_FALSE(runtime.phase_c_arena().download_buffer().valid());
 
     const std::uint64_t exact_host_capacity_bytes =
         static_cast<std::uint64_t>(result->host_minimizers.capacity())

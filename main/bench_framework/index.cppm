@@ -1181,6 +1181,22 @@ struct RegressionRule {
     bool blocking = true;
 };
 
+/// Unfiltered declaration metadata for one registered benchmark. Regression
+/// rule references must be validated against this universe rather than the
+/// post-CLI-filter report map; otherwise a valid rule scoped to a filtered-out
+/// benchmark is misdiagnosed as a typo.
+struct RegressionBenchmarkDeclaration {
+    std::string benchmark_key;
+    std::vector<std::string> config_algorithms{};
+    std::vector<std::string> config_test_cases{};
+    std::vector<std::string> matrix_algorithms{};
+    std::vector<std::string> matrix_test_cases{};
+    std::vector<std::string> metrics{};
+};
+
+using RegressionValidationUniverse =
+    std::map<std::string, std::vector<RegressionBenchmarkDeclaration>>;
+
 /// One detected regression. Mirrors the user-visible JSON shape: arrays of
 /// size 1 for `violating_tuples` / `test_cases` so the writer doesn't need
 /// to special-case singletons. `regression_since` is empty-string when
@@ -5509,7 +5525,7 @@ struct ConfigParseOutcome {
 /// own `config_path`:
 ///   - Rule names must be unique within the same config file.
 ///   - Every entry of `benchmarks` (when present) must name a benchmark
-///     that actually loaded from this config_path.
+///     that is registered for this config_path.
 ///   - Every benchmark/algorithm deny-list entry must name a declaration in
 ///     this config and cannot remove every cell the rule could cover.
 ///   - The metric must appear in the benchmarks the rule applies to
@@ -5525,10 +5541,11 @@ struct ConfigParseOutcome {
 ///     the syntactic case at parse time.
 [[nodiscard]] inline std::vector<ValidationDiag> semantic_validate_regression_rules(
     const RegressionRulesByConfig& regression_rules_by_config,
-    const std::map<std::string, std::shared_ptr<BenchmarkExecutionState>>& reports) noexcept
+    const RegressionValidationUniverse& validation_universe) noexcept
 {
     std::vector<ValidationDiag> diagnostics;
-    auto error = [&](std::string code, std::string location, std::string message) {
+    auto error = [&diagnostics](
+        std::string code, std::string location, std::string message) {
         diagnostics.push_back({
             ValidationDiag::Severity::Error,
             std::move(code), std::move(location), std::move(message)
@@ -5536,11 +5553,13 @@ struct ConfigParseOutcome {
     };
 
     for (const auto& [config_path, rules] : regression_rules_by_config) {
-        // Collect the benchmark states loaded from this config_path.
-        std::vector<const BenchmarkExecutionState*> states_for_config;
-        for (const auto& [bench_key, state_ptr] : reports) {
-            if (state_ptr->config.config_path == config_path) {
-                states_for_config.push_back(state_ptr.get());
+        std::vector<const RegressionBenchmarkDeclaration*>
+            declarations_for_config;
+        if (const auto universe_it = validation_universe.find(config_path);
+            universe_it != validation_universe.end()) {
+            declarations_for_config.reserve(universe_it->second.size());
+            for (const auto& declaration : universe_it->second) {
+                declarations_for_config.push_back(&declaration);
             }
         }
 
@@ -5557,14 +5576,16 @@ struct ConfigParseOutcome {
             }
 
             // 2. Determine matching benchmarks within this config_path.
-            std::vector<const BenchmarkExecutionState*> matching_states;
+            std::vector<const RegressionBenchmarkDeclaration*>
+                matching_declarations;
             const std::set<std::string> excluded_benchmarks(
                 rule.exclude_benchmarks.begin(), rule.exclude_benchmarks.end());
             for (const auto& excluded_bench : excluded_benchmarks) {
                 const bool found = std::any_of(
-                    states_for_config.begin(), states_for_config.end(),
-                    [&](const auto* state) {
-                        return state->config.benchmark_key == excluded_bench;
+                    declarations_for_config.begin(),
+                    declarations_for_config.end(),
+                    [&excluded_bench](const auto* declaration) {
+                        return declaration->benchmark_key == excluded_bench;
                     });
                 if (!found) {
                     error("regression_unknown_benchmark", base_loc,
@@ -5572,75 +5593,81 @@ struct ConfigParseOutcome {
                                     excluded_bench, config_path));
                 }
             }
-            if (rule.benchmarks.empty()) {
-                for (const auto* state : states_for_config) {
-                    if (!excluded_benchmarks.contains(
-                            state->config.benchmark_key)) {
-                        matching_states.push_back(state);
-                    }
-                }
-            } else {
-                for (const auto& declared_bench : rule.benchmarks) {
-                    bool found = false;
-                    for (const auto* state : states_for_config) {
-                        if (state->config.benchmark_key == declared_bench) {
-                            if (!excluded_benchmarks.contains(declared_bench)) {
-                                matching_states.push_back(state);
-                            }
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        error("regression_unknown_benchmark", base_loc,
-                            fmt::format("benchmark '{}' is not declared in '{}'",
-                                        declared_bench, config_path));
-                    }
+            const std::set<std::string> included_benchmarks(
+                rule.benchmarks.begin(), rule.benchmarks.end());
+            for (const auto& declared_bench : included_benchmarks) {
+                const bool found = std::any_of(
+                    declarations_for_config.begin(),
+                    declarations_for_config.end(),
+                    [&declared_bench](const auto* declaration) {
+                        return declaration->benchmark_key == declared_bench;
+                    });
+                if (!found) {
+                    error("regression_unknown_benchmark", base_loc,
+                        fmt::format("benchmark '{}' is not declared in '{}'",
+                                    declared_bench, config_path));
                 }
             }
-            if (matching_states.empty() && !states_for_config.empty()) {
+            for (const auto* declaration : declarations_for_config) {
+                const bool included = included_benchmarks.empty()
+                    || included_benchmarks.contains(declaration->benchmark_key);
+                if (included
+                    && !excluded_benchmarks.contains(
+                        declaration->benchmark_key)) {
+                    matching_declarations.push_back(declaration);
+                }
+            }
+            if (matching_declarations.empty()
+                && !declarations_for_config.empty()) {
                 error("regression_excludes_all_benchmarks", base_loc,
                     fmt::format("regression rule '{}' excludes every matching benchmark; the rule can never fire",
                                 rule.name));
             }
 
             // 3. Metric existence check.
-            const auto metric_in_state = [&](const BenchmarkExecutionState& state) noexcept {
-                for (const auto& metric : state.config.metrics) {
-                    if (metric.name == rule.metric) return true;
-                }
-                return false;
+            const auto metric_in_declaration = [&rule](
+                    const RegressionBenchmarkDeclaration& declaration) noexcept {
+                return std::find(
+                    declaration.metrics.begin(), declaration.metrics.end(),
+                    rule.metric) != declaration.metrics.end();
             };
             if (!rule.benchmarks.empty()) {
-                for (const auto* state : matching_states) {
-                    if (!metric_in_state(*state)) {
+                for (const auto* declaration : matching_declarations) {
+                    if (!metric_in_declaration(*declaration)) {
                         error("regression_metric_missing_in_benchmark", base_loc,
                             fmt::format("regression rule '{}' targets metric '{}' but benchmark '{}' (explicitly listed in 'benchmarks') does not declare it under matrix.metrics",
-                                        rule.name, rule.metric, state->config.benchmark_key));
+                                        rule.name, rule.metric,
+                                        declaration->benchmark_key));
                     }
                 }
-            } else if (!matching_states.empty()) {
+            } else if (!matching_declarations.empty()) {
                 bool found_any = false;
-                for (const auto* state : matching_states) {
-                    if (metric_in_state(*state)) { found_any = true; break; }
+                for (const auto* declaration : matching_declarations) {
+                    if (metric_in_declaration(*declaration)) {
+                        found_any = true;
+                        break;
+                    }
                 }
                 if (!found_any) {
                     error("regression_metric_unused", base_loc,
-                        fmt::format("regression rule '{}' (no 'benchmarks' filter) targets metric '{}' but no benchmark loaded from '{}' declares it",
+                        fmt::format("regression rule '{}' (no 'benchmarks' filter) targets metric '{}' but no benchmark registered from '{}' declares it",
                                     rule.name, rule.metric, config_path));
                 }
             }
 
             // 4. exclude_cases membership check (and over-coverage).
-            //    test_cases are config-global, so any state sharing the
-            //    config_path has the full list — pick one and use its
-            //    declared set.
-            if (!matching_states.empty()) {
-                const auto& declared_test_cases = matching_states.front()->test_cases;
+            //    Test-case declarations are config-global; use the registered
+            //    unfiltered universe so a CLI filter cannot turn a valid name
+            //    into a false unknown-reference error.
+            if (!matching_declarations.empty()) {
                 std::set<std::string> declared_names;
-                for (const auto& spec : declared_test_cases) declared_names.insert(spec.name);
+                for (const auto* declaration : declarations_for_config) {
+                    declared_names.insert(
+                        declaration->config_test_cases.begin(),
+                        declaration->config_test_cases.end());
+                }
                 for (const auto& excluded : rule.exclude_cases) {
-                    if (declared_names.find(excluded) == declared_names.end()) {
+                    if (!declared_names.contains(excluded)) {
                         error("regression_unknown_test_case", base_loc,
                             fmt::format("exclude_cases entry '{}' is not declared in 'test_cases'",
                                         excluded));
@@ -5650,10 +5677,10 @@ struct ConfigParseOutcome {
                 // Over-coverage: union of every for_each in matching
                 // benchmarks minus exclude_cases must be non-empty.
                 std::set<std::string> covered_test_cases;
-                for (const auto* state : matching_states) {
-                    for (const auto& [test_case_name, _iters] : state->config.for_each) {
-                        covered_test_cases.insert(test_case_name);
-                    }
+                for (const auto* declaration : matching_declarations) {
+                    covered_test_cases.insert(
+                        declaration->matrix_test_cases.begin(),
+                        declaration->matrix_test_cases.end());
                 }
                 std::set<std::string> excluded_set(
                     rule.exclude_cases.begin(), rule.exclude_cases.end());
@@ -5663,10 +5690,6 @@ struct ConfigParseOutcome {
                         any_remains = true; break;
                     }
                 }
-                // In a targeted run `matching_states` contains only the selected
-                // benchmark subset.  A globally valid rule may appear to exclude
-                // every case solely because the other benchmarks were filtered
-                // out.  Complete runs retain the strict over-coverage error.
                 if (!any_remains && !covered_test_cases.empty()) {
                     error("regression_excludes_all", base_loc,
                         fmt::format("regression rule '{}' excludes every test_case its matching benchmarks would run on; the rule can never fire (use a narrower 'exclude_cases' or remove it)",
@@ -5674,9 +5697,10 @@ struct ConfigParseOutcome {
                 }
 
                 std::set<std::string> declared_algorithms;
-                for (const auto& [algorithm_name, _schema] :
-                     matching_states.front()->config.algorithm_schemas) {
-                    declared_algorithms.insert(algorithm_name);
+                for (const auto* declaration : declarations_for_config) {
+                    declared_algorithms.insert(
+                        declaration->config_algorithms.begin(),
+                        declaration->config_algorithms.end());
                 }
                 const std::set<std::string> excluded_algorithms(
                     rule.exclude_algorithms.begin(),
@@ -5689,10 +5713,11 @@ struct ConfigParseOutcome {
                     }
                 }
                 bool any_algorithm_remains = false;
-                for (const auto* state : matching_states) {
-                    for (const auto& tuple : state->execution_tuples) {
+                for (const auto* declaration : matching_declarations) {
+                    for (const auto& algorithm_name :
+                         declaration->matrix_algorithms) {
                         if (!excluded_algorithms.contains(
-                                tuple.algorithm_name)) {
+                                algorithm_name)) {
                             any_algorithm_remains = true;
                             break;
                         }
@@ -9104,7 +9129,8 @@ struct HistoricalRegressionCandidateSelector {
     const ReportMeta&              current_meta,
     std::size_t                    current_index,
     HistoricalReportCache&         history_cache,
-    std::vector<ValidationDiag>&   diagnostics_out) noexcept
+    std::vector<ValidationDiag>&   diagnostics_out,
+    bool                           selection_is_partial) noexcept
 {
     std::vector<RegressionEntry> entries;
 
@@ -9154,6 +9180,44 @@ struct HistoricalRegressionCandidateSelector {
 
             const std::string rule_location =
                 fmt::format("{}/regression_rules/{}", config_path, rule.name);
+
+            // A targeted selection legitimately omits whole rule partitions.
+            // Skip only when the selected states contain no statically
+            // applicable cell for this rule. Once a selected cell is in
+            // scope, the runtime matched-nothing diagnostic remains
+            // fail-closed for missing regions/samples.
+            const auto selected_state_has_rule_scope = [
+                &rule,
+                &excluded_test_cases,
+                &excluded_algorithms
+            ](const BenchmarkExecutionState* state) noexcept {
+                const bool metric_declared = std::any_of(
+                    state->config.metrics.begin(), state->config.metrics.end(),
+                    [&rule](const MetricSpec& metric) {
+                        return metric.name == rule.metric;
+                    });
+                const bool algorithm_remains = std::any_of(
+                    state->execution_tuples.begin(),
+                    state->execution_tuples.end(),
+                    [&excluded_algorithms](const ExecutionTuple& tuple) {
+                        return !excluded_algorithms.contains(
+                            tuple.algorithm_name);
+                    });
+                const bool test_case_remains = std::any_of(
+                    state->config.for_each.begin(),
+                    state->config.for_each.end(),
+                    [&excluded_test_cases](const auto& test_case) {
+                        return !excluded_test_cases.contains(test_case.first);
+                    });
+                return metric_declared && algorithm_remains
+                    && test_case_remains;
+            };
+            if (selection_is_partial
+                && std::none_of(
+                    matching_states.begin(), matching_states.end(),
+                    selected_state_has_rule_scope)) {
+                continue;
+            }
 
             for (const auto* state : matching_states) {
                 const auto& merged_index = merged_for(state);
@@ -13702,22 +13766,29 @@ inline void render_progress_loop(ProgressState& progress) noexcept {
 
 // ----------------- run_impl -----------------
 
-/// Lightweight (tags, over-keys) view of one benchmark block, used by the
-/// `--filter` pre-pass to select benchmarks before the parallel run.
+/// Lightweight declaration view of one benchmark block. The `--filter`
+/// pre-pass uses tags/over-keys for selection; regression-rule validation
+/// uses the remaining fields as its unfiltered registered universe.
 struct BenchmarkFilterMetadata {
     std::string              benchmark_key;
-    std::vector<std::string> tags;        // <key>.tags
-    std::vector<std::string> case_names;  // keys of <key>.matrix.over
+    std::vector<std::string> tags;               // <key>.tags
+    std::vector<std::string> case_names;          // <key>.matrix.over keys
+    std::vector<std::string> config_algorithms;   // top-level params keys
+    std::vector<std::string> config_test_cases;   // top-level test_cases keys
+    std::vector<std::string> matrix_test_cases;   // <key>.matrix.for keys
+    std::vector<std::string> metric_names;        // <key>.matrix.metrics keys
     bool                     fast = false;
     bool                     complete_matrix_acceptance = false;
-    bool                     parsed_ok = false;  // false => treat as no tags/no cases
+    bool                     parsed_ok = false;  // false => treat as no declarations
 };
 
 /// Best-effort extraction of selection/acceptance metadata for one benchmark.
 /// Never fails the run — on any parse problem returns parsed_ok=false and the
 /// closure's full parse will surface the real schema error later. Reads
 /// `fast`, `tags`, `matrix.over` keys and the presence of an exact
-/// acceptance contract; keep these reads in sync with parse_benchmark_block.
+/// acceptance contract, and the declaration names needed for regression-rule
+/// validation; keep these reads in sync with parse_config_file and
+/// parse_benchmark_block.
 [[nodiscard]] inline BenchmarkFilterMetadata extract_filter_metadata(
     const std::string& config_path, const std::string& benchmark_key) noexcept {
     BenchmarkFilterMetadata meta;
@@ -13727,8 +13798,22 @@ struct BenchmarkFilterMetadata {
     simdjson::dom::parser parser;
     simdjson::dom::element root;
     if (parser.parse(body).get(root) != simdjson::SUCCESS) return meta;
+    simdjson::dom::object root_obj;
+    if (root.get(root_obj) != simdjson::SUCCESS) return meta;
+    simdjson::dom::object params_obj;
+    if (root_obj["params"].get(params_obj) == simdjson::SUCCESS) {
+        for (auto field : params_obj) {
+            meta.config_algorithms.emplace_back(field.key);
+        }
+    }
+    simdjson::dom::object test_cases_obj;
+    if (root_obj["test_cases"].get(test_cases_obj) == simdjson::SUCCESS) {
+        for (auto field : test_cases_obj) {
+            meta.config_test_cases.emplace_back(field.key);
+        }
+    }
     simdjson::dom::object bench_obj;
-    if (root[benchmark_key].get(bench_obj) != simdjson::SUCCESS) return meta;
+    if (root_obj[benchmark_key].get(bench_obj) != simdjson::SUCCESS) return meta;
     bool fast = false;
     if (bench_obj["fast"].get(fast) == simdjson::SUCCESS) meta.fast = fast;
     simdjson::dom::array tags_array;
@@ -13742,6 +13827,18 @@ struct BenchmarkFilterMetadata {
     if (bench_obj["matrix"].get(matrix_obj) == simdjson::SUCCESS) {
         if (matrix_obj["over"].get(over_obj) == simdjson::SUCCESS) {
             for (auto kv : over_obj) meta.case_names.emplace_back(kv.key);
+        }
+        simdjson::dom::object for_obj;
+        if (matrix_obj["for"].get(for_obj) == simdjson::SUCCESS) {
+            for (auto field : for_obj) {
+                meta.matrix_test_cases.emplace_back(field.key);
+            }
+        }
+        simdjson::dom::object metrics_obj;
+        if (matrix_obj["metrics"].get(metrics_obj) == simdjson::SUCCESS) {
+            for (auto field : metrics_obj) {
+                meta.metric_names.emplace_back(field.key);
+            }
         }
         simdjson::dom::object acceptance_obj;
         simdjson::dom::array exact_rows;
@@ -13834,6 +13931,29 @@ struct BenchmarkFilterMetadata {
         }
     }
 
+    // Parse the declaration-only view before any CLI selection can prune a
+    // benchmark. Semantic regression-rule validation must resolve names
+    // against all registered benchmarks, including rows omitted by
+    // --filter/--fast. The full closure parse remains authoritative for
+    // schema/semantic errors.
+    std::vector<BenchmarkFilterMetadata> registered_metadata;
+    registered_metadata.reserve(selected.size());
+    RegressionValidationUniverse regression_validation_universe;
+    for (const auto& erased : selected) {
+        registered_metadata.push_back(extract_filter_metadata(
+            erased.config_path, erased.benchmark_key));
+        const auto& metadata = registered_metadata.back();
+        RegressionBenchmarkDeclaration declaration;
+        declaration.benchmark_key = metadata.benchmark_key;
+        declaration.config_algorithms = metadata.config_algorithms;
+        declaration.config_test_cases = metadata.config_test_cases;
+        declaration.matrix_algorithms = metadata.case_names;
+        declaration.matrix_test_cases = metadata.matrix_test_cases;
+        declaration.metrics = metadata.metric_names;
+        regression_validation_universe[erased.config_path].push_back(
+            std::move(declaration));
+    }
+
     oneapi::tbb::global_control concurrency_limit(
         oneapi::tbb::global_control::max_allowed_parallelism, thread_count);
     oneapi::tbb::task_arena bench_arena(static_cast<int>(thread_count));
@@ -13873,14 +13993,11 @@ struct BenchmarkFilterMetadata {
     if (f.cases) case_allow_list.emplace(f.cases->begin(), f.cases->end());
 
     // (2) Selection + warnings — ONLY when a filter is present. `runnable`
-    // defaults to keep-everything so the no-filter path does NO config
-    // re-parse and NO pruning (zero overhead on the default run).
+    // defaults to keep-everything; the declaration pre-pass above is also
+    // reused here, so selection itself performs no additional config reads.
     std::vector<char> runnable(selected.size(), 1);
     if (!f.empty()) {
-        std::vector<BenchmarkFilterMetadata> meta;
-        meta.reserve(selected.size());
-        for (const auto& erased : selected)
-            meta.push_back(extract_filter_metadata(erased.config_path, erased.benchmark_key));
+        const auto& meta = registered_metadata;
 
         // keep[i] = passes tag+benchmark filter.
         std::vector<char> keep(selected.size(), 1);
@@ -14172,7 +14289,7 @@ struct BenchmarkFilterMetadata {
     // `benchmarks` membership and metric existence in one place).
     {
         auto regression_validation_diags = semantic_validate_regression_rules(
-            regression_rules_by_config, reports);
+            regression_rules_by_config, regression_validation_universe);
         std::lock_guard<std::mutex> guard(diagnostics_mu);
         for (auto& diag : regression_validation_diags) {
             diagnostics.push_back(std::move(diag));
@@ -14218,7 +14335,8 @@ struct BenchmarkFilterMetadata {
     std::vector<ValidationDiag> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
         regression_rules_by_config, reports,
-        run_meta, current_index, history_cache, regression_eval_diagnostics);
+        run_meta, current_index, history_cache, regression_eval_diagnostics,
+        !cli.filter.empty() || cli.fast_filter);
     const bool regression_eval_had_errors = report_diagnostics(
         std::span<const ValidationDiag>{regression_eval_diagnostics},
         "regression");

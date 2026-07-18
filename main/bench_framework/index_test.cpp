@@ -3987,7 +3987,7 @@ using Estimator = std::function<RunConstraints(
 /// memory-budget skips. All benches share the trivial sum/eval bodies.
 [[nodiscard]] inline ErasedBenchmark make_toy_bench(
     std::string_view key, std::string_view title, const std::string& config_path,
-    Estimator estimate = nullptr)
+    Estimator estimate = nullptr, double evaluation_scale = 1.0)
 {
     using InputFn = std::function<ToyInput(std::string_view, std::string_view,
                                            simdjson::dom::element, const RunConstraints&)>;
@@ -4010,9 +4010,11 @@ using Estimator = std::function<RunConstraints(
         for (const auto value : in.values) out.sum += value;
         return out;
     };
-    EvalFn eval_fn = [](std::string_view, const ParamMap&, const ToyInput&,
-                        const ToyOutput& out) {
-        return std::map<std::string, double>{{"sum_value", static_cast<double>(out.sum)}};
+    EvalFn eval_fn = [evaluation_scale](
+        std::string_view, const ParamMap&, const ToyInput&,
+        const ToyOutput& out) {
+        return std::map<std::string, double>{{
+            "sum_value", evaluation_scale * static_cast<double>(out.sum)}};
     };
     return create_benchmark<ToyInput, ToyOutput>(
         std::string{title}, std::string{key}, config_path,
@@ -5734,6 +5736,292 @@ TEST_CASE("bench_framework --filter selection + warnings", "[bench_framework][fi
     }
 }
 
+TEST_CASE("regression partitions remain valid under targeted selection",
+          "[bench_framework][filter][regression]") {
+    TestLogSilencer silence_mlogging;
+
+    static constexpr std::array<AlgorithmSpec, 2> algorithms{{
+        {"cpu", std::span<const AlgoParamSpec>{kFilterParams}},
+        {"gpu", std::span<const AlgoParamSpec>{kFilterParams}},
+    }};
+    static constexpr std::array<TestCaseDataSpec, 1> test_cases{{
+        {"SMALL", "partitioned regression", R"({"length":8,"seed":3})", 1},
+    }};
+    static constexpr std::array<ForEntry, 1> for_entries{{
+        {"SMALL", 2},
+    }};
+    static constexpr std::array<OverEntry, 1> other_over{{
+        {"cpu", "{}"},
+    }};
+    static constexpr std::array<OverEntry, 2> curated_over{{
+        {"cpu", "{}"}, {"gpu", "{}"},
+    }};
+    const std::array<BenchmarkSpec, 2> benches{{
+        BenchmarkSpec{
+            .key = "bench_other",
+            .description = "global partition",
+            .fast = true,
+            .concurrency = false,
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{other_over},
+            .metrics = std::span<const MetricSpecLite>{kFilterMetrics},
+        },
+        BenchmarkSpec{
+            .key = "bench_curated",
+            .description = "curated partition",
+            .fast = false,
+            .concurrency = false,
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{curated_over},
+            .metrics = std::span<const MetricSpecLite>{kFilterMetrics},
+        },
+    }};
+    static constexpr std::string_view partitioned_rules = R"([
+      {
+        "name":"global_except_curated",
+        "metric":"sum_value",
+        "aggregate":"sum",
+        "operator":{"compare":"=","tolerance%":0},
+        "exclude_benchmarks":["bench_curated"]
+      },
+      {
+        "name":"curated_cpu_blocking",
+        "benchmarks":["bench_curated"],
+        "metric":"sum_value",
+        "aggregate":"sum",
+        "operator":{"compare":"=","tolerance%":0},
+        "exclude_algorithms":["gpu"]
+      },
+      {
+        "name":"curated_gpu_diagnostic",
+        "benchmarks":["bench_curated"],
+        "metric":"sum_value",
+        "aggregate":"sum",
+        "operator":{"compare":"=","tolerance%":0},
+        "exclude_algorithms":["cpu"],
+        "blocking":false
+      }
+    ])";
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{algorithms},
+        std::span<const TestCaseDataSpec>{test_cases},
+        std::span<const BenchmarkSpec>{benches}, partitioned_rules);
+
+    SECTION("benchmark filter skips only rules outside the selected partition") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 2> filter{
+            "--filter", "benchmark=bench_other"};
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other", config_path),
+            make_toy_bench("bench_curated", "curated", config_path));
+        REQUIRE(outcome.exit_code == 0);
+        REQUIRE_FALSE(stderr_contains(
+            outcome.captured_stderr, "regression_unknown_benchmark"));
+        REQUIRE_FALSE(stderr_contains(
+            outcome.captured_stderr, "regression_rule_matched_nothing"));
+    }
+
+    SECTION("GPU-only curated drift is diagnostic and CPU partition is skipped") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 4> filter{
+            "--filter", "benchmark=bench_curated",
+            "--filter", "cases=gpu"};
+        REQUIRE(run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other baseline", config_path),
+            make_toy_bench("bench_curated", "curated baseline", config_path))
+                    .exit_code == 0);
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other drift", config_path,
+                           Estimator{}, 2.0),
+            make_toy_bench("bench_curated", "curated drift", config_path,
+                           Estimator{}, 2.0));
+        REQUIRE(outcome.exit_code == 0);
+        REQUIRE(outcome.report.at("regressions").size() == 1);
+        REQUIRE(outcome.report.at("regressions").at(0).at("rule_name")
+                == "curated_gpu_diagnostic");
+        REQUIRE(outcome.report.at("regressions").at(0).at("blocking")
+                == false);
+        REQUIRE_FALSE(stderr_contains(
+            outcome.captured_stderr, "regression_rule_matched_nothing"));
+    }
+
+    SECTION("CPU-only curated drift remains blocking and GPU partition is skipped") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 4> filter{
+            "--filter", "benchmark=bench_curated",
+            "--filter", "cases=cpu"};
+        REQUIRE(run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other baseline", config_path),
+            make_toy_bench("bench_curated", "curated baseline", config_path))
+                    .exit_code == 0);
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other drift", config_path,
+                           Estimator{}, 2.0),
+            make_toy_bench("bench_curated", "curated drift", config_path,
+                           Estimator{}, 2.0));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(outcome.report.at("regressions").size() == 1);
+        REQUIRE(outcome.report.at("regressions").at(0).at("rule_name")
+                == "curated_cpu_blocking");
+        REQUIRE(outcome.report.at("regressions").at(0).at("blocking")
+                == true);
+        REQUIRE_FALSE(stderr_contains(
+            outcome.captured_stderr, "regression_rule_matched_nothing"));
+    }
+
+    SECTION("fast mode treats slow-only rule partitions as unselected") {
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, config_text);
+        const std::array<std::string, 1> fast{"--fast"};
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{fast},
+            make_toy_bench("bench_other", "fast", config_path),
+            make_toy_bench("bench_curated", "slow", config_path));
+        REQUIRE(outcome.exit_code == 0);
+        REQUIRE(report_benchmark_keys(outcome.report)
+                == std::set<std::string>{"bench_other"});
+        REQUIRE_FALSE(stderr_contains(
+            outcome.captured_stderr, "regression_rule_matched_nothing"));
+    }
+
+    SECTION("filtered-out declaration typos still fail closed") {
+        static constexpr std::string_view typo_rules = R"([
+          {
+            "name":"unknown_include",
+            "benchmarks":["bench_curtaed"],
+            "metric":"sum_value",
+            "aggregate":"sum",
+            "operator":{"compare":"=","tolerance%":0}
+          },
+          {
+            "name":"unknown_exclude",
+            "metric":"sum_value",
+            "aggregate":"sum",
+            "operator":{"compare":"=","tolerance%":0},
+            "exclude_benchmarks":["bench_missing"]
+          },
+          {
+            "name":"unknown_algorithm",
+            "benchmarks":["bench_curated"],
+            "metric":"sum_value",
+            "aggregate":"sum",
+            "operator":{"compare":"=","tolerance%":0},
+            "exclude_algorithms":["tpu"]
+          }
+        ])";
+        const auto typo_config = render_config(
+            std::span<const AlgorithmSpec>{algorithms},
+            std::span<const TestCaseDataSpec>{test_cases},
+            std::span<const BenchmarkSpec>{benches}, typo_rules);
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(report_dir, typo_config);
+        const std::array<std::string, 2> filter{
+            "--filter", "benchmark=bench_other"};
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other", config_path),
+            make_toy_bench("bench_curated", "curated", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "benchmark 'bench_curtaed' is not declared"));
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "exclude_benchmarks entry 'bench_missing'"));
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "exclude_algorithms entry 'tpu'"));
+    }
+
+    SECTION("filtered-out unknown exclude_cases still fails closed") {
+        static constexpr std::string_view unknown_case_rule = R"([{
+          "name":"unknown_test_case",
+          "benchmarks":["bench_curated"],
+          "metric":"sum_value",
+          "aggregate":"sum",
+          "operator":{"compare":"=","tolerance%":0},
+          "exclude_cases":["NOT_DECLARED"]
+        }])";
+        const auto unknown_case_config = render_config(
+            std::span<const AlgorithmSpec>{algorithms},
+            std::span<const TestCaseDataSpec>{test_cases},
+            std::span<const BenchmarkSpec>{benches}, unknown_case_rule);
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(
+            report_dir, unknown_case_config);
+        const std::array<std::string, 2> filter{
+            "--filter", "benchmark=bench_other"};
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other", config_path),
+            make_toy_bench("bench_curated", "curated", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "regression_unknown_test_case"));
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr,
+            "exclude_cases entry 'NOT_DECLARED' is not declared"));
+    }
+
+    SECTION("unfiltered excludes-all remains a semantic error") {
+        static constexpr std::string_view excludes_all_rule = R"([{
+          "name":"impossible_partition",
+          "benchmarks":["bench_curated"],
+          "exclude_benchmarks":["bench_curated"],
+          "metric":"sum_value",
+          "aggregate":"sum",
+          "operator":{"compare":"=","tolerance%":0}
+        }])";
+        const auto excludes_all_config = render_config(
+            std::span<const AlgorithmSpec>{algorithms},
+            std::span<const TestCaseDataSpec>{test_cases},
+            std::span<const BenchmarkSpec>{benches}, excludes_all_rule);
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(
+            report_dir, excludes_all_config);
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{},
+            make_toy_bench("bench_other", "other", config_path),
+            make_toy_bench("bench_curated", "curated", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr,
+            "regression_excludes_all_benchmarks"));
+    }
+
+    SECTION("selected applicable rule with no runtime region still fails closed") {
+        static constexpr std::string_view missing_region_rule = R"([{
+          "name":"missing_region",
+          "benchmarks":["bench_other"],
+          "regions":["never_visited"],
+          "metric":"sum_value",
+          "aggregate":"sum",
+          "operator":{"compare":"=","tolerance%":0}
+        }])";
+        const auto missing_region_config = render_config(
+            std::span<const AlgorithmSpec>{algorithms},
+            std::span<const TestCaseDataSpec>{test_cases},
+            std::span<const BenchmarkSpec>{benches}, missing_region_rule);
+        TempReportDir report_dir;
+        const auto config_path = write_config_file(
+            report_dir, missing_region_config);
+        const std::array<std::string, 2> filter{
+            "--filter", "benchmark=bench_other"};
+        const auto outcome = run_with_args(
+            report_dir, std::span<const std::string>{filter},
+            make_toy_bench("bench_other", "other", config_path),
+            make_toy_bench("bench_curated", "curated", config_path));
+        REQUIRE(outcome.exit_code == 1);
+        REQUIRE(stderr_contains(
+            outcome.captured_stderr, "regression_rule_matched_nothing"));
+    }
+}
+
 TEST_CASE("MCP benchmark/case filters select all nine XXL_HIFI rows only",
           "[bench_framework][filter][xxl-relative]") {
     TestLogSilencer silence_mlogging;
@@ -6696,9 +6984,9 @@ TEST_CASE("GPU historical timing policies keep centers blocking and tails scoped
             != std::string::npos);
 
     const auto& rules = config.at("regression_rules");
-    auto find_rule = [&](std::string_view name) -> const nlohmann::json& {
+    auto find_rule = [&rules](std::string_view name) -> const nlohmann::json& {
         const auto found = std::find_if(rules.begin(), rules.end(),
-            [&](const auto& rule) { return rule.at("name") == name; });
+            [name](const auto& rule) { return rule.at("name") == name; });
         REQUIRE(found != rules.end());
         return *found;
     };

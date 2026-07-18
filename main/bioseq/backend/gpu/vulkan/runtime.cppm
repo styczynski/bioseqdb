@@ -2573,6 +2573,11 @@ static_assert(std::is_standard_layout_v<GenerateUnitsPush>);
 struct RuntimeSketchResult {
     Buffer minimizer_words;
     std::uint64_t count = 0;
+    // Operation-originated lifetime receipt.  A successful roundtrip may hand
+    // its standalone output buffer to the caller only after every shared-arena
+    // backing buffer has been destroyed.  The caller consumes this receipt
+    // before shrinking dispatch admission or reserving exact host storage.
+    bool arena_trimmed_before_return = false;
     bool overflow = false;
 };
 
@@ -12049,10 +12054,28 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     if (!features_.available) {
         throw VulkanRuntimeError("run_phase_c_sketch_roundtrip on unavailable device");
     }
+    GpuArena& arena = phase_c_arena();
+    // A completed minimizer roundtrip returns only a standalone output buffer;
+    // no result aliases the shared arena.  Drop any idle high-water inherited
+    // from an earlier request, then cover every exit/exception path in this
+    // request with the same physical-trim invariant.
+    if (!arena.release_idle_capacity()) {
+        throw VulkanRuntimeError(
+            "phase_c sketch entered with live arena slices");
+    }
+    GpuArenaTrimGuard arena_trim{arena};
     const std::uint32_t bp = params.bp_size;
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
-    if (bp == 0u || w == 0u || k == 0u || bp < k) { result.count = 0; return result; }
+    if (bp == 0u || w == 0u || k == 0u || bp < k) {
+        result.count = 0;
+        if (!arena_trim.release_now()) {
+            throw VulkanRuntimeError(
+                "phase_c sketch empty roundtrip left live arena slices");
+        }
+        result.arena_trimmed_before_return = true;
+        return result;
+    }
     if (query_gate_words.size()
         > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c sketch query gate exceeds uint32 word count");
@@ -12114,7 +12137,6 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     Buffer out_words = create_device_buffer(out_bytes, kPhaseBBufferUsage);
     if (out_words.mapped == nullptr) throw VulkanRuntimeError("phase_c sketch non-unified memory");
 
-    GpuArena& arena = phase_c_arena();
     const std::uint64_t arena_bytes = sat_add(
         memory_plan.arena_scaffold_bytes,
         query_gate_bytes == 0u
@@ -12244,6 +12266,12 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         result.minimizer_words = std::move(out_words);
     }
     arena.rewind(mark);
+    if (!arena_trim.release_now()) {
+        result.minimizer_words.reset();
+        throw VulkanRuntimeError(
+            "phase_c sketch completed with live arena slices");
+    }
+    result.arena_trimmed_before_return = true;
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(pc_sketch-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return result;
