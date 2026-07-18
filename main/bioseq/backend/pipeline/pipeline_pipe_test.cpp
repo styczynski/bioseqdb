@@ -181,77 +181,162 @@ TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device
     source.host_ownership_route = bioseq::gpu::vulkan::
         VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
     source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes =
+        original_capacity * sizeof(Sketch);
     source.arena_trimmed_before_host_materialization = true;
 
-    std::vector<Sketch> adopted;
-    const auto receipt = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
-        adopt_fixed_vulkan_sketch_host_result(
-            std::move(source), adopted);
+    using Owner = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        FixedVulkanTargetHostOwner<Sketch>;
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<Owner>);
+    STATIC_REQUIRE_FALSE(std::is_move_assignable_v<Owner>);
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    const auto& receipt = adopted.adoption;
 
     REQUIRE(receipt.zero_copy_adoption_accepted());
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(receipt.host_permit_released_to_process_footprint);
+    REQUIRE(receipt.retained_host_permit_bytes == 0u);
+    REQUIRE(receipt.device_owner_present_before_adoption);
+    REQUIRE(receipt.device_owner_unique_before_adoption);
     REQUIRE(receipt.source_data == original_data);
     REQUIRE(receipt.adopted_data == original_data);
-    REQUIRE(adopted.data() == original_data);
-    REQUIRE(adopted.capacity() == original_capacity);
-    REQUIRE(adopted.size() == 2u);
+    REQUIRE(receipt.adopted_capacity == original_capacity);
+    REQUIRE(adopted.minimizers.data() == original_data);
+    REQUIRE(adopted.minimizers.capacity() == original_capacity);
+    REQUIRE(adopted.minimizers.size() == 2u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
     REQUIRE(source.host_minimizers.capacity() == 0u);
     REQUIRE(source.device == nullptr);
     REQUIRE(device_lifetime.expired());
     REQUIRE_FALSE(source.host_permit.has_value());
 }
 
+TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
+          "[pipeline][vulkan][sketch][zero-copy][route-selection]") {
+    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using pipe_entry_detail::
+        fixed_vulkan_target_host_adoption_route_selected;
+    constexpr std::uint64_t minimum = pipe_entry_detail::
+        kVulkanFixedHostAdoptionTargetMinimumBp;
+    // Route selection is intentionally independent of emitted-vector size.
+    // An ambiguity-heavy dna5 target can be >=256 MiB yet emit only this
+    // representative small nonzero payload, which must retain its exact permit
+    // if RSS reconciliation is inconclusive.
+    constexpr std::uint64_t sparse_dna5_emitted_bytes =
+        2u * sizeof(MinimapSketchData);
+
+    STATIC_REQUIRE(minimum == (std::uint64_t{256} << 20u));
+    STATIC_REQUIRE(sparse_dna5_emitted_bytes < (std::uint64_t{64} << 10u));
+    STATIC_REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected(
+        /*phase_c_gpu_index=*/false,
+        MinimizerAlgorithmType::VULKAN_MINIMAP_INT,
+        minimum - 1u));
+    STATIC_REQUIRE(fixed_vulkan_target_host_adoption_route_selected(
+        /*phase_c_gpu_index=*/false,
+        MinimizerAlgorithmType::VULKAN_MINIMAP_INT,
+        minimum));
+    STATIC_REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected(
+        /*phase_c_gpu_index=*/true,
+        MinimizerAlgorithmType::VULKAN_MINIMAP_INT,
+        minimum));
+    STATIC_REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected(
+        /*phase_c_gpu_index=*/false,
+        MinimizerAlgorithmType::TWO_STACK_NTHASH,
+        minimum));
+}
+
+TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases device",
+          "[pipeline][vulkan][sketch][zero-copy][lifetime][empty]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+
+    Source source;
+    auto device = std::make_shared<Device>();
+    std::weak_ptr<Device> device_lifetime = device;
+    source.device = std::move(device);
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    const auto& receipt = adopted.adoption;
+
+    REQUIRE(receipt.zero_copy_adoption_accepted());
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(receipt.adopted_size == 0u);
+    REQUIRE(receipt.adopted_capacity == 0u);
+    REQUIRE(receipt.host_capacity_bytes == 0u);
+    REQUIRE(receipt.source_capacity_after_adoption == 0u);
+    REQUIRE(adopted.minimizers.empty());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(source.device == nullptr);
+    REQUIRE(device_lifetime.expired());
+}
+
 TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes",
           "[pipeline][vulkan][sketch][zero-copy][memory-admission][empty]") {
     using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
 
     auto& admission =
         bioseq::parallelism::MemoryAdmissionController::instance();
     const std::uint64_t baseline = admission.reserved_bytes();
-    std::vector<Sketch> source;
-    source.reserve(64u);
-    std::optional<bioseq::parallelism::MemoryPermit> index_permit;
-    bioseq::indexing::MinimizerHashmapFragmentIndex index;
-
-    const auto receipt = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    Source source;
+    source.device = std::make_shared<Device>();
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.arena_trimmed_before_host_materialization = true;
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
-            source,
-            /*target_len=*/1'000u,
-            index,
-            index_permit);
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
 
-    REQUIRE(receipt.accepted());
+    REQUIRE(admitted.accepted());
     REQUIRE(receipt.admitted_position_headroom_bytes == 0u);
     REQUIRE(receipt.admitted_table_headroom_bytes == 0u);
     REQUIRE(receipt.admitted_build_bytes == 0u);
     REQUIRE(receipt.retained_position_bytes == 0u);
     REQUIRE(receipt.retained_table_bytes == 0u);
     REQUIRE(receipt.retained_index_bytes == 0u);
-    REQUIRE(source.capacity() == 0u);
-    REQUIRE(index_permit.has_value());
-    REQUIRE(index_permit->bytes() == 0u);
-    REQUIRE(index.positions.capacity() == 0u);
-    REQUIRE(index.table_allocation_bytes() == 0u);
+    REQUIRE(receipt.retained_index_permit_bytes == 0u);
+    REQUIRE(receipt.transferred_position_footprint_bytes == 0u);
+    REQUIRE_FALSE(
+        receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.every_retained_position_initialized);
+    REQUIRE(receipt.source_capacity_released);
+    REQUIRE(receipt.source_host_permit_cleared_after_consumption);
+    REQUIRE(receipt.source_adoption_cleared_after_consumption);
+    REQUIRE_FALSE(receipt.source_host_permit_retained_during_build);
+    REQUIRE(admitted.index_permit.has_value());
+    REQUIRE(admitted.index_permit->bytes() == 0u);
+    REQUIRE(admitted.index.positions.capacity() == 0u);
+    REQUIRE(admitted.index.table_allocation_bytes() == 0u);
     REQUIRE(admission.reserved_bytes() == baseline);
 
-    index.release_storage();
-    index_permit.reset();
+    admitted.release_storage_before_permit();
     REQUIRE(admission.reserved_bytes() == baseline);
 }
 
-TEST_CASE("real fixed Vulkan target result releases footprint then adopts and builds admitted index",
-          "[pipeline][vulkan][sketch][zero-copy][memory-admission][hardware]") {
-    namespace vk = bioseq::gpu::vulkan;
-    if (!vk::hardware_device_available(vk::Runtime::instance())) {
-        SUCCEED("hardware Vulkan unavailable; real fixed-route handoff skipped");
-        return;
-    }
-
+TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to positions",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][replacement-authority]") {
     using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
-    using PackedSequence =
-        sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-    constexpr std::size_t letter_count = 1'000'000u;
-    constexpr std::size_t window_size = 10u;
-    constexpr std::size_t kmer_size = 15u;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+    using Authority = ::bioseq::simd::HWY_NAMESPACE::pipe::
+        TransientTargetIndexReleaseAuthority;
 
     auto& admission =
         bioseq::parallelism::MemoryAdmissionController::instance();
@@ -265,17 +350,349 @@ TEST_CASE("real fixed Vulkan target result releases footprint then adopts and bu
     admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
         previous_cap,
         bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{64} << 20u)));
+
+    Source source;
+    source.host_minimizers.reserve(2u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u);
+    REQUIRE(source.host_minimizers.size()
+            == source.host_minimizers.capacity());
+    const std::uint64_t source_host_bytes =
+        source.host_minimizers.capacity() * sizeof(Sketch);
+    source.device = std::make_shared<Device>();
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes = source_host_bytes;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    REQUIRE(adopted.ownership_authority_accepted());
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+
+    REQUIRE(admitted.accepted());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE(adopted.adoption.adopted_size == 0u);
+    REQUIRE(adopted.adoption.host_capacity_bytes == 0u);
+    REQUIRE_FALSE(
+        adopted.adoption.host_permit_released_to_process_footprint);
+    REQUIRE(receipt.source_host_capacity_bytes_before_build
+            == source_host_bytes);
+    REQUIRE(receipt.source_footprint_reflected_bytes_before_build
+            >= source_host_bytes);
+    REQUIRE(receipt.source_minimizer_count_before_build == 2u);
+    REQUIRE(receipt.retained_position_count == 2u);
+    REQUIRE(receipt.retained_position_initialized_bytes
+            == receipt.retained_position_bytes);
+    REQUIRE(admitted.index.positions.size()
+            == admitted.index.positions.capacity());
+    REQUIRE(receipt.every_retained_position_initialized);
+    REQUIRE(receipt.source_capacity_released);
+    REQUIRE(receipt.source_adoption_cleared_after_consumption);
+    REQUIRE_FALSE(receipt.source_host_permit_retained_during_build);
+    REQUIRE(receipt.source_host_permit_bytes_before_build == 0u);
+    REQUIRE(receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.transferred_position_footprint_bytes
+            == receipt.retained_position_bytes);
+    REQUIRE(receipt.transferred_position_footprint_bytes
+            == source_host_bytes);
+    REQUIRE(receipt.retained_index_permit_bytes
+            == receipt.retained_table_bytes);
+    REQUIRE(receipt.retained_index_bytes
+            == receipt.retained_index_permit_bytes
+                + receipt.transferred_position_footprint_bytes);
+    REQUIRE(admitted.index_permit->bytes()
+            == receipt.retained_index_permit_bytes);
+    REQUIRE(admission.reserved_bytes()
+            == baseline + receipt.retained_index_permit_bytes);
+    REQUIRE(admitted.index.lookup(7u).size() == 1u);
+    REQUIRE(admitted.index.lookup(9u).size() == 1u);
+
+    Authority authority{
+        .index = &admitted.index,
+        .permit = &*admitted.index_permit,
+        .expected_permit_bytes = receipt.retained_index_permit_bytes,
+        .require_exact_permit_bytes = true,
+    };
+    REQUIRE(authority.accepted());
+    Authority mismatched_authority = authority;
+    ++mismatched_authority.expected_permit_bytes;
+    REQUIRE_FALSE(mismatched_authority.accepted());
+    ::bioseq::simd::HWY_NAMESPACE::pipe::PostSeedOwnedLifetime lifetime{
+        /*seed_users=*/1u,
+        /*owned_gpu_cache=*/nullptr,
+        authority};
+    const auto release = lifetime.complete_seed_user();
+    REQUIRE(release.cpu_index_releases == 1u);
+    REQUIRE(release.cpu_index_permit_releases == 1u);
+    REQUIRE(release.cpu_index_permit_bytes_released
+            == receipt.retained_index_permit_bytes);
+    REQUIRE(release.cpu_index_storage_released_before_permit);
+    REQUIRE(admitted.index.table_empty());
+    REQUIRE(admitted.index.positions.capacity() == 0u);
+    REQUIRE_FALSE(static_cast<bool>(*admitted.index_permit));
+    REQUIRE(admitted.index_permit->bytes() == 0u);
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][replacement-authority][mismatch]") {
+    using WideSketch =
+        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<40u, 15u>;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<WideSketch>;
+    using Device =
+        bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<WideSketch>;
+    STATIC_REQUIRE(sizeof(WideSketch) == 2u * sizeof(std::uint64_t));
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{64} << 20u)));
+
+    Source source;
+    source.host_minimizers.reserve(2u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u);
+    REQUIRE(source.host_minimizers.size()
+            == source.host_minimizers.capacity());
+    const std::uint64_t source_host_bytes =
+        source.host_minimizers.capacity() * sizeof(WideSketch);
+    source.device = std::make_shared<Device>();
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes = source_host_bytes;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+
+    REQUIRE(admitted.accepted());
+    REQUIRE(receipt.source_host_capacity_bytes_before_build
+            == source_host_bytes);
+    REQUIRE(receipt.retained_position_bytes
+            == 2u * sizeof(std::uint64_t));
+    REQUIRE(receipt.retained_position_initialized_bytes
+            == receipt.retained_position_bytes);
+    REQUIRE(admitted.index.positions.size()
+            == admitted.index.positions.capacity());
+    REQUIRE(receipt.source_host_capacity_bytes_before_build
+            != receipt.retained_position_bytes);
+    REQUIRE_FALSE(
+        receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.transferred_position_footprint_bytes == 0u);
+    REQUIRE(receipt.retained_index_permit_bytes
+            == receipt.retained_index_bytes);
+    REQUIRE(admitted.index_permit->bytes()
+            == receipt.retained_index_bytes);
+    REQUIRE(admission.reserved_bytes()
+            == baseline + receipt.retained_index_bytes);
+
+    admitted.release_storage_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through index consumption",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][retained-permit]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+    using IndexOwner = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        VulkanAdmittedTargetIndex;
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<IndexOwner>);
+    STATIC_REQUIRE_FALSE(std::is_move_assignable_v<IndexOwner>);
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{64} << 20u)));
+
+    constexpr std::size_t minimizer_count = 2u;
+    const std::uint64_t planned_host_bytes =
+        minimizer_count * sizeof(Sketch);
+    auto host_permit = admission.try_reserve(planned_host_bytes);
+    REQUIRE(host_permit.has_value());
+    Source source;
+    source.host_permit.emplace(std::move(*host_permit));
+    source.host_minimizers.reserve(minimizer_count);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u);
+    const std::uint64_t exact_host_bytes =
+        source.host_minimizers.capacity() * sizeof(Sketch);
+    REQUIRE(exact_host_bytes <= planned_host_bytes);
+    source.host_permit->shrink_to(exact_host_bytes);
+    const Sketch* const original_data = source.host_minimizers.data();
+    source.device = std::make_shared<Device>();
+    std::weak_ptr<Device> device_lifetime = source.device;
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = false;
+    source.host_footprint_reflected_delta_bytes = 0u;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(adopted.minimizers.data() == original_data);
+    REQUIRE(adopted.host_permit.has_value());
+    REQUIRE(adopted.host_permit->bytes() == exact_host_bytes);
+    REQUIRE(adopted.adoption.retained_host_permit_bytes == exact_host_bytes);
+    REQUIRE_FALSE(
+        adopted.adoption.host_permit_released_to_process_footprint);
+    REQUIRE(device_lifetime.expired());
+    REQUIRE(admission.reserved_bytes() == baseline + exact_host_bytes);
+
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+    REQUIRE(admitted.accepted());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(adopted.adoption.adopted_size == 0u);
+    REQUIRE(adopted.adoption.host_capacity_bytes == 0u);
+    REQUIRE_FALSE(
+        adopted.adoption.host_permit_released_to_process_footprint);
+    REQUIRE(receipt.source_host_permit_retained_during_build);
+    REQUIRE(receipt.source_host_permit_bytes_before_build
+            == exact_host_bytes);
+    REQUIRE(receipt.reserved_bytes_before_index_admission
+            == baseline + exact_host_bytes);
+    REQUIRE(receipt.reserved_bytes_after_index_admission
+            == baseline + exact_host_bytes + receipt.admitted_build_bytes);
+    REQUIRE(receipt.source_capacity_released);
+    REQUIRE(receipt.source_host_permit_cleared_after_consumption);
+    REQUIRE(receipt.source_adoption_cleared_after_consumption);
+    REQUIRE_FALSE(
+        receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.transferred_position_footprint_bytes == 0u);
+    REQUIRE(receipt.retained_index_permit_bytes
+            == receipt.retained_index_bytes);
+    REQUIRE(admission.reserved_bytes()
+            == baseline + receipt.retained_index_bytes);
+    REQUIRE(admitted.index.lookup(7u).size() == 1u);
+    REQUIRE(admitted.index.lookup(9u).size() == 1u);
+
+    admitted.release_storage_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
+          "[pipeline][vulkan][sketch][zero-copy][lifetime][alias]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+
+    Source source;
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.device = std::make_shared<Device>();
+    const auto device_alias = source.device;
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes = sizeof(Sketch);
+    source.arena_trimmed_before_host_materialization = true;
+
+    REQUIRE_THROWS_AS(
+        ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+            adopt_fixed_vulkan_sketch_host_result(std::move(source)),
+        bioseq::gpu::vulkan::VulkanRuntimeError);
+    REQUIRE(device_alias != nullptr);
+}
+
+TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and builds admitted index",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][hardware][dna5]") {
+    namespace vk = bioseq::gpu::vulkan;
+    auto& runtime = vk::Runtime::instance();
+    if (!vk::hardware_device_available(runtime)) {
+        SUCCEED("hardware Vulkan unavailable; real fixed-route handoff skipped");
+        return;
+    }
+
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using PackedSequence =
+        sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    constexpr std::size_t letter_count = 1'000'000u;
+    constexpr std::size_t window_size = 10u;
+    constexpr std::size_t kmer_size = 15u;
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    const std::uint64_t pipeline_cache_metadata_baseline =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
             baseline, std::uint64_t{512} << 20u)));
 
-    std::vector<seq::dna4> letters;
-    letters.reserve(letter_count);
+    seq::dna5 ambiguous{};
+    ambiguous.assign_char('N');
+    std::vector<seq::dna5> letters(letter_count, ambiguous);
+    std::vector<bool> ambiguous_positions(letter_count, true);
+    constexpr std::size_t island_size = 128u;
+    constexpr std::size_t island_stride = 100'000u;
     std::uint64_t lcg = 0x243f6a8885a308d3ULL;
-    for (std::size_t i = 0u; i < letter_count; ++i) {
-        lcg = lcg * 6364136223846793005ULL + 1442695040888963407ULL;
-        seq::dna4 value{};
-        value.assign_rank(
-            static_cast<std::uint8_t>((lcg >> 33u) & 3u));
-        letters.push_back(value);
+    for (std::size_t island_start = 4'096u;
+         island_start + island_size <= letter_count;
+         island_start += island_stride) {
+        for (std::size_t offset = 0u; offset < island_size; ++offset) {
+            lcg = lcg * 6364136223846793005ULL
+                + 1442695040888963407ULL;
+            seq::dna5 value{};
+            constexpr std::array<char, 4> canonical{'A', 'C', 'G', 'T'};
+            value.assign_char(canonical[(lcg >> 33u) & 3u]);
+            letters[island_start + offset] = value;
+            ambiguous_positions[island_start + offset] = false;
+        }
     }
     auto sequence = compact_sequence_range<PackedSequence>(letters);
 
@@ -290,49 +707,97 @@ TEST_CASE("real fixed Vulkan target result releases footprint then adopts and bu
     REQUIRE(result->host_ownership_route
             == vk::VulkanSketchHostOwnershipRoute::
                 fixed_zero_copy_adoption);
-    REQUIRE(result->host_permit_released_to_process_footprint);
-    REQUIRE_FALSE(result->host_permit.has_value());
     REQUIRE(result->arena_trimmed_before_host_materialization);
     REQUIRE_FALSE(result->host_minimizers.empty());
+    REQUIRE(result->host_minimizers.size() < 10'000u);
     const std::uint64_t host_capacity_bytes =
         result->host_minimizers.capacity() * sizeof(Sketch);
-    REQUIRE(result->host_footprint_reflected_delta_bytes
-            >= host_capacity_bytes);
+    const bool footprint_authority =
+        result->host_permit_released_to_process_footprint
+        && !result->host_permit.has_value()
+        && result->host_footprint_reflected_delta_bytes
+            >= host_capacity_bytes;
+    const bool retained_permit_authority =
+        !result->host_permit_released_to_process_footprint
+        && result->host_permit.has_value()
+        && result->host_permit->bytes() == host_capacity_bytes;
+    REQUIRE(footprint_authority != retained_permit_authority);
+    for (const Sketch& minimizer : result->host_minimizers) {
+        const std::size_t last_position =
+            static_cast<std::size_t>(minimizer.last_pos());
+        REQUIRE(last_position + 1u >= kmer_size);
+        const std::size_t first_position =
+            last_position + 1u - kmer_size;
+        REQUIRE(last_position < ambiguous_positions.size());
+        for (std::size_t position = first_position;
+             position <= last_position;
+             ++position) {
+            REQUIRE_FALSE(ambiguous_positions[position]);
+        }
+    }
     const Sketch* const original_data = result->host_minimizers.data();
     std::weak_ptr<vk::VulkanDeviceMinimizerStorage<Sketch>> device_lifetime =
         result->device;
 
-    std::vector<Sketch> adopted;
-    const auto adoption = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
-        adopt_fixed_vulkan_sketch_host_result(
-            std::move(*result), adopted);
-    REQUIRE(adoption.zero_copy_adoption_accepted());
-    REQUIRE(adopted.data() == original_data);
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(*result));
+    REQUIRE(adopted.adoption.zero_copy_adoption_accepted());
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(adopted.minimizers.data() == original_data);
     REQUIRE(device_lifetime.expired());
-    REQUIRE_FALSE(result->host_permit.has_value());
+    // Moving an optional leaves its source engagement unspecified.  If the
+    // retained-permit case leaves an engaged source, its MemoryPermit must be
+    // moved-from and therefore own neither a controller nor any bytes.
+    if (result->host_permit.has_value()) {
+        REQUIRE_FALSE(static_cast<bool>(*result->host_permit));
+        REQUIRE(result->host_permit->bytes() == 0u);
+    }
     REQUIRE(result->host_minimizers.capacity() == 0u);
 
-    std::optional<bioseq::parallelism::MemoryPermit> index_permit;
-    bioseq::indexing::MinimizerHashmapFragmentIndex index;
-    const auto handoff = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
         admit_and_build_fixed_vulkan_target_index(
-            adopted,
-            letter_count,
-            index,
-            index_permit);
-    REQUIRE(handoff.accepted());
-    REQUIRE(adopted.capacity() == 0u);
-    REQUIRE(index_permit.has_value());
-    REQUIRE(index_permit->bytes() == handoff.retained_index_bytes);
+            std::move(adopted), letter_count);
+    const auto& handoff = admitted.receipt;
+    REQUIRE(admitted.accepted());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(admitted.index_permit.has_value());
+    REQUIRE(admitted.index_permit->bytes()
+            == handoff.retained_index_permit_bytes);
     REQUIRE(handoff.retained_position_bytes
-            == index.positions.capacity() * sizeof(std::uint64_t));
+            == admitted.index.positions.capacity() * sizeof(std::uint64_t));
     REQUIRE(handoff.retained_table_bytes
-            == index.table_allocation_bytes());
-    REQUIRE(index.table_peak_allocation_bytes()
+            == admitted.index.table_allocation_bytes());
+    REQUIRE(admitted.index.table_peak_allocation_bytes()
             <= handoff.admitted_table_headroom_bytes);
+    REQUIRE(handoff.retained_index_bytes
+            == handoff.retained_index_permit_bytes
+                + handoff.transferred_position_footprint_bytes);
+    if (footprint_authority) {
+        REQUIRE(handoff.source_footprint_authority_transferred_to_positions);
+        REQUIRE(handoff.transferred_position_footprint_bytes
+                == handoff.retained_position_bytes);
+    } else {
+        REQUIRE_FALSE(
+            handoff.source_footprint_authority_transferred_to_positions);
+        REQUIRE(handoff.transferred_position_footprint_bytes == 0u);
+    }
 
-    index.release_storage();
-    index_permit.reset();
+    admitted.release_storage_before_permit();
+    // This first real sketch may compile and retain Vulkan pipelines.  Their
+    // process-lifetime metadata has its own explicit MemoryPermit and is not
+    // part of the adopted host vector or admitted index.  Prove that the only
+    // reservation surviving this transaction is precisely that cache growth;
+    // an unreturned host/device/index permit would make the equality fail.
+    const std::uint64_t pipeline_cache_metadata_after =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    REQUIRE(pipeline_cache_metadata_after
+            >= pipeline_cache_metadata_baseline);
+    REQUIRE(admission.reserved_bytes()
+            == bioseq::parallelism::saturating_add(
+                baseline,
+                pipeline_cache_metadata_after
+                    - pipeline_cache_metadata_baseline));
 }
 
 TEST_CASE("raw sketch batches grow geometrically and nested query scopes release only their tail",
@@ -5968,7 +6433,8 @@ TEST_CASE("post-seed owned lifetime releases only after the final seed user",
     PostSeedOwnedLifetime lifetime{
         /*seed_users=*/2u,
         /*owned_gpu_cache=*/nullptr,
-        /*owned_cpu_index=*/&index};
+        TransientTargetIndexReleaseAuthority{
+            .index = &index}};
     const auto first = lifetime.complete_seed_user();
     REQUIRE(first.cpu_index_releases == 0u);
     REQUIRE_FALSE(index.table_empty());

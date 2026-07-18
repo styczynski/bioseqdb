@@ -6531,6 +6531,26 @@ struct IndexStage : StageBase<IndexStage<IndexT>, IndexT /* pass-through; downst
     }
 };
 
+/// Release authority for one operation-owned transient CPU target index.
+/// Ordinary transient indexes carry only `index`; the fixed Vulkan handoff
+/// also carries the exact permit that accounts for storage not already
+/// represented by its one-shot process-footprint authority.
+struct TransientTargetIndexReleaseAuthority {
+    bioseq::indexing::MinimizerHashmapFragmentIndex* index = nullptr;
+    bioseq::parallelism::MemoryPermit* permit = nullptr;
+    std::uint64_t expected_permit_bytes = 0u;
+    bool require_exact_permit_bytes = false;
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return index != nullptr
+            && (!require_exact_permit_bytes || permit != nullptr)
+            && (permit == nullptr
+                || static_cast<bool>(*permit)
+                    && (!require_exact_permit_bytes
+                        || permit->bytes() == expected_permit_bytes));
+    }
+};
+
 /// One operation-owned lifetime boundary between seed lookup and chaining.
 /// Borrowed persisted CPU indexes may use it only to retire an invocation-owned
 /// GPU cache; external caches never receive release authority. Every successful
@@ -6543,16 +6563,19 @@ struct PostSeedOwnedLifetime {
         std::uint64_t gpu_resident_bytes_released = 0;
         std::uint64_t cpu_index_releases = 0;
         std::uint64_t cpu_position_bytes_released = 0;
+        std::uint64_t cpu_index_permit_releases = 0;
+        std::uint64_t cpu_index_permit_bytes_released = 0;
+        bool cpu_index_storage_released_before_permit = false;
     };
 
     std::atomic<std::size_t> remaining_seed_users{0};
     bioseq::indexing::GpuMinimizerIndexCache* owned_gpu_cache = nullptr;
-    bioseq::indexing::MinimizerHashmapFragmentIndex* owned_cpu_index = nullptr;
+    TransientTargetIndexReleaseAuthority owned_cpu_index{};
 
     PostSeedOwnedLifetime(
             std::size_t seed_users,
             bioseq::indexing::GpuMinimizerIndexCache* gpu_cache,
-            bioseq::indexing::MinimizerHashmapFragmentIndex* cpu_index) noexcept
+            TransientTargetIndexReleaseAuthority cpu_index) noexcept
         : remaining_seed_users(seed_users),
           owned_gpu_cache(gpu_cache),
           owned_cpu_index(cpu_index) {}
@@ -6577,16 +6600,35 @@ struct PostSeedOwnedLifetime {
             proof.gpu_cache_evictions =
                 proof.gpu_resident_bytes_released != 0u ? 1u : 0u;
         }
-        if (owned_cpu_index != nullptr) {
+        if (owned_cpu_index.index != nullptr) {
+            if (!owned_cpu_index.accepted()) {
+                bioseq_log<ERR>(
+                    "post-seed lifetime has invalid CPU index release authority");
+                std::abort();
+            }
             const bool had_resident_storage =
-                !owned_cpu_index->table_empty()
-                || owned_cpu_index->positions.capacity() != 0u;
+                !owned_cpu_index.index->table_empty()
+                || owned_cpu_index.index->positions.capacity() != 0u;
             proof.cpu_position_bytes_released =
                 bioseq::parallelism::saturating_mul(
-                    owned_cpu_index->positions.capacity(),
+                    owned_cpu_index.index->positions.capacity(),
                     sizeof(std::uint64_t));
-            owned_cpu_index->release_storage();
+            owned_cpu_index.index->release_storage();
             proof.cpu_index_releases = had_resident_storage ? 1u : 0u;
+            if (owned_cpu_index.permit != nullptr) {
+                if (!owned_cpu_index.index->table_empty()
+                    || owned_cpu_index.index->positions.capacity() != 0u) {
+                    bioseq_log<ERR>(
+                        "post-seed CPU index permit release preceded storage");
+                    std::abort();
+                }
+                proof.cpu_index_storage_released_before_permit = true;
+                proof.cpu_index_permit_bytes_released =
+                    owned_cpu_index.permit->bytes();
+                proof.cpu_index_permit_releases =
+                    static_cast<bool>(*owned_cpu_index.permit) ? 1u : 0u;
+                owned_cpu_index.permit->release();
+            }
         }
         return proof;
     }
@@ -8652,8 +8694,8 @@ template <is_constexpr_aligner_params Cep,
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false,
-    bioseq::indexing::MinimizerHashmapFragmentIndex*
-        transient_target_index_owner = nullptr)
+    TransientTargetIndexReleaseAuthority
+        transient_target_index_owner = {})
 {
     std::optional<context::context>                 owned_context;
     std::optional<context::installed_context_scope> install;
@@ -8812,7 +8854,8 @@ template <is_constexpr_aligner_params Cep,
     }
 
     std::optional<PostSeedOwnedLifetime> post_seed_owned_lifetime;
-    if (owned_gpu_index_cache || transient_target_index_owner != nullptr) {
+    if (owned_gpu_index_cache
+        || transient_target_index_owner.index != nullptr) {
         // CPU-index release authority is supplied only by `minimap2_port`,
         // which owns that transient value. GPU-cache release authority is
         // independent: even a borrowed persisted CPU index may use and then
@@ -9467,8 +9510,8 @@ struct pipeline_run_leaf {
         bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache,
         bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity,
         bool allow_gpu_target_index_build,
-        bioseq::indexing::MinimizerHashmapFragmentIndex*
-            transient_target_index_owner = nullptr)
+        TransientTargetIndexReleaseAuthority
+            transient_target_index_owner = {})
     {
         using SpecCep     = ConstexprAlignerParams<10u, K, L>;
         #if BIOSEQ_OPTTIMIZATION_LEVEL <= 2
@@ -9638,8 +9681,8 @@ MatchResultCollection dispatch_pipeline(
     bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache = nullptr,
     bioseq::indexing::GpuIndexCacheIdentity gpu_index_identity = {},
     bool allow_gpu_target_index_build = false,
-    bioseq::indexing::MinimizerHashmapFragmentIndex*
-        transient_target_index_owner = nullptr)
+    TransientTargetIndexReleaseAuthority
+        transient_target_index_owner = {})
 {
     using Traits = detail::pipeline_run_traits<EP, QR, TR, MinimizerT, IndexT, Scanner>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order so the L step (per-K) can
@@ -9710,6 +9753,145 @@ using bioseq::indexing::MinimizerSeedIndex;
 
 namespace pipe_entry_detail {
 
+// Restrict fixed-allocation adoption to mmap-scale targets.  Within this route,
+// a sparse result whose allocator pages were already resident retains its exact
+// permit; query and ordinary small-target sketches keep the collector route.
+inline constexpr std::uint64_t
+    kVulkanFixedHostAdoptionTargetMinimumBp = std::uint64_t{256} << 20u;
+
+/// Select the fixed host-ownership transaction only for a large target sketch.
+/// Query sketching intentionally never calls this target-only selector and
+/// therefore remains on the established collector-compatible Vulkan route.
+[[nodiscard]] constexpr bool
+fixed_vulkan_target_host_adoption_route_selected(
+        bool phase_c_gpu_index,
+        MinimizerAlgorithmType minimizer_algorithm,
+        std::uint64_t target_bp) noexcept {
+    return !phase_c_gpu_index
+        && minimizer_algorithm
+            == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
+        && target_bp >= kVulkanFixedHostAdoptionTargetMinimumBp;
+}
+
+/// Evidence carried with the fixed Vulkan target host allocation.  The host
+/// allocation has exactly one accounting authority: either its fully-touched
+/// bytes were reconciled into process footprint and the permit was released,
+/// or an exact permit remains attached to the allocation.  Empty output is the
+/// footprint-authoritative zero-byte case.
+template <class MinimizerT>
+struct VulkanSketchHostAdoptionReceipt {
+    const MinimizerT* source_data = nullptr;
+    const MinimizerT* adopted_data = nullptr;
+    std::size_t adopted_size = 0u;
+    std::size_t adopted_capacity = 0u;
+    std::size_t source_capacity_after_adoption = 0u;
+    std::uint64_t host_capacity_bytes = 0u;
+    std::uint64_t retained_host_permit_bytes = 0u;
+    std::uint64_t host_footprint_reflected_delta_bytes = 0u;
+    std::uint64_t device_allocation_bytes_released = 0u;
+    bool host_permit_released_to_process_footprint = false;
+    bool device_owner_present_before_adoption = false;
+    bool device_owner_unique_before_adoption = false;
+    bool device_released_before_return = false;
+    bool arena_trimmed_before_adoption = false;
+    bioseq::gpu::vulkan::VulkanSketchDispatchToken dispatch_token{};
+
+    [[nodiscard]] bool zero_copy_adoption_accepted() const noexcept {
+        const std::uint64_t expected_capacity_bytes =
+            bioseq::parallelism::saturating_mul(
+                static_cast<std::uint64_t>(adopted_capacity),
+                static_cast<std::uint64_t>(sizeof(MinimizerT)));
+        const bool allocation_identity_accepted = adopted_size == 0u
+            ? adopted_capacity == 0u && host_capacity_bytes == 0u
+            : source_data == adopted_data
+                && adopted_capacity == adopted_size
+                && host_capacity_bytes == expected_capacity_bytes;
+        const bool footprint_authority =
+            host_permit_released_to_process_footprint
+            && retained_host_permit_bytes == 0u
+            && (host_capacity_bytes == 0u
+                || host_footprint_reflected_delta_bytes
+                    >= host_capacity_bytes);
+        const bool retained_permit_authority =
+            !host_permit_released_to_process_footprint
+            && host_capacity_bytes != 0u
+            && retained_host_permit_bytes == host_capacity_bytes;
+        return allocation_identity_accepted
+            && expected_capacity_bytes
+                != (std::numeric_limits<std::uint64_t>::max)()
+            && source_capacity_after_adoption == 0u
+            && footprint_authority != retained_permit_authority
+            && device_owner_present_before_adoption
+            && device_owner_unique_before_adoption
+            && device_released_before_return
+            && arena_trimmed_before_adoption
+            && dispatch_token.accepted();
+    }
+};
+
+/// Return-by-value lifetime owner for an adopted fixed Vulkan target sketch.
+/// The permit is declared before the vector so normal reverse destruction frees
+/// the allocation before returning its reservation.  Move assignment is
+/// intentionally unavailable: memberwise assignment would release an existing
+/// destination permit before freeing its destination vector.
+template <class MinimizerT>
+struct FixedVulkanTargetHostOwner {
+    std::optional<bioseq::parallelism::MemoryPermit> host_permit;
+    std::vector<MinimizerT> minimizers;
+    VulkanSketchHostAdoptionReceipt<MinimizerT> adoption{};
+
+    FixedVulkanTargetHostOwner() = default;
+    FixedVulkanTargetHostOwner(const FixedVulkanTargetHostOwner&) = delete;
+    FixedVulkanTargetHostOwner& operator=(
+        const FixedVulkanTargetHostOwner&) = delete;
+    FixedVulkanTargetHostOwner& operator=(
+        FixedVulkanTargetHostOwner&&) = delete;
+
+    FixedVulkanTargetHostOwner(
+            FixedVulkanTargetHostOwner&& other) noexcept {
+        // Swap the allocation while the source permit is still live, then move
+        // its authority.  The destination is newly constructed and empty.
+        minimizers.swap(other.minimizers);
+        adoption = other.adoption;
+        other.adoption = {};
+        if (other.host_permit.has_value()) {
+            host_permit.emplace(std::move(*other.host_permit));
+        }
+        other.host_permit.reset();
+    }
+
+    [[nodiscard]] bool ownership_authority_accepted() const noexcept {
+        const bool valid_permit_present = host_permit.has_value()
+            && static_cast<bool>(*host_permit);
+        const bool footprint_authority =
+            adoption.host_permit_released_to_process_footprint
+            && !host_permit.has_value();
+        const bool retained_permit_authority =
+            !adoption.host_permit_released_to_process_footprint
+            && valid_permit_present
+            && host_permit->bytes() == adoption.host_capacity_bytes
+            && host_permit->bytes()
+                == adoption.retained_host_permit_bytes;
+        const bool allocation_matches_receipt =
+            minimizers.size() == adoption.adopted_size
+            && minimizers.capacity() == adoption.adopted_capacity
+            && (minimizers.empty()
+                || minimizers.data() == adoption.adopted_data);
+        return adoption.zero_copy_adoption_accepted()
+            && allocation_matches_receipt
+            && footprint_authority != retained_permit_authority;
+    }
+
+    void release_consumed_host_permit() {
+        if (minimizers.capacity() != 0u) {
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "fixed Vulkan host permit release preceded vector "
+                "deallocation"};
+        }
+        host_permit.reset();
+    }
+};
+
 /// Exact accounting returned by the fixed Vulkan host-vector -> CPU index
 /// handoff.  Keeping the transaction in one helper lets tests exercise the
 /// same reserve/build/validate path used by `minimap2_port` instead of merely
@@ -9721,34 +9903,133 @@ struct VulkanTargetIndexHandoffReceipt {
     std::uint64_t retained_position_bytes = 0u;
     std::uint64_t retained_table_bytes = 0u;
     std::uint64_t retained_index_bytes = 0u;
+    std::uint64_t retained_index_permit_bytes = 0u;
+    std::uint64_t transferred_position_footprint_bytes = 0u;
+    std::uint64_t source_host_capacity_bytes_before_build = 0u;
+    std::uint64_t source_footprint_reflected_bytes_before_build = 0u;
+    std::uint64_t source_minimizer_count_before_build = 0u;
+    std::uint64_t retained_position_count = 0u;
+    std::uint64_t retained_position_initialized_bytes = 0u;
+    std::uint64_t source_host_permit_bytes_before_build = 0u;
+    std::uint64_t reserved_bytes_before_index_admission = 0u;
+    std::uint64_t reserved_bytes_after_index_admission = 0u;
+    bool source_host_permit_retained_during_build = false;
+    bool source_footprint_authority_transferred_to_positions = false;
+    bool every_retained_position_initialized = false;
     bool source_capacity_released = false;
+    bool source_host_permit_cleared_after_consumption = false;
+    bool source_adoption_cleared_after_consumption = false;
 
     [[nodiscard]] bool accepted() const noexcept {
         return source_capacity_released
+            && source_host_permit_cleared_after_consumption
+            && source_adoption_cleared_after_consumption
             && retained_position_bytes
                 <= admitted_position_headroom_bytes
             && retained_table_bytes <= admitted_table_headroom_bytes
             && retained_index_bytes
                 == bioseq::parallelism::saturating_add(
-                    retained_position_bytes, retained_table_bytes);
+                    retained_position_bytes, retained_table_bytes)
+            && retained_index_bytes
+                == bioseq::parallelism::saturating_add(
+                    retained_index_permit_bytes,
+                    transferred_position_footprint_bytes)
+            && transferred_position_footprint_bytes
+                <= retained_position_bytes
+            && (transferred_position_footprint_bytes == 0u
+                || transferred_position_footprint_bytes
+                    == retained_position_bytes)
+            && every_retained_position_initialized
+            && retained_position_count
+                == source_minimizer_count_before_build
+            && retained_position_initialized_bytes
+                == retained_position_bytes
+            && retained_position_initialized_bytes
+                == bioseq::parallelism::saturating_mul(
+                    retained_position_count,
+                    static_cast<std::uint64_t>(sizeof(std::uint64_t)))
+            && (!source_footprint_authority_transferred_to_positions
+                ? transferred_position_footprint_bytes == 0u
+                : transferred_position_footprint_bytes != 0u
+                    && !source_host_permit_retained_during_build
+                    && source_host_permit_bytes_before_build == 0u
+                    && source_host_capacity_bytes_before_build
+                        == transferred_position_footprint_bytes
+                    && source_footprint_reflected_bytes_before_build
+                        >= source_host_capacity_bytes_before_build);
+    }
+};
+
+/// Owning return value for the strict fixed-Vulkan target-index handoff.  The
+/// index permit precedes the index so reverse destruction releases table and
+/// position storage first.  Move assignment is deleted to rule out releasing a
+/// destination permit before its previous index storage is deallocated.
+struct VulkanAdmittedTargetIndex {
+    std::optional<bioseq::parallelism::MemoryPermit> index_permit;
+    MinimizerHashmapFragmentIndex index;
+    VulkanTargetIndexHandoffReceipt receipt{};
+
+    VulkanAdmittedTargetIndex() = default;
+    VulkanAdmittedTargetIndex(const VulkanAdmittedTargetIndex&) = delete;
+    VulkanAdmittedTargetIndex& operator=(
+        const VulkanAdmittedTargetIndex&) = delete;
+    VulkanAdmittedTargetIndex& operator=(VulkanAdmittedTargetIndex&&) = delete;
+
+    VulkanAdmittedTargetIndex(VulkanAdmittedTargetIndex&& other) noexcept
+        : index(std::move(other.index)),
+          receipt(other.receipt) {
+        // Move storage while the source reservation remains authoritative,
+        // then transfer the reservation into this new empty owner.
+        if (other.index_permit.has_value()) {
+            index_permit.emplace(std::move(*other.index_permit));
+        }
+        other.index_permit.reset();
+        other.receipt = {};
+    }
+
+    [[nodiscard]] bool accepted() const noexcept {
+        return receipt.accepted()
+            && index_permit.has_value()
+            && static_cast<bool>(*index_permit)
+            && index_permit->bytes()
+                == receipt.retained_index_permit_bytes;
+    }
+
+    void release_storage_before_permit() noexcept {
+        index.release_storage();
+        index_permit.reset();
     }
 };
 
 template <class MinimizerT>
-[[nodiscard]] VulkanTargetIndexHandoffReceipt
+[[nodiscard]] VulkanAdmittedTargetIndex
 admit_and_build_fixed_vulkan_target_index(
-    std::vector<MinimizerT>& target_minimizers,
-    sequence_size_t target_len,
-    MinimizerHashmapFragmentIndex& target_index,
-    std::optional<bioseq::parallelism::MemoryPermit>& target_index_permit)
+    FixedVulkanTargetHostOwner<MinimizerT> target_host,
+    sequence_size_t target_len)
 {
-    if (target_index_permit.has_value()) {
+    if (!target_host.ownership_authority_accepted()) {
         throw bioseq::gpu::vulkan::VulkanRuntimeError{
-            "Vulkan zero-copy target-index permit was pre-owned"};
+            "Vulkan zero-copy target-index handoff lacks host ownership "
+            "authority"};
     }
+    const bool source_host_permit_retained_during_build =
+        target_host.host_permit.has_value();
+    const bool source_footprint_authority_before_build =
+        target_host.adoption.host_permit_released_to_process_footprint
+        && !target_host.host_permit.has_value();
+    const std::uint64_t source_host_capacity_bytes_before_build =
+        target_host.adoption.host_capacity_bytes;
+    const std::uint64_t source_footprint_reflected_bytes_before_build =
+        target_host.adoption.host_footprint_reflected_delta_bytes;
+    const std::uint64_t source_minimizer_count_before_build =
+        static_cast<std::uint64_t>(target_host.minimizers.size());
+    const std::uint64_t source_host_permit_bytes_before_build =
+        source_host_permit_retained_during_build
+            ? target_host.host_permit->bytes()
+            : 0u;
     const std::uint64_t position_payload_bytes =
         bioseq::parallelism::saturating_mul(
-            static_cast<std::uint64_t>(target_minimizers.size()),
+            static_cast<std::uint64_t>(target_host.minimizers.size()),
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
     // Empty sketches retain neither positions nor a table.  Do not turn the
     // generic allocator slop allowance into a fictitious 128 KiB reservation.
@@ -9760,7 +10041,7 @@ admit_and_build_fixed_vulkan_target_index(
                     position_payload_bytes);
     const bioseq::indexing::MinimizerHashmapTableAllocationPlan table_plan =
         bioseq::indexing::minimizer_hashmap_table_allocation_plan(
-            static_cast<std::uint64_t>(target_minimizers.size()));
+            static_cast<std::uint64_t>(target_host.minimizers.size()));
     const std::uint64_t admitted_table_headroom_bytes = !table_plan.valid
         ? (std::numeric_limits<std::uint64_t>::max)()
         : table_plan.allocation_bytes == 0u
@@ -9784,9 +10065,24 @@ admit_and_build_fixed_vulkan_target_index(
             "Vulkan zero-copy target-index handoff has invalid "
             "capacity accounting"};
     }
+    VulkanAdmittedTargetIndex admitted_index;
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_bytes_before_index_admission =
+        admission.reserved_bytes();
+    if (source_host_permit_retained_during_build) {
+        // This deliberately counts the source reservation even if some reused
+        // allocator pages are visible in RSS.  The conservative overlap can
+        // deny a medium sparse result, but it never over-admits the real
+        // host-vector + positions + one-shot FOA-table build peak.
+        bioseq_log<DBG>(
+            "[vulkan sketch] strict target-index handoff keeps sparse host "
+            "permit through build: host={} index_peak={}",
+            source_host_permit_bytes_before_build,
+            build_peak_bytes);
+    }
     bioseq::parallelism::MemoryAdmissionFailure failure{};
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-        .try_reserve(build_peak_bytes, &failure);
+    auto permit = admission.try_reserve(build_peak_bytes, &failure);
     if (!permit.has_value()) {
         bioseq_log<ERR>(
             "[vulkan sketch] strict target-index handoff admission "
@@ -9801,23 +10097,35 @@ admit_and_build_fixed_vulkan_target_index(
         throw bioseq::gpu::vulkan::VulkanRuntimeError{
             "Vulkan zero-copy target-index handoff admission denied"};
     }
-    target_index_permit = std::move(*permit);
-    target_index.build_consuming_full_table(
-        std::move(target_minimizers), target_len);
+    admitted_index.index_permit.emplace(std::move(*permit));
+    const std::uint64_t reserved_bytes_after_index_admission =
+        admission.reserved_bytes();
+    admitted_index.index.build_consuming_full_table(
+        std::move(target_host.minimizers), target_len);
     const std::uint64_t retained_position_bytes =
         bioseq::parallelism::saturating_mul(
-            static_cast<std::uint64_t>(target_index.positions.capacity()),
+            static_cast<std::uint64_t>(
+                admitted_index.index.positions.capacity()),
             static_cast<std::uint64_t>(sizeof(std::uint64_t)));
     const std::uint64_t retained_table_bytes =
-        target_index.table_allocation_bytes();
+        admitted_index.index.table_allocation_bytes();
+    const std::uint64_t retained_position_count =
+        static_cast<std::uint64_t>(admitted_index.index.positions.size());
+    const std::uint64_t retained_position_initialized_bytes =
+        bioseq::parallelism::saturating_mul(
+            retained_position_count,
+            static_cast<std::uint64_t>(sizeof(std::uint64_t)));
     const std::uint64_t retained_index_bytes =
         bioseq::parallelism::saturating_add(
             retained_position_bytes, retained_table_bytes);
-    if (target_minimizers.capacity() != 0u
+    if (target_host.minimizers.capacity() != 0u
         || retained_position_bytes
             == (std::numeric_limits<std::uint64_t>::max)()
+        || retained_position_initialized_bytes
+            == (std::numeric_limits<std::uint64_t>::max)()
         || retained_position_bytes > admitted_position_headroom_bytes
-        || target_index.table_peak_allocation_bytes()
+        || retained_position_count != source_minimizer_count_before_build
+        || admitted_index.index.table_peak_allocation_bytes()
             > admitted_table_headroom_bytes
         || retained_table_bytes != table_plan.allocation_bytes
         || retained_index_bytes
@@ -9826,8 +10134,63 @@ admit_and_build_fixed_vulkan_target_index(
             "Vulkan zero-copy target-index build exceeded admitted "
             "host capacity"};
     }
-    target_index_permit->shrink_to(retained_index_bytes);
-    return VulkanTargetIndexHandoffReceipt{
+    // The source allocation is gone now and only now may its retained permit
+    // be returned.  On every earlier throw the by-value host owner unwinds its
+    // vector before its permit.
+    target_host.release_consumed_host_permit();
+    const bool source_host_permit_cleared_after_consumption =
+        !target_host.host_permit.has_value();
+    // Exact replacement accounting is deliberately all-or-nothing.  The
+    // footprint route may transfer its one-use authority only after every
+    // position is initialized and the source allocation is gone, and only
+    // when the replacement has exactly the same nonzero byte extent.  Any
+    // mismatch discards the old authority and retains the full index permit.
+    const bool exact_position_footprint_replacement =
+        source_footprint_authority_before_build
+        && source_host_capacity_bytes_before_build != 0u
+        && source_footprint_reflected_bytes_before_build
+            >= source_host_capacity_bytes_before_build
+        && retained_position_count == source_minimizer_count_before_build
+        && retained_position_initialized_bytes == retained_position_bytes
+        && target_host.minimizers.capacity() == 0u
+        && source_host_capacity_bytes_before_build
+            == retained_position_bytes;
+    const std::uint64_t transferred_position_footprint_bytes =
+        exact_position_footprint_replacement
+            ? retained_position_bytes
+            : 0u;
+    const std::uint64_t retained_index_permit_bytes =
+        retained_index_bytes - transferred_position_footprint_bytes;
+    bioseq_log<INF>(
+        "[vulkan sketch] strict target-index replacement authority: "
+        "source_authority={} source_capacity={} source_reflected={} "
+        "source_permit={} source_count={} position_count={} "
+        "position_initialized={} position_capacity={} exact_replacement={} "
+        "transferred_positions={} retained_permit={} retained_total={}",
+        source_footprint_authority_before_build
+            ? "process_footprint"
+            : source_host_permit_retained_during_build
+                ? "retained_permit"
+                : "invalid",
+        source_host_capacity_bytes_before_build,
+        source_footprint_reflected_bytes_before_build,
+        source_host_permit_bytes_before_build,
+        source_minimizer_count_before_build,
+        retained_position_count,
+        retained_position_initialized_bytes,
+        retained_position_bytes,
+        exact_position_footprint_replacement,
+        transferred_position_footprint_bytes,
+        retained_index_permit_bytes,
+        retained_index_bytes);
+    target_host.adoption = {};
+    const bool source_adoption_cleared_after_consumption =
+        target_host.adoption.adopted_size == 0u
+        && target_host.adoption.host_capacity_bytes == 0u
+        && !target_host.adoption.
+            host_permit_released_to_process_footprint;
+    admitted_index.index_permit->shrink_to(retained_index_permit_bytes);
+    admitted_index.receipt = VulkanTargetIndexHandoffReceipt{
         .admitted_position_headroom_bytes =
             admitted_position_headroom_bytes,
         .admitted_table_headroom_bytes = admitted_table_headroom_bytes,
@@ -9835,8 +10198,44 @@ admit_and_build_fixed_vulkan_target_index(
         .retained_position_bytes = retained_position_bytes,
         .retained_table_bytes = retained_table_bytes,
         .retained_index_bytes = retained_index_bytes,
-        .source_capacity_released = target_minimizers.capacity() == 0u,
+        .retained_index_permit_bytes = retained_index_permit_bytes,
+        .transferred_position_footprint_bytes =
+            transferred_position_footprint_bytes,
+        .source_host_capacity_bytes_before_build =
+            source_host_capacity_bytes_before_build,
+        .source_footprint_reflected_bytes_before_build =
+            source_footprint_reflected_bytes_before_build,
+        .source_minimizer_count_before_build =
+            source_minimizer_count_before_build,
+        .retained_position_count = retained_position_count,
+        .retained_position_initialized_bytes =
+            retained_position_initialized_bytes,
+        .source_host_permit_bytes_before_build =
+            source_host_permit_bytes_before_build,
+        .reserved_bytes_before_index_admission =
+            reserved_bytes_before_index_admission,
+        .reserved_bytes_after_index_admission =
+            reserved_bytes_after_index_admission,
+        .source_host_permit_retained_during_build =
+            source_host_permit_retained_during_build,
+        .source_footprint_authority_transferred_to_positions =
+            exact_position_footprint_replacement,
+        .every_retained_position_initialized =
+            retained_position_count == source_minimizer_count_before_build
+            && retained_position_initialized_bytes
+                == retained_position_bytes,
+        .source_capacity_released =
+            target_host.minimizers.capacity() == 0u,
+        .source_host_permit_cleared_after_consumption =
+            source_host_permit_cleared_after_consumption,
+        .source_adoption_cleared_after_consumption =
+            source_adoption_cleared_after_consumption,
     };
+    if (!admitted_index.accepted()) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            "Vulkan zero-copy target-index owning receipt was rejected"};
+    }
+    return admitted_index;
 }
 
 } // namespace pipe_entry_detail
@@ -9919,9 +10318,7 @@ template <class MinimizerT,
     const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
     const std::vector<MinimizerT>& query_minimizers,
     std::vector<MinimizerT> target_minimizers,
-    const Minimap2Params& params = Minimap2Params{},
-    std::optional<bioseq::parallelism::MemoryPermit>*
-        target_index_permit = nullptr)
+    const Minimap2Params& params = Minimap2Params{})
 {
     static const auto* _desc =
         bioseq::instr::register_region_static("minimap2_port");
@@ -9935,17 +10332,8 @@ template <class MinimizerT,
     const bool phase_c_gpu_index =
         ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
     if (!phase_c_gpu_index) {
-        if (target_index_permit != nullptr) {
-            (void)pipe_entry_detail::
-                admit_and_build_fixed_vulkan_target_index(
-                    target_minimizers,
-                    target_len,
-                    target_index,
-                    *target_index_permit);
-        } else {
-            target_index.build_consuming(
-                std::move(target_minimizers), target_len);
-        }
+        target_index.build_consuming(
+            std::move(target_minimizers), target_len);
     } else {
         std::vector<MinimizerT>{}.swap(target_minimizers);
     }
@@ -9957,10 +10345,74 @@ template <class MinimizerT,
             QueryRange, TargetRange, MinimizerT,
             MinimizerHashmapFragmentIndex, Scanner>(
                 query_seq, target_seq, query_minimizers, target_index, params,
-                nullptr, {}, phase_c_gpu_index, &target_index);
+                nullptr, {}, phase_c_gpu_index,
+                ::bioseq::simd::HWY_NAMESPACE::pipe::
+                    TransientTargetIndexReleaseAuthority{
+                        .index = &target_index});
 }
 
 namespace pipe_entry_detail {
+
+/// Fixed Vulkan target handoff with a non-escapable local admission lifetime.
+/// The permit is declared before the transient index, so reverse destruction
+/// always frees table/position storage before returning the reservation.  A
+/// separate entry avoids a nullable output parameter on the legacy public
+/// `minimap2_port` shape and prevents ordinary callers from accidentally
+/// selecting exact-allocation accounting without ownership authority.
+template <class MinimizerT,
+          supports_compact_sequence_range QueryRange,
+          supports_compact_sequence_range TargetRange,
+          class Scanner = bioseq::storage::sequence_scanner_none<
+              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+[[nodiscard]] MatchResultCollection
+minimap2_port_with_fixed_vulkan_target_handoff(
+    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
+    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    const std::vector<MinimizerT>& query_minimizers,
+    FixedVulkanTargetHostOwner<MinimizerT> target_host,
+    const Minimap2Params& params)
+{
+    if (::bioseq::simd::HWY_NAMESPACE::pipe::
+            phase_c_index_build_active(params)) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            "fixed Vulkan host target handoff cannot own a Phase-C index"};
+    }
+
+    static const auto* _desc =
+        bioseq::instr::register_region_static("minimap2_port");
+    auto _scope = bioseq::instr::region(_desc);
+    const sequence_size_t target_len = target_seq.bp_size();
+    VulkanAdmittedTargetIndex target_index =
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(target_host), target_len);
+    if (!target_index.accepted()) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            "fixed Vulkan target-index handoff receipt was rejected"};
+    }
+
+    static const auto* _with_index_desc =
+        bioseq::instr::register_region_static("minimap2_port_with_index");
+    auto _with_index_scope = bioseq::instr::region(_with_index_desc);
+    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
+        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
+            QueryRange, TargetRange, MinimizerT,
+            MinimizerHashmapFragmentIndex, Scanner>(
+                query_seq,
+                target_seq,
+                query_minimizers,
+                target_index.index,
+                params,
+                nullptr,
+                {},
+                /*allow_gpu_target_index_build=*/false,
+                ::bioseq::simd::HWY_NAMESPACE::pipe::
+                    TransientTargetIndexReleaseAuthority{
+                        .index = &target_index.index,
+                        .permit = &*target_index.index_permit,
+                        .expected_permit_bytes =
+                            target_index.receipt.retained_index_permit_bytes,
+                        .require_exact_permit_bytes = true});
+}
 
 // =============================================================================
 // DOC0256 §5.10.4 / §6.3 — sketch leaf and helpers
@@ -10004,40 +10456,16 @@ struct MinimizerSketchExecutionProof {
     }
 };
 
-/// Receipt for the only route allowed to use fixed-size Vulkan host-result
-/// admission.  It proves allocation adoption rather than record copying and
-/// proves that the much larger device result no longer survives into CPU
-/// target-index construction.
+/// Transfer a fixed Vulkan host vector and whichever one accounting authority
+/// it owns into a single return value.  Dense vectors normally arrive with a
+/// footprint reconciliation and no permit.  Sparse non-empty vectors may carry
+/// their exact permit because allocator-page reuse made the RSS delta
+/// inconclusive.  Device ownership must be unique and is destroyed here before
+/// any later CPU-index admission can begin.
 template <class MinimizerT>
-struct VulkanSketchHostAdoptionReceipt {
-    const MinimizerT* source_data = nullptr;
-    const MinimizerT* adopted_data = nullptr;
-    std::size_t adopted_size = 0u;
-    std::size_t source_capacity_after_adoption = 0u;
-    std::uint64_t host_capacity_bytes = 0u;
-    std::uint64_t device_allocation_bytes_released = 0u;
-    bool device_released_before_return = false;
-    bioseq::gpu::vulkan::VulkanSketchDispatchToken dispatch_token{};
-
-    [[nodiscard]] bool zero_copy_adoption_accepted() const noexcept {
-        return source_data == adopted_data
-            && source_capacity_after_adoption == 0u
-            && device_released_before_return
-            && dispatch_token.accepted();
-    }
-};
-
-/// Transfer a footprint-reconciled Vulkan host vector into its final owner.
-/// Its temporary allocation permit has already been released by the serialized
-/// materialization transaction; subsequent admission therefore observes this
-/// vector through live process RSS. The separate destination permit remains
-/// empty until CPU index storage is admitted after sort/count. The device owner
-/// is dropped here, before that admission sample.
-template <class MinimizerT>
-[[nodiscard]] VulkanSketchHostAdoptionReceipt<MinimizerT>
+[[nodiscard]] FixedVulkanTargetHostOwner<MinimizerT>
 adopt_fixed_vulkan_sketch_host_result(
-    bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT>&& source,
-    std::vector<MinimizerT>& destination)
+    bioseq::gpu::vulkan::VulkanSketchResult<MinimizerT> source)
 {
     using bioseq::gpu::vulkan::VulkanRuntimeError;
     using bioseq::gpu::vulkan::VulkanSketchHostOwnershipRoute;
@@ -10045,51 +10473,101 @@ adopt_fixed_vulkan_sketch_host_result(
 
     if (source.host_ownership_route
             != VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
-        || !source.host_permit_released_to_process_footprint
         || !source.arena_trimmed_before_host_materialization
         || !source.dispatch_token.accepted()) {
         throw VulkanRuntimeError{
             "Vulkan fixed host result lacks zero-copy ownership authority"};
     }
-    if (destination.capacity() != 0u) {
-        throw VulkanRuntimeError{
-            "Vulkan fixed host result destination already owns capacity"};
-    }
     const std::uint64_t host_capacity_bytes = saturating_mul(
         static_cast<std::uint64_t>(source.host_minimizers.capacity()),
         static_cast<std::uint64_t>(sizeof(MinimizerT)));
+    const bool valid_retained_permit = source.host_permit.has_value()
+        && static_cast<bool>(*source.host_permit)
+        && source.host_permit->bytes() == host_capacity_bytes;
+    const bool footprint_authority =
+        source.host_permit_released_to_process_footprint
+        && !source.host_permit.has_value()
+        && (host_capacity_bytes == 0u
+            || source.host_footprint_reflected_delta_bytes
+                >= host_capacity_bytes);
+    const bool retained_permit_authority =
+        !source.host_permit_released_to_process_footprint
+        && host_capacity_bytes != 0u
+        && valid_retained_permit;
+    const bool device_owner_present = source.device != nullptr;
+    const bool device_owner_unique = device_owner_present
+        && source.device.use_count() == 1u;
     if (host_capacity_bytes == (std::numeric_limits<std::uint64_t>::max)()
-        || source.host_permit.has_value()) {
+        || source.host_minimizers.size()
+            != source.host_minimizers.capacity()
+        || footprint_authority == retained_permit_authority
+        || !device_owner_unique) {
         throw VulkanRuntimeError{
-            "Vulkan fixed host result retained a reconciled host permit"};
+            "Vulkan fixed host result has inconsistent host/device ownership "
+            "authority"};
     }
 
+    std::weak_ptr<bioseq::gpu::vulkan::
+        VulkanDeviceMinimizerStorage<MinimizerT>> device_lifetime =
+            source.device;
     VulkanSketchHostAdoptionReceipt<MinimizerT> receipt{
         .source_data = source.host_minimizers.data(),
         .adopted_size = source.host_minimizers.size(),
         .host_capacity_bytes = host_capacity_bytes,
-        .device_allocation_bytes_released = source.device != nullptr
-            ? source.device->words.allocation_bytes
+        .retained_host_permit_bytes = retained_permit_authority
+            ? source.host_permit->bytes()
             : 0u,
+        .host_footprint_reflected_delta_bytes =
+            source.host_footprint_reflected_delta_bytes,
+        .device_allocation_bytes_released =
+            source.device->words.allocation_bytes,
+        .host_permit_released_to_process_footprint =
+            source.host_permit_released_to_process_footprint,
+        .device_owner_present_before_adoption = device_owner_present,
+        .device_owner_unique_before_adoption = device_owner_unique,
+        .arena_trimmed_before_adoption =
+            source.arena_trimmed_before_host_materialization,
         .dispatch_token = source.dispatch_token,
     };
-    destination.swap(source.host_minimizers);
+    FixedVulkanTargetHostOwner<MinimizerT> adopted;
+    adopted.minimizers.swap(source.host_minimizers);
+    if (source.host_permit.has_value()) {
+        adopted.host_permit.emplace(std::move(*source.host_permit));
+        source.host_permit.reset();
+    }
     source.device.reset();
-    receipt.adopted_data = destination.data();
+    receipt.adopted_data = adopted.minimizers.data();
+    receipt.adopted_capacity = adopted.minimizers.capacity();
     receipt.source_capacity_after_adoption =
         source.host_minimizers.capacity();
-    receipt.device_released_before_return = source.device == nullptr;
-    if (!receipt.zero_copy_adoption_accepted()) {
+    receipt.device_released_before_return = device_lifetime.expired();
+    adopted.adoption = receipt;
+    if (!adopted.ownership_authority_accepted()) {
         throw VulkanRuntimeError{
             "Vulkan fixed host result was not adopted zero-copy"};
     }
-    return receipt;
+    return adopted;
 }
 
+template <class MinimizerT>
+struct FixedVulkanTargetSketch {
+    FixedVulkanTargetHostOwner<MinimizerT> host;
+    MinimizerSketchExecutionProof proof{};
+
+    FixedVulkanTargetSketch(
+            FixedVulkanTargetHostOwner<MinimizerT> adopted_host,
+            MinimizerSketchExecutionProof execution_proof) noexcept
+        : host(std::move(adopted_host)), proof(execution_proof) {}
+    FixedVulkanTargetSketch(const FixedVulkanTargetSketch&) = delete;
+    FixedVulkanTargetSketch& operator=(const FixedVulkanTargetSketch&) = delete;
+    FixedVulkanTargetSketch& operator=(FixedVulkanTargetSketch&&) = delete;
+    FixedVulkanTargetSketch(FixedVulkanTargetSketch&& other) noexcept
+        : host(std::move(other.host)), proof(other.proof) {}
+};
+
 template <class MinimizerT, class Range>
-[[nodiscard]] MinimizerSketchExecutionProof
+[[nodiscard]] FixedVulkanTargetSketch<MinimizerT>
 sketch_vulkan_into_adopted_host_vector(
-    std::vector<MinimizerT>& destination,
     Range& range,
     const std::size_t& window_len,
     const std::size_t& kmer_len,
@@ -10112,19 +10590,14 @@ sketch_vulkan_into_adopted_host_vector(
         throw bioseq::gpu::vulkan::VulkanRuntimeError{
             "Vulkan fixed host sketch returned no result"};
     }
-    const auto receipt = adopt_fixed_vulkan_sketch_host_result(
-        std::move(*source), destination);
+    auto adopted = adopt_fixed_vulkan_sketch_host_result(
+        std::move(*source));
     MinimizerSketchExecutionProof proof{};
     proof.partial_vulkan.sketch_dispatches =
-        receipt.dispatch_token.completed_roundtrips;
-    return proof;
+        adopted.adoption.dispatch_token.completed_roundtrips;
+    return FixedVulkanTargetSketch<MinimizerT>{
+        std::move(adopted), proof};
 }
-
-// Restrict footprint-reconciled adoption to mmap-scale targets. Small/repeated
-// allocator bins may reuse resident pages without producing an attributable
-// footprint delta and therefore remain on the retained-permit collector route.
-inline constexpr std::uint64_t
-    kVulkanFixedHostFootprintTargetMinimumBp = std::uint64_t{256} << 20u;
 
 [[nodiscard]] inline bool minimizer_sketch_proof_matches_selected_route(
     ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType selected,
@@ -10365,29 +10838,25 @@ template <class MinimizerT,
     // DOC0310 §16 — skip the host target sketch for the Phase C GPU-index leaf;
     // the device index build sketches the target itself. If that selected GPU
     // path cannot run, the pipeline throws instead of rebuilding on CPU.
-    // The fixed Vulkan host vector has already been reconciled into process
-    // footprint. This separate permit is acquired later for CPU index storage
-    // and remains in the caller so it outlives the nested target index.
-    std::optional<bioseq::parallelism::MemoryPermit> target_index_permit;
+    // The fixed Vulkan host vector carries either footprint authority or its
+    // exact retained permit. Its dedicated handoff owns the later CPU-index
+    // permit locally and destroys the nested index before releasing it.
     std::vector<MinimizerT> target_minimizers;
+    std::optional<FixedVulkanTargetSketch<MinimizerT>> fixed_target_sketch;
     MinimizerSketchExecutionProof target_sketch_proof{};
     const bool phase_c_gpu_index =
         ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
     const bool fixed_target_zero_copy_route =
-        !phase_c_gpu_index
-        && params.minimizer_algorithm
-            == MinimizerAlgorithmType::VULKAN_MINIMAP_INT
-        && static_cast<std::uint64_t>(target_seq.bp_size())
-            >= kVulkanFixedHostFootprintTargetMinimumBp;
+        fixed_vulkan_target_host_adoption_route_selected(
+            phase_c_gpu_index,
+            params.minimizer_algorithm,
+            static_cast<std::uint64_t>(target_seq.bp_size()));
     if (!phase_c_gpu_index) {
         if (fixed_target_zero_copy_route) {
-            target_sketch_proof =
+            fixed_target_sketch.emplace(
                 sketch_vulkan_into_adopted_host_vector<MinimizerT>(
-                    target_minimizers,
-                    target_seq,
-                    window_len,
-                    kmer_len,
-                    params);
+                    target_seq, window_len, kmer_len, params));
+            target_sketch_proof = fixed_target_sketch->proof;
         } else {
             sketch_collector_t<MinimizerT> target_collector;
             target_sketch_proof = sketch_into_collector<MinimizerT>(
@@ -10435,13 +10904,20 @@ template <class MinimizerT,
 
     auto owned_target_minimizers = std::move(target_minimizers);
     std::vector<MinimizerT>{}.swap(target_minimizers);
-    MatchResultCollection result =
-        minimap2_port<MinimizerT, QueryRange, TargetRange, Scanner>(
-        query_seq, target_seq, query_minimizers,
-        std::move(owned_target_minimizers), params,
-        fixed_target_zero_copy_route
-            ? std::addressof(target_index_permit)
-            : nullptr);
+    MatchResultCollection result = fixed_target_zero_copy_route
+        ? minimap2_port_with_fixed_vulkan_target_handoff<
+              MinimizerT, QueryRange, TargetRange, Scanner>(
+                  query_seq,
+                  target_seq,
+                  query_minimizers,
+                  std::move(fixed_target_sketch->host),
+                  params)
+        : minimap2_port<MinimizerT, QueryRange, TargetRange, Scanner>(
+              query_seq,
+              target_seq,
+              query_minimizers,
+              std::move(owned_target_minimizers),
+              params);
     result.record_query_sketch_host_time(query_sketch_host_wall_ns);
     record_minimizer_sketch_execution_proof(
         result, query_sketch_proof, MinimizerSketchRole::query);

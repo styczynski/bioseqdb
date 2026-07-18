@@ -1267,6 +1267,18 @@ vulkan_exact_host_allocation_admission_bytes(
         kVulkanExactHostAllocationHeadroomBytes);
 }
 
+/// Exact fixed-result reservation.  An empty GPU sketch owns no host
+/// allocation, so it must not be charged allocator slop or be rejectable under
+/// pressure for a fictitious 64-KiB vector.
+[[nodiscard]] constexpr std::uint64_t
+vulkan_fixed_host_result_admission_bytes(
+        std::uint64_t exact_host_size_bytes) noexcept {
+    return exact_host_size_bytes == 0u
+        ? 0u
+        : vulkan_exact_host_allocation_admission_bytes(
+            exact_host_size_bytes);
+}
+
 [[nodiscard]] constexpr std::uint64_t
 vulkan_sketch_dispatch_admission_bytes(
     std::uint64_t physical_arena_bytes,
@@ -1635,7 +1647,7 @@ sketch_uploaded_window_result(
         const std::uint64_t exact_host_headroom_bytes =
             host_ownership_route
                     == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
-                ? vulkan_exact_host_allocation_admission_bytes(
+                ? vulkan_fixed_host_result_admission_bytes(
                       exact_host_size_bytes)
                 : saturating_mul(
                       exact_host_size_bytes,
@@ -1710,7 +1722,14 @@ sketch_uploaded_window_result(
         std::uint64_t exact_host_capacity_bytes = 0u;
         bool host_permit_released_to_process_footprint = false;
         std::uint64_t host_footprint_reflected_delta_bytes = 0u;
-        const auto allocate_and_download = [&] {
+        const auto allocate_and_download = [
+                &host_minimizers,
+                &exact_host_capacity_bytes,
+                &raw,
+                host_ownership_route,
+                exact_host_headroom_bytes,
+                &owned_host_permit,
+                &runtime] {
             host_minimizers.resize(static_cast<std::size_t>(raw.count));
             exact_host_capacity_bytes = saturating_mul(
                 static_cast<std::uint64_t>(host_minimizers.capacity()),
@@ -1743,7 +1762,8 @@ sketch_uploaded_window_result(
             auto materialization =
                 MemoryAdmissionController::instance().materialize(
                     *owned_host_permit,
-                    [&]() -> bioseq::parallelism::
+                    [&allocate_and_download,
+                     &exact_host_capacity_bytes]() -> bioseq::parallelism::
                             MemoryMaterializationEvidence {
                         allocate_and_download();
                         return {
@@ -1760,19 +1780,27 @@ sketch_uploaded_window_result(
             host_footprint_reflected_delta_bytes =
                 materialization.reflected_delta_bytes;
             if (!materialization.permit_released) {
-                bioseq_log<ERR>(
+                // A large target does not imply a large emitted vector.  An
+                // ambiguity-heavy dna5 target can produce a small non-empty
+                // allocation whose allocator pages were already resident, so
+                // the serialized RSS probe may correctly decline to release
+                // the reservation.  Keep the exact, already-shrunk permit as
+                // the alternative ownership authority.  The pipeline moves it
+                // with the vector and releases it only after index construction
+                // has consumed the vector and proved capacity()==0.
+                bioseq_log<DBG>(
                     "[vulkan sketch] fixed host footprint reconciliation "
-                    "failed: actual={} touched={} before={} after={} delta={}",
+                    "retained exact permit: actual={} touched={} before={} "
+                    "after={} delta={} permit={}",
                     materialization.evidence.actual_allocation_bytes,
                     materialization.evidence.fully_touched_bytes,
                     materialization.footprint_before_bytes,
                     materialization.footprint_after_bytes,
-                    materialization.reflected_delta_bytes);
-                throw VulkanRuntimeError{
-                    "Vulkan fixed host result was not reflected in process "
-                    "footprint"};
+                    materialization.reflected_delta_bytes,
+                    owned_host_permit->bytes());
+            } else {
+                owned_host_permit.reset();
             }
-            owned_host_permit.reset();
         } else {
             allocate_and_download();
             if (host_ownership_route

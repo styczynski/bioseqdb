@@ -14865,12 +14865,12 @@ TEST_CASE("transient minimizer index consumes source and releases storage",
     REQUIRE(idx.lookup(100).size() == 2u);
     REQUIRE(idx.lookup(7).size() == 1u);
     REQUIRE(idx.target_length() == 1000);
-    const auto small_plan =
-        bioseq::indexing::minimizer_hashmap_table_allocation_plan(3u);
-    REQUIRE(small_plan.valid);
-    REQUIRE(small_plan.allocation_bytes == 2'048u);
-    REQUIRE(idx.table_allocation_bytes() == small_plan.allocation_bytes);
-    REQUIRE(idx.table_peak_allocation_bytes() == small_plan.allocation_bytes);
+    // This is the deliberately unchanged legacy half-reserve path, not the
+    // admitted one-shot full-table path exercised below.  Its allocator
+    // counters still have to report a self-consistent non-zero lifetime.
+    REQUIRE(idx.table_allocation_bytes() != 0u);
+    REQUIRE(idx.table_peak_allocation_bytes()
+            == idx.table_allocation_bytes());
 
     idx.release_storage();
     REQUIRE(idx.table_empty());

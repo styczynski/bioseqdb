@@ -432,6 +432,10 @@ TEST_CASE("vulkan minimizer: 500-Mbp w10 dispatch excludes pessimistic host resu
 
 TEST_CASE("vulkan minimizer: Report156 zero-copy handoff phases fit captured pressure",
           "[vulkan][phase-c][memory-admission][zero-copy][arithmetic]") {
+    STATIC_REQUIRE(vk::vulkan_fixed_host_result_admission_bytes(0u) == 0u);
+    STATIC_REQUIRE(
+        vk::vulkan_fixed_host_result_admission_bytes(1u)
+        == 1u + vk::kVulkanExactHostAllocationHeadroomBytes);
     constexpr std::uint64_t emitted_minimizers = 93'308'896u;
     constexpr std::uint64_t device_output_bytes = 1'200'001'536u;
     constexpr std::uint64_t persistent_runtime_bytes = 676'076u;
@@ -444,12 +448,39 @@ TEST_CASE("vulkan minimizer: Report156 zero-copy handoff phases fit captured pre
     const std::uint64_t host_payload_bytes =
         emitted_minimizers * sizeof(MinimapSketchData);
     const std::uint64_t fixed_host_admission =
-        vk::vulkan_exact_host_allocation_admission_bytes(
+        vk::vulkan_fixed_host_result_admission_bytes(
             host_payload_bytes);
+    const std::uint64_t legacy_collector_host_admission =
+        bioseq::parallelism::saturating_mul(
+            host_payload_bytes,
+            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
     REQUIRE(host_payload_bytes == 746'471'168u);
     REQUIRE(fixed_host_admission == 746'536'704u);
+    REQUIRE(legacy_collector_host_admission == 1'492'942'336u);
     REQUIRE(captured_allocatable_before_host == 1'400'478'996u);
     REQUIRE(fixed_host_admission <= captured_allocatable_before_host);
+    REQUIRE(legacy_collector_host_admission
+            > captured_allocatable_before_host);
+    REQUIRE(captured_allocatable_before_host - fixed_host_admission
+            == 653'942'292u);
+    REQUIRE(legacy_collector_host_admission
+                - captured_allocatable_before_host
+            == 92'463'340u);
+
+    // Report156 also recorded an earlier, tighter process ceiling before the
+    // later 2,601,156,608-byte snapshot.  Pin the same route contrast against
+    // that worst observed ceiling: fixed exact staging still fits, while the
+    // legacy growable-vector 2x reservation still cannot be admitted.
+    constexpr std::uint64_t captured_tight_budget_ceiling =
+        2'479'079'424u;
+    constexpr std::uint64_t captured_tight_allocatable_before_host =
+        captured_tight_budget_ceiling - captured_reserved_before_host;
+    REQUIRE(captured_tight_allocatable_before_host == 1'278'401'812u);
+    REQUIRE(captured_tight_allocatable_before_host - fixed_host_admission
+            == 531'865'108u);
+    REQUIRE(legacy_collector_host_admission
+                - captured_tight_allocatable_before_host
+            == 214'540'524u);
 
     // The opaque Boost FOA geometry is pinned and measured by the index's
     // allocator. Reserving the full possible-distinct count produces one 2-GiB
@@ -505,6 +536,54 @@ TEST_CASE("vulkan minimizer: Report156 zero-copy handoff phases fit captured pre
     REQUIRE(target_index_build_permit
             < target_index_build_permit
                 + former_half_table_plan.allocation_bytes);
+}
+
+TEST_CASE("vulkan minimizer: Report157 replacement authority admits dense resident upload",
+          "[vulkan][memory-admission][zero-copy][report157][replacement-authority][arithmetic]") {
+    // Report157 reached this point only after the strict CPU index had been
+    // built successfully.  Its old full reservation covered both positions
+    // and the FOA table, so the subsequent sorted-dense GPU upload missed by
+    // 106,379,618 bytes.
+    constexpr std::uint64_t retained_position_bytes = 746'471'168u;
+    constexpr std::uint64_t retained_table_bytes = 2'147'483'648u;
+    constexpr std::uint64_t retained_index_bytes = 2'893'954'816u;
+    constexpr std::uint64_t runtime_metadata_bytes = 546u;
+    constexpr std::uint64_t budget_ceiling = 4'658'036'736u;
+    constexpr std::uint64_t resident_upload_bytes = 1'870'460'992u;
+    constexpr std::uint64_t old_reserved_bytes = 2'893'955'362u;
+    constexpr std::uint64_t old_allocatable_bytes = 1'764'081'374u;
+    constexpr std::uint64_t old_shortfall_bytes = 106'379'618u;
+
+    STATIC_REQUIRE(retained_index_bytes
+        == retained_position_bytes + retained_table_bytes);
+    STATIC_REQUIRE(old_reserved_bytes
+        == retained_index_bytes + runtime_metadata_bytes);
+    STATIC_REQUIRE(old_allocatable_bytes
+        == budget_ceiling - old_reserved_bytes);
+    STATIC_REQUIRE(old_shortfall_bytes
+        == resident_upload_bytes - old_allocatable_bytes);
+    STATIC_REQUIRE(resident_upload_bytes > old_allocatable_bytes);
+
+    // The dense source host vector was nonempty, exact-size, fully touched and
+    // already reflected in process footprint.  Once it is deallocated, the
+    // exactly equal, fully initialized positions allocation consumes that
+    // one-use authority.  Only the table remains permit-accounted.
+    constexpr std::uint64_t transferred_position_footprint_bytes =
+        retained_position_bytes;
+    constexpr std::uint64_t retained_index_permit_bytes =
+        retained_index_bytes - transferred_position_footprint_bytes;
+    constexpr std::uint64_t new_reserved_bytes =
+        retained_index_permit_bytes + runtime_metadata_bytes;
+    constexpr std::uint64_t new_allocatable_bytes =
+        budget_ceiling - new_reserved_bytes;
+    constexpr std::uint64_t new_margin_bytes =
+        new_allocatable_bytes - resident_upload_bytes;
+
+    STATIC_REQUIRE(retained_index_permit_bytes == 2'147'483'648u);
+    STATIC_REQUIRE(new_reserved_bytes == 2'147'484'194u);
+    STATIC_REQUIRE(new_allocatable_bytes == 2'510'552'542u);
+    STATIC_REQUIRE(resident_upload_bytes <= new_allocatable_bytes);
+    STATIC_REQUIRE(new_margin_bytes == 640'091'550u);
 }
 
 TEST_CASE("vulkan target index: 500-Mbp ungated count replaces C-sized main peak",
