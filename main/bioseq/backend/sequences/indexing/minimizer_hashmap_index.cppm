@@ -3817,6 +3817,16 @@ public:
         build_sorted_in_place(sorted_minimizers, target_length);
     }
 
+    /// Sort one caller-owned minimizer source by its canonical hash without
+    /// constructing the FOA lookup table or a positions vector.  The direct
+    /// mapped Vulkan route uses this same production radix implementation,
+    /// then streams the sorted source into its final resident allocation.
+    template <class MinimizerT>
+    static void sort_source_by_hash_in_place(
+            std::vector<MinimizerT>& source) {
+        sort_minimizers_in_place_(source);
+    }
+
     /// Build a transient lookup index by consuming caller-owned minimizers.
     /// Sorting happens in the caller's allocation and the vector is
     /// deterministically deallocated before this function returns.
