@@ -35,6 +35,7 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "catalog/dependency.h"
 #include "catalog/namespace.h"
@@ -44,9 +45,14 @@ extern "C" {
 #include "catalog/pg_sequence.h"
 #include "catalog/pg_type_d.h"
 #include "commands/extension.h"
+#include "commands/defrem.h"
 #include "commands/sequence.h"
 #include "miscadmin.h"
 #include "fmgr.h"
+#include "nodes/primnodes.h"
+#include "parser/analyze.h"
+#include "parser/parser.h"
+#include "rewrite/rewriteHandler.h"
 }
 
 #include <algorithm>
@@ -562,6 +568,525 @@ inline void validate_bound_read_catalog_contract(
 }
 
 } // namespace source_version_detail
+
+// DOC0383 P5 — the descriptor catalog deliberately permits nullable payload
+// locator attributes and owns two partial indexes, so the legacy eight-column
+// sidecar validator cannot describe it.  Keep this cold schema authority next
+// to the existing PostgreSQL-owned sequence-source catalog contracts; mapped
+// image/lifecycle code consumes the exported entry point without importing a
+// second tuple-shape authority.
+namespace minimizer_generation_catalog_detail {
+
+enum class DefaultKind : std::uint8_t {
+    none,
+    zero_int2,
+    zero_int4,
+    zero_int8,
+    empty_text,
+};
+
+struct AttributeContract {
+    AttrNumber attno = InvalidAttrNumber;
+    std::string_view name{};
+    Oid type_oid = InvalidOid;
+    bool not_null = false;
+    DefaultKind default_kind = DefaultKind::none;
+};
+
+inline constexpr std::array<AttributeContract, 18>
+kStorageAttributeContracts{{
+    {1, "database_oid", OIDOID, true},
+    {2, "tablespace_oid", OIDOID, true},
+    {3, "main_relfilenode", OIDOID, true},
+    {4, "user_relid", OIDOID, true},
+    {5, "column_attno", INT2OID, true},
+    {6, "index_name", NAMEOID, true},
+    {7, "query_key", INT8OID, true},
+    {8, "generation_id", INT8OID, true},
+    {9, "provider", INT2OID, true},
+    {10, "payload_relation_oid", OIDOID, false},
+    {11, "payload_database_oid", OIDOID, false},
+    {12, "payload_tablespace_oid", OIDOID, false},
+    {13, "payload_relfilenode", OIDOID, false},
+    {14, "payload_relation_name", NAMEOID, false},
+    {15, "image_bytes", INT8OID, true},
+    {16, "header_checksum", INT8OID, true},
+    {17, "retire_full_xid", XID8OID, false},
+    {18, "state", INT2OID, true},
+}};
+
+inline constexpr std::array<AttributeContract, 5>
+kReaperAttributeContracts{{
+    {1, "database_oid", OIDOID, true},
+    {2, "tablespace_root_ordinal", INT4OID, true,
+        DefaultKind::zero_int4},
+    {3, "shard_ordinal", INT2OID, true, DefaultKind::zero_int2},
+    {4, "last_canonical_filename", TEXTOID, true,
+        DefaultKind::empty_text},
+    {5, "pass", INT8OID, true, DefaultKind::zero_int8},
+}};
+
+inline constexpr std::array<std::string_view, 13>
+kStorageCheckExpressions{{
+    "database_oid <> 0",
+    "tablespace_oid <> 0",
+    "main_relfilenode <> 0",
+    "user_relid <> 0",
+    "column_attno > 0",
+    "index_name = 'minimizers_per_fragment'",
+    "query_key >= 0",
+    "generation_id > 0",
+    "provider IN (0, 1)",
+    "image_bytes >= 4096",
+    "state IN (1, 2)",
+    "((provider = 0 "
+        "AND payload_relation_oid IS NOT NULL "
+        "AND payload_database_oid IS NOT NULL "
+        "AND payload_tablespace_oid IS NOT NULL "
+        "AND payload_relfilenode IS NOT NULL "
+        "AND payload_relation_name IS NOT NULL "
+        "AND payload_relation_oid <> 0 "
+        "AND payload_database_oid = database_oid "
+        "AND payload_tablespace_oid <> 0 "
+        "AND payload_relfilenode <> 0) "
+      "OR (provider = 1 "
+        "AND payload_relation_oid IS NULL "
+        "AND payload_database_oid IS NULL "
+        "AND payload_tablespace_oid IS NULL "
+        "AND payload_relfilenode IS NULL "
+        "AND payload_relation_name IS NULL))",
+    "((state = 1 AND retire_full_xid IS NULL) "
+      "OR (state = 2 AND retire_full_xid IS NOT NULL))",
+}};
+
+inline constexpr std::array<std::string_view, 4>
+kReaperCheckExpressions{{
+    "database_oid <> 0",
+    "tablespace_root_ordinal >= 0",
+    "shard_ordinal BETWEEN 0 AND 255",
+    "pass >= 0",
+}};
+
+[[noreturn]] inline void contract_error(
+        const std::string_view catalog,
+        const std::string_view detail) {
+    const std::string owned_catalog{catalog};
+    const std::string owned_detail{detail};
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&owned_catalog, &owned_detail] {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq minimizer generation catalog contract changed"),
+                 errdetail("catalog=%s invariant=%s",
+                    owned_catalog.c_str(), owned_detail.c_str())));
+        });
+    pg_unreachable();
+}
+
+[[nodiscard]] inline bool exact_default(
+        Relation relation,
+        const AttributeContract& expected) {
+    Node* node = bioseq::pg_utils::invoke_pg_as_cpp(
+        [relation, &expected] {
+            return build_column_default(relation, expected.attno);
+        });
+    if (expected.default_kind == DefaultKind::none) {
+        return node == nullptr;
+    }
+    if (node == nullptr || !IsA(node, Const)) return false;
+    const auto* constant = castNode(Const, node);
+    if (constant->constisnull) return false;
+    switch (expected.default_kind) {
+        case DefaultKind::none:
+            return false;
+        case DefaultKind::zero_int2:
+            return constant->consttype == INT2OID
+                && DatumGetInt16(constant->constvalue) == 0;
+        case DefaultKind::zero_int4:
+            return constant->consttype == INT4OID
+                && DatumGetInt32(constant->constvalue) == 0;
+        case DefaultKind::zero_int8:
+            return constant->consttype == INT8OID
+                && DatumGetInt64(constant->constvalue) == 0;
+        case DefaultKind::empty_text: {
+            if (constant->consttype != TEXTOID) return false;
+            const text* value = DatumGetTextPP(constant->constvalue);
+            return VARSIZE_ANY_EXHDR(value) == 0;
+        }
+    }
+    return false;
+}
+
+template <std::size_t AttributeCount>
+inline void validate_relation_shape(
+        Relation relation,
+        const Oid expected_relation_oid,
+        const std::string_view expected_name,
+        const std::array<AttributeContract, AttributeCount>& attributes,
+        const std::uint16_t expected_check_count) {
+    if (relation == nullptr
+        || RelationGetRelid(relation) != expected_relation_oid
+        || RelationGetNamespace(relation)
+            != bioseq::pg_utils::invoke_pg_as_cpp(
+                [] { return get_namespace_oid("bioseq_internal", true); })
+        || relation->rd_rel == nullptr
+        || relation->rd_rel->relkind != RELKIND_RELATION
+        || relation->rd_rel->relam != HEAP_TABLE_AM_OID
+        || relation->rd_rel->relpersistence != RELPERSISTENCE_UNLOGGED) {
+        contract_error(expected_name,
+            "relation identity, UNLOGGED persistence, or heap AM");
+    }
+    TupleDesc descriptor = RelationGetDescr(relation);
+    if (descriptor == nullptr
+        || descriptor->natts != static_cast<int>(attributes.size())) {
+        contract_error(expected_name, "attribute count");
+    }
+    std::uint16_t observed_defaults = 0;
+    for (const AttributeContract& expected : attributes) {
+        const Form_pg_attribute attribute = TupleDescAttr(
+            descriptor, expected.attno - 1);
+        const bool expects_default =
+            expected.default_kind != DefaultKind::none;
+        if (attribute->attnum != expected.attno
+            || attribute->attisdropped
+            || attribute->attinhcount != 0
+            || !attribute->attislocal
+            || attribute->attnotnull != expected.not_null
+            || attribute->atttypid != expected.type_oid
+            || attribute->atttypmod != -1
+            || attribute->attcollation
+                != bioseq::pg_utils::invoke_pg_as_cpp(
+                    [&expected] {
+                        return get_typcollation(expected.type_oid);
+                    })
+            || attribute->atthasdef != expects_default
+            || attribute->atthasmissing
+            || attribute->attidentity != '\0'
+            || attribute->attgenerated != '\0'
+            || std::string_view{NameStr(attribute->attname)}
+                != expected.name
+            || !exact_default(relation, expected)) {
+            contract_error(expected_name,
+                "attribute ordinal/name/type/typmod/nullability/default");
+        }
+        if (expects_default) ++observed_defaults;
+    }
+    const TupleConstr* constraints = descriptor->constr;
+    if (constraints == nullptr
+        || !constraints->has_not_null
+        || constraints->has_generated_stored
+        || constraints->num_defval != observed_defaults
+        || constraints->num_check != expected_check_count
+        || (expected_check_count != 0 && constraints->check == nullptr)) {
+        contract_error(expected_name,
+            "NOT NULL/default/CHECK constraint counts");
+    }
+    for (std::uint16_t index = 0;
+         index < constraints->num_check; ++index) {
+        const ConstrCheck& check = constraints->check[index];
+        if (check.ccname == nullptr || check.ccname[0] == '\0'
+            || check.ccbin == nullptr || check.ccbin[0] == '\0'
+            || !check.ccvalid || check.ccnoinherit) {
+            contract_error(expected_name,
+                "CHECK constraint identity, validation, or inheritance");
+        }
+    }
+}
+
+[[nodiscard]] inline Node* analyze_expected_check_expression(
+        const std::string_view relation_name,
+        const std::string_view expression) {
+    const std::string sql = fmt::format(
+        "SELECT ({}) FROM ONLY bioseq_internal.{};",
+        expression, relation_name);
+    return bioseq::pg_utils::invoke_pg_as_cpp([&sql] {
+        List* raw_statements = raw_parser(sql.c_str(), RAW_PARSE_DEFAULT);
+        if (list_length(raw_statements) != 1) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq generation schema expectation did not parse as one statement")));
+        }
+        auto* raw = castNode(RawStmt, linitial(raw_statements));
+        Query* query = parse_analyze_fixedparams(
+            raw, sql.c_str(), nullptr, 0, nullptr);
+        if (query == nullptr
+            || query->commandType != CMD_SELECT
+            || list_length(query->targetList) != 1) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq generation schema expectation did not analyze as one expression")));
+        }
+        auto* target = castNode(TargetEntry, linitial(query->targetList));
+        return reinterpret_cast<Node*>(target->expr);
+    });
+}
+
+template <std::size_t CheckCount>
+inline void validate_check_expressions(
+        Relation relation,
+        const std::string_view relation_name,
+        const std::array<std::string_view, CheckCount>& expected_checks) {
+    const TupleConstr* constraints = RelationGetDescr(relation)->constr;
+    if (constraints == nullptr
+        || constraints->num_check != expected_checks.size()) {
+        contract_error(relation_name, "exact CHECK expression count");
+    }
+    std::array<Node*, CheckCount> expected_nodes{};
+    std::array<bool, CheckCount> matched{};
+    for (std::size_t expected_index = 0;
+         expected_index < expected_checks.size(); ++expected_index) {
+        expected_nodes[expected_index] = analyze_expected_check_expression(
+            relation_name, expected_checks[expected_index]);
+    }
+    for (std::uint16_t actual_index = 0;
+         actual_index < constraints->num_check; ++actual_index) {
+        const ConstrCheck& check = constraints->check[actual_index];
+        Node* actual = static_cast<Node*>(stringToNode(check.ccbin));
+        bool found = false;
+        for (std::size_t expected_index = 0;
+             expected_index < expected_nodes.size(); ++expected_index) {
+            if (!matched[expected_index]
+                && equal(actual, expected_nodes[expected_index])) {
+                matched[expected_index] = true;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            contract_error(relation_name,
+                "CHECK expression differs from the frozen contract");
+        }
+    }
+    if (std::find(matched.begin(), matched.end(), false) != matched.end()) {
+        contract_error(relation_name,
+            "required CHECK expression is missing");
+    }
+}
+
+[[nodiscard]] inline bool exact_state_predicate(
+        Relation index,
+        const std::int16_t expected_state) {
+    List* predicate = bioseq::pg_utils::invoke_pg_as_cpp(
+        [index] { return RelationGetIndexPredicate(index); });
+    if (predicate == NIL || list_length(predicate) != 1) return false;
+    const Node* node = static_cast<const Node*>(linitial(predicate));
+    if (node == nullptr || !IsA(node, OpExpr)) return false;
+    const auto* equality = castNode(OpExpr, node);
+    if (equality->opresulttype != BOOLOID
+        || list_length(equality->args) != 2
+        || bioseq::pg_utils::invoke_pg_as_cpp(
+            [equality] { return get_opcode(equality->opno); }) != F_INT2EQ) {
+        return false;
+    }
+    const Node* left = static_cast<const Node*>(linitial(equality->args));
+    const Node* right = static_cast<const Node*>(lsecond(equality->args));
+    if (left == nullptr || right == nullptr
+        || !IsA(left, Var) || !IsA(right, Const)) return false;
+    const auto* variable = castNode(Var, left);
+    const auto* constant = castNode(Const, right);
+    return variable->varattno == 18
+        && variable->vartype == INT2OID
+        && variable->varlevelsup == 0
+        && constant->consttype == INT2OID
+        && !constant->constisnull
+        && DatumGetInt16(constant->constvalue) == expected_state;
+}
+
+template <std::size_t KeyCount>
+[[nodiscard]] inline bool exact_index(
+        Relation index,
+        const Oid expected_table_oid,
+        const std::string_view expected_name,
+        const bool expected_primary,
+        const bool expected_unique,
+        const std::array<AttrNumber, KeyCount>& keys,
+        const std::array<Oid, KeyCount>& key_types,
+        const std::optional<std::int16_t> expected_state) {
+    const Form_pg_index shape = index == nullptr ? nullptr : index->rd_index;
+    if (shape == nullptr
+        || RelationGetRelid(index) == InvalidOid
+        || std::string_view{RelationGetRelationName(index)} != expected_name
+        || shape->indrelid != expected_table_oid
+        || index->rd_rel == nullptr
+        || index->rd_rel->relkind != RELKIND_INDEX
+        || index->rd_rel->relam != BTREE_AM_OID
+        || index->rd_rel->relpersistence != RELPERSISTENCE_UNLOGGED
+        || shape->indisprimary != expected_primary
+        || shape->indisunique != expected_unique
+        || !shape->indimmediate
+        || !shape->indisvalid
+        || !shape->indisready
+        || !shape->indislive
+        || shape->indisexclusion
+        || shape->indisclustered
+        || shape->indisreplident
+        || shape->indnullsnotdistinct
+        || shape->indnkeyatts != static_cast<int>(keys.size())
+        || shape->indnatts != static_cast<int>(keys.size())
+        || bioseq::pg_utils::invoke_pg_as_cpp(
+            [index] { return RelationGetIndexExpressions(index); }) != NIL) {
+        return false;
+    }
+    const List* predicate = bioseq::pg_utils::invoke_pg_as_cpp(
+        [index] { return RelationGetIndexPredicate(index); });
+    if ((!expected_state.has_value() && predicate != NIL)
+        || (expected_state.has_value()
+            && !exact_state_predicate(index, *expected_state))) {
+        return false;
+    }
+    for (std::size_t key = 0; key < keys.size(); ++key) {
+        const Oid expected_opclass =
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [&key_types, key] {
+                    return GetDefaultOpClass(
+                        key_types[key], BTREE_AM_OID);
+                });
+        if (!OidIsValid(expected_opclass)
+            || shape->indkey.values[key] != keys[key]
+            || get_index_column_opclass(
+                RelationGetRelid(index), static_cast<int>(key + 1))
+                != expected_opclass
+            || index->rd_indcollation == nullptr
+            || index->rd_indcollation[key]
+                != get_typcollation(key_types[key])
+            || index->rd_indoption == nullptr
+            || index->rd_indoption[key] != 0
+            || (index->rd_opcoptions != nullptr
+                && index->rd_opcoptions[key] != nullptr)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline void validate_storage_indexes(Relation storage) {
+    static constexpr std::array<AttrNumber, 8> primary_keys{
+        1, 2, 3, 4, 5, 6, 7, 8};
+    static constexpr std::array<Oid, 8> primary_types{
+        OIDOID, OIDOID, OIDOID, OIDOID, INT2OID, NAMEOID, INT8OID, INT8OID};
+    static constexpr std::array<AttrNumber, 7> live_keys{
+        1, 2, 3, 4, 5, 6, 7};
+    static constexpr std::array<Oid, 7> live_types{
+        OIDOID, OIDOID, OIDOID, OIDOID, INT2OID, NAMEOID, INT8OID};
+    static constexpr std::array<AttrNumber, 9> retired_keys{
+        17, 1, 2, 3, 4, 5, 6, 7, 8};
+    static constexpr std::array<Oid, 9> retired_types{
+        XID8OID, OIDOID, OIDOID, OIDOID, OIDOID,
+        INT2OID, NAMEOID, INT8OID, INT8OID};
+
+    List* indexes = bioseq::pg_utils::invoke_pg_as_cpp(
+        [storage] { return RelationGetIndexList(storage); });
+    std::size_t exact_count = 0;
+    ListCell* cell = nullptr;
+    foreach (cell, indexes) {
+        const Oid index_oid = lfirst_oid(cell);
+        Relation index = bioseq::pg_utils::invoke_pg_as_cpp(
+            [index_oid] { return index_open(index_oid, AccessShareLock); });
+        const std::string_view name{RelationGetRelationName(index)};
+        const bool exact =
+            (name == "minimizer_generation_storage_pkey"
+             && exact_index(index, RelationGetRelid(storage), name,
+                true, true, primary_keys, primary_types, std::nullopt))
+            || (name == "minimizer_generation_storage_one_live"
+                && exact_index(index, RelationGetRelid(storage), name,
+                    false, true, live_keys, live_types,
+                    std::optional<std::int16_t>{1}))
+            || (name == "minimizer_generation_storage_retired"
+                && exact_index(index, RelationGetRelid(storage), name,
+                    false, false, retired_keys, retired_types,
+                    std::optional<std::int16_t>{2}));
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [index] { index_close(index, AccessShareLock); });
+        if (!exact) {
+            contract_error("minimizer_generation_storage",
+                "primary/one-LIVE/retired index contract");
+        }
+        ++exact_count;
+    }
+    bioseq::pg_utils::invoke_pg_as_cpp([indexes] { list_free(indexes); });
+    if (exact_count != 3) {
+        contract_error("minimizer_generation_storage",
+            "exactly three authoritative indexes");
+    }
+}
+
+inline void validate_reaper_indexes(Relation reaper) {
+    static constexpr std::array<AttrNumber, 1> primary_keys{1};
+    static constexpr std::array<Oid, 1> primary_types{OIDOID};
+    List* indexes = bioseq::pg_utils::invoke_pg_as_cpp(
+        [reaper] { return RelationGetIndexList(reaper); });
+    if (list_length(indexes) != 1) {
+        contract_error("minimizer_generation_reaper_state",
+            "exactly one primary index");
+    }
+    const Oid index_oid = lfirst_oid(list_head(indexes));
+    Relation index = bioseq::pg_utils::invoke_pg_as_cpp(
+        [index_oid] { return index_open(index_oid, AccessShareLock); });
+    const bool exact = exact_index(
+        index, RelationGetRelid(reaper),
+        "minimizer_generation_reaper_state_pkey",
+        true, true, primary_keys, primary_types, std::nullopt);
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [index] { index_close(index, AccessShareLock); });
+    bioseq::pg_utils::invoke_pg_as_cpp([indexes] { list_free(indexes); });
+    if (!exact) {
+        contract_error("minimizer_generation_reaper_state",
+            "primary index order/opclass/validity");
+    }
+}
+
+} // namespace minimizer_generation_catalog_detail
+
+/// Fail closed when either installation-local DOC0383 authority drifts.  This
+/// is intentionally a cold publication/open guard, not a per-anchor check.
+inline void validate_minimizer_generation_storage_catalogs_pg() {
+    using namespace minimizer_generation_catalog_detail;
+    const Oid namespace_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+        [] { return get_namespace_oid("bioseq_internal", true); });
+    if (!OidIsValid(namespace_oid)) {
+        contract_error("bioseq_internal", "internal schema is missing");
+    }
+    const Oid storage_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+        [namespace_oid] {
+            return get_relname_relid(
+                "minimizer_generation_storage", namespace_oid);
+        });
+    const Oid reaper_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+        [namespace_oid] {
+            return get_relname_relid(
+                "minimizer_generation_reaper_state", namespace_oid);
+        });
+    if (!OidIsValid(storage_oid) || !OidIsValid(reaper_oid)) {
+        contract_error("bioseq_internal",
+            "generation descriptor or reaper catalog is missing");
+    }
+    Relation storage = bioseq::pg_utils::invoke_pg_as_cpp(
+        [storage_oid] {
+            return relation_open(storage_oid, AccessShareLock);
+        });
+    Relation reaper = bioseq::pg_utils::invoke_pg_as_cpp(
+        [reaper_oid] {
+            return relation_open(reaper_oid, AccessShareLock);
+        });
+    validate_relation_shape(
+        storage, storage_oid, "minimizer_generation_storage",
+        kStorageAttributeContracts, 13);
+    validate_check_expressions(
+        storage, "minimizer_generation_storage",
+        kStorageCheckExpressions);
+    validate_storage_indexes(storage);
+    validate_relation_shape(
+        reaper, reaper_oid, "minimizer_generation_reaper_state",
+        kReaperAttributeContracts, 4);
+    validate_check_expressions(
+        reaper, "minimizer_generation_reaper_state",
+        kReaperCheckExpressions);
+    validate_reaper_indexes(reaper);
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [reaper] { relation_close(reaper, AccessShareLock); });
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [storage] { relation_close(storage, AccessShareLock); });
+}
 
 class PendingSequenceSource;
 

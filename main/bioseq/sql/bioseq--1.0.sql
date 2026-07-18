@@ -453,6 +453,96 @@ REVOKE ALL ON SEQUENCE
 COMMENT ON SEQUENCE bioseq_internal.minimizer_generation_id_seq IS
     'Extension-owned noncycling allocator for immutable revision-3 minimizer generation identifiers.';
 
+-- DOC0383 P5 — narrow transactional authority for immutable minimizer query
+-- images.  Payload bytes never live in this catalog: provider 0 carries the
+-- complete PostgreSQL-relation locator and provider 1 carries no relation
+-- locator at all.  Both providers retain the authenticated image receipt.
+-- LIVE=1 and RETIRED=2 are persisted wire values.
+CREATE UNLOGGED TABLE bioseq_internal.minimizer_generation_storage (
+    database_oid           oid      NOT NULL CHECK (database_oid <> 0),
+    tablespace_oid         oid      NOT NULL CHECK (tablespace_oid <> 0),
+    main_relfilenode       oid      NOT NULL CHECK (main_relfilenode <> 0),
+    user_relid             oid      NOT NULL CHECK (user_relid <> 0),
+    column_attno           smallint NOT NULL CHECK (column_attno > 0),
+    index_name             name     NOT NULL
+        CHECK (index_name = 'minimizers_per_fragment'),
+    query_key              bigint   NOT NULL CHECK (query_key >= 0),
+    generation_id          bigint   NOT NULL CHECK (generation_id > 0),
+    provider               smallint NOT NULL CHECK (provider IN (0, 1)),
+
+    payload_relation_oid   oid,
+    payload_database_oid   oid,
+    payload_tablespace_oid oid,
+    payload_relfilenode    oid,
+    payload_relation_name  name,
+
+    image_bytes            bigint   NOT NULL CHECK (image_bytes >= 4096),
+    header_checksum        bigint   NOT NULL,
+    retire_full_xid        xid8,
+    state                   smallint NOT NULL CHECK (state IN (1, 2)),
+
+    PRIMARY KEY (
+        database_oid, tablespace_oid, main_relfilenode, user_relid,
+        column_attno, index_name, query_key, generation_id),
+
+    CHECK (
+        (provider = 0
+         AND payload_relation_oid IS NOT NULL
+         AND payload_database_oid IS NOT NULL
+         AND payload_tablespace_oid IS NOT NULL
+         AND payload_relfilenode IS NOT NULL
+         AND payload_relation_name IS NOT NULL
+         AND payload_relation_oid <> 0
+         AND payload_database_oid = database_oid
+         AND payload_tablespace_oid <> 0
+         AND payload_relfilenode <> 0)
+        OR
+        (provider = 1
+         AND payload_relation_oid IS NULL
+         AND payload_database_oid IS NULL
+         AND payload_tablespace_oid IS NULL
+         AND payload_relfilenode IS NULL
+         AND payload_relation_name IS NULL)
+    ),
+    CHECK (
+        (state = 1 AND retire_full_xid IS NULL)
+        OR (state = 2 AND retire_full_xid IS NOT NULL)
+    )
+) USING heap;
+
+CREATE UNIQUE INDEX minimizer_generation_storage_one_live
+ON bioseq_internal.minimizer_generation_storage (
+    database_oid, tablespace_oid, main_relfilenode, user_relid,
+    column_attno, index_name, query_key)
+WHERE state = smallint '1';
+
+CREATE INDEX minimizer_generation_storage_retired
+ON bioseq_internal.minimizer_generation_storage (
+    retire_full_xid, database_oid, tablespace_oid, main_relfilenode,
+    user_relid, column_attno, index_name, query_key, generation_id)
+WHERE state = smallint '2';
+
+-- Bounded orphan reconciliation resumes from this installation-local cursor;
+-- it is derived state and intentionally resets on crash/dump restore.
+CREATE UNLOGGED TABLE bioseq_internal.minimizer_generation_reaper_state (
+    database_oid             oid     PRIMARY KEY CHECK (database_oid <> 0),
+    tablespace_root_ordinal  integer NOT NULL DEFAULT integer '0'
+        CHECK (tablespace_root_ordinal >= 0),
+    shard_ordinal            smallint NOT NULL DEFAULT smallint '0'
+        CHECK (shard_ordinal BETWEEN 0 AND 255),
+    last_canonical_filename  text    NOT NULL DEFAULT text '',
+    pass                     bigint  NOT NULL DEFAULT bigint '0' CHECK (pass >= 0)
+) USING heap;
+
+REVOKE ALL ON TABLE
+    bioseq_internal.minimizer_generation_storage FROM PUBLIC;
+REVOKE ALL ON TABLE
+    bioseq_internal.minimizer_generation_reaper_state FROM PUBLIC;
+COMMENT ON TABLE bioseq_internal.minimizer_generation_storage IS
+    'DOC0383 immutable minimizer generation descriptor; provider 0=postgres_relation, 1=mapped_file; state 1=LIVE, 2=RETIRED.';
+COMMENT ON TABLE bioseq_internal.minimizer_generation_reaper_state IS
+    'DOC0383 bounded mapped-generation orphan-reaper cursor.';
+
 -- A sequence locator is a physical address, not a content version.  Persist
 -- one PostgreSQL-owned source epoch per immutable locator range so a cold
 -- revision-3 reader can attest the visible source with one indexed catalogue
@@ -595,6 +685,10 @@ GRANT EXECUTE ON FUNCTION bioseq_internal.add_to_extension_secdef(text, text)
 SELECT pg_extension_config_dump('bioseq_internal.seq_sub_table', 'WHERE FALSE');
 SELECT pg_extension_config_dump(
     'bioseq_internal.sequence_source_version', 'WHERE FALSE');
+SELECT pg_extension_config_dump(
+    'bioseq_internal.minimizer_generation_storage', 'WHERE FALSE');
+SELECT pg_extension_config_dump(
+    'bioseq_internal.minimizer_generation_reaper_state', 'WHERE FALSE');
 -- DOC0279 — the new index catalogs carry OIDs/relfilenodes that do not survive
 -- a dump/restore, so dump the table definition but no rows.
 SELECT pg_extension_config_dump('bioseq_internal.index_policy', 'WHERE FALSE');
@@ -2057,6 +2151,24 @@ RETURNS jsonb
 LANGUAGE C VOLATILE PARALLEL UNSAFE
 AS 'MODULE_PATHNAME',
    'bioseq_last_alignment_format5_reader_memory_evidence_v3';
+
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format5_reader_memory_evidence_v4()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format5_reader_memory_evidence_v4';
+
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format5_reader_memory_evidence_v5()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format5_reader_memory_evidence_v5';
+
+CREATE OR REPLACE FUNCTION bioseq.last_alignment_format5_reader_memory_evidence_v6()
+RETURNS jsonb
+LANGUAGE C VOLATILE PARALLEL UNSAFE
+AS 'MODULE_PATHNAME',
+   'bioseq_last_alignment_format5_reader_memory_evidence_v6';
 
 CREATE OR REPLACE FUNCTION bioseq.last_alignment_format6_reader_evidence()
 RETURNS jsonb

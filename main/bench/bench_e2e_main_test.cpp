@@ -169,6 +169,10 @@ inline constexpr auto kFragmentNativeFlatMetricFields =
             &E2eOutput::fragment_native_peak_occurrence_capacity_bytes},
         {"fragment_native_peak_query_plan_capacity_bytes",
             &E2eOutput::fragment_native_peak_query_plan_capacity_bytes},
+        {"fragment_native_peak_query_group_offset_capacity_bytes",
+            &E2eOutput::fragment_native_peak_query_group_offset_capacity_bytes},
+        {"fragment_native_peak_query_membership_filter_capacity_bytes",
+            &E2eOutput::fragment_native_peak_query_membership_filter_capacity_bytes},
         {"fragment_native_peak_query_radix_capacity_bytes",
             &E2eOutput::fragment_native_peak_query_radix_capacity_bytes},
         {"fragment_native_peak_occurrence_count_capacity_bytes",
@@ -181,6 +185,10 @@ inline constexpr auto kFragmentNativeFlatMetricFields =
             &E2eOutput::fragment_native_occurrence_allocations},
         {"fragment_native_query_plan_allocations",
             &E2eOutput::fragment_native_query_plan_allocations},
+        {"fragment_native_query_group_offset_allocations",
+            &E2eOutput::fragment_native_query_group_offset_allocations},
+        {"fragment_native_query_membership_filter_allocations",
+            &E2eOutput::fragment_native_query_membership_filter_allocations},
         {"fragment_native_query_radix_allocations",
             &E2eOutput::fragment_native_query_radix_allocations},
         {"fragment_native_occurrence_count_allocations",
@@ -189,18 +197,118 @@ inline constexpr auto kFragmentNativeFlatMetricFields =
             &E2eOutput::fragment_native_block_layout_allocations},
         {"fragment_native_block_evidence_allocations",
             &E2eOutput::fragment_native_block_evidence_allocations},
+        {"fragment_native_query_occurrences",
+            &E2eOutput::fragment_native_query_occurrences},
+        {"fragment_native_unique_query_plans",
+            &E2eOutput::fragment_native_unique_query_plans},
+        {"fragment_native_packed_occurrence_waves",
+            &E2eOutput::fragment_native_packed_occurrence_waves},
+        {"fragment_native_wide_occurrence_waves",
+            &E2eOutput::fragment_native_wide_occurrence_waves},
+        {"fragment_native_compact_direct_lookup_ns",
+            &E2eOutput::fragment_native_compact_direct_lookup_ns},
         {"fragment_native_evidence_saturated",
             &E2eOutput::fragment_native_evidence_saturated},
     });
-static_assert(kFragmentNativeFlatMetricFields.size() == 40);
+static_assert(kFragmentNativeFlatMetricFields.size() == 49);
+
+inline constexpr auto kExpectedFormat5V4AdditionKeys =
+    std::to_array<std::string_view>({
+        "provider_configured",
+        "provider_captured",
+        "provider_persisted",
+        "provider_opened",
+        "provider_head_scans",
+        "provider_head_rows",
+        "provider_descriptor_scans",
+        "provider_descriptor_rows",
+        "payload_tuples_formed",
+        "payload_tuples_inserted",
+        "payload_tuples_reread",
+        "mapped_sink_calls",
+        "mapped_sink_bytes",
+        "mapped_sink_flushes",
+        "mapped_sink_coalescer_capacity_bytes",
+        "mapped_sink_pwrite_calls",
+        "mapped_sink_short_writes",
+        "mapped_sink_eintr_retries",
+        "mapped_sink_preallocation_bytes",
+        "mapped_sink_preallocation_result",
+        "header_crc_bytes",
+        "directory_crc_bytes",
+        "manifest_crc_bytes",
+        "seal_aggregate_payload_crc_bytes",
+        "open_aggregate_payload_crc_bytes",
+        "lazy_extent_cas_winners",
+        "lazy_extent_waiters",
+        "lazy_extent_executions",
+        "lazy_extent_reuses",
+        "lazy_extent_crc_bytes",
+        "lazy_extent_state_bytes",
+        "lazy_extent_invalid_receipts",
+        "lazy_state_layout",
+        "mapping_bytes",
+        "mapping_count",
+        "mapping_resourceowner_releases",
+        "file_action_high_water",
+        "file_action_identity_mismatches",
+        "reaper_descriptors_examined",
+        "reaper_relation_rows_deleted",
+        "reaper_payload_bytes_deleted",
+        "reaper_files_queued",
+        "reaper_remaining",
+        "orphan_entries_examined",
+        "orphan_files_acted",
+        "orphan_bytes_acted",
+        "orphan_remaining",
+        "orphan_cursor_wraps",
+        "madvise_choice",
+        "madvise_result",
+    });
+static_assert(kExpectedFormat5V4AdditionKeys.size() == 50);
 
 }  // namespace
 
-TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
-          "[bench_e2e][raw-samples][format5][format6]") {
+TEST_CASE("DOC0383 Format-5 V4 preserves the exact V3 prefix and 50-key tail",
+          "[bench_e2e][raw-samples][format5][doc0383][p5][schema-v4]") {
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceKeys.size() == 71);
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceV4AdditionKeys.size() == 50);
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceV4Keys.size() == 121);
+    REQUIRE(std::ranges::equal(
+        kFormat5ReaderMemoryEvidenceV4AdditionKeys,
+        kExpectedFormat5V4AdditionKeys));
+    REQUIRE(std::ranges::equal(
+        std::span{kFormat5ReaderMemoryEvidenceV4Keys}.first(
+            kFormat5ReaderMemoryEvidenceKeys.size()),
+        kFormat5ReaderMemoryEvidenceKeys));
+    REQUIRE(std::ranges::equal(
+        std::span{kFormat5ReaderMemoryEvidenceV4Keys}.last(
+            kFormat5ReaderMemoryEvidenceV4AdditionKeys.size()),
+        kExpectedFormat5V4AdditionKeys));
+    const std::set<std::string_view> unique_keys{
+        kFormat5ReaderMemoryEvidenceV4Keys.begin(),
+        kFormat5ReaderMemoryEvidenceV4Keys.end()};
+    REQUIRE(unique_keys.size() == kFormat5ReaderMemoryEvidenceV4Keys.size());
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceV5AdditionKeys.size() == 4);
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceV5Keys.size() == 125);
+    REQUIRE(std::ranges::equal(
+        std::span{kFormat5ReaderMemoryEvidenceV5Keys}.first(
+            kFormat5ReaderMemoryEvidenceV4Keys.size()),
+        kFormat5ReaderMemoryEvidenceV4Keys));
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceV6AdditionKeys.size() == 15);
+    STATIC_REQUIRE(kFormat5ReaderMemoryEvidenceV6Keys.size() == 140);
+    REQUIRE(std::ranges::equal(
+        std::span{kFormat5ReaderMemoryEvidenceV6Keys}.first(
+            kFormat5ReaderMemoryEvidenceV5Keys.size()),
+        kFormat5ReaderMemoryEvidenceV5Keys));
+}
+
+TEST_CASE("E2E raw samples pin Format-5 V6 and Format-6 reader evidence",
+          "[bench_e2e][raw-samples][format5][format6]"
+          "[doc0383][p5][schema-v6]") {
     const nlohmann::json memory_evidence{
         {"schema", "bioseq.format5_reader_memory_evidence"},
-        {"version", 3},
+        {"version", 6},
         {"execution_id", 41},
         {"backend_pid", 42},
         {"database_oid", 43},
@@ -252,20 +360,94 @@ TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
         {"fragment_native_compaction_bytes", 0},
         {"fragment_native_final_copy_bytes", 0},
         {"fragment_native_peak_occurrence_capacity_bytes", 400},
-        {"fragment_native_peak_query_plan_capacity_bytes", 500},
+        {"fragment_native_peak_query_plan_capacity_bytes", 0},
+        {"fragment_native_peak_query_group_offset_capacity_bytes", 48},
+        {"fragment_native_peak_query_membership_filter_capacity_bytes",
+            16 * 1024 * 1024},
         {"fragment_native_peak_query_radix_capacity_bytes", 600},
-        {"fragment_native_peak_occurrence_count_capacity_bytes", 700},
+        {"fragment_native_peak_occurrence_count_capacity_bytes", 40},
         {"fragment_native_peak_block_layout_capacity_bytes", 800},
         {"fragment_native_peak_block_evidence_capacity_bytes", 900},
         {"fragment_native_occurrence_allocations", 1},
-        {"fragment_native_query_plan_allocations", 2},
+        {"fragment_native_query_plan_allocations", 0},
+        {"fragment_native_query_group_offset_allocations", 1},
+        {"fragment_native_query_membership_filter_allocations", 1},
         {"fragment_native_query_radix_allocations", 3},
         {"fragment_native_occurrence_count_allocations", 4},
         {"fragment_native_block_layout_allocations", 5},
         {"fragment_native_block_evidence_allocations", 6},
+        {"fragment_native_query_occurrences", 64},
+        {"fragment_native_unique_query_plans", 11},
+        {"fragment_native_packed_occurrence_waves", 2},
+        {"fragment_native_wide_occurrence_waves", 0},
+        {"fragment_native_compact_direct_lookup_ns", 110},
+        {"fragment_native_compact_direct_selection_shards", 32},
+        {"fragment_native_compact_direct_shard_query_layouts", 512},
+        {"fragment_native_compact_direct_layout_shards_completed", 32},
+        {"fragment_native_compact_direct_emission_shards_completed", 32},
+        {"fragment_native_compact_direct_posting_visit_passes", 1},
+        {"fragment_native_compact_direct_selected_postings", 100},
+        {"fragment_native_compact_direct_layout_postings_visited", 0},
+        {"fragment_native_compact_direct_emission_postings_visited", 100},
+        {"fragment_native_compact_direct_target_control_scan_bytes", 0},
+        {"fragment_native_compact_direct_target_control_scan_passes", 0},
+        {"fragment_native_compact_direct_fallbacks", 0},
+        {"fragment_native_compact_direct_traversal_rank_checkpoints_examined", 0},
+        {"fragment_native_compact_direct_traversal_membership_words_examined", 0},
+        {"fragment_native_compact_direct_rejected_posting_reads", 0},
         {"fragment_native_evidence_saturated", false},
         {"format5_reader_memory_evidence_saturated", false},
         {"stats_saturated", false},
+        {"provider_configured", 1},
+        {"provider_captured", 1},
+        {"provider_persisted", 1},
+        {"provider_opened", 1},
+        {"provider_head_scans", 1},
+        {"provider_head_rows", 1},
+        {"provider_descriptor_scans", 1},
+        {"provider_descriptor_rows", 1},
+        {"payload_tuples_formed", 0},
+        {"payload_tuples_inserted", 0},
+        {"payload_tuples_reread", 0},
+        {"mapped_sink_calls", 1},
+        {"mapped_sink_bytes", 4'096},
+        {"mapped_sink_flushes", 1},
+        {"mapped_sink_coalescer_capacity_bytes", 1'048'576},
+        {"mapped_sink_pwrite_calls", 1},
+        {"mapped_sink_short_writes", 0},
+        {"mapped_sink_eintr_retries", 0},
+        {"mapped_sink_preallocation_bytes", 4'096},
+        {"mapped_sink_preallocation_result", 1},
+        {"header_crc_bytes", 4'096},
+        {"directory_crc_bytes", 128},
+        {"manifest_crc_bytes", 64},
+        {"seal_aggregate_payload_crc_bytes", 0},
+        {"open_aggregate_payload_crc_bytes", 0},
+        {"lazy_extent_cas_winners", 2},
+        {"lazy_extent_waiters", 0},
+        {"lazy_extent_executions", 2},
+        {"lazy_extent_reuses", 4},
+        {"lazy_extent_crc_bytes", 512},
+        {"lazy_extent_state_bytes", 16},
+        {"lazy_extent_invalid_receipts", 0},
+        {"lazy_state_layout", 1},
+        {"mapping_bytes", 8'192},
+        {"mapping_count", 1},
+        {"mapping_resourceowner_releases", 1},
+        {"file_action_high_water", 2},
+        {"file_action_identity_mismatches", 0},
+        {"reaper_descriptors_examined", 1},
+        {"reaper_relation_rows_deleted", 0},
+        {"reaper_payload_bytes_deleted", 0},
+        {"reaper_files_queued", 0},
+        {"reaper_remaining", 0},
+        {"orphan_entries_examined", 1},
+        {"orphan_files_acted", 0},
+        {"orphan_bytes_acted", 0},
+        {"orphan_remaining", 0},
+        {"orphan_cursor_wraps", 0},
+        {"madvise_choice", 1},
+        {"madvise_result", 1},
     };
 
     E2eInput input{};
@@ -348,31 +530,111 @@ TEST_CASE("E2E raw samples pin Format-5 and Format-6 reader evidence",
         "fragment_native_final_copy_bytes",
         "fragment_native_peak_occurrence_capacity_bytes",
         "fragment_native_peak_query_plan_capacity_bytes",
+        "fragment_native_peak_query_group_offset_capacity_bytes",
+        "fragment_native_peak_query_membership_filter_capacity_bytes",
         "fragment_native_peak_query_radix_capacity_bytes",
         "fragment_native_peak_occurrence_count_capacity_bytes",
         "fragment_native_peak_block_layout_capacity_bytes",
         "fragment_native_peak_block_evidence_capacity_bytes",
         "fragment_native_occurrence_allocations",
         "fragment_native_query_plan_allocations",
+        "fragment_native_query_group_offset_allocations",
+        "fragment_native_query_membership_filter_allocations",
         "fragment_native_query_radix_allocations",
         "fragment_native_occurrence_count_allocations",
         "fragment_native_block_layout_allocations",
         "fragment_native_block_evidence_allocations",
+        "fragment_native_query_occurrences",
+        "fragment_native_unique_query_plans",
+        "fragment_native_packed_occurrence_waves",
+        "fragment_native_wide_occurrence_waves",
+        "fragment_native_compact_direct_lookup_ns",
+        "fragment_native_compact_direct_selection_shards",
+        "fragment_native_compact_direct_shard_query_layouts",
+        "fragment_native_compact_direct_layout_shards_completed",
+        "fragment_native_compact_direct_emission_shards_completed",
+        "fragment_native_compact_direct_posting_visit_passes",
+        "fragment_native_compact_direct_selected_postings",
+        "fragment_native_compact_direct_layout_postings_visited",
+        "fragment_native_compact_direct_emission_postings_visited",
+        "fragment_native_compact_direct_target_control_scan_bytes",
+        "fragment_native_compact_direct_target_control_scan_passes",
+        "fragment_native_compact_direct_fallbacks",
+        "fragment_native_compact_direct_traversal_rank_checkpoints_examined",
+        "fragment_native_compact_direct_traversal_membership_words_examined",
+        "fragment_native_compact_direct_rejected_posting_reads",
         "fragment_native_evidence_saturated",
         "format5_reader_memory_evidence_saturated",
         "stats_saturated",
+        "provider_configured",
+        "provider_captured",
+        "provider_persisted",
+        "provider_opened",
+        "provider_head_scans",
+        "provider_head_rows",
+        "provider_descriptor_scans",
+        "provider_descriptor_rows",
+        "payload_tuples_formed",
+        "payload_tuples_inserted",
+        "payload_tuples_reread",
+        "mapped_sink_calls",
+        "mapped_sink_bytes",
+        "mapped_sink_flushes",
+        "mapped_sink_coalescer_capacity_bytes",
+        "mapped_sink_pwrite_calls",
+        "mapped_sink_short_writes",
+        "mapped_sink_eintr_retries",
+        "mapped_sink_preallocation_bytes",
+        "mapped_sink_preallocation_result",
+        "header_crc_bytes",
+        "directory_crc_bytes",
+        "manifest_crc_bytes",
+        "seal_aggregate_payload_crc_bytes",
+        "open_aggregate_payload_crc_bytes",
+        "lazy_extent_cas_winners",
+        "lazy_extent_waiters",
+        "lazy_extent_executions",
+        "lazy_extent_reuses",
+        "lazy_extent_crc_bytes",
+        "lazy_extent_state_bytes",
+        "lazy_extent_invalid_receipts",
+        "lazy_state_layout",
+        "mapping_bytes",
+        "mapping_count",
+        "mapping_resourceowner_releases",
+        "file_action_high_water",
+        "file_action_identity_mismatches",
+        "reaper_descriptors_examined",
+        "reaper_relation_rows_deleted",
+        "reaper_payload_bytes_deleted",
+        "reaper_files_queued",
+        "reaper_remaining",
+        "orphan_entries_examined",
+        "orphan_files_acted",
+        "orphan_bytes_acted",
+        "orphan_remaining",
+        "orphan_cursor_wraps",
+        "madvise_choice",
+        "madvise_result",
     };
-    REQUIRE(expected_keys.size() == 67);
+    REQUIRE(expected_keys.size() == 140);
     std::set<std::string> actual_keys;
     for (const auto& [key, value] : nested.items()) {
         (void)value;
         actual_keys.insert(key);
     }
     REQUIRE(actual_keys == expected_keys);
-    REQUIRE(nested.size() == 67);
+    REQUIRE(nested.size() == 140);
     REQUIRE(nested.at("schema")
             == "bioseq.format5_reader_memory_evidence");
-    REQUIRE(nested.at("version") == 3);
+    REQUIRE(nested.at("version") == 6);
+    REQUIRE(nested.at("fragment_native_query_occurrences").get<std::int64_t>()
+        >= nested.at("fragment_native_unique_query_plans").get<std::int64_t>());
+    REQUIRE(nested.at("fragment_native_packed_occurrence_waves")
+                .get<std::int64_t>()
+            + nested.at("fragment_native_wide_occurrence_waves")
+                .get<std::int64_t>()
+        == nested.at("fragment_native_waves").get<std::int64_t>());
     REQUIRE(nested == memory_evidence);
     const auto& format6_nested = payload.at("attestation").at(
         "format6_reader_evidence");
@@ -411,6 +673,37 @@ TEST_CASE("E2E publishes fragment-native evidence as configured flat metrics",
     for (const auto& [key, member] : kFragmentNativeFlatMetricFields) {
         (void)member;
         REQUIRE(configured_metrics.contains(std::string{key}));
+    }
+    for (const std::string_view key : kExpectedFormat5V4AdditionKeys) {
+        REQUIRE(configured_metrics.contains(std::string{key}));
+    }
+}
+
+TEST_CASE("E2E publishes every Format-5 V4 addition from the V6 envelope",
+          "[bench_e2e][evaluation][format5][doc0383][p5][schema-v6]") {
+    nlohmann::json evidence = nlohmann::json::object();
+    for (const std::string_view key : kFormat5ReaderMemoryEvidenceV6Keys) {
+        evidence[std::string{key}] = 0;
+    }
+    evidence["schema"] = "bioseq.format5_reader_memory_evidence";
+    evidence["version"] = 6;
+    evidence["fragment_native_evidence_saturated"] = false;
+    evidence["format5_reader_memory_evidence_saturated"] = false;
+    evidence["stats_saturated"] = false;
+    std::int64_t expected = 1;
+    for (const std::string_view key : kExpectedFormat5V4AdditionKeys) {
+        evidence[std::string{key}] = expected++;
+    }
+
+    E2eOutput output{};
+    output.format5_reader_memory_evidence = std::move(evidence);
+    const auto metrics = e2e_eval(
+        "format5-v4-test", ParamMap{}, E2eInput{}, output);
+    expected = 1;
+    for (const std::string_view key : kExpectedFormat5V4AdditionKeys) {
+        const auto found = metrics.find(std::string{key});
+        REQUIRE(found != metrics.end());
+        REQUIRE(found->second == static_cast<double>(expected++));
     }
 }
 

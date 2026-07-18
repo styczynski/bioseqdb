@@ -255,6 +255,33 @@ class CacheModeRoutingTest(unittest.TestCase):
         self.assertIn("bioseq_caching/bioseq_cache.so", result["error"])
         self.assertEqual(result["binary_subdir"], "bioseq_caching")
 
+    def test_postgresql_bioseq_inspect_mapping_uses_bench_e2e_dso_candidates(
+            self) -> None:
+        definition = server.INSPECT_TARGETS["postgresql_bioseq"]
+        self.assertEqual(definition.mode, "bench-e2e")
+        self.assertEqual(
+            definition.artifact_names,
+            ("bioseq.dylib", "bioseq.so", "bioseq.dll"),
+        )
+        self.assertEqual(
+            definition.shared_target_names,
+            ("bioseq_modules_nopg",),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = inspect_tool.run_inspect(
+                function_name="PreparedShapeV5FragmentQueryReader",
+                target="postgresql_bioseq",
+                build_dir=Path(tmp),
+                binary_subdir="",
+                artifact_names=definition.artifact_names,
+                shared_target_names=definition.shared_target_names,
+            )
+        self.assertIn("error", result)
+        self.assertIn("bioseq.dylib", result["error"])
+        self.assertIn("bioseq.so", result["error"])
+        self.assertIn("bioseq.dll", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

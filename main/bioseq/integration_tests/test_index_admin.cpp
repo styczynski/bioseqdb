@@ -24,7 +24,10 @@
 // bioseq.index_table_row_count() libpq wrapper (index_table_row_count()).
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
+#include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <libpq-fe.h>
 #include <thread>
 #include <utility>
@@ -660,6 +663,488 @@ TEST_CASE("DOC0371 sequence-source version catalog has exact schema indexes and 
         "sequence_source_epoch_seq,sequence_source_version,"
         "sequence_source_version_fragment_row_idx,"
         "sequence_source_version_locator_key,sequence_source_version_pkey");
+}
+
+TEST_CASE("DOC0383 payload-provider GUC is user-set with frozen spellings and default",
+          "[index_admin][doc0383][p5][provider][guc]") {
+    connection_test_context ctx;
+    const auto setting = query_one(ctx,
+        "SELECT setting, reset_val, boot_val, context, vartype, "
+        "array_to_string(enumvals, ',') FROM pg_settings "
+        "WHERE name='bioseq.index_payload_storage_backend';");
+    REQUIRE(setting.size() == 6);
+    REQUIRE(setting[0].value() == "postgres_relation");
+    REQUIRE(setting[1].value() == "postgres_relation");
+    REQUIRE(setting[2].value() == "postgres_relation");
+    REQUIRE(setting[3].value() == "user");
+    REQUIRE(setting[4].value() == "enum");
+    REQUIRE(setting[5].value() == "postgres_relation,mapped_file");
+
+    exec_sql(ctx, "SET bioseq.index_payload_storage_backend=mapped_file;");
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.index_payload_storage_backend;") == "mapped_file");
+    exec_sql(ctx, "RESET bioseq.index_payload_storage_backend;");
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.index_payload_storage_backend;")
+        == "postgres_relation");
+}
+
+TEST_CASE("DOC0384 MPF Format-5 lookup-route GUC has explicit frozen spellings",
+          "[index_admin][doc0384][compact-h32][route][guc]") {
+    connection_test_context ctx;
+    const auto setting = query_one(ctx,
+        "SELECT setting, reset_val, boot_val, context, vartype, "
+        "array_to_string(enumvals, ',') FROM pg_settings "
+        "WHERE name='bioseq.aligner.mpf_format5_lookup_route';");
+    REQUIRE(setting.size() == 6);
+    REQUIRE(setting[0].value() == "format5_control_scans");
+    REQUIRE(setting[1].value() == "format5_control_scans");
+    REQUIRE(setting[2].value() == "format5_control_scans");
+    REQUIRE(setting[3].value() == "user");
+    REQUIRE(setting[4].value() == "enum");
+    REQUIRE(setting[5].value()
+        == "format5_control_scans,compact_h32_direct");
+
+    exec_sql(ctx,
+        "SET bioseq.aligner.mpf_format5_lookup_route="
+        "compact_h32_direct;");
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.aligner.mpf_format5_lookup_route;")
+        == "compact_h32_direct");
+    exec_sql(ctx, "RESET bioseq.aligner.mpf_format5_lookup_route;");
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.aligner.mpf_format5_lookup_route;")
+        == "format5_control_scans");
+}
+
+TEST_CASE("DOC0383 generation descriptor and reaper catalogs have exact protected shape",
+          "[index_admin][doc0383][p5][catalog][schema][acl]") {
+    connection_test_context ctx;
+    const auto catalogs = query_rows(ctx,
+        "SELECT c.relname, c.relkind::text, c.relpersistence::text, am.amname, "
+        "(SELECT string_agg(a.attname || ':' || "
+        "format_type(a.atttypid,a.atttypmod) || ':' || "
+        "a.attnotnull::int || ':' || a.atthasdef::int, ',' ORDER BY a.attnum) "
+        "FROM pg_attribute a WHERE a.attrelid=c.oid "
+        "AND a.attnum>0 AND NOT a.attisdropped), "
+        "(EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e "
+        "ON e.oid=d.refobjid WHERE d.classid='pg_class'::regclass "
+        "AND d.objid=c.oid AND d.objsubid=0 "
+        "AND d.refclassid='pg_extension'::regclass "
+        "AND d.deptype='e' AND e.extname='bioseq' "
+        "AND e.extowner=c.relowner))::int::text, "
+        "(NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(c.relacl, "
+        "acldefault('r',c.relowner))) a WHERE a.grantee=0))::int::text, "
+        "(NOT EXISTS (SELECT 1 FROM aclexplode(COALESCE(c.relacl, "
+        "acldefault('r',c.relowner))) a "
+        "WHERE a.grantee<>c.relowner))::int::text, "
+        "(EXISTS (SELECT 1 FROM pg_extension e "
+        "CROSS JOIN LATERAL unnest(e.extconfig,e.extcondition) "
+        "AS cfg(relid,condition) WHERE e.extname='bioseq' "
+        "AND cfg.relid=c.oid AND cfg.condition='WHERE FALSE'))::int::text "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+        "JOIN pg_am am ON am.oid=c.relam "
+        "WHERE n.nspname='bioseq_internal' AND c.relname IN "
+        "('minimizer_generation_storage',"
+        "'minimizer_generation_reaper_state') ORDER BY c.relname;");
+    REQUIRE(catalogs.size() == 2);
+    REQUIRE(catalogs[0].size() == 9);
+    REQUIRE(catalogs[0][0].value() ==
+        "minimizer_generation_reaper_state");
+    REQUIRE(catalogs[0][1].value() == "r");
+    REQUIRE(catalogs[0][2].value() == "u");
+    REQUIRE(catalogs[0][3].value() == "heap");
+    REQUIRE(catalogs[0][4].value() ==
+        "database_oid:oid:1:0,tablespace_root_ordinal:integer:1:1,"
+        "shard_ordinal:smallint:1:1,last_canonical_filename:text:1:1,"
+        "pass:bigint:1:1");
+    REQUIRE(catalogs[1][0].value() == "minimizer_generation_storage");
+    REQUIRE(catalogs[1][1].value() == "r");
+    REQUIRE(catalogs[1][2].value() == "u");
+    REQUIRE(catalogs[1][3].value() == "heap");
+    REQUIRE(catalogs[1][4].value() ==
+        "database_oid:oid:1:0,tablespace_oid:oid:1:0,"
+        "main_relfilenode:oid:1:0,user_relid:oid:1:0,"
+        "column_attno:smallint:1:0,index_name:name:1:0,"
+        "query_key:bigint:1:0,generation_id:bigint:1:0,"
+        "provider:smallint:1:0,payload_relation_oid:oid:0:0,"
+        "payload_database_oid:oid:0:0,payload_tablespace_oid:oid:0:0,"
+        "payload_relfilenode:oid:0:0,payload_relation_name:name:0:0,"
+        "image_bytes:bigint:1:0,header_checksum:bigint:1:0,"
+        "retire_full_xid:xid8:0:0,state:smallint:1:0");
+    for (const auto& catalog : catalogs) {
+        REQUIRE(catalog[5].value() == "1"); // extension-owned member
+        REQUIRE(catalog[6].value() == "1"); // no PUBLIC table privilege
+        REQUIRE(catalog[7].value() == "1"); // no non-owner privilege
+        REQUIRE(catalog[8].value() == "1"); // empty config-dump contract
+    }
+
+    const auto storage_indexes = query_rows(ctx,
+        "SELECT ci.relname, i.indisprimary::int::text, "
+        "i.indisunique::int::text, i.indimmediate::int::text, "
+        "i.indisvalid::int::text, i.indisready::int::text, "
+        "i.indislive::int::text, i.indnkeyatts::text, i.indnatts::text, "
+        "i.indkey::text, COALESCE(regexp_replace(pg_get_expr(i.indpred, "
+        "i.indrelid), '[()[:space:]]', '', 'g'), ''), "
+        "(SELECT string_agg(opc.opcname, ',' ORDER BY opclass_key.ord) "
+        "FROM unnest(i.indclass::oid[]) WITH ORDINALITY "
+        "opclass_key(opcoid,ord) "
+        "JOIN pg_opclass opc ON opc.oid=opclass_key.opcoid) "
+        "FROM pg_index i JOIN pg_class ci ON ci.oid=i.indexrelid "
+        "WHERE i.indrelid="
+        "'bioseq_internal.minimizer_generation_storage'::regclass "
+        "ORDER BY ci.relname;");
+    REQUIRE(storage_indexes.size() == 3);
+    REQUIRE(storage_indexes[0][0].value() ==
+        "minimizer_generation_storage_one_live");
+    REQUIRE(storage_indexes[0][1].value() == "0");
+    REQUIRE(storage_indexes[0][2].value() == "1");
+    REQUIRE(storage_indexes[0][7].value() == "7");
+    REQUIRE(storage_indexes[0][8].value() == "7");
+    REQUIRE(storage_indexes[0][9].value() == "1 2 3 4 5 6 7");
+    REQUIRE(storage_indexes[0][10].value() == "state='1'::smallint");
+    REQUIRE(storage_indexes[0][11].value() ==
+        "oid_ops,oid_ops,oid_ops,oid_ops,int2_ops,name_ops,int8_ops");
+    REQUIRE(storage_indexes[1][0].value() ==
+        "minimizer_generation_storage_pkey");
+    REQUIRE(storage_indexes[1][1].value() == "1");
+    REQUIRE(storage_indexes[1][2].value() == "1");
+    REQUIRE(storage_indexes[1][7].value() == "8");
+    REQUIRE(storage_indexes[1][8].value() == "8");
+    REQUIRE(storage_indexes[1][9].value() == "1 2 3 4 5 6 7 8");
+    REQUIRE(storage_indexes[1][10].value().empty());
+    REQUIRE(storage_indexes[1][11].value() ==
+        "oid_ops,oid_ops,oid_ops,oid_ops,int2_ops,name_ops,int8_ops,int8_ops");
+    REQUIRE(storage_indexes[2][0].value() ==
+        "minimizer_generation_storage_retired");
+    REQUIRE(storage_indexes[2][1].value() == "0");
+    REQUIRE(storage_indexes[2][2].value() == "0");
+    REQUIRE(storage_indexes[2][7].value() == "9");
+    REQUIRE(storage_indexes[2][8].value() == "9");
+    REQUIRE(storage_indexes[2][9].value() == "17 1 2 3 4 5 6 7 8");
+    REQUIRE(storage_indexes[2][10].value() == "state='2'::smallint");
+    REQUIRE(storage_indexes[2][11].value() ==
+        "xid8_ops,oid_ops,oid_ops,oid_ops,oid_ops,int2_ops,name_ops,int8_ops,int8_ops");
+    for (const auto& index : storage_indexes) {
+        REQUIRE(index[3].value() == "1");
+        REQUIRE(index[4].value() == "1");
+        REQUIRE(index[5].value() == "1");
+        REQUIRE(index[6].value() == "1");
+    }
+
+    const auto constraint_receipt = query_one(ctx,
+        "SELECT count(*) FILTER (WHERE contype='c')::text, "
+        "count(*) FILTER (WHERE contype='p')::text, "
+        "bool_and(convalidated)::int::text, "
+        "bool_and(NOT connoinherit)::int::text, "
+        "bool_and(CASE WHEN contype='c' THEN conbin IS NOT NULL "
+        "ELSE conkey=ARRAY[1,2,3,4,5,6,7,8]::smallint[] END)::int::text "
+        "FROM pg_constraint WHERE conrelid="
+        "'bioseq_internal.minimizer_generation_storage'::regclass;");
+    REQUIRE(constraint_receipt[0].value() == "13");
+    REQUIRE(constraint_receipt[1].value() == "1");
+    REQUIRE(constraint_receipt[2].value() == "1");
+    REQUIRE(constraint_receipt[3].value() == "1");
+    REQUIRE(constraint_receipt[4].value() == "1");
+
+    const auto reaper_index = query_one(ctx,
+        "SELECT ci.relname, i.indisprimary::int::text, "
+        "i.indisunique::int::text, i.indisvalid::int::text, "
+        "i.indnkeyatts::text, i.indnatts::text, i.indkey::text, "
+        "(i.indpred IS NULL)::int::text, "
+        "(i.indexprs IS NULL)::int::text "
+        "FROM pg_index i JOIN pg_class ci ON ci.oid=i.indexrelid "
+        "WHERE i.indrelid="
+        "'bioseq_internal.minimizer_generation_reaper_state'::regclass;");
+    REQUIRE(reaper_index[0].value() ==
+        "minimizer_generation_reaper_state_pkey");
+    REQUIRE(reaper_index[1].value() == "1");
+    REQUIRE(reaper_index[2].value() == "1");
+    REQUIRE(reaper_index[3].value() == "1");
+    REQUIRE(reaper_index[4].value() == "1");
+    REQUIRE(reaper_index[5].value() == "1");
+    REQUIRE(reaper_index[6].value() == "1");
+    REQUIRE(reaper_index[7].value() == "1");
+    REQUIRE(reaper_index[8].value() == "1");
+    const auto reaper_constraints = query_one(ctx,
+        "SELECT count(*) FILTER (WHERE contype='c')::text, "
+        "count(*) FILTER (WHERE contype='p')::text, "
+        "bool_and(convalidated AND NOT connoinherit)::int::text "
+        "FROM pg_constraint WHERE conrelid="
+        "'bioseq_internal.minimizer_generation_reaper_state'::regclass;");
+    REQUIRE(reaper_constraints[0].value() == "4");
+    REQUIRE(reaper_constraints[1].value() == "1");
+    REQUIRE(reaper_constraints[2].value() == "1");
+
+    exec_sql(ctx, "BEGIN;");
+    const auto defaults = query_one(ctx,
+        "INSERT INTO bioseq_internal.minimizer_generation_reaper_state "
+        "(database_oid) VALUES ('4294967294'::oid) RETURNING "
+        "tablespace_root_ordinal::text, shard_ordinal::text, "
+        "last_canonical_filename, pass::text;");
+    REQUIRE(defaults[0].value() == "0");
+    REQUIRE(defaults[1].value() == "0");
+    REQUIRE(defaults[2].value().empty());
+    REQUIRE(defaults[3].value() == "0");
+    exec_sql(ctx, "ROLLBACK;");
+
+    const auto relation_without_locator = sql_error(ctx,
+        "INSERT INTO bioseq_internal.minimizer_generation_storage "
+        "(database_oid,tablespace_oid,main_relfilenode,user_relid,"
+        "column_attno,index_name,query_key,generation_id,provider,"
+        "image_bytes,header_checksum,state) VALUES "
+        "(1,1,1,1,1,'minimizers_per_fragment',0,9223372036854775800,"
+        "0,4096,0,1);");
+    REQUIRE(relation_without_locator.sqlstate == "23514");
+    const auto mapped_with_locator = sql_error(ctx,
+        "INSERT INTO bioseq_internal.minimizer_generation_storage "
+        "(database_oid,tablespace_oid,main_relfilenode,user_relid,"
+        "column_attno,index_name,query_key,generation_id,provider,"
+        "payload_relation_oid,payload_database_oid,payload_tablespace_oid,"
+        "payload_relfilenode,payload_relation_name,image_bytes,"
+        "header_checksum,state) VALUES "
+        "(1,1,1,1,1,'minimizers_per_fragment',0,9223372036854775801,"
+        "1,1,1,1,1,'unexpected',4096,0,1);");
+    REQUIRE(mapped_with_locator.sqlstate == "23514");
+    const auto live_with_retire_xid = sql_error(ctx,
+        "INSERT INTO bioseq_internal.minimizer_generation_storage "
+        "(database_oid,tablespace_oid,main_relfilenode,user_relid,"
+        "column_attno,index_name,query_key,generation_id,provider,"
+        "image_bytes,header_checksum,retire_full_xid,state) VALUES "
+        "(1,1,1,1,1,'minimizers_per_fragment',0,9223372036854775802,"
+        "1,4096,0,'1'::xid8,1);");
+    REQUIRE(live_with_retire_xid.sqlstate == "23514");
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
+TEST_CASE("DOC0383 mapped MPS rejection precedes every catalog and generation mutation",
+          "[index_admin][doc0383][p5][provider][mps][no-mutation]") {
+    constexpr std::string_view table = "doc0383_mapped_mps_guard";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off; "
+        "SET bioseq.index_async_persist=off; "
+        "SET bioseq.recompute_async_persist=off; "
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled=on; "
+        "CREATE TABLE doc0383_mapped_mps_guard "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq; "
+        "INSERT INTO doc0383_mapped_mps_guard VALUES "
+        "(1, repeat('ACGT', 64)::bioseq.seq('dna4', 64));");
+    const std::string receipt_sql =
+        "SELECT "
+        "(SELECT last_value::text || ':' || is_called::int::text FROM "
+        "bioseq_internal.minimizer_generation_id_seq), "
+        "(SELECT count(*)::text FROM bioseq_internal.metadata_age_log "
+        "WHERE user_relid='doc0383_mapped_mps_guard'::regclass), "
+        "(SELECT count(*)::text FROM bioseq_internal.index_table_shard "
+        "WHERE database_oid=(SELECT oid FROM pg_database "
+        "WHERE datname=current_database()) "
+        "AND main_relfilenode=pg_relation_filenode("
+        "'doc0383_mapped_mps_guard'::regclass) "
+        "AND index_name='minimizers_per_sequence'), "
+        "(SELECT count(*)::text FROM "
+        "bioseq_internal.minimizer_generation_storage "
+        "WHERE user_relid='doc0383_mapped_mps_guard'::regclass), "
+        "(SELECT count(*)::text FROM "
+        "bioseq_internal.minimizer_generation_reaper_state), "
+        "(SELECT count(*)::text FROM "
+        "bioseq_internal.sequence_source_version "
+        "WHERE user_relid='doc0383_mapped_mps_guard'::regclass);";
+    const auto before = query_one(ctx, receipt_sql);
+    exec_sql(ctx, "SET bioseq.index_payload_storage_backend=mapped_file;");
+    const auto rejection = sql_error(ctx,
+        "SELECT bioseq.update_index("
+        "'doc0383_mapped_mps_guard'::regclass,"
+        "'minimizers_per_sequence');");
+    REQUIRE(rejection.sqlstate == "0A000");
+    REQUIRE(rejection.contains("MPS/Format-6 is not supported by mapped_file"));
+    const auto after = query_one(ctx, receipt_sql);
+    REQUIRE(after == before);
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.index_payload_storage_backend;") == "mapped_file");
+}
+
+TEST_CASE("DOC0384 mapped MPF rejection precedes head descriptor and file mutation",
+          "[index_admin][doc0384][compact-h32][provider][mpf]"
+          "[mapped-rejection][no-mutation]") {
+    constexpr std::string_view table = "doc0384_mapped_mpf_guard";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off; "
+        "SET bioseq.index_async_persist=off; "
+        "SET bioseq.recompute_async_persist=off; "
+        "SET bioseq.aligner.grouped32_persisted_generation_enabled=on; "
+        "CREATE TABLE doc0384_mapped_mpf_guard "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq; "
+        "INSERT INTO doc0384_mapped_mpf_guard VALUES "
+        "(1, repeat('ACGT', 64)::bioseq.seq('dna4', 64));");
+
+    // Freeze every existing immutable MPF5 image by name, length and mtime.
+    // The provider gate runs before generation-id allocation, so equality of
+    // this receipt also rejects an overwrite hidden behind a stable file count.
+    const auto image_receipt = [&ctx] {
+        const std::filesystem::path image_directory =
+            std::filesystem::path{query_scalar(ctx, "SHOW data_directory;")}
+            / "bioseq_mpf5";
+        std::vector<std::string> receipt;
+        std::error_code error;
+        if (!std::filesystem::exists(image_directory, error)) {
+            REQUIRE_FALSE(error);
+            return receipt;
+        }
+        for (std::filesystem::directory_iterator iterator{
+                 image_directory, error}, end;
+             !error && iterator != end; iterator.increment(error)) {
+            if (!iterator->is_regular_file(error)
+                || iterator->path().extension() != ".mpf5") {
+                continue;
+            }
+            const std::uintmax_t bytes = iterator->file_size(error);
+            REQUIRE_FALSE(error);
+            const auto modified = iterator->last_write_time(error);
+            REQUIRE_FALSE(error);
+            receipt.push_back(fmt::format(
+                "{}:{}:{}", iterator->path().filename().string(), bytes,
+                modified.time_since_epoch().count()));
+        }
+        REQUIRE_FALSE(error);
+        std::sort(receipt.begin(), receipt.end());
+        return receipt;
+    };
+    const std::string catalog_receipt_sql =
+        "SELECT "
+        "(SELECT last_value::text || ':' || is_called::int::text FROM "
+        "bioseq_internal.minimizer_generation_id_seq), "
+        "(SELECT count(*)::text FROM bioseq_internal.metadata_age_log "
+        "WHERE user_relid='doc0384_mapped_mpf_guard'::regclass), "
+        "(SELECT count(*)::text FROM bioseq_internal.index_table_shard "
+        "WHERE database_oid=(SELECT oid FROM pg_database "
+        "WHERE datname=current_database()) "
+        "AND main_relfilenode=pg_relation_filenode("
+        "'doc0384_mapped_mpf_guard'::regclass) "
+        "AND index_name='minimizers_per_fragment'), "
+        "(SELECT count(*)::text FROM "
+        "bioseq_internal.minimizer_generation_storage "
+        "WHERE user_relid='doc0384_mapped_mpf_guard'::regclass), "
+        "(SELECT count(*)::text FROM "
+        "bioseq_internal.minimizer_generation_reaper_state), "
+        "(SELECT count(*)::text FROM "
+        "bioseq_internal.sequence_source_version "
+        "WHERE user_relid='doc0384_mapped_mpf_guard'::regclass);";
+    const auto catalogs_before = query_one(ctx, catalog_receipt_sql);
+    const auto images_before = image_receipt();
+
+    exec_sql(ctx, "SET bioseq.index_payload_storage_backend=mapped_file;");
+    const auto rejection = sql_error(ctx,
+        "SELECT bioseq.update_index("
+        "'doc0384_mapped_mpf_guard'::regclass,"
+        "'minimizers_per_fragment');");
+    REQUIRE(rejection.sqlstate == "0A000");
+    REQUIRE(rejection.contains(
+        "mapped_file MPF lifecycle is not installed"));
+    REQUIRE(rejection.contains(
+        "no relation-provider fallback is permitted"));
+    REQUIRE(query_one(ctx, catalog_receipt_sql) == catalogs_before);
+    REQUIRE(image_receipt() == images_before);
+    REQUIRE(query_scalar(ctx,
+        "SHOW bioseq.index_payload_storage_backend;") == "mapped_file");
+}
+
+TEST_CASE("DOC0383 relation descriptor publication replaces and rolls back atomically",
+          "[index_admin][doc0383][p5][descriptor][publication]"
+          "[replacement][rollback][guc-independence]") {
+    constexpr std::string_view table = "doc0383_descriptor_publication";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx, "SET bioseq.update_index_on_insert=off;");
+    exec_sqlf(ctx,
+        "CREATE TABLE {} (id int, seq bioseq.seq('dna4',64)) USING bioseq;",
+        table);
+    exec_sqlf(ctx,
+        "INSERT INTO {} VALUES "
+        "(1,repeat('ACGT',4099)::bioseq.seq('dna4',64));", table);
+    const auto rowno = only_column_row_number(ctx, table);
+    const auto build = [&] {
+        return query_one(ctx, fmt::format(
+            "SELECT * FROM "
+            "bioseq_internal.rev3_test_build_ready_mpf_generation("
+            "'{}'::regclass,'minimizers_per_fragment',{},'scalar');",
+            table, rowno));
+    };
+    const auto descriptors = [&](const std::string& sidecar) {
+        return query_rows(ctx, fmt::format(
+            "SELECT generation_id::text,state::text,"
+            "(retire_full_xid IS NOT NULL)::int::text,provider::text,"
+            "(payload_relation_oid='bioseq_internal.{}'::regclass)::int::text,"
+            "(payload_database_oid=(SELECT oid FROM pg_database "
+            "WHERE datname=current_database()))::int::text,"
+            "(payload_relfilenode=pg_relation_filenode("
+            "'bioseq_internal.{}'::regclass))::int::text,"
+            "(payload_relation_name='{}'::name)::int::text,"
+            "(image_bytes>=4096)::int::text "
+            "FROM bioseq_internal.minimizer_generation_storage "
+            "WHERE user_relid='{}'::regclass AND query_key={} "
+            "AND index_name='minimizers_per_fragment' "
+            "ORDER BY generation_id;",
+            sidecar, sidecar, sidecar, table, rowno));
+    };
+
+    const auto baseline = build();
+    REQUIRE(baseline.size() == 45);
+    const std::string sidecar = baseline[0].value();
+    const std::string baseline_generation = baseline[10].value();
+    auto rows = descriptors(sidecar);
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0][0].value() == baseline_generation);
+    REQUIRE(rows[0][1].value() == "1");
+    REQUIRE(rows[0][2].value() == "0");
+    REQUIRE(rows[0][3].value() == "0");
+    for (std::size_t field = 4; field < rows[0].size(); ++field) {
+        REQUIRE(rows[0][field].value() == "1");
+    }
+
+    exec_sql(ctx, "BEGIN;");
+    const auto speculative = build();
+    REQUIRE(speculative[0].value() == sidecar);
+    rows = descriptors(sidecar);
+    REQUIRE(rows.size() == 2);
+    REQUIRE(rows[0][0].value() == baseline_generation);
+    REQUIRE(rows[0][1].value() == "2");
+    REQUIRE(rows[0][2].value() == "1");
+    REQUIRE(rows[1][0].value() == speculative[10].value());
+    REQUIRE(rows[1][1].value() == "1");
+    REQUIRE(rows[1][2].value() == "0");
+    exec_sql(ctx, "ROLLBACK;");
+    rows = descriptors(sidecar);
+    REQUIRE(rows.size() == 1);
+    REQUIRE(rows[0][0].value() == baseline_generation);
+    REQUIRE(rows[0][1].value() == "1");
+    REQUIRE(rows[0][2].value() == "0");
+
+    const auto replacement = build();
+    rows = descriptors(sidecar);
+    REQUIRE(rows.size() == 2);
+    REQUIRE(rows[0][0].value() == baseline_generation);
+    REQUIRE(rows[0][1].value() == "2");
+    REQUIRE(rows[0][2].value() == "1");
+    REQUIRE(rows[1][0].value() == replacement[10].value());
+    REQUIRE(rows[1][1].value() == "1");
+    REQUIRE(rows[1][2].value() == "0");
+    exec_sql(ctx, "SET bioseq.index_payload_storage_backend=mapped_file;");
+    REQUIRE(descriptors(sidecar) == rows);
+    exec_sql(ctx, "RESET bioseq.index_payload_storage_backend;");
+    exec_sql(ctx, "BEGIN;");
+    exec_sqlf(ctx,
+        "DELETE FROM bioseq_internal.minimizer_generation_storage "
+        "WHERE user_relid='{}'::regclass AND query_key={} AND state=1;",
+        table, rowno);
+    const auto missing_live = sql_error(ctx, fmt::format(
+        "SELECT * FROM "
+        "bioseq_internal.rev3_test_build_ready_mpf_generation("
+        "'{}'::regclass,'minimizers_per_fragment',{},'scalar');",
+        table, rowno));
+    REQUIRE(missing_live.contains(
+        "active head and LIVE generation descriptor disagree"));
+    exec_sql(ctx, "ROLLBACK;");
 }
 
 TEST_CASE("DOC0371 source epochs publish atomically and represent repeated empty sources",
@@ -3574,6 +4059,7 @@ TEST_CASE("update_index rejects an unknown index name",
                     kTable)));
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 TEST_CASE("ExactSimd update_index accepts DNA5 without scalar fallback",
           "[index_admin][exact-simd][dna5]") {
     constexpr std::string_view table = "test_index_admin_exact_dna5";
@@ -3604,6 +4090,7 @@ TEST_CASE("ExactSimd update_index accepts DNA5 without scalar fallback",
         "'minimizers_per_sequence');",
         table)) == 1);
 }
+#endif
 
 TEST_CASE("update_index accepts text and explicit regclass for the table arg",
           "[index_admin][update][regclass]") {

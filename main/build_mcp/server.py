@@ -936,6 +936,10 @@ INSPECT_TARGETS: Dict[str, InspectTargetDefinition] = {
         mode="unit+integration",
         artifact_names=("bioseq_bench_e2e_tests_exec",),
         shared_target_names=("bioseq_modules_nopg",)),
+    "postgresql_bioseq": InspectTargetDefinition(
+        mode="bench-e2e",
+        artifact_names=("bioseq.dylib", "bioseq.so", "bioseq.dll"),
+        shared_target_names=("bioseq_modules_nopg",)),
     "postgresql_bioseq_cache": InspectTargetDefinition(
         mode="cache-unit",
         artifact_names=("bioseq_cache.dylib", "bioseq_cache.so",

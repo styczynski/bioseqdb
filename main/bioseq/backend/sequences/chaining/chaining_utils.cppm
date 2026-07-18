@@ -142,11 +142,18 @@ struct CanonicalAnchorSortEvidence {
     std::uint64_t primary_bytes = 0u;
     std::uint64_t tie_bytes = 0u;
     bool saturated = false;
+    bool bounded_u32_primary_key = false;
 };
 
-[[nodiscard]] inline CanonicalAnchorSortEvidence sort_canonical_anchor_primary(
-        std::span<Anchor> anchors) noexcept {
+namespace canonical_anchor_sort_detail {
+
+template <class Key>
+[[nodiscard]] inline CanonicalAnchorSortEvidence sort_primary(
+        std::span<Anchor> anchors,
+        Key key,
+        bool bounded_u32_primary_key) noexcept {
     CanonicalAnchorSortEvidence evidence{};
+    evidence.bounded_u32_primary_key = bounded_u32_primary_key;
     if (anchors.size() < 2u) return evidence;
 
     const auto add_payload_bytes = [&evidence](
@@ -170,16 +177,52 @@ struct CanonicalAnchorSortEvidence {
         destination += bytes;
     };
 
+    add_payload_bytes(evidence.primary_bytes, anchors.size());
+    bioseq::sorting::radix_sort(
+        anchors.data(), anchors.data() + anchors.size(), key);
+    return evidence;
+}
+
+} // namespace canonical_anchor_sort_detail
+
+[[nodiscard]] inline CanonicalAnchorSortEvidence sort_canonical_anchor_primary(
+        std::span<Anchor> anchors) noexcept {
     struct AnchorRefBitsKey {
         [[nodiscard, gnu::always_inline]] std::uint64_t operator()(
                 const Anchor& anchor) const noexcept {
             return anchor.ref_bits();
         }
     };
-    add_payload_bytes(evidence.primary_bytes, anchors.size());
-    bioseq::sorting::radix_sort(
-        anchors.data(), anchors.data() + anchors.size(), AnchorRefBitsKey{});
-    return evidence;
+    return canonical_anchor_sort_detail::sort_primary(
+        anchors, AnchorRefBitsKey{}, false);
+}
+
+/// Fragment-native callers present one orientation-homogeneous slice at a
+/// time and have already authenticated every reference position against the
+/// target length.  For targets whose exclusive length fits in u32, the
+/// orientation bit is constant and `ref_position` is therefore the exact
+/// canonical primary key.  Selecting a u32 key prevents the in-place MSD
+/// radix from scanning four constant high bytes.  Larger targets retain the
+/// full `ref_bits()` authority without first scanning the anchor payload for
+/// a narrower maximum.
+[[nodiscard]] inline CanonicalAnchorSortEvidence
+sort_canonical_anchor_primary_bounded(
+        std::span<Anchor> orientation_homogeneous_anchors,
+        std::uint64_t authenticated_target_length) noexcept {
+    if (authenticated_target_length
+            <= (std::numeric_limits<std::uint32_t>::max)()) {
+        struct AnchorRefPositionU32Key {
+            [[nodiscard, gnu::always_inline]] std::uint32_t operator()(
+                    const Anchor& anchor) const noexcept {
+                return static_cast<std::uint32_t>(anchor.ref_position);
+            }
+        };
+        return canonical_anchor_sort_detail::sort_primary(
+            orientation_homogeneous_anchors,
+            AnchorRefPositionU32Key{},
+            true);
+    }
+    return sort_canonical_anchor_primary(orientation_homogeneous_anchors);
 }
 
 [[nodiscard]] inline CanonicalAnchorSortEvidence

@@ -123,6 +123,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -176,6 +177,7 @@ import bioseq.storage.scanner_pg;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
 import bioseq.parallelism.pool;
+import bioseq.parallelism.pipeline_ops;
 import bioseq.parallelism.memory_admission;
 import bioseq.scheduler.supervisor_pg;
 
@@ -245,10 +247,12 @@ export enum class BatchInvocationRole : std::uint8_t {
 
 export class BatchProcessor {
 public:
-	enum class CpuQueryUnionStorage : std::uint8_t {
-		minimizer_sketch,
-		canonical_u32,
-	};
+		enum class CpuQueryUnionStorage : std::uint8_t {
+			minimizer_sketch,
+			canonical_u32,
+			canonical_u32_sequential_fallback,
+			retained_sketch_only,
+		};
 
 	struct CpuPreparedQuerySketch {
 		std::uint64_t query_ordinal = 0;
@@ -296,9 +300,21 @@ public:
 		 * independent. Its only target-wide state is query-specific global
 		 * occurrence counts required by max-occ pruning; no posting owner,
 		 * span federation, or hash-to-fragment lookup index is retained. */
+		/* Declared before the borrowing reader so reverse destruction drops
+		 * every mapped span consumer before the backend-thread guard promptly
+		 * forgets, unmaps and closes its PostgreSQL ResourceOwner lease. */
+		std::optional<bioseq::storage::indexing::
+			MappedMinimizerFormat5LeaseGuardPg>
+			persisted_shape_v5_mapping_guard{};
 		std::optional<
 			bioseq::indexing::PreparedShapeV5FragmentQueryReader>
 			persisted_shape_v5_reader{};
+		/* Captured once when the persisted reader is opened.  Production call
+		 * sites must pass this explicitly: compact_h32_direct is fail-closed and
+		 * must never silently take the default Format-5 control-scan route. */
+		bioseq::indexing::FragmentAnchorLookupRoute
+			persisted_shape_v5_lookup_route = bioseq::indexing::
+				FragmentAnchorLookupRoute::format5_control_scans;
 		/* MPS Format-5 retains its sequence-wide query-selected image.  It is
 		 * deliberately separate from the MPF mmap reader above: MPS consumes
 		 * the authenticated PostgreSQL payload scan and must never borrow the
@@ -325,8 +341,14 @@ public:
 		std::uint64_t persisted_source_identity = 0;
 		bioseq::storage::indexing::MinimizerGenerationReadStats
 			persisted_read_stats{};
-		bool build_set_checksum_present = false;
-		std::uint64_t build_set_checksum = 0;
+			bool build_set_checksum_present = false;
+			std::uint64_t build_set_checksum = 0;
+			/* Compact-direct full-batch preparation already constructs the exact
+			 * sorted unique query set needed by the reader.  While this is true the
+			 * historical prepared/build checksum is deliberately unpublished; the
+			 * backend thread must resolve it exactly once before worker fanout or
+			 * materialize the admitted slow fallback before row execution. */
+			bool compact_direct_query_set_proof_pending = false;
 
 		[[nodiscard]] const CpuPreparedQuerySketch*
 		find_retained_query_sketch(
@@ -411,12 +433,20 @@ public:
 			release_query_union_state_noexcept();
 		}
 
-		[[nodiscard]] CpuPreparedIndexGroup* find_group(
-				std::int32_t kmer_size,
+			[[nodiscard]] CpuPreparedIndexGroup* find_group(
+					std::int32_t kmer_size,
 				std::int32_t window_size,
 				std::int32_t max_occ,
-				MinimizerSketchBackend sketch_backend) noexcept;
-	};
+					MinimizerSketchBackend sketch_backend) noexcept;
+
+			[[nodiscard]] bool query_set_proof_ready() const noexcept {
+				return std::ranges::none_of(
+					groups,
+					[](const CpuPreparedIndexGroup& group) noexcept {
+						return group.compact_direct_query_set_proof_pending;
+					});
+			}
+		};
 
 	/* One restart-cold, PostgreSQL-authenticated Format-5 generation retained
 	 * for the complete BatchJoin target lifecycle.  The resident owns the three
@@ -505,6 +535,79 @@ public:
 				|| view.at(0u) != 3u
 				|| view.at(1u) != 7u
 				|| view.at(2u) != 11u) {
+				return false;
+			}
+		}
+		/* The retained-sketch receipt is fail-closed, one-shot, and leaves no
+		 * canonical owner behind.  Exercise both direct publication and the
+		 * admitted historical sort/dedup fallback through the existing SQL seam. */
+		{
+			CpuPreparedTarget proof_target;
+			proof_target.unions_ready = true;
+			proof_target.query_count = 0u;
+			proof_target.key_set_checksum =
+				bioseq::indexing::kCompactDirectQuerySetFnvOffset;
+			proof_target.groups.emplace_back();
+			auto& group = proof_target.groups.front();
+			group.kmer_size = 15;
+			group.window_size = 10;
+			group.max_occ = 500;
+			group.sketch_backend = MinimizerSketchBackend::Scalar;
+			group.compact_direct_query_set_proof_pending = true;
+			const bioseq::indexing::CompactDirectQuerySetProof proof{
+				.query_count = 0u,
+				.query_occurrence_count = 0u,
+				.unique_hash_count = 0u,
+				.group_key_set_checksum = bioseq::indexing::
+					compact_direct_query_set_checksum_prefix(15u, 10u, 500u),
+				.present = true,
+			};
+			auto rejected = proof;
+			rejected.query_count = 1u;
+			if (proof_target.query_set_proof_ready()
+				|| group.canonical_query_hash_union_u32.capacity() != 0u
+				|| publish_compact_direct_query_set_proof(
+					proof_target, group, rejected)
+				|| !group.compact_direct_query_set_proof_pending
+				|| !publish_compact_direct_query_set_proof(
+					proof_target, group, proof)
+				|| publish_compact_direct_query_set_proof(
+					proof_target, group, proof)
+				|| !proof_target.query_set_proof_ready()
+				|| group.canonical_query_hash_union_u32.capacity() != 0u
+				|| proof_target.total_unique_keys != 0u
+				|| group.key_set_checksum != proof.group_key_set_checksum
+				|| !group.build_set_checksum_present
+				|| group.build_set_checksum != group.key_set_checksum) {
+				return false;
+			}
+
+			CpuPreparedTarget fallback_target;
+			fallback_target.unions_ready = true;
+			fallback_target.query_count = 0u;
+			fallback_target.key_set_checksum =
+				bioseq::indexing::kCompactDirectQuerySetFnvOffset;
+			fallback_target.groups.emplace_back();
+			auto& fallback_group = fallback_target.groups.front();
+			fallback_group.kmer_size = 15;
+			fallback_group.window_size = 10;
+			fallback_group.max_occ = 500;
+			fallback_group.sketch_backend = MinimizerSketchBackend::Scalar;
+			fallback_group.compact_direct_query_set_proof_pending = true;
+			try {
+				finalize_pending_compact_direct_query_set_proof_fallback(
+					fallback_target);
+			} catch (...) {
+				return false;
+			}
+			if (!fallback_target.query_set_proof_ready()
+				|| fallback_group.canonical_query_hash_union_u32.capacity()
+					!= 0u
+				|| fallback_target.total_unique_keys != 0u
+				|| fallback_group.key_set_checksum
+					!= proof.group_key_set_checksum
+				|| fallback_target.key_set_checksum
+					!= proof_target.key_set_checksum) {
 				return false;
 			}
 		}
@@ -640,7 +743,7 @@ public:
 		CpuQueryUnionStorage union_storage,
 		CpuPreparedTarget& prepared_target);
 
-	void prepare_cpu_persisted_native_target(
+		void prepare_cpu_persisted_native_target(
 		Oid database_oid,
 		Oid tablespace_oid,
 		Oid main_relfilenode,
@@ -656,7 +759,15 @@ public:
 		const Minimap2Params& base_params,
 		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
 			executor_read,
-		CpuPreparedTarget& prepared_target);
+			CpuPreparedTarget& prepared_target);
+
+		[[nodiscard]] static bool publish_compact_direct_query_set_proof(
+			CpuPreparedTarget& prepared_target,
+			CpuPreparedIndexGroup& group,
+			const bioseq::indexing::CompactDirectQuerySetProof& proof) noexcept;
+
+		static void finalize_pending_compact_direct_query_set_proof_fallback(
+			CpuPreparedTarget& prepared_target);
 
 	void prepare_gpu_persisted_shape_v5_target(
 		Oid database_oid,

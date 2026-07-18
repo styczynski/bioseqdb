@@ -32,6 +32,7 @@ import bioseq.common.context;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.pipe;
@@ -2352,6 +2353,10 @@ TEST_CASE("DOC0383 fragment-native query evidence preserves additive and peak me
     PreparedFragmentAnchorBatchEvidence first{};
     first.waves = 1u;
     first.queries = 3u;
+    first.query_occurrences = 7u;
+    first.unique_query_plans = 3u;
+    first.packed_occurrence_waves = 1u;
+    first.wide_occurrence_waves = 0u;
     first.occurrence_fill_ns = 11u;
     first.control_count_bytes = 101u;
     first.pass2_position_bytes = 40u;
@@ -2367,6 +2372,10 @@ TEST_CASE("DOC0383 fragment-native query evidence preserves additive and peak me
     PreparedFragmentAnchorBatchEvidence second{};
     second.waves = 2u;
     second.queries = 5u;
+    second.query_occurrences = 11u;
+    second.unique_query_plans = 4u;
+    second.packed_occurrence_waves = 1u;
+    second.wide_occurrence_waves = 1u;
     second.occurrence_fill_ns = 17u;
     second.control_count_bytes = 203u;
     second.pass2_position_bytes = 72u;
@@ -2382,6 +2391,13 @@ TEST_CASE("DOC0383 fragment-native query evidence preserves additive and peak me
     first.merge(second);
     REQUIRE(first.waves == 3u);
     REQUIRE(first.queries == 8u);
+    REQUIRE(first.query_occurrences == 18u);
+    REQUIRE(first.unique_query_plans == 7u);
+    REQUIRE(first.query_occurrences >= first.unique_query_plans);
+    REQUIRE(first.packed_occurrence_waves == 2u);
+    REQUIRE(first.wide_occurrence_waves == 1u);
+    REQUIRE(first.packed_occurrence_waves + first.wide_occurrence_waves
+        == first.waves);
     REQUIRE(first.occurrence_fill_ns == 28u);
     REQUIRE(first.control_count_bytes == 304u);
     REQUIRE(first.pass2_position_bytes == 112u);
@@ -2407,11 +2423,122 @@ TEST_CASE("DOC0383 fragment-native query evidence preserves additive and peak me
     PipelineOperationalStats overflow{};
     overflow.fragment_native_query_evidence.waves =
         (std::numeric_limits<std::uint64_t>::max)();
+    overflow.fragment_native_query_evidence.query_occurrences =
+        (std::numeric_limits<std::uint64_t>::max)();
     aggregate.merge(overflow);
     REQUIRE(aggregate.fragment_native_query_evidence.waves
         == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(aggregate.fragment_native_query_evidence.query_occurrences
+        == (std::numeric_limits<std::uint64_t>::max)());
     REQUIRE(aggregate.fragment_native_query_evidence.saturated);
     REQUIRE(aggregate.stats_saturated);
+}
+
+TEST_CASE("DOC0383 Format-5 provider evidence preserves stable codes and checked counters",
+          "[pipeline][operational-stats][format5][provider-evidence]"
+          "[doc0383][p5][schema-v4]") {
+    using namespace bioseq::pipeline_stats;
+
+    PipelineOperationalStats first{};
+    auto& first_evidence = first.format5_provider_evidence;
+    first_evidence.record_provider_configured(1u);
+    first_evidence.record_provider_captured(1u);
+    first_evidence.record_provider_persisted(1u);
+    first_evidence.record_provider_opened(1u);
+    first_evidence.record_mapped_sink_preallocation_result(
+        Format5EvidenceOperationResult::succeeded);
+    first_evidence.record_lazy_state_layout(
+        Format5LazyStateLayout::compact_aligned_planes);
+    first_evidence.record_madvise(
+        Format5MappingAdvice::random,
+        Format5EvidenceOperationResult::succeeded);
+    first_evidence.record_counter(first_evidence.provider_head_scans, 1u);
+    first_evidence.record_counter(first_evidence.provider_head_rows, 1u);
+    first_evidence.record_counter(first_evidence.mapped_sink_calls, 1u);
+    first_evidence.record_counter(first_evidence.mapped_sink_bytes, 100u);
+    first_evidence.record_counter(first_evidence.mapping_bytes, 400u);
+    first_evidence.record_file_action_high_water(2u);
+    REQUIRE(first_evidence.provider_identity_complete_and_consistent());
+
+    PipelineOperationalStats second{};
+    auto& second_evidence = second.format5_provider_evidence;
+    second_evidence.record_provider_configured(1u);
+    second_evidence.record_provider_captured(1u);
+    second_evidence.record_provider_persisted(1u);
+    second_evidence.record_provider_opened(1u);
+    second_evidence.record_mapped_sink_preallocation_result(
+        Format5EvidenceOperationResult::succeeded);
+    second_evidence.record_lazy_state_layout(
+        Format5LazyStateLayout::compact_aligned_planes);
+    second_evidence.record_madvise(
+        Format5MappingAdvice::random,
+        Format5EvidenceOperationResult::succeeded);
+    second_evidence.record_counter(second_evidence.provider_head_scans, 1u);
+    second_evidence.record_counter(second_evidence.provider_head_rows, 1u);
+    second_evidence.record_counter(second_evidence.mapped_sink_calls, 1u);
+    second_evidence.record_counter(second_evidence.mapped_sink_bytes, 200u);
+    second_evidence.record_counter(second_evidence.mapping_bytes, 800u);
+    second_evidence.record_file_action_high_water(3u);
+
+    PipelineOperationalStats aggregate{};
+    aggregate.merge(first);
+    aggregate.merge(second);
+    const auto& evidence = aggregate.format5_provider_evidence;
+    REQUIRE(evidence.provider_identity_complete_and_consistent());
+    REQUIRE(evidence.provider_configured == 1u);
+    REQUIRE(evidence.provider_captured == 1u);
+    REQUIRE(evidence.provider_persisted == 1u);
+    REQUIRE(evidence.provider_opened == 1u);
+    REQUIRE(evidence.provider_head_scans == 2u);
+    REQUIRE(evidence.provider_head_rows == 2u);
+    REQUIRE(evidence.mapped_sink_calls == 2u);
+    REQUIRE(evidence.mapped_sink_bytes == 300u);
+    REQUIRE(evidence.mapping_bytes == 1'200u);
+    REQUIRE(evidence.file_action_high_water == 3u);
+    REQUIRE(evidence.mapped_sink_preallocation_result
+        == static_cast<std::uint64_t>(
+            Format5EvidenceOperationResult::succeeded));
+    REQUIRE(evidence.lazy_state_layout
+        == static_cast<std::uint64_t>(
+            Format5LazyStateLayout::compact_aligned_planes));
+    REQUIRE(evidence.madvise_choice
+        == static_cast<std::uint64_t>(Format5MappingAdvice::random));
+    REQUIRE(evidence.madvise_result
+        == static_cast<std::uint64_t>(
+            Format5EvidenceOperationResult::succeeded));
+    REQUIRE_FALSE(evidence.stable_value_conflict);
+    REQUIRE_FALSE(evidence.saturated);
+    REQUIRE_FALSE(aggregate.operational_identity_conflict);
+    REQUIRE_FALSE(aggregate.format5_reader_memory_evidence_saturated);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats conflicting{};
+    conflicting.format5_provider_evidence.record_provider_opened(0u);
+    aggregate.merge(conflicting);
+    REQUIRE(aggregate.operational_identity_conflict);
+    REQUIRE(aggregate.format5_provider_evidence.stable_value_conflict);
+    REQUIRE_FALSE(
+        aggregate.format5_provider_evidence.provider_identity_complete_and_consistent());
+
+    PipelineOperationalStats exact_limit{};
+    exact_limit.format5_provider_evidence.record_counter(
+        exact_limit.format5_provider_evidence.mapping_bytes,
+        sql_bigint_value_max);
+    PipelineOperationalStats saturated_aggregate{};
+    saturated_aggregate.merge(exact_limit);
+    REQUIRE(saturated_aggregate.format5_provider_evidence.mapping_bytes
+        == sql_bigint_value_max);
+    REQUIRE_FALSE(saturated_aggregate.stats_saturated);
+
+    PipelineOperationalStats plus_one{};
+    plus_one.format5_provider_evidence.record_counter(
+        plus_one.format5_provider_evidence.mapping_bytes, 1u);
+    saturated_aggregate.merge(plus_one);
+    REQUIRE(saturated_aggregate.format5_provider_evidence.mapping_bytes
+        == sql_bigint_value_max);
+    REQUIRE(saturated_aggregate.format5_provider_evidence.saturated);
+    REQUIRE(saturated_aggregate.format5_reader_memory_evidence_saturated);
+    REQUIRE(saturated_aggregate.stats_saturated);
 }
 
 TEST_CASE("Format-6 reader receipts preserve max peaks and report-once owners",
@@ -4814,6 +4941,75 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     REQUIRE((subrange_proof.exact_simd.generic_u64_kernel_calls > 0u
         || subrange_proof.exact_simd
             .k15_w10_b8_u32_hash_kernel_calls > 0u));
+}
+
+TEST_CASE("Indexed dna4 u64 queries use zero-copy u32 B8 continuation with scalar-identical records",
+          "[pipe][exact-simd][indexed-query][u64-u32][b8][parity][proof]") {
+    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using query_sequence = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using query_range = compact_sequence_range<query_sequence>;
+    using b8_sequence = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    using b8_range = compact_sequence_range<b8_sequence>;
+
+    if (two_stack_internal::select_exact_simd_kernel_kind<
+            MinimapSketchData, b8_range::traits>(4'123u)
+        != ExactSimdKernelKind::k15_w10_b8_u32_hash) {
+        return;
+    }
+
+    Minimap2Params params;
+    params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+
+    const auto assert_case = [&params](std::vector<seq::dna4> data,
+                                      std::string_view fixture) {
+        CAPTURE(fixture, data.size());
+        query_range resident(data);
+        auto lazy_query = bioseq::storage::make_lazy_in_memory(resident);
+        auto fast = sketch_query_for_index_selection<MinimapSketchData>(
+            lazy_query, params, 10u, 15u);
+
+        sketch_collector_t<MinimapSketchData> scalar_collector;
+        collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+            scalar_collector,
+            resident,
+            resident.begin(),
+            resident.end(),
+            10u,
+            15u);
+        const auto scalar =
+            std::move(scalar_collector).extract_sketches_data();
+
+        REQUIRE(fast.exact_simd_execution_proof_present);
+        const TwoStackExecutionProof& proof =
+            fast.exact_simd_execution_proof;
+        REQUIRE(proof.accepted(/*require_nonempty_vector_work=*/true));
+        REQUIRE(proof.bp_consumed == data.size());
+        REQUIRE(proof.resident_vector_stream_kernel_calls == 0u);
+        REQUIRE(proof.resident_vector_stream_single_calls == 0u);
+        REQUIRE(proof.resident_vector_stream_dual_calls == 0u);
+        REQUIRE(proof.generic_u64_kernel_calls == 0u);
+        REQUIRE(proof.k15_w10_b8_u32_hash_kernel_calls == 1u);
+        REQUIRE(proof.k15_w10_b8_u32_hash_candidate_blocks > 0u);
+        REQUIRE(proof.k15_w10_b8_u32_hash_lane_visits > 0u);
+        REQUIRE(proof.k15_w10_b8_packed22_groups > 0u);
+        REQUIRE(proof.k15_w10_b8_packed22_lane_visits > 0u);
+        REQUIRE(fast.minimizers.size() == scalar.size());
+        for (std::size_t i = 0; i < scalar.size(); ++i) {
+            CAPTURE(i);
+            REQUIRE(fast.minimizers[i].raw_value()
+                == scalar[i].raw_value());
+        }
+    };
+
+    assert_case(
+        doc0307_e2e::make_dna4(4'123u, 0xB8D0A57u),
+        "non-periodic tail");
+    std::vector<seq::dna4> repeated(4'123u);
+    seq::dna4 adenine;
+    adenine.assign_rank(
+        static_cast<decltype(adenine.to_rank())>(0u));
+    std::fill(repeated.begin(), repeated.end(), adenine);
+    assert_case(std::move(repeated), "equal-hash tie windows");
 }
 
 TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",

@@ -145,6 +145,31 @@ void radix_sort(T* beg, T* end, KeyFn key) {
     }
 }
 
+/// Sort a range whose more-significant radix bytes were already partitioned.
+///
+/// `Shift` is the next byte shift to consume.  Callers must provide a range in
+/// which every key byte above `Shift` is equal; under that precondition this is
+/// exactly the recursive suffix that `radix_sort()` would execute after its
+/// already-completed higher-byte passes.  Keeping the ordinary small-span
+/// insertion-sort fallback is important: it preserves both the upstream
+/// threshold and its unspecified-but-repeatable equal-key permutation.
+template <int Shift, typename T, typename KeyFn>
+void radix_sort_from_shift(T* beg, T* end, KeyFn key) {
+    using KeyT = std::decay_t<decltype(key(*beg))>;
+    static_assert(std::is_unsigned_v<KeyT>,
+                  "radix sort requires an unsigned key");
+    static_assert(Shift >= 0, "radix shift must be non-negative");
+    static_assert(Shift % static_cast<int>(kRadixMaxBits) == 0,
+                  "radix shift must select a byte boundary");
+    static_assert(Shift < static_cast<int>(sizeof(KeyT) * 8u),
+                  "radix shift exceeds the key width");
+    if (end - beg <= static_cast<std::ptrdiff_t>(kRadixMinSize)) {
+        detail::rs_insertsort(beg, end, key);
+    } else {
+        detail::rs_sort(beg, end, kRadixMaxBits, Shift, key);
+    }
+}
+
 /// Specialised wrapper for sorting raw `uint64_t` ascending — equivalent
 /// to minimap2's `radix_sort_64`.
 inline void radix_sort_u64(std::uint64_t* beg, std::uint64_t* end) {

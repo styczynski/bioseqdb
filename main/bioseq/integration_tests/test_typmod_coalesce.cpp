@@ -23,6 +23,7 @@
 // user-visible signal but the row set is the load-bearing part.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 
 #include <set>
 #include <string>
@@ -109,6 +110,7 @@ TEST_CASE("EXPLAIN surfaces \"coalesce to seq('dna4', 32)\" when the "
     REQUIRE(plan_contains(plan, "coalesce to seq('dna4', 32)"));
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 TEST_CASE("Cross-alphabet recompute: dna5 query against dna4 column "
           "still returns matches",
           "[mmsearch][cross_alphabet][typmod_coalesce][regression]") {
@@ -178,6 +180,7 @@ TEST_CASE("Cross-alphabet recompute: dna5 query against dna4 column "
         REQUIRE(dna5_pks.count(key) > 0);
     }
 }
+#endif
 
 // Parameterised matrix: column at dna4/32 vs literal at every
 // supported (alphabet, width) typmod. The contract:
@@ -212,6 +215,22 @@ TEMPLATE_TEST_CASE_SIG(
     (Dna5Entry, 32),
     (Dna5Entry, 64)) {
     auto ctx = fresh_context({kCoalesceTable});
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    if constexpr (std::is_same_v<typename Entry::alphabet_type,
+                                 seq_entry_tag::dna5>) {
+        const auto unsupported_alphabet = sql_error(
+            ctx,
+            fmt::format(
+                "SELECT "
+                "'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('{}', {});",
+                Entry::alphabet_name_sv, Width));
+        REQUIRE(unsupported_alphabet.sqlstate == "22023");
+        REQUIRE(unsupported_alphabet.contains(
+            "bioseq.seq alphabet \"dna5\" is not supported"));
+        REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
+    } else
+#endif
+    {
     seed_hoe_fixture(ctx, kCoalesceTable);
 
     // Baseline at the column's exact typmod.
@@ -267,8 +286,10 @@ TEMPLATE_TEST_CASE_SIG(
             REQUIRE(param_pks.count(key) > 0);
         }
     }
+    }
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 TEST_CASE("EXPLAIN surfaces \"Bioseq Recomputed: minimizers 100%\" with "
           "\"Performance reduced\" hint when alphabets differ",
           "[mmsearch][cross_alphabet][typmod_coalesce][explain]") {
@@ -295,3 +316,4 @@ TEST_CASE("EXPLAIN surfaces \"Bioseq Recomputed: minimizers 100%\" with "
     REQUIRE(plan_contains(plan, "Bioseq Recomputed"));
     REQUIRE(plan_contains(plan, "Performance reduced"));
 }
+#endif

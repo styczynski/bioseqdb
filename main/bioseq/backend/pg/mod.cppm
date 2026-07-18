@@ -947,16 +947,53 @@ template<std::size_t N>
 	return result;
 }
 
+enum class Format5ReaderMemoryEvidenceVersion : std::uint32_t {
+    exact_array_layout = 2u,
+    fragment_native_query = 3u,
+    provider_lifecycle = 4u,
+    bucket_direct_query = 5u,
+    compact_direct_one_decode = 6u,
+};
+
 [[nodiscard]] std::string format5_reader_memory_evidence_json_versioned(
         const alignment_exec::AlignmentExecutionSnapshot& snapshot,
-        const std::uint32_t version,
-        const bool include_fragment_native_query)
+        const Format5ReaderMemoryEvidenceVersion version)
 {
+    bool include_fragment_native_query = false;
+    bool include_provider_lifecycle = false;
+    bool include_bucket_direct_query = false;
+    bool include_compact_direct_one_decode = false;
+    switch (version) {
+        case Format5ReaderMemoryEvidenceVersion::exact_array_layout:
+            break;
+        case Format5ReaderMemoryEvidenceVersion::fragment_native_query:
+            include_fragment_native_query = true;
+            break;
+        case Format5ReaderMemoryEvidenceVersion::provider_lifecycle:
+            include_fragment_native_query = true;
+            include_provider_lifecycle = true;
+            break;
+        case Format5ReaderMemoryEvidenceVersion::bucket_direct_query:
+            include_fragment_native_query = true;
+            include_provider_lifecycle = true;
+            include_bucket_direct_query = true;
+            break;
+        case Format5ReaderMemoryEvidenceVersion::compact_direct_one_decode:
+            include_fragment_native_query = true;
+            include_provider_lifecycle = true;
+            include_bucket_direct_query = true;
+            include_compact_direct_one_decode = true;
+            break;
+    }
+    const std::uint32_t version_number =
+        static_cast<std::uint32_t>(version);
     const auto& operational = snapshot.pipeline.operational;
     std::string result =
         R"({"schema":"bioseq.format5_reader_memory_evidence","version":)"
-        + std::to_string(version);
-    result.reserve(include_fragment_native_query ? 6'144u : 2'048u);
+        + std::to_string(version_number);
+    result.reserve(include_provider_lifecycle
+        ? 12'288u
+        : include_fragment_native_query ? 6'144u : 2'048u);
 	const auto append_signed = [&result](
 			const std::string_view key,
 			const std::int64_t value) {
@@ -1113,6 +1150,14 @@ template<std::size_t N>
             evidence.block_layout_allocations);
         append("fragment_native_block_evidence_allocations",
             evidence.block_evidence_allocations);
+        append("fragment_native_query_occurrences",
+            evidence.query_occurrences);
+        append("fragment_native_unique_query_plans",
+            evidence.unique_query_plans);
+        append("fragment_native_packed_occurrence_waves",
+            evidence.packed_occurrence_waves);
+        append("fragment_native_wide_occurrence_waves",
+            evidence.wide_occurrence_waves);
         result += R"(,"fragment_native_evidence_saturated":)";
         result += evidence.saturated ? "true" : "false";
     }
@@ -1121,6 +1166,117 @@ template<std::size_t N>
 		? "true" : "false";
 	result += R"(,"stats_saturated":)";
 	result += operational.stats_saturated ? "true" : "false";
+	if (include_provider_lifecycle) {
+		const auto& evidence = operational.format5_provider_evidence;
+		append("provider_configured", evidence.provider_configured);
+		append("provider_captured", evidence.provider_captured);
+		append("provider_persisted", evidence.provider_persisted);
+		append("provider_opened", evidence.provider_opened);
+		append("provider_head_scans", evidence.provider_head_scans);
+		append("provider_head_rows", evidence.provider_head_rows);
+		append("provider_descriptor_scans",
+			evidence.provider_descriptor_scans);
+		append("provider_descriptor_rows", evidence.provider_descriptor_rows);
+		append("payload_tuples_formed", evidence.payload_tuples_formed);
+		append("payload_tuples_inserted", evidence.payload_tuples_inserted);
+		append("payload_tuples_reread", evidence.payload_tuples_reread);
+		append("mapped_sink_calls", evidence.mapped_sink_calls);
+		append("mapped_sink_bytes", evidence.mapped_sink_bytes);
+		append("mapped_sink_flushes", evidence.mapped_sink_flushes);
+		append("mapped_sink_coalescer_capacity_bytes",
+			evidence.mapped_sink_coalescer_capacity_bytes);
+		append("mapped_sink_pwrite_calls", evidence.mapped_sink_pwrite_calls);
+		append("mapped_sink_short_writes", evidence.mapped_sink_short_writes);
+		append("mapped_sink_eintr_retries", evidence.mapped_sink_eintr_retries);
+		append("mapped_sink_preallocation_bytes",
+			evidence.mapped_sink_preallocation_bytes);
+		append("mapped_sink_preallocation_result",
+			evidence.mapped_sink_preallocation_result);
+		append("header_crc_bytes", evidence.header_crc_bytes);
+		append("directory_crc_bytes", evidence.directory_crc_bytes);
+		append("manifest_crc_bytes", evidence.manifest_crc_bytes);
+		append("seal_aggregate_payload_crc_bytes",
+			evidence.seal_aggregate_payload_crc_bytes);
+		append("open_aggregate_payload_crc_bytes",
+			evidence.open_aggregate_payload_crc_bytes);
+		append("lazy_extent_cas_winners", evidence.lazy_extent_cas_winners);
+		append("lazy_extent_waiters", evidence.lazy_extent_waiters);
+		append("lazy_extent_executions", evidence.lazy_extent_executions);
+		append("lazy_extent_reuses", evidence.lazy_extent_reuses);
+		append("lazy_extent_crc_bytes", evidence.lazy_extent_crc_bytes);
+		append("lazy_extent_state_bytes", evidence.lazy_extent_state_bytes);
+		append("lazy_extent_invalid_receipts",
+			evidence.lazy_extent_invalid_receipts);
+		append("lazy_state_layout", evidence.lazy_state_layout);
+		append("mapping_bytes", evidence.mapping_bytes);
+		append("mapping_count", evidence.mapping_count);
+		append("mapping_resourceowner_releases",
+			evidence.mapping_resourceowner_releases);
+		append("file_action_high_water", evidence.file_action_high_water);
+		append("file_action_identity_mismatches",
+			evidence.file_action_identity_mismatches);
+		append("reaper_descriptors_examined",
+			evidence.reaper_descriptors_examined);
+		append("reaper_relation_rows_deleted",
+			evidence.reaper_relation_rows_deleted);
+		append("reaper_payload_bytes_deleted",
+			evidence.reaper_payload_bytes_deleted);
+		append("reaper_files_queued", evidence.reaper_files_queued);
+		append("reaper_remaining", evidence.reaper_remaining);
+		append("orphan_entries_examined", evidence.orphan_entries_examined);
+		append("orphan_files_acted", evidence.orphan_files_acted);
+		append("orphan_bytes_acted", evidence.orphan_bytes_acted);
+		append("orphan_remaining", evidence.orphan_remaining);
+		append("orphan_cursor_wraps", evidence.orphan_cursor_wraps);
+		append("madvise_choice", evidence.madvise_choice);
+			append("madvise_result", evidence.madvise_result);
+		}
+    if (include_bucket_direct_query) {
+        const auto& evidence = operational.fragment_native_query_evidence;
+        append("fragment_native_peak_query_group_offset_capacity_bytes",
+            evidence.peak_query_group_offset_capacity_bytes);
+        append("fragment_native_peak_query_membership_filter_capacity_bytes",
+            evidence.peak_query_membership_filter_capacity_bytes);
+        append("fragment_native_query_group_offset_allocations",
+            evidence.query_group_offset_allocations);
+        append("fragment_native_query_membership_filter_allocations",
+            evidence.query_membership_filter_allocations);
+    }
+	if (include_compact_direct_one_decode) {
+		const auto& evidence = operational.fragment_native_query_evidence;
+		append("fragment_native_compact_direct_lookup_ns",
+			evidence.compact_direct_lookup_ns);
+		append("fragment_native_compact_direct_selection_shards",
+			evidence.compact_direct_selection_shards);
+		append("fragment_native_compact_direct_shard_query_layouts",
+			evidence.compact_direct_shard_query_layouts);
+		append("fragment_native_compact_direct_layout_shards_completed",
+			evidence.compact_direct_layout_shards_completed);
+		append("fragment_native_compact_direct_emission_shards_completed",
+			evidence.compact_direct_emission_shards_completed);
+		append("fragment_native_compact_direct_posting_visit_passes",
+			evidence.compact_direct_posting_visit_passes);
+		append("fragment_native_compact_direct_selected_postings",
+			evidence.compact_direct_selected_postings);
+		append("fragment_native_compact_direct_layout_postings_visited",
+			evidence.compact_direct_layout_postings_visited);
+		append("fragment_native_compact_direct_emission_postings_visited",
+			evidence.compact_direct_emission_postings_visited);
+		append("fragment_native_compact_direct_target_control_scan_bytes",
+			evidence.compact_direct_target_control_scan_bytes);
+		append("fragment_native_compact_direct_target_control_scan_passes",
+			evidence.compact_direct_target_control_scan_passes);
+		append("fragment_native_compact_direct_fallbacks",
+			evidence.compact_direct_fallbacks);
+		append(
+			"fragment_native_compact_direct_traversal_rank_checkpoints_examined",
+			evidence.compact_direct_traversal_rank_checkpoints_examined);
+		append(
+			"fragment_native_compact_direct_traversal_membership_words_examined",
+			evidence.compact_direct_traversal_membership_words_examined);
+		append("fragment_native_compact_direct_rejected_posting_reads",
+			evidence.compact_direct_rejected_posting_reads);
+	}
 	result += '}';
     return result;
 }
@@ -1128,13 +1284,32 @@ template<std::size_t N>
 [[nodiscard]] std::string format5_reader_memory_evidence_json_v2(
         const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
     return format5_reader_memory_evidence_json_versioned(
-        snapshot, 2u, /*include_fragment_native_query=*/false);
+        snapshot, Format5ReaderMemoryEvidenceVersion::exact_array_layout);
 }
 
 [[nodiscard]] std::string format5_reader_memory_evidence_json_v3(
         const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
     return format5_reader_memory_evidence_json_versioned(
-        snapshot, 3u, /*include_fragment_native_query=*/true);
+        snapshot, Format5ReaderMemoryEvidenceVersion::fragment_native_query);
+}
+
+[[nodiscard]] std::string format5_reader_memory_evidence_json_v4(
+        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
+    return format5_reader_memory_evidence_json_versioned(
+        snapshot, Format5ReaderMemoryEvidenceVersion::provider_lifecycle);
+}
+
+[[nodiscard]] std::string format5_reader_memory_evidence_json_v5(
+        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
+    return format5_reader_memory_evidence_json_versioned(
+        snapshot, Format5ReaderMemoryEvidenceVersion::bucket_direct_query);
+}
+
+[[nodiscard]] std::string format5_reader_memory_evidence_json_v6(
+        const alignment_exec::AlignmentExecutionSnapshot& snapshot) {
+    return format5_reader_memory_evidence_json_versioned(
+        snapshot,
+        Format5ReaderMemoryEvidenceVersion::compact_direct_one_decode);
 }
 
 [[nodiscard]] std::string format6_reader_evidence_json(
@@ -3044,6 +3219,57 @@ Datum bioseq_last_alignment_format5_reader_memory_evidence_v3(
 		format5_reader_memory_evidence_json_v3(snapshot);
 	PG_RETURN_DATUM(DirectFunctionCall1(
 		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+/* DOC0383: v4 appends exact provider/image/lifecycle evidence to frozen v3. */
+CXX_PG_FUNCTION_INFO_V1(
+	bioseq_last_alignment_format5_reader_memory_evidence_v4);
+Datum bioseq_last_alignment_format5_reader_memory_evidence_v4(
+		PG_FUNCTION_ARGS) {
+	if (!last_alignment_execution_snapshot.has_value()) {
+		PG_RETURN_NULL();
+	}
+	const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+		*last_alignment_execution_snapshot;
+	(void)validate_alignment_snapshot_environment(snapshot);
+	const std::string encoded =
+		format5_reader_memory_evidence_json_v4(snapshot);
+	PG_RETURN_DATUM(DirectFunctionCall1(
+		jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+/* P4: v5 appends bucket-direct/Bloom capacity evidence to frozen v4. */
+CXX_PG_FUNCTION_INFO_V1(
+    bioseq_last_alignment_format5_reader_memory_evidence_v5);
+Datum bioseq_last_alignment_format5_reader_memory_evidence_v5(
+        PG_FUNCTION_ARGS) {
+    if (!last_alignment_execution_snapshot.has_value()) {
+        PG_RETURN_NULL();
+    }
+    const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+        *last_alignment_execution_snapshot;
+    (void)validate_alignment_snapshot_environment(snapshot);
+    const std::string encoded =
+        format5_reader_memory_evidence_json_v5(snapshot);
+    PG_RETURN_DATUM(DirectFunctionCall1(
+        jsonb_in, CStringGetDatum(encoded.c_str())));
+}
+
+/* P0: v6 appends compact-direct sharding/one-decode proof to frozen v5. */
+CXX_PG_FUNCTION_INFO_V1(
+    bioseq_last_alignment_format5_reader_memory_evidence_v6);
+Datum bioseq_last_alignment_format5_reader_memory_evidence_v6(
+        PG_FUNCTION_ARGS) {
+    if (!last_alignment_execution_snapshot.has_value()) {
+        PG_RETURN_NULL();
+    }
+    const alignment_exec::AlignmentExecutionSnapshot& snapshot =
+        *last_alignment_execution_snapshot;
+    (void)validate_alignment_snapshot_environment(snapshot);
+    const std::string encoded =
+        format5_reader_memory_evidence_json_v6(snapshot);
+    PG_RETURN_DATUM(DirectFunctionCall1(
+        jsonb_in, CStringGetDatum(encoded.c_str())));
 }
 
 /* Exact Format-6 timed-reader identity, physical-I/O and ownership receipt. */

@@ -1728,7 +1728,9 @@ TEST_CASE("ExactSimd K15/W10 B8 selector is representation and target exact",
             : ExactSimdKernelKind::generic_u64));
     REQUIRE(two_stack_internal::select_exact_simd_kernel_kind<
             MinimapSketchData, fast_traits>(4096)
-        == ExactSimdKernelKind::generic_u64);
+        == (target_supports_fast
+            ? ExactSimdKernelKind::k15_w10_b8_u32_hash
+            : ExactSimdKernelKind::generic_u64));
     REQUIRE(two_stack_internal::select_exact_simd_kernel_kind<
             xxl_fast_minimizer, u64_traits>(4096)
         == ExactSimdKernelKind::generic_u64);

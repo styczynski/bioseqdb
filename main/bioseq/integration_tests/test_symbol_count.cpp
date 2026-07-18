@@ -1,7 +1,7 @@
 // Integration scenarios for bioseq.symbol_count (DOC0279 §12.5):
 //   * The deleted POC 49-stub is gone: bioseq.symbol_count(LITERAL, 'L') now
-//     returns the REAL per-rank tally (tally_symbol_counts) for both dna4 and
-//     dna5 literals on the scalar path (no row context).
+//     returns the REAL per-rank tally (tally_symbol_counts) for every alphabet
+//     enabled by the active PostgreSQL build profile on the scalar path.
 //   * The scalar result is identical whether bioseq.enable_vectorization is on
 //     or off — the SIMD path must not diverge from the scalar path.
 //   * On a USING bioseq columnar table the custom-scan VarInjector rewrites
@@ -18,6 +18,7 @@
 //   'ACGTN'::dna5            -> A=1, C=1, G=1, T=1, N=1
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
@@ -61,6 +62,14 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
           "[symbol_count][literal][dna5]") {
     auto ctx = fresh_context();
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    const auto error = sql_error(
+        ctx, "SELECT bioseq.symbol_count("
+             "    'NNNNN'::bioseq.seq('dna5', 32), 'N');");
+    REQUIRE(error.sqlstate == "22023");
+    REQUIRE(error.contains("bioseq.seq alphabet \"dna5\" is not supported"));
+    REQUIRE(error.contains("Valid alphabets: 'dna4'"));
+#else
     // 'NNNNN' is five N's; in dna5 the rank of N is 4, so N=5 and every other
     // letter is 0. The typmod packs dna5 in 3 bits/char (width 32 is fine).
     REQUIRE(query_scalar_int(
@@ -86,6 +95,7 @@ TEST_CASE("scalar literal symbol_count returns the real tally (dna5)",
     REQUIRE(query_scalar_int(
                 ctx, "SELECT bioseq.symbol_count("
                      "    'ACGTN'::bioseq.seq('dna5', 32), 'N');") == 1);
+#endif
 }
 
 // ---- 2. Vectorization parity ------------------------------------------------

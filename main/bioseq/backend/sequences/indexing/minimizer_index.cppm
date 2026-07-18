@@ -30,7 +30,25 @@ using bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
 /// callers catch this named type before crossing the longjmp ERROR boundary.
 class PersistedMinimizerLookupError final : public std::runtime_error {
 public:
+    enum class Reason : std::uint8_t {
+        unspecified,
+        admission_or_allocation,
+    };
+
+private:
+    Reason reason_ = Reason::unspecified;
+
+public:
     using std::runtime_error::runtime_error;
+
+    PersistedMinimizerLookupError(
+            Reason reason,
+            const char* message)
+        : std::runtime_error(message), reason_(reason) {}
+
+    [[nodiscard]] Reason reason() const noexcept {
+        return reason_;
+    }
 };
 
 /// One borrowed, chronologically encoded position run for a minimizer hash.

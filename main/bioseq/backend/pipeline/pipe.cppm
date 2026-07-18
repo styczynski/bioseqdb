@@ -659,6 +659,356 @@ struct Format6ReaderOperationalEvidence {
     }
 };
 
+/// Stable result code shared by Format-5 mapped-sink preallocation and
+/// mapping-advice receipts. These values are report ABI, not raw errno values.
+enum class Format5EvidenceOperationResult : std::uint64_t {
+    not_attempted = 0u,
+    succeeded = 1u,
+    failed = 2u,
+};
+
+/// Stable identity of the selected lazy extent-validation state layout.
+enum class Format5LazyStateLayout : std::uint64_t {
+    unselected = 0u,
+    compact_aligned_planes = 1u,
+    cache_line_padded_entries = 2u,
+};
+
+/// Stable identity of the selected read-only mapping advice policy.
+enum class Format5MappingAdvice : std::uint64_t {
+    none = 0u,
+    random = 1u,
+};
+
+static_assert(static_cast<std::uint64_t>(
+    Format5EvidenceOperationResult::not_attempted) == 0u);
+static_assert(static_cast<std::uint64_t>(
+    Format5EvidenceOperationResult::succeeded) == 1u);
+static_assert(static_cast<std::uint64_t>(
+    Format5EvidenceOperationResult::failed) == 2u);
+static_assert(static_cast<std::uint64_t>(
+    Format5LazyStateLayout::unselected) == 0u);
+static_assert(static_cast<std::uint64_t>(
+    Format5LazyStateLayout::compact_aligned_planes) == 1u);
+static_assert(static_cast<std::uint64_t>(
+    Format5LazyStateLayout::cache_line_padded_entries) == 2u);
+static_assert(static_cast<std::uint64_t>(
+    Format5MappingAdvice::none) == 0u);
+static_assert(static_cast<std::uint64_t>(
+    Format5MappingAdvice::random) == 1u);
+
+/// Provider, mapped-image and lifecycle evidence appended by the exact
+/// Format-5 evidence V4 schema. Counter producers build operation-local
+/// deltas through record_counter(); aggregation remains checked and clamps at
+/// SQL bigint max. Stable codes use explicit presence bits because provider
+/// code zero (postgres_relation) is a valid published identity.
+struct Format5ProviderOperationalEvidence {
+    std::uint64_t provider_configured = 0u;
+    std::uint64_t provider_captured = 0u;
+    std::uint64_t provider_persisted = 0u;
+    std::uint64_t provider_opened = 0u;
+    std::uint64_t provider_head_scans = 0u;
+    std::uint64_t provider_head_rows = 0u;
+    std::uint64_t provider_descriptor_scans = 0u;
+    std::uint64_t provider_descriptor_rows = 0u;
+
+    std::uint64_t payload_tuples_formed = 0u;
+    std::uint64_t payload_tuples_inserted = 0u;
+    std::uint64_t payload_tuples_reread = 0u;
+    std::uint64_t mapped_sink_calls = 0u;
+    std::uint64_t mapped_sink_bytes = 0u;
+    std::uint64_t mapped_sink_flushes = 0u;
+    std::uint64_t mapped_sink_coalescer_capacity_bytes = 0u;
+    std::uint64_t mapped_sink_pwrite_calls = 0u;
+    std::uint64_t mapped_sink_short_writes = 0u;
+    std::uint64_t mapped_sink_eintr_retries = 0u;
+    std::uint64_t mapped_sink_preallocation_bytes = 0u;
+    std::uint64_t mapped_sink_preallocation_result = 0u;
+
+    std::uint64_t header_crc_bytes = 0u;
+    std::uint64_t directory_crc_bytes = 0u;
+    std::uint64_t manifest_crc_bytes = 0u;
+    std::uint64_t seal_aggregate_payload_crc_bytes = 0u;
+    std::uint64_t open_aggregate_payload_crc_bytes = 0u;
+
+    std::uint64_t lazy_extent_cas_winners = 0u;
+    std::uint64_t lazy_extent_waiters = 0u;
+    std::uint64_t lazy_extent_executions = 0u;
+    std::uint64_t lazy_extent_reuses = 0u;
+    std::uint64_t lazy_extent_crc_bytes = 0u;
+    std::uint64_t lazy_extent_state_bytes = 0u;
+    std::uint64_t lazy_extent_invalid_receipts = 0u;
+    std::uint64_t lazy_state_layout = 0u;
+    std::uint64_t mapping_bytes = 0u;
+    std::uint64_t mapping_count = 0u;
+    std::uint64_t mapping_resourceowner_releases = 0u;
+
+    std::uint64_t file_action_high_water = 0u;
+    std::uint64_t file_action_identity_mismatches = 0u;
+    std::uint64_t reaper_descriptors_examined = 0u;
+    std::uint64_t reaper_relation_rows_deleted = 0u;
+    std::uint64_t reaper_payload_bytes_deleted = 0u;
+    std::uint64_t reaper_files_queued = 0u;
+    std::uint64_t reaper_remaining = 0u;
+    std::uint64_t orphan_entries_examined = 0u;
+    std::uint64_t orphan_files_acted = 0u;
+    std::uint64_t orphan_bytes_acted = 0u;
+    std::uint64_t orphan_remaining = 0u;
+    std::uint64_t orphan_cursor_wraps = 0u;
+
+    std::uint64_t madvise_choice = 0u;
+    std::uint64_t madvise_result = 0u;
+
+    // Presence/conflict state is intentionally not serialized. It makes
+    // report-once code zero distinguishable from an unrecorded field.
+    bool provider_configured_present = false;
+    bool provider_captured_present = false;
+    bool provider_persisted_present = false;
+    bool provider_opened_present = false;
+    bool mapped_sink_preallocation_result_present = false;
+    bool lazy_state_layout_present = false;
+    bool madvise_choice_present = false;
+    bool madvise_result_present = false;
+    bool stable_value_conflict = false;
+    bool saturated = false;
+
+    [[nodiscard]] constexpr bool operator==(
+        const Format5ProviderOperationalEvidence&) const noexcept = default;
+
+    /// Add one SQL-bound count/byte receipt and retain a local saturation bit.
+    void record_counter(
+            std::uint64_t& destination,
+            std::uint64_t increment) noexcept {
+        saturated = merge_counter(destination, increment) || saturated;
+    }
+
+    /// File-action occupancy is a high-water mark, not an additive count.
+    void record_file_action_high_water(std::uint64_t value) noexcept {
+        if (value > sql_bigint_value_max) {
+            value = sql_bigint_value_max;
+            saturated = true;
+        }
+        file_action_high_water = std::max(file_action_high_water, value);
+    }
+
+    void record_provider_configured(std::uint64_t provider) noexcept {
+        record_stable_value(
+            provider_configured,
+            provider_configured_present,
+            provider,
+            stable_value_conflict);
+    }
+
+    void record_provider_captured(std::uint64_t provider) noexcept {
+        record_stable_value(
+            provider_captured,
+            provider_captured_present,
+            provider,
+            stable_value_conflict);
+    }
+
+    void record_provider_persisted(std::uint64_t provider) noexcept {
+        record_stable_value(
+            provider_persisted,
+            provider_persisted_present,
+            provider,
+            stable_value_conflict);
+    }
+
+    void record_provider_opened(std::uint64_t provider) noexcept {
+        record_stable_value(
+            provider_opened,
+            provider_opened_present,
+            provider,
+            stable_value_conflict);
+    }
+
+    void record_mapped_sink_preallocation_result(
+            Format5EvidenceOperationResult result) noexcept {
+        record_stable_value(
+            mapped_sink_preallocation_result,
+            mapped_sink_preallocation_result_present,
+            static_cast<std::uint64_t>(result),
+            stable_value_conflict);
+    }
+
+    void record_lazy_state_layout(Format5LazyStateLayout layout) noexcept {
+        record_stable_value(
+            lazy_state_layout,
+            lazy_state_layout_present,
+            static_cast<std::uint64_t>(layout),
+            stable_value_conflict);
+    }
+
+    void record_madvise(
+            Format5MappingAdvice choice,
+            Format5EvidenceOperationResult result) noexcept {
+        record_stable_value(
+            madvise_choice,
+            madvise_choice_present,
+            static_cast<std::uint64_t>(choice),
+            stable_value_conflict);
+        record_stable_value(
+            madvise_result,
+            madvise_result_present,
+            static_cast<std::uint64_t>(result),
+            stable_value_conflict);
+    }
+
+    [[nodiscard]] constexpr bool
+    provider_identity_complete_and_consistent() const noexcept {
+        return provider_configured_present
+            && provider_captured_present
+            && provider_persisted_present
+            && provider_opened_present
+            && !stable_value_conflict
+            && provider_configured == provider_captured
+            && provider_configured == provider_persisted
+            && provider_configured == provider_opened;
+    }
+
+    /// Merge one operation-local provider/lifecycle delta.
+    [[nodiscard]] bool merge(
+            const Format5ProviderOperationalEvidence& rhs,
+            bool& identity_conflict) noexcept {
+        bool overflow = saturated || rhs.saturated;
+        bool conflict = stable_value_conflict || rhs.stable_value_conflict;
+        merge_stable_value(
+            provider_configured, provider_configured_present,
+            rhs.provider_configured, rhs.provider_configured_present,
+            conflict);
+        merge_stable_value(
+            provider_captured, provider_captured_present,
+            rhs.provider_captured, rhs.provider_captured_present,
+            conflict);
+        merge_stable_value(
+            provider_persisted, provider_persisted_present,
+            rhs.provider_persisted, rhs.provider_persisted_present,
+            conflict);
+        merge_stable_value(
+            provider_opened, provider_opened_present,
+            rhs.provider_opened, rhs.provider_opened_present,
+            conflict);
+        merge_stable_value(
+            mapped_sink_preallocation_result,
+            mapped_sink_preallocation_result_present,
+            rhs.mapped_sink_preallocation_result,
+            rhs.mapped_sink_preallocation_result_present,
+            conflict);
+        merge_stable_value(
+            lazy_state_layout, lazy_state_layout_present,
+            rhs.lazy_state_layout, rhs.lazy_state_layout_present,
+            conflict);
+        merge_stable_value(
+            madvise_choice, madvise_choice_present,
+            rhs.madvise_choice, rhs.madvise_choice_present,
+            conflict);
+        merge_stable_value(
+            madvise_result, madvise_result_present,
+            rhs.madvise_result, rhs.madvise_result_present,
+            conflict);
+
+        const auto add = [&overflow](
+                std::uint64_t& destination,
+                std::uint64_t increment) noexcept {
+            overflow = merge_counter(destination, increment) || overflow;
+        };
+        add(provider_head_scans, rhs.provider_head_scans);
+        add(provider_head_rows, rhs.provider_head_rows);
+        add(provider_descriptor_scans, rhs.provider_descriptor_scans);
+        add(provider_descriptor_rows, rhs.provider_descriptor_rows);
+        add(payload_tuples_formed, rhs.payload_tuples_formed);
+        add(payload_tuples_inserted, rhs.payload_tuples_inserted);
+        add(payload_tuples_reread, rhs.payload_tuples_reread);
+        add(mapped_sink_calls, rhs.mapped_sink_calls);
+        add(mapped_sink_bytes, rhs.mapped_sink_bytes);
+        add(mapped_sink_flushes, rhs.mapped_sink_flushes);
+        add(mapped_sink_coalescer_capacity_bytes,
+            rhs.mapped_sink_coalescer_capacity_bytes);
+        add(mapped_sink_pwrite_calls, rhs.mapped_sink_pwrite_calls);
+        add(mapped_sink_short_writes, rhs.mapped_sink_short_writes);
+        add(mapped_sink_eintr_retries, rhs.mapped_sink_eintr_retries);
+        add(mapped_sink_preallocation_bytes,
+            rhs.mapped_sink_preallocation_bytes);
+        add(header_crc_bytes, rhs.header_crc_bytes);
+        add(directory_crc_bytes, rhs.directory_crc_bytes);
+        add(manifest_crc_bytes, rhs.manifest_crc_bytes);
+        add(seal_aggregate_payload_crc_bytes,
+            rhs.seal_aggregate_payload_crc_bytes);
+        add(open_aggregate_payload_crc_bytes,
+            rhs.open_aggregate_payload_crc_bytes);
+        add(lazy_extent_cas_winners, rhs.lazy_extent_cas_winners);
+        add(lazy_extent_waiters, rhs.lazy_extent_waiters);
+        add(lazy_extent_executions, rhs.lazy_extent_executions);
+        add(lazy_extent_reuses, rhs.lazy_extent_reuses);
+        add(lazy_extent_crc_bytes, rhs.lazy_extent_crc_bytes);
+        add(lazy_extent_state_bytes, rhs.lazy_extent_state_bytes);
+        add(lazy_extent_invalid_receipts,
+            rhs.lazy_extent_invalid_receipts);
+        add(mapping_bytes, rhs.mapping_bytes);
+        add(mapping_count, rhs.mapping_count);
+        add(mapping_resourceowner_releases,
+            rhs.mapping_resourceowner_releases);
+        const auto bounded_file_action_high_water =
+            std::min(rhs.file_action_high_water, sql_bigint_value_max);
+        overflow = overflow || rhs.file_action_high_water > sql_bigint_value_max;
+        file_action_high_water = std::max(
+            file_action_high_water, bounded_file_action_high_water);
+        add(file_action_identity_mismatches,
+            rhs.file_action_identity_mismatches);
+        add(reaper_descriptors_examined,
+            rhs.reaper_descriptors_examined);
+        add(reaper_relation_rows_deleted,
+            rhs.reaper_relation_rows_deleted);
+        add(reaper_payload_bytes_deleted,
+            rhs.reaper_payload_bytes_deleted);
+        add(reaper_files_queued, rhs.reaper_files_queued);
+        add(reaper_remaining, rhs.reaper_remaining);
+        add(orphan_entries_examined, rhs.orphan_entries_examined);
+        add(orphan_files_acted, rhs.orphan_files_acted);
+        add(orphan_bytes_acted, rhs.orphan_bytes_acted);
+        add(orphan_remaining, rhs.orphan_remaining);
+        add(orphan_cursor_wraps, rhs.orphan_cursor_wraps);
+
+        saturated = overflow;
+        stable_value_conflict = conflict;
+        identity_conflict = identity_conflict || conflict;
+        return overflow;
+    }
+
+private:
+    static void record_stable_value(
+            std::uint64_t& destination,
+            bool& destination_present,
+            std::uint64_t incoming,
+            bool& conflict) noexcept {
+        if (!destination_present) {
+            destination = incoming;
+            destination_present = true;
+            return;
+        }
+        if (destination != incoming) conflict = true;
+    }
+
+    static void merge_stable_value(
+            std::uint64_t& destination,
+            bool& destination_present,
+            std::uint64_t incoming,
+            bool incoming_present,
+            bool& conflict) noexcept {
+        if ((!destination_present && destination != 0u)
+            || (!incoming_present && incoming != 0u)) {
+            conflict = true;
+        }
+        if (!incoming_present) return;
+        record_stable_value(
+            destination,
+            destination_present,
+            incoming,
+            conflict);
+    }
+};
+
 /// Once-per-buffer operational counters and report-once identities.
 struct PipelineOperationalStats {
     std::array<PipelineStageTiming, pipeline_stage_count> timing{};
@@ -745,6 +1095,7 @@ struct PipelineOperationalStats {
     std::uint64_t format5_reader_retained_layout_checks = 0;
     std::uint64_t format5_reader_retained_layout_failures = 0;
     bool format5_reader_memory_evidence_saturated = false;
+    Format5ProviderOperationalEvidence format5_provider_evidence{};
     bioseq::indexing::PreparedFragmentAnchorBatchEvidence
         fragment_native_query_evidence{};
     Format6ReaderOperationalEvidence format6_reader_evidence{};
@@ -1072,6 +1423,12 @@ struct PipelineOperationalStats {
         format5_reader_memory_evidence_saturated =
             format5_reader_memory_evidence_saturated
             || rhs.format5_reader_memory_evidence_saturated;
+        saturated = format5_provider_evidence.merge(
+            rhs.format5_provider_evidence,
+            operational_identity_conflict) || saturated;
+        format5_reader_memory_evidence_saturated =
+            format5_reader_memory_evidence_saturated
+            || format5_provider_evidence.saturated;
         fragment_native_query_evidence.merge(
             rhs.fragment_native_query_evidence);
         saturated = fragment_native_query_evidence.saturated || saturated;
@@ -4960,6 +5317,90 @@ minimizer_dispatch_range(
         .scalar = proof,
         .scalar_present = true,
     };
+}
+
+/// Dispatch one complete indexed-query sketch while preserving the selected
+/// persisted minimizer scheme.  Exact K15/W10 DNA4 queries stored in u64 words
+/// receive a zero-copy u32 view so the chronological B8 continuation leaf can
+/// process twice as many bases per vector batch on NEON.  Calling that Exact
+/// leaf directly is intentional: `bit_casted_view` is a continuation-kernel
+/// substrate and does not provide the unrelated Scalar, Paper, or resident
+/// vector_stream interfaces instantiated by the general runtime dispatcher.
+/// Every ineligible alphabet, width, backend, fragmented scanner, and k/w
+/// shape retains the existing generic dispatcher without changing semantics.
+template <class MinimizerT, class Collector, class QuerySequence>
+[[gnu::always_inline]] inline MinimizerRangeExecutionProof
+minimizer_dispatch_indexed_query_whole(
+        Collector& collector,
+        QuerySequence& query_sequence,
+        std::size_t window_size,
+        std::size_t kmer_size,
+        MinimizerSketchBackend backend) {
+    const auto try_exact_b8_u32 =
+        [&collector, window_size, kmer_size]
+        <class ResidentSequence>(const ResidentSequence& resident)
+        -> std::optional<MinimizerRangeExecutionProof> {
+            using resident_type =
+                std::remove_cvref_t<ResidentSequence>;
+            if constexpr (requires { typename resident_type::traits; }) {
+                using resident_traits = typename resident_type::traits;
+                if constexpr (std::same_as<
+                        typename resident_traits::alphabet_type,
+                        seq::dna4>
+                    && std::same_as<
+                        typename resident_traits::storage_unit,
+                        std::uint64_t>
+                    && std::endian::native == std::endian::little
+                    && requires {
+                        resident.template
+                            bit_cast_to_storage_unit<std::uint32_t>();
+                    }) {
+                    auto u32_view = resident.template
+                        bit_cast_to_storage_unit<std::uint32_t>();
+                    TwoStackExecutionProof proof =
+                        ::bioseq::simd::HWY_NAMESPACE::
+                            collect_minimizers_two_stack_nthash_exact_range_or_throw<
+                                0, 0, MinimizerT>(
+                                    collector,
+                                    u32_view,
+                                    0u,
+                                    static_cast<std::size_t>(u32_view.size()),
+                                    window_size,
+                                    kmer_size,
+                                    0u,
+                                    "persisted query minimizer sketch");
+                    return MinimizerRangeExecutionProof{
+                        .exact_simd = proof,
+                        .exact_simd_present = true,
+                    };
+                }
+            }
+            return std::nullopt;
+        };
+
+    if (backend == MinimizerSketchBackend::ExactSimd
+        && window_size == 10u && kmer_size == 15u) [[likely]] {
+        using query_type = std::remove_cvref_t<QuerySequence>;
+        if constexpr (requires { typename query_type::scanner_type; }) {
+            if constexpr (!query_type::scanner_type::supports_fragments()) {
+                if (auto proof = try_exact_b8_u32(
+                        query_sequence.underlying())) {
+                    return *proof;
+                }
+            }
+        } else if (auto proof = try_exact_b8_u32(query_sequence)) {
+            return *proof;
+        }
+    }
+    return minimizer_dispatch_range<MinimizerT>(
+        collector,
+        query_sequence,
+        0u,
+        static_cast<sequence_size_t>(query_sequence.size()),
+        window_size,
+        kmer_size,
+        backend,
+        ExactSimdRangeRoute::require_continuation);
 }
 
 // Resolve the biological target-sketch backend from the minimizer selector
@@ -10088,17 +10529,24 @@ template <class MinimizerT, class QuerySeq>
     // every other non-GPU tuple retains its explicitly scalar query backend.
     const MinimizerSketchBackend cpu_query_backend =
         pipe::target_index_sketch_backend_from_params(params);
+    // The SQL/bench dna4 query representation is packed in u64 units, while
+    // the exact K15/W10/B8 continuation kernel consumes u32 words on NEON.
+    // Reinterpret a whole resident query as u32 without copying so the same
+    // persisted-index-compatible continuation scheme executes eight
+    // chronological candidates per block.  This is intentionally *not* the
+    // report-76 resident vector_stream selection route: its minimizer scheme
+    // differs from the persisted target index and remains forbidden here.
+    // The u32 view changes only the decoder lane width; scalar-oracle
+    // differential tests freeze the emitted raw minimizer sequence. Native
+    // little-endian word order is part of this zero-copy split; other targets
+    // retain the existing generic-u64 continuation.
     const pipe::MinimizerRangeExecutionProof execution_proof =
-        pipe::minimizer_dispatch_range<MinimizerT>(
-        query_collector,
-        query_seq,
-        0,
-        (query_seq.bp_size() + QuerySeq::traits::letters_per_unit - 1)
-            / QuerySeq::traits::letters_per_unit,
-        w,
-        k,
-        cpu_query_backend,
-        pipe::ExactSimdRangeRoute::require_continuation);
+        pipe::minimizer_dispatch_indexed_query_whole<MinimizerT>(
+            query_collector,
+            query_seq,
+            w,
+            k,
+            cpu_query_backend);
     if (!pipe::minimizer_range_proof_matches_backend(
             cpu_query_backend,
             execution_proof,

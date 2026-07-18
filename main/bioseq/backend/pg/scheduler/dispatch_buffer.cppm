@@ -2172,6 +2172,12 @@ public:
                 0,
                 last_stats,
                 &scanner_pg_ctx);
+			if (join_cpu_prepared_target.unions_ready
+				&& !join_cpu_prepared_target.query_set_proof_ready()) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqBatchJoin compact-direct query-set proof remained pending after dispatch")));
+			}
 			normalize_shared_join_target_outcomes(
 				last_stats,
 				record_physical_target,

@@ -12,6 +12,7 @@
 // so the alphabet name string is sourced from the production pack.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
@@ -57,15 +58,28 @@ TEMPLATE_TEST_CASE_SIG(
     const std::string sample(sample_for<Entry>());
     const auto literal = format_literal(sample, typmod);
 
-    const auto row = query_one(
-        ctx, fmt::format("SELECT {0}::text AS roundtrip, "
-                         "       bioseq.len({0}) AS bp, "
-                         "       bioseq.unit_len({0}) AS units;",
-                         literal));
-    REQUIRE(row[0].value() == sample);
-    REQUIRE(std::stoll(row[1].value()) ==
-            static_cast<long long>(sample.size()));
-    REQUIRE(std::stoll(row[2].value()) > 0);
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    if constexpr (std::is_same_v<typename Entry::alphabet_type,
+                                 seq_entry_tag::dna5>) {
+        const auto unsupported_alphabet = sql_error(
+            ctx, fmt::format("SELECT {}::text;", literal));
+        REQUIRE(unsupported_alphabet.sqlstate == "22023");
+        REQUIRE(unsupported_alphabet.contains(
+            "bioseq.seq alphabet \"dna5\" is not supported"));
+        REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
+    } else
+#endif
+    {
+        const auto row = query_one(
+            ctx, fmt::format("SELECT {0}::text AS roundtrip, "
+                             "       bioseq.len({0}) AS bp, "
+                             "       bioseq.unit_len({0}) AS units;",
+                             literal));
+        REQUIRE(row[0].value() == sample);
+        REQUIRE(std::stoll(row[1].value()) ==
+                static_cast<long long>(sample.size()));
+        REQUIRE(std::stoll(row[2].value()) > 0);
+    }
 }
 
 TEMPLATE_TEST_CASE_SIG(
@@ -91,16 +105,28 @@ TEMPLATE_TEST_CASE_SIG(
 }
 
 TEMPLATE_TEST_CASE_SIG(
-    "bioseq.seq cross-typmod cast: dna4 strips N, dna5 keeps N",
+    "bioseq.seq cross-typmod cast follows the active alphabet profile",
     "[seq][typmod][cast]",
     ((int Width), Width),
     8, 16, 32, 64) {
     auto ctx = fresh_context();
-    const auto row = query_one(
+    REQUIRE(query_scalar(
         ctx,
-        fmt::format("SELECT 'ACGTN'::bioseq.seq('dna4', {})::text, "
-                    "       'ACGTN'::bioseq.seq('dna5', {})::text;",
-                    Width, Width));
-    REQUIRE(row[0].value() == "ACGTA");
-    REQUIRE(row[1].value() == "ACGTN");
+        fmt::format("SELECT 'ACGTN'::bioseq.seq('dna4', {})::text;",
+                    Width)) == "ACGTA");
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    const auto unsupported_alphabet = sql_error(
+        ctx,
+        fmt::format("SELECT 'ACGTN'::bioseq.seq('dna5', {})::text;",
+                    Width));
+    REQUIRE(unsupported_alphabet.sqlstate == "22023");
+    REQUIRE(unsupported_alphabet.contains(
+        "bioseq.seq alphabet \"dna5\" is not supported"));
+    REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
+#else
+    REQUIRE(query_scalar(
+        ctx,
+        fmt::format("SELECT 'ACGTN'::bioseq.seq('dna5', {})::text;",
+                    Width)) == "ACGTN");
+#endif
 }
