@@ -1160,6 +1160,10 @@ struct RegressionRule {
     std::string name;
     /// Empty means "applies to every benchmark in the same config file".
     std::vector<std::string> benchmarks{};
+    /// Benchmarks removed from the include/default-all set. This keeps a
+    /// config-global policy authoritative while permitting one benchmark to
+    /// carry a more suitable, separately named policy.
+    std::vector<std::string> exclude_benchmarks{};
     /// Always non-empty after parse. Defaults to `{"all_regions"}`.
     std::vector<std::string> regions{};
     std::string metric;
@@ -1168,6 +1172,13 @@ struct RegressionRule {
     /// Test cases excluded from this rule. Schema requires non-empty if
     /// the array is present at all.
     std::vector<std::string> exclude_cases{};
+    /// Algorithms excluded after benchmark selection. This is intentionally
+    /// a deny-list: newly added algorithms remain covered by blocking rules
+    /// unless they are explicitly classified otherwise.
+    std::vector<std::string> exclude_algorithms{};
+    /// Diagnostic regressions remain in the report and stderr but do not
+    /// affect process success. Defaults true for backward compatibility.
+    bool blocking = true;
 };
 
 /// One detected regression. Mirrors the user-visible JSON shape: arrays of
@@ -1184,6 +1195,7 @@ struct RegressionEntry {
     std::string region;
     std::string metric;
     Aggregate aggregate = Aggregate::Sum;
+    bool        blocking = true;
     double      previously = 0.0;
     double      now = 0.0;
     /// Empty string ⇒ JSON `null`. Otherwise the file basename like
@@ -2320,7 +2332,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "regression_rules": {
       "title": "RegressionRules",
-      "description": "Optional list of regression rules. Each rule compares aggregated samples in this run to those in the immediately preceding report on disk (report_<N-1>.json) and emits a 'regressions' entry whenever the configured operator/tolerance is violated. Regression rules are global to the config file: by default they apply to every benchmark in the same file. The framework writes its run as report_<N>.json (postfixed integer starting at 1).",
+      "description": "Optional list of regression rules. Each rule compares aggregated samples in this run to the newest eligible historical report on disk and emits a 'regressions' entry whenever the configured operator/tolerance is violated. Eligibility requires matching run mode and complete, cardinality-consistent evidence for the selected cell; malformed or incomplete reports are skipped with a non-blocking diagnostic. Regression rules are global to the config file: by default they apply to every benchmark in the same file. The framework writes its run as report_<N>.json (postfixed integer starting at 1).",
       "type": "array",
       "items": { "$ref": "#/definitions/regression_rule" }
     }
@@ -2807,7 +2819,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "regression_rule": {
       "title": "RegressionRule",
-      "description": "One regression check. Iterates a target metric across (benchmark, execution_tuple, test_case, region) combos in the current run, aggregates the samples per the 'aggregate' field, and compares to the same combo in the previous report (report_<N-1>.json). Operator semantics are inherited from the rule comparator with 'threshold%' fixed at 0; the schema rejects any explicit 'threshold%' in the operator block.",
+      "description": "One regression check. Iterates a target metric across (benchmark, execution_tuple, test_case, region) combos in the current run, aggregates the samples per the 'aggregate' field, and compares to the same combo in the newest eligible historical report. Candidate selection walks backward over malformed, incomplete, mode-mismatched, or cardinality-incompatible reports, and the same eligibility rule governs regression_since attribution. Operator semantics are inherited from the rule comparator with 'threshold%' fixed at 0; the schema rejects any explicit 'threshold%' in the operator block.",
       "type": "object",
       "required": ["name", "metric", "aggregate", "operator"],
       "additionalProperties": false,
@@ -2823,6 +2835,12 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "description": "Optional list of benchmark identifiers this rule applies to. Each entry must name a benchmark block declared in the same config file. When the field is absent, the rule applies to every benchmark in the file.",
           "items": { "type": "string", "minLength": 1 }
         },
+        "exclude_benchmarks": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Optional benchmark deny-list applied after 'benchmarks' (or the default all-benchmarks set). Newly added benchmarks remain covered unless explicitly excluded.",
+          "items": { "type": "string", "minLength": 1 }
+        },
         "regions": { "$ref": "#/definitions/regression_regions" },
         "metric": {
           "type": "string",
@@ -2836,6 +2854,17 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "minItems": 1,
           "description": "Optional list of test_case names to skip when this rule fires. Useful when a metric is too small (e.g. wall-clock in nanoseconds) for the tolerance to make sense on a particular case. Cannot be empty if present.",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "exclude_algorithms": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Optional algorithm deny-list applied inside the selected benchmarks. Newly added algorithms remain covered unless explicitly excluded.",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "blocking": {
+          "type": "boolean",
+          "default": true,
+          "description": "False records and prints regression findings as diagnostics without failing the benchmark process. Omitted means true."
         }
       },
       "examples": [
@@ -2845,7 +2874,8 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
           "metric": "minimizer_count",
           "aggregate": "sum",
           "operator": { "compare": "=", "tolerance%": 2 },
-          "exclude_cases": ["SMALL"]
+          "exclude_cases": ["SMALL"],
+          "blocking": true
         }
       ]
     },
@@ -2863,7 +2893,7 @@ inline constexpr std::string_view kBenchConfigSchema = R"json({
     },
     "regression_operator": {
       "title": "RegressionOperator",
-      "description": "Comparator for a regression rule. Accepts the same three operators as the per-rule comparator (<, >, =) but does NOT accept 'threshold%' — that knob is implicitly zero, leaving 'tolerance%' as the only relaxation. Pass conditions (with t = tolerance% / 100): '<' passes iff now < previously*(1+t); '>' passes iff now > previously*(1-t); '=' passes iff |now - previously| <= |previously|*t.",
+      "description": "Comparator for a regression rule. Accepts the same three operators as the per-rule comparator (<, >, =) but does NOT accept 'threshold%' — that knob is implicitly zero, leaving 'tolerance%' as the only relaxation. An exactly unchanged zero (including -0 versus +0) passes every regression operator before ordered comparison; otherwise, with t = tolerance% / 100: '<' passes iff now < previously*(1+t); '>' passes iff now > previously*(1-t); '=' passes iff |now - previously| <= |previously|*t.",
       "oneOf": [
         {
           "title": "RegressionOrderedOperator",
@@ -2936,7 +2966,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
     },
     "regressions": {
       "type": "array",
-      "description": "Every regression rule violation detected against the previous report (report_<N-1>.json). Empty on the first run after a clean report_dir, when no regression rules are configured, or when nothing regressed.",
+      "description": "Every regression rule violation detected against the newest eligible historical report. Historical candidates must match meta.fast, carry complete raw-evidence authority when a sidecar exists, contain the selected cell and finite aggregate, and match the current total/finite sample cardinalities. Empty on the first run after a clean report_dir, when no regression rules are configured, when no eligible baseline exists, or when nothing regressed.",
       "items": { "$ref": "#/definitions/regression_entry" }
     },
     "sanity_warnings": {
@@ -3360,7 +3390,7 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
       "title": "RegressionEntry",
       "description": "One detected regression. Granularity: one entry per (rule, benchmark, algorithm, tuple, test_case, region). 'violating_tuples' and 'test_cases' are arrays of size 1 in every entry — they exist as arrays so a future aggregation pass can group entries without breaking the schema. 'regression_since' is the basename of the oldest report on disk where the rule still fails when compared to the current run, or null when the framework hit a missing report (gap) or a tuple/region that disappeared in a historical run.",
       "type": "object",
-      "required": ["location", "benchmark", "rule_name", "algorithm_name", "violating_tuples", "test_cases", "region", "metric", "aggregate", "previously", "now", "regression_since", "regression_since_commit"],
+      "required": ["location", "benchmark", "rule_name", "algorithm_name", "violating_tuples", "test_cases", "region", "metric", "aggregate", "blocking", "previously", "now", "regression_since", "regression_since_commit"],
       "additionalProperties": false,
       "properties": {
         "location":       { "type": "string", "description": "Path to the config file the regression rule was declared in." },
@@ -3382,11 +3412,12 @@ inline constexpr std::string_view kBenchReportSchema = R"json({
         "region":     { "type": "string", "description": "Region key inside the test_case bucket where the regression was detected (e.g. 'all_regions' or a custom descriptor name)." },
         "metric":     { "type": "string", "description": "Metric name from the regression rule." },
         "aggregate":  { "type": "string", "enum": ["sum", "min", "max", "p01", "p50", "p99"] },
-        "previously": { "type": "number", "description": "Aggregated metric value from the previous report's matching cell." },
+        "blocking":   { "type": "boolean", "description": "True when this finding contributes to process failure; false when it is an explicit diagnostic/confirmation signal." },
+        "previously": { "type": "number", "description": "Aggregated metric value from the newest eligible historical report's matching cell." },
         "now":        { "type": "number", "description": "Aggregated metric value from the current run's matching cell." },
         "regression_since": {
           "type": ["string", "null"],
-          "description": "Basename of the report where the regression was first observable (oldest historical report still failing against current). Null when the walk hit a history gap."
+          "description": "Basename of the eligible report where the regression was first observable (oldest eligible historical report still failing against current). Ineligible reports are skipped and can never become attribution origins."
         },
         "regression_since_commit": {
           "type": ["string", "null"],
@@ -3932,6 +3963,21 @@ parse_compare_and_tolerance(
             }
         }
 
+        simdjson::dom::array exclude_benchmarks_array;
+        if (rule_obj["exclude_benchmarks"].get(exclude_benchmarks_array)
+            == simdjson::SUCCESS) {
+            for (auto bench_entry : exclude_benchmarks_array) {
+                std::string_view bench_key;
+                if (bench_entry.get(bench_key) != simdjson::SUCCESS) {
+                    bioseq_log<ERR>("[bench_framework] regression rule '{}' exclude_benchmarks[*] is not a string",
+                         rule.name);
+                    parse_ok = false;
+                    continue;
+                }
+                rule.exclude_benchmarks.emplace_back(bench_key);
+            }
+        }
+
         simdjson::dom::element regions_element;
         if (rule_obj["regions"].get(regions_element) == simdjson::SUCCESS) {
             std::string_view single_region;
@@ -4007,6 +4053,26 @@ parse_compare_and_tolerance(
                 }
                 rule.exclude_cases.emplace_back(exclude_name);
             }
+        }
+
+        simdjson::dom::array exclude_algorithms_array;
+        if (rule_obj["exclude_algorithms"].get(exclude_algorithms_array)
+            == simdjson::SUCCESS) {
+            for (auto exclude_entry : exclude_algorithms_array) {
+                std::string_view exclude_name;
+                if (exclude_entry.get(exclude_name) != simdjson::SUCCESS) {
+                    bioseq_log<ERR>("[bench_framework] regression rule '{}' exclude_algorithms[*] is not a string",
+                         rule.name);
+                    parse_ok = false;
+                    continue;
+                }
+                rule.exclude_algorithms.emplace_back(exclude_name);
+            }
+        }
+
+        bool blocking = true;
+        if (rule_obj["blocking"].get(blocking) == simdjson::SUCCESS) {
+            rule.blocking = blocking;
         }
 
         result.push_back(std::move(rule));
@@ -5444,6 +5510,8 @@ struct ConfigParseOutcome {
 ///   - Rule names must be unique within the same config file.
 ///   - Every entry of `benchmarks` (when present) must name a benchmark
 ///     that actually loaded from this config_path.
+///   - Every benchmark/algorithm deny-list entry must name a declaration in
+///     this config and cannot remove every cell the rule could cover.
 ///   - The metric must appear in the benchmarks the rule applies to
 ///     (every listed benchmark when explicit; at least one when
 ///     implicit).
@@ -5490,14 +5558,35 @@ struct ConfigParseOutcome {
 
             // 2. Determine matching benchmarks within this config_path.
             std::vector<const BenchmarkExecutionState*> matching_states;
+            const std::set<std::string> excluded_benchmarks(
+                rule.exclude_benchmarks.begin(), rule.exclude_benchmarks.end());
+            for (const auto& excluded_bench : excluded_benchmarks) {
+                const bool found = std::any_of(
+                    states_for_config.begin(), states_for_config.end(),
+                    [&](const auto* state) {
+                        return state->config.benchmark_key == excluded_bench;
+                    });
+                if (!found) {
+                    error("regression_unknown_benchmark", base_loc,
+                        fmt::format("exclude_benchmarks entry '{}' is not declared in '{}'",
+                                    excluded_bench, config_path));
+                }
+            }
             if (rule.benchmarks.empty()) {
-                matching_states = states_for_config;
+                for (const auto* state : states_for_config) {
+                    if (!excluded_benchmarks.contains(
+                            state->config.benchmark_key)) {
+                        matching_states.push_back(state);
+                    }
+                }
             } else {
                 for (const auto& declared_bench : rule.benchmarks) {
                     bool found = false;
                     for (const auto* state : states_for_config) {
                         if (state->config.benchmark_key == declared_bench) {
-                            matching_states.push_back(state);
+                            if (!excluded_benchmarks.contains(declared_bench)) {
+                                matching_states.push_back(state);
+                            }
                             found = true;
                             break;
                         }
@@ -5508,6 +5597,11 @@ struct ConfigParseOutcome {
                                         declared_bench, config_path));
                     }
                 }
+            }
+            if (matching_states.empty() && !states_for_config.empty()) {
+                error("regression_excludes_all_benchmarks", base_loc,
+                    fmt::format("regression rule '{}' excludes every matching benchmark; the rule can never fire",
+                                rule.name));
             }
 
             // 3. Metric existence check.
@@ -5576,6 +5670,38 @@ struct ConfigParseOutcome {
                 if (!any_remains && !covered_test_cases.empty()) {
                     error("regression_excludes_all", base_loc,
                         fmt::format("regression rule '{}' excludes every test_case its matching benchmarks would run on; the rule can never fire (use a narrower 'exclude_cases' or remove it)",
+                                    rule.name));
+                }
+
+                std::set<std::string> declared_algorithms;
+                for (const auto& [algorithm_name, _schema] :
+                     matching_states.front()->config.algorithm_schemas) {
+                    declared_algorithms.insert(algorithm_name);
+                }
+                const std::set<std::string> excluded_algorithms(
+                    rule.exclude_algorithms.begin(),
+                    rule.exclude_algorithms.end());
+                for (const auto& excluded : excluded_algorithms) {
+                    if (!declared_algorithms.contains(excluded)) {
+                        error("regression_unknown_algorithm", base_loc,
+                            fmt::format("exclude_algorithms entry '{}' is not declared in 'params'",
+                                        excluded));
+                    }
+                }
+                bool any_algorithm_remains = false;
+                for (const auto* state : matching_states) {
+                    for (const auto& tuple : state->execution_tuples) {
+                        if (!excluded_algorithms.contains(
+                                tuple.algorithm_name)) {
+                            any_algorithm_remains = true;
+                            break;
+                        }
+                    }
+                    if (any_algorithm_remains) break;
+                }
+                if (!any_algorithm_remains) {
+                    error("regression_excludes_all_algorithms", base_loc,
+                        fmt::format("regression rule '{}' excludes every algorithm in its matching benchmarks; the rule can never fire",
                                     rule.name));
                 }
             }
@@ -7205,6 +7331,12 @@ static_assert(raw_schedule_shuffle_seed(
     double now_value,
     double previously_value) noexcept
 {
+    // Ordered regression operators express a direction of change, but an
+    // exactly unchanged zero (including either sign of IEEE zero) is not a
+    // change at all.  Keep this exception local to regression rules: the
+    // within-run RuleComparator path intentionally retains strict `<` / `>`
+    // semantics, as do every non-zero ordered boundary below.
+    if (now_value == 0.0 && previously_value == 0.0) return true;
     return comparator_passes(op.op, now_value, previously_value,
                               /*threshold_pct=*/0.0, op.tolerance_pct);
 }
@@ -8308,13 +8440,12 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
 
 /// Walk a parsed report's
 /// `benchmarks.<bench>.execution_tuples[*].test_cases.<tc>.<region>.<metric>`
-/// path and pull out the pre-aggregated record. Returns nullopt
-/// on any miss (benchmark absent, no matching tuple, region
-/// missing, etc.) — the regression evaluator and the interactive
-/// UI both treat this as "no historical baseline for this
-/// combo". V17: replaces the pre-V17 `samples_from_report` that
-/// returned a raw sample vector.
-[[nodiscard]] inline std::optional<AggregatedSamples> aggregated_from_report(
+/// path and return the matching metric object.  Keeping the raw DOM object
+/// available lets regression-history eligibility validate persisted numeric
+/// fields before `parse_aggregated_samples` applies its intentionally
+/// permissive UI defaults.
+[[nodiscard]] inline std::optional<simdjson::dom::object>
+aggregated_metric_object_from_report(
     simdjson::dom::element report_root,
     std::string_view benchmark,
     std::string_view algorithm_name,
@@ -8366,9 +8497,29 @@ try_get_object(simdjson::dom::object parent, std::string_view key) noexcept {
         simdjson::dom::object metric_obj;
         if ((*region_obj).at_key(metric).get(metric_obj) != simdjson::SUCCESS) continue;
 
-        return parse_aggregated_samples(metric_obj);
+        return metric_obj;
     }
     return std::nullopt;
+}
+
+/// Pull one pre-aggregated record from a parsed report. Returns nullopt on
+/// any path miss. The general historical-report UI remains permissive here;
+/// regression candidate selection performs its stricter integrity checks on
+/// `aggregated_metric_object_from_report` before accepting a baseline.
+[[nodiscard]] inline std::optional<AggregatedSamples> aggregated_from_report(
+    simdjson::dom::element report_root,
+    std::string_view benchmark,
+    std::string_view algorithm_name,
+    const ParamMap&  params,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric)
+{
+    const auto metric_obj = aggregated_metric_object_from_report(
+        report_root, benchmark, algorithm_name, params,
+        test_case, region, metric);
+    if (!metric_obj.has_value()) return std::nullopt;
+    return parse_aggregated_samples(*metric_obj);
 }
 
 /// Lazy parser-cache for historical reports. Each `report_<N>.json`
@@ -8406,6 +8557,258 @@ struct HistoricalReportCache {
         auto* raw = loaded.get();
         cached.emplace(index, std::move(loaded));
         return raw;
+    }
+};
+
+/// Parse a non-negative JSON integer into `size_t` without accepting a
+/// floating-point spelling or overflowing the host type.
+[[nodiscard]] inline std::optional<std::size_t> strict_json_size_field(
+    simdjson::dom::object object, std::string_view key) noexcept
+{
+    simdjson::dom::element value;
+    if (object.at_key(key).get(value) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    std::uint64_t unsigned_value = 0;
+    if (value.get(unsigned_value) == simdjson::SUCCESS) {
+        if (unsigned_value > (std::numeric_limits<std::size_t>::max)()) {
+            return std::nullopt;
+        }
+        return static_cast<std::size_t>(unsigned_value);
+    }
+    std::int64_t signed_value = 0;
+    if (value.get(signed_value) != simdjson::SUCCESS || signed_value < 0) {
+        return std::nullopt;
+    }
+    return static_cast<std::size_t>(signed_value);
+}
+
+/// Parse a JSON number and reject missing, malformed, or non-finite values.
+/// Regression baselines use this instead of `json_double_or` so corrupt
+/// aggregate fields can never become an eligible synthetic zero.
+[[nodiscard]] inline std::optional<double> strict_finite_json_number_field(
+    simdjson::dom::object object, std::string_view key) noexcept
+{
+    simdjson::dom::element value;
+    if (object.at_key(key).get(value) != simdjson::SUCCESS) {
+        return std::nullopt;
+    }
+    double number = 0.0;
+    if (value.get(number) == simdjson::SUCCESS && std::isfinite(number)) {
+        return number;
+    }
+    std::int64_t signed_value = 0;
+    if (value.get(signed_value) == simdjson::SUCCESS) {
+        return static_cast<double>(signed_value);
+    }
+    std::uint64_t unsigned_value = 0;
+    if (value.get(unsigned_value) == simdjson::SUCCESS) {
+        number = static_cast<double>(unsigned_value);
+        if (std::isfinite(number)) return number;
+    }
+    return std::nullopt;
+}
+
+/// Validate the top-level durable raw-evidence authority of one historical
+/// report. `null` is the explicit no-sidecar state and is eligible. An object
+/// is eligible only when it explicitly records `complete: true` and a valid
+/// non-negative `record_count`; missing or malformed states fail closed.
+[[nodiscard]] inline std::optional<std::string>
+historical_raw_evidence_ineligibility_reason(
+    simdjson::dom::element report_root) noexcept
+{
+    const auto root_obj = try_as_object(report_root);
+    if (!root_obj.has_value()) return std::string{"report root is not an object"};
+
+    simdjson::dom::element raw_evidence;
+    if ((*root_obj).at_key("raw_evidence").get(raw_evidence)
+        != simdjson::SUCCESS) {
+        return std::string{"raw_evidence is missing"};
+    }
+    if (raw_evidence.type() == simdjson::dom::element_type::NULL_VALUE) {
+        return std::nullopt;
+    }
+
+    const auto raw_obj = try_as_object(raw_evidence);
+    if (!raw_obj.has_value()) {
+        return std::string{"raw_evidence is neither null nor an object"};
+    }
+    bool complete = false;
+    if ((*raw_obj).at_key("complete").get(complete) != simdjson::SUCCESS) {
+        return std::string{"raw_evidence.complete is missing or malformed"};
+    }
+    if (!complete) return std::string{"raw_evidence.complete is false"};
+    if (!strict_json_size_field(*raw_obj, "record_count").has_value()) {
+        return std::string{"raw_evidence.record_count is missing or malformed"};
+    }
+    return std::nullopt;
+}
+
+/// Read the aggregate field selected by one regression rule directly from
+/// its persisted JSON object. Unlike the general report/UI parser, every
+/// selected field is mandatory and finite on this authoritative path.
+[[nodiscard]] inline std::optional<double>
+strict_historical_aggregate_value(
+    simdjson::dom::object metric_obj, Aggregate aggregate) noexcept
+{
+    if (aggregate == Aggregate::P01
+        || aggregate == Aggregate::P50
+        || aggregate == Aggregate::P99) {
+        const auto percentiles = try_get_object(metric_obj, "percentiles");
+        if (!percentiles.has_value()) return std::nullopt;
+        switch (aggregate) {
+            case Aggregate::P01:
+                return strict_finite_json_number_field(*percentiles, "P01");
+            case Aggregate::P50:
+                return strict_finite_json_number_field(*percentiles, "P50");
+            case Aggregate::P99:
+                return strict_finite_json_number_field(*percentiles, "P99");
+            default:
+                return std::nullopt;
+        }
+    }
+
+    const auto stats = try_get_object(metric_obj, "stats");
+    if (!stats.has_value()) return std::nullopt;
+    switch (aggregate) {
+        case Aggregate::Sum:
+            return strict_finite_json_number_field(*stats, "sum");
+        case Aggregate::Min:
+            return strict_finite_json_number_field(*stats, "min");
+        case Aggregate::Max:
+            return strict_finite_json_number_field(*stats, "max");
+        case Aggregate::P01:
+        case Aggregate::P50:
+        case Aggregate::P99:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+/// Sum the ten persisted histogram counts, rejecting malformed buckets and
+/// arithmetic overflow. The result is the historical cell's finite-sample
+/// cardinality and must match the current raw vector's finite count.
+[[nodiscard]] inline std::optional<std::size_t>
+strict_historical_finite_sample_count(
+    simdjson::dom::object metric_obj) noexcept
+{
+    simdjson::dom::array histogram;
+    if (metric_obj.at_key("histogram").get(histogram) != simdjson::SUCCESS
+        || histogram.size() != kHistogramBucketCount) {
+        return std::nullopt;
+    }
+    std::size_t total = 0;
+    for (const auto bucket_element : histogram) {
+        const auto bucket = try_as_object(bucket_element);
+        if (!bucket.has_value()) return std::nullopt;
+        const auto count = strict_json_size_field(*bucket, "count");
+        if (!count.has_value()
+            || *count > (std::numeric_limits<std::size_t>::max)() - total) {
+            return std::nullopt;
+        }
+        total += *count;
+    }
+    return total;
+}
+
+/// One accepted historical comparison point. The report pointer is pinned by
+/// `HistoricalReportCache`; `aggregate_value` is the strictly parsed statistic
+/// selected by the active regression rule.
+struct HistoricalRegressionCandidate {
+    ParsedHistoricalReport* report = nullptr;
+    double aggregate_value = 0.0;
+};
+
+/// Cached result for one report index. `candidate` is populated only when all
+/// eligibility gates pass; otherwise `reason` is suitable for the required
+/// non-blocking skipped-candidate diagnostic.
+struct HistoricalRegressionCandidateAssessment {
+    std::optional<HistoricalRegressionCandidate> candidate{};
+    std::string reason{};
+};
+
+/// Per-current-cell historical candidate selector. Baseline selection and the
+/// `regression_since` walk share this exact instance, so they cannot disagree
+/// about completeness, mode, tuple identity, or sample topology. Assessments
+/// are cached by report index to avoid re-walking DOM trees.
+struct HistoricalRegressionCandidateSelector {
+    HistoricalReportCache& reports;
+    bool current_fast = false;
+    std::string_view benchmark;
+    std::string_view algorithm_name;
+    const ParamMap& params;
+    std::string_view test_case;
+    std::string_view region;
+    std::string_view metric;
+    Aggregate aggregate = Aggregate::Sum;
+    std::size_t expected_sample_count = 0;
+    std::size_t expected_finite_count = 0;
+    std::map<std::size_t, HistoricalRegressionCandidateAssessment> cached{};
+
+    /// Assess `report_index` once and return the cached result thereafter.
+    [[nodiscard]] const HistoricalRegressionCandidateAssessment& assess(
+        std::size_t report_index) noexcept
+    {
+        if (const auto found = cached.find(report_index); found != cached.end()) {
+            return found->second;
+        }
+
+        HistoricalRegressionCandidateAssessment assessment;
+        auto* report = reports.fetch(report_index);
+        if (report == nullptr) {
+            assessment.reason = "report is missing or malformed";
+        } else if (const auto historical_fast = fast_from_report(report->root);
+                   !historical_fast.has_value()) {
+            assessment.reason = "meta.fast is missing or malformed";
+        } else if (*historical_fast != current_fast) {
+            assessment.reason = fmt::format(
+                "meta.fast={} does not match current meta.fast={}",
+                *historical_fast ? "true" : "false",
+                current_fast ? "true" : "false");
+        } else if (const auto raw_reason =
+                       historical_raw_evidence_ineligibility_reason(report->root);
+                   raw_reason.has_value()) {
+            assessment.reason = *raw_reason;
+        } else {
+            const auto metric_obj = aggregated_metric_object_from_report(
+                report->root, benchmark, algorithm_name, params,
+                test_case, region, metric);
+            if (!metric_obj.has_value()) {
+                assessment.reason = "matching tuple/case/region/metric is missing";
+            } else {
+                const auto sample_count =
+                    strict_json_size_field(*metric_obj, "samples_count");
+                const auto finite_count =
+                    strict_historical_finite_sample_count(*metric_obj);
+                const auto selected_value =
+                    strict_historical_aggregate_value(*metric_obj, aggregate);
+                if (!sample_count.has_value()) {
+                    assessment.reason = "samples_count is missing or malformed";
+                } else if (*sample_count != expected_sample_count) {
+                    assessment.reason = fmt::format(
+                        "sample cardinality {} does not match current cardinality {}",
+                        *sample_count, expected_sample_count);
+                } else if (!finite_count.has_value()) {
+                    assessment.reason = "histogram finite count is malformed";
+                } else if (*finite_count != expected_finite_count) {
+                    assessment.reason = fmt::format(
+                        "finite histogram count {} does not match current finite count {}",
+                        *finite_count, expected_finite_count);
+                } else if (!selected_value.has_value()) {
+                    assessment.reason = fmt::format(
+                        "selected {} aggregate is missing, malformed, or non-finite",
+                        aggregate_name(aggregate));
+                } else {
+                    assessment.candidate = HistoricalRegressionCandidate{
+                        .report = report,
+                        .aggregate_value = *selected_value,
+                    };
+                }
+            }
+        }
+
+        return cached.emplace(report_index, std::move(assessment))
+            .first->second;
     }
 };
 
@@ -8705,10 +9108,6 @@ struct HistoricalReportCache {
 {
     std::vector<RegressionEntry> entries;
 
-    auto fetch_report = [&](std::size_t index) -> ParsedHistoricalReport* {
-        return history_cache.fetch(index);
-    };
-
     // Per-state merged-samples cache built once per `(config_path,
     // benchmark)` and reused across every rule that touches the same
     // state. Earlier versions rebuilt this map per-rule, which scaled
@@ -8729,8 +9128,12 @@ struct HistoricalReportCache {
             std::size_t matched_count = 0;
 
             std::vector<const BenchmarkExecutionState*> matching_states;
+            const std::set<std::string> excluded_benchmarks(
+                rule.exclude_benchmarks.begin(), rule.exclude_benchmarks.end());
             for (const auto& [_bench_key, state_ptr] : reports) {
                 if (state_ptr->config.config_path != config_path) continue;
+                if (excluded_benchmarks.contains(
+                        state_ptr->config.benchmark_key)) continue;
                 if (!rule.benchmarks.empty()) {
                     bool listed = false;
                     for (const auto& declared : rule.benchmarks) {
@@ -8745,6 +9148,9 @@ struct HistoricalReportCache {
 
             const std::set<std::string> excluded_test_cases(
                 rule.exclude_cases.begin(), rule.exclude_cases.end());
+            const std::set<std::string> excluded_algorithms(
+                rule.exclude_algorithms.begin(),
+                rule.exclude_algorithms.end());
 
             const std::string rule_location =
                 fmt::format("{}/regression_rules/{}", config_path, rule.name);
@@ -8752,6 +9158,8 @@ struct HistoricalReportCache {
             for (const auto* state : matching_states) {
                 const auto& merged_index = merged_for(state);
                 for (const auto& tuple : state->execution_tuples) {
+                    if (excluded_algorithms.contains(
+                            tuple.algorithm_name)) continue;
                     for (const auto& [test_case_name, _iter] : state->config.for_each) {
                         if (excluded_test_cases.count(test_case_name) > 0) continue;
                         for (const auto& region_name : rule.regions) {
@@ -8796,41 +9204,71 @@ struct HistoricalReportCache {
                                 continue;
                             }
 
-                            auto* baseline_report = fetch_report(current_index - 1);
-                            std::optional<AggregatedSamples> baseline_aggregate;
-                            if (baseline_report != nullptr) {
-                                const auto baseline_fast = fast_from_report(baseline_report->root);
-                                if (baseline_fast.has_value()
-                                    && *baseline_fast != current_meta.fast) {
-                                    diagnostics_out.push_back({
-                                        ValidationDiag::Severity::Warning,
-                                        "regression_baseline_mode_mismatch",
-                                        rule_location,
-                                        fmt::format("report_{}.json has meta.fast={} but current run has meta.fast={}; no comparable baseline for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
-                                                    current_index - 1,
-                                                    *baseline_fast ? "true" : "false",
-                                                    current_meta.fast ? "true" : "false",
-                                                    state->config.benchmark_key,
-                                                    tuple.algorithm_name,
-                                                    test_case_name, region_name,
-                                                    rule.metric)
-                                    });
-                                    continue;
+                            const auto current_finite_count =
+                                static_cast<std::size_t>(std::count_if(
+                                    metric_it->second.begin(),
+                                    metric_it->second.end(),
+                                    [](double sample) noexcept {
+                                        return std::isfinite(sample);
+                                    }));
+                            HistoricalRegressionCandidateSelector candidates{
+                                .reports = history_cache,
+                                .current_fast = current_meta.fast,
+                                .benchmark = state->config.benchmark_key,
+                                .algorithm_name = tuple.algorithm_name,
+                                .params = tuple.params,
+                                .test_case = test_case_name,
+                                .region = region_name,
+                                .metric = rule.metric,
+                                .aggregate = rule.aggregate,
+                                .expected_sample_count = metric_it->second.size(),
+                                .expected_finite_count = current_finite_count,
+                            };
+                            auto diagnose_skipped_candidate = [
+                                &diagnostics_out,
+                                &rule_location,
+                                state,
+                                &tuple,
+                                &test_case_name,
+                                &region_name,
+                                &rule](std::size_t report_index,
+                                      std::string_view reason) {
+                                diagnostics_out.push_back({
+                                    ValidationDiag::Severity::Warning,
+                                    "regression_history_candidate_skipped",
+                                    rule_location,
+                                    fmt::format(
+                                        "skipped report_{}.json as a regression-history candidate for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}': {}",
+                                        report_index,
+                                        state->config.benchmark_key,
+                                        tuple.algorithm_name,
+                                        test_case_name, region_name,
+                                        rule.metric, reason)
+                                });
+                            };
+
+                            const HistoricalRegressionCandidate* baseline = nullptr;
+                            std::size_t baseline_index = 0;
+                            for (std::size_t historical_index = current_index - 1;;
+                                 --historical_index) {
+                                const auto& assessment =
+                                    candidates.assess(historical_index);
+                                if (assessment.candidate.has_value()) {
+                                    baseline = &*assessment.candidate;
+                                    baseline_index = historical_index;
+                                    break;
                                 }
-                                baseline_aggregate = aggregated_from_report(
-                                    baseline_report->root,
-                                    state->config.benchmark_key,
-                                    tuple.algorithm_name, tuple.params,
-                                    test_case_name, region_name, rule.metric);
+                                diagnose_skipped_candidate(
+                                    historical_index, assessment.reason);
+                                if (historical_index == 1) break;
                             }
-                            if (!baseline_aggregate.has_value()
-                                || !has_finite_samples(*baseline_aggregate)) {
+                            if (baseline == nullptr) {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
                                     "regression_baseline_missing",
                                     rule_location,
-                                    fmt::format("no matching samples in report_{}.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
-                                                current_index - 1,
+                                    fmt::format("no eligible historical baseline exists before report_{}.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}'; rule treated as satisfied",
+                                                current_index,
                                                 state->config.benchmark_key,
                                                 tuple.algorithm_name,
                                                 test_case_name, region_name,
@@ -8839,88 +9277,57 @@ struct HistoricalReportCache {
                                 continue;
                             }
 
-                            const double previously_value =
-                                aggregate_samples(rule.aggregate, *baseline_aggregate);
+                            const double previously_value = baseline->aggregate_value;
 
                             if (comparator_passes(rule.op, now_value, previously_value)) {
                                 continue;     // no regression
                             }
 
-                            // Walk back through history to compute
-                            // regression_since.
-                            std::size_t oldest_failing = current_index - 1;
-                            bool history_gap = false;
-                            // current_index >= 3 is required to enter the
-                            // loop: with index = 2 the first predecessor
-                            // we'd inspect is index 0 (which doesn't
-                            // exist), so the walk has nothing to do and
-                            // oldest_failing stays at 1.
-                            for (std::size_t historical_index = current_index - 2;
-                                 current_index >= 3 && historical_index >= 1;
-                                 --historical_index)
-                            {
-                                auto* hist_report = fetch_report(historical_index);
-                                if (hist_report == nullptr) {
-                                    history_gap = true; break;
+                            // Walk back through the same cached selector to
+                            // compute regression_since. Ineligible reports are
+                            // evidence gaps, never attribution origins.
+                            std::size_t oldest_failing = baseline_index;
+                            if (baseline_index > 1) {
+                                for (std::size_t historical_index = baseline_index - 1;;
+                                     --historical_index) {
+                                    const auto& assessment =
+                                        candidates.assess(historical_index);
+                                    if (!assessment.candidate.has_value()) {
+                                        diagnose_skipped_candidate(
+                                            historical_index, assessment.reason);
+                                    } else if (comparator_passes(
+                                                   rule.op, now_value,
+                                                   assessment.candidate->aggregate_value)) {
+                                        break;     // found an eligible passing report
+                                    } else {
+                                        oldest_failing = historical_index;
+                                    }
+                                    if (historical_index == 1) break;
                                 }
-                                const auto hist_fast = fast_from_report(hist_report->root);
-                                if (hist_fast.has_value()
-                                    && *hist_fast != current_meta.fast) {
-                                    history_gap = true; break;
-                                }
-                                auto hist_aggregate = aggregated_from_report(
-                                    hist_report->root,
-                                    state->config.benchmark_key,
-                                    tuple.algorithm_name, tuple.params,
-                                    test_case_name, region_name, rule.metric);
-                                if (!hist_aggregate.has_value()
-                                    || !has_finite_samples(*hist_aggregate)) {
-                                    history_gap = true; break;
-                                }
-                                const double hist_value =
-                                    aggregate_samples(rule.aggregate, *hist_aggregate);
-                                if (comparator_passes(rule.op, now_value, hist_value)) {
-                                    break;     // found a passing report
-                                }
-                                oldest_failing = historical_index;
-                                // Decrementing past 1 underflows std::size_t;
-                                // break before the for-statement's --historical_index
-                                // can do that.
-                                if (historical_index == 1) break;
                             }
 
                             std::string regression_since_label;
                             std::string regression_since_commit;
-                            if (history_gap) {
+                            regression_since_label =
+                                fmt::format("report_{}.json", oldest_failing);
+                            const auto& origin = candidates.assess(oldest_failing);
+                            DEBUG_ASSERT(origin.candidate.has_value(),
+                                "regression_since origin must be an eligible candidate");
+                            if (origin.candidate.has_value()) {
+                                regression_since_commit = commit_from_report(
+                                    origin.candidate->report->root);
+                            }
+                            if (oldest_failing == 1) {
                                 diagnostics_out.push_back({
                                     ValidationDiag::Severity::Warning,
-                                    "regression_history_incomplete",
+                                    "regression_pre_existing",
                                     rule_location,
-                                    fmt::format("could not walk full history while attributing regression for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}': a historical report was missing or did not contain matching samples",
+                                    fmt::format("regression has been present in every eligible report on disk back to report_1.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' — almost certainly not introduced by recent changes",
                                                 state->config.benchmark_key,
                                                 tuple.algorithm_name,
                                                 test_case_name, region_name,
                                                 rule.metric)
                                 });
-                            } else {
-                                regression_since_label =
-                                    fmt::format("report_{}.json", oldest_failing);
-                                if (auto* origin_report = fetch_report(oldest_failing);
-                                    origin_report != nullptr) {
-                                    regression_since_commit = commit_from_report(origin_report->root);
-                                }
-                                if (oldest_failing == 1) {
-                                    diagnostics_out.push_back({
-                                        ValidationDiag::Severity::Warning,
-                                        "regression_pre_existing",
-                                        rule_location,
-                                        fmt::format("regression has been present in every report on disk back to report_1.json for benchmark '{}', tuple algo '{}', test_case '{}', region '{}', metric '{}' — almost certainly not introduced by recent changes",
-                                                    state->config.benchmark_key,
-                                                    tuple.algorithm_name,
-                                                    test_case_name, region_name,
-                                                    rule.metric)
-                                    });
-                                }
                             }
 
                             RegressionEntry entry;
@@ -8933,6 +9340,7 @@ struct HistoricalReportCache {
                             entry.region          = region_name;
                             entry.metric          = rule.metric;
                             entry.aggregate       = rule.aggregate;
+                            entry.blocking        = rule.blocking;
                             entry.previously      = previously_value;
                             entry.now             = now_value;
                             entry.regression_since        = std::move(regression_since_label);
@@ -8948,7 +9356,7 @@ struct HistoricalReportCache {
                     ValidationDiag::Severity::Error,
                     "regression_rule_matched_nothing",
                     rule_location,
-                    fmt::format("regression rule '{}' did not match any (benchmark, tuple, test_case, region) combination with current samples; check 'benchmarks', 'regions', 'metric', and 'exclude_cases'",
+                    fmt::format("regression rule '{}' did not match any (benchmark, tuple, test_case, region) combination with current samples; check benchmark/algorithm filters, 'regions', 'metric', and 'exclude_cases'",
                                 rule.name)
                 });
             }
@@ -11114,7 +11522,7 @@ template<typename Input, typename Output>
 
     /// Emit one regression entry. Field order mirrors the user spec:
     /// location, benchmark, rule_name, algorithm_name, violating_tuples,
-    /// test_cases, region, metric, aggregate, previously, now,
+    /// test_cases, region, metric, aggregate, blocking, previously, now,
     /// regression_since.
     auto emit_one_regression = [&](auto& b, const RegressionEntry& entry) {
         emit_object_with_body(b, [&](auto& inner) {
@@ -11144,6 +11552,9 @@ template<typename Input, typename Output>
             inner.append_comma();
             emit_kv_string(inner, "aggregate",
                 std::string_view{aggregate_name(entry.aggregate)});
+            inner.append_comma();
+            emit_key(inner, "blocking");
+            inner.append(entry.blocking);
             inner.append_comma();
             emit_key(inner, "previously");
             inner.append(entry.previously);
@@ -11524,10 +11935,11 @@ inline void print_regressions(const std::vector<RegressionEntry>& regressions) n
 
     for (const auto& entry : regressions) {
         std::fprintf(stderr,
-            "[%s] %s (rule=%s, test_case=%s, region=%s, metric=%s, aggregate=%s)\n",
+            "[%s] %s (rule=%s, classification=%s, test_case=%s, region=%s, metric=%s, aggregate=%s)\n",
             entry.benchmark.c_str(),
             entry.algorithm_name.c_str(),
             entry.rule_name.c_str(),
+            entry.blocking ? "BLOCKING" : "diagnostic",
             entry.test_case.c_str(),
             entry.region.c_str(),
             entry.metric.c_str(),
@@ -13798,10 +14210,11 @@ struct BenchmarkFilterMetadata {
     // `report_<N>.json` is parsed at most once per run.
     HistoricalReportCache history_cache{report_dir_path};
 
-    // Evaluate regression rules against report_<current_index - 1>.json
-    // (and walk further back as needed for `regression_since`). The
-    // evaluator never writes anything; we collect entries and flush
-    // them to the report below alongside any diagnostics it produced.
+    // Evaluate regression rules against the newest eligible historical
+    // candidate (walking backward over ineligible reports), then reuse that
+    // exact predicate for `regression_since`. The evaluator never writes
+    // anything; we collect entries and flush them to the report below
+    // alongside any diagnostics it produced.
     std::vector<ValidationDiag> regression_eval_diagnostics;
     auto regressions = evaluate_regressions(
         regression_rules_by_config, reports,
@@ -13856,8 +14269,13 @@ struct BenchmarkFilterMetadata {
     const bool blocking_rule_violation = std::any_of(
         violations.begin(), violations.end(),
         [](const Violation& violation) { return violation.blocking; });
+    const bool blocking_regression = std::any_of(
+        regressions.begin(), regressions.end(),
+        [](const RegressionEntry& regression) {
+            return regression.blocking;
+        });
     return (!blocking_rule_violation
-            && regressions.empty()
+            && !blocking_regression
             && !diagnostics_had_errors
             && !regression_eval_had_errors
             && !report_schema_failed) ? 0 : 1;

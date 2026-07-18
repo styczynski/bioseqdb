@@ -738,6 +738,25 @@ adopt_gpu_built_index(
             == (built.position_count
                     > built.ownership.target_minimizer_capacity_estimate
                 ? 1u : 0u)
+        && built.ownership.idle_arena_trim_attempts_before_count == 1u
+        && built.ownership.idle_arena_trim_successes_before_count == 1u
+        && built.ownership.idle_arena_released_bytes_before_count
+            <= built.ownership.pretrim_peak_observed_bytes
+        && built.ownership.pretrim_peak_observed_bytes
+            <= built.ownership.peak_observed_bytes
+        && built.ownership.direct_sequence_arena_copies == 1u
+        && built.ownership.host_sequence_capacity_releases_before_main
+            == (built.ownership.host_sequence_capacity_released_bytes != 0u
+                    ? 1u : 0u)
+        && built.ownership.direct_tile_arena_fills == 1u
+        && built.ownership.host_tile_staging_elided_bytes != 0u
+        && built.ownership.count_phase_host_transient_bytes
+            == built.ownership.host_sequence_capacity_released_bytes
+        && built.ownership.main_phase_host_transient_bytes == 0u
+        && built.ownership.host_transient_excluded_before_main_bytes
+            == bioseq::parallelism::saturating_add(
+                built.ownership.host_sequence_capacity_released_bytes,
+                built.ownership.host_tile_staging_elided_bytes)
         && built.ownership.arena_trimmed_before_permit_shrink == 1u;
     if (!target_build_route_matches) {
         return std::unexpected{GpuBuiltIndexAdoptionError::evidence_mismatch};

@@ -847,6 +847,52 @@ template<typename OnInput, typename OnRun, typename OnEvaluate,
     return std::nullopt;
 }
 
+/// Mutable counterpart used only by history-corruption fixtures. Returns a
+/// pointer into `report`, or nullptr when the selected aggregate cell is
+/// absent.
+[[nodiscard]] inline nlohmann::json* mutable_aggregate_at(
+    nlohmann::json& report,
+    std::string_view bench_key,
+    std::string_view algorithm,
+    std::string_view test_case,
+    std::string_view region,
+    std::string_view metric)
+{
+    if (!report.contains("benchmarks")) return nullptr;
+    auto& benches = report["benchmarks"];
+    if (!benches.contains(bench_key)) return nullptr;
+    auto& bench = benches[std::string{bench_key}];
+    if (!bench.contains("execution_tuples")) return nullptr;
+    for (auto& tuple_record : bench["execution_tuples"]) {
+        if (!tuple_record.contains("tuple")) continue;
+        auto& tuple_obj = tuple_record["tuple"];
+        if (!tuple_obj.contains(std::string{algorithm})) continue;
+        if (!tuple_record.contains("test_cases")) continue;
+        auto& test_cases = tuple_record["test_cases"];
+        if (!test_cases.contains(std::string{test_case})) continue;
+        auto& selected_case = test_cases[std::string{test_case}];
+        if (!selected_case.contains(std::string{region})) continue;
+        auto& region_obj = selected_case[std::string{region}];
+        if (!region_obj.contains(std::string{metric})) continue;
+        return &region_obj[std::string{metric}];
+    }
+    return nullptr;
+}
+
+/// Replace one historical report with a deliberately mutated JSON document.
+/// Returns false on any file-open or write failure so fixtures fail clearly.
+[[nodiscard]] inline bool rewrite_report_json(
+    const std::filesystem::path& path,
+    const nlohmann::json& report)
+{
+    const std::string body = report.dump();
+    std::ofstream output(path, std::ios::trunc | std::ios::binary);
+    if (!output) return false;
+    output.write(body.data(), static_cast<std::streamsize>(body.size()));
+    output.close();
+    return output.good();
+}
+
 /// Convenience: `samples_count` for the cell, or 0 when the cell
 /// is absent. Replaces the pre-V17 `samples_at(...).size()`
 /// idiom that several tests used to validate iteration counts.
@@ -3315,10 +3361,338 @@ TEST_CASE("regression rule fires after value drift", "[bench_framework][regressi
         REQUIRE(outcome.report["regressions"].size() == 1);
         const auto& entry = outcome.report["regressions"][0];
         REQUIRE(entry["rule_name"].get<std::string>() == "value_eq");
+        REQUIRE(entry["blocking"].get<bool>() == true);
         REQUIRE(entry["regression_since"].get<std::string>() == "report_1.json");
         REQUIRE(entry["previously"].get<double>() == 2.0);   // 1.0 + 1.0
         REQUIRE(entry["now"].get<double>()        == 4.0);   // 2.0 + 2.0
     }
+}
+
+TEST_CASE("regression history skips every ineligible candidate",
+          "[bench_framework][regression][history][eligibility]") {
+    TestLogSilencer silence_mlogging;
+
+    static constexpr auto& no_params = kDummyParams;
+    static constexpr std::array<AlgorithmSpec, 1> algorithms{{
+        {"identity", std::span<const AlgoParamSpec>{no_params}}
+    }};
+    static constexpr std::array<TestCaseDataSpec, 1> test_cases{{
+        {"ONE", "history eligibility", R"({"length":4})"}
+    }};
+    static constexpr std::array<ForEntry, 1> for_entries{{ {"ONE", 2} }};
+    static constexpr std::array<OverEntry, 1> over_entries{{ {"identity", "{}"} }};
+    const std::array<MetricSpecLite, 1> metrics{{
+        {"value", "evaluation", "", "", "[]"},
+    }};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{
+            .key = "bench_history_eligibility",
+            .description = "strict historical candidate eligibility",
+            .concurrency = false,
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        }
+    }};
+    static constexpr std::string_view regression_rules = R"([{
+        "name":"value_eq","metric":"value","aggregate":"sum",
+        "operator":{"compare":"=","tolerance%":0}
+    }])";
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{algorithms},
+        std::span<const TestCaseDataSpec>{test_cases},
+        std::span<const BenchmarkSpec>{benches}, regression_rules);
+    const auto on_run = [](
+        std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
+        return ToyOutput{};
+    };
+    const auto evaluate_one = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", 1.0}}; };
+    const auto evaluate_one_and_half = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", 1.5}}; };
+    const auto evaluate_two = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", 2.0}}; };
+
+    // Null is the explicit no-sidecar state and remains eligible.
+    {
+        TempReportDir report_dir;
+        const auto baseline = run_one_bench(
+            "bench_history_eligibility", "null raw baseline", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        REQUIRE(baseline.report["raw_evidence"].is_null());
+        const auto current = run_one_bench(
+            "bench_history_eligibility", "null raw current", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(current.report["regressions"].size() == 1);
+        REQUIRE(current.report["regressions"][0]["previously"] == 2.0);
+    }
+
+    enum class Mutation {
+        incomplete_raw,
+        missing_raw_complete,
+        malformed_record_count,
+        missing_fast,
+        mismatched_fast,
+        sample_count,
+        finite_count,
+        aggregate,
+    };
+    struct MutationCase {
+        Mutation mutation;
+        std::string_view reason;
+    };
+    static constexpr std::array<MutationCase, 8> mutations{{
+        {Mutation::incomplete_raw, "raw_evidence.complete is false"},
+        {Mutation::missing_raw_complete,
+         "raw_evidence.complete is missing or malformed"},
+        {Mutation::malformed_record_count,
+         "raw_evidence.record_count is missing or malformed"},
+        {Mutation::missing_fast, "meta.fast is missing or malformed"},
+        {Mutation::mismatched_fast, "does not match current meta.fast"},
+        {Mutation::sample_count, "sample cardinality"},
+        {Mutation::finite_count, "finite histogram count"},
+        {Mutation::aggregate,
+         "selected sum aggregate is missing, malformed, or non-finite"},
+    }};
+
+    for (const auto& mutation : mutations) {
+        INFO("candidate mutation " << static_cast<int>(mutation.mutation));
+        TempReportDir report_dir;
+        const auto oldest = run_one_bench(
+            "bench_history_eligibility", "oldest valid", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        REQUIRE(oldest.report_path.filename() == "report_1.json");
+        auto candidate = run_one_bench(
+            "bench_history_eligibility", "candidate", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(candidate.report_path.filename() == "report_2.json");
+
+        if (mutation.mutation == Mutation::incomplete_raw) {
+            candidate.report["raw_evidence"] = {
+                {"complete", false}, {"record_count", 2}};
+        } else if (mutation.mutation == Mutation::missing_raw_complete) {
+            candidate.report["raw_evidence"] = {{"record_count", 2}};
+        } else if (mutation.mutation == Mutation::malformed_record_count) {
+            candidate.report["raw_evidence"] = {
+                {"complete", true}, {"record_count", "two"}};
+        } else if (mutation.mutation == Mutation::missing_fast) {
+            candidate.report["meta"].erase("fast");
+        } else if (mutation.mutation == Mutation::mismatched_fast) {
+            candidate.report["meta"]["fast"] =
+                !candidate.report["meta"]["fast"].get<bool>();
+        } else {
+            auto* aggregate = mutable_aggregate_at(
+                candidate.report, "bench_history_eligibility", "identity",
+                "ONE", "all_regions", "value");
+            REQUIRE(aggregate != nullptr);
+            if (mutation.mutation == Mutation::sample_count) {
+                (*aggregate)["samples_count"] = 3;
+            } else if (mutation.mutation == Mutation::finite_count) {
+                // Claims one finite + one non-finite sample, unlike current.
+                (*aggregate)["histogram"][0]["count"] = 1;
+            } else {
+                (*aggregate)["stats"]["sum"] = "not-a-number";
+            }
+        }
+        REQUIRE(rewrite_report_json(candidate.report_path, candidate.report));
+
+        const auto current = run_one_bench(
+            "bench_history_eligibility", "current", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(current.report["regressions"].size() == 1);
+        const auto& regression = current.report["regressions"][0];
+        REQUIRE(regression["previously"] == 2.0);
+        REQUIRE(regression["now"] == 4.0);
+        REQUIRE(regression["regression_since"] == "report_1.json");
+        REQUIRE(current.captured_stderr.find(
+                    "regression_history_candidate_skipped")
+                != std::string::npos);
+        REQUIRE(current.captured_stderr.find(mutation.reason)
+                != std::string::npos);
+    }
+
+    // Attribution must skip an incomplete report that would otherwise become
+    // the oldest failing origin.
+    {
+        TempReportDir report_dir;
+        const auto report_one = run_one_bench(
+            "bench_history_eligibility", "passing origin", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(report_one.report_path.filename() == "report_1.json");
+        auto report_two = run_one_bench(
+            "bench_history_eligibility", "incomplete origin", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one_and_half);
+        report_two.report["raw_evidence"] = {
+            {"complete", false}, {"record_count", 2}};
+        REQUIRE(rewrite_report_json(report_two.report_path, report_two.report));
+        const auto report_three = run_one_bench(
+            "bench_history_eligibility", "nearest valid baseline", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        REQUIRE(report_three.report_path.filename() == "report_3.json");
+        const auto current = run_one_bench(
+            "bench_history_eligibility", "attribution current", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(current.report["regressions"].size() == 1);
+        REQUIRE(current.report["regressions"][0]["regression_since"]
+                == "report_3.json");
+        REQUIRE(current.captured_stderr.find(
+                    "skipped report_2.json as a regression-history candidate")
+                != std::string::npos);
+    }
+}
+
+TEST_CASE("ordered regression treats only exact zero as unchanged",
+          "[bench_framework][regression][ordered-zero]") {
+    TestLogSilencer silence_mlogging;
+
+    static constexpr auto& no_params = kDummyParams;
+    static constexpr std::array<AlgorithmSpec, 1> algorithms{{
+        {"identity", std::span<const AlgoParamSpec>{no_params}}
+    }};
+    static constexpr std::array<TestCaseDataSpec, 1> test_cases{{
+        {"ONE", "ordered zero", R"({"length":4})"}
+    }};
+    static constexpr std::array<ForEntry, 1> for_entries{{ {"ONE", 1} }};
+    static constexpr std::array<OverEntry, 1> over_entries{{ {"identity", "{}"} }};
+    const std::array<MetricSpecLite, 1> metrics{{
+        {"value", "evaluation", "", "", "[]"},
+    }};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{
+            .key = "bench_ordered_zero",
+            .description = "ordered zero boundary",
+            .concurrency = false,
+            .for_entries = std::span<const ForEntry>{for_entries},
+            .over_entries = std::span<const OverEntry>{over_entries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        }
+    }};
+    static constexpr std::string_view regression_rules = R"([{
+        "name":"value_gt","metric":"value","aggregate":"sum",
+        "operator":{"compare":">","tolerance%":0}
+    }])";
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{algorithms},
+        std::span<const TestCaseDataSpec>{test_cases},
+        std::span<const BenchmarkSpec>{benches}, regression_rules);
+    const auto on_run = [](
+        std::string_view, const ParamMap&, const ToyInput&) -> ToyOutput {
+        return ToyOutput{};
+    };
+    const auto evaluate_positive_zero = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", 0.0}}; };
+    const auto evaluate_negative_zero = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", -0.0}}; };
+    const auto evaluate_one = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", 1.0}}; };
+    const auto evaluate_ninety_percent = [](
+        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
+        -> std::map<std::string, double> { return {{"value", 0.90}}; };
+
+    {
+        TempReportDir report_dir;
+        const auto baseline = run_one_bench(
+            "bench_ordered_zero", "positive zero baseline", config_text,
+            report_dir, build_toy_input, on_run, evaluate_positive_zero);
+        REQUIRE(baseline.report_path.filename() == "report_1.json");
+        const auto unchanged = run_one_bench(
+            "bench_ordered_zero", "negative zero unchanged", config_text,
+            report_dir, build_toy_input, on_run, evaluate_negative_zero);
+        REQUIRE(unchanged.exit_code == 0);
+        REQUIRE(unchanged.report["regressions"].empty());
+    }
+
+    {
+        TempReportDir report_dir;
+        const auto baseline = run_one_bench(
+            "bench_ordered_zero", "one baseline", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        REQUIRE(baseline.report_path.filename() == "report_1.json");
+        const auto regressed = run_one_bench(
+            "bench_ordered_zero", "ninety percent current", config_text,
+            report_dir, build_toy_input, on_run, evaluate_ninety_percent);
+        REQUIRE(regressed.exit_code == 1);
+        REQUIRE(regressed.report["regressions"].size() == 1);
+        REQUIRE(regressed.report["regressions"][0]["previously"] == 1.0);
+        REQUIRE(regressed.report["regressions"][0]["now"].get<double>()
+                == Catch::Approx(0.90));
+    }
+}
+
+TEST_CASE("diagnostic regression is reported without blocking and algorithm deny-list is scoped",
+          "[bench_framework][regression][diagnostic]") {
+    TestLogSilencer silence_mlogging;
+
+    static constexpr auto& kNoParams = kDummyParams;
+    static constexpr std::array<AlgorithmSpec, 2> kAlgos{{
+        {"cpu", std::span<const AlgoParamSpec>{kNoParams}},
+        {"gpu", std::span<const AlgoParamSpec>{kNoParams}},
+    }};
+    static constexpr std::array<TestCaseDataSpec, 1> kTestCases{{
+        {"ONE", "diagnostic regression", R"({"length":4})"}
+    }};
+    static constexpr std::array<ForEntry, 1> kForEntries{{ {"ONE", 2} }};
+    static constexpr std::array<OverEntry, 2> kOverEntries{{
+        {"cpu", "{}"}, {"gpu", "{}"},
+    }};
+    const std::array<MetricSpecLite, 1> metrics{{
+        {"value", "evaluation", "", "", "[]"},
+    }};
+    const std::array<BenchmarkSpec, 1> benches{{
+        BenchmarkSpec{
+            .key = "bench_reg_diagnostic",
+            .description = "diagnostic regression",
+            .concurrency = false,
+            .for_entries = std::span<const ForEntry>{kForEntries},
+            .over_entries = std::span<const OverEntry>{kOverEntries},
+            .metrics = std::span<const MetricSpecLite>{metrics},
+        }
+    }};
+    static constexpr std::string_view kRegressionRules = R"([{
+        "name":"gpu_value_confirmation",
+        "metric":"value",
+        "aggregate":"sum",
+        "operator":{"compare":"=","tolerance%":0},
+        "exclude_algorithms":["cpu"],
+        "blocking":false
+    }])";
+    const auto config_text = render_config(
+        std::span<const AlgorithmSpec>{kAlgos},
+        std::span<const TestCaseDataSpec>{kTestCases},
+        std::span<const BenchmarkSpec>{benches},
+        kRegressionRules);
+
+    TempReportDir report_dir;
+    auto on_run = [](std::string_view, const ParamMap&, const ToyInput&) {
+        return ToyOutput{};
+    };
+    auto on_eval_one = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&) {
+        return std::map<std::string, double>{{"value", 1.0}};
+    };
+    auto on_eval_two = [](std::string_view, const ParamMap&,
+                           const ToyInput&, const ToyOutput&) {
+        return std::map<std::string, double>{{"value", 2.0}};
+    };
+
+    REQUIRE(run_one_bench(
+        "bench_reg_diagnostic", "baseline", config_text, report_dir,
+        build_toy_input, on_run, on_eval_one).exit_code == 0);
+    const auto outcome = run_one_bench(
+        "bench_reg_diagnostic", "drift", config_text, report_dir,
+        build_toy_input, on_run, on_eval_two);
+    REQUIRE(outcome.exit_code == 0);
+    REQUIRE(outcome.report.at("regressions").size() == 1);
+    const auto& regression = outcome.report.at("regressions").at(0);
+    REQUIRE(regression.at("algorithm_name") == "gpu");
+    REQUIRE(regression.at("blocking") == false);
+    REQUIRE(stderr_contains(outcome.captured_stderr, "classification=diagnostic"));
 }
 
 // ---------------------------------------------------------------------------
@@ -4386,14 +4760,14 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     }
     const std::set<std::string> expected_rule_names{
         "report76_xxl_hifi_block_simd_over_ksw2_simd_wall_ratio_max_1_057921",
-        "report76_xxl_hifi_ksw2_batched_over_ksw2_simd_wall_ratio_max_1_000654",
+        "complete_reports120_148_151_153_xxl_hifi_ksw2_batched_over_ksw2_simd_wall_ratio_max_1_005000",
         "report76_xxl_hifi_vulkan_tiled_over_ksw2_simd_wall_ratio_max_1_011221",
         "report76_xxl_hifi_legacy_block_vulkan_over_block_simd_wall_ratio_max_1_714040",
         "report76_xxl_hifi_phase_c_block_vulkan_over_block_simd_wall_ratio_max_1_722027",
         "report76_xxl_hifi_ksw2_simd_over_minimap2_wall_ratio_max_0_797045",
         "report76_xxl_hifi_ksw2_simd_over_scalar_wall_ratio_max_0_540314",
-        "report76_xxl_hifi_nthash_simd_over_scalar_sketch_ratio_max_0_210496957",
-        "report76_xxl_hifi_chaining_simd_over_scalar_ratio_max_0_579268421",
+        "complete_paired_medians_xxl_hifi_nthash_simd_over_scalar_sketch_ratio_max_0_214000",
+        "complete_paired_medians_xxl_hifi_chaining_simd_over_scalar_ratio_max_0_600000",
         "report76_xxl_hifi_backtrack_simd_over_scalar_ratio_max_0_955048972",
         "report76_xxl_hifi_block_over_ksw2_alignment_ratio_max_0_591278239",
     };
@@ -4405,11 +4779,11 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     }
     REQUIRE(configured_rule_names == expected_rule_names);
 
-    const std::map<std::string, double> expected_report76_ratios{
+    const std::map<std::string, double> expected_policy_max_ratios{
         {"report76_xxl_hifi_block_simd_over_ksw2_simd_wall_ratio_max_1_057921",
          Report76XxlHifiP50::block_wall / Report76XxlHifiP50::simd_wall},
-        {"report76_xxl_hifi_ksw2_batched_over_ksw2_simd_wall_ratio_max_1_000654",
-         Report76XxlHifiP50::batched_wall / Report76XxlHifiP50::simd_wall},
+        {"complete_reports120_148_151_153_xxl_hifi_ksw2_batched_over_ksw2_simd_wall_ratio_max_1_005000",
+         1.005},
         {"report76_xxl_hifi_vulkan_tiled_over_ksw2_simd_wall_ratio_max_1_011221",
          Report76XxlHifiP50::vulkan_wall / Report76XxlHifiP50::simd_wall},
         {"report76_xxl_hifi_legacy_block_vulkan_over_block_simd_wall_ratio_max_1_714040",
@@ -4420,10 +4794,10 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
          Report76XxlHifiP50::simd_wall / Report76XxlHifiP50::minimap2_wall},
         {"report76_xxl_hifi_ksw2_simd_over_scalar_wall_ratio_max_0_540314",
          Report76XxlHifiP50::simd_wall / Report76XxlHifiP50::scalar_wall},
-        {"report76_xxl_hifi_nthash_simd_over_scalar_sketch_ratio_max_0_210496957",
-         Report76XxlHifiP50::simd_sketch / Report76XxlHifiP50::scalar_sketch},
-        {"report76_xxl_hifi_chaining_simd_over_scalar_ratio_max_0_579268421",
-         Report76XxlHifiP50::simd_chain / Report76XxlHifiP50::scalar_chain},
+        {"complete_paired_medians_xxl_hifi_nthash_simd_over_scalar_sketch_ratio_max_0_214000",
+         0.214},
+        {"complete_paired_medians_xxl_hifi_chaining_simd_over_scalar_ratio_max_0_600000",
+         0.600},
         {"report76_xxl_hifi_backtrack_simd_over_scalar_ratio_max_0_955048972",
          Report76XxlHifiP50::simd_backtrack / Report76XxlHifiP50::scalar_backtrack},
         {"report76_xxl_hifi_block_over_ksw2_alignment_ratio_max_0_591278239",
@@ -4443,8 +4817,14 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
                 ? 0.000001
                 : 0.000000001;
             REQUIRE(configured_max_ratio == Catch::Approx(
-                        expected_report76_ratios.at(rule_name))
+                        expected_policy_max_ratios.at(rule_name))
                         .margin(allowed_rounding));
+            if (rule_name
+                == "report76_xxl_hifi_vulkan_tiled_over_ksw2_simd_wall_ratio_max_1_011221") {
+                REQUIRE(comparator.at("blocking") == false);
+            } else {
+                REQUIRE_FALSE(comparator.contains("blocking"));
+            }
         }
     }
 
@@ -4605,8 +4985,9 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     REQUIRE(config.contains("bench_aligners_xxl_hifi_relative"));
     REQUIRE(config.contains("bench_aligners_xxl_hifi_paired"));
 
-    // The exact report_76 compatibility gate remains a distinct four-repeat
-    // benchmark. Its comparators keep the historical independent-P50 shape.
+    // The blocking monitoring gate remains a distinct four-repeat benchmark.
+    // Its estimators keep the independent-P50 shape; only the historical
+    // partial-GPU Vulkan ceiling is explicitly nonblocking.
     const auto& compatibility =
         config.at("bench_aligners_xxl_hifi_relative");
     REQUIRE(compatibility.at("matrix").at("for").at("XXL_HIFI") == 4);
@@ -4616,7 +4997,12 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
                  .at(metric_name).at("rules")) {
             REQUIRE_FALSE(rule.at(2).contains("pairing"));
             REQUIRE_FALSE(rule.at(2).contains("paired_baseline"));
-            REQUIRE_FALSE(rule.at(2).contains("blocking"));
+            if (rule.at(0)
+                == "report76_xxl_hifi_vulkan_tiled_over_ksw2_simd_wall_ratio_max_1_011221") {
+                REQUIRE(rule.at(2).at("blocking") == false);
+            } else {
+                REQUIRE_FALSE(rule.at(2).contains("blocking"));
+            }
             REQUIRE_FALSE(rule.at(2).contains("warmup_repetitions"));
         }
     }
@@ -4805,6 +5191,51 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     REQUIRE(description.find("first-repeat") != std::string::npos);
     REQUIRE(description.find("not a globally cold") != std::string::npos);
     REQUIRE(description.find("Raw evidence") != std::string::npos);
+}
+
+TEST_CASE("Paper ntHash unequal-work sketch comparisons are prototype diagnostics",
+          "[bench_framework][paper-nthash][configuration]") {
+    const auto source_path = std::filesystem::path{__FILE__};
+    auto config_path = source_path.parent_path().parent_path()
+        / "bench" / "bench_v10_configuration.json";
+    if (!std::filesystem::exists(config_path)) {
+        config_path = std::filesystem::current_path()
+            / "main" / "bench" / "bench_v10_configuration.json";
+    }
+    REQUIRE(std::filesystem::exists(config_path));
+
+    std::ifstream config_stream{config_path};
+    REQUIRE(config_stream.good());
+    const nlohmann::json config = nlohmann::json::parse(config_stream);
+    const auto& probe = config.at("bench_paper_nthash_xxl_hifi_probe");
+    const std::string description =
+        probe.at("description").get<std::string>();
+    REQUIRE(description.find("unequal work") != std::string::npos);
+    REQUIRE(description.find("1.46-1.48") != std::string::npos);
+    REQUIRE(description.find("nonblocking prototype diagnostic")
+            != std::string::npos);
+
+    const auto& rules = probe.at("matrix").at("metrics")
+        .at("region_total_ns").at("rules");
+    REQUIRE(rules.size() == 2);
+    const std::set<std::string> expected_rule_names{
+        "bounded_paper_nthash_sketch_vs_exactsimd_lt_1_prototype_diagnostic",
+        "bounded_paper_nthash_block_sketch_vs_exactsimd_lt_1_prototype_diagnostic",
+    };
+    std::set<std::string> configured_rule_names;
+    for (const auto& rule : rules) {
+        configured_rule_names.insert(rule.at(0).get<std::string>());
+        const auto& comparator = rule.at(2);
+        REQUIRE(comparator.at("compare") == "<");
+        REQUIRE(comparator.value("threshold%", 0.0) == 0.0);
+        REQUIRE(comparator.at("tolerance%") == 0.0);
+        REQUIRE(comparator.at("aggregate") == "p50");
+        REQUIRE(comparator.at("pairing") == "by_iteration_ratio");
+        REQUIRE(comparator.at("paired_baseline") == 1.0);
+        REQUIRE(comparator.at("blocking") == false);
+        REQUIRE(comparator.at("warmup_repetitions") == 1);
+    }
+    REQUIRE(configured_rule_names == expected_rule_names);
 }
 
 TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block Vulkan ratios",
@@ -6228,5 +6659,85 @@ TEST_CASE("bench_framework --debug abort backstop sweep", "[bench_framework][deb
         REQUIRE(tuples.size() == 1);
         REQUIRE(tuples[0]["test_cases"].contains("SMALL"));
         REQUIRE_FALSE(tuples[0]["test_cases"].contains("BIG"));
+    }
+}
+
+TEST_CASE("GPU historical timing policies keep centers blocking and tails scoped",
+          "[bench_framework][configuration][gpu][regression]") {
+    const auto source_path = std::filesystem::path{__FILE__};
+    auto config_path = source_path.parent_path().parent_path()
+        / "bench" / "bench_v10_configuration.json";
+    if (!std::filesystem::exists(config_path)) {
+        config_path = std::filesystem::current_path()
+            / "main" / "bench" / "bench_v10_configuration.json";
+    }
+    std::ifstream config_stream{config_path};
+    REQUIRE(config_stream.good());
+    const nlohmann::json config = nlohmann::json::parse(config_stream);
+
+    const auto& kernels = config.at("bench_prefilter_kernels");
+    REQUIRE(kernels.at("concurrency").at("bench_lock") == true);
+    REQUIRE(kernels.at("concurrency").at("concurrency") == false);
+    REQUIRE(kernels.at("iteration_order").at("mode")
+            == "interleaved_seeded");
+    REQUIRE(kernels.at("iteration_order").at("seed") == 5121008);
+    for (const auto& [_case_name, iterations] :
+         kernels.at("matrix").at("for").items()) {
+        REQUIRE(iterations == 11);
+    }
+    REQUIRE(kernels.at("description").get<std::string>().find(
+                "Reports 151/153/154") != std::string::npos);
+
+    const auto& curated = config.at("bench_aligners_curated");
+    REQUIRE(curated.at("concurrency").at("bench_lock") == false);
+    REQUIRE(curated.at("concurrency").at("concurrency") == true);
+    REQUIRE(curated.at("description").get<std::string>().find(
+                "P50 remains a blocking historical gate")
+            != std::string::npos);
+
+    const auto& rules = config.at("regression_rules");
+    auto find_rule = [&](std::string_view name) -> const nlohmann::json& {
+        const auto found = std::find_if(rules.begin(), rules.end(),
+            [&](const auto& rule) { return rule.at("name") == name; });
+        REQUIRE(found != rules.end());
+        return *found;
+    };
+    const auto& p50 = find_rule("wall_clock_p50_no_blowup");
+    REQUIRE(p50.at("aggregate") == "p50");
+    REQUIRE_FALSE(p50.contains("blocking"));
+    REQUIRE_FALSE(p50.contains("exclude_benchmarks"));
+
+    const auto& global_p99 = find_rule("wall_clock_p99_no_runaway_outlier");
+    REQUIRE(global_p99.at("aggregate") == "p99");
+    REQUIRE(global_p99.at("exclude_benchmarks")
+            == nlohmann::json::array({"bench_aligners_curated"}));
+    REQUIRE_FALSE(global_p99.contains("blocking"));
+
+    const std::set<std::string> high_variance_gpu{
+        "bioseq_block_vulkan_dp_vulkan_minimap_int",
+        "bioseq_block_vulkan_phase_c_frontend",
+    };
+    const auto& curated_blocking =
+        find_rule("curated_wall_clock_p99_no_runaway_outlier");
+    REQUIRE(curated_blocking.at("aggregate") == "p99");
+    REQUIRE_FALSE(curated_blocking.contains("blocking"));
+    std::set<std::string> configured_gpu_exclusions;
+    for (const auto& algorithm :
+         curated_blocking.at("exclude_algorithms")) {
+        configured_gpu_exclusions.insert(algorithm.get<std::string>());
+    }
+    REQUIRE(configured_gpu_exclusions == high_variance_gpu);
+
+    const auto& confirmation =
+        find_rule("curated_high_variance_partial_gpu_p99_confirmation");
+    REQUIRE(confirmation.at("aggregate") == "p99");
+    REQUIRE(confirmation.at("blocking") == false);
+    REQUIRE(confirmation.at("benchmarks")
+            == nlohmann::json::array({"bench_aligners_curated"}));
+    for (const auto& algorithm : high_variance_gpu) {
+        REQUIRE(std::find(
+            confirmation.at("exclude_algorithms").begin(),
+            confirmation.at("exclude_algorithms").end(), algorithm)
+            == confirmation.at("exclude_algorithms").end());
     }
 }

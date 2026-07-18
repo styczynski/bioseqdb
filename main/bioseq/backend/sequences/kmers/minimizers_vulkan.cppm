@@ -28,6 +28,7 @@ module;
 #include <algorithm>
 #include <concepts>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1206,7 +1207,9 @@ template <class MinimizerT>
     if (!plan.valid) {
         return (std::numeric_limits<std::uint64_t>::max)();
     }
-    return sat_add(plan.arena_scaffold_bytes, plan.host_transient_bytes);
+    return sat_add(
+        plan.arena_scaffold_bytes,
+        plan.count_phase_host_transient_bytes);
 }
 
 [[nodiscard]] inline std::uint64_t vulkan_sketch_transient_reserved_bytes(
@@ -1443,7 +1446,7 @@ sketch_uploaded_window_result(
         runtime.phase_c_arena_allocation_requirement(arena_request_bytes);
     const std::uint64_t host_transient_headroom_bytes =
         vulkan_exact_host_allocation_admission_bytes(
-            dispatch_plan.host_transient_bytes);
+            dispatch_plan.count_phase_host_transient_bytes);
     const std::uint64_t resident_allocation_bytes =
         allocation_requirements.pessimistic_output_allocation_bytes;
     const std::uint64_t transient_bytes = sat_add(
@@ -1717,7 +1720,9 @@ build_gpu_index_from_upload_on_device(
     std::size_t window_size,
     std::size_t kmer_size,
     VulkanSketchQueryGate query_gate = {},
-    VulkanSketchDecline* decline_out = nullptr)
+    VulkanSketchDecline* decline_out = nullptr,
+    std::uint64_t owned_sequence_staging_bytes = 0u,
+    std::function<void()> release_owned_sequence_staging = {})
 {
     using bioseq::parallelism::MemoryAdmissionController;
 
@@ -1792,6 +1797,15 @@ build_gpu_index_from_upload_on_device(
         decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
         return std::nullopt;
     }
+    const PhaseCTargetIndexHostScratchPlan host_scratch_plan =
+        phase_c_target_index_host_scratch_plan(
+            memory_plan, owned_sequence_staging_bytes);
+    if (!host_scratch_plan.valid
+        || (owned_sequence_staging_bytes != 0u
+            && !release_owned_sequence_staging)) {
+        decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
+        return std::nullopt;
+    }
     const std::uint64_t query_gate_bytes =
         bioseq::parallelism::saturating_mul(
             static_cast<std::uint64_t>(query_gate.words.size()),
@@ -1805,7 +1819,7 @@ build_gpu_index_from_upload_on_device(
     const std::uint64_t count_arena_bytes =
         runtime.phase_c_arena_allocation_requirement(count_arena_request);
     const std::uint64_t admission_bytes = sat_add(
-        count_arena_bytes, memory_plan.host_transient_bytes);
+        count_arena_bytes, host_scratch_plan.count_phase_bytes);
     if (query_gate_bytes == (std::numeric_limits<std::uint64_t>::max)()
         || admission_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
         decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
@@ -1869,26 +1883,20 @@ build_gpu_index_from_upload_on_device(
         const auto materialization = admission.materialize(
             *permit,
             [&]() -> bioseq::parallelism::MemoryMaterializationEvidence {
-                {
-                    std::vector<std::byte> padded_sequence(
-                        static_cast<std::size_t>(upload.padded_byte_size));
-                    if (upload.byte_size != 0u && upload.bytes != nullptr) {
-                        std::memcpy(
-                            padded_sequence.data(),
-                            upload.bytes,
-                            static_cast<std::size_t>(upload.byte_size));
-                    }
-                    built = runtime.run_phase_c_build_target_index(
-                        std::span<const std::byte>{
-                            padded_sequence.data(), padded_sequence.size()},
-                        rank_lut,
-                        sketch_params,
-                        max_minimizers,
-                        query_gate.words,
-                        query_gate.mask,
-                        query_gate_identity,
-                        &*permit);
-                } // host sequence dies before the post-materialization probe.
+                built = runtime.run_phase_c_build_target_index(
+                    std::span<const std::byte>{
+                        static_cast<const std::byte*>(upload.bytes),
+                        static_cast<std::size_t>(upload.byte_size)},
+                    upload.padded_byte_size,
+                    owned_sequence_staging_bytes,
+                    std::move(release_owned_sequence_staging),
+                    rank_lut,
+                    sketch_params,
+                    max_minimizers,
+                    query_gate.words,
+                    query_gate.mask,
+                    query_gate_identity,
+                    &*permit);
 
                 if (!built.valid) {
                     return {};
@@ -1905,10 +1913,7 @@ build_gpu_index_from_upload_on_device(
                     built.slots.reset();
                     return {};
                 }
-                const std::uint64_t observed_total = sat_add(
-                    built.observed_device_peak_bytes,
-                    memory_plan.host_transient_bytes);
-                if (observed_total > permit->bytes()) {
+                if (built.ownership.peak_observed_bytes > permit->bytes()) {
                     built.valid = false;
                     built.failure_reason = GpuBuiltIndexFailureReason::
                         peak_allocation_exceeds_admission;
@@ -2692,13 +2697,23 @@ template <class MinimizerT, class Seq>
                 const SequenceUploadView upload =
                     make_upload_view_from_window<bare>(seq, base, descriptor);
                 const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
+                const std::uint64_t scratch_capacity_bytes =
+                    bioseq::parallelism::saturating_mul(
+                        static_cast<std::uint64_t>(scratch.capacity()),
+                        sizeof(storage_unit));
+                auto release_scratch =
+                    [scratch = std::move(scratch)]() mutable noexcept {
+                        std::vector<storage_unit>{}.swap(scratch);
+                    };
                 return build_gpu_index_from_upload_on_device<MinimizerT>(
                     upload,
                     rank_lut,
                     window_size,
                     kmer_size,
                     query_gate,
-                    decline_out);
+                    decline_out,
+                    scratch_capacity_bytes,
+                    std::move(release_scratch));
             }
         }
     } else if constexpr (!vulkan_sketchable_sequence<bare>) {
@@ -2826,13 +2841,26 @@ template <class MinimizerT, class Seq>
             const SequenceUploadView upload =
                 make_upload_view_from_window<bare>(seq, base, descriptor);
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
+            const std::uint64_t scratch_capacity_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(scratch.capacity()),
+                    sizeof(storage_unit));
+            std::function<void()> release_scratch;
+            if (!scratch.empty()) {
+                release_scratch =
+                    [scratch = std::move(scratch)]() mutable noexcept {
+                        std::vector<storage_unit>{}.swap(scratch);
+                    };
+            }
             return build_gpu_index_from_upload_on_device<MinimizerT>(
                 upload,
                 rank_lut,
                 window_size,
                 kmer_size,
                 query_gate,
-                decline_out);
+                decline_out,
+                scratch_capacity_bytes,
+                std::move(release_scratch));
         }
     }
 }
@@ -3080,7 +3108,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
                     maximum_dispatch_plan.arena_scaffold_bytes);
             const std::uint64_t maximum_host_transient_headroom_bytes =
                 vulkan_exact_host_allocation_admission_bytes(
-                    maximum_dispatch_plan.host_transient_bytes);
+                    maximum_dispatch_plan.count_phase_host_transient_bytes);
             const std::uint64_t maximum_dispatch_phase_bytes =
                 vulkan_sketch_dispatch_admission_bytes(
                     maximum_physical_arena_bytes,

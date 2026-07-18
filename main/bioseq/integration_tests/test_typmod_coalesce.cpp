@@ -86,13 +86,14 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
     REQUIRE(rows_match == rows_coalesce);
 }
 
-TEST_CASE("EXPLAIN surfaces \"coalesce to seq('dna4', 32)\" when the "
-          "literal width differs from the column width",
+TEST_CASE("EXPLAIN typmod-coalesce metadata follows the active storage-width "
+          "profile",
           "[mmsearch][typmod_coalesce][explain]") {
-    // The user explicitly asked for the EXPLAIN line so they can
-    // see the coalesce decision in the plan. We only check for
-    // the substring; the exact wording is in customscan's
-    // ExplainCustomScan.
+    // Optimisation levels 0 and 1 deliberately normalise every accepted
+    // SQL width to uint64_t.  Under those profiles the nominal dna4/32
+    // column and dna4/64 literal have the same packed typmod, so there is
+    // no coalesce decision to surface.  Level 2 retains the requested
+    // widths and must expose the user-visible coalesce hint.
     auto ctx = fresh_context({kCoalesceTable});
     seed_hoe_fixture(ctx, kCoalesceTable);
 
@@ -104,10 +105,12 @@ TEST_CASE("EXPLAIN surfaces \"coalesce to seq('dna4', 32)\" when the "
             "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));",
             kCoalesceTable));
     REQUIRE_FALSE(plan.empty());
-    // The EXPLAIN line should include both the index-fetch
-    // reference and the coalesce hint. We check for "coalesce" so
-    // the test isn't brittle against rewording.
+#if BIOSEQ_OPTTIMIZATION_LEVEL <= 1
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "coalesce to seq"));
+#else
     REQUIRE(plan_contains(plan, "coalesce to seq('dna4', 32)"));
+#endif
 }
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL >= 1

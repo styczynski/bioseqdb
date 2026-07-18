@@ -217,6 +217,14 @@ make_adoptable_gpu_built_index(
     proof.count_emit_parity_verified = 1u;
     proof.target_minimizer_capacity_estimate = 4u;
     proof.capacity_estimate_underestimated = 0u;
+    proof.idle_arena_trim_attempts_before_count = 1u;
+    proof.idle_arena_trim_successes_before_count = 1u;
+    proof.direct_sequence_arena_copies = 1u;
+    proof.direct_tile_arena_fills = 1u;
+    proof.host_tile_staging_elided_bytes = 24u;
+    proof.count_phase_host_transient_bytes = 0u;
+    proof.main_phase_host_transient_bytes = 0u;
+    proof.host_transient_excluded_before_main_bytes = 24u;
     proof.arena_trimmed_before_permit_shrink = 1u;
     proof.resident_bytes = resident_bytes;
     proof.gate_count_dispatches = gate_enabled ? 1u : 0u;

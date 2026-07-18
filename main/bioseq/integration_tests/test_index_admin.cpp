@@ -836,7 +836,8 @@ TEST_CASE("DOC0383 generation descriptor and reaper catalogs have exact protecte
         "SELECT count(*) FILTER (WHERE contype='c')::text, "
         "count(*) FILTER (WHERE contype='p')::text, "
         "bool_and(convalidated)::int::text, "
-        "bool_and(NOT connoinherit)::int::text, "
+        "bool_and(CASE WHEN contype='c' THEN NOT connoinherit "
+        "WHEN contype='p' THEN connoinherit ELSE false END)::int::text, "
         "bool_and(CASE WHEN contype='c' THEN conbin IS NOT NULL "
         "ELSE conkey=ARRAY[1,2,3,4,5,6,7,8]::smallint[] END)::int::text "
         "FROM pg_constraint WHERE conrelid="
@@ -869,7 +870,9 @@ TEST_CASE("DOC0383 generation descriptor and reaper catalogs have exact protecte
     const auto reaper_constraints = query_one(ctx,
         "SELECT count(*) FILTER (WHERE contype='c')::text, "
         "count(*) FILTER (WHERE contype='p')::text, "
-        "bool_and(convalidated AND NOT connoinherit)::int::text "
+        "bool_and(convalidated AND CASE WHEN contype='c' "
+        "THEN NOT connoinherit WHEN contype='p' THEN connoinherit "
+        "ELSE false END)::int::text "
         "FROM pg_constraint WHERE conrelid="
         "'bioseq_internal.minimizer_generation_reaper_state'::regclass;");
     REQUIRE(reaper_constraints[0].value() == "4");
