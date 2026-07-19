@@ -38,6 +38,7 @@ module;
 
 
 extern "C" {
+#include "commands/extension.h"
 #include "utils/inval.h"
 }
 
@@ -554,11 +555,12 @@ struct BioseqStubOids {
 		return DatumGetObjectId(DirectFunctionCall1(regtypein,
 			CStringGetDatum(type_name)));
 	};
-	result.mmsearch_oid              = resolve("mmsearch(bioseq.seq, bioseq.seq)");
-	result.mmsearch_with_opts_oid    = resolve("mmsearch(bioseq.seq, bioseq.seq, bioseq_aligner_options)");
+	result.mmsearch_oid              = resolve("public.mmsearch(bioseq.seq, bioseq.seq)");
+	result.mmsearch_with_opts_oid    = resolve(
+		"public.mmsearch(bioseq.seq, bioseq.seq, public.bioseq_aligner_options)");
 	result.bioseq_seq_type_oid       = resolve_type("bioseq.seq");
 	result.bioseq_aligner_options_type_oid =
-		resolve_type("bioseq_aligner_options");
+		resolve_type("public.bioseq_aligner_options");
 	result.score_oid                 = resolve("bioseq.score(anyelement)");
 	result.dp_score_oid              = resolve("bioseq.dp_score(anyelement)");
 	result.query_len_oid             = resolve("bioseq.query_len(anyelement)");
@@ -2692,6 +2694,11 @@ BioseqBatchJoinSetJoinPathlistHook(
 		|| outerrel->reloptkind != RELOPT_BASEREL
 		|| innerrel->reloptkind != RELOPT_BASEREL
 		|| list_length(extra->restrictlist) != 1) {
+		return;
+	}
+	// shared_preload_libraries installs this hook cluster-wide. Databases that
+	// have not installed Bioseq must retain ordinary PostgreSQL join planning.
+	if (!OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
 		return;
 	}
 

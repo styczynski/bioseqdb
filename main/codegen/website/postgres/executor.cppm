@@ -2,9 +2,14 @@ module;
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
+#include <filesystem>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -31,6 +36,7 @@ struct isolation_settings {
     std::string socket_directory;
     int port{};
     std::string template_database;
+    bool require_extension{true};
 };
 
 /// @brief Executes tutorial SQL against a private Unix-socket cluster.
@@ -88,10 +94,19 @@ public:
         std::string role;
         std::string clone;
         std::string peer_role;
+        std::string admin_role;
         std::expected<sql_example_result, diagnostic> result =
             std::unexpected(diagnostic{});
         try {
             bioseq::libpq::connection admin(settings.admin_conninfo);
+            const bioseq::libpq::result admin_identity =
+                admin.exec("SELECT current_user");
+            if (admin_identity.rows() != 1 || admin_identity.is_null(0, 0)) {
+                throw bioseq::libpq::query_error(
+                    "could not determine the private-cluster administrator role",
+                    std::string{});
+            }
+            admin_role = std::string(admin_identity.value(0, 0));
             const std::string suffix =
                 unique_suffix(example.local_id.empty() ? example.canonical_id
                                                        : example.local_id);
@@ -105,10 +120,12 @@ public:
                 admin.escape_identifier(settings.template_database);
             // §13.3 hardening: the extension-bearing template becomes an
             // unconnectable IS_TEMPLATE database with no PUBLIC access, and the
-            // administrative database also rejects PUBLIC CONNECT, so a restricted
+            // standard cluster databases also reject PUBLIC CONNECT, so a restricted
             // role can reach only its own clone. Idempotent across serial examples.
             harden_template(admin, quoted_template);
             (void)admin.exec("REVOKE CONNECT ON DATABASE postgres FROM PUBLIC");
+            (void)admin.exec("REVOKE CONNECT ON DATABASE template0 FROM PUBLIC");
+            (void)admin.exec("REVOKE CONNECT ON DATABASE template1 FROM PUBLIC");
             (void)admin.exec("CREATE ROLE " + quoted_role
                 + " LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS");
             (void)admin.exec("CREATE DATABASE " + quoted_clone + " TEMPLATE "
@@ -116,6 +133,7 @@ public:
             (void)admin.exec("REVOKE CONNECT ON DATABASE " + quoted_clone + " FROM PUBLIC");
             (void)admin.exec("GRANT CONNECT ON DATABASE " + quoted_clone
                 + " TO " + quoted_role);
+            grant_extension_clone_acl(settings, admin_role, role, clone);
             // A second restricted LOGIN role that owns nothing, standing in for
             // another example's role: the clone must reject it (§13.3), proving
             // this role could not reach another example's clone either.
@@ -125,37 +143,64 @@ public:
             // before the example; a violated security guarantee fails the example.
             if (auto violation = verify_clone_acl(admin, role, clone)) {
                 result = std::unexpected(std::move(*violation));
-            } else if (auto violation =
-                           assert_no_foreign_connect(settings, role, clone, peer_role)) {
-                result = std::unexpected(std::move(*violation));
             } else {
                 std::optional<bioseq::libpq::connection> role_connection;
                 try {
-                    role_connection.emplace(bioseq::libpq::unix_socket_conninfo(
-                        settings.socket_directory, clone, role, settings.port));
-                    if (auto violation =
-                            assert_no_privilege_escalation(*role_connection)) {
-                        result = std::unexpected(std::move(*violation));
+                    std::optional<diagnostic> preflight_violation;
+                    {
+                        // Positive socket/HBA control: establish the restricted
+                        // role's own-clone connection before interpreting any
+                        // failed foreign connection as a security denial.
+                        bioseq::libpq::connection probe_connection(
+                            bioseq::libpq::unix_socket_conninfo(
+                                settings.socket_directory, clone, role, settings.port));
+                        if (auto violation = assert_no_foreign_connect(
+                                settings, role, clone, peer_role)) {
+                            preflight_violation = std::move(*violation);
+                        } else if (auto violation = assert_extension_clone_acl(
+                                       probe_connection, settings.require_extension)) {
+                            preflight_violation = std::move(*violation);
+                        } else if (auto violation = assert_no_privilege_escalation(
+                                       probe_connection, admin, admin_role,
+                                       settings.socket_directory, suffix)) {
+                            preflight_violation = std::move(*violation);
+                        }
+                    }  // The probe session can never leak state into tutorial SQL.
+                    if (preflight_violation) {
+                        result = std::unexpected(std::move(*preflight_violation));
                     } else {
+                        role_connection.emplace(bioseq::libpq::unix_socket_conninfo(
+                            settings.socket_directory, clone, role, settings.port));
                         result = run_example_on(*role_connection, example,
                                                 /*run_teardown=*/false);
                     }
                 } catch (const bioseq::libpq::query_error& error) {
                     result = std::unexpected(make_error("execute", error));
                 }
-                // Teardown always runs (§13.5): on the live idle connection, or
-                // via the clone/role recovery path when the visible phase left it
-                // closed, timed out, or non-idle.
-                teardown_isolated(settings, role, clone, example,
-                                  role_connection ? &*role_connection : nullptr);
+                // Author teardown is permitted only after every isolation preflight
+                // passed and the post-preflight role session was established. A
+                // failed preflight goes straight to administrative clone cleanup.
+                if (role_connection) {
+                    teardown_isolated(settings, role, clone, example,
+                                      &*role_connection);
+                }
             }
         } catch (const bioseq::libpq::query_error& error) {
             result = std::unexpected(make_error("isolate", error));
         }
         // Cleanup always runs on a FRESH bounded admin connection so a dead or
         // timed-out provisioning connection can never leak the clone/role (§13.3,
-        // §13.5). The drops are idempotent (IF EXISTS) and best-effort.
-        cleanup_isolated(settings.admin_conninfo, role, clone, peer_role);
+        // §13.5). Any cleanup error or verified residue overrides tutorial success.
+        if (auto cleanup = cleanup_isolated(
+                settings, admin_role, role, clone, peer_role)) {
+            if (!result && !result.error().message.empty()) {
+                diagnostic combined = std::move(result.error());
+                combined.message += "; additionally, " + cleanup->message;
+                result = std::unexpected(std::move(combined));
+            } else {
+                result = std::unexpected(std::move(*cleanup));
+            }
+        }
         return result;
     }
 
@@ -203,8 +248,9 @@ private:
                 // A success example must not raise a server error (§10.7).
                 return std::unexpected(make_error("execute", *visible.error));
             }
+            const auto type_names = resolve_type_names(connection, visible.results);
             for (const bioseq::libpq::result& set : visible.results) {
-                outcome.visible_results.push_back(project_result(set));
+                outcome.visible_results.push_back(project_result(set, type_names));
             }
             // Exceeding a retention limit is a build error, never a silent
             // truncation — displayed output must be the actual result (§13.4).
@@ -269,35 +315,195 @@ private:
         }
     }
 
-    // Drops the per-example clone, role, and negative-assertion peer role over a
-    // FRESH bounded admin connection (§13.5): the provisioning connection may have
-    // died or timed out, so cleanup must not depend on it. Every drop is
-    // idempotent (IF EXISTS) and best-effort; the clone is dropped first (WITH
-    // FORCE) so the owning role has no dependent objects left when it is dropped.
-    static void cleanup_isolated(const std::string& admin_conninfo,
-                                 const std::string& role, const std::string& clone,
-                                 const std::string& peer_role) {
+    // Cleans the clone over a FRESH bounded admin connection (§13.5), including
+    // rolling back any 2PC state that DROP DATABASE ... WITH (FORCE) deliberately
+    // does not remove. Every action is attempted, but the result is fail-closed:
+    // any error or surviving database/role becomes an isolation diagnostic.
+    [[nodiscard]] static std::optional<diagnostic> cleanup_isolated(
+        isolation_settings const& settings, const std::string& admin_role,
+        const std::string& role, const std::string& clone,
+        const std::string& peer_role) {
         if (role.empty() && clone.empty() && peer_role.empty()) {
-            return;
+            return std::nullopt;
         }
+        std::optional<diagnostic> failure;
+        auto remember_failure = [&failure](std::string operation,
+                                           const bioseq::libpq::query_error& error) {
+            if (failure) {
+                return;
+            }
+            const std::string sqlstate = error.sqlstate().empty()
+                ? std::string("<client-side>") : std::string(error.sqlstate());
+            failure = isolation_violation("isolated cleanup " + std::move(operation)
+                + " failed with SQLSTATE " + sqlstate + ": " + error.what());
+        };
         try {
-            bioseq::libpq::connection admin(admin_conninfo);
+            bioseq::libpq::connection admin(settings.admin_conninfo);
+            auto admin_command = [&admin, &remember_failure](
+                                     const std::string& sql,
+                                     const std::string& operation) {
+                try {
+                    (void)admin.exec(sql, std::chrono::seconds(5));
+                    return true;
+                } catch (const bioseq::libpq::query_error& error) {
+                    remember_failure(operation, error);
+                    return false;
+                }
+            };
+
             if (!clone.empty()) {
-                drop_quietly(admin, "DROP DATABASE IF EXISTS "
-                    + admin.escape_identifier(clone) + " WITH (FORCE)");
+                const std::string quoted_clone = admin.escape_identifier(clone);
+                bool clone_exists = false;
+                try {
+                    const bioseq::libpq::result exists = admin.exec(
+                        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database "
+                        "WHERE datname = " + admin.escape_literal(clone) + ")",
+                        std::chrono::seconds(5));
+                    clone_exists = exists.rows() == 1 && !exists.is_null(0, 0)
+                        && exists.value(0, 0) == "t";
+                } catch (const bioseq::libpq::query_error& error) {
+                    remember_failure("database existence check", error);
+                    clone_exists = true;  // still attempt every bounded cleanup step
+                }
+
+                if (clone_exists) {
+                    (void)admin_command("REVOKE CONNECT ON DATABASE " + quoted_clone
+                        + " FROM PUBLIC", "PUBLIC CONNECT revocation");
+                    (void)admin_command("ALTER DATABASE " + quoted_clone
+                        + " IS_TEMPLATE false", "template-flag restoration");
+                    (void)admin_command("ALTER DATABASE " + quoted_clone
+                        + " ALLOW_CONNECTIONS true", "connection restoration");
+                    (void)admin_command("ALTER DATABASE " + quoted_clone
+                        + " CONNECTION LIMIT -1", "connection-limit restoration");
+
+                    // Open the one administrative clone session before sealing.
+                    // The seal precedes the 2PC snapshot, so no new role session
+                    // can prepare a transaction after discovery and race the DROP.
+                    std::optional<bioseq::libpq::connection> clone_admin;
+                    if (admin_role.empty()) {
+                        if (!failure) {
+                            failure = isolation_violation(
+                                "isolated cleanup cannot open the clone without the "
+                                "administrator role name");
+                        }
+                    } else {
+                        try {
+                            clone_admin.emplace(bioseq::libpq::unix_socket_conninfo(
+                                settings.socket_directory, clone,
+                                admin_role, settings.port));
+                        } catch (const bioseq::libpq::query_error& error) {
+                            remember_failure("clone administrator connection", error);
+                        }
+                    }
+                    (void)admin_command("ALTER DATABASE " + quoted_clone
+                        + " CONNECTION LIMIT 0", "clone sealing");
+                    (void)admin_command("ALTER DATABASE " + quoted_clone
+                        + " ALLOW_CONNECTIONS false", "clone sealing");
+
+                    try {
+                        const bioseq::libpq::result prepared = admin.exec(
+                            "SELECT gid FROM pg_catalog.pg_prepared_xacts "
+                            "WHERE database::text = " + admin.escape_literal(clone)
+                            + " ORDER BY gid",
+                            std::chrono::seconds(5));
+                        if (prepared.rows() > 0 && !clone_admin) {
+                            if (!failure) {
+                                failure = isolation_violation(
+                                    "isolated cleanup cannot roll back prepared transactions "
+                                    "without a clone administrator connection");
+                            }
+                        } else if (clone_admin) {
+                            for (int row = 0; row < prepared.rows(); ++row) {
+                                if (prepared.is_null(row, 0)) {
+                                    if (!failure) {
+                                        failure = isolation_violation(
+                                            "isolated cleanup found a NULL prepared "
+                                            "transaction identifier");
+                                    }
+                                    continue;
+                                }
+                                try {
+                                    (void)clone_admin->exec(
+                                        "ROLLBACK PREPARED "
+                                            + clone_admin->escape_literal(
+                                                prepared.value(row, 0)),
+                                        std::chrono::seconds(5));
+                                } catch (const bioseq::libpq::query_error& error) {
+                                    remember_failure(
+                                        "prepared-transaction rollback", error);
+                                }
+                            }
+                        }
+                        const bioseq::libpq::result remaining = admin.exec(
+                            "SELECT count(*) FROM pg_catalog.pg_prepared_xacts "
+                            "WHERE database::text = " + admin.escape_literal(clone),
+                            std::chrono::seconds(5));
+                        if (remaining.rows() != 1 || remaining.is_null(0, 0)
+                            || remaining.value(0, 0) != "0") {
+                            if (!failure) {
+                                failure = isolation_violation(
+                                    "isolated cleanup found a surviving prepared transaction");
+                            }
+                        }
+                    } catch (const bioseq::libpq::query_error& error) {
+                        remember_failure("prepared-transaction discovery", error);
+                    }
+
+                    clone_admin.reset();
+                    (void)admin_command("DROP DATABASE IF EXISTS " + quoted_clone
+                        + " WITH (FORCE)", "database drop");
+                }
             }
             if (!role.empty()) {
-                drop_quietly(admin, "DROP ROLE IF EXISTS "
-                    + admin.escape_identifier(role));
+                (void)admin_command("DROP ROLE IF EXISTS "
+                    + admin.escape_identifier(role), "example-role drop");
             }
             if (!peer_role.empty()) {
-                drop_quietly(admin, "DROP ROLE IF EXISTS "
-                    + admin.escape_identifier(peer_role));
+                (void)admin_command("DROP ROLE IF EXISTS "
+                    + admin.escape_identifier(peer_role), "peer-role drop");
             }
-        } catch (const bioseq::libpq::query_error&) {
-            // A fresh admin connection could not be opened; the private cluster is
-            // torn down at build end regardless, so this is the bounded last try.
+
+            std::vector<std::string> residue_conditions;
+            if (!clone.empty()) {
+                residue_conditions.push_back(
+                    "EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE datname = "
+                    + admin.escape_literal(clone) + ")");
+            }
+            if (!role.empty()) {
+                residue_conditions.push_back(
+                    "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = "
+                    + admin.escape_literal(role) + ")");
+            }
+            if (!peer_role.empty()) {
+                residue_conditions.push_back(
+                    "EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = "
+                    + admin.escape_literal(peer_role) + ")");
+            }
+            std::string residue_sql = "SELECT NOT (";
+            for (std::size_t index = 0; index < residue_conditions.size(); ++index) {
+                if (index != 0) {
+                    residue_sql += " OR ";
+                }
+                residue_sql += residue_conditions[index];
+            }
+            residue_sql += ")";
+            try {
+                const bioseq::libpq::result clean = admin.exec(
+                    residue_sql, std::chrono::seconds(5));
+                if (clean.rows() != 1 || clean.is_null(0, 0)
+                    || clean.value(0, 0) != "t") {
+                    if (!failure) {
+                        failure = isolation_violation(
+                            "isolated cleanup verification found a surviving clone or role");
+                    }
+                }
+            } catch (const bioseq::libpq::query_error& error) {
+                remember_failure("residue verification", error);
+            }
+        } catch (const bioseq::libpq::query_error& error) {
+            remember_failure("fresh administrator connection", error);
         }
+        return failure;
     }
 
     // §13.3 template hardening: marks the extension-bearing template as an
@@ -364,15 +570,23 @@ private:
     }
 
     // §13.3 negative connection assertions: the example role must be rejected by
-    // the administrative database and the extension template, and the clone must
-    // reject a foreign role — which proves the role could not reach another
-    // example's clone. A successful connection is a security breach.
+    // every pre-existing private-cluster database, and the clone must reject a
+    // foreign role — which proves the role could not reach another example's
+    // clone. A successful connection is a security breach.
     [[nodiscard]] static std::optional<diagnostic> assert_no_foreign_connect(
         isolation_settings const& settings, const std::string& role,
         const std::string& clone, const std::string& peer_role) {
         if (role_can_connect(settings, "postgres", role)) {
             return isolation_violation(
                 "restricted role could connect to the administrative database");
+        }
+        if (role_can_connect(settings, "template0", role)) {
+            return isolation_violation(
+                "restricted role could connect to template0");
+        }
+        if (role_can_connect(settings, "template1", role)) {
+            return isolation_violation(
+                "restricted role could connect to template1");
         }
         if (role_can_connect(settings, settings.template_database, role)) {
             return isolation_violation(
@@ -392,25 +606,221 @@ private:
         std::string violation) {
         try {
             (void)role_connection.exec(sql, std::chrono::seconds(10));
-        } catch (const bioseq::libpq::query_error&) {
-            return std::nullopt;  // rejected as required
+        } catch (const bioseq::libpq::query_error& error) {
+            if (error.sqlstate() == "42501") {
+                return std::nullopt;  // insufficient_privilege, as required
+            }
+            const std::string sqlstate = error.sqlstate().empty()
+                ? std::string("<client-side>") : std::string(error.sqlstate());
+            return isolation_violation(
+                std::move(violation) + " denial probe failed with SQLSTATE "
+                + sqlstate + " instead of 42501: " + error.what());
         }
         return isolation_violation(std::move(violation));
     }
 
-    // §13.3: tutorial SQL must not be able to CREATE ROLE or CREATE DATABASE.
-    // Both run as the restricted role on its own clone and must be denied.
+    // A probe that unexpectedly succeeds must leave no cluster state behind.
+    // Cleanup failures are themselves isolation violations and are never hidden.
+    [[nodiscard]] static std::optional<diagnostic> cleanup_probe(
+        bioseq::libpq::connection& connection, const std::string& sql,
+        std::string operation) {
+        try {
+            (void)connection.exec(sql, std::chrono::seconds(10));
+            return std::nullopt;
+        } catch (const bioseq::libpq::query_error& error) {
+            const std::string sqlstate = error.sqlstate().empty()
+                ? std::string("<client-side>") : std::string(error.sqlstate());
+            return isolation_violation(std::move(operation)
+                + " cleanup failed with SQLSTATE " + sqlstate + ": " + error.what());
+        }
+    }
+
+    // PostgreSQL 13 has no pg_database_owner predefined role. Grant the small
+    // extension ACL directly inside each clone instead, which is version-neutral
+    // and disappears atomically with that clone.
+    static void grant_extension_clone_acl(isolation_settings const& settings,
+                                          const std::string& admin_role,
+                                          const std::string& role,
+                                          const std::string& clone) {
+        if (!settings.require_extension) {
+            return;
+        }
+        bioseq::libpq::connection clone_admin(
+            bioseq::libpq::unix_socket_conninfo(
+                settings.socket_directory, clone, admin_role, settings.port));
+        const std::string quoted_role = clone_admin.escape_identifier(role);
+        (void)clone_admin.exec("GRANT USAGE, CREATE ON SCHEMA bioseq_internal TO "
+            + quoted_role);
+        (void)clone_admin.exec(
+            "GRANT SELECT ON TABLE bioseq_internal.index_policy TO " + quoted_role);
+        (void)clone_admin.exec(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE "
+            "bioseq_internal.metadata_age_log TO " + quoted_role);
+    }
+
+    // In production, prove that the extension and every ACL-tested object exist,
+    // then verify the dynamic clone owner receives exactly the narrow privileges
+    // needed by runnable examples. The focused plain-SQL harness opts out
+    // explicitly; absence can therefore never make a production check pass.
+    [[nodiscard]] static std::optional<diagnostic> assert_extension_clone_acl(
+        bioseq::libpq::connection& role_connection, bool require_extension) {
+        if (!require_extension) {
+            return std::nullopt;
+        }
+        const bioseq::libpq::result acl = role_connection.exec(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e "
+            "WHERE e.extname = 'bioseq' "
+            "AND pg_catalog.to_regnamespace('bioseq_internal') IS NOT NULL "
+            "AND pg_catalog.to_regclass('bioseq_internal.index_policy') IS NOT NULL "
+            "AND pg_catalog.to_regclass('bioseq_internal.metadata_age_log') IS NOT NULL "
+            "AND pg_catalog.to_regclass('bioseq_internal.seq_sub_table') IS NOT NULL "
+            "AND pg_catalog.to_regclass("
+                "'bioseq_internal.sequence_source_epoch_seq') IS NOT NULL "
+            "AND pg_catalog.to_regprocedure("
+                "'bioseq_internal.add_to_extension_secdef(text,text)') IS NOT NULL "
+            "AND NOT pg_catalog.pg_has_role(current_user, e.extowner, 'USAGE') "
+            "AND current_user = (SELECT pg_catalog.pg_get_userbyid(d.datdba) "
+                "FROM pg_catalog.pg_database d "
+                "WHERE d.datname = pg_catalog.current_database()) "
+            "AND pg_catalog.has_schema_privilege(current_user, 'bioseq_internal', 'USAGE') "
+            "AND pg_catalog.has_schema_privilege(current_user, 'bioseq_internal', 'CREATE') "
+            "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n "
+                "CROSS JOIN LATERAL pg_catalog.aclexplode(n.nspacl) a "
+                "WHERE n.nspname = 'bioseq_internal' AND a.grantee = 0 "
+                "AND a.privilege_type IN ('USAGE', 'CREATE')) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.index_policy'), 'SELECT'), false) "
+            "AND NOT COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.index_policy'), 'INSERT'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'SELECT'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'INSERT'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'UPDATE'), false) "
+            "AND COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'DELETE'), false) "
+            "AND NOT COALESCE(pg_catalog.has_table_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.seq_sub_table'), 'SELECT'), false) "
+            "AND NOT COALESCE(pg_catalog.has_sequence_privilege(current_user, "
+                "pg_catalog.to_regclass('bioseq_internal.sequence_source_epoch_seq'), "
+                "'USAGE'), false) "
+            "AND NOT COALESCE(pg_catalog.has_function_privilege(current_user, "
+                "pg_catalog.to_regprocedure("
+                    "'bioseq_internal.add_to_extension_secdef(text,text)'), "
+                "'EXECUTE'), false) "
+            "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p "
+                "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
+                "WHERE n.nspname = 'bioseq_internal' "
+                "AND pg_catalog.has_function_privilege("
+                    "current_user, p.oid, 'EXECUTE')))");
+        if (acl.rows() != 1 || acl.is_null(0, 0) || acl.value(0, 0) != "t") {
+            return isolation_violation(
+                "clone owner does not have the required least-privilege extension ACL");
+        }
+        return std::nullopt;
+    }
+
+    // §13.3: execute every required cluster-escape operation as the restricted
+    // clone role. Each command is syntactically and operationally valid, so only
+    // a genuine PostgreSQL permission rejection counts as a pass. Unexpected
+    // successes are cleaned up before the isolation violation is returned.
     [[nodiscard]] static std::optional<diagnostic> assert_no_privilege_escalation(
-        bioseq::libpq::connection& role_connection) {
-        const std::string probe = role_connection.escape_identifier("biosite_probe");
+        bioseq::libpq::connection& role_connection,
+        bioseq::libpq::connection& admin, const std::string& admin_role,
+        const std::string& socket_directory, const std::string& suffix) {
+        const std::string probe_name = "biosite_probe_" + suffix;
+        const std::string probe = role_connection.escape_identifier(probe_name);
         if (auto violation = assert_role_denied(role_connection,
                 "CREATE ROLE " + probe + " LOGIN",
                 "restricted role could CREATE ROLE")) {
+            if (auto cleanup = cleanup_probe(admin, "DROP ROLE IF EXISTS "
+                    + admin.escape_identifier(probe_name), "CREATE ROLE probe")) {
+                return cleanup;
+            }
             return violation;
         }
         if (auto violation = assert_role_denied(role_connection,
                 "CREATE DATABASE " + probe,
                 "restricted role could CREATE DATABASE")) {
+            if (auto cleanup = cleanup_probe(admin, "DROP DATABASE IF EXISTS "
+                    + admin.escape_identifier(probe_name) + " WITH (FORCE)",
+                    "CREATE DATABASE probe")) {
+                return cleanup;
+            }
+            return violation;
+        }
+
+        const std::string custom_guc = "biosite.probe_" + suffix;
+        if (auto violation = assert_role_denied(role_connection,
+                "ALTER SYSTEM SET " + custom_guc + " = '1'",
+                "restricted role could ALTER SYSTEM")) {
+            if (auto cleanup = cleanup_probe(admin,
+                    "ALTER SYSTEM RESET " + custom_guc, "ALTER SYSTEM probe")) {
+                return cleanup;
+            }
+            return violation;
+        }
+
+        const std::filesystem::path tablespace_directory =
+            std::filesystem::path(socket_directory) / ("tablespace_" + suffix);
+        if (!tablespace_directory.is_absolute()) {
+            return isolation_violation(
+                "private socket directory is not absolute for the tablespace denial probe");
+        }
+        std::error_code path_error;
+        const bool directory_created =
+            std::filesystem::create_directory(tablespace_directory, path_error);
+        if (!directory_created || path_error) {
+            return isolation_violation(
+                "could not create the empty tablespace denial-probe directory");
+        }
+        auto tablespace_violation = assert_role_denied(role_connection,
+            "CREATE TABLESPACE " + probe + " LOCATION "
+                + role_connection.escape_literal(tablespace_directory.string()),
+            "restricted role could CREATE TABLESPACE");
+        if (tablespace_violation) {
+            if (auto cleanup = cleanup_probe(admin, "DROP TABLESPACE IF EXISTS "
+                    + admin.escape_identifier(probe_name), "CREATE TABLESPACE probe")) {
+                return cleanup;  // Keep the referenced path intact if DROP failed.
+            }
+        }
+        (void)std::filesystem::remove(tablespace_directory, path_error);
+        if (path_error) {
+            return isolation_violation(
+                "could not remove the tablespace denial-probe directory");
+        }
+        if (tablespace_violation) {
+            return tablespace_violation;
+        }
+
+        if (auto violation = assert_role_denied(role_connection,
+                "CREATE SUBSCRIPTION " + probe
+                    + " CONNECTION 'dbname=postgres user=biosite_probe "
+                      "password=biosite_probe' "
+                      "PUBLICATION biosite_probe WITH "
+                      "(connect = false, create_slot = false, enabled = false, "
+                      "slot_name = NONE)",
+                "restricted role could CREATE SUBSCRIPTION")) {
+            if (auto cleanup = cleanup_probe(role_connection,
+                    "DROP SUBSCRIPTION IF EXISTS " + probe,
+                    "CREATE SUBSCRIPTION probe")) {
+                return cleanup;
+            }
+            return violation;
+        }
+        if (auto violation = assert_role_denied(role_connection,
+                "COPY (SELECT 1) TO PROGRAM '/bin/cat >/dev/null'",
+                "restricted role could COPY TO PROGRAM")) {
+            return violation;
+        }
+        if (auto violation = assert_role_denied(role_connection,
+                "SET ROLE " + role_connection.escape_identifier(admin_role),
+                "restricted role could SET ROLE to the cluster administrator")) {
+            if (auto cleanup = cleanup_probe(role_connection, "RESET ROLE",
+                    "SET ROLE probe")) {
+                return cleanup;
+            }
             return violation;
         }
         return std::nullopt;
@@ -536,8 +946,9 @@ private:
             return mismatch;
         }
         // Retain the results that completed before PostgreSQL stopped, in order.
+        const auto type_names = resolve_type_names(connection, visible.results);
         for (const bioseq::libpq::result& set : visible.results) {
-            outcome.visible_results.push_back(project_result(set));
+            outcome.visible_results.push_back(project_result(set, type_names));
         }
         if (auto breach = check_visible_limits(outcome.visible_results)) {
             diagnostic limit;
@@ -594,15 +1005,78 @@ private:
         return std::nullopt;
     }
 
-    [[nodiscard]] static sql_result_set project_result(const bioseq::libpq::result& result) {
+    using type_name_map = std::map<std::uint32_t, std::string>;
+
+    // Resolve every distinct PQftype OID in one query against the same clone that
+    // produced the visible results. This must happen before teardown because a
+    // setup phase may have created clone-local domains or composite types (§13.6).
+    [[nodiscard]] static type_name_map resolve_type_names(
+        bioseq::libpq::connection& connection,
+        const std::vector<bioseq::libpq::result>& results) {
+        std::set<std::uint32_t> oids;
+        for (const bioseq::libpq::result& result : results) {
+            if (!result.has_rows()) {
+                continue;
+            }
+            for (int column = 0; column < result.columns(); ++column) {
+                oids.insert(result.column_type_oid(column));
+            }
+        }
+        if (oids.empty()) {
+            return {};
+        }
+
+        std::string sql =
+            "SELECT pg_catalog.format_type(requested_oid, NULL) "
+            "FROM pg_catalog.unnest(ARRAY[";
+        bool first = true;
+        for (const std::uint32_t oid : oids) {
+            if (!first) {
+                sql.push_back(',');
+            }
+            first = false;
+            sql += std::to_string(oid);
+        }
+        sql += "]::oid[]) AS requested(requested_oid) ORDER BY requested_oid";
+        const bioseq::libpq::result resolved =
+            connection.exec(sql, std::chrono::seconds(5));
+        if (!resolved.has_rows()
+            || resolved.rows() != static_cast<int>(oids.size())) {
+            throw bioseq::libpq::query_error(
+                "same-clone PostgreSQL type-name lookup returned an incomplete result",
+                std::string{});
+        }
+
+        type_name_map names;
+        auto oid = oids.begin();
+        for (int row = 0; row < resolved.rows(); ++row, ++oid) {
+            if (resolved.is_null(row, 0)) {
+                throw bioseq::libpq::query_error(
+                    "same-clone PostgreSQL type-name lookup returned NULL",
+                    std::string{});
+            }
+            names.emplace(*oid, std::string(resolved.value(row, 0)));
+        }
+        return names;
+    }
+
+    [[nodiscard]] static sql_result_set project_result(
+        const bioseq::libpq::result& result, const type_name_map& type_names) {
         sql_result_set set;
         if (result.has_rows()) {
             set.kind = sql_result_kind::rows;
             for (int column = 0; column < result.columns(); ++column) {
+                const std::uint32_t type_oid = result.column_type_oid(column);
+                const auto type_name = type_names.find(type_oid);
+                if (type_name == type_names.end()) {
+                    throw bioseq::libpq::query_error(
+                        "same-clone PostgreSQL type-name lookup omitted an OID",
+                        std::string{});
+                }
                 set.columns.push_back(sql_column{
                     .name = result.column_name(column),
-                    .type_oid = result.column_type_oid(column),
-                    .type_name = {}});
+                    .type_oid = type_oid,
+                    .type_name = type_name->second});
             }
             for (int row = 0; row < result.rows(); ++row) {
                 std::vector<sql_cell> cells;
@@ -617,6 +1091,7 @@ private:
         } else {
             set.kind = sql_result_kind::command;
             set.command_tag = result.command_tag();
+            set.affected_rows = result.affected_rows();
         }
         return set;
     }

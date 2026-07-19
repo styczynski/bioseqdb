@@ -1,15 +1,17 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="entity-index">
-  <h1>{{ page.title }}</h1>
+<section data-page-panel data-screen-label="Docs · Entity index" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header">
+    <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb">{% for crumb in page.breadcrumb %}<a href="{{ crumb.url }}">{{ crumb.name }}</a><span class="dd-s0043" aria-hidden="true">/</span>{% endfor %}</nav>
+    <h1 class="dd-s0045">{{ page.title }}</h1>
+    <p class="dd-s0046">{{ page.description }}</p>
+  </header>
   {% if entities %}
-  <ul class="entity-list">
-  {% for e in entities %}
-    <li><a href="{{ e.route_path }}"><code>{{ e.qualified_name }}</code></a> <span class="kind">{{ e.kind }}</span>{% if e.summary %} — {{ e.summary }}{% endif %}</li>
+  <ul class="design-entity-list">
+  {% for item in entities %}
+    <li><a class="design-entity-card dd-h005" href="{{ item.route_path }}"><span class="design-entity-heading"><code>{{ item.qualified_name }}</code><span class="design-kind-badge">{{ item.kind }}</span></span>{% if item.summary %}<span class="design-entity-summary">{{ item.summary }}</span>{% endif %}</a></li>
   {% endfor %}
   </ul>
-  {% else %}
-  <p>No entities are documented for this domain yet.</p>
-  {% endif %}
-</article>
+  {% else %}<p class="design-empty">No entities are documented for this domain.</p>{% endif %}
+</section>
 {% endblock %}

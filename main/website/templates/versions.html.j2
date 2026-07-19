@@ -1,9 +1,7 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="versions">
-  <h1>Versions</h1>
-  <ul class="version-list">
-  {% for v in versions %}<li><a href="{{ v.route }}">{{ v.label }}</a></li>{% endfor %}
-  </ul>
-</article>
+<section data-page-panel data-screen-label="Docs · Versions" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header"><h1 class="dd-s0045">Versions</h1><p class="dd-s0046">Choose a generated BioseqDB documentation version.</p></header>
+  <ul class="design-entity-list">{% for version in versions %}<li><a class="design-entity-card dd-h005" href="{{ version.route }}"><span class="design-entity-heading"><code>{{ version.label }}</code><span class="design-kind-badge">documentation</span></span></a></li>{% endfor %}</ul>
+</section>
 {% endblock %}

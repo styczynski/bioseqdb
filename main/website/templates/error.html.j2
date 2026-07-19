@@ -1,14 +1,7 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="error-page">
-  <p class="eyebrow">Error 404</p>
-  <h1>Page not found</h1>
-  <p class="lede">The page you requested does not exist or has moved.</p>
-  <p>Return to the <a href="{{ site.base_path }}">Bioseq home page</a>, or press <kbd>Ctrl</kbd> <kbd>K</kbd> to search the documentation.</p>
-  <ul class="error-links">
-    <li><a href="{{ nav.documentation }}">Documentation</a></li>
-    <li><a href="{{ nav.tutorials }}">Tutorials</a></li>
-    <li><a href="{{ nav.reference }}">Reference</a></li>
-  </ul>
-</article>
+<section data-page-panel data-screen-label="Docs · Not found" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header"><p class="design-eyebrow">Error 404</p><h1 class="dd-s0045">Page not found</h1><p class="dd-s0046">The page you requested does not exist or has moved.</p></header>
+  <div class="design-card-grid"><a class="design-route-card dd-h005" href="{{ nav.documentation }}"><span class="design-route-label">Documentation</span></a><a class="design-route-card dd-h005" href="{{ nav.tutorials }}"><span class="design-route-label">Tutorials</span></a><a class="design-route-card dd-h005" href="{{ nav.reference }}"><span class="design-route-label">Reference</span></a></div>
+</section>
 {% endblock %}

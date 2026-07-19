@@ -1,15 +1,8 @@
 {% extends "base.html.j2" %}
 {% block body_class %}landing-design-page{% endblock %}
-{% block head_extra %}
-<link rel="stylesheet" href="{{ site.assets_base_url }}css/landing-design.css">
-<script type="module" src="{{ site.assets_base_url }}js/landing-design.mjs"></script>
-{% endblock %}
-{% block header %}{% endblock %}
-{% block skip_link %}{% endblock %}
-{% block breadcrumb %}{% endblock %}
-{% block doc_navigation %}{% endblock %}
-{% block doc_toc %}{% endblock %}
-{% block main %}
+{% block design_css %}<link rel="stylesheet" href="{{ site.assets_base_url }}css/landing-design.css">{% endblock %}
+{% block skip_link %}<a class="skip-link" href="#main">Skip to content</a>{% endblock %}
+{% block page %}
 <div data-screen-label="BioseqDB landing" class="ld-s0001">
 
   <!-- NAV -->
@@ -26,11 +19,13 @@
         <a href="#scale" class="ld-s0009 ld-h001">Scale</a>
       </nav>
       <div class="ld-s0010">
-        <a href="{{ site.repository_url }}" class="ld-s0011">GitHub</a>
+        <a href="{{ site.repository_url }}" rel="noreferrer" class="ld-s0011">GitHub</a>
         <a href="{{ nav.documentation }}" class="ld-s0012">Read the docs</a>
       </div>
     </div>
   </header>
+
+  <main id="main">
 
   <!-- HERO with background video -->
   <section id="top" class="ld-s0013">
@@ -63,7 +58,7 @@
           </div>
           <div class="ld-s0034">
             <span class="ld-s0035"></span>
-            <span class="ld-s0036">Alpha available late August 2027</span>
+            <span class="ld-s0036">{{ site.status_label }} &middot; {{ site.version }}</span>
           </div>
         </div>
       </div>
@@ -94,26 +89,20 @@
             <span class="ld-s0053"></span>
             <span class="ld-s0054">query.sql</span>
           </div>
-          <pre class="ld-s0055"><code><span id="tok-select" class="ld-s0056">SELECT</span> id, accession
-<span class="ld-s0057">FROM</span>   sequences
-<span id="tok-where" class="ld-s0058">WHERE</span>  <span class="ld-s0059">mmsearch</span>(
-         seq,
-         <span class="ld-s0060">'ACGTACGTACGT'</span>::<span class="ld-s0061">bioseq.seq</span>(<span id="tok-dna4" class="ld-s0062">'dna4'</span>, 64)
-       )<span class="ld-s0063"></span></code></pre>
-          <div class="ld-s0064">
-            <div class="ld-s0065">3 rows</div>
-            <table class="ld-s0066">
-              <thead><tr>
-                <th class="ld-s0067">id</th>
-                <th class="ld-s0067">accession</th>
-              </tr></thead>
-              <tbody>
-                <tr><td class="ld-s0068">1042</td><td class="ld-s0069">NR_046018.2</td></tr>
-                <tr><td class="ld-s0068">2087</td><td class="ld-s0069">NC_000913.3</td></tr>
-                <tr><td class="ld-s0068">3765</td><td class="ld-s0069">CP041828.1</td></tr>
-              </tbody>
-            </table>
-          </div>
+          <pre class="ld-s0055"><code id="hero-query-code" class="language-sql" data-annotated-query>{{ examples.hero_query.visible_sql }}</code></pre>
+          {% if examples.hero_query.result %}
+<div data-live-result="hero_query" class="ld-s0064">
+  <div class="ld-s0065">{{ examples.hero_query.result.rows | length }} rows</div>
+  <table class="ld-s0066 annotated-result-table">
+    <thead><tr>{% for col in examples.hero_query.result.columns %}<th scope="col" class="ld-s0067">{{ col.name }}<span class="landing-result-column-type"> ({{ col.type_name }})</span></th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in examples.hero_query.result.rows %}
+      <tr>{% for cell in row %}<td class="{% if loop.index0 == 1 %}ld-s0069{% else %}ld-s0068{% endif %}">{% if cell.is_null %}NULL{% else %}{{ cell.text }}{% endif %}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
         </div>
 
         <!-- callouts -->
@@ -232,98 +221,43 @@
             <span class="ld-s0122">query.sql</span>
           </div>
           <div class="ld-s0123">
-            <div data-example-panel="0">
-              <pre class="ld-s0124"><code><span class="ld-s0057">SELECT</span> id, accession
-<span class="ld-s0057">FROM</span> sequences
-<span class="ld-s0057">WHERE</span> <span class="ld-s0059">mmsearch</span>(seq, <span class="ld-s0060">'ACGTACGTACGT'</span>::<span class="ld-s0061">bioseq.seq</span>(<span class="ld-s0060">'dna4'</span>, 64))</code></pre>
+            <div data-example-panel="0" data-sql-example-code="hero_query">
+              <pre class="ld-s0124"><code id="landing-example-0" class="language-sql">{{ examples.hero_query.visible_sql }}</code></pre>
             </div>
-            <div data-example-panel="1" hidden>
-              <pre class="ld-s0125"><code><span class="ld-s0057">CREATE TABLE</span> reference_reads (
-  id                <span class="ld-s0126">bigint</span>,
-  accession         <span class="ld-s0126">text</span>,
-  organism          <span class="ld-s0126">text</span>,
-  collected_on      <span class="ld-s0126">date</span>,
-  quality_score     <span class="ld-s0126">double precision</span>,
-  seq               <span class="ld-s0061">bioseq.seq</span>(<span class="ld-s0060">'dna4'</span>, 64)
-) <span class="ld-s0057">USING</span> bioseq
-
-<span class="ld-s0057">SELECT</span> id,
-       accession,
-       organism,
-       <span class="ld-s0061">bioseq.len</span>(seq) <span class="ld-s0057">AS</span> bases
-<span class="ld-s0057">FROM</span> reference_reads
-<span class="ld-s0057">WHERE</span> organism = <span class="ld-s0060">'Homo sapiens'</span>
-  <span class="ld-s0057">AND</span> collected_on &gt;= <span class="ld-s0057">DATE</span> <span class="ld-s0060">'2025-01-01'</span>
-  <span class="ld-s0057">AND</span> <span class="ld-s0061">bioseq.len</span>(seq) &gt;= 1000
-  <span class="ld-s0057">AND</span> <span class="ld-s0059">mmsearch</span>(seq, <span class="ld-s0060">'CTAGTCACTGTAGCCTGATCGTAGCTAGT'</span>::<span class="ld-s0061">bioseq.seq</span>(<span class="ld-s0060">'dna4'</span>, 64))
-<span class="ld-s0057">ORDER BY</span> quality_score <span class="ld-s0057">DESC</span>, accession
-<span class="ld-s0057">LIMIT</span> 25</code></pre>
+            <div data-example-panel="1" data-sql-example-code="similarity_search" hidden>
+              <pre class="ld-s0125"><code id="landing-example-1" class="language-sql">{{ examples.similarity_search.visible_sql }}</code></pre>
             </div>
-            <div data-example-panel="2" hidden>
-              <pre class="ld-s0125"><code><span class="ld-s0057">CREATE TABLE</span> run_reads (
-  id            <span class="ld-s0126">bigint</span> <span class="ld-s0057">GENERATED ALWAYS AS IDENTITY PRIMARY KEY</span>,
-  read_id       <span class="ld-s0126">text</span> <span class="ld-s0057">NOT NULL</span>,
-  sample_id     <span class="ld-s0126">text</span> <span class="ld-s0057">NOT NULL</span>,
-  run_name      <span class="ld-s0126">text</span> <span class="ld-s0057">NOT NULL</span>,
-  collected_on  <span class="ld-s0126">date</span> <span class="ld-s0057">NOT NULL DEFAULT</span> <span class="ld-s0061">CURRENT_DATE</span>,
-  seq           <span class="ld-s0061">bioseq.seq</span>(<span class="ld-s0060">'dna4'</span>, 64)
-) <span class="ld-s0057">USING</span> bioseq
-
-<span class="ld-s0057">SET</span> bioseq.update_index_on_insert = <span class="ld-s0057">on</span>
-
-<span class="ld-s0057">SELECT</span> <span class="ld-s0061">bioseq.load</span>(
-  <span class="ld-s0060">'run_reads'</span>::<span class="ld-s0126">regclass</span>,
-  <span class="ld-s0060">'/data/runs/run_042/reads.fasta'</span>,
-  <span class="ld-s0060">'auto'</span>,
-  <span class="ld-s0057">ARRAY</span>[
-    (<span class="ld-s0060">'read_id'</span>, <span class="ld-s0060">'0'</span>)::<span class="ld-s0061">bioseq.column_mapping</span>,
-    (<span class="ld-s0060">'sample_id'</span>, <span class="ld-s0060">'sample'</span>)::<span class="ld-s0061">bioseq.column_mapping</span>,
-    (<span class="ld-s0060">'run_name'</span>, <span class="ld-s0060">'run'</span>)::<span class="ld-s0061">bioseq.column_mapping</span>
-  ]
-)
-
-<span class="ld-s0057">INSERT INTO</span> run_reads (read_id, sample_id, run_name, seq)
-<span class="ld-s0057">VALUES</span> (
-  <span class="ld-s0060">'manual_read_001'</span>,
-  <span class="ld-s0060">'validation_batch'</span>,
-  <span class="ld-s0060">'run_042'</span>,
-  <span class="ld-s0060">'ACGTACGTACGTACGTACGTACGT'</span>::<span class="ld-s0061">bioseq.seq</span>(<span class="ld-s0060">'dna4'</span>, 64)
-)
-
-<span class="ld-s0057">SELECT</span> read_id,
-       sample_id,
-       <span class="ld-s0061">bioseq.target_start</span>(id) <span class="ld-s0057">AS</span> match_start,
-       <span class="ld-s0061">bioseq.target_end</span>(id)   <span class="ld-s0057">AS</span> match_end
-<span class="ld-s0057">FROM</span> run_reads
-<span class="ld-s0057">WHERE</span> <span class="ld-s0059">mmsearch</span>(seq, <span class="ld-s0060">'ACGTACGTACGT'</span>::<span class="ld-s0061">bioseq.seq</span>(<span class="ld-s0060">'dna4'</span>, 64))
-<span class="ld-s0057">ORDER BY</span> collected_on <span class="ld-s0057">DESC</span>, read_id</code></pre>
+            <div data-example-panel="2" data-sql-example-code="sequence_storage" hidden>
+              <pre class="ld-s0125"><code id="landing-example-2" class="language-sql">{{ examples.sequence_storage.visible_sql }}</code></pre>
             </div>
           </div>
         </div>
 
         <div class="ld-s0127">
-          <div data-example-panel="0">
+          <div data-example-panel="0" data-sql-example="hero_query">
             <div class="ld-s0127">
               <div class="ld-s0128">
                 <div class="ld-s0129">The smallest story</div>
                 <p class="ld-s0130">This is the smallest BioseqDB story. A normal SELECT becomes sequence-aware when mmsearch appears in the WHERE clause.</p>
               </div>
-              <div data-example-result>
-                <div class="ld-s0131">
-                  <div class="ld-s0132">Result &middot; 3 rows</div>
-                  <table class="ld-s0066">
-                    <thead><tr><th class="ld-s0133">id</th><th class="ld-s0133">accession</th></tr></thead>
-                    <tbody>
-                      <tr><td class="ld-s0068">1042</td><td class="ld-s0069">NR_046018.2</td></tr>
-                      <tr><td class="ld-s0068">2087</td><td class="ld-s0069">NC_000913.3</td></tr>
-                      <tr><td class="ld-s0068">3765</td><td class="ld-s0069">CP041828.1</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+
             </div>
-          </div>
-          <div data-example-panel="1" hidden>
+
+{% if examples.hero_query.result %}
+<div data-live-result="hero_query" class="ld-s0131">
+  <div class="ld-s0132">Executed query result</div>
+  <table class="ld-s0066 result-table">
+    <thead><tr>{% for col in examples.hero_query.result.columns %}<th scope="col" class="ld-s0133">{{ col.name }}<span class="landing-result-column-type"> ({{ col.type_name }})</span></th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in examples.hero_query.result.rows %}
+      <tr>{% for cell in row %}<td class="ld-s0068">{% if cell.is_null %}NULL{% else %}{{ cell.text }}{% endif %}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+</div>
+          <div data-example-panel="1" data-sql-example="similarity_search" hidden>
             <div class="ld-s0127">
               <div class="ld-s0128">
                 <div class="ld-s0129">What the query does</div>
@@ -333,22 +267,24 @@
                 <div class="ld-s0135">Performance</div>
                 <p class="ld-s0136">The sequence-search work can use selected Vulkan-backed GPU paths. The metadata filters and ordering stay in the same SQL query.</p>
               </div>
-              <div data-example-result>
-                <div class="ld-s0131">
-                  <div class="ld-s0132">Result &middot; 25 rows</div>
-                  <table class="ld-s0137">
-                    <thead><tr><th class="ld-s0138">id</th><th class="ld-s0138">organism</th><th class="ld-s0139">bases</th></tr></thead>
-                    <tbody>
-                      <tr><td class="ld-s0069">5521</td><td class="ld-s0068">Homo sapiens</td><td class="ld-s0140">3,412</td></tr>
-                      <tr><td class="ld-s0069">4410</td><td class="ld-s0068">Homo sapiens</td><td class="ld-s0140">2,088</td></tr>
-                      <tr><td class="ld-s0069">6193</td><td class="ld-s0068">Homo sapiens</td><td class="ld-s0140">1,204</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+
             </div>
-          </div>
-          <div data-example-panel="2" hidden>
+
+{% if examples.similarity_search.result %}
+<div data-live-result="similarity_search" class="ld-s0131">
+  <div class="ld-s0132">Executed query result</div>
+  <table class="ld-s0066 result-table">
+    <thead><tr>{% for col in examples.similarity_search.result.columns %}<th scope="col" class="ld-s0133">{{ col.name }}<span class="landing-result-column-type"> ({{ col.type_name }})</span></th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in examples.similarity_search.result.rows %}
+      <tr>{% for cell in row %}<td class="ld-s0068">{% if cell.is_null %}NULL{% else %}{{ cell.text }}{% endif %}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+</div>
+          <div data-example-panel="2" data-sql-example="sequence_storage" hidden>
             <div class="ld-s0141">
               <div class="ld-s0142">
                 <div class="ld-s0143">Loading</div>
@@ -363,7 +299,21 @@
                 <p class="ld-s0147">The follow-up query shows the payoff. Loaded and inserted records are available to sequence search and metadata ordering in one place.</p>
               </div>
             </div>
-          </div>
+
+{% if examples.sequence_storage.result %}
+<div data-live-result="sequence_storage" class="ld-s0131">
+  <div class="ld-s0132">Executed query result</div>
+  <table class="ld-s0066 result-table">
+    <thead><tr>{% for col in examples.sequence_storage.result.columns %}<th scope="col" class="ld-s0133">{{ col.name }}<span class="landing-result-column-type"> ({{ col.type_name }})</span></th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in examples.sequence_storage.result.rows %}
+      <tr>{% for cell in row %}<td class="ld-s0068">{% if cell.is_null %}NULL{% else %}{{ cell.text }}{% endif %}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+</div>
         </div>
       </div>
     </div>
@@ -815,10 +765,10 @@
           <p class="ld-s0276">Load your reads and references, keep them beside their metadata, and search everything in one place.</p>
           <div class="ld-s0277">
             <a href="{{ nav.documentation }}" class="ld-s0278">Read the docs</a>
-            <a href="{{ site.repository_url }}" class="ld-s0278">View on GitHub</a>
+            <a href="{{ site.repository_url }}" rel="noreferrer" class="ld-s0278">View on GitHub</a>
             <div class="ld-s0279">
               <span class="ld-s0280"></span>
-              <span class="ld-s0281">Alpha available late August 2027</span>
+              <span class="ld-s0281">{{ site.status_label }} &middot; {{ site.version }}</span>
             </div>
           </div>
         </div>
@@ -853,8 +803,8 @@
           <div class="ld-s0291">Project</div>
           <div class="ld-s0292">
             <a href="{{ nav.documentation }}" class="ld-s0294">Documentation</a>
-            <a href="{{ site.repository_url }}" class="ld-s0294">GitHub</a>
-            <span class="ld-s0295">Alpha &middot; Aug 2027</span>
+            <a href="{{ site.repository_url }}" rel="noreferrer" class="ld-s0294">GitHub</a>
+            <span class="ld-s0295">{{ site.status_label }} &middot; {{ site.version }}</span>
           </div>
         </div>
       </div>
@@ -863,16 +813,17 @@
     <div class="ld-s0296">
       <div class="ld-s0297"></div>
       <div class="ld-s0298">
-        <span class="ld-s0299">&copy; 2027 BioseqDB &mdash; an independent open-source project.</span>
+        <span class="ld-s0299">&copy; {{ site.copyright_year }} {{ site.copyright_holder }} &mdash; an independent open-source project.</span>
         <nav class="ld-s0300">
-          <a href="#" class="ld-s0301 ld-h005">License (MIT)</a>
-          <a href="#" class="ld-s0301 ld-h005">Privacy</a>
+          <a href="{{ site.repository_url }}/blob/main/__main/LICENSE" rel="noreferrer" class="ld-s0301 ld-h005">License (MIT)</a>
+          <a href="{{ site.versions_page_url }}" class="ld-s0301 ld-h005">Versions</a>
           <a href="#top" class="ld-s0301 ld-h005">Back to top</a>
         </nav>
       </div>
     </div>
   </footer>
+  </main>
 
 </div>
 {% endblock %}
-{% block footer %}{% endblock %}
+{% block design_script %}<script type="module" src="{{ site.assets_base_url }}js/landing-design.mjs"></script>{% endblock %}

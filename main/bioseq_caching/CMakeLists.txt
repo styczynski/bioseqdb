@@ -31,12 +31,19 @@ target_sources(postgresql_bioseq_cache
       "${CMAKE_CURRENT_LIST_DIR}/pg/index.cppm")
 target_include_directories(postgresql_bioseq_cache PRIVATE
   ${PostgreSQL_INCLUDE_DIRS})
+# Backend modules resolve server APIs from the hosting `postgres` executable;
+# keep static libpq and its frontend pgcommon/pgport archives out of this DSO.
 target_link_libraries(postgresql_bioseq_cache PRIVATE
-  PostgreSQL::PostgreSQL
+  PostgreSQL::ServerHeaders
   bioseq_cache_core
   bioseq_cache_provider_api
   bioseq_pg_support
   bioseq_memory_budget)
+if(WIN32)
+  # FindPostgreSQL selects the postgres import library on Windows.
+  target_link_libraries(postgresql_bioseq_cache PRIVATE
+    PostgreSQL::PostgreSQL)
+endif()
 if(BIOSEQ_CACHE_TESTING)
   target_sources(postgresql_bioseq_cache
     PRIVATE FILE_SET CXX_MODULES

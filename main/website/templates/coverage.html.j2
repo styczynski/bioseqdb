@@ -1,47 +1,11 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="coverage">
-  <h1>Documentation coverage</h1>
-  <p>{{ page.documented_total }} of {{ page.public_total }} public entities documented.</p>
-
-  {% if page.groups %}
-  <h2>By module and SQL domain</h2>
-  <table class="coverage-groups">
-    <thead><tr><th>Group</th><th>Documented</th><th>Public</th></tr></thead>
-    <tbody>
-    {% for g in page.groups %}
-      <tr><td><code>{{ g.group }}</code></td><td>{{ g.documented_total }}</td><td>{{ g.public_total }}</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
-
-  {% if page.fatal_missing %}
-  <h2>Required but undocumented (fatal)</h2>
-  <ul class="fatal-list">
-  {% for id in page.fatal_missing %}<li><code>{{ id }}</code></li>{% endfor %}
-  </ul>
-  {% endif %}
-
-  {% if page.missing %}
-  <h2>Missing summaries (warnings)</h2>
-  <ul class="missing-list">
-  {% for id in page.missing %}<li><code>{{ id }}</code></li>{% endfor %}
-  </ul>
-  {% endif %}
-
-  {% if page.missing_parameters %}
-  <h2>Missing parameter documentation (warnings)</h2>
-  <ul class="missing-parameters">
-  {% for id in page.missing_parameters %}<li><code>{{ id }}</code></li>{% endfor %}
-  </ul>
-  {% endif %}
-
-  {% if page.missing_returns %}
-  <h2>Missing return documentation (warnings)</h2>
-  <ul class="missing-returns">
-  {% for id in page.missing_returns %}<li><code>{{ id }}</code></li>{% endfor %}
-  </ul>
-  {% endif %}
-</article>
+<section data-page-panel data-screen-label="Docs · Coverage" class="dd-s0040 design-page">
+  <header data-reveal class="dd-s0041 design-page-header"><h1 class="dd-s0045">Documentation coverage</h1><p class="dd-s0046">{{ page.documented_total }} of {{ page.public_total }} public entities documented.</p></header>
+  {% if page.groups %}<section class="design-entity-section"><h2>By module and SQL domain</h2><div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Group</th><th scope="col">Documented</th><th scope="col">Public</th></tr></thead><tbody>{% for group in page.groups %}<tr><td><code>{{ group.group }}</code></td><td>{{ group.documented_total }}</td><td>{{ group.public_total }}</td></tr>{% endfor %}</tbody></table></div></section>{% endif %}
+  {% if page.fatal_missing %}<section class="design-entity-section design-severity-error"><h2>Required but undocumented</h2><ul class="design-code-list">{% for id in page.fatal_missing %}<li><code>{{ id }}</code></li>{% endfor %}</ul></section>{% endif %}
+  {% if page.missing %}<section class="design-entity-section"><h2>Missing summaries</h2><ul class="design-code-list">{% for id in page.missing %}<li><code>{{ id }}</code></li>{% endfor %}</ul></section>{% endif %}
+  {% if page.missing_parameters %}<section class="design-entity-section"><h2>Missing parameter documentation</h2><ul class="design-code-list">{% for id in page.missing_parameters %}<li><code>{{ id }}</code></li>{% endfor %}</ul></section>{% endif %}
+  {% if page.missing_returns %}<section class="design-entity-section"><h2>Missing return documentation</h2><ul class="design-code-list">{% for id in page.missing_returns %}<li><code>{{ id }}</code></li>{% endfor %}</ul></section>{% endif %}
+</section>
 {% endblock %}

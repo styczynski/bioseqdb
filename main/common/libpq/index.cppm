@@ -5,12 +5,15 @@ module;
 #include <poll.h>
 
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -124,6 +127,10 @@ public:
 
     /// @brief PostgreSQL command tag such as "SELECT 3" or "CREATE EXTENSION".
     [[nodiscard]] std::string command_tag() const { return command_tag_; }
+    /// @brief Tuple count reported by PQcmdTuples, when the command has one.
+    [[nodiscard]] std::optional<std::uint64_t> affected_rows() const noexcept {
+        return affected_rows_;
+    }
     [[nodiscard]] ExecStatusType status() const noexcept { return status_; }
     [[nodiscard]] bool has_rows() const noexcept { return status_ == PGRES_TUPLES_OK; }
     [[nodiscard]] std::string error_sqlstate() const { return error_sqlstate_; }
@@ -134,6 +141,7 @@ public:
     std::vector<column_meta> columns_;
     std::vector<std::vector<cell>> rows_;
     std::string command_tag_;
+    std::optional<std::uint64_t> affected_rows_;
     std::string error_sqlstate_;
 
 private:
@@ -269,6 +277,22 @@ public:
 
 private:
     using clock = std::chrono::steady_clock;
+
+    [[nodiscard]] static std::optional<std::uint64_t> command_affected_rows(
+        PGresult* raw) noexcept {
+        const char* text = PQcmdTuples(raw);
+        if (text == nullptr || *text == '\0') {
+            return std::nullopt;
+        }
+        const std::string_view value{text};
+        std::uint64_t count{};
+        const auto [end, error] = std::from_chars(
+            value.data(), value.data() + value.size(), count);
+        if (error != std::errc{} || end != value.data() + value.size()) {
+            return std::nullopt;
+        }
+        return count;
+    }
 
     // Waits until a raw socket is readable or writable, or the deadline passes.
     // Returns false on timeout or a poll error; slices the wait at one second so
@@ -638,6 +662,7 @@ private:
                 result current;
                 current.status_ = PGRES_COMMAND_OK;
                 current.command_tag_ = PQcmdStatus(res) ? PQcmdStatus(res) : std::string{};
+                current.affected_rows_ = command_affected_rows(res);
                 provisional = result{};
                 have_chunk_columns = false;
                 capped = commit(std::move(current));

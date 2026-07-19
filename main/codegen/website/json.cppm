@@ -278,6 +278,11 @@ namespace {
                                           : boost::json::value(nullptr);
     object["return_type"] = entity.return_type ? boost::json::value(*entity.return_type)
                                                : boost::json::value(nullptr);
+    boost::json::array documentation;
+    for (const document_node& node : entity.documentation) {
+        documentation.push_back(serialize_node(node));
+    }
+    object["documentation"] = std::move(documentation);
     if (entity.declaration) {
         boost::json::object declaration;
         declaration["path"] = entity.declaration->path.generic_string();
@@ -293,9 +298,17 @@ namespace {
         item["type"] = parameter.type;
         item["default"] = parameter.default_value
             ? boost::json::value(*parameter.default_value) : boost::json::value(nullptr);
+        boost::json::array description;
+        for (const document_node& node : parameter.description) {
+            description.push_back(serialize_node(node));
+        }
+        item["description"] = std::move(description);
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
+    object["implementation_entity_id"] = entity.implementation_entity_id
+        ? boost::json::value(*entity.implementation_entity_id)
+        : boost::json::value(nullptr);
     boost::json::array overload_ids;
     for (const std::string& id : entity.overload_ids) {
         overload_ids.push_back(boost::json::value(id));
@@ -392,6 +405,27 @@ namespace {
 
 namespace {
 
+[[nodiscard]] std::string document_plain_text(const document_node& node) {
+    std::string result = node.text;
+    for (const document_node& child : node.children) {
+        result += document_plain_text(child);
+    }
+    return result;
+}
+
+[[nodiscard]] std::string document_plain_text(
+    const std::vector<document_node>& nodes) {
+    std::string result;
+    for (const document_node& node : nodes) {
+        const std::string fragment = document_plain_text(node);
+        if (!result.empty() && !fragment.empty()) {
+            result.push_back(' ');
+        }
+        result += fragment;
+    }
+    return result;
+}
+
 // Projects an entity onto a template view whose plain-text fields are already
 // HTML-escaped (§14). Distinct from serialize_entity, which keeps raw values for
 // the on-disk data artifact; this view is bound straight into a page context and
@@ -399,7 +433,7 @@ namespace {
 // path built by the generator and is attribute-escaped for safety.
 [[nodiscard]] boost::json::value serialize_entity_view(const documented_entity& entity) {
     boost::json::object object;
-    object["canonical_id"] = entity.canonical_id;
+    object["canonical_id"] = html_escape(entity.canonical_id);
     object["domain"] = entity.domain == entity_domain::sql ? "sql" : "cpp";
     object["kind"] = html_escape(entity_kind_name(entity.kind));
     object["qualified_name"] = html_escape(entity.qualified_name);
@@ -417,6 +451,7 @@ namespace {
         item["default"] = parameter.default_value
             ? boost::json::value(html_escape(*parameter.default_value))
             : boost::json::value(nullptr);
+        item["description"] = html_escape(document_plain_text(parameter.description));
         parameters.push_back(std::move(item));
     }
     object["parameters"] = std::move(parameters);
@@ -424,12 +459,17 @@ namespace {
     if (!entity.attributes.empty()) {
         boost::json::array attributes;
         for (const auto& [name, value] : entity.attributes) {
+            if (name == "refid") {
+                continue;  // internal Doxygen routing alias, never page content
+            }
             boost::json::object item;
             item["name"] = html_escape(name);
             item["value"] = html_escape(value);
             attributes.push_back(std::move(item));
         }
-        object["attributes"] = std::move(attributes);
+        if (!attributes.empty()) {
+            object["attributes"] = std::move(attributes);
+        }
     }
     if (!entity.overload_members.empty()) {
         boost::json::array overloads;
@@ -482,7 +522,7 @@ namespace {
 /// @brief Serializes executed landing slots to the `examples.<slot>` context.
 ///
 /// Shape consumed by the landing partials: each slot has `visible_sql` and a
-/// nullable `result` with `columns[].name` and `rows[][].{is_null,text}`. Every
+/// nullable `result` with typed `columns[]` and `rows[][].{is_null,text}`. Every
 /// plain-text value is HTML-escaped at the source; there is no autoescape (§14).
 [[nodiscard]] std::string serialize_landing_examples(
     const std::vector<landing_example_view>& slots) {
@@ -496,6 +536,7 @@ namespace {
             for (const sql_column& column : slot.result.columns) {
                 boost::json::object header;
                 header["name"] = html_escape(column.name);
+                header["type_name"] = html_escape(column.type_name);
                 columns.push_back(std::move(header));
             }
             result["columns"] = std::move(columns);
@@ -691,6 +732,12 @@ namespace {
     entity.route_path = std::string(object.at("route_path").as_string());
     entity.module_name = as_optional_string(object.at("module"));
     entity.return_type = as_optional_string(object.at("return_type"));
+    if (const boost::json::value* documentation = object.if_contains("documentation");
+        documentation != nullptr && documentation->is_array()) {
+        for (const boost::json::value& node : documentation->as_array()) {
+            entity.documentation.push_back(deserialize_node(node));
+        }
+    }
     if (const boost::json::value& declaration = object.at("declaration");
         declaration.is_object()) {
         source_span span;
@@ -699,14 +746,25 @@ namespace {
             static_cast<std::size_t>(declaration.at("line").to_number<std::int64_t>());
         entity.declaration = span;
     }
-    for (const boost::json::value& parameter : object.at("parameters").as_array()) {
-        const boost::json::object& fields = parameter.as_object();
-        parameter_documentation documented;
-        documented.name = std::string(fields.at("name").as_string());
-        documented.type = std::string(fields.at("type").as_string());
-        documented.default_value = as_optional_string(fields.at("default"));
-        entity.parameters.push_back(std::move(documented));
+    if (const boost::json::value* parameters = object.if_contains("parameters");
+        parameters != nullptr && parameters->is_array()) {
+        for (const boost::json::value& parameter : parameters->as_array()) {
+            const boost::json::object& fields = parameter.as_object();
+            parameter_documentation documented;
+            documented.name = std::string(fields.at("name").as_string());
+            documented.type = std::string(fields.at("type").as_string());
+            documented.default_value = as_optional_string(fields.at("default"));
+            if (const boost::json::value* description = fields.if_contains("description");
+                description != nullptr && description->is_array()) {
+                for (const boost::json::value& node : description->as_array()) {
+                    documented.description.push_back(deserialize_node(node));
+                }
+            }
+            entity.parameters.push_back(std::move(documented));
+        }
     }
+    entity.implementation_entity_id = object.if_contains("implementation_entity_id")
+        ? as_optional_string(object.at("implementation_entity_id")) : std::nullopt;
     if (const boost::json::value* overload_ids = object.if_contains("overload_ids");
         overload_ids != nullptr && overload_ids->is_array()) {
         for (const boost::json::value& id : overload_ids->as_array()) {
@@ -737,6 +795,7 @@ namespace {
         for (const sql_column& column : slot.result.columns) {
             boost::json::object header;
             header["name"] = column.name;
+            header["type_name"] = column.type_name;
             columns.push_back(std::move(header));
         }
         result["columns"] = std::move(columns);
@@ -770,6 +829,8 @@ namespace {
         for (const boost::json::value& column : result.at("columns").as_array()) {
             sql_column header;
             header.name = std::string(column.as_object().at("name").as_string());
+            header.type_name = std::string(
+                column.as_object().at("type_name").as_string());
             slot.result.columns.push_back(std::move(header));
         }
         for (const boost::json::value& source_row : result.at("rows").as_array()) {
@@ -790,9 +851,8 @@ namespace {
 
 /// @brief Parses a cpp_entities/sql_entities artifact back into the model (§11.3).
 ///
-/// Reconstructs the scalar entity fields that reference/search pages bind to
-/// (identity, kind, names, signature, parameters, declaration); the documentation
-/// node forest is not needed for the current entity page shape and is skipped.
+/// Reconstructs the complete persisted entity projection, including detailed and
+/// per-parameter documentation plus the SQL-to-C++ implementation relationship.
 /// @param text Canonical entity-index JSON text.
 /// @return The documented entities in the array's stored order.
 [[nodiscard]] std::vector<documented_entity> deserialize_entities(std::string_view text) {
@@ -1261,6 +1321,17 @@ namespace {
         record["signature"] = entity.normalized_signature;
         record["summary"] = entity.summary_text;
         record["route"] = entity.route_path;
+        record["return_type"] = entity.return_type
+            ? boost::json::value(*entity.return_type) : boost::json::value(nullptr);
+        boost::json::array parameters;
+        for (const parameter_documentation& parameter : entity.parameters) {
+            boost::json::object item;
+            item["name"] = parameter.name;
+            item["type"] = parameter.type;
+            item["description"] = document_plain_text(parameter.description);
+            parameters.push_back(std::move(item));
+        }
+        record["parameters"] = std::move(parameters);
         records[entity.canonical_id] = std::move(record);
     }
     root["entities"] = std::move(records);

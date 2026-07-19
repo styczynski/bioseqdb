@@ -1,62 +1,43 @@
 {% extends "base.html.j2" %}
 {% block main %}
-<article class="entity">
-  <p class="kind-badge">{{ entity.domain }} &#183; {{ entity.kind }}</p>
-  <h1><code>{{ entity.qualified_name }}</code></h1>
-  {% if entity.summary %}<p class="summary">{{ entity.summary }}</p>{% endif %}
+<article data-page-panel data-screen-label="Docs · API entity" class="dd-s0040 design-page design-entity-page">
+  <header data-reveal class="dd-s0041 design-page-header">
+    <nav aria-label="Breadcrumb" class="dd-s0042 design-breadcrumb">{% for crumb in page.breadcrumb %}<a href="{{ crumb.url }}">{{ crumb.name }}</a><span class="dd-s0043" aria-hidden="true">/</span>{% endfor %}</nav>
+    <p class="design-kind-line"><span class="design-kind-badge">{{ entity.domain }} &#183; {{ entity.kind }}</span></p>
+    <h1 class="dd-s0045 design-entity-title"><code>{{ entity.qualified_name }}</code></h1>
+    {% if entity.summary %}<p class="dd-s0046">{{ entity.summary }}</p>{% endif %}
+  </header>
+
   {% if entity.normalized_signature %}
-  <figure class="doc-code entity-signature">
-    <figcaption class="doc-code-bar">
-      <span class="doc-code-lang">Signature</span>
-      <button type="button" class="copy-button" data-copy-target="entity-signature-code" aria-label="Copy signature to clipboard">Copy</button>
-    </figcaption>
-    <pre><code id="entity-signature-code">{{ entity.normalized_signature }}</code></pre>
+  <figure data-term class="doc-code design-signature">
+    <figcaption class="doc-code-bar"><span class="doc-code-lang">Signature</span><button type="button" class="copy-button" data-copy data-copy-target="entity-signature-code">Copy</button></figcaption>
+    <pre data-code><code id="entity-signature-code">{{ entity.normalized_signature }}</code></pre>
   </figure>
   {% endif %}
-  {% if page.detail_html %}<div class="entity-detail">{{ page.detail_html }}</div>{% endif %}
+
+  {% if page.detail_html %}<div class="docs-content entity-detail">{{ page.detail_html }}</div>{% endif %}
+
   {% if entity.parameters %}
-  <h2 id="parameters">Parameters</h2>
-  <dl class="parameters">
-  {% for p in entity.parameters %}
-    <dt><code>{{ p.name }}</code> : <code>{{ p.type }}</code>{% if p.default %} = <code>{{ p.default }}</code>{% endif %}</dt>
-  {% endfor %}
-  </dl>
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="parameters" data-toc data-title="Parameters">Parameters<a data-hash href="#parameters" class="dd-s0052">#</a></h2>
+    <div class="design-table-wrap"><table class="design-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Description</th></tr></thead><tbody>
+    {% for parameter in entity.parameters %}<tr><td><code>{{ parameter.name }}</code></td><td><code>{{ parameter.type }}</code>{% if parameter.default %} = <code>{{ parameter.default }}</code>{% endif %}</td><td>{% if parameter.description %}{{ parameter.description }}{% endif %}</td></tr>{% endfor %}
+    </tbody></table></div>
+  </section>
   {% endif %}
-  {% if entity.return_type %}<p class="returns">Returns <code>{{ entity.return_type }}</code></p>{% endif %}
+  {% if entity.return_type %}<p class="design-return"><span>Returns</span><code>{{ entity.return_type }}</code></p>{% endif %}
+
   {% if entity.attributes %}
-  <h2 id="attributes">{% if entity.domain == "sql" %}Attributes{% else %}Qualifiers{% endif %}</h2>
-  <dl class="entity-attributes">
-  {% for a in entity.attributes %}
-    <dt><code>{{ a.name }}</code></dt><dd>{{ a.value }}</dd>
-  {% endfor %}
-  </dl>
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="attributes" data-toc data-title="Attributes">{% if entity.domain == "sql" %}Attributes{% else %}Qualifiers{% endif %}<a data-hash href="#attributes" class="dd-s0052">#</a></h2><dl class="design-definition-list">{% for attribute in entity.attributes %}<div><dt><code>{{ attribute.name }}</code></dt><dd>{{ attribute.value }}</dd></div>{% endfor %}</dl></section>
   {% endif %}
   {% if entity.overloads %}
-  <h2 id="overloads">Overloads</h2>
-  <ul class="overloads">
-  {% for o in entity.overloads %}
-    <li><a href="{{ o.url }}"><code>{{ o.signature }}</code></a></li>
-  {% endfor %}
-  </ul>
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="overloads" data-toc data-title="Overloads">Overloads<a data-hash href="#overloads" class="dd-s0052">#</a></h2><ul class="design-link-list">{% for overload in entity.overloads %}<li><a href="{{ overload.url }}"><code>{{ overload.signature }}</code></a></li>{% endfor %}</ul></section>
   {% endif %}
   {% if entity.members %}
-  <h2 id="members">Members</h2>
-  <ul class="members">
-  {% for m in entity.members %}
-    <li><a href="{{ m.url }}"><code>{{ m.name }}</code></a></li>
-  {% endfor %}
-  </ul>
+  <section class="design-entity-section"><h2 class="hx design-section-heading" id="members" data-toc data-title="Members">Members<a data-hash href="#members" class="dd-s0052">#</a></h2><ul class="design-link-list">{% for member in entity.members %}<li><a href="{{ member.url }}"><code>{{ member.name }}</code></a></li>{% endfor %}</ul></section>
   {% endif %}
-  {% if entity.implemented_by %}<p class="implemented-by">Implemented by <a href="{{ entity.implemented_by }}">source definition</a></p>{% endif %}
-  {% if page.source_url %}<p class="source-link">Source: <a href="{{ page.source_url }}" rel="noreferrer">{{ page.source_label }}</a></p>{% endif %}
-  {% if page.provenance %}<p class="provenance">{{ page.provenance }}</p>{% endif %}
-  {% if page.backlinks %}
-  <h2 id="referenced-by">Referenced by</h2>
-  <ul class="backlinks">
-  {% for b in page.backlinks %}
-    <li><a href="{{ b.url }}">{{ b.title }}</a></li>
-  {% endfor %}
-  </ul>
-  {% endif %}
+  {% if entity.implemented_by %}<p class="design-source-line">Implemented by <a href="{{ entity.implemented_by }}">source definition</a>.</p>{% endif %}
+  {% if page.source_url %}<p class="design-source-line">Source: <a href="{{ page.source_url }}" rel="noreferrer">{{ page.source_label }}</a></p>{% endif %}
+  {% if page.provenance %}<p class="design-provenance">{{ page.provenance }}</p>{% endif %}
+  {% if page.backlinks %}<section class="design-entity-section"><h2 class="hx design-section-heading" id="referenced-by" data-toc data-title="Referenced by">Referenced by<a data-hash href="#referenced-by" class="dd-s0052">#</a></h2><ul class="design-link-list">{% for backlink in page.backlinks %}<li><a href="{{ backlink.url }}">{{ backlink.title }}</a></li>{% endfor %}</ul></section>{% endif %}
 </article>
 {% endblock %}

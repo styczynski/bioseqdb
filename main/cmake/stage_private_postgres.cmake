@@ -2,7 +2,7 @@
 #
 # Run with: cmake -DPG_CONFIG=... -DSTAGE_ROOT=... -DCONTROL_FILE=... \
 #                 -DINSTALL_SQL=... -DLIBRARY_FILE=... -DEXTENSION_VERSION=... \
-#                 -DMANIFEST_OUT=... -P stage_private_postgres.cmake
+#                 -DMANIFEST_OUT=... -DHASH_OUT=... -P stage_private_postgres.cmake
 #
 # It stages a relocatable copy of the selected PostgreSQL bindir/sharedir/
 # pkglibdir under STAGE_ROOT, preserving each absolute path relative to a
@@ -14,7 +14,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 foreach(_required PG_CONFIG STAGE_ROOT CONTROL_FILE INSTALL_SQL LIBRARY_FILE
-                  EXTENSION_VERSION MANIFEST_OUT)
+                  EXTENSION_VERSION MANIFEST_OUT HASH_OUT)
   if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
     message(FATAL_ERROR "stage_private_postgres: -D${_required} is required")
   endif()
@@ -129,6 +129,11 @@ endforeach()
 file(SHA256 "${CONTROL_FILE}" _control_sha)
 file(SHA256 "${INSTALL_SQL}" _sql_sha)
 file(SHA256 "${LIBRARY_FILE}" _library_sha)
+string(CONCAT _artifact_hash_record
+  "control:${_control_filename}:${_control_sha}\n"
+  "install_sql:${_install_sql_name}:${_sql_sha}\n"
+  "library:${_library_filename}:${_library_sha}\n")
+string(SHA256 _aggregate_sha "${_artifact_hash_record}")
 
 # Emit expected copied tool paths relative to STAGE_ROOT.
 string(REGEX REPLACE "^/+" "" _sharedir_rel "${PG_SHAREDIR}")
@@ -158,6 +163,7 @@ set(_manifest "{
     \"pkglibdir\": \"${_pkglibdir_rel}\"
   },
   \"bioseq_artifacts\": {
+    \"aggregate_sha256\": \"${_aggregate_sha}\",
     \"control\": {\"staged\": \"${_sharedir_rel}/extension/${_control_filename}\", \"sha256\": \"${_control_sha}\"},
     \"install_sql\": {\"version\": \"${_extension_version}\", \"sha256\": \"${_sql_sha}\"},
     \"library\": {\"filename\": \"${_library_filename}\", \"staged\": \"${_pkglibdir_rel}/${_library_filename}\", \"sha256\": \"${_library_sha}\"}
@@ -174,4 +180,7 @@ ${_tool_signatures}
 get_filename_component(_manifest_dir "${MANIFEST_OUT}" DIRECTORY)
 file(MAKE_DIRECTORY "${_manifest_dir}")
 file(WRITE "${MANIFEST_OUT}" "${_manifest}")
+get_filename_component(_hash_dir "${HASH_OUT}" DIRECTORY)
+file(MAKE_DIRECTORY "${_hash_dir}")
+file(WRITE "${HASH_OUT}" "${_aggregate_sha}\n")
 message(STATUS "stage_private_postgres: staged ${PG_VERSION} under ${STAGE_ROOT}")

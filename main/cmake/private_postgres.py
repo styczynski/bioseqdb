@@ -181,6 +181,7 @@ class ClusterInputs:
     bootstrap_labels: tuple[str, ...] = ()
     library_dirs: tuple[Path, ...] = ()
     preload_libraries: tuple[str, ...] = ()
+    disable_prepared_transactions: bool = False
     data_dir_parent: Path | None = None
     socket_dir_parent: Path | None = None
     log_dir: Path | None = None
@@ -244,6 +245,8 @@ class UniquePrivateCluster:
             preload = ",".join(self.inputs.preload_libraries)
             additions.append(
                 f"shared_preload_libraries = {_postgresql_conf_literal(preload)}")
+        if self.inputs.disable_prepared_transactions:
+            additions.append("max_prepared_transactions = 0")
         additions.append("")
         with (self.data_dir / "postgresql.conf").open("a", encoding="utf-8") as stream:
             if base and not base.endswith("\n"):
@@ -341,6 +344,7 @@ class UniquePrivateCluster:
             "BIOSEQ_TEST_PG_DATABASE": self.database,
             "BIOSEQ_TEST_PG_USER": self.database_user,
             "BIOSEQ_TEST_PG_RUN_DIR": str(self.run_dir),
+            "BIOSEQ_TEST_PG_DATA_DIR": str(self.data_dir),
         })
         return env
 

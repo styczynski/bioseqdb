@@ -136,10 +136,28 @@ struct code_language_view {
 struct html_writer {
     std::string out;
     std::size_t code_ordinal{0};
+    const document_node* terminal_result{nullptr};
 
     void render_children(const std::vector<document_node>& children) {
-        for (const document_node& child : children) {
-            render_node(child);
+        for (std::size_t index = 0; index < children.size(); ++index) {
+            const document_node& child = children[index];
+            const document_node* previous_result = terminal_result;
+            const bool annotated_code = child.kind == document_node_kind::code_block
+                && std::ranges::any_of(child.children, [](const document_node& nested) {
+                       return nested.kind == document_node_kind::code_annotation;
+                   });
+            if (child.kind == document_node_kind::code_block
+                && !annotated_code
+                && index + 1 < children.size()
+                && children[index + 1].kind == document_node_kind::table
+                && attribute_or(children[index + 1], "class", "") == "result-table") {
+                terminal_result = &children[index + 1];
+                render_node(child);
+                terminal_result = previous_result;
+                ++index;
+            } else {
+                render_node(child);
+            }
         }
     }
 
@@ -159,12 +177,64 @@ struct html_writer {
         return found == node.attributes.end() ? fallback : std::string_view(found->second);
     }
 
+    // Doxygen may place block elements such as itemized/ordered lists directly
+    // inside a <para>. HTML <p> accepts phrasing content only and is implicitly
+    // closed by a block element, so wrapping the whole model paragraph would emit
+    // an unmatched trailing </p>. Keep the closed set of phrasing node kinds here;
+    // every other model node is rendered as a sibling block.
+    [[nodiscard]] static bool paragraph_child_is_block(document_node_kind kind) {
+        switch (kind) {
+        case document_node_kind::text:
+        case document_node_kind::emphasis:
+        case document_node_kind::strong_text:
+        case document_node_kind::strikethrough:
+        case document_node_kind::highlight:
+        case document_node_kind::link:
+        case document_node_kind::image:
+        case document_node_kind::entity_link:
+        case document_node_kind::code_span:
+        case document_node_kind::footnote:
+        case document_node_kind::line_break:
+            return false;
+        default:
+            return true;
+        }
+    }
+
     void render_node(const document_node& node) {
         switch (node.kind) {
         case document_node_kind::document:
             render_children(node.children);
             break;
-        case document_node_kind::paragraph: wrap("p", node); break;
+        case document_node_kind::paragraph: {
+            bool paragraph_open = false;
+            const auto open_paragraph = [&] {
+                if (!paragraph_open) {
+                    out += "<p class=\"doc-paragraph\">";
+                    paragraph_open = true;
+                }
+            };
+            const auto close_paragraph = [&] {
+                if (paragraph_open) {
+                    out += "</p>";
+                    paragraph_open = false;
+                }
+            };
+            if (node.children.empty()) {
+                open_paragraph();
+            }
+            for (const document_node& child : node.children) {
+                if (paragraph_child_is_block(child.kind)) {
+                    close_paragraph();
+                    render_node(child);
+                } else {
+                    open_paragraph();
+                    render_node(child);
+                }
+            }
+            close_paragraph();
+            break;
+        }
         case document_node_kind::text: append_escaped_text(out, node.text); break;
         case document_node_kind::heading: {
             // The page template owns the single <h1>; body headings start at h2 so
@@ -187,15 +257,36 @@ struct html_writer {
             if (anchor != node.attributes.end() && !anchor->second.empty()) {
                 out.push_back('<');
                 out += tag;
-                out += " id=\"";
-                out += anchor->second;
+                out += " class=\"hx\" id=\"";
+                append_escaped_attribute(out, anchor->second);
+                out += level > 2 ? "\" data-toc-sub data-title=\""
+                                 : "\" data-toc data-title=\"";
+                std::string title;
+                const auto collect_text = [&](const document_node& item,
+                                              auto&& self_collect) -> void {
+                    title += item.text;
+                    for (const document_node& child : item.children) {
+                        self_collect(child, self_collect);
+                    }
+                };
+                collect_text(node, collect_text);
+                append_escaped_attribute(out, title);
                 out += "\">";
                 render_children(node.children);
+                out += "<a data-hash href=\"#";
+                append_escaped_attribute(out, anchor->second);
+                out += "\" aria-label=\"Link to this section\">#</a>";
                 out += "</";
                 out += tag;
                 out.push_back('>');
             } else {
-                wrap(tag, node);
+                out.push_back('<');
+                out += tag;
+                out += " class=\"hx\">";
+                render_children(node.children);
+                out += "</";
+                out += tag;
+                out.push_back('>');
             }
             break;
         }
@@ -221,30 +312,179 @@ struct html_writer {
             // carrying a source range + number. Collect the ranges to underline the
             // matched spans and the cards to render below. An annotated block skips the
             // Prism class so the server-rendered <mark> spans survive (Prism rewrites
-            // <code> innerHTML). Copy still returns the exact source: <mark> holds the
-            // original substring, so textContent equals the source.
+            // <code> innerHTML).
             struct anno_span { std::size_t start; std::size_t len; std::size_t number; };
             std::vector<anno_span> spans;
             std::vector<const document_node*> cards;
             for (const document_node& child : node.children) {
                 if (child.kind == document_node_kind::code_annotation) {
-                    spans.push_back({parse_index(attribute_or(child, "start", "0")),
-                                     parse_index(attribute_or(child, "len", "0")),
-                                     parse_index(attribute_or(child, "number", "0"))});
-                    cards.push_back(&child);
+                    const std::size_t start =
+                        parse_index(attribute_or(child, "start", "0"));
+                    const std::size_t len =
+                        parse_index(attribute_or(child, "len", "0"));
+                    // Invalid ranges must not influence the focus window or produce
+                    // a card with no corresponding underline. process_annotations
+                    // already guarantees valid ranges; this remains a safe boundary
+                    // for a deserialized/tampered model.
+                    if (len > 0 && start <= node.text.size()
+                        && len <= node.text.size() - start) {
+                        spans.push_back({start, len,
+                                         parse_index(attribute_or(child, "number", "0"))});
+                        cards.push_back(&child);
+                    }
                 }
             }
             std::ranges::sort(spans, [](const anno_span& lhs, const anno_span& rhs) {
                 return lhs.start < rhs.start;
             });
             const bool annotated = !spans.empty();
-            out += "<figure class=\"doc-code\"><figcaption class=\"doc-code-bar\">"
+
+            if (annotated) {
+                // The supplied documentation design treats an annotated type as an
+                // anatomy component, not a terminal. Focus the smallest single-line
+                // call expression that encloses every source range. For example, the
+                // declaration `CREATE TABLE ... bioseq.seq('dna4', 64)` becomes the
+                // centered `bioseq.seq('dna4', 64)` expression while its two authored
+                // annotation ranges and prose remain fully data-driven.
+                std::size_t marked_start = spans.front().start;
+                std::size_t marked_end = spans.front().start + spans.front().len;
+                for (const anno_span& span : spans) {
+                    marked_start = std::min(marked_start, span.start);
+                    marked_end = std::max(marked_end, span.start + span.len);
+                }
+                const std::size_t line_start_position =
+                    node.text.rfind('\n', marked_start);
+                const std::size_t line_start = line_start_position == std::string::npos
+                    ? 0 : line_start_position + 1;
+                const std::size_t newline = node.text.find('\n', marked_end);
+                const std::size_t line_end = newline == std::string::npos
+                    ? node.text.size() : newline;
+                std::size_t focus_start = line_start;
+                std::size_t focus_end = line_end;
+                const auto is_name_character = [](char character) {
+                    return (character >= 'a' && character <= 'z')
+                        || (character >= 'A' && character <= 'Z')
+                        || (character >= '0' && character <= '9')
+                        || character == '_' || character == '.' || character == ':';
+                };
+                std::size_t best_width = line_end - line_start + 1;
+                for (std::size_t open = line_start; open < line_end; ++open) {
+                    if (node.text[open] != '(') {
+                        continue;
+                    }
+                    std::size_t name_start = open;
+                    while (name_start > line_start
+                           && is_name_character(node.text[name_start - 1])) {
+                        --name_start;
+                    }
+                    if (name_start == open || name_start > marked_start) {
+                        continue;
+                    }
+                    std::size_t depth = 0;
+                    std::size_t close = std::string::npos;
+                    for (std::size_t cursor = open; cursor < line_end; ++cursor) {
+                        if (node.text[cursor] == '(') {
+                            ++depth;
+                        } else if (node.text[cursor] == ')' && --depth == 0) {
+                            close = cursor;
+                            break;
+                        }
+                    }
+                    if (close == std::string::npos || close + 1 < marked_end) {
+                        continue;
+                    }
+                    const std::size_t width = close + 1 - name_start;
+                    if (width < best_width) {
+                        best_width = width;
+                        focus_start = name_start;
+                        focus_end = close + 1;
+                    }
+                }
+                while (focus_start < focus_end
+                       && (node.text[focus_start] == ' ' || node.text[focus_start] == '\t')) {
+                    ++focus_start;
+                }
+                while (focus_end > focus_start
+                       && (node.text[focus_end - 1] == ' ' || node.text[focus_end - 1] == '\t')) {
+                    --focus_end;
+                }
+
+                out += "<figure class=\"doc-code annotated-type\" data-annotated-type>"
+                       "<div class=\"annotated-type-expression\"><code id=\"";
+                append_escaped_attribute(out, id);
+                out += "\" data-code tabindex=\"0\" aria-label=\"Annotated type expression\">";
+                std::size_t cursor = focus_start;
+                const std::size_t open = node.text.find('(', focus_start);
+                for (const anno_span& span : spans) {
+                    if (span.start < focus_start || span.start + span.len > focus_end
+                        || span.start < cursor) {
+                        continue;
+                    }
+                    if (cursor < span.start) {
+                        if (cursor == focus_start && open != std::string::npos
+                            && open < span.start && open < focus_end) {
+                            out += "<span class=\"annotated-type-name\">";
+                            append_escaped_text(
+                                out, std::string_view(node.text).substr(cursor, open - cursor));
+                            out += "</span>";
+                            append_escaped_text(
+                                out, std::string_view(node.text).substr(open, span.start - open));
+                        } else {
+                            append_escaped_text(
+                                out, std::string_view(node.text).substr(
+                                         cursor, span.start - cursor));
+                        }
+                    }
+                    out += "<mark class=\"anno annotated-type-value annotated-type-value-";
+                    out += std::to_string(span.number);
+                    out += "\" data-anno=\"";
+                    out += std::to_string(span.number);
+                    out += "\">";
+                    append_escaped_text(
+                        out, std::string_view(node.text).substr(span.start, span.len));
+                    out += "</mark>";
+                    cursor = span.start + span.len;
+                }
+                if (cursor < focus_end) {
+                    append_escaped_text(
+                        out, std::string_view(node.text).substr(cursor, focus_end - cursor));
+                }
+                out += "</code></div>";
+                std::ranges::sort(cards, [this](const document_node* lhs,
+                                                const document_node* rhs) {
+                    return parse_index(attribute_or(*lhs, "number", "0"))
+                        < parse_index(attribute_or(*rhs, "number", "0"));
+                });
+                out += "<ol class=\"anno-cards annotated-type-cards\" data-split>";
+                for (const document_node* card : cards) {
+                    const std::size_t number =
+                        parse_index(attribute_or(*card, "number", "0"));
+                    out += "<li class=\"anno-card annotated-type-card annotated-type-card-";
+                    out += std::to_string(number);
+                    out += "\" data-anno-card=\"";
+                    out += std::to_string(number);
+                    out += "\"><span class=\"anno-card-num\" aria-hidden=\"true\">";
+                    out += std::to_string(number);
+                    out += "</span><div class=\"anno-card-body\"><p class=\"anno-card-title\">";
+                    append_escaped_text(out, attribute_or(*card, "title", ""));
+                    out += "</p>";
+                    render_children(card->children);
+                    out += "</div></li>";
+                }
+                out += "</ol></figure>";
+                break;
+            }
+
+            out += "<figure class=\"doc-code\" data-term><figcaption class=\"doc-code-bar\">"
+                   "<span class=\"term-dot term-dot-red\" aria-hidden=\"true\"></span>"
+                   "<span class=\"term-dot term-dot-amber\" aria-hidden=\"true\"></span>"
+                   "<span class=\"term-dot term-dot-blue\" aria-hidden=\"true\"></span>"
                    "<span class=\"doc-code-lang\">";
             append_escaped_text(out, language.label);
-            out += "</span><button type=\"button\" class=\"copy-button\" data-copy-target=\"";
+            out += "</span><button type=\"button\" class=\"copy-button\" data-copy data-copy-target=\"";
             append_escaped_attribute(out, id);
             out += "\" aria-label=\"Copy code to clipboard\">Copy</button></figcaption>"
-                   "<pre><code id=\"";
+                   "<pre data-code><code id=\"";
             append_escaped_attribute(out, id);
             out.push_back('"');
             if (!language.prism_class.empty() && !annotated) {
@@ -281,24 +521,15 @@ struct html_writer {
                 append_escaped_text(out, text.substr(cursor));
             }
             out += "</code></pre>";
-            if (annotated) {
-                std::ranges::sort(cards, [this](const document_node* lhs,
-                                                const document_node* rhs) {
-                    return parse_index(attribute_or(*lhs, "number", "0"))
-                        < parse_index(attribute_or(*rhs, "number", "0"));
-                });
-                out += "<ol class=\"anno-cards\">";
-                for (const document_node* card : cards) {
-                    out += "<li class=\"anno-card\"><span class=\"anno-card-num\" "
-                           "aria-hidden=\"true\">";
-                    out += std::to_string(parse_index(attribute_or(*card, "number", "0")));
-                    out += "</span><div class=\"anno-card-body\"><p class=\"anno-card-title\">";
-                    append_escaped_text(out, attribute_or(*card, "title", ""));
-                    out += "</p>";
-                    render_children(card->children);
-                    out += "</div></li>";
-                }
-                out += "</ol>";
+            if (terminal_result != nullptr) {
+                const std::size_t row_count = terminal_result->children.empty()
+                    ? 0 : terminal_result->children.size() - 1;
+                out += "<div class=\"terminal-result\" data-result>"
+                       "<div class=\"terminal-result-label\">Result · ";
+                out += std::to_string(row_count);
+                out += row_count == 1 ? " row</div>" : " rows</div>";
+                render_node(*terminal_result);
+                out += "</div>";
             }
             out += "</figure>";
             break;
@@ -335,6 +566,8 @@ struct html_writer {
             if (!entity_id.empty() && !node.target.empty() && is_safe_href(node.target)) {
                 out += "<a class=\"entity-ref\" href=\"";
                 append_escaped_attribute(out, node.target);
+                out += "\" data-entity=\"";
+                append_escaped_attribute(out, entity_id);
                 out += "\" data-entity-id=\"";
                 append_escaped_attribute(out, entity_id);
                 const std::string_view tooltip = attribute_or(node, "tooltip_url", "");
@@ -368,14 +601,54 @@ struct html_writer {
         }
         case document_node_kind::block_quote: wrap("blockquote", node); break;
         case document_node_kind::admonition: {
-            const std::string_view kind = attribute_or(node, "class", "note");
+            // Markdown stores one of the five authored severities in `class`;
+            // Doxygen stores semantic kinds (`return`, `param:*`, `warning`, ...)
+            // in `kind`. Preserve the useful label while collapsing the latter to
+            // the supplied callout colour vocabulary (never emit punctuation such
+            // as ':' into a CSS class token).
+            std::string raw_kind(attribute_or(node, "class", ""));
+            if (raw_kind.empty()) {
+                raw_kind = std::string(attribute_or(node, "kind", "note"));
+            }
+            raw_kind = to_ascii_lower(raw_kind);
+            std::string tone = "note";
+            std::string label = "Note";
+            if (raw_kind == "tip") {
+                tone = "tip";
+                label = "Tip";
+            } else if (raw_kind == "important") {
+                tone = "important";
+                label = "Important";
+            } else if (raw_kind == "warning" || raw_kind == "attention") {
+                tone = "warning";
+                label = "Warning";
+            } else if (raw_kind == "caution" || raw_kind == "error"
+                       || raw_kind == "exception") {
+                tone = "caution";
+                label = raw_kind == "exception" ? "Exception" : "Caution";
+            } else if (raw_kind == "return" || raw_kind == "retval") {
+                label = "Returns";
+            } else if (raw_kind.starts_with("param:")) {
+                label = "Parameters";
+            } else if (raw_kind == "pre") {
+                label = "Precondition";
+            } else if (raw_kind == "post") {
+                label = "Postcondition";
+            } else if (raw_kind == "remark") {
+                label = "Remark";
+            } else if (raw_kind == "see") {
+                label = "See also";
+            }
             out += "<aside class=\"admonition admonition-";
-            append_escaped_attribute(out, kind);
-            out += "\"><p class=\"admonition-label\">";
-            append_escaped_text(out, kind);
+            append_escaped_attribute(out, tone);
+            out += "\" data-callout=\"";
+            append_escaped_attribute(out, tone);
+            out += "\"><span class=\"admonition-icon\" aria-hidden=\"true\"></span>"
+                   "<div class=\"admonition-body\"><p class=\"admonition-label\">";
+            append_escaped_text(out, label);
             out += "</p>";
             render_children(node.children);
-            out += "</aside>";
+            out += "</div></aside>";
             break;
         }
         case document_node_kind::ordered_list: wrap("ol", node); break;
@@ -389,8 +662,24 @@ struct html_writer {
                 append_escaped_attribute(out, table_class);
                 out.push_back('"');
             }
+            if (table_class == "result-table") {
+                out += " aria-label=\"Executed SQL result\"";
+            }
             out.push_back('>');
-            render_children(node.children);
+            if (table_class == "result-table" && !node.children.empty()) {
+                // PostgreSQL result nodes always store the column header first.
+                // Preserve that semantic split in the DOM, matching the supplied
+                // terminal-result table and improving screen-reader navigation.
+                out += "<thead>";
+                render_node(node.children.front());
+                out += "</thead><tbody>";
+                for (std::size_t index = 1; index < node.children.size(); ++index) {
+                    render_node(node.children[index]);
+                }
+                out += "</tbody>";
+            } else {
+                render_children(node.children);
+            }
             out += "</table>";
             break;
         }
