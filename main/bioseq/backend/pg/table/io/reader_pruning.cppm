@@ -15,6 +15,7 @@ import bioseq.common.mlogging;
 import bioseq.storage.metadata;
 import bioseq.pg_utils;
 import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_expect<Const>/<Var>
+import bioseq.types.pg_compact_sequence;
 
 using namespace bioseq::pg_utils;   // DOC0333 — node view helpers live in bioseq::pg_utils
 
@@ -154,6 +155,7 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 
 	bool *selectedChunkMask = make_array<bool>(stripeSkipList->chunkCount);
 	memset(selectedChunkMask, true, stripeSkipList->chunkCount * sizeof(bool));
+	const Oid sequenceTypeId = bioseq_seq_type_oid_missing_ok();
 
 	for (auto column : PList<Var>(whereClauseVars))
 	{
@@ -165,6 +167,14 @@ SelectedChunkMask(StripeSkipList *stripeSkipList, List *whereClauseList,
 		}
 
 		uint32_t columnIndex = column->varattno - 1;
+
+		/* seq extrema are never a sound proxy for logical rank-stream order.
+		 * Fail closed even if legacy or corrupt metadata claims min/max data. */
+		if (OidIsValid(sequenceTypeId)
+			&& column->vartype == sequenceTypeId)
+		{
+			continue;
+		}
 
 		/* if this column's data type doesn't have a comparator, skip it */
 		FmgrInfo *comparisonFunction = GetFunctionInfoOrNull(column->vartype,

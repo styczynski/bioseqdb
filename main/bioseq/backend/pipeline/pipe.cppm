@@ -4676,123 +4676,93 @@ template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, cl
     }
 }
 
-template <MinKernelKind Kind, class MinimizerT, class Seq, class Collector>
+template <MinKernelKind Kind, class MinimizerT,
+          sequence_alphabet Alphabet, class Collector>
 [[gnu::always_inline]] inline TwoStackExecutionProof minimizer_dispatch(
-    Collector& c, Seq& seq, std::size_t w, std::size_t k)
+    Collector& c,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+    std::size_t w,
+    std::size_t k)
 {
     if constexpr (Kind == MinKernelKind::ExactSimd) {
-        using sequence_type = std::remove_cvref_t<Seq>;
-        if constexpr (requires { typename sequence_type::scanner_type; }) {
-            if constexpr (!sequence_type::scanner_type::supports_fragments()) {
-                auto& resident = const_cast<std::remove_cvref_t<
-                    decltype(seq.underlying())>&>(seq.underlying());
-                if constexpr (resident_vector_stream_shape_v<
-                        MinimizerT, decltype(resident)>) {
-                    if (w == 10u && k == 15u) [[likely]] {
-                        return collect_minimizers_two_stack_nthash_resident_or_throw<
-                            MinimizerT>(c, resident, w, k);
-                    }
-                }
-                return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                    0, 0, MinimizerT>(
-                        c,
-                        resident,
-                        0,
-                        static_cast<std::size_t>(resident.size()),
-                        w,
-                        k,
-                        0,
-                        "query minimizer sketch");
-            }
+        if (seq.bp_size() > static_cast<sequence_size_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::arithmetic_overflow,
+                "query minimizer sketch"};
         }
-        if constexpr (!requires { typename sequence_type::scanner_type; }) {
-            auto& resident = const_cast<sequence_type&>(seq);
-            if constexpr (resident_vector_stream_shape_v<
-                    MinimizerT, decltype(resident)>) {
-                if (w == 10u && k == 15u) [[likely]] {
-                    return collect_minimizers_two_stack_nthash_resident_or_throw<
-                        MinimizerT>(c, resident, w, k);
-                }
-            }
+        const auto size = static_cast<std::size_t>(seq.bp_size());
+        auto run_exact = [&c, w, k, size](auto resident_view) {
+            return collect_minimizers_two_stack_nthash_exact_range_or_throw<
+                0, 0, MinimizerT>(
+                    c, resident_view, 0u, size, w, k, 0u,
+                    "query minimizer sketch");
+        };
+        if (seq.try_resident_packed(0u, seq.bp_size(), 4u).has_value()) {
+            return run_exact(seq);
         }
-        return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-            0, 0, MinimizerT>(
-                c,
-                seq,
-                0,
-                static_cast<std::size_t>(seq.size()),
-                w,
-                k,
-                0,
-                "query minimizer sketch");
-    } else if constexpr (requires { typename Seq::scanner_type; }) {
-        if constexpr (!Seq::scanner_type::supports_fragments()) {
-            run_minimizer_inram<Kind, MinimizerT>(c, seq.underlying(), w, k);
-        } else {
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                c, seq, seq.begin(), seq.end(), w, k);
+        const std::uint64_t admitted_bytes =
+            bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                seq.bp_size(), 4u);
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(admitted_bytes);
+        if (!permit) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::non_contiguous_range,
+                "query minimizer sketch admission"};
         }
+        auto owner = bioseq::storage::materialize_packed_region(
+            seq, 0u, seq.bp_size(), 4u, std::move(*permit));
+        return run_exact(owner.view());
     } else {
-        run_minimizer_inram<Kind, MinimizerT>(c, seq, w, k);
+        collect_minimizers_segment_scalar<MinimizerT>(
+            c, seq, 0u, seq.bp_size(), w, k);
     }
     return {};
 }
 
-template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, class Seq, class Collector>
-[[gnu::always_inline]] inline TwoStackExecutionProof minimizer_dispatch_constexpr(Collector& c, Seq& seq, std::size_t w, std::size_t k)
+template <MinKernelKind Kind, std::size_t W, std::size_t K,
+          class MinimizerT, sequence_alphabet Alphabet, class Collector>
+[[gnu::always_inline]] inline TwoStackExecutionProof
+minimizer_dispatch_constexpr(
+    Collector& c,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+    std::size_t w,
+    std::size_t k)
 {
     if constexpr (Kind == MinKernelKind::ExactSimd) {
-        using sequence_type = std::remove_cvref_t<Seq>;
-        if constexpr (requires { typename sequence_type::scanner_type; }) {
-            if constexpr (!sequence_type::scanner_type::supports_fragments()) {
-                auto& resident = const_cast<std::remove_cvref_t<
-                    decltype(seq.underlying())>&>(seq.underlying());
-                if constexpr (W == 10u && K == 15u
-                    && resident_vector_stream_shape_v<
-                        MinimizerT, decltype(resident)>) {
-                    return collect_minimizers_two_stack_nthash_resident_constexpr_or_throw<
-                        W, K, MinimizerT>(c, resident, w, k);
-                }
-                return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                    W, K, MinimizerT>(
-                        c,
-                        resident,
-                        0,
-                        static_cast<std::size_t>(resident.size()),
-                        w,
-                        k,
-                        0,
-                        "constexpr query minimizer sketch");
-            }
+        if (seq.bp_size() > static_cast<sequence_size_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::arithmetic_overflow,
+                "constexpr query minimizer sketch"};
         }
-        if constexpr (!requires { typename sequence_type::scanner_type; }) {
-            auto& resident = const_cast<sequence_type&>(seq);
-            if constexpr (W == 10u && K == 15u
-                && resident_vector_stream_shape_v<
-                    MinimizerT, decltype(resident)>) {
-                return collect_minimizers_two_stack_nthash_resident_constexpr_or_throw<
-                    W, K, MinimizerT>(c, resident, w, k);
-            }
+        const auto size = static_cast<std::size_t>(seq.bp_size());
+        auto run_exact = [&c, w, k, size](auto resident_view) {
+            return collect_minimizers_two_stack_nthash_exact_range_or_throw<
+                W, K, MinimizerT>(
+                    c, resident_view, 0u, size, w, k, 0u,
+                    "constexpr query minimizer sketch");
+        };
+        if (seq.try_resident_packed(0u, seq.bp_size(), 4u).has_value()) {
+            return run_exact(seq);
         }
-        return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-            W, K, MinimizerT>(
-                c,
-                seq,
-                0,
-                static_cast<std::size_t>(seq.size()),
-                w,
-                k,
-                0,
-                "constexpr query minimizer sketch");
-    } else if constexpr (requires { typename Seq::scanner_type; }) {
-        if constexpr (!Seq::scanner_type::supports_fragments()) {
-            run_minimizer_inram_constexpr<Kind, W, K, MinimizerT>(c, seq.underlying());
-        } else {
-            ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_view<minimap_int_hasher, MinimizerT>(
-                c, seq, seq.begin(), seq.end(), w, k);
+        const std::uint64_t admitted_bytes =
+            bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                seq.bp_size(), 4u);
+        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(admitted_bytes);
+        if (!permit) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::non_contiguous_range,
+                "constexpr query minimizer sketch admission"};
         }
+        auto owner = bioseq::storage::materialize_packed_region(
+            seq, 0u, seq.bp_size(), 4u, std::move(*permit));
+        return run_exact(owner.view());
     } else {
-        run_minimizer_inram_constexpr<Kind, W, K, MinimizerT>(c, seq);
+        collect_minimizers_segment_scalar<MinimizerT>(
+            c, seq, 0u, seq.bp_size(), w, k);
     }
     return {};
 }
@@ -4923,7 +4893,7 @@ enum class ExactSimdRangeRoute : std::uint8_t {
 
 template <class MinimizerT, class Seq, class Collector>
 [[gnu::always_inline]] inline MinimizerRangeExecutionProof
-minimizer_dispatch_range(
+minimizer_dispatch_range_legacy_resident_impl(
     Collector& collector,
     Seq& seq,
     sequence_size_t lo_unit,
@@ -5320,84 +5290,111 @@ minimizer_dispatch_range(
     };
 }
 
-/// Dispatch one complete indexed-query sketch while preserving the selected
-/// persisted minimizer scheme.  Exact K15/W10 DNA4 queries stored in u64 words
-/// receive a zero-copy u32 view so the chronological B8 continuation leaf can
-/// process twice as many bases per vector batch on NEON.  Calling that Exact
-/// leaf directly is intentional: `bit_casted_view` is a continuation-kernel
-/// substrate and does not provide the unrelated Scalar, Paper, or resident
-/// vector_stream interfaces instantiated by the general runtime dispatcher.
-/// Every ineligible alphabet, width, backend, fragmented scanner, and k/w
-/// shape retains the existing generic dispatcher without changing semantics.
-template <class MinimizerT, class Collector, class QuerySequence>
+template <class MinimizerT, sequence_alphabet Alphabet, class Collector>
+[[gnu::always_inline]] inline MinimizerRangeExecutionProof
+minimizer_dispatch_range(
+    Collector& collector,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+    sequence_size_t lo_bp,
+    sequence_size_t hi_bp,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    MinimizerSketchBackend backend,
+    ExactSimdRangeRoute exact_simd_route =
+        ExactSimdRangeRoute::require_continuation)
+{
+    if (lo_bp > hi_bp || hi_bp > seq.bp_size()) {
+        throw std::invalid_argument(
+            "minimizer range has an invalid biological-coordinate shape");
+    }
+    if (backend == MinimizerSketchBackend::VulkanSegment) {
+        throw std::invalid_argument(
+            "Vulkan minimizer range requires an admitted GPU upload owner");
+    }
+    if (backend == MinimizerSketchBackend::PaperNtHashSimd) {
+        throw PaperNtHashRuntimeError(
+            "PaperNtHashSimd facade range requires its admitted resident owner");
+    }
+    if (backend == MinimizerSketchBackend::ExactSimd) {
+        if (exact_simd_route
+                == ExactSimdRangeRoute::require_resident_vector_stream) {
+            throw std::invalid_argument(
+                "the legacy resident vector-stream selection route is not a "
+                "canonical facade route");
+        }
+        const sequence_size_t length = hi_bp - lo_bp;
+        if (length > static_cast<sequence_size_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+            throw ExactSimdRuntimeError{
+                TwoStackContinuationStatus::arithmetic_overflow,
+                "target minimizer range sketch"};
+        }
+        auto run_exact = [&collector, window_size, kmer_size](
+                auto resident_view,
+                std::size_t begin,
+                std::size_t end) {
+            return collect_minimizers_two_stack_nthash_exact_range_or_throw<
+                0, 0, MinimizerT>(
+                    collector, resident_view, begin, end,
+                    window_size, kmer_size, 0u,
+                    "target minimizer range sketch");
+        };
+        TwoStackExecutionProof proof{};
+        if (seq.try_resident_packed(lo_bp, hi_bp, 4u).has_value()) {
+            proof = run_exact(
+                seq,
+                static_cast<std::size_t>(lo_bp),
+                static_cast<std::size_t>(hi_bp));
+        } else {
+            const std::uint64_t admitted_bytes =
+                bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                    length, 4u);
+            auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(admitted_bytes);
+            if (!permit) {
+                throw ExactSimdRuntimeError{
+                    TwoStackContinuationStatus::non_contiguous_range,
+                    "target minimizer range sketch admission"};
+            }
+            auto owner = bioseq::storage::materialize_packed_region(
+                seq, lo_bp, hi_bp, 4u, std::move(*permit));
+            proof = run_exact(
+                owner.view(), 0u, static_cast<std::size_t>(length));
+        }
+        return MinimizerRangeExecutionProof{
+            .exact_simd = proof,
+            .exact_simd_present = true,
+        };
+    }
+    if (backend != MinimizerSketchBackend::Scalar) {
+        throw std::invalid_argument(
+            "minimizer range received an unsupported backend");
+    }
+    collect_minimizers_segment_scalar<MinimizerT>(
+        collector, seq, lo_bp, hi_bp, window_size, kmer_size);
+    ScalarMinimizerExecutionProof proof{};
+    proof.record(hi_bp - lo_bp);
+    return MinimizerRangeExecutionProof{
+        .scalar = proof,
+        .scalar_present = true,
+    };
+}
+
+/// Dispatch one complete indexed-query sketch through the canonical facade.
+template <class MinimizerT, sequence_alphabet Alphabet, class Collector>
 [[gnu::always_inline]] inline MinimizerRangeExecutionProof
 minimizer_dispatch_indexed_query_whole(
-        Collector& collector,
-        QuerySequence& query_sequence,
-        std::size_t window_size,
-        std::size_t kmer_size,
-        MinimizerSketchBackend backend) {
-    const auto try_exact_b8_u32 =
-        [&collector, window_size, kmer_size]
-        <class ResidentSequence>(const ResidentSequence& resident)
-        -> std::optional<MinimizerRangeExecutionProof> {
-            using resident_type =
-                std::remove_cvref_t<ResidentSequence>;
-            if constexpr (requires { typename resident_type::traits; }) {
-                using resident_traits = typename resident_type::traits;
-                if constexpr (std::same_as<
-                        typename resident_traits::alphabet_type,
-                        seq::dna4>
-                    && std::same_as<
-                        typename resident_traits::storage_unit,
-                        std::uint64_t>
-                    && std::endian::native == std::endian::little
-                    && requires {
-                        resident.template
-                            bit_cast_to_storage_unit<std::uint32_t>();
-                    }) {
-                    auto u32_view = resident.template
-                        bit_cast_to_storage_unit<std::uint32_t>();
-                    TwoStackExecutionProof proof =
-                        ::bioseq::simd::HWY_NAMESPACE::
-                            collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                                0, 0, MinimizerT>(
-                                    collector,
-                                    u32_view,
-                                    0u,
-                                    static_cast<std::size_t>(u32_view.size()),
-                                    window_size,
-                                    kmer_size,
-                                    0u,
-                                    "persisted query minimizer sketch");
-                    return MinimizerRangeExecutionProof{
-                        .exact_simd = proof,
-                        .exact_simd_present = true,
-                    };
-                }
-            }
-            return std::nullopt;
-        };
-
-    if (backend == MinimizerSketchBackend::ExactSimd
-        && window_size == 10u && kmer_size == 15u) [[likely]] {
-        using query_type = std::remove_cvref_t<QuerySequence>;
-        if constexpr (requires { typename query_type::scanner_type; }) {
-            if constexpr (!query_type::scanner_type::supports_fragments()) {
-                if (auto proof = try_exact_b8_u32(
-                        query_sequence.underlying())) {
-                    return *proof;
-                }
-            }
-        } else if (auto proof = try_exact_b8_u32(query_sequence)) {
-            return *proof;
-        }
-    }
+    Collector& collector,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_sequence,
+    std::size_t window_size,
+    std::size_t kmer_size,
+    MinimizerSketchBackend backend) {
     return minimizer_dispatch_range<MinimizerT>(
         collector,
         query_sequence,
         0u,
-        static_cast<sequence_size_t>(query_sequence.size()),
+        query_sequence.bp_size(),
         window_size,
         kmer_size,
         backend,
@@ -5930,16 +5927,13 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         static constexpr bool emits_scalar_ksw2_execution_proof = true;
         static constexpr bool emits_ksw2_batched_execution_proof = false;
 
-        template <supports_compact_sequence_range QR,
-                  supports_compact_sequence_range TR,
-                  class Scanner = bioseq::storage::sequence_scanner_none<
-                      typename compact_sequence_range<QR>::traits::storage_unit>>
+        template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
             std::span<AlignRegion>                       regions,
             std::span<const ::bioseq::chaining::Anchor>  anchors,
-            const bioseq::storage::lazy_compact_sequence<QR, Scanner>&            query_seq,
-            const bioseq::storage::lazy_compact_sequence<TR, Scanner>&            target_seq,
-            const ScoringMatrix<QR>&                     scoring_matrix,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+            const ScoringMatrix<Alphabet>&               scoring_matrix,
             const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
             BlockAlignerExecutionProof* forbidden_block_proof,
             ScalarPipelineExecutionProof* scalar_execution_proof)
@@ -5988,16 +5982,13 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         static constexpr bool emits_scalar_ksw2_execution_proof = false;
         static constexpr bool emits_ksw2_batched_execution_proof = false;
 
-        template <supports_compact_sequence_range QR,
-                  supports_compact_sequence_range TR,
-                  class Scanner = bioseq::storage::sequence_scanner_none<
-                      typename compact_sequence_range<QR>::traits::storage_unit>>
+        template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
             std::span<AlignRegion>                       regions,
             std::span<const ::bioseq::chaining::Anchor>  anchors,
-            const bioseq::storage::lazy_compact_sequence<QR, Scanner>&            query_seq,
-            const bioseq::storage::lazy_compact_sequence<TR, Scanner>&            target_seq,
-            const ScoringMatrix<QR>&                     scoring_matrix,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+            const ScoringMatrix<Alphabet>&               scoring_matrix,
             const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
             BlockAlignerExecutionProof* block_execution_proof,
             ScalarPipelineExecutionProof* /*scalar_execution_proof*/)
@@ -6051,16 +6042,13 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
         static constexpr bool emits_scalar_ksw2_execution_proof = false;
         static constexpr bool emits_ksw2_batched_execution_proof = true;
 
-        template <supports_compact_sequence_range QR,
-                  supports_compact_sequence_range TR,
-                  class Scanner = bioseq::storage::sequence_scanner_none<
-                      typename compact_sequence_range<QR>::traits::storage_unit>>
+        template <sequence_alphabet Alphabet>
         [[gnu::always_inline]] static void call(
             std::span<AlignRegion>                       regions,
             std::span<const ::bioseq::chaining::Anchor>  anchors,
-            const bioseq::storage::lazy_compact_sequence<QR, Scanner>&            query_seq,
-            const bioseq::storage::lazy_compact_sequence<TR, Scanner>&            target_seq,
-            const ScoringMatrix<QR>&                     scoring_matrix,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+            const ScoringMatrix<Alphabet>&               scoring_matrix,
             const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
             BlockAlignerExecutionProof* forbidden_block_proof,
             ScalarPipelineExecutionProof* /*scalar_execution_proof*/,
@@ -6069,7 +6057,7 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmTyp
             if (forbidden_block_proof != nullptr) {
                 block_aligner_forbidden_ksw2_fallback(*forbidden_block_proof);
             }
-            ::bioseq::simd::HWY_NAMESPACE::align_regions_batched<QR, TR>(
+            ::bioseq::simd::HWY_NAMESPACE::align_regions_batched<Alphabet>(
                 regions, anchors, query_seq, target_seq, scoring_matrix, params,
                 execution_proof);
         }
@@ -6234,15 +6222,15 @@ namespace detail {
  * inside `minimap2_port_with_index_impl`.  Hoisted to a free function so
  * both the legacy entry point and `pipeline_run_impl_batch` can share it.
  */
-template <supports_compact_sequence_range QR>
-[[nodiscard, gnu::always_inline]] inline const ScoringMatrix<QR>&
+template <sequence_alphabet Alphabet>
+[[nodiscard, gnu::always_inline]] inline const ScoringMatrix<Alphabet>&
 thread_local_scoring_matrix(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params)
 {
     thread_local int8_t cached_match    = std::numeric_limits<int8_t>::min();
     thread_local int8_t cached_mismatch = std::numeric_limits<int8_t>::min();
     thread_local int8_t cached_ambi     = std::numeric_limits<int8_t>::min();
-    thread_local ScoringMatrix<QR> cached_matrix{};
+    thread_local ScoringMatrix<Alphabet> cached_matrix{};
 
     const int8_t want_match    = static_cast<int8_t>(params.match_score);
     const int8_t want_mismatch = static_cast<int8_t>(params.mismatch_pen);
@@ -6251,7 +6239,8 @@ thread_local_scoring_matrix(
         || cached_mismatch != want_mismatch
         || cached_ambi != want_ambi)
     {
-        cached_matrix   = ScoringMatrix<QR>::generate(want_match, want_mismatch, want_ambi);
+        cached_matrix   = ScoringMatrix<Alphabet>::generate(
+            want_match, want_mismatch, want_ambi);
         cached_match    = want_match;
         cached_mismatch = want_mismatch;
         cached_ambi     = want_ambi;
@@ -6283,15 +6272,13 @@ thread_local_scoring_matrix(
  */
 template <class MinimizerT,
           class Kernel,
-          supports_compact_sequence_range QR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 struct MinimizerStage
-    : StageBase<MinimizerStage<MinimizerT, Kernel, QR, Scanner>, MinimizerT>
+    : StageBase<MinimizerStage<MinimizerT, Kernel, Alphabet>, MinimizerT>
 {
     static constexpr std::string_view stage_name = "MinimizerStage";
 
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
     int32_t runtime_w;
     int32_t runtime_k;
     // DOC0307 §5.1 — runtime flags so the Vulkan kernel can gate on
@@ -6323,7 +6310,7 @@ struct MinimizerStage
         // Vulkan kernel can construct a masked MinimizerRepr. A query shorter
         // than k is valid and naturally emits an empty minimizer batch.
         require_representable_minimizer_query_length<MinimizerT>(
-            query_seq_->bp_size());
+            query_seq_.bp_size());
 
         // DOC0307 §5.1 — device-minimizer path: only the Vulkan kernel exposes
         // `call_result`. When it returns a result, copy the host minimizers into
@@ -6333,7 +6320,7 @@ struct MinimizerStage
             if constexpr (Kernel::may_emit_device_minimizers) {
                 if (auto gpu_result =
                         Kernel::template call_result<MinimizerT>(
-                            params, *query_seq_, window_size, kmer_size))
+                            params, query_seq_, window_size, kmer_size))
                 {
                     if (proof_dst == nullptr
                         || !gpu_result->dispatch_token.accepted()) {
@@ -6372,7 +6359,7 @@ struct MinimizerStage
 
         auto sketches_slab = make_arena_slab<MinimizerT>();
         sketches_slab.reserve(detail::estimated_sketch_count(
-            query_seq_->bp_size(), static_cast<int32_t>(window_size)));
+            query_seq_.bp_size(), static_cast<int32_t>(window_size)));
 
         sketch_collector_arena_adapter<MinimizerT> collector{&sketches_slab};
 
@@ -6381,10 +6368,10 @@ struct MinimizerStage
                 if constexpr (!Cep::generic_fallback) {
                     return Kernel::template call_constexpr<
                         Cep::window_len, Cep::kmer_len, MinimizerT>(
-                            params, collector, *query_seq_);
+                            params, collector, query_seq_);
                 } else {
                     return Kernel::template call<MinimizerT>(
-                        params, collector, *query_seq_,
+                        params, collector, query_seq_,
                         window_size, kmer_size);
                 }
             }();
@@ -6402,10 +6389,10 @@ struct MinimizerStage
             if constexpr (!Cep::generic_fallback) {
                 proof = Kernel::template call_constexpr<
                     Cep::window_len, Cep::kmer_len, MinimizerT>(
-                        params, collector, *query_seq_);
+                        params, collector, query_seq_);
             } else {
                 proof = Kernel::template call<MinimizerT>(
-                    params, collector, *query_seq_,
+                    params, collector, query_seq_,
                     window_size, kmer_size);
             }
             if (proof_dst == nullptr || !proof.accepted()) {
@@ -6419,10 +6406,10 @@ struct MinimizerStage
                 if constexpr (!Cep::generic_fallback) {
                     return Kernel::template call_constexpr<
                         Cep::window_len, Cep::kmer_len, MinimizerT>(
-                            params, collector, *query_seq_);
+                            params, collector, query_seq_);
                 } else {
                     return Kernel::template call<MinimizerT>(
-                        params, collector, *query_seq_,
+                        params, collector, query_seq_,
                         window_size, kmer_size);
                 }
             }();
@@ -6439,10 +6426,10 @@ struct MinimizerStage
                 if constexpr (!Cep::generic_fallback) {
                     return Kernel::template call_constexpr<
                         Cep::window_len, Cep::kmer_len, MinimizerT>(
-                            params, collector, *query_seq_);
+                            params, collector, query_seq_);
                 } else {
                     return Kernel::template call<MinimizerT>(
-                        params, collector, *query_seq_,
+                        params, collector, query_seq_,
                         window_size, kmer_size);
                 }
             }();
@@ -6457,10 +6444,10 @@ struct MinimizerStage
         } else if constexpr (!Cep::generic_fallback) {
             Kernel::template call_constexpr<
                 Cep::window_len, Cep::kmer_len, MinimizerT>(
-                    params, collector, *query_seq_);
+                    params, collector, query_seq_);
         } else {
             Kernel::template call<MinimizerT>(
-                params, collector, *query_seq_, window_size, kmer_size);
+                params, collector, query_seq_, window_size, kmer_size);
         }
 
         if (host_timing_dst != nullptr) {
@@ -6485,7 +6472,7 @@ struct MinimizerStage
         // the describe path the proto is empty so bp_size() is zero — which
         // still yields the +64 safety margin from `estimated_sketch_count`.
         desc.estimated_batch_size = detail::estimated_sketch_count(
-            query_seq_ != nullptr ? query_seq_->bp_size() : 0u,
+            query_seq_.bp_size(),
             runtime_w > 0 ? runtime_w : 10);
         return desc;
     }
@@ -8116,17 +8103,14 @@ resolve_prefilter_algorithm(
  * intentionally excluded.  A region is removed only when the sum of proven
  * per-fill lower bounds exceeds the SQL predicate's maximum edit count.
  */
-template <supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+template <sequence_alphabet Alphabet>
 struct PrefilterStage
-    : StageBase<PrefilterStage<QR, TR, Scanner>, AlignRegion> {
+    : StageBase<PrefilterStage<Alphabet>, AlignRegion> {
     static constexpr std::string_view stage_name = "PrefilterStage";
 
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>* query_seq_;
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>* target_seq_;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_;
     MatchResultCollection* proof_dst_ = nullptr;
 
     [[nodiscard]] static constexpr std::string_view backend_name(
@@ -8176,8 +8160,8 @@ struct PrefilterStage
                         window.query_end - window.query_start;
                     const std::uint64_t target_length =
                         window.target_end - window.target_start;
-                    if (window.query_end > query_seq_->bp_size()
-                        || window.target_end > target_seq_->bp_size()
+                    if (window.query_end > query_seq_.bp_size()
+                        || window.target_end > target_seq_.bp_size()
                         || query_length > max_flat_offset
                         || target_length > max_flat_offset
                         || query_ranks.size() > max_flat_offset - query_length
@@ -8202,17 +8186,17 @@ struct PrefilterStage
                         target_ranks.data() + target_offset,
                         static_cast<std::size_t>(target_length)};
                     if (region.is_reverse) {
-                        query_seq_->template to_encoded_into<true, false>(
+                        query_seq_.template to_encoded_into<true, false>(
                             query_destination,
                             static_cast<std::size_t>(window.query_start),
                             static_cast<std::size_t>(window.query_end));
                     } else {
-                        query_seq_->template to_encoded_into<false, false>(
+                        query_seq_.template to_encoded_into<false, false>(
                             query_destination,
                             static_cast<std::size_t>(window.query_start),
                             static_cast<std::size_t>(window.query_end));
                     }
-                    target_seq_->template to_encoded_into<false, false>(
+                    target_seq_.template to_encoded_into<false, false>(
                         target_destination,
                         static_cast<std::size_t>(window.target_start),
                         static_cast<std::size_t>(window.target_end));
@@ -8486,17 +8470,14 @@ struct ExactEditFilterStage
  * `Kernel::populate_runtime_params(...)`.
  */
 template <class Kernel,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
-struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> {
+          sequence_alphabet Alphabet>
+struct AlignStage : StageBase<AlignStage<Kernel, Alphabet>, AlignRegion> {
     static constexpr std::string_view stage_name = "AlignStage";
 
     ::bioseq::simd::HWY_NAMESPACE::Minimap2Params params;
-    const ScoringMatrix<QR>*                      sm;
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>*             query_seq_;
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>*             target_seq_;
+    const ScoringMatrix<Alphabet>*                sm;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_;
     bool                                          enabled;
     MatchResultCollection*                        proof_dst_;
     MatchResultCollection*                        host_timing_dst_;
@@ -8516,11 +8497,11 @@ struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> 
                     std::abort();
                 }
                 ScalarPipelineExecutionProof call_proof{};
-                Kernel::template call<QR, TR>(
+                Kernel::template call<Alphabet>(
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    *query_seq_, *target_seq_, *sm, params,
+                    query_seq_, target_seq_, *sm, params,
                     /*forbidden_block_proof=*/nullptr,
                     &call_proof);
                 proof_dst_->record_scalar_pipeline_execution_proof(
@@ -8533,11 +8514,11 @@ struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> 
                     std::abort();
                 }
                 Ksw2BatchedExecutionProof call_proof{};
-                Kernel::template call<QR, TR>(
+                Kernel::template call<Alphabet>(
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    *query_seq_, *target_seq_, *sm, params,
+                    query_seq_, target_seq_, *sm, params,
                     /*forbidden_block_proof=*/nullptr,
                     /*scalar_execution_proof=*/nullptr,
                     &call_proof);
@@ -8556,11 +8537,11 @@ struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> 
                     std::abort();
                 }
                 BlockAlignerExecutionProof call_proof{};
-                Kernel::template call<QR, TR>(
+                Kernel::template call<Alphabet>(
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    *query_seq_, *target_seq_, *sm, params, &call_proof,
+                    query_seq_, target_seq_, *sm, params, &call_proof,
                     /*scalar_execution_proof=*/nullptr);
                 if (!call_proof.accepted()) {
                     bioseq_log<ERR>(
@@ -8570,11 +8551,11 @@ struct AlignStage : StageBase<AlignStage<Kernel, QR, TR, Scanner>, AlignRegion> 
                 proof_dst_->record_block_aligner_execution_proof(
                     call_proof);
             } else {
-                Kernel::template call<QR, TR>(
+                Kernel::template call<Alphabet>(
                     std::span<AlignRegion>{regions.data(), regions.size()},
                     std::span<const ::bioseq::chaining::Anchor>{
                         anchors.data(), anchors.size()},
-                    *query_seq_, *target_seq_, *sm, params,
+                    query_seq_, target_seq_, *sm, params,
                     /*forbidden_block_proof=*/nullptr,
                     /*scalar_execution_proof=*/nullptr);
             }
@@ -8750,18 +8731,15 @@ template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
           ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
+          sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>,
           class QueryMinimizers = std::vector<MinimizerT>>
 [[nodiscard, gnu::always_inline]] inline auto make_minimap_pipeline(
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
-    const ScoringMatrix<QR>&          scoring_matrix,
+    const ScoringMatrix<Alphabet>&    scoring_matrix,
     MatchResultCollection&            output_collection,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     sequence_size_t                   query_len,
@@ -8801,10 +8779,10 @@ template <is_constexpr_aligner_params Cep,
         DivergenceStage<MinimizerT, QueryMinimizers>{
             {}, &query_minimizers, query_len, target_len, params.kmer_size,
             params.compute_divergence },
-        PrefilterStage<QR, TR, Scanner>{
-            {}, params, &query_seq, &target_seq, &output_collection },
-        AlignStage<kernel_t<BAA>, QR, TR, Scanner>{
-            {}, params, &scoring_matrix, &query_seq, &target_seq,
+        PrefilterStage<Alphabet>{
+            {}, params, query_seq, target_seq, &output_collection },
+        AlignStage<kernel_t<BAA>, Alphabet>{
+            {}, params, &scoring_matrix, query_seq, target_seq,
             params.do_cigar || params.compute_edit_distance,
             alignment_proof_dst, host_timing_dst },
         ExactEditFilterStage{{}, params},
@@ -8815,8 +8793,8 @@ template <is_constexpr_aligner_params Cep,
     );
 
     if constexpr (EP == EntryPoint::FromSequence) {
-        MinimizerStage<MinimizerT, kernel_t<MA>, QR, Scanner> head{
-            {}, &query_seq, params.window_size, params.kmer_size, params,
+        MinimizerStage<MinimizerT, kernel_t<MA>, Alphabet> head{
+            {}, query_seq, params.window_size, params.kmer_size, params,
             &output_collection, host_timing_dst };
         return head.template attach<Cep>(std::move(tail));
     } else {
@@ -9199,14 +9177,11 @@ template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
           ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+          sequence_alphabet Alphabet,
+          class MinimizerT, class IndexT>
 [[nodiscard]] std::vector<MatchResultCollection> pipeline_run_impl_batch(
-    std::span<const bioseq::storage::lazy_compact_sequence<QR, Scanner>> query_seqs,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&           target_seq,
+    std::span<const bioseq::storage::basic_lazy_sequence_view<Alphabet>> query_seqs,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     std::span<const std::vector<MinimizerT>>    query_minimizers_per_query,
     const IndexT&                               target_index,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
@@ -9230,7 +9205,7 @@ template <is_constexpr_aligner_params Cep,
             static_cast<int>(EP), query_seqs.size(), target_seq.bp_size());
 
     const sequence_size_t target_len = target_seq.bp_size();
-    const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
+    const auto& scoring_matrix = thread_local_scoring_matrix<Alphabet>(params);
 
     // DOC0307 §4.4/§5.2 — one GPU index cache for the whole batch wave, shared
     // across queries that look up the same target index. When a Vulkan seed
@@ -9321,11 +9296,11 @@ template <is_constexpr_aligner_params Cep,
     static const std::vector<MinimizerT> empty_minimizers_proto{};
 
     auto run_one_query =
-        [target_len, &query_seqs, &query_minimizers_per_query, &target_seq,
+        [target_len, &query_seqs, &query_minimizers_per_query, target_seq,
          &effective_index, &scoring_matrix, &params, gpu_index_cache_ptr,
          gpu_index_identity, vulkan_target_index_built,
          vulkan_target_index_ownership, phase_c_gate_proof](std::size_t qi) {
-        const auto&   query_seq = query_seqs[qi];
+        const auto query_seq = query_seqs[qi];
         const sequence_size_t query_len = query_seq.bp_size();
 
         auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
@@ -9415,7 +9390,8 @@ template <is_constexpr_aligner_params Cep,
         }
 
         auto pipeline =
-            make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT, Scanner>(
+            make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet,
+                                  MinimizerT, IndexT>(
             query_seq, target_seq, mins_for_this_query, effective_index,
             scoring_matrix, out, params, query_len, target_len,
             gpu_index_cache_ptr, gpu_index_identity);
@@ -9440,7 +9416,11 @@ template <is_constexpr_aligner_params Cep,
             bioseq::parallelism::GlobalPool::instance().mode())
         && query_seqs.size()
             >= bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT
-        && bioseq::storage::lazy_is_worker_shareable(target_seq);
+        && lazy_is_worker_shareable(target_seq)
+        && std::ranges::all_of(query_seqs,
+               [](const auto query) {
+                   return lazy_is_worker_shareable(query);
+               });
 
     if (may_parallel_batch) {
         out_per_query.resize(query_seqs.size());
@@ -9485,15 +9465,12 @@ template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
           ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
+          sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>,
           class QueryMinimizers = std::vector<MinimizerT>>
 [[nodiscard, gnu::always_inline]] inline MatchResultCollection pipeline_run_impl(
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
@@ -9521,7 +9498,7 @@ template <is_constexpr_aligner_params Cep,
 
     const sequence_size_t target_len = target_seq.bp_size();
     const sequence_size_t query_len = query_seq.bp_size();
-    const auto& scoring_matrix = thread_local_scoring_matrix<QR>(params);
+    const auto& scoring_matrix = thread_local_scoring_matrix<Alphabet>(params);
 
     if (gpu_index_cache == nullptr
         && params.vulkan_enabled && params.vulkan_seed_hits_enabled
@@ -9802,7 +9779,8 @@ template <is_constexpr_aligner_params Cep,
     }
     auto per_query_chain_scope = context::current().push<context::Arena::Chain>();
     auto pipeline =
-        make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, IndexT, Scanner, QueryMinimizers>(
+        make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet,
+                              MinimizerT, IndexT, QueryMinimizers>(
         query_seq, target_seq, query_minimizers, effective_index,
         scoring_matrix, out, params, query_len, target_len,
         gpu_index_cache_ptr, gpu_index_identity,
@@ -10319,15 +10297,12 @@ using dispatch_chain = ::bioseq::common::templating::dispatch_chain<
 namespace detail {
 
 template <EntryPoint EP_v,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
+          sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
           std::size_t L, std::size_t K,
           ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
-          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+          ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA>
 struct pipeline_run_leaf {
     static_assert(std::is_same_v<decltype(L), std::size_t>,
         "pipeline_run_leaf: L must be std::size_t (comes from seq_len_log2_step).");
@@ -10347,8 +10322,8 @@ struct pipeline_run_leaf {
     BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
     static MatchResultCollection call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
-        const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
         const QueryMinimizers&            query_minimizers,
         const IndexT&                     target_index,
         bioseq::indexing::GpuMinimizerIndexCache* gpu_index_cache,
@@ -10371,13 +10346,15 @@ struct pipeline_run_leaf {
         if (params.window_size == 10
             && params.kmer_size == static_cast<int32_t>(K))
         {
-            return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner, QueryMinimizers>(
+            return pipeline_run_impl<SpecCep, BAA, CA, MA, EP_v, Alphabet,
+                                     MinimizerT, IndexT, QueryMinimizers>(
                 query_seq, target_seq, query_minimizers, target_index, params,
                 gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
                 transient_target_index_owner);
         }
         #endif
-        return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, QR, TR, MinimizerT, IndexT, Scanner, QueryMinimizers>(
+        return pipeline_run_impl<FallbackCep, BAA, CA, MA, EP_v, Alphabet,
+                                 MinimizerT, IndexT, QueryMinimizers>(
             query_seq, target_seq, query_minimizers, target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build,
             transient_target_index_owner);
@@ -10385,16 +10362,12 @@ struct pipeline_run_leaf {
 };
 
 template <EntryPoint EP_v,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class MinimizerT, class IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+          sequence_alphabet Alphabet,
+          class MinimizerT, class IndexT>
 struct pipeline_run_traits {
     template <auto K, auto L, auto BAA, auto CA, auto MA>
     using leaf = pipeline_run_leaf<
-        EP_v, QR, TR, MinimizerT, IndexT,
-        L, K, BAA, CA, MA, Scanner>;
+        EP_v, Alphabet, MinimizerT, IndexT, L, K, BAA, CA, MA>;
 };
 
 /// Common leaf body shared by both Spec and Fallback Cep branches inside
@@ -10408,11 +10381,10 @@ template <is_constexpr_aligner_params Cep,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA,
           ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType     MA,
           EntryPoint                                                EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR>
+          sequence_alphabet Alphabet>
 [[nodiscard]] PipelineDescription describe_pipeline_leaf(
-    const compact_sequence_range<QR>& query_seq,
-    const compact_sequence_range<TR>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
     sequence_size_t query_len, sequence_size_t target_len)
 {
@@ -10420,21 +10392,19 @@ template <is_constexpr_aligner_params Cep,
     const std::vector<MinimizerT> empty_minimizers{};
     MinimizerHashmapFragmentIndex empty_index{};
     MatchResultCollection         ignored_out{};
-    const auto& sm = thread_local_scoring_matrix<QR>(params);
+    const auto& sm = thread_local_scoring_matrix<Alphabet>(params);
 
-    auto describe_lazy_q = bioseq::storage::make_lazy_in_memory(query_seq);
-    auto describe_lazy_t = bioseq::storage::make_lazy_in_memory(target_seq);
     auto pipeline =
-        make_minimap_pipeline<Cep, BAA, CA, MA, EP, QR, TR, MinimizerT, MinimizerHashmapFragmentIndex>(
-        describe_lazy_q, describe_lazy_t, empty_minimizers, empty_index, sm, ignored_out,
+        make_minimap_pipeline<Cep, BAA, CA, MA, EP, Alphabet, MinimizerT,
+                              MinimizerHashmapFragmentIndex>(
+        query_seq, target_seq, empty_minimizers, empty_index, sm, ignored_out,
         params, query_len, target_len);
     return describe_with_params<Cep>(pipeline);
 }
 
 // Describe-side leaf — see DOC0256 §5.10.3 for the rationale on why
 // EP/MA are pinned constants here instead of chain-dispatched dimensions.
-template <supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
+template <sequence_alphabet Alphabet,
           std::size_t L, std::size_t K,
           ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType BAA,
           ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType      CA>
@@ -10453,8 +10423,8 @@ struct describe_leaf {
     BIOSEQ_PIPELINE_NODISCARD_INLINE_ATTR
     static PipelineDescription call(
         const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-        const compact_sequence_range<QR>& q,
-        const compact_sequence_range<TR>& t,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> t,
         const int32_t& query_len,
         const int32_t& target_len)
     {
@@ -10478,22 +10448,21 @@ struct describe_leaf {
             && params.kmer_size == static_cast<int32_t>(K))
         {
             return describe_pipeline_leaf<SpecCep, BAA, CA,
-                MA_describe, EP_describe, QR, TR>(
+                MA_describe, EP_describe, Alphabet>(
                     q, t, params, query_len, target_len);
         }
         #endif
         return describe_pipeline_leaf<FallbackCep, BAA, CA,
-            MA_describe, EP_describe, QR, TR>(
+            MA_describe, EP_describe, Alphabet>(
                 q, t, params, query_len, target_len);
     }
 };
 
-template <supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR>
+template <sequence_alphabet Alphabet>
 struct describe_traits {
     // DOC0271 Phase 1 §5.1: chain pins K before L (see pipeline_run_traits).
     template <auto K, auto L, auto BAA, auto CA>
-    using leaf = describe_leaf<QR, TR, L, K, BAA, CA>;
+    using leaf = describe_leaf<Alphabet, L, K, BAA, CA>;
 };
 
 } // namespace detail
@@ -10509,16 +10478,13 @@ struct describe_traits {
 // (L, K, BAA, CA, MA) — see DOC0256 §R16.
 
 template <EntryPoint EP,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
+          sequence_alphabet Alphabet,
           class MinimizerT, class IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>,
           class QueryMinimizers = std::vector<MinimizerT>>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection dispatch_pipeline(
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const QueryMinimizers&            query_minimizers,
     const IndexT&                     target_index,
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
@@ -10528,7 +10494,7 @@ MatchResultCollection dispatch_pipeline(
     TransientTargetIndexReleaseAuthority
         transient_target_index_owner = {})
 {
-    using Traits = detail::pipeline_run_traits<EP, QR, TR, MinimizerT, IndexT, Scanner>;
+    using Traits = detail::pipeline_run_traits<EP, Alphabet, MinimizerT, IndexT>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order so the L step (per-K) can
     // iterate only the breakpoints relevant for the pinned K.
     return detail::dispatch_chain<
@@ -10554,18 +10520,17 @@ MatchResultCollection dispatch_pipeline(
 // pinned constants inside `describe_leaf` (§5.10.3) — describe output is
 // invariant in them.
 
-template <supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR>
+template <sequence_alphabet Alphabet>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 PipelineDescription describe_pipeline_for(
     const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& params,
-    const compact_sequence_range<QR>& query_seq_proto,
-    const compact_sequence_range<TR>& target_seq_proto)
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq_proto,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq_proto)
 {
     const sequence_size_t query_len  = query_seq_proto.bp_size();
     const sequence_size_t target_len = target_seq_proto.bp_size();
 
-    using Traits = detail::describe_traits<QR, TR>;
+    using Traits = detail::describe_traits<Alphabet>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
     return detail::dispatch_chain<
         PipelineDescription,
@@ -11132,14 +11097,11 @@ admit_and_build_fixed_vulkan_target_index(
  * `(BAA, CA)` switch at this layer.
  */
 template <class MinimizerT,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          ::bioseq::indexing::MinimizerSeedIndex IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet,
+          ::bioseq::indexing::MinimizerSeedIndex IndexT>
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const std::vector<MinimizerT>& query_minimizers,
     const IndexT& prebuilt_target_index,
     const Minimap2Params& params = Minimap2Params{},
@@ -11152,20 +11114,17 @@ template <class MinimizerT,
     auto _scope = bioseq::instr::region(_desc);
     return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
         ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
-            QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
+            Alphabet, MinimizerT, IndexT>(
             query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
 
 template <class MinimizerT,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          ::bioseq::indexing::MinimizerSeedIndex IndexT,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet,
+          ::bioseq::indexing::MinimizerSeedIndex IndexT>
 [[nodiscard]] MatchResultCollection minimap2_port_with_index(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const ::bioseq::simd::HWY_NAMESPACE::pipe::MinimizerBatchView<MinimizerT>& query_minimizers,
     const IndexT& prebuilt_target_index,
     const Minimap2Params& params = Minimap2Params{},
@@ -11178,7 +11137,7 @@ template <class MinimizerT,
     auto _scope = bioseq::instr::region(_desc);
     return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
         ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
-            QueryRange, TargetRange, MinimizerT, IndexT, Scanner>(
+            Alphabet, MinimizerT, IndexT>(
             query_seq, target_seq, query_minimizers, prebuilt_target_index, params,
             gpu_index_cache, gpu_index_identity, allow_gpu_target_index_build);
 }
@@ -11191,13 +11150,10 @@ template <class MinimizerT,
  * `minimap2_port_with_index`.
  */
 template <class MinimizerT,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] MatchResultCollection minimap2_port(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const std::vector<MinimizerT>& query_minimizers,
     std::vector<MinimizerT> target_minimizers,
     const Minimap2Params& params = Minimap2Params{})
@@ -11224,8 +11180,7 @@ template <class MinimizerT,
     auto _with_index_scope = bioseq::instr::region(_with_index_desc);
     return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
         ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
-            QueryRange, TargetRange, MinimizerT,
-            MinimizerHashmapFragmentIndex, Scanner>(
+            Alphabet, MinimizerT, MinimizerHashmapFragmentIndex>(
                 query_seq, target_seq, query_minimizers, target_index, params,
                 nullptr, {}, phase_c_gpu_index,
                 ::bioseq::simd::HWY_NAMESPACE::pipe::
@@ -11241,14 +11196,11 @@ namespace pipe_entry_detail {
 /// operation-unique key, and only then released.  No CPU FOA table or CPU
 /// positions vector is constructed on this route.
 template <class MinimizerT,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] MatchResultCollection
 minimap2_port_with_fixed_vulkan_target_handoff(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const std::vector<MinimizerT>& query_minimizers,
     FixedVulkanTargetHostOwner<MinimizerT> target_host,
     const Minimap2Params& params)
@@ -11338,8 +11290,7 @@ minimap2_port_with_fixed_vulkan_target_handoff(
         ledger.minimizer_count = inspected->minimizer_count;
         ledger.distinct_count = inspected->distinct_count;
 
-        using TargetAlphabet = typename compact_sequence_range<
-            TargetRange>::traits::alphabet_type;
+        using TargetAlphabet = Alphabet;
         ledger.identity_checked = true;
         cache_identity = bioseq::indexing::
             make_gpu_source_direct_sorted_dense_identity<MinimizerT>(
@@ -11485,8 +11436,7 @@ minimap2_port_with_fixed_vulkan_target_handoff(
         auto result = ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
             ::bioseq::simd::HWY_NAMESPACE::pipe::
                 EntryPoint::WithPrebuiltMinimizers,
-                QueryRange, TargetRange, MinimizerT,
-                MinimizerHashmapFragmentIndex, Scanner>(
+                Alphabet, MinimizerT, MinimizerHashmapFragmentIndex>(
                     query_seq,
                     target_seq,
                     query_minimizers,
@@ -12078,13 +12028,10 @@ MinimizerSketchExecutionProof sketch_into_collector(
  * query sketching.
  */
 template <class MinimizerT,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] MatchResultCollection minimap_port_with_repr(
-    bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const Minimap2Params& params)
 {
     static const auto* _desc =
@@ -12112,8 +12059,7 @@ template <class MinimizerT,
     MinimizerSketchExecutionProof target_sketch_proof{};
     const bool phase_c_gpu_index =
         ::bioseq::simd::HWY_NAMESPACE::pipe::phase_c_index_build_active(params);
-    using TargetAlphabet = typename compact_sequence_range<
-        TargetRange>::traits::alphabet_type;
+    using TargetAlphabet = Alphabet;
     const bool fixed_target_zero_copy_route =
         fixed_vulkan_target_host_adoption_route_selected<MinimizerT>(
             phase_c_gpu_index,
@@ -12176,13 +12122,13 @@ template <class MinimizerT,
     std::vector<MinimizerT>{}.swap(target_minimizers);
     MatchResultCollection result = fixed_target_zero_copy_route
         ? minimap2_port_with_fixed_vulkan_target_handoff<
-              MinimizerT, QueryRange, TargetRange, Scanner>(
+              MinimizerT, Alphabet>(
                   query_seq,
                   target_seq,
                   query_minimizers,
                   std::move(fixed_target_sketch->host),
                   params)
-        : minimap2_port<MinimizerT, QueryRange, TargetRange, Scanner>(
+        : minimap2_port<MinimizerT, Alphabet>(
               query_seq,
               target_seq,
               query_minimizers,
@@ -12207,11 +12153,8 @@ template <class MinimizerT,
 // `MinimizerRepr<L, K>` storage type and delegates to the existing
 // `minimap_port_with_repr<MinimizerT>` body unchanged.
 
-template <supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          std::size_t L, std::size_t K,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+template <sequence_alphabet Alphabet,
+          std::size_t L, std::size_t K>
 struct minimap_port_repr_leaf {
     static_assert(std::is_same_v<decltype(L), std::size_t>,
         "minimap_port_repr_leaf: L must be std::size_t (from seq_len_log2_step).");
@@ -12221,22 +12164,19 @@ struct minimap_port_repr_leaf {
     BIOSEQ_PIPELINE_INLINE_ATTR
     static MatchResultCollection call(
         const Minimap2Params& params,
-        bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  q,
-        bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& t)
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> q,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> t)
     {
         using MinimizerT = ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<L, K>;
-        return minimap_port_with_repr<MinimizerT, QueryRange, TargetRange, Scanner>(
+        return minimap_port_with_repr<MinimizerT, Alphabet>(
             q, t, params);
     }
 };
 
-template <supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+template <sequence_alphabet Alphabet>
 struct minimap_port_traits {
     template <auto K, auto L>
-    using leaf = minimap_port_repr_leaf<QueryRange, TargetRange, L, K, Scanner>;
+    using leaf = minimap_port_repr_leaf<Alphabet, L, K>;
 };
 
 } // namespace pipe_entry_detail
@@ -12253,17 +12193,14 @@ struct minimap_port_traits {
  * to `minimap2_port_with_index` (which in turn calls
  * `pipe::dispatch_pipeline<EP::WithPrebuiltMinimizers>`).
  */
-template <supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+template <sequence_alphabet Alphabet>
 BIOSEQ_PIPELINE_NODISCARD_INLINE_FLATTEN_ATTR
 MatchResultCollection minimap_port(
-    bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const Minimap2Params& params = Minimap2Params{})
 {
-    using Traits = pipe_entry_detail::minimap_port_traits<QueryRange, TargetRange, Scanner>;
+    using Traits = pipe_entry_detail::minimap_port_traits<Alphabet>;
     // DOC0271 Phase 1 §5.1 — K-then-L chain order (per-K L step).
     return ::bioseq::simd::HWY_NAMESPACE::pipe::detail::dispatch_chain<
         MatchResultCollection,
@@ -12541,9 +12478,12 @@ private:
     }
 };
 
-template <class MinimizerT, class QuerySeq>
+template <class MinimizerT, sequence_alphabet Alphabet>
 [[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
-    QuerySeq& query_seq, const Minimap2Params& params, std::size_t w, std::size_t k)
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    const Minimap2Params& params,
+    std::size_t w,
+    std::size_t k)
 {
     require_representable_minimizer_query_length<MinimizerT>(
         query_seq.bp_size());
@@ -12619,14 +12559,26 @@ template <class MinimizerT, class QuerySeq>
     return result;
 }
 
-template <supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>,
+template <class MinimizerT, class R, class Scanner>
+[[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
+    const bioseq::storage::lazy_compact_sequence<R, Scanner>& query_owner,
+    const Minimap2Params& params,
+    std::size_t w,
+    std::size_t k)
+{
+    // The facade borrows `query_owner`; the delegated core is synchronous, so
+    // the caller-owned lazy sequence remains live for every view read.
+    const auto query_view =
+        bioseq::storage::as_lazy_sequence_view(query_owner);
+    return sketch_query_for_index_selection<MinimizerT>(
+        query_view, params, w, k);
+}
+
+template <sequence_alphabet Alphabet,
           class FragmentIndexStorage = std::nullptr_t>
 [[nodiscard]] MatchResultCollection minimap_port_segmented(
-    bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     const Minimap2Params& params = Minimap2Params{},
     FragmentIndexStorage* fragment_index_out = nullptr)
 {
@@ -12986,8 +12938,7 @@ template <supports_compact_sequence_range QueryRange,
 
     // (2) Segment the target. Overlap >= longest target match span so a match
     //     starting in a segment core is fully indexed within that segment.
-    constexpr std::size_t lpu =
-        compact_sequence_range<TargetRange>::traits::letters_per_unit;
+    constexpr std::size_t lpu = 1u;
     const sequence_size_t overlap_bp = pipe::segment_overlap_bp(query_len);
 
     auto run_serial_segmented =
@@ -13005,9 +12956,7 @@ template <supports_compact_sequence_range QueryRange,
         const auto ranges =
             pipe::segment_unit_ranges_for_backend(
                 target_len, query_len, lpu, target_sketch_backend);
-        constexpr std::size_t frag_units = Scanner::fragment_storage_units;
-        const sequence_size_t frag_bp =
-            static_cast<sequence_size_t>(frag_units) * lpu;
+        constexpr sequence_size_t frag_bp = 32768u;
 
         bioseq_log_lazy<DBG>([&] {
             bioseq_log_progress<DBG>("[minimap_port_segmented] serial target_len={} query_len={} segments={} "
@@ -13314,8 +13263,8 @@ template <supports_compact_sequence_range QueryRange,
         || !bioseq::parallelism::task_parallel(pool.mode())
         || pool.max_concurrency() <= 1
         || target_sketch_backend == MinimizerSketchBackend::VulkanSegment
-        || !bioseq::storage::lazy_is_worker_shareable(query_seq)
-        || !bioseq::storage::lazy_is_worker_shareable(target_seq)) {
+        || !lazy_is_worker_shareable(query_seq)
+        || !lazy_is_worker_shareable(target_seq)) {
         return run_serial_segmented();
     }
 
@@ -13473,9 +13422,7 @@ template <supports_compact_sequence_range QueryRange,
 
     if constexpr (!std::is_same_v<FragmentIndexStorage, std::nullptr_t>) {
         if (fragment_index_out != nullptr) {
-            constexpr std::size_t frag_units = Scanner::fragment_storage_units;
-            const sequence_size_t frag_bp =
-                static_cast<sequence_size_t>(frag_units) * lpu;
+            constexpr sequence_size_t frag_bp = 32768u;
             FragmentPersistAccumulator<FragmentIndexStorage, MinimizerT> acc{
                 *fragment_index_out, target_len, frag_bp};
             MatchResultCollection merged_collection;

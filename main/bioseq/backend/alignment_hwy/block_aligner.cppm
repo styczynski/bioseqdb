@@ -447,10 +447,10 @@ class BlockPaddedBytes {
 public:
     BlockPaddedBytes() = default;
 
-    /// Build from compact_sequence_range sub-region.
+    /// Build from a canonical logical-rank facade sub-region.
     template<bool is_reversed, bool write_reversed, int AlphabetDim,
-             supports_compact_sequence_range R, class Scanner>
-    void fill(const bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+             sequence_alphabet Alphabet>
+    void fill(bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
               size_t bp_from, size_t bp_to, size_t block_size) {
         len_ = bp_to - bp_from;
         const size_t total = 1 + len_ + block_size;
@@ -929,11 +929,11 @@ HWY_INLINE void ba_record_trace(
 /// For DOWN shifts, the caller swaps query<->ref and the border buffers.
 /// Returns (D_max, D_argmax_i, D_argmax_j) per lane.
 template<bool TRACE, bool X_DROP, bool COLLECT_METRICS,
-         supports_compact_sequence_range R, class D,
-         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
+         sequence_alphabet Alphabet, class D,
+         size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u>
 HWY_INLINE auto ba_place_block(
     D d,
-    const ScoringMatrix<R>& matrix,
+    const ScoringMatrix<Alphabet>& matrix,
     int8_t gap_open_neg,
     int8_t gap_extend_neg,
     const BlockPaddedBytes& query,
@@ -1175,15 +1175,15 @@ HWY_INLINE int16_t ba_suffix_max(D d, const int16_t* buf, size_t buf_len) {
 enum class BlockDirection : uint8_t { Right, Down, Grow };
 
 template<bool TRACE, bool X_DROP, bool COLLECT_METRICS,
-         supports_compact_sequence_range R, class D,
-         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
+         sequence_alphabet Alphabet, class D,
+         size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u>
 void ba_align_core(
     D d,
     int32_t& out_score,
     size_t& out_query_idx,
     size_t& out_ref_idx,
     BlockAlignerScratch& alloc,
-    const ScoringMatrix<R>& matrix,
+    const ScoringMatrix<Alphabet>& matrix,
     int8_t gap_open_neg,
     int8_t gap_extend_neg,
     const BlockPaddedBytes& query,
@@ -1241,7 +1241,7 @@ void ba_align_core(
                 ? hn::SaturatedAdd(D_corner, off_add) : hn::Set(d, BA_MIN);
 
             std::tie(D_max, D_argmax_i, D_argmax_j) =
-                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, R>(
+                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     query, reference, alloc.trace,
                     state_i, state_j + block_size - BA_STEP,
@@ -1275,7 +1275,7 @@ void ba_align_core(
 
             // Query/ref SWAPPED, D_row<->D_col, R_row<->C_col
             std::tie(D_max, D_argmax_i, D_argmax_j) =
-                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, R>(
+                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     reference, query, alloc.trace,
                     state_j, state_i + block_size - BA_STEP,
@@ -1305,7 +1305,7 @@ void ba_align_core(
             // Grow DOWN: prev_size cols x grow_step rows
             hn::Vec<D> D_max1, ai1, aj1;
             std::tie(D_max1, ai1, aj1) =
-                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, R>(
+                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     reference, query, alloc.trace,
                     state_j, state_i + prev_size,
@@ -1326,7 +1326,7 @@ void ba_align_core(
             // Grow RIGHT: grow_step cols x block_size rows
             hn::Vec<D> D_max2, ai2, aj2;
             std::tie(D_max2, ai2, aj2) =
-                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, R>(
+                ba_place_block<TRACE, X_DROP, COLLECT_METRICS, Alphabet>(
                     d, matrix, gap_open_neg, gap_extend_neg,
                     query, reference, alloc.trace,
                     state_i, state_j + prev_size,
@@ -1864,10 +1864,10 @@ enum class BlockAlignerContractError : std::uint8_t {
     return BlockAlignerContractError::None;
 }
 
-template<supports_compact_sequence_range R,
-         size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
+template<sequence_alphabet Alphabet,
+         size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u>
 [[nodiscard]] bool ba_generated_diagonal_score_layout(
-        const ScoringMatrix<R>& scoring_matrix,
+        const ScoringMatrix<Alphabet>& scoring_matrix,
         std::int8_t& match_score,
         std::int8_t& mismatch_score) noexcept {
     // AlphabetDim-1 is Block Aligner's NULL/padding sentinel.  The generated
@@ -1971,21 +1971,17 @@ template<bool is_reversed>
 /// enough because it leaves the old traceback tie policy observable.
 template<
     bool is_reversed,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    size_t AlphabetDim,
-    class Scanner>
+    sequence_alphabet Alphabet,
+    size_t AlphabetDim>
 [[nodiscard]] HWY_INLINE BlockDiagonalCertificate
 ba_try_global_diagonal_certificate(
-        const bioseq::storage::lazy_compact_sequence<
-            QueryRange, Scanner>& query_seq,
-        const bioseq::storage::lazy_compact_sequence<
-            TargetRange, Scanner>& target_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const ScoringMatrix<QueryRange>& scoring_matrix,
+        const ScoringMatrix<Alphabet>& scoring_matrix,
         const BlockAlignerParams& params) {
     BlockDiagonalCertificate result;
     const bool ordered_coordinates = query_end >= query_start
@@ -2015,7 +2011,7 @@ ba_try_global_diagonal_certificate(
     constexpr size_t biological_ranks = AlphabetDim - 1;
     std::int8_t match_score = 0;
     std::int8_t mismatch_score = 0;
-    if (!ba_generated_diagonal_score_layout<QueryRange, AlphabetDim>(
+    if (!ba_generated_diagonal_score_layout<Alphabet, AlphabetDim>(
             scoring_matrix, match_score, mismatch_score)) {
         return result;
     }
@@ -2118,36 +2114,18 @@ ba_try_global_diagonal_certificate(
 ///    one logical Block execution through record_certified_global_gap().
 template<
     bool is_reversed,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    class Scanner>
+    sequence_alphabet Alphabet>
 [[nodiscard]] HWY_INLINE BlockPackedCertificateAttempt
 ba_try_packed_global_gap_certificate(
-        const bioseq::storage::lazy_compact_sequence<
-            QueryRange, Scanner>& query_seq,
-        const bioseq::storage::lazy_compact_sequence<
-            TargetRange, Scanner>& target_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
         const BlockGlobalGapCertificatePlan& plan) noexcept {
     BlockPackedCertificateAttempt attempt;
-    using query_traits = typename compact_sequence_range<QueryRange>::traits;
-    using target_traits = typename compact_sequence_range<TargetRange>::traits;
-    constexpr bool resident_dna4_u64 =
-        !Scanner::supports_fragments()
-        && std::same_as<typename query_traits::alphabet_type, seq::dna4>
-        && std::same_as<typename target_traits::alphabet_type, seq::dna4>
-        && std::same_as<typename query_traits::storage_unit, std::uint64_t>
-        && std::same_as<typename target_traits::storage_unit, std::uint64_t>
-        && query_traits::bits_per_char == 2u
-        && target_traits::bits_per_char == 2u
-        && query_traits::letters_per_unit == 32u
-        && target_traits::letters_per_unit == 32u
-        && query_traits::unit_leftover_bits == 0u
-        && target_traits::unit_leftover_bits == 0u;
-    if constexpr (!resident_dna4_u64) {
+    if constexpr (!std::same_as<Alphabet, seq::dna4>) {
         return attempt;
     } else {
         const bool ordered_coordinates = query_end >= query_start
@@ -2173,12 +2151,21 @@ ba_try_packed_global_gap_certificate(
             return attempt;
         }
 
-        const std::uint64_t* const query_units = query_seq.read_cptr(
-            query_seq.cbegin());
-        const std::uint64_t* const target_units = target_seq.read_cptr(
-            target_seq.cbegin());
-        const size_t query_total = static_cast<size_t>(query_seq.bp_size());
-        const size_t target_total = static_cast<size_t>(target_seq.bp_size());
+        const auto query_region = query_seq.try_resident_packed(
+            query_start, query_end, 8u);
+        const auto target_region = target_seq.try_resident_packed(
+            target_start, target_end, 8u);
+        if (!query_region.has_value() || !target_region.has_value()
+            || query_region->leading_symbol_offset != 0u
+            || target_region->leading_symbol_offset != 0u) {
+            return attempt;
+        }
+        const auto* query_units =
+            static_cast<const std::uint64_t*>(query_region->units);
+        const auto* target_units =
+            static_cast<const std::uint64_t*>(target_region->units);
+        const size_t query_total = query_len;
+        const size_t target_total = target_len;
 
         // Extraction handles arbitrary base offsets one word at a time.  The
         // staging arrays are completely initialized before each masked load;
@@ -2202,10 +2189,10 @@ ba_try_packed_global_gap_certificate(
                     size_t{32}, query_len - symbol_offset);
                 query_words[lane] = ba_load_oriented_dna4_window<is_reversed>(
                     query_units, query_total,
-                    query_start + symbol_offset, symbol_count);
+                    symbol_offset, symbol_count);
                 target_words[lane] = ba_load_oriented_dna4_window<false>(
                     target_units, target_total,
-                    target_start + symbol_offset, symbol_count);
+                    symbol_offset, symbol_count);
             }
             const auto active = hn::FirstN(d64, active_lanes);
             const auto query_packed = hn::MaskedLoad(
@@ -2382,11 +2369,11 @@ inline void block_aligner_record_executed(
 class HwyBlockAligner {
 public:
     template<
-        supports_compact_sequence_range R,
-        size_t AlphabetDim = compact_sequence_range<R>::traits::alphabet_size_n>
+        sequence_alphabet Alphabet,
+        size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u>
     [[nodiscard]] static BlockGlobalGapCertificatePlan
     prepare_global_gap_certificate(
-            const ScoringMatrix<R>& scoring_matrix,
+            const ScoringMatrix<Alphabet>& scoring_matrix,
             const BlockAlignerParams& params) noexcept {
         BlockGlobalGapCertificatePlan plan{
             .params = params,
@@ -2397,22 +2384,18 @@ public:
             && validate_block_aligner_contract(params, lanes)
                 == BlockAlignerContractError::None;
         plan.generated_matrix_supported =
-            ba_generated_diagonal_score_layout<R, AlphabetDim>(
+            ba_generated_diagonal_score_layout<Alphabet, AlphabetDim>(
                 scoring_matrix, plan.match_score, plan.mismatch_score);
         return plan;
     }
 
     template<
         bool is_reversed,
-        supports_compact_sequence_range QueryRange,
-        supports_compact_sequence_range TargetRange,
-        class Scanner>
+        sequence_alphabet Alphabet>
     [[nodiscard]] static HWY_INLINE BlockPackedCertificateAttempt
     try_packed_global_gap(
-            const bioseq::storage::lazy_compact_sequence<
-                QueryRange, Scanner>& query_seq,
-            const bioseq::storage::lazy_compact_sequence<
-                TargetRange, Scanner>& target_seq,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
             size_t query_start,
             size_t query_end,
             size_t target_start,
@@ -2467,36 +2450,23 @@ public:
     template<
         bool is_reversed,
         bool enable_diagonal_certificate = true,
-        supports_compact_sequence_range QueryRange,
-        supports_compact_sequence_range TargetRange,
-        size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n,
-        class Scanner = bioseq::storage::sequence_scanner_none<
-            typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+        sequence_alphabet Alphabet,
+        size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u>
     [[nodiscard]] static KswAlignResult align(
-        const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-        const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const ScoringMatrix<QueryRange>& scoring_matrix,
+        const ScoringMatrix<Alphabet>& scoring_matrix,
         const BlockAlignerParams& params,
         BlockAlignerExecutionProof* execution_proof = nullptr,
         BlockAlignerConstructionEvidence* construction_evidence = nullptr)
     {
-        using query_alphabet_t = typename compact_sequence_range<
-            QueryRange>::traits::alphabet_type;
-        using target_alphabet_t = typename compact_sequence_range<
-            TargetRange>::traits::alphabet_type;
-        static_assert(std::same_as<query_alphabet_t, target_alphabet_t>,
-            "Block Aligner query and target alphabets must be identical");
-        static_assert(
-            compact_sequence_range<QueryRange>::traits::alphabet_size_n
-                == compact_sequence_range<TargetRange>::traits::alphabet_size_n,
-            "Block Aligner query and target alphabet ranks must be compatible");
         static_assert(
             AlphabetDim
-                == compact_sequence_range<QueryRange>::traits::alphabet_size_n,
+                == seqan3::alphabet_size<Alphabet> + 1u,
             "Block Aligner scoring/padding alphabet dimension must match input");
 
         KswAlignResult result;
@@ -2594,8 +2564,7 @@ public:
         if constexpr (enable_diagonal_certificate) {
             const BlockDiagonalCertificate certificate =
                 ba_try_global_diagonal_certificate<
-                    is_reversed, QueryRange, TargetRange,
-                    AlphabetDim, Scanner>(
+                    is_reversed, Alphabet, AlphabetDim>(
                         query_seq, target_seq,
                         query_start, query_end, target_start, target_end,
                         scoring_matrix, params);
@@ -2693,13 +2662,13 @@ public:
         // Dispatch based on TRACE and X_DROP combinations
         if (do_trace && use_xdrop) {
             if (execution_proof != nullptr) {
-                ba_align_core<true, true, true, QueryRange>(
+                ba_align_core<true, true, true, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size,
                     params.x_drop, metrics);
             } else {
-                ba_align_core<true, true, false, QueryRange>(
+                ba_align_core<true, true, false, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size,
@@ -2707,25 +2676,25 @@ public:
             }
         } else if (do_trace && !use_xdrop) {
             if (execution_proof != nullptr) {
-                ba_align_core<true, false, true, QueryRange>(
+                ba_align_core<true, false, true, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size, 0, metrics);
             } else {
-                ba_align_core<true, false, false, QueryRange>(
+                ba_align_core<true, false, false, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size, 0, metrics);
             }
         } else if (!do_trace && use_xdrop) {
             if (execution_proof != nullptr) {
-                ba_align_core<false, true, true, QueryRange>(
+                ba_align_core<false, true, true, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size,
                     params.x_drop, metrics);
             } else {
-                ba_align_core<false, true, false, QueryRange>(
+                ba_align_core<false, true, false, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size,
@@ -2733,12 +2702,12 @@ public:
             }
         } else {
             if (execution_proof != nullptr) {
-                ba_align_core<false, false, true, QueryRange>(
+                ba_align_core<false, false, true, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size, 0, metrics);
             } else {
-                ba_align_core<false, false, false, QueryRange>(
+                ba_align_core<false, false, false, Alphabet>(
                     d, score, out_qi, out_ri, scratch,
                     scoring_matrix, gap_open_neg, gap_extend_neg,
                     query_padded, ref_padded, min_size, max_size, 0, metrics);

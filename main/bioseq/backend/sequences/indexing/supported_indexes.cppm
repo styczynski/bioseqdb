@@ -20,7 +20,8 @@ export module bioseq.indexing.registry;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;          // the index_descriptor PRIMARY (declared-undefined)
-import bioseq.storage.lazy;             // lazy_compact_sequence<R,Scanner>
+import bioseq.sequences;
+import bioseq.storage.lazy;             // canonical basic_lazy_sequence_view
 import bioseq.sequences.kmers;          // DOC0345 Patch G — MinimizerSketchBackend
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
@@ -132,19 +133,20 @@ struct supported_indexes {
     // ---- build / rebuild drivers (fold over the index pack) -------------
     // DOC0345 Patch G — fragmented build/rebuild driver threads an explicit
     // MinimizerSketchBackend to B::build / B::rebuild (their 3-arg overloads).
-    template <bool Rebuild, bool OnlyOnInsert, class OpenFragment, class R, class Scanner>
+    template <bool Rebuild, bool OnlyOnInsert, class OpenFragment,
+              sequence_alphabet Alphabet>
     [[gnu::always_inline]] void run_fragmented_(OpenFragment&& open_for,
-            bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
         std::size_t i = 0;
         // DOC0321 — explicit minimal capture (no `[&]` capture-all): `this` for
         // the enabled[]/policy[] members, the fold counter, the open callback,
         // the sequence, and the backend enum (by value).
-        ([this, &i, &open_for, &seq, backend]{
+        ([this, &i, &open_for, seq, backend]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT &&
                           (!OnlyOnInsert || index_descriptor<Indexes>::allows_update_on_insert)) {
-                static_assert(index_provides_build_fragmented<B, R, Scanner>);
+                static_assert(index_provides_build_fragmented<B, Alphabet>);
                 const std::size_t idx = i;
                 const bool want = enabled[idx] &&
                     (!OnlyOnInsert || policy[idx] == IndexUpdatePolicy::UPDATE_ON_INSERT);
@@ -161,15 +163,16 @@ struct supported_indexes {
             ++i;
         }(), ...);
     }
-    template <bool Rebuild, bool OnlyOnInsert, class OpenInline, class R, class Scanner>
+    template <bool Rebuild, bool OnlyOnInsert, class OpenInline,
+              sequence_alphabet Alphabet>
     [[gnu::always_inline]] void run_inline_(OpenInline&& open_for,
-            bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         std::size_t i = 0;
-        ([&]{
+        ([this, &i, &open_for, seq]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::INLINE_PER_SEQUENCE &&
                           (!OnlyOnInsert || index_descriptor<Indexes>::allows_update_on_insert)) {
-                static_assert(index_provides_build_inline<B, R, Scanner>);
+                static_assert(index_provides_build_inline<B, Alphabet>);
                 const std::size_t idx = i;
                 const bool want = enabled[idx] &&
                     (!OnlyOnInsert || policy[idx] == IndexUpdatePolicy::UPDATE_ON_INSERT);
@@ -182,7 +185,7 @@ struct supported_indexes {
     template <bool Rebuild, bool OnlyOnInsert, class OpenTable>
     [[gnu::always_inline]] void run_table_(OpenTable&& open_for) {
         std::size_t i = 0;
-        ([&]{
+        ([this, &i, &open_for]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_TABLE && !OnlyOnInsert) {
                 static_assert(index_provides_build_table<B>);
@@ -194,42 +197,54 @@ struct supported_indexes {
     }
 
     // DOC0345 Patch G — explicit-backend + scalar-default fragmented drivers.
-    template <bool OnlyOnInsert = false, class OpenFragment, class R, class Scanner>
+    template <bool OnlyOnInsert = false, class OpenFragment,
+              sequence_alphabet Alphabet>
     void build_fragmented(
         OpenFragment&& open_for,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
         run_fragmented_<false, OnlyOnInsert>(open_for, seq, backend);
     }
-    template <bool OnlyOnInsert = false, class OpenFragment, class R, class Scanner>
+    template <bool OnlyOnInsert = false, class OpenFragment,
+              sequence_alphabet Alphabet>
     void build_fragmented(
         OpenFragment&& open_for,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         run_fragmented_<false, OnlyOnInsert>(
             open_for,
             seq,
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
     }
-    template <bool OnlyOnInsert=false, class OpenInline, class R, class Scanner>
-    void build_sequence(OpenInline&& open_for, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) { run_inline_<false, OnlyOnInsert>(open_for, seq); }
+    template <bool OnlyOnInsert=false, class OpenInline,
+              sequence_alphabet Alphabet>
+    void build_sequence(
+        OpenInline&& open_for,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
+        run_inline_<false, OnlyOnInsert>(open_for, seq);
+    }
     template <class OpenTable> void build_table(OpenTable&& open_for) { run_table_<false, false>(open_for); }
-    template <class OpenFragment, class R, class Scanner>
+    template <class OpenFragment, sequence_alphabet Alphabet>
     void rebuild_fragmented(
         OpenFragment&& open_for,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
         run_fragmented_<true, false>(open_for, seq, backend);
     }
-    template <class OpenFragment, class R, class Scanner>
+    template <class OpenFragment, sequence_alphabet Alphabet>
     void rebuild_fragmented(
         OpenFragment&& open_for,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         run_fragmented_<true, false>(
             open_for,
             seq,
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
     }
-    template <class OpenInline,   class R, class Scanner> void rebuild_sequence  (OpenInline&&   open_for, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) { run_inline_<true, false>(open_for, seq); }
+    template <class OpenInline, sequence_alphabet Alphabet>
+    void rebuild_sequence(
+        OpenInline&& open_for,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
+        run_inline_<true, false>(open_for, seq);
+    }
     template <class OpenTable> void rebuild_table(OpenTable&& open_for) { run_table_<true, false>(open_for); }
 
     /// Layout of a named index (compile-time table lookup), for the SQL surface to route by.
@@ -240,14 +255,14 @@ struct supported_indexes {
     }
     /// Rebuild ONLY the named index for ONE sequence (per-sequence layouts).
     /// DOC0345 Patch G — explicit-backend + scalar-default forms.
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     void rebuild_one_fragmented(
         std::string_view name,
         StorageFragment& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
         // DOC0321 — explicit minimal capture (no `[&]` capture-all).
-        ([&storage, &seq, &name, backend]{
+        ([&storage, seq, &name, backend]{
             using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_FRAGMENT) {
                 if (index_descriptor<Indexes>::index_name == name) {
@@ -256,26 +271,29 @@ struct supported_indexes {
             }
         }(), ...);
     }
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     void rebuild_one_fragmented(
         std::string_view name,
         StorageFragment& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         rebuild_one_fragmented(
             name,
             storage,
             seq,
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar);
     }
-    template <class R, class Scanner>
-    void rebuild_one_inline(std::string_view name, StorageSequence& s, bioseq::storage::lazy_compact_sequence<R,Scanner>& seq) {
-        ([&]{ using B = bound_t<Indexes>;
+    template <sequence_alphabet Alphabet>
+    void rebuild_one_inline(
+        std::string_view name,
+        StorageSequence& s,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
+        ([&name, &s, seq]{ using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::INLINE_PER_SEQUENCE)
                 if (index_descriptor<Indexes>::index_name == name) B::rebuild(s, seq);
         }(), ...);
     }
     void rebuild_one_table(std::string_view name, StorageTable& s) {
-        ([&]{ using B = bound_t<Indexes>;
+        ([&name, &s]{ using B = bound_t<Indexes>;
             if constexpr (B::index_type == SequenceIndexType::CHUNKED_PER_TABLE)
                 if (index_descriptor<Indexes>::index_name == name) B::rebuild(s);
         }(), ...);
@@ -283,7 +301,7 @@ struct supported_indexes {
 
     /// Drop every chunk of one index. Delegates to whichever storage backs that index.
     void clear_index(StorageFragment& f, StorageSequence& q, StorageTable& t, std::string_view name) {
-        ([&]{
+        ([&f, &q, &t, &name]{
             constexpr SequenceIndexType M = index_descriptor<Indexes>::index_type;
             if (index_descriptor<Indexes>::index_name == name) {
                 if constexpr      (M == SequenceIndexType::CHUNKED_PER_FRAGMENT) f.clear(name);

@@ -23,6 +23,7 @@ import bioseq.storage.physical;
 import bioseq.storage.metadata;   // DOC0322 §9.2 — the column-store data-model structs (was types.h)
 import bioseq.config;             // DOC0322 §9.2 — CompressionType + COMPRESSION_* (moved to config)
 import bioseq.pg_utils;
+import bioseq.types.pg_compact_sequence;
 import :buffers;
 
 export void BioseqColumnFlushPendingWrites(BioseqColumnWriteState *state);
@@ -56,6 +57,7 @@ BioseqColumnBeginWrite(RelFileLocator relfilelocator,
 {
 	/* get comparison function pointers for each of the columns */
 	uint32_t columnCount = tupleDescriptor->natts;
+	const Oid sequenceTypeId = bioseq_seq_type_oid_missing_ok();
 	FmgrInfo **comparisonFunctionArray = make_array<FmgrInfo*>(columnCount);
 	for (uint32_t columnIndex = 0; columnIndex < columnCount; columnIndex++)
 	{
@@ -63,7 +65,9 @@ BioseqColumnBeginWrite(RelFileLocator relfilelocator,
 		FormData_pg_attribute *attributeForm = TupleDescAttr(tupleDescriptor,
 															 columnIndex);
 
-		if (!attributeForm->attisdropped)
+		if (!attributeForm->attisdropped
+			&& (!OidIsValid(sequenceTypeId)
+				|| attributeForm->atttypid != sequenceTypeId))
 		{
 			Oid typeId = attributeForm->atttypid;
 

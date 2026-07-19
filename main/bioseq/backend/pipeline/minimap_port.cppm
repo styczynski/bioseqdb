@@ -1662,7 +1662,7 @@ void classify_primary_secondary(
 // Phase 7: Base-level alignment — dual-affine gap DP (KSW2 equivalent)
 // ============================================================================
 
-// generate_score_matrix is now ScoringMatrix<R>::generate in alignment_hwy_utils.
+// generate_score_matrix is now ScoringMatrix<Alphabet>::generate.
 
 // ============================================================================
 // KSW2 alignment wrapper
@@ -2002,18 +2002,15 @@ static_assert([] {
 
 template<
     bool is_reversed,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    sequence_alphabet Alphabet>
 [[nodiscard]] KswAlignResult ksw2_align_pair(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     const Minimap2Params& params,
     int align_bandwidth, int end_bonus, int zdrop, KswFlags ksw_flags,
     BlockAlignerExecutionProof* forbidden_block_proof = nullptr,
@@ -2081,18 +2078,15 @@ template<
 template<
     bool is_reversed,
     bool enable_diagonal_certificate = true,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    sequence_alphabet Alphabet>
 [[nodiscard]] KswAlignResult block_aligner_align_pair(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     const Minimap2Params& params,
     BlockAlignerPhase phase,
     BlockAlignerExecutionProof* execution_proof)
@@ -2237,13 +2231,10 @@ template <class Callback>
  * deliberately projects both Eq and X to M at its public CIGAR boundary.
  */
 template <bool strand_reversed,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] sequence_size_t exact_edit_distance_from_packed_cigar(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -2323,13 +2314,10 @@ template <bool strand_reversed,
  * must compare this span explicitly.
  */
 template <bool strand_reversed,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+          sequence_alphabet Alphabet>
 [[nodiscard]] sequence_size_t exact_edit_distance_for_implicit_seed(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     std::size_t query_start,
     std::size_t query_end,
     std::size_t target_start,
@@ -2448,15 +2436,12 @@ inline void append_implicit_seed_cigar(
 }
 
 template <BaseAlignmentAlgorithmType base_alignment_algorithm,
-          supports_compact_sequence_range QueryRange,
-          supports_compact_sequence_range TargetRange,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QueryRange>::traits::storage_unit>,
+          sequence_alphabet Alphabet,
           bool enable_diagonal_certificate = true>
 struct AlignOnePhase {
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>&  query_seq;
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq;
-    const ScoringMatrix<QueryRange>&           scoring_matrix;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq;
+    const ScoringMatrix<Alphabet>&              scoring_matrix;
     const Minimap2Params&                      params;
     int32_t                                    align_bandwidth;
 
@@ -2642,7 +2627,8 @@ struct AlignOnePhase {
                                 params)) {
                             if (!packed_gap_plan_ready) {
                                 packed_gap_plan =
-                                    HwyBlockAligner::prepare_global_gap_certificate(
+                                    HwyBlockAligner::
+                                        prepare_global_gap_certificate<Alphabet>(
                                         scoring_matrix,
                                         project_block_aligner_params(
                                             params,
@@ -2853,16 +2839,13 @@ struct AlignOnePhase {
 template<
     BaseAlignmentAlgorithmType base_alignment_algorithm,
     bool enable_diagonal_certificate = true,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    class Scanner = bioseq::storage::sequence_scanner_none<
-        typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    sequence_alphabet Alphabet>
 void align_regions(
     std::span<AlignRegion> regions,
     std::span<const Anchor> anchors,
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     const Minimap2Params& params,
     BlockAlignerExecutionProof* block_execution_proof = nullptr,
     ScalarPipelineExecutionProof* scalar_execution_proof = nullptr)
@@ -2883,7 +2866,7 @@ void align_regions(
     // batch with the kernel-invariant references; the per-region call
     // surface is `aligner.template run<is_reversed>(...)`.
     const AlignOnePhase<
-        base_alignment_algorithm, QueryRange, TargetRange, Scanner,
+        base_alignment_algorithm, Alphabet,
         enable_diagonal_certificate> aligner{
         query_seq, target_seq, scoring_matrix, params, align_bandwidth};
 
@@ -3090,8 +3073,8 @@ void align_regions(
         bioseq::parallelism::task_parallel(pool.mode())
         && pool.max_concurrency() > 1
         && base_alignment_algorithm != BaseAlignmentAlgorithmType::KSW2_BATCHED
-        && bioseq::storage::lazy_is_worker_shareable(query_seq)
-        && bioseq::storage::lazy_is_worker_shareable(target_seq)
+        && lazy_is_worker_shareable(query_seq)
+        && lazy_is_worker_shareable(target_seq)
         && regions.size() >= bioseq::parallelism::TaskParallelMinTriggers::MIN_REGIONS_COUNT;
     std::size_t total_seed_count = 0;
     if (task_parallel_candidate) {

@@ -375,6 +375,8 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
     pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width, [&]<class S>() {
         compact_sequence_range<S> rng{*hdr};
         auto lazy = bioseq::storage::make_lazy_in_memory(rng);
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         std::map<std::string_view, IndexStorageFragmentPg> fcache;
         std::map<std::string_view, IndexStorageSequencePg> qcache;
         auto open_frag = [&](std::string_view name) -> IndexStorageFragmentPg& {
@@ -388,8 +390,8 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
             return qcache.emplace(name, open_sequence_storage(user_relid, rid.db_oid, rid.tablespace_oid, rid.relfilenode,
                                      attno, name, loc, rowno, nullptr, mctx)).first->second; };
         try {
-            idx.build_fragmented<true>(open_frag, lazy, backend);
-            idx.build_sequence<true>(open_inl, lazy);
+            idx.build_fragmented<true>(open_frag, lazy_view, backend);
+            idx.build_sequence<true>(open_inl, lazy_view);
             for (auto& [name, storage] : fcache) {
                 (void)name;
                 storage.close_checked();
@@ -668,11 +670,15 @@ inline void rebuild_one_fragmented_maybe_resident(
                 try_materialize_for_parallel_sequence_index_build(lazy, rowno, name);
             resident.has_value()) {
             auto resident_lazy = bioseq::storage::make_lazy_in_memory(resident->range);
-            idx.rebuild_one_fragmented(name, store, resident_lazy, backend);
+            const auto resident_view =
+                bioseq::storage::as_lazy_sequence_view(resident_lazy);
+            idx.rebuild_one_fragmented(
+                name, store, resident_view, backend);
             return;
         }
     }
-    idx.rebuild_one_fragmented(name, store, lazy, backend);
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
+    idx.rebuild_one_fragmented(name, store, lazy_view, backend);
 }
 
 /// Opt-in locator-backed MPF/MPS Format-6 publication bridge.  The existing
@@ -1236,10 +1242,13 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         rid.db_oid, rid.tablespace_oid, rid.relfilenode,
                         seq_attno, loc, pad, rs->snapshot, caches, inner,
                         [&](auto& lazy){
+                            const auto lazy_view =
+                                bioseq::storage::as_lazy_sequence_view(lazy);
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
-                                    idx.rebuild_one_inline(name, store, lazy);
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view] {
+                                    idx.rebuild_one_inline(
+                                        name, store, lazy_view);
                                 });
                             } else if (use_grouped32_generation) {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
@@ -1263,13 +1272,16 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                 pgseq_t::dispatch_instance(alpha, hdr->storage_unit_byte_width, [&]<class S>(){
                     compact_sequence_range<S> rng{*hdr};
                     auto lazy = bioseq::storage::make_lazy_in_memory(rng);
+                    const auto lazy_view =
+                        bioseq::storage::as_lazy_sequence_view(lazy);
                     seq_locator loc{}; loc.total_bp_size = rng.bp_size();
                     loc.bucket_idx = (std::uint8_t)bioseq::storage::bucket_index_for_size<bioseq::storage::sequence_size_t,8,42>(loc.total_bp_size);
                     loc.shard_idx = 0;
                     if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                         auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy] {
-                            idx.rebuild_one_inline(name, store, lazy);
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view] {
+                            idx.rebuild_one_inline(
+                                name, store, lazy_view);
                         });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
@@ -2557,9 +2569,11 @@ build_and_publish_minimizer_format6_generation_pg(
         const std::uint64_t maximum_hash =
             bioseq::indexing::minimizer_format6_max_hash(compatibility);
 
+        const auto sequence_view =
+            bioseq::storage::as_lazy_sequence_view(sequence);
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             storage,
-            sequence,
+            sequence_view,
             backend,
             /*core_span_bp=*/0u,
             /*position_segment_span_bp=*/locator.total_bp_size,
@@ -3236,9 +3250,11 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 .minimizer_scheme_version = scheme.version,
                 .max_occ_cap = kMaxOccCap,
             };
+            const auto sequence_view =
+                bioseq::storage::as_lazy_sequence_view(sequence);
             if (is_mpf) {
                 auto encoded = MpfIndex::encode_persisted_generation(
-                    sequence, backend, *state->writer, options,
+                    sequence_view, backend, *state->writer, options,
                     bioseq::indexing::MinimizerGenerationFixedWidthLimits{},
                     &state->mpf_execution);
                 if (encoded) {
@@ -3250,7 +3266,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
             } else {
                 state->mps_spill_started = true;
                 auto spill = MpsIndex::spill_generation_replay_runs_serial(
-                    storage, sequence, backend,
+                    storage, sequence_view, backend,
                     /*core_span_bp=*/0,
                     bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
                     &state->mps_execution);

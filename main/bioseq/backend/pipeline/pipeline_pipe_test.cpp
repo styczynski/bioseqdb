@@ -5094,6 +5094,10 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         std::vector<seq::dna4> t_data(64);
         compact_sequence_range<std::vector<seq::dna4>> q{q_data};
         compact_sequence_range<std::vector<seq::dna4>> t{t_data};
+        auto q_owner = bioseq::storage::make_lazy_in_memory(q);
+        auto t_owner = bioseq::storage::make_lazy_in_memory(t);
+        const auto q_view = bioseq::storage::as_lazy_sequence_view(q_owner);
+        const auto t_view = bioseq::storage::as_lazy_sequence_view(t_owner);
         using MinimizerT =
             ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
@@ -5102,11 +5106,11 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         // The leaf's W==10 && K==15 branch picks SpecCep.
         auto result = detail::pipeline_run_leaf<
             EntryPoint::WithPrebuiltMinimizers,
-            std::vector<seq::dna4>, std::vector<seq::dna4>,
+            seq::dna4,
             MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx,
+                params, q_view, t_view, mins, idx,
                 nullptr, ::bioseq::indexing::GpuIndexCacheIdentity{}, false);
         REQUIRE(result.size() == 0u);
     }
@@ -5121,6 +5125,10 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         std::vector<seq::dna4> t_data(64);
         compact_sequence_range<std::vector<seq::dna4>> q{q_data};
         compact_sequence_range<std::vector<seq::dna4>> t{t_data};
+        auto q_owner = bioseq::storage::make_lazy_in_memory(q);
+        auto t_owner = bioseq::storage::make_lazy_in_memory(t);
+        const auto q_view = bioseq::storage::as_lazy_sequence_view(q_owner);
+        const auto t_view = bioseq::storage::as_lazy_sequence_view(t_owner);
         using MinimizerT =
             ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<15u, 15u>;
         const std::vector<MinimizerT> mins{};
@@ -5128,11 +5136,11 @@ TEST_CASE("DOC0256 — pipeline_run_leaf::call routes Cep on (W, K) runtime matc
         idx.build(mins, t.bp_size());
         auto result = detail::pipeline_run_leaf<
             EntryPoint::WithPrebuiltMinimizers,
-            std::vector<seq::dna4>, std::vector<seq::dna4>,
+            seq::dna4,
             MinimizerT, ::bioseq::indexing::MinimizerHashmapFragmentIndex,
             15u, 15u,
             BAA::BLOCK_ALIGNER, CA::SCALAR_MM2, MA::SCALAR>::call(
-                params, bioseq::storage::make_lazy_in_memory(q), bioseq::storage::make_lazy_in_memory(t), mins, idx,
+                params, q_view, t_view, mins, idx,
                 nullptr, ::bioseq::indexing::GpuIndexCacheIdentity{}, false);
         REQUIRE(result.size() == 0u);
     }
@@ -5273,7 +5281,9 @@ using range_t  = compact_sequence_range<dna4_u64>;
     range_t t_range(td);
     auto lazy_q = bioseq::storage::make_lazy_in_memory(q_range);
     auto lazy_t = bioseq::storage::make_lazy_in_memory(t_range);
-    return ::bioseq::simd::HWY_NAMESPACE::minimap_port(lazy_q, lazy_t, params);
+    const auto q_view = bioseq::storage::as_lazy_sequence_view(lazy_q);
+    const auto t_view = bioseq::storage::as_lazy_sequence_view(lazy_t);
+    return ::bioseq::simd::HWY_NAMESPACE::minimap_port(q_view, t_view, params);
 }
 
 [[nodiscard]] bool exact_biological_results_equal(
@@ -5507,6 +5517,10 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
     range_t target_range(dna4_from_ascii(target_text));
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_target);
 
     const std::vector<Anchor> anchors{
         make_anchor(15u, 15u, false),
@@ -5546,8 +5560,8 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
         std::vector<AlignRegion> observed;
         int on_batch_count = 0;
         PrefilterProbeSink probe{&observed, &on_batch_count};
-        PrefilterStage<dna4_u64, dna4_u64> stage{
-            {}, params, &lazy_query, &lazy_target, &proof};
+        PrefilterStage<seq::dna4> stage{
+            {}, params, query_view, target_view, &proof};
         auto bound = stage.template attach<Cep>(probe);
         bound.on_batch_pair(
             std::span<AlignRegion>{regions},
@@ -5603,6 +5617,8 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     auto data = doc0307_e2e::make_dna4(4096u, 0x51A1D5EEDu);
     range_type resident(data);
     auto lazy_resident = bioseq::storage::make_lazy_in_memory(resident);
+    const auto resident_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_resident);
 
     collector_type whole_collector;
     if (!::bioseq::simd::HWY_NAMESPACE::two_stack_internal::
@@ -5610,7 +5626,7 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
         try {
             (void)minimizer_dispatch_constexpr<
                 MinKernelKind::ExactSimd, 10u, 15u, minimizer_type>(
-                    whole_collector, lazy_resident, 10u, 15u);
+                    whole_collector, resident_view, 10u, 15u);
             FAIL("unsupported Highway target must reject resident pipe routing");
         } catch (const ::bioseq::simd::HWY_NAMESPACE::
                 ExactSimdRuntimeError& error) {
@@ -5622,7 +5638,7 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     }
     const auto whole_proof = minimizer_dispatch_constexpr<
         MinKernelKind::ExactSimd, 10u, 15u, minimizer_type>(
-            whole_collector, lazy_resident, 10u, 15u);
+            whole_collector, resident_view, 10u, 15u);
     REQUIRE(whole_proof.accepted(true));
     REQUIRE(whole_proof.resident_vector_stream_kernel_calls == 1u);
     REQUIRE(whole_proof.resident_vector_stream_dual_calls == 1u);
@@ -5637,9 +5653,9 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     const auto paired_resident_proof =
         minimizer_dispatch_range<minimizer_type>(
             paired_resident_collector,
-            lazy_resident,
+            resident_view,
             0u,
-            static_cast<std::size_t>(resident.size()),
+            resident.bp_size(),
             10u,
             15u,
             MinimizerSketchBackend::ExactSimd,
@@ -5665,9 +5681,9 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     const auto persisted_compatible_proof =
         minimizer_dispatch_range<minimizer_type>(
             persisted_compatible_collector,
-            lazy_resident,
+            resident_view,
             0u,
-            static_cast<std::size_t>(resident.size()),
+            resident.bp_size(),
             10u,
             15u,
             MinimizerSketchBackend::ExactSimd,
@@ -5696,9 +5712,9 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     REQUIRE_THROWS_AS(
         minimizer_dispatch_range<minimizer_type>(
             rejected_resident_subrange_collector,
-            lazy_resident,
+            resident_view,
             0u,
-            static_cast<std::size_t>(resident.size()) - 1u,
+            resident.bp_size() - 1u,
             10u,
             15u,
             MinimizerSketchBackend::ExactSimd,
@@ -5710,9 +5726,9 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     collector_type subrange_collector;
     const auto subrange_proof = minimizer_dispatch_range<minimizer_type>(
         subrange_collector,
-        lazy_resident,
+        resident_view,
         0u,
-        static_cast<std::size_t>(resident.size()) - 1u,
+        resident.bp_size() - 1u,
         10u,
         15u,
         MinimizerSketchBackend::ExactSimd);
@@ -5871,18 +5887,27 @@ void check_fragmented_paper_range_materialization() {
     auto data = doc0307_e2e::make_dna4(
         4'123, 0xF12A6E57u + sizeof(StorageUnit));
     range_type range(data);
+    auto resident_owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto resident_view =
+        bioseq::storage::as_lazy_sequence_view(resident_owner);
     REQUIRE(range.size() > 12u);
     REQUIRE(range.padding() != 0u);
     using sequence_size_type = bioseq::storage::sequence_size_t;
     const auto check_slice = [&](sequence_size_type lo_unit,
                                  sequence_size_type hi_unit) {
         CAPTURE(lo_unit, hi_unit, sizeof(StorageUnit));
+        constexpr sequence_size_type letters_per_unit =
+            range_type::traits::letters_per_unit;
+        const sequence_size_type lo_bp = lo_unit * letters_per_unit;
+        const sequence_size_type hi_bp = std::min(
+            hi_unit * letters_per_unit,
+            static_cast<sequence_size_type>(range.bp_size()));
         collector_type resident_collector;
         const auto resident_proof = minimizer_dispatch_range<minimizer_type>(
             resident_collector,
-            range,
-            lo_unit,
-            hi_unit,
+            resident_view,
+            lo_bp,
+            hi_bp,
             10u,
             15u,
             MinimizerSketchBackend::PaperNtHashSimd);
@@ -5899,12 +5924,14 @@ void check_fragmented_paper_range_materialization() {
             bioseq::storage::lazy_compact_sequence<
                 packed_sequence, chunked_scanner> fragmented{
                     chunked_scanner::from_range(range)};
+            const auto fragmented_view =
+                bioseq::storage::as_lazy_sequence_view(fragmented);
             const auto fragmented_proof =
                 minimizer_dispatch_range<minimizer_type>(
                     fragmented_collector,
-                    fragmented,
-                    lo_unit,
-                    hi_unit,
+                    fragmented_view,
+                    lo_bp,
+                    hi_bp,
                     10u,
                     15u,
                     MinimizerSketchBackend::PaperNtHashSimd);
@@ -5921,9 +5948,9 @@ void check_fragmented_paper_range_materialization() {
             REQUIRE_THROWS_AS(
                 minimizer_dispatch_range<minimizer_type>(
                     rejected_collector,
-                    fragmented,
-                    lo_unit,
-                    hi_unit,
+                    fragmented_view,
+                    lo_bp,
+                    hi_bp,
                     9u,
                     15u,
                     MinimizerSketchBackend::PaperNtHashSimd),
@@ -6085,15 +6112,25 @@ TEST_CASE("fragmented Paper ntHash unwinds its vector and memory permit for ever
             .reads = &reads,
         };
         lazy_type fragmented{std::move(scanner)};
+        const auto fragmented_view =
+            bioseq::storage::as_lazy_sequence_view(fragmented);
         collector_type collector;
         const std::uint64_t reserved_before = admission.reserved_bytes();
+        constexpr bioseq::storage::sequence_size_t letters_per_unit =
+            range_type::traits::letters_per_unit;
+        const bioseq::storage::sequence_size_t lo_bp =
+            2u * letters_per_unit;
+        const bioseq::storage::sequence_size_t hi_bp = std::min(
+            static_cast<bioseq::storage::sequence_size_t>(
+                (range.size() - 2u) * letters_per_unit),
+            static_cast<bioseq::storage::sequence_size_t>(range.bp_size()));
 
         REQUIRE_THROWS_AS(
             minimizer_dispatch_range<minimizer_type>(
                 collector,
-                fragmented,
-                2u,
-                static_cast<bioseq::storage::sequence_size_t>(range.size() - 2u),
+                fragmented_view,
+                lo_bp,
+                hi_bp,
                 10u,
                 15u,
                 MinimizerSketchBackend::PaperNtHashSimd),
@@ -6283,6 +6320,10 @@ TEST_CASE("Paper ntHash segmented pipe globalizes local coordinates without fall
     doc0307_e2e::range_t target_range(target);
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_range);
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_range);
+    const auto query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_target);
 
     Minimap2Params params{};
     params.minimizer_algorithm =
@@ -6292,7 +6333,7 @@ TEST_CASE("Paper ntHash segmented pipe globalizes local coordinates without fall
     params.do_cigar = false;
 
     const auto result = ::bioseq::simd::HWY_NAMESPACE::
-        minimap_port_segmented(lazy_query, lazy_target, params);
+        minimap_port_segmented(query_view, target_view, params);
     REQUIRE(result.paper_nthash_query_execution_accepted(true));
     REQUIRE(result.paper_nthash_target_execution_accepted(true));
     REQUIRE(result.paper_nthash_target_execution_proof.segments_combined >= 2);
@@ -6903,11 +6944,15 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
             bioseq::storage::make_lazy_in_memory(query_range);
         auto direct_lazy_target =
             bioseq::storage::make_lazy_in_memory(target_range);
+        const auto direct_query_view =
+            bioseq::storage::as_lazy_sequence_view(direct_lazy_query);
+        const auto direct_target_view =
+            bioseq::storage::as_lazy_sequence_view(direct_lazy_target);
         direct_results =
             ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
                 minimap2_port_with_fixed_vulkan_target_handoff(
-                    direct_lazy_query,
-                    direct_lazy_target,
+                    direct_query_view,
+                    direct_target_view,
                     query_sketch->host_minimizers,
                     std::move(target_owner),
                     direct_params);
@@ -6921,10 +6966,14 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
             bioseq::storage::make_lazy_in_memory(query_range);
         auto phase_c_lazy_target =
             bioseq::storage::make_lazy_in_memory(target_range);
+        const auto phase_c_query_view =
+            bioseq::storage::as_lazy_sequence_view(phase_c_lazy_query);
+        const auto phase_c_target_view =
+            bioseq::storage::as_lazy_sequence_view(phase_c_lazy_target);
         phase_c_results =
             ::bioseq::simd::HWY_NAMESPACE::minimap_port(
-                phase_c_lazy_query,
-                phase_c_lazy_target,
+                phase_c_query_view,
+                phase_c_target_view,
                 phase_c_params);
 
         // A nonempty query shorter than k has no minimizers, but the already
@@ -6961,11 +7010,15 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
             bioseq::storage::make_lazy_in_memory(short_query_range);
         auto empty_lazy_target =
             bioseq::storage::make_lazy_in_memory(target_range);
+        const auto empty_query_view =
+            bioseq::storage::as_lazy_sequence_view(empty_lazy_query);
+        const auto empty_target_view =
+            bioseq::storage::as_lazy_sequence_view(empty_lazy_target);
         empty_minimizer_results =
             ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
                 minimap2_port_with_fixed_vulkan_target_handoff(
-                    empty_lazy_query,
-                    empty_lazy_target,
+                    empty_query_view,
+                    empty_target_view,
                     empty_query_sketch->host_minimizers,
                     std::move(second_target_owner),
                     direct_params);

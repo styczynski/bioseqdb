@@ -233,15 +233,12 @@ bucket_fills_by_geometry(
 
 namespace detail_ksw2_batched {
 
-template <bool Reverse,
-          supports_compact_sequence_range QR, supports_compact_sequence_range TR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+template <bool Reverse, sequence_alphabet Alphabet>
 [[gnu::always_inline]] inline void run_single_fill(
     FillDescriptor&                    fill,
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
-    const ScoringMatrix<QR>&           scoring_matrix,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    const ScoringMatrix<Alphabet>&      scoring_matrix,
     const Minimap2Params&              params,
     std::int32_t                       align_bandwidth,
     Ksw2BatchedExecutionProof*         execution_proof,
@@ -369,17 +366,13 @@ template <bool Reverse,
  * batching is preserved so a future fused-lanes DP can substitute
  * here without touching the bucketing or stitching infrastructure.
  */
-template <std::size_t Lanes, bool Reverse,
-          supports_compact_sequence_range QR,
-          supports_compact_sequence_range TR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+template <std::size_t Lanes, bool Reverse, sequence_alphabet Alphabet>
 void ksw2_extz2_batched_inner(
     FillDescriptor*                    fills,
     std::size_t                        n_fills,
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
-    const ScoringMatrix<QR>&           scoring_matrix,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    const ScoringMatrix<Alphabet>&      scoring_matrix,
     const Minimap2Params&              params,
     std::int32_t                       bucket_max_q,
     std::int32_t                       bucket_max_t,
@@ -403,14 +396,12 @@ void ksw2_extz2_batched_inner(
 // DOC0254 §11.5 — Per-bucket execute phase.
 // ============================================================================
 
-template <supports_compact_sequence_range QR, supports_compact_sequence_range TR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+template <sequence_alphabet Alphabet>
 void execute_buckets(
     std::span<std::pair<FillBucketKey, std::span<FillDescriptor>>> buckets,
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&  query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&  target_seq,
-    const ScoringMatrix<QR>&           scoring_matrix,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    const ScoringMatrix<Alphabet>&      scoring_matrix,
     const Minimap2Params&              params,
     Ksw2BatchedExecutionProof*         execution_proof)
 {
@@ -448,13 +439,13 @@ void execute_buckets(
                     static_cast<std::uint64_t>(lane_count));
             }
             if (reverse) {
-                ksw2_extz2_batched_inner<Lanes, true, QR, TR>(
+                ksw2_extz2_batched_inner<Lanes, true, Alphabet>(
                     bucket_fills.data() + i, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
                     bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
                     execution_proof);
             } else {
-                ksw2_extz2_batched_inner<Lanes, false, QR, TR>(
+                ksw2_extz2_batched_inner<Lanes, false, Alphabet>(
                     bucket_fills.data() + i, lane_count,
                     query_seq, target_seq, scoring_matrix, params,
                     bucket_key.q_max, bucket_key.t_max, bucket_key.bw_max,
@@ -647,15 +638,13 @@ namespace detail_ksw2_batched {
  * forwards to this; the per-region inner loop mirrors
  * `align_regions<KSW2>` exactly on every per-fill coordinate.
  */
-template <supports_compact_sequence_range QR, supports_compact_sequence_range TR,
-          class Scanner = bioseq::storage::sequence_scanner_none<
-              typename compact_sequence_range<QR>::traits::storage_unit>>
+template <sequence_alphabet Alphabet>
 void align_regions_batched(
     std::span<AlignRegion>                       regions,
     std::span<const ::bioseq::chaining::Anchor>  anchors,
-    const bioseq::storage::lazy_compact_sequence<QR, Scanner>&            query_seq,
-    const bioseq::storage::lazy_compact_sequence<TR, Scanner>&            target_seq,
-    const ScoringMatrix<QR>&                     scoring_matrix,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
+    const ScoringMatrix<Alphabet>&                scoring_matrix,
     const Minimap2Params&                        params,
     Ksw2BatchedExecutionProof* execution_proof = nullptr)
 {
@@ -845,7 +834,7 @@ void align_regions_batched(
             static_cast<std::uint64_t>(fills.size()));
     }
     auto buckets = bucket_fills_by_geometry(fills, params);
-    execute_buckets<QR, TR>(buckets, query_seq, target_seq,
+    execute_buckets<Alphabet>(buckets, query_seq, target_seq,
                             scoring_matrix, params, execution_proof);
     stitch_cigars_into_regions(
         regions, anchors, fills, query_length,

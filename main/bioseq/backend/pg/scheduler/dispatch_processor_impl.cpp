@@ -1068,6 +1068,9 @@ void append_cpu_prepared_query_sketch(
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
+	auto query_owner = bioseq::storage::make_lazy_in_memory(query);
+	const auto query_view =
+		bioseq::storage::as_lazy_sequence_view(query_owner);
 	if (!minimizer_query_length_is_representable<MinimapSketchData>(
 			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
 		bioseq::pg_utils::invoke_pg_as_cpp([] {
@@ -1100,7 +1103,7 @@ void append_cpu_prepared_query_sketch(
 		auto proof = pipe::minimizer_dispatch_indexed_query_whole<
 			MinimapSketchData>(
 			collector,
-			query,
+			query_view,
 			static_cast<std::size_t>(window_size),
 			static_cast<std::size_t>(kmer_size),
 			sketch_backend);
@@ -1153,7 +1156,7 @@ void append_cpu_prepared_query_sketch(
 	const auto proof = pipe::minimizer_dispatch_indexed_query_whole<
 		MinimapSketchData>(
 		collector,
-		query,
+		query_view,
 		static_cast<std::size_t>(window_size),
 		static_cast<std::size_t>(kmer_size),
 		sketch_backend);
@@ -1319,6 +1322,9 @@ prepare_independently_admitted_query_sketch(
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
+	auto query_owner = bioseq::storage::make_lazy_in_memory(query);
+	const auto query_view =
+		bioseq::storage::as_lazy_sequence_view(query_owner);
 	if (!minimizer_query_length_is_representable<MinimapSketchData>(
 			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
 		return ParallelPreparedQuerySketchStatus::query_length_unsupported;
@@ -1337,7 +1343,7 @@ prepare_independently_admitted_query_sketch(
 	auto proof = pipe::minimizer_dispatch_indexed_query_whole<
 		MinimapSketchData>(
 		collector,
-		query,
+		query_view,
 		static_cast<std::size_t>(window_size),
 		static_cast<std::size_t>(kmer_size),
 		sketch_backend);

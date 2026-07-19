@@ -2701,6 +2701,10 @@ template <class LazyQuery, class Target>
     sequence_size_t total_bp_size)
 {
     MatchResultCollection collection;
+	const auto lazy_query_view =
+		bioseq::storage::as_lazy_sequence_view(lazy_query);
+	const auto target_view =
+		bioseq::storage::as_lazy_sequence_view(target);
 	// Every PostgreSQL terminal error below crosses a true
 	// invoke_pg_as_cpp leaf. Keep this orchestration in ordinary C++ so MPS
 	// chunks, sorted runs, GPU cache, query proof, assembled indexes, and
@@ -2732,14 +2736,14 @@ template <class LazyQuery, class Target>
         bioseq::indexing::MinimizerSequenceMergedIndex<
             OpportunisticSequenceIndexStorage>::build(
                 mps_store,
-                target,
+                target_view,
                 backend,
                 scalar_query_selected
                     ? &scalar_target_build_proof : nullptr);
 
         auto query_sketch =
             sketch_query_for_index_selection<MinimapSketchData>(
-                lazy_query,
+                lazy_query_view,
                 mps_params,
                 static_cast<std::size_t>(mps_params.window_size),
                 static_cast<std::size_t>(mps_params.kmer_size));
@@ -2754,7 +2758,7 @@ template <class LazyQuery, class Target>
                 reinterpret_cast<std::uintptr_t>(&mps_store));
         bioseq::indexing::MinimizerAssemblyScratch scratch;
         auto run_mps_index =
-            [&mps_store, &lazy_query, &target, &query_sketch, &mps_params,
+            [&mps_store, lazy_query_view, target_view, &query_sketch, &mps_params,
              total_bp_size, &scratch, gpu_index_cache_ptr,
              transient_identity_base, backend](
                     sequence_size_t clip_lo_bp,
@@ -2777,8 +2781,8 @@ template <class LazyQuery, class Target>
                     clip_hi_bp,
                     backend);
             return minimap2_port_with_index_pg_checked(
-                lazy_query,
-                target,
+                lazy_query_view,
+                target_view,
                 query_sketch.minimizers,
                 index,
                 mps_params,
@@ -3024,8 +3028,12 @@ run_recompute_with_deferred_minimizer_persist(
 	(void)alphabet_code;
 	(void)storage_unit_byte_width;
 	(void)last_fragment_padding;
+	const auto lazy_query_view =
+		bioseq::storage::as_lazy_sequence_view(lazy_query);
+	const auto resident_target_view =
+		bioseq::storage::as_lazy_sequence_view(resident_target);
 	MatchResultCollection collection = minimap_port_segmented_pg_checked(
-		lazy_query, resident_target, params);
+		lazy_query_view, resident_target_view, params);
 	bioseq_log<DBG>("[bioseq] index: recompute external-file persist prohibited row={} index={} target_bp={} constructor_entries={} writer_entries={} async_staged=false",
             static_cast<unsigned long long>(sequence_rowno),
             choice.index_name,
@@ -3450,10 +3458,14 @@ template <class S>
     const BatchProcessor::CpuPreparedQuerySketch*
         retained_prepared_query_sketch = nullptr;
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
+    const auto lazy_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_query);
     // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
     using SP = bioseq::storage::sequence_scanner_pg<S>;
     bioseq::storage::lazy_compact_sequence<S, SP> fq_pg{
         bioseq::storage::make_scanner_pg_in_memory<S>(query_seq)};
+    const auto fq_pg_view =
+        bioseq::storage::as_lazy_sequence_view(fq_pg);
     const auto& loc_opt = scanner_pg_ctx->target_locators[i];
     const bool persisted_required =
         scanner_pg_ctx->index_read_requirement
@@ -3504,6 +3516,8 @@ template <class S>
             scanner_pg_ctx->parent_mctx);
         bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
             std::move(target_scanner)};
+        const auto ft_pg_view =
+            bioseq::storage::as_lazy_sequence_view(ft_pg);
         // DOC0279 §11.3a — ASSEMBLE from the stored
         // per-fragment minimizer index if present
         // (deserialise + globalise, no re-collection);
@@ -3577,7 +3591,7 @@ template <class S>
                     : cached_query_minimizer_proof;
             auto ensure_q =
                 [&query_minimizers, &query_minimizer_proof,
-                 &query_seq, &idx_params,
+                 &query_seq, lazy_query_view, &idx_params,
                  &row_consumed_persisted_query_sketch,
                  &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
@@ -3604,9 +3618,9 @@ template <class S>
                     auto proof = pipe::minimizer_dispatch_range<
                         MinimapSketchData>(
                         qc,
-                        query_seq,
+                        lazy_query_view,
                         0,
-                        static_cast<sequence_size_t>(query_seq.size()),
+                        static_cast<sequence_size_t>(query_seq.bp_size()),
                         static_cast<size_t>(idx_params.window_size),
                         static_cast<size_t>(idx_params.kmer_size),
                         backend,
@@ -3797,8 +3811,8 @@ template <class S>
 									: *query_minimizers;
 							if (has_format6_reader) {
 							collection = minimap2_port_with_index_pg_checked(
-								fq_pg,
-								ft_pg,
+								fq_pg_view,
+								ft_pg_view,
 							alignment_query_minimizers,
 							*prepared_group->persisted_format6_reader,
 								idx_params,
@@ -3808,8 +3822,8 @@ template <class S>
 							collection = run_aligner_pg_checked(
 								"fragment-native single-query anchor preparation",
 									[&alignment_query_minimizers, &query_seq,
-									 &idx_params, prepared_group, &fq_pg,
-									 &ft_pg]() -> MatchResultCollection {
+									 &idx_params, prepared_group, fq_pg_view,
+									 ft_pg_view]() -> MatchResultCollection {
 									const std::uint64_t prepare_started_ns =
 										dispatch_host_now_ns();
 									auto& admission = bioseq::parallelism::
@@ -3849,8 +3863,8 @@ template <class S>
 									const std::uint64_t prepare_host_wall_ns =
 										elapsed_dispatch_host_ns(prepare_started_ns);
 									MatchResultCollection out = minimap2_port_with_index(
-										fq_pg,
-										ft_pg,
+										fq_pg_view,
+										ft_pg_view,
 										alignment_query_minimizers,
 										query_index,
 										idx_params,
@@ -3864,8 +3878,8 @@ template <class S>
 								});
 							} else {
 							collection = minimap2_port_with_index_pg_checked(
-								fq_pg,
-								ft_pg,
+								fq_pg_view,
+								ft_pg_view,
 								alignment_query_minimizers,
 								*prepared_group->
 									persisted_mps_shape_v5_reader,
@@ -3876,8 +3890,8 @@ template <class S>
 						} else {
 						ensure_q();
 							collection = minimap2_port_with_index_pg_checked(
-								fq_pg,
-								ft_pg,
+								fq_pg_view,
+								ft_pg_view,
 								*query_minimizers,
 								*prepared_group->persisted_grouped32_reader,
 								idx_params,
@@ -3904,8 +3918,8 @@ template <class S>
 				&& prepared_group->target_index) {
 				ensure_q();
 				collection = minimap2_port_with_index_pg_checked(
-					fq_pg,
-					ft_pg,
+					fq_pg_view,
+					ft_pg_view,
 					*query_minimizers,
 					*prepared_group->target_index,
 					idx_params,
@@ -3954,11 +3968,11 @@ template <class S>
 	                                        .clip_hi_bp = clip_hi_bp,
 	                                    };
 	                                };
-		                                    auto run_fragment_backed_index =
-		                                    [&ensure_q, &loc_opt, &idx_params,
+	                                    auto run_fragment_backed_index =
+	                                    [&ensure_q, &loc_opt, &idx_params,
                          &query_seq, &query_minimizers,
                          &collection, &assembled,
-                         &make_cache_key, &fq_pg, &ft_pg,
+                         &make_cache_key, fq_pg_view, ft_pg_view,
 		                 pg_gpu_index_cache_ptr, prepared_group,
 		                 cpu_prepared_target](
                                 IStore& fragment_store,
@@ -4012,7 +4026,8 @@ template <class S>
 	                                                scratch);
 	                                    };
 	                                    auto run_with_segment_index =
-	                                        [&make_cache_key, &assemble_one, &fq_pg, &ft_pg,
+	                                        [&make_cache_key, &assemble_one,
+	                                         fq_pg_view, ft_pg_view,
 	                                         &query_minimizers, &idx_params, cache_index_name,
 	                                         pg_gpu_index_cache_ptr,
 	                                         prepared_group,
@@ -4030,8 +4045,8 @@ template <class S>
 	                                                bioseq::storage::indexing::lookup_assembled_index(
 	                                                    cache_key)) {
 	                                            return minimap2_port_with_index_pg_checked(
-	                                                fq_pg,
-	                                                ft_pg,
+	                                                fq_pg_view,
+	                                                ft_pg_view,
 	                                                *query_minimizers,
 	                                                *hit->index,
 	                                                idx_params,
@@ -4073,8 +4088,8 @@ template <class S>
 	                                                ++cpu_prepared_target->physical_target_index_reads;
 	                                            }
 	                                            return minimap2_port_with_index_pg_checked(
-	                                                fq_pg,
-	                                                ft_pg,
+	                                                fq_pg_view,
+	                                                ft_pg_view,
 	                                                *query_minimizers,
 	                                                *prepared_group->target_index,
 	                                                idx_params,
@@ -4085,8 +4100,8 @@ template <class S>
 	                                        }
 	                                        MatchResultCollection out =
 	                                            minimap2_port_with_index_pg_checked(
-	                                                fq_pg,
-	                                                ft_pg,
+	                                                fq_pg_view,
+	                                                ft_pg_view,
 	                                                *query_minimizers,
 	                                                idx,
 	                                                idx_params,
@@ -4196,7 +4211,8 @@ template <class S>
 	                                                    assembly_query_vec.size());
 	                                            bioseq::indexing::MinimizerAssemblyScratch sq_scratch;
 	                                            auto run_mps_index =
-	                                                [&make_cache_key, &seq_store, &fq_pg, &ft_pg,
+	                                                [&make_cache_key, &seq_store,
+	                                                 fq_pg_view, ft_pg_view,
 	                                                 &idx_params, &query_vec, query_span, total_bp,
 	                                                 &sq_scratch, pg_gpu_index_cache_ptr,
 	                                                 prepared_group,
@@ -4213,8 +4229,8 @@ template <class S>
 	                                                        bioseq::storage::indexing::lookup_assembled_index(
 	                                                            cache_key)) {
 	                                                    return minimap2_port_with_index_pg_checked(
-	                                                        fq_pg,
-	                                                        ft_pg,
+	                                                        fq_pg_view,
+	                                                        ft_pg_view,
 	                                                        query_vec,
 	                                                        *hit->index,
 	                                                        idx_params,
@@ -4264,8 +4280,8 @@ template <class S>
 	                                                        ++cpu_prepared_target->physical_target_index_reads;
 	                                                    }
 	                                                    return minimap2_port_with_index_pg_checked(
-	                                                        fq_pg,
-	                                                        ft_pg,
+	                                                        fq_pg_view,
+	                                                        ft_pg_view,
 	                                                        query_vec,
 	                                                        *prepared_group->target_index,
 	                                                        idx_params,
@@ -4276,8 +4292,8 @@ template <class S>
 	                                                }
 	                                                MatchResultCollection out =
 	                                                    minimap2_port_with_index_pg_checked(
-	                                                        fq_pg,
-	                                                        ft_pg,
+	                                                        fq_pg_view,
+	                                                        ft_pg_view,
 	                                                        query_vec,
 	                                                        idx,
 	                                                        idx_params,
@@ -4398,7 +4414,7 @@ template <class S>
                     OpportunisticFragmentIndexStorage ram_store;
 	                                        bioseq::indexing::MinimizersPerFragmentIndex<
 	                                            OpportunisticFragmentIndexStorage>::build(
-	                                                ram_store, ft_pg,
+	                                                ram_store, ft_pg_view,
                             target_backend_from_params_for_recompute(params));
 	                                        const std::string_view opportunistic_index_name =
 	                                            want_seq
@@ -4468,7 +4484,8 @@ template <class S>
                             != bioseq::indexing::IndexReadRequirement::
                                 require_absent;
                     auto run_with_ram_index =
-                        [&make_cache_key, &assemble_ram_one, &fq_pg, &ft_pg,
+                        [&make_cache_key, &assemble_ram_one,
+                         fq_pg_view, ft_pg_view,
                          &query_minimizers, &idx_params,
                          opportunistic_index_name,
                          pg_gpu_index_cache_ptr,
@@ -4488,8 +4505,8 @@ template <class S>
                                 bioseq::storage::indexing::lookup_assembled_index(
                                     cache_key)) {
                                 return minimap2_port_with_index_pg_checked(
-                                    fq_pg,
-                                    ft_pg,
+                                    fq_pg_view,
+                                    ft_pg_view,
                                     *query_minimizers,
                                     *hit->index,
                                     idx_params,
@@ -4500,8 +4517,8 @@ template <class S>
                         auto idx = assemble_ram_one(cs_u, ce_u);
                         MatchResultCollection out =
                             minimap2_port_with_index_pg_checked(
-                                fq_pg,
-                                ft_pg,
+                                fq_pg_view,
+                                ft_pg_view,
                                 *query_minimizers,
                                 idx,
                                 idx_params,
@@ -4669,6 +4686,9 @@ template <class S>
                     auto resident_target =
                         bioseq::storage::make_lazy_in_memory(
                             resident->range);
+                    const auto resident_target_view =
+                        bioseq::storage::as_lazy_sequence_view(
+                            resident_target);
                     const bool can_defer_recompute_persist =
                         can_defer_recompute_minimizer_persist(
                             *scanner_pg_ctx, params);
@@ -4696,7 +4716,7 @@ template <class S>
                                 *deferred_persist_choice);
                     } else {
                         collection = minimap_port_segmented_pg_checked(
-                            lazy_query, resident_target, params);
+                            lazy_query_view, resident_target_view, params);
                         if (scanner_pg_ctx->recompute_async_persist_active
                             && (params.kmer_size != 15
                                 || params.window_size != 10)) {
@@ -4717,7 +4737,7 @@ template <class S>
                     }
                 } else {
                     collection = minimap_port_segmented_pg_checked(
-                        fq_pg, ft_pg, params);
+                        fq_pg_view, ft_pg_view, params);
                     stage_recompute_mps_build_if_selected(
                         *scanner_pg_ctx,
                         *loc_opt,
@@ -4732,8 +4752,10 @@ template <class S>
             } else {
                 collection =
                     (target_bp_size > kPgSegmentationThresholdBp)
-                        ? minimap_port_segmented_pg_checked(fq_pg, ft_pg, params)
-                        : minimap_port_pg_checked(fq_pg, ft_pg, params);
+                        ? minimap_port_segmented_pg_checked(
+                            fq_pg_view, ft_pg_view, params)
+                        : minimap_port_pg_checked(
+                            fq_pg_view, ft_pg_view, params);
                 stage_recompute_mps_build_if_selected(
                     *scanner_pg_ctx,
                     *loc_opt,
@@ -4750,10 +4772,14 @@ template <class S>
         compact_sequence_range<S> target_seq{*target_hdr};
         bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
             bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
+        const auto ft_pg_view =
+            bioseq::storage::as_lazy_sequence_view(ft_pg);
         collection =
             (target_bp_size > kPgSegmentationThresholdBp)
-                ? minimap_port_segmented_pg_checked(fq_pg, ft_pg, params)
-                : minimap_port_pg_checked(fq_pg, ft_pg, params);
+                ? minimap_port_segmented_pg_checked(
+                    fq_pg_view, ft_pg_view, params)
+                : minimap_port_pg_checked(
+                    fq_pg_view, ft_pg_view, params);
     }
 
     if (query_sketch_host_wall_ns != 0u) {
@@ -4824,7 +4850,12 @@ template <class S>
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-    return minimap_port_pg_checked(lazy_query, lazy_target, params);
+    const auto lazy_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto lazy_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_target);
+    return minimap_port_pg_checked(
+        lazy_query_view, lazy_target_view, params);
 }
 #endif
 
@@ -4839,7 +4870,12 @@ template <class S>
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-    return minimap_port_segmented_pg_checked(lazy_query, lazy_target, params);
+    const auto lazy_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto lazy_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_target);
+    return minimap_port_segmented_pg_checked(
+        lazy_query_view, lazy_target_view, params);
 }
 #endif
 
@@ -4859,7 +4895,9 @@ template <class S>
         chunked::from_range(query_seq)};
     bioseq::storage::lazy_compact_sequence<S, chunked> ft{
         chunked::from_range(target_seq)};
-    return minimap_port_pg_checked(fq, ft, params);
+    const auto fq_view = bioseq::storage::as_lazy_sequence_view(fq);
+    const auto ft_view = bioseq::storage::as_lazy_sequence_view(ft);
+    return minimap_port_pg_checked(fq_view, ft_view, params);
 }
 #endif
 
@@ -4879,7 +4917,9 @@ template <class S>
         chunked::from_range(query_seq)};
     bioseq::storage::lazy_compact_sequence<S, chunked> ft{
         chunked::from_range(target_seq)};
-    return minimap_port_segmented_pg_checked(fq, ft, params);
+    const auto fq_view = bioseq::storage::as_lazy_sequence_view(fq);
+    const auto ft_view = bioseq::storage::as_lazy_sequence_view(ft);
+    return minimap_port_segmented_pg_checked(fq_view, ft_view, params);
 }
 #endif
 
@@ -4913,6 +4953,10 @@ template <class S>
     auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
     auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
+    const auto lazy_query_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_query);
+    const auto lazy_target_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_target);
     if (chunked_scanner_forced) {
         using chunked = bioseq::storage::sequence_scanner_test_chunked<
             typename compact_sequence_range<S>::traits::storage_unit,
@@ -4921,13 +4965,17 @@ template <class S>
             chunked::from_range(query_seq)};
         bioseq::storage::lazy_compact_sequence<S, chunked> ft{
             chunked::from_range(target_seq)};
+        const auto fq_view = bioseq::storage::as_lazy_sequence_view(fq);
+        const auto ft_view = bioseq::storage::as_lazy_sequence_view(ft);
         return (target_bp_size > kPgSegmentationThresholdBp)
-            ? minimap_port_segmented_pg_checked(fq, ft, params)
-            : minimap_port_pg_checked(fq, ft, params);
+            ? minimap_port_segmented_pg_checked(fq_view, ft_view, params)
+            : minimap_port_pg_checked(fq_view, ft_view, params);
     }
     return (target_bp_size > kPgSegmentationThresholdBp)
-        ? minimap_port_segmented_pg_checked(lazy_query, lazy_target, params)
-        : minimap_port_pg_checked(lazy_query, lazy_target, params);
+        ? minimap_port_segmented_pg_checked(
+            lazy_query_view, lazy_target_view, params)
+        : minimap_port_pg_checked(
+            lazy_query_view, lazy_target_view, params);
 #endif
 }
 #endif
@@ -6936,6 +6984,9 @@ template <class S>
                         const auto resident_target =
                             bioseq::storage::make_lazy_in_memory(
                                 resident->range);
+                        const auto resident_target_view =
+                            bioseq::storage::as_lazy_sequence_view(
+                                resident_target);
                         const auto* const format6_reader =
                             native_group->persisted_format6_reader
                             ? &*native_group->persisted_format6_reader
@@ -6971,7 +7022,7 @@ template <class S>
                             "persisted fragment-native parallel seed wave",
                             [&native_collections,
                              &native_query_params,
-                             &resident_target,
+                             resident_target_view,
                              &retained_query_sketches,
                              per_row_query_hdrs,
 							 format6_reader,
@@ -6986,7 +7037,7 @@ template <class S>
                                 const auto align_query =
                                     [&native_collections,
                                      &native_query_params,
-                                     &resident_target,
+                                     resident_target_view,
                                      &retained_query_sketches,
                                      per_row_query_hdrs](
                                             const std::size_t row,
@@ -6998,10 +7049,14 @@ template <class S>
                                             bioseq::storage::
                                                 make_lazy_in_memory(
                                                     query_seq);
+                                        const auto lazy_query_view =
+                                            bioseq::storage::
+                                                as_lazy_sequence_view(
+                                                    lazy_query);
                                         native_collections[row] =
                                             minimap2_port_with_index(
-                                                lazy_query,
-                                                resident_target,
+                                                lazy_query_view,
+                                                resident_target_view,
                                                 retained_query_sketches[row]
                                                     ->minimizers,
                                                 target_index,

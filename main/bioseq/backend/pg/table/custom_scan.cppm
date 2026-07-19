@@ -29,16 +29,24 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <limits>
 #include <memory>
+#include <string>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 
 extern "C" {
 #include "commands/extension.h"
+#include "storage/dsm.h"
+#include "storage/shmem.h"
 #include "utils/inval.h"
 }
 
@@ -80,6 +88,7 @@ import bioseq.storage.indexing_pg.admin;    // estimate_index_presence, open_seq
 import bioseq.instr;                      // runtime profiler — summary at scan end
 import bioseq.common.sequan_compat;                     // seq:: alphabet alias used by sequence_custom_alphabet
 import bioseq.pg_utils.nodes;             // DOC0333 — pg_node_view/try_as, expression walker+mutator adapters, arg-shape helpers
+import bioseq.table.batch_sort_scan;      // the one chained create_upper_paths dispatcher
 
 using namespace bioseq::pg_utils;         // DOC0333 — node view/walker/mutator helpers live in bioseq::pg_utils
 
@@ -190,17 +199,8 @@ struct MmsearchParamRebind {
 	uint8_t    storage_unit_byte_width         = 0;
 	std::string column_name;
 	/*
-	 * Stash a pointer to the SPECIFIC mmsearch FuncExpr that
-	 * registered this rebind. Selecting the first mmsearch in
-	 * plan.qual order is incorrect because the planner is free to
-	 * order quals differently from our priority-classified order.
-	 * For Param + Const-extra stacking the planner often places
-	 * the Const first, so a plan-order lookup would return the
-	 * Const FuncExpr (whose arg1 is a Const) and the Param-rebind
-	 * loop would silently fall through, leaving the buffer's
-	 * primary mmsearch with stale bytes. Stashing the
-	 * Param-driving FuncExpr at register time lets ReScan resolve
-	 * the correct Param every rescan.
+	 * Stash the exact privately owned FuncExpr so ReScan resolves the same Param
+	 * without consulting or depending on executable qual order.
 	 */
 	FuncExpr*  mmsearch_fe        = nullptr;
 };
@@ -299,6 +299,8 @@ struct BioseqScanRuntime {
 	AttrNumber                                edit_sequence_attno = InvalidAttrNumber;
 	Index                                     match_sequence_varno = 0;
 	AttrNumber                                match_sequence_attno = InvalidAttrNumber;
+	/* SQL strictness for an owned mmsearch whose Const/Param query is NULL. */
+	bool                                      mmsearch_null_input = false;
 	/* True only after the access-method source itself returned EOF. */
 	bool                                      source_exhausted = false;
 	bool                                      locator_passthrough = false;
@@ -321,6 +323,8 @@ struct BioseqScanRuntime {
 /* Internal planner/executor ABI for the two-child join. */
 constexpr int kBioseqBatchJoinPlanVersion = 2;
 constexpr int kBioseqLocatorPassthroughMagic = 0x424c5031; /* BLP1 */
+constexpr int kBioseqMmsearchOwnerMagic = 0x424d4f31; /* BMO1 */
+constexpr int kBioseqMmsearchOwnerVersion = 1;
 constexpr int kBioseqBatchJoinPathPrivateFields = 13;
 constexpr int kBioseqBatchJoinPrivateFields = 17;
 
@@ -682,8 +686,8 @@ static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
 }
 
 /*
- * Classifier used by AddBioseqColumnScanPath's wehavemagic sweep and by
- * BeginCustomScan's primary-key discovery. Returns true if funcid
+ * Classifier used by planner ownership and BeginCustomScan discovery. Returns
+ * true if funcid
  * matches any of the bioseq projection stubs (i.e. anything that
  * VarInjectorMutator will rewrite into a placeholder Const).
  */
@@ -721,12 +725,179 @@ contains_mmsearch_qualifier(Node* node, const BioseqStubOids& oids)
 	return pg_walk_expression_including_root(node, data, visitor);
 }
 
+struct MmsearchOccurrenceCounter {
+	const BioseqStubOids* oids = nullptr;
+	std::size_t count = 0;
+};
+
+struct mmsearch_occurrence_visitor {
+	[[nodiscard]] pg_walk_step
+	operator()(pg_expression_walk_cursor, pg_node_view node,
+			   MmsearchOccurrenceCounter& data) const {
+		if (FuncExpr* fe = node.try_as<FuncExpr>();
+			fe != nullptr && is_mmsearch_funcid(fe->funcid, *data.oids)) {
+			++data.count;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+[[nodiscard]] static std::size_t
+count_mmsearch_occurrences(Node* node, const BioseqStubOids& oids)
+{
+	MmsearchOccurrenceCounter data{ &oids, 0 };
+	mmsearch_occurrence_visitor visitor;
+	pg_walk_expression_including_root(node, data, visitor);
+	return data.count;
+}
+
+struct OwnedMmsearchRestriction {
+	RestrictInfo* restriction = nullptr;
+	FuncExpr* normalized_expr = nullptr;
+};
+
 /*
- * mmsearch() must remain in scan.plan.qual so ExecQual and the custom
- * mmsearch runtime see it, but the columnar reader's qual list is only used
- * for min/max chunk pruning. The reader cannot prune on mmsearch and deep
- * copying that FuncExpr during table_beginscan has crashed on same-row
- * mmsearch(seq, seq) plans, so strip those clauses at the storage boundary.
+ * Choose the one RestrictInfo the custom scan is allowed to execute.  The
+ * decision is deliberately made against the original planner nodes: their
+ * pointer identity is the proof later used to remove only this restriction
+ * from executable quals and to prune competing paths that would execute it.
+ */
+[[nodiscard]] static OwnedMmsearchRestriction
+choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
+								 RangeTblEntry* rte, List* restrictions,
+								 Relids param_relids,
+								 const BioseqStubOids& oids)
+{
+	std::size_t semantic_calls = 0;
+	RestrictInfo* semantic_restriction = nullptr;
+	for (RestrictInfo* rinfo : PList<RestrictInfo>(restrictions)) {
+		const std::size_t in_clause = count_mmsearch_occurrences(
+			reinterpret_cast<Node*>(rinfo->clause), oids);
+		semantic_calls += in_clause;
+		if (in_clause != 0) {
+			semantic_restriction = rinfo;
+		}
+	}
+	if (semantic_calls > 1) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("stacked mmsearch qualifiers are unsupported"),
+			 errdetail("A Bioseq scan can own exactly one semantic mmsearch call."),
+			 errhint("Split the alignment predicates into separate query levels.")));
+	}
+	if (semantic_calls == 0 || semantic_restriction == nullptr) {
+		return {};
+	}
+
+	/* Nested Boolean/CASE/NOT shapes are not equivalent to a consumed, strict
+	 * top-level predicate and therefore remain executable SQL quals. */
+	FuncExpr* original = pg_node_try_as<FuncExpr>(
+		reinterpret_cast<Node*>(semantic_restriction->clause));
+	if (original == nullptr || !is_mmsearch_funcid(original->funcid, oids)) {
+		return {};
+	}
+	const int arity = list_length(original->args);
+	if ((original->funcid == oids.mmsearch_oid && arity != 2)
+		|| (original->funcid == oids.mmsearch_with_opts_oid && arity != 3)) {
+		return {};
+	}
+
+	/* Fail closed under row-level security, security-barrier quals, leaky
+	 * ordering, pseudoconstants, or volatile siblings. */
+	if (root == nullptr || root->parse == nullptr || root->parse->hasRowSecurity
+		|| rte == nullptr || rte->securityQuals != NIL
+		|| semantic_restriction->pseudoconstant
+		|| semantic_restriction->security_level != 0
+		|| !restriction_is_securely_promotable(semantic_restriction, rel)) {
+		return {};
+	}
+	for (RestrictInfo* sibling : PList<RestrictInfo>(restrictions)) {
+		if (sibling != semantic_restriction
+			&& contain_volatile_functions(
+				reinterpret_cast<Node*>(sibling->clause))) {
+			return {};
+		}
+	}
+
+	pg_first_two_node_args args = pg_first_two_args_if_arity_between(*original, 2, 3);
+	if (!args.present()) {
+		return {};
+	}
+	Var* target = pg_node_try_as<Var>(args.first);
+	if (target == nullptr || target->varlevelsup != 0
+		|| target->varno != rel->relid || target->varattno <= 0
+		|| target->vartype != oids.bioseq_seq_type_oid
+		|| target->vartypmod < 0) {
+		return {};
+	}
+
+	Node* query = args.second;
+	if (Const* constant = pg_node_try_as<Const>(query)) {
+		if (constant->consttype != oids.bioseq_seq_type_oid
+			|| constant->consttypmod < 0) {
+			return {};
+		}
+	} else if (Param* param = pg_node_try_as<Param>(query)) {
+		if (param->paramtype != oids.bioseq_seq_type_oid
+			|| (param->paramkind != PARAM_EXEC
+				&& param->paramkind != PARAM_EXTERN)
+			|| (param->paramtypmod < 0 && param->paramkind != PARAM_EXTERN)) {
+			return {};
+		}
+	} else if (Var* query_var = pg_node_try_as<Var>(query)) {
+		const bool same_relation = query_var->varno == rel->relid;
+		const bool available_outer = bms_is_member(query_var->varno, param_relids);
+		if (query_var->varlevelsup != 0 || query_var->varattno <= 0
+			|| query_var->vartype != oids.bioseq_seq_type_oid
+			|| query_var->vartypmod < 0
+			|| (!same_relation && !available_outer)) {
+			return {};
+		}
+	} else {
+		return {};
+	}
+
+	FuncExpr* normalized = copyObject(original);
+	if (arity == 3) {
+		Node* option = reinterpret_cast<Node*>(list_nth(normalized->args, 2));
+		if (contain_volatile_functions(option)) {
+			return {};
+		}
+		Node* folded = eval_const_expressions(root, option);
+		Const* option_const = pg_node_try_as<Const>(folded);
+		if (option_const == nullptr
+			|| option_const->consttype != oids.bioseq_aligner_options_type_oid) {
+			return {};
+		}
+		lfirst(list_nth_cell(normalized->args, 2)) = folded;
+	}
+
+	return { semantic_restriction, normalized };
+}
+
+[[nodiscard]] static List*
+restrictions_without_owned_mmsearch(List* restrictions,
+							 RestrictInfo* owned,
+							 Expr* owned_clause,
+							 bool restrictions_are_private_copies)
+{
+	PList<RestrictInfo> result;
+	for (RestrictInfo* rinfo : PList<RestrictInfo>(restrictions)) {
+		if (owned != nullptr
+			&& (rinfo == owned
+				|| (restrictions_are_private_copies
+					&& equal(rinfo->clause, owned_clause)))) {
+			continue;
+		}
+		result.append(rinfo);
+	}
+	return result.release();
+}
+
+/*
+ * The owned mmsearch is removed before these storage quals are built. Keep a
+ * defensive filter at the reader boundary so an unowned/nested rendezvous
+ * expression can never be mistaken for a min/max pruning predicate.
  */
 [[nodiscard]] static List*
 storage_prunable_quals_without_mmsearch(List* quals, const BioseqStubOids& oids)
@@ -2692,8 +2863,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 	if (root == nullptr || joinrel == nullptr || outerrel == nullptr
 		|| innerrel == nullptr || extra == nullptr || jointype != JOIN_INNER
 		|| outerrel->reloptkind != RELOPT_BASEREL
-		|| innerrel->reloptkind != RELOPT_BASEREL
-		|| list_length(extra->restrictlist) != 1) {
+		|| innerrel->reloptkind != RELOPT_BASEREL) {
 		return;
 	}
 	// shared_preload_libraries installs this hook cluster-wide. Databases that
@@ -2702,33 +2872,60 @@ BioseqBatchJoinSetJoinPathlistHook(
 		return;
 	}
 
-	RestrictInfo* restriction = reinterpret_cast<RestrictInfo*>(
-		linitial(extra->restrictlist));
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	std::size_t semantic_calls = 0;
+	RestrictInfo* restriction = nullptr;
+	for (RestrictInfo* candidate : PList<RestrictInfo>(extra->restrictlist)) {
+		const std::size_t calls = count_mmsearch_occurrences(
+			reinterpret_cast<Node*>(candidate->clause), oids);
+		semantic_calls += calls;
+		if (calls != 0) restriction = candidate;
+	}
+	if (semantic_calls > 1) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("stacked mmsearch join qualifiers are unsupported"),
+			 errhint("Split the alignment predicates into separate query levels.")));
+	}
+	if (semantic_calls != 1 || list_length(extra->restrictlist) != 1
+		|| restriction == nullptr) {
+		return;
+	}
 	FuncExpr* mmsearch = restriction == nullptr
 		? nullptr
 		: pg_node_try_as<FuncExpr>(
 			reinterpret_cast<Node*>(restriction->clause));
-	const BioseqStubOids& oids = get_cached_stub_oids();
-	if (mmsearch == nullptr
-		|| mmsearch->funcid != oids.mmsearch_with_opts_oid
-		|| list_length(mmsearch->args) != 3) {
+	if (mmsearch == nullptr || !is_mmsearch_funcid(mmsearch->funcid, oids)
+		|| (mmsearch->funcid == oids.mmsearch_oid
+			&& list_length(mmsearch->args) != 2)
+		|| (mmsearch->funcid == oids.mmsearch_with_opts_oid
+			&& list_length(mmsearch->args) != 3)
+		|| root->parse == nullptr || root->parse->hasRowSecurity
+		|| restriction->pseudoconstant || restriction->security_level != 0
+		|| !restriction_is_securely_promotable(restriction, joinrel)) {
 		return;
 	}
 	PList<Node> arguments(mmsearch->args);
 	Var* target_var = pg_node_try_as<Var>(arguments.first());
 	Var* query_var = pg_node_try_as<Var>(arguments.second());
 	/* Eligibility is non-throwing: fold only the option expression on a
-	 * private copy, and leave unsupported parameter/volatile/NULL shapes to
-	 * PostgreSQL's ordinary join paths. */
+	 * private copy. A typed NULL Const means default options. */
 	auto* batch_mmsearch = static_cast<FuncExpr*>(copyObject(mmsearch));
-	Node* folded_options = eval_const_expressions(
-		root, reinterpret_cast<Node*>(copyObject(arguments.third())));
-	lfirst(list_nth_cell(batch_mmsearch->args, 2)) = folded_options;
-	Const* options = pg_node_try_as<Const>(folded_options);
-	if (target_var == nullptr || query_var == nullptr || options == nullptr
-		|| options->constisnull
-		|| options->consttype != oids.bioseq_aligner_options_type_oid
+	if (list_length(mmsearch->args) == 3) {
+		Node* folded_options = eval_const_expressions(
+			root, reinterpret_cast<Node*>(copyObject(arguments.third())));
+		Const* options = pg_node_try_as<Const>(folded_options);
+		if (options == nullptr
+			|| options->consttype != oids.bioseq_aligner_options_type_oid) {
+			return;
+		}
+		lfirst(list_nth_cell(batch_mmsearch->args, 2)) = folded_options;
+	}
+	if (target_var == nullptr || query_var == nullptr
 		|| target_var->varattno <= 0 || query_var->varattno <= 0
+		|| target_var->varlevelsup != 0 || query_var->varlevelsup != 0
+		|| !bms_is_empty(target_var->varnullingrels)
+		|| !bms_is_empty(query_var->varnullingrels)
 		|| target_var->vartype != oids.bioseq_seq_type_oid
 		|| query_var->vartype != oids.bioseq_seq_type_oid
 		|| !batch_join_typmod_is_supported(target_var->vartypmod)
@@ -2761,7 +2958,10 @@ BioseqBatchJoinSetJoinPathlistHook(
 		return;
 	}
 	RangeTblEntry* target_rte = rt_fetch(target_var->varno, root->parse->rtable);
+	RangeTblEntry* query_rte = rt_fetch(query_var->varno, root->parse->rtable);
 	if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION
+		|| query_rte == nullptr || query_rte->rtekind != RTE_RELATION
+		|| target_rte->securityQuals != NIL || query_rte->securityQuals != NIL
 		|| !OidIsValid(target_rte->relid)
 		|| !IsBioseqColumnTableAmTable(target_rte->relid)
 		|| batch_join_target_expression_is_forbidden(
@@ -2850,6 +3050,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 		copyObject(target_path->custom_private));
 	locator_path->custom_paths = static_cast<List*>(
 		copyObject(target_path->custom_paths));
+	locator_path->custom_restrictinfo = NIL;
 	if (!path_target_contains_expression(
 			locator_path->path.pathtarget,
 			reinterpret_cast<Expr*>(target_var))) {
@@ -2901,65 +3102,37 @@ BioseqBatchJoinSetJoinPathlistHook(
 		* (cpu_tuple_cost
 			+ cpu_operator_cost * (1.0 + planned_query_width / 64.0));
 	const Cost output_cost = join_path->path.rows * cpu_tuple_cost;
-	const Cost honest_startup_cost = query_path->total_cost
-		+ locator_path->path.startup_cost
-		+ query_materialization_cost;
+	const Cost honest_startup_cost = std::max<Cost>(0,
+		query_path->total_cost
+			+ locator_path->path.startup_cost
+			+ query_materialization_cost);
 	const Cost honest_total_cost = std::max(
 		honest_startup_cost,
-		query_path->total_cost
+		std::max<Cost>(0, query_path->total_cost
 			+ locator_path->path.total_cost
 			+ query_materialization_cost
-			+ output_cost);
+			+ output_cost));
 	if (!std::isfinite(honest_startup_cost)
 		|| !std::isfinite(honest_total_cost)) {
 		return;
 	}
 
-	/* BioseqScan uses a historical negative planner sentinel (-100000 per
-	 * match-result owner) to win against the SQL rendezvous stub. A normal
-	 * parameterized Nested Loop multiplies that sentinel by the estimated
-	 * query rows, while this executor correctly charges its one target child
-	 * once. Consequently an honest BatchJoin cost can never be selected even
-	 * though its physical work is strictly less. After every semantic guard
-	 * above has passed, carry the honest cost as private EXPLAIN evidence but
-	 * place this sole owner path below the finite incumbent join-path floor.
-	 * The 2% margin is intentionally larger than PostgreSQL's fuzzy path-cost
-	 * comparison and remains finite/overflow checked. */
-	Cost incumbent_cost_floor = (std::numeric_limits<Cost>::max)();
-	bool incumbent_cost_present = false;
+	/* Retain the best incumbent as EXPLAIN evidence only.  Path selection is
+	 * structural once ownership is established, never a negative sentinel. */
+	Cost incumbent_cost_floor = honest_total_cost;
 	for (Path* incumbent : PList<Path>(joinrel->pathlist)) {
 		if (incumbent == nullptr) continue;
-		if (std::isfinite(incumbent->startup_cost)) {
-			incumbent_cost_floor = std::min(
-				incumbent_cost_floor, incumbent->startup_cost);
-			incumbent_cost_present = true;
-		}
-		if (std::isfinite(incumbent->total_cost)) {
+		if (std::isfinite(incumbent->total_cost)
+			&& incumbent->total_cost >= 0) {
 			incumbent_cost_floor = std::min(
 				incumbent_cost_floor, incumbent->total_cost);
-			incumbent_cost_present = true;
 		}
 	}
-	if (!incumbent_cost_present) {
-		incumbent_cost_floor = std::min(
-			honest_startup_cost, honest_total_cost);
-	}
-	const long double floor_wide = incumbent_cost_floor;
-	const long double preference_margin = std::max<long double>(
-		1.0L, std::abs(floor_wide) * 0.02L);
-	const long double preferred_wide = floor_wide - preference_margin;
-	if (!std::isfinite(preferred_wide)
-		|| preferred_wide
-			< static_cast<long double>(
-				(std::numeric_limits<Cost>::lowest)())) {
-		return;
-	}
-	const Cost preferred_cost = static_cast<Cost>(preferred_wide);
-	join_path->path.startup_cost = std::min(
-		honest_startup_cost, preferred_cost);
-	join_path->path.total_cost = std::min(
-		honest_total_cost, preferred_cost);
+	join_path->path.startup_cost = std::max<Cost>(0, honest_startup_cost);
+	join_path->path.total_cost = std::max(
+		join_path->path.startup_cost, std::max<Cost>(0, honest_total_cost));
 	join_path->flags = 0;
+	join_path->custom_restrictinfo = list_make1(restriction);
 	join_path->custom_paths = list_make2(locator_path, query_path);
 	join_path->custom_private = list_make5(
 		makeInteger(kBioseqBatchJoinPlanVersion),
@@ -2991,6 +3164,20 @@ BioseqBatchJoinSetJoinPathlistHook(
 	Assert(list_length(join_path->custom_private)
 		== kBioseqBatchJoinPathPrivateFields);
 	join_path->methods = &BioseqBatchJoinPathMethods;
+	auto retain_existing_owner = [restriction](List* paths) {
+		PList<Path> survivors;
+		for (Path* incumbent : PList<Path>(paths)) {
+			if (incumbent != nullptr && IsA(incumbent, CustomPath)
+				&& list_member_ptr(
+					reinterpret_cast<CustomPath*>(incumbent)->custom_restrictinfo,
+					restriction)) {
+				survivors.append(incumbent);
+			}
+		}
+		return survivors.release();
+	};
+	joinrel->pathlist = retain_existing_owner(joinrel->pathlist);
+	joinrel->partial_pathlist = retain_existing_owner(joinrel->partial_pathlist);
 	add_path(joinrel, &join_path->path);
 }
 
@@ -3925,6 +4112,56 @@ AddBioseqColumnScanPaths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	AddBioseqColumnScanPathsRec(root, rel, rte, paramRelids, candidateRelids,
 							depthLimit);
 
+	/* Once a CustomPath claims a restriction, remove only alternatives that
+	 * would execute that same RestrictInfo through the SQL function.  This is
+	 * structural selection; costs remain honest and nonnegative. */
+	PList<RestrictInfo> owners;
+	for (Path* candidate : PList<Path>(rel->pathlist)) {
+		if (!IsA(candidate, CustomPath)) continue;
+		CustomPath* custom = reinterpret_cast<CustomPath*>(candidate);
+		bool is_mmsearch_owner = false;
+		for (Node* private_node : PList<Node>(custom->custom_private)) {
+			if (private_node == nullptr || !IsA(private_node, List)) continue;
+			List* tag = reinterpret_cast<List*>(private_node);
+			if (list_length(tag) == 3
+				&& IsA(reinterpret_cast<Node*>(linitial(tag)), Integer)
+				&& intVal(linitial(tag)) == kBioseqMmsearchOwnerMagic) {
+				is_mmsearch_owner = true;
+				break;
+			}
+		}
+		if (!is_mmsearch_owner) continue;
+		for (RestrictInfo* owner : PList<RestrictInfo>(custom->custom_restrictinfo)) {
+			if (!list_member_ptr(owners.ptr(), owner)) owners.append(owner);
+		}
+	}
+	auto prune_owned = [rel, &owners](List* paths) {
+		PList<Path> survivors;
+		for (Path* candidate : PList<Path>(paths)) {
+			bool remove = false;
+			for (RestrictInfo* owner : owners) {
+				const bool executes_owner =
+					list_member_ptr(rel->baserestrictinfo, owner)
+					|| (candidate->param_info != nullptr
+						&& list_member_ptr(candidate->param_info->ppi_clauses, owner));
+				const bool owns_restriction = IsA(candidate, CustomPath)
+					&& list_member_ptr(
+						reinterpret_cast<CustomPath*>(candidate)->custom_restrictinfo,
+						owner);
+				if (executes_owner && !owns_restriction) {
+					remove = true;
+					break;
+				}
+			}
+			if (!remove) survivors.append(candidate);
+		}
+		return survivors.release();
+	};
+	if (!owners.empty()) {
+		rel->pathlist = prune_owned(rel->pathlist);
+		rel->partial_pathlist = prune_owned(rel->partial_pathlist);
+	}
+
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPaths() returning");
 }
 
@@ -3970,9 +4207,34 @@ AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 	Assert(!bms_overlap(paramRelids, candidateRelids));
 
 	Path *bioseqColumnScanPath = AddBioseqColumnScanPath(root, rel, rte, paramRelids);
-	add_path(rel, bioseqColumnScanPath);
+	CustomPath* owner_path = IsA(bioseqColumnScanPath, CustomPath)
+		? reinterpret_cast<CustomPath*>(bioseqColumnScanPath) : nullptr;
+	if (owner_path != nullptr
+		&& list_length(owner_path->custom_restrictinfo) == 1) {
+		RestrictInfo* owner = reinterpret_cast<RestrictInfo*>(
+			linitial(owner_path->custom_restrictinfo));
+		auto prune_competing_owner_execution = [rel, owner](List* paths) {
+			PList<Path> survivors;
+			for (Path* candidate : PList<Path>(paths)) {
+				const bool executes_owner =
+					list_member_ptr(rel->baserestrictinfo, owner)
+					|| (candidate->param_info != nullptr
+						&& list_member_ptr(candidate->param_info->ppi_clauses, owner));
+				const bool owns_restriction = IsA(candidate, CustomPath)
+					&& list_member_ptr(
+						reinterpret_cast<CustomPath*>(candidate)->custom_restrictinfo,
+						owner);
+				if (!executes_owner || owns_restriction) survivors.append(candidate);
+			}
+			return survivors.release();
+		};
+		rel->pathlist = prune_competing_owner_execution(rel->pathlist);
+		rel->partial_pathlist =
+			prune_competing_owner_execution(rel->partial_pathlist);
+	}
 	if (bioseq_enable_parallel_execution)
 		bioseqColumnScanPath->total_cost += bioseqColumnScanPath->rows * 0.1;
+	add_path(rel, bioseqColumnScanPath);
 
 	/* For columnar custom scan we should also do planning for parallel exeuction
 	 * if it is enabled with GUC.
@@ -4212,47 +4474,6 @@ struct cost_test_visitor {
 };
 
 /*
- * Walker context for bioseq_projection_walker — pairs a stub-OID
- * snapshot with an integer counter incremented for each detected
- * bioseq.<...>(...) call site. The walker handles FuncExprs at any
- * depth, including children of PlaceHolderVar wrappers introduced by
- * bioseq_placeholder_support when the query has joins or aggregates.
- */
-struct BioseqProjectionCounter {
-	const BioseqStubOids* stub_oids;
-	int* count;
-};
-
-struct projection_counter_visitor {
-	[[nodiscard]] pg_walk_step
-	operator()(pg_expression_walk_cursor, pg_node_view node, BioseqProjectionCounter& data) const {
-		if (FuncExpr* fe = node.try_as<FuncExpr>()) {
-			if (is_mmsearch_funcid(fe->funcid, *data.stub_oids)) {
-				bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected mmsearch funcexpr (any depth)");
-				++(*data.count);
-			} else if (is_bioseq_projection_funcid(fe->funcid, *data.stub_oids)) {
-				bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected bioseq projection funcid={}",
-						fe->funcid);
-				++(*data.count);
-			} else if (fe->funcid == data.stub_oids->symbol_count_oid
-					   && list_length(fe->args) == 2) {
-				/*
-				 * symbol_count(Var, Const) is a cost inflator: the scalar
-				 * Postgres-level function path is O(n) over the varlena,
-				 * but the custom scan resolves it via a single O(1) array
-				 * index into meta_sidecar.counts[]. We count every call
-				 * site so the negative-cost adjustment scales with the
-				 * number of rewrites VarInjectorMutator will perform.
-				 */
-				bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() detected bioseq.symbol_count funcexpr");
-				++(*data.count);
-			}
-		}
-		return pg_walk_step::descend;
-	}
-};
-
-/*
  * Create and add a path with the given parameterization paramRelids.
  *
  * XXX: Consider refactoring to be more like postgresGetForeignPaths(). The
@@ -4282,31 +4503,9 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	const BioseqStubOids& stub_oids = get_cached_stub_oids();
 
-	bool wehavemagic = false;
-	int wehavemagic_cnt = 0;
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() mmsearch_oid={} score_oid={} cigar_oid={} query_start_oid={} symbol_count_oid={}",
 		stub_oids.mmsearch_oid, stub_oids.score_oid, stub_oids.cigar_oid, stub_oids.query_start_oid,
 		stub_oids.symbol_count_oid);
-	/*
-	 * Tree-walk the parse tlist (and its expression children) to count
-	 * every bioseq.* FuncExpr. A flat top-level scan misses three real
-	 * shapes that need the custom scan to win:
-	 *   (a) Targetlist entries holding a TargetEntry whose expr is a
-	 *       PlaceHolderVar — this is the post-planner-support shape for
-	 *       any bioseq.* projection in a query with JOINs or aggs.
-	 *   (b) Composite expressions like `bioseq.cigar(t1.pk) || '!'`
-	 *       where the FuncExpr is a child of a higher operator.
-	 *   (c) `symbol_count(Var, 'L')` calls nested similarly.
-	 * Without the walker, picking PHV-wrapping in
-	 * bioseq_placeholder_support would silently lose the cost reduction
-	 * and the planner would prefer Index Scan / Seq Scan over our
-	 * custom scan — observed for the LEFT JOIN regression test.
-	 */
-	BioseqProjectionCounter walker_data{ &stub_oids, &wehavemagic_cnt };
-	projection_counter_visitor projection_visitor;
-	pg_walk_expression_including_root(
-		reinterpret_cast<Node*>(root->parse->targetList), walker_data, projection_visitor);
-	wehavemagic = wehavemagic_cnt > 0;
 
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() walking pathtarget expressions");
 	cost_test_visitor cost_visitor;
@@ -4325,55 +4524,36 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	 * Usable clauses for this parameterization exist in baserestrictinfo and
 	 * ppi_clauses.
 	 */
-	PList<RestrictInfo> allClauses = copyObject(rel->baserestrictinfo);
-	if (path->param_info != NULL)
-	{
-		allClauses.concat(path->param_info->ppi_clauses);
+	PList<RestrictInfo> clauseReferences;
+	for (RestrictInfo* rinfo : PList<RestrictInfo>(rel->baserestrictinfo)) {
+		if (!list_member_ptr(clauseReferences.ptr(), rinfo)) {
+			clauseReferences.append(rinfo);
+		}
 	}
+	if (path->param_info != NULL) {
+		for (RestrictInfo* rinfo : PList<RestrictInfo>(path->param_info->ppi_clauses)) {
+			if (!list_member_ptr(clauseReferences.ptr(), rinfo)) {
+				clauseReferences.append(rinfo);
+			}
+		}
+	}
+	const OwnedMmsearchRestriction owned_mmsearch =
+		choose_owned_mmsearch_restriction(
+			root, rel, rte, clauseReferences.ptr(), paramRelids, stub_oids);
 
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() iterating allClauses (no-op pass for tracing)");
-	for (auto restrict_info : allClauses)
+	for (auto restrict_info : clauseReferences)
 	{
 		(void) restrict_info;
 	}
 
-	allClauses = FilterPushdownClauses(root, rel, allClauses);
-
-	/*
-	 * Count mmsearch FuncExprs that landed in this path's scan-quals
-	 * (allClauses already contains both baserestrictinfo and the
-	 * `ppi_clauses` Postgres added because `paramRelids` brings them
-	 * into scope). For an unparameterised path, a cross-table
-	 * mmsearch like `mmsearch(t1.seq, t2.seq2)` lives in the join
-	 * filter and is NOT in allClauses; for the matching
-	 * parameterised path, it IS — and we want the planner to pick
-	 * that one. Each such qual contributes another unit of
-	 * wehavemagic so the parameterised path's negative cost is
-	 * strictly more negative than the unparameterised competitor.
-	 *
-	 * Without this boost the unparameterised path's cost matches the
-	 * parameterised one (both have wehavemagic_cnt = 1 from the
-	 * targetlist's bioseq.cigar projection). The planner then picks
-	 * the simpler unparameterised path + Nested-Loop-with-join-filter
-	 * shape, which silently runs the mmsearch C stub (always TRUE)
-	 * and emits every cross-product row with NULL bioseq.* columns —
-	 * the regression the user reported.
-	 */
-	bool has_mmsearch_scan_qual = false;
-	{
-			const BioseqStubOids& mmsearch_oids = get_cached_stub_oids();
-			for (auto rinfo : allClauses) {
-				Node* clause_node = reinterpret_cast<Node*>(rinfo->clause);
-				if (contains_mmsearch_qualifier(clause_node, mmsearch_oids)) {
-					has_mmsearch_scan_qual = true;
-					wehavemagic = true;
-					++wehavemagic_cnt;
-					bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() recursively nested mmsearch in scan quals adds wehavemagic; new cnt={}",
-							wehavemagic_cnt);
-				}
-			}
-	}
-	if (has_mmsearch_scan_qual) {
+	PList<RestrictInfo> allClauses(FilterPushdownClauses(
+		root, rel, list_copy(clauseReferences.ptr())));
+	if (owned_mmsearch.restriction != nullptr) {
+		allClauses = restrictions_without_owned_mmsearch(
+			allClauses.release(), owned_mmsearch.restriction,
+			owned_mmsearch.restriction->clause,
+			/*restrictions_are_private_copies=*/true);
 		/*
 		 * DOC0371 \u00a75.2: the POC publishes backend-local proof and has no
 		 * DSM aggregation.  A worker-local snapshot must never masquerade as
@@ -4415,6 +4595,15 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	else
 	{
 		cpath->custom_private = list_make2(NIL, NIL);
+	}
+	if (owned_mmsearch.restriction != nullptr) {
+		cpath->custom_restrictinfo = list_make1(owned_mmsearch.restriction);
+		cpath->custom_private = lappend(cpath->custom_private,
+			list_make3(makeInteger(kBioseqMmsearchOwnerMagic),
+				makeInteger(kBioseqMmsearchOwnerVersion),
+				copyObject(owned_mmsearch.normalized_expr)));
+	} else {
+		cpath->custom_restrictinfo = NIL;
 	}
 
 	int numberOfColumnsRead = 0;
@@ -4461,45 +4650,26 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	CostBioseqColumnScan(root, rel, rte->relid, cpath, numberOfColumnsRead,
 					 numberOfClausesPushed);
 
-	if (wehavemagic) {
-		//(&cpath->path)->total_cost -= 90000;
-		PathTarget* pt = (&cpath->path)->pathtarget;
-		//auto curcost = pt->cost.per_tuple;
-
-		/*
-		 * Estimate what fraction of the scanned relation's rows has a
-		 * prebuilt minimizer index in bioseq_internal.index_sidecar and
-		 * scale an additional cost reduction by that factor. A table with
-		 * 100% sidecar coverage (bioseq.update_index_on_insert = on for
-		 * every INSERT) wins by a fuller margin than one that was bulk-
-		 * loaded with the GUC off. See SPEC_MINIMIZER_STORAGE.md §8 for
-		 * how the GUC toggling interacts with scan-time backfill.
-		 *
-		 * estimate_index_presence() clamps to [0, 1]; the resulting
-		 * delta is in [0, 10000]. wehavemagic_cnt's 100000-per-call
-		 * reduction still dominates so the custom scan always wins when
-		 * a rewrite is possible — the sidecar coverage just adjusts the
-		 * *margin*, not the *direction*, of the preference.
-			 */
-		const float index_presence =
-			bioseq::storage::indexing::estimate_index_presence(
-				rte->relid, rel->tuples,
-				bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX);
-		const double sidecar_bonus = 10000.0 * static_cast<double>(index_presence);
-
-		bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() reducing mmsearch cost path_total={} path_startup={} pertuple={} pt_startup={} cpath_startup={} cpath_total={} magic_cnt={} index_presence={:.4f}",
-			path->total_cost, path->startup_cost, pt->cost.per_tuple, pt->cost.startup,
-			(&cpath->path)->startup_cost, (&cpath->path)->total_cost,
-			wehavemagic_cnt, static_cast<double>(index_presence));
-		/* Apply the sidecar bonus to BOTH startup and total cost so the
-		 * Postgres cost-model invariant (startup_cost <= total_cost)
-		 * stays satisfied. Without the double-subtract the two costs
-		 * diverge when the bonus is positive and some planner paths
-		 * (parallel sort, partition pruning) rely on the invariant
-		 * when ranking candidate plans. */
-		cpath->path.total_cost   = -100000.0 * wehavemagic_cnt - sidecar_bonus;
-		cpath->path.startup_cost = -100000.0 * wehavemagic_cnt - sidecar_bonus;
+	if (owned_mmsearch.normalized_expr != nullptr) {
+		QualCost operand_cost{};
+		cost_qual_eval(&operand_cost,
+			owned_mmsearch.normalized_expr->args, root);
+		const Cost alignment_startup = std::max<Cost>(
+			0.0, operand_cost.startup + cpu_operator_cost * 8.0);
+		const Cost alignment_per_row = std::max<Cost>(
+			0.0, operand_cost.per_tuple + cpu_tuple_cost
+				+ cpu_operator_cost * 16.0);
+		path->startup_cost += alignment_startup;
+		path->total_cost += alignment_startup
+			+ alignment_per_row * std::max(0.0, path->rows);
 	}
+	if (!std::isfinite(path->startup_cost) || path->startup_cost < 0) {
+		path->startup_cost = 0;
+	}
+	if (!std::isfinite(path->total_cost)) {
+		path->total_cost = std::numeric_limits<Cost>::max() / 4.0;
+	}
+	path->total_cost = std::max(path->startup_cost, path->total_cost);
 
 
 	bioseq_report_pg_lazy(BioseqColumnPlannerDebugLevel, [&] {
@@ -4664,14 +4834,38 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	cscan->methods = &BioseqColumnScanScanMethods;
 	cscan->custom_private = NIL;
 	bool locator_passthrough_requested = false;
-	if (list_length(best_path->custom_private) >= 3) {
-		Node* possible_tag = reinterpret_cast<Node*>(
-			list_nth(best_path->custom_private, 2));
-		locator_passthrough_requested = possible_tag != nullptr
-			&& IsA(possible_tag, List)
-			&& list_length(reinterpret_cast<List*>(possible_tag)) == 4
-			&& intVal(list_nth(reinterpret_cast<List*>(possible_tag), 0))
-				== kBioseqLocatorPassthroughMagic;
+	FuncExpr* owned_mmsearch_expr = nullptr;
+	for (Node* possible_tag : PList<Node>(best_path->custom_private)) {
+		if (possible_tag == nullptr || !IsA(possible_tag, List)) continue;
+		List* tag = reinterpret_cast<List*>(possible_tag);
+		if (tag == NIL
+			|| !IsA(reinterpret_cast<Node*>(linitial(tag)), Integer)) continue;
+		if (list_length(tag) == 4
+			&& intVal(list_nth(tag, 0)) == kBioseqLocatorPassthroughMagic) {
+			locator_passthrough_requested = true;
+		}
+		if (list_length(tag) == 3
+			&& intVal(list_nth(tag, 0)) == kBioseqMmsearchOwnerMagic) {
+			if (intVal(list_nth(tag, 1)) != kBioseqMmsearchOwnerVersion
+				|| owned_mmsearch_expr != nullptr
+				|| (owned_mmsearch_expr = pg_node_try_as<FuncExpr>(
+					reinterpret_cast<Node*>(list_nth(tag, 2)))) == nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("Bioseq mmsearch owner path tag is invalid")));
+			}
+		}
+	}
+	RestrictInfo* owned_mmsearch_restriction =
+		list_length(best_path->custom_restrictinfo) == 1
+			? reinterpret_cast<RestrictInfo*>(
+				linitial(best_path->custom_restrictinfo))
+			: nullptr;
+	if ((owned_mmsearch_expr == nullptr)
+		!= (owned_mmsearch_restriction == nullptr)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("Bioseq mmsearch ownership metadata is inconsistent")));
 	}
 
 	/* XXX: also need to store projected column list for EXPLAIN */
@@ -4704,8 +4898,22 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 		cscan->custom_exprs = list_make2(NIL, NIL);
 	}
 
+	List* executable_clauses = restrictions_without_owned_mmsearch(
+		clauses, owned_mmsearch_restriction,
+		owned_mmsearch_restriction != nullptr
+			? owned_mmsearch_restriction->clause : nullptr,
+		/*restrictions_are_private_copies=*/false);
 	cscan->scan.plan.qual = extract_actual_clauses(
-		clauses, false /* no pseudoconstants */);
+		executable_clauses, false /* no pseudoconstants */);
+	if (owned_mmsearch_expr != nullptr) {
+		for (Node* qual : PList<Node>(cscan->scan.plan.qual)) {
+			if (contains_mmsearch_qualifier(qual, get_cached_stub_oids())) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("owned mmsearch remained in executable scan quals")));
+			}
+		}
+	}
 
 	/* Split the exact edit predicate out before ExecInitQual sees it.  Its
 	 * placeholder has no value until MatchResults are drained, whereas every
@@ -4764,16 +4972,17 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
-	if (list_length(best_path->custom_private) >= 3) {
-		Node* tag_node = reinterpret_cast<Node*>(
-			list_nth(best_path->custom_private, 2));
+	for (Node* tag_node : PList<Node>(best_path->custom_private)) {
 		if (tag_node != nullptr && IsA(tag_node, List)) {
-			List* tag = reinterpret_cast<List*>(copyObject(tag_node));
+			List* source_tag = reinterpret_cast<List*>(tag_node);
+			if (source_tag == NIL
+				|| !IsA(reinterpret_cast<Node*>(linitial(source_tag)), Integer)) {
+				continue;
+			}
+			List* tag = reinterpret_cast<List*>(copyObject(source_tag));
 			if (list_length(tag) == 4
-				&& intVal(list_nth(tag, 0))
-					== kBioseqLocatorPassthroughMagic
-				&& intVal(list_nth(tag, 1))
-					== kBioseqBatchJoinPlanVersion) {
+				&& intVal(list_nth(tag, 0)) == kBioseqLocatorPassthroughMagic
+				&& intVal(list_nth(tag, 1)) == kBioseqBatchJoinPlanVersion) {
 				TargetEntry* rowno_entry = reinterpret_cast<TargetEntry*>(
 					llast(cscan->scan.plan.targetlist));
 				if (rowno_entry == nullptr
@@ -4815,6 +5024,12 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 		/* We still need to create third entry in custom_exprs */
 		cscan->custom_exprs = lappend(cscan->custom_exprs, NIL);
 	}
+	/* The fourth expression list is executor-only ownership state.  Keeping it
+	 * in custom_exprs lets PostgreSQL replace outer Vars with PARAM_EXEC while
+	 * ensuring ExecInitQual never sees the rendezvous function. */
+	cscan->custom_exprs = lappend(cscan->custom_exprs,
+		owned_mmsearch_expr != nullptr
+			? list_make1(copyObject(owned_mmsearch_expr)) : NIL);
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() returning");
 	return reinterpret_cast<Plan *>(cscan);
@@ -5500,6 +5715,7 @@ enum class MmsearchParamResolution : std::uint8_t {
 	}
 	if (query_const->constisnull) {
 		runtime.buffer.clear_mmsearch_context();
+		runtime.mmsearch_null_input = true;
 		bioseq_log<DBG>(
 			"[bioseq] pg: {} mmsearch Param paramid={} kind={} resolved "
 			"to NULL; strict qual matches no rows",
@@ -5558,6 +5774,7 @@ enum class MmsearchParamResolution : std::uint8_t {
 		runtime.param_rebind.alphabet_code,
 		runtime.param_rebind.storage_unit_byte_width,
 		runtime.param_rebind.primary_key_attno);
+	runtime.mmsearch_null_input = false;
 	bioseq_log<DBG>(
 		"[bioseq] pg: {} rebound mmsearch query bp_size={} extras_count={} "
 		"from Param paramid={} kind={}",
@@ -5605,6 +5822,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	runtime.edit_sequence_attno = InvalidAttrNumber;
 	runtime.match_sequence_varno = 0;
 	runtime.match_sequence_attno = InvalidAttrNumber;
+	runtime.mmsearch_null_input = false;
 	for (Node* private_node : PList<Node>(cscan->custom_private)) {
 		if (private_node == nullptr || !IsA(private_node, List)) continue;
 		List* tag = reinterpret_cast<List*>(private_node);
@@ -5660,6 +5878,14 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	ResetExprContext(bioseqScanState->css_RuntimeContext);
 	PList<List> custom_exprs(cscan->custom_exprs);
 	List *plainClauses = custom_exprs.first();
+	List* owned_mmsearch_quals = list_length(cscan->custom_exprs) >= 4
+		? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 3))
+		: NIL;
+	if (list_length(owned_mmsearch_quals) > 1) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("Bioseq scan plan owns more than one mmsearch qualifier")));
+	}
 	List *storagePlainClauses = storage_prunable_quals_without_mmsearch(
 		plainClauses, get_cached_stub_oids());
 	bioseqScanState->qual = reinterpret_cast<List *>(eval_params(
@@ -5763,6 +5989,15 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	 * scan.plan.targetlist).
 	 */
 	const BioseqStubOids& scan_stub_oids = get_cached_stub_oids();
+	for (Node* executable_qual : PList<Node>(cscan->scan.plan.qual)) {
+		if (contains_mmsearch_qualifier(executable_qual, scan_stub_oids)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("mmsearch qualifier is not owned by a Bioseq executor"),
+				 errdetail("Nested, stacked, volatile, security-sensitive, or otherwise unsupported mmsearch shapes cannot execute through the SQL function."),
+				 errhint("Use exactly one top-level mmsearch predicate with supported operands, or split the query into separate levels.")));
+		}
+	}
 	AttrNumber primary_key_attno = InvalidAttrNumber;
 	for (auto tgt : PList<TargetEntry>(cscan->scan.plan.targetlist))
 	{
@@ -5795,10 +6030,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	register_runtime_cleanup_callback(bioseqScanState, estate);
 
 	/*
-	 * Walk cscan->scan.plan.qual to discover the WHERE mmsearch(...) call,
-	 * pull out (varattno of the TEXT column, query literal) and configure
-	 * the dispatch buffer so submit_scan has enough context to emit the
-	 * per-tuple log line and buffer the right column values.
+	 * Decode the one planner-owned expression from custom_exprs and configure
+	 * the dispatch buffer. The executable qual list is intentionally ignored.
 	 */
 	/* Begin is the only place that should drop extras as part of the
 	 * primary reset — every Begin call repopulates them from scratch
@@ -5811,45 +6044,20 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	const Oid relation_oid_for_attname = RelationGetRelid(relation_for_attname);
 
 	/*
-	 * State threaded across the qual loop so subsequent mmsearch
-	 * quals can be registered as additional Const-driven filters.
+	 * State retained by the legacy classifier/configuration branches. Planner
+	 * ownership guarantees this loop contains at most one expression.
 	 *
-	 * `primary_configured` flips to true once the first acceptable
-	 * mmsearch qual is installed (either via configure_mmsearch for
-	 * the literal-query case, configure_mmsearch_per_row for the
-	 * same-rel Var case, or via param_rebind for the
-	 * parametrised-NL case). Every subsequent mmsearch qual we see
-	 * is treated as an additional AND-filter — accepted when:
-	 *   - the new qual is Const-driven (Param/Var-same-rel extras
-	 *     would need their own per-rescan resolve machinery and
-	 *     are still rejected with NOTICE),
-	 *   - the new qual's first Var is the SAME column as the
-	 *     primary's,
-	 *   - and the new qual's typmod matches the primary's.
-	 * Param-primary + Const-extra IS supported as of §9.4 — the
-	 * primary rebinds per-rescan and the Const extras are added
-	 * once during BeginCustomScan and intersected via match_map
-	 * filter inside `run_batch_and_build_cursors`.
-	 *
-	 * `primary_seq_attno` / `primary_typmod_packed` carry the
-	 * primary's column and typmod for these comparisons.
+	 * `primary_configured` flips once the sole owned expression is installed
+	 * through the Const, Param-rebind, or same-relation Var path.
 	 */
 	bool primary_configured = false;
-	bool primary_is_const = false;
 	AttrNumber primary_seq_attno = InvalidAttrNumber;
-	int32 primary_typmod_packed = -1;
 	FuncExpr* primary_mmsearch_fe = nullptr;
-	std::vector<FuncExpr*> extra_mmsearch_fes;
 
 	/*
-	 * Two-pass qual processing. The previous single-pass loop
-	 * processed mmsearch quals in `cscan->scan.plan.qual` order,
-	 * which is not stable across plans (the planner is free to
-	 * reorder). For Param + Const stacking that bit us: when the
-	 * planner placed the Const first, the Const became the
-	 * primary and the Param-driven qual was rejected as an extra
-	 * (Param can't be a Const-extra). The Param qual then evaluated
-	 * as the always-true C stub and silently dropped from the AND.
+	 * Process only the private expression selected by the planner. Executable
+	 * quals never participate in alignment ownership, and stacked calls are
+	 * rejected before a CustomPath is built.
 	 *
 	 * Solution: classify quals first, then pick the primary by
 	 * priority:
@@ -5864,7 +6072,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	 * we reject the Param (we only have one primary slot); same for
 	 * multi-Param or multi-Var-same-rel. Every top-level mmsearch qual must
 	 * be accounted for below: unsupported combinations fail closed rather
-	 * than being evaluated by the always-true SQL rendezvous stub.
+	 * rather than reaching the fail-closed SQL rendezvous stub.
 	 */
 	struct ClassifiedMmsearchQual {
 		FuncExpr* fe;
@@ -5876,7 +6084,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	};
 	std::vector<ClassifiedMmsearchQual> classified_quals;
 	std::size_t top_level_mmsearch_qual_count = 0;
-	for (auto qual_node : PList<Node>(cscan->scan.plan.qual))
+	for (auto qual_node : PList<Node>(owned_mmsearch_quals))
 	{
 		FuncExpr* fe_classify = pg_node_try_as<FuncExpr>(qual_node);
 		if (fe_classify == nullptr
@@ -5955,10 +6163,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		if (arg1_is_const)
 		{
 			Const* query_const = reinterpret_cast<Const*>(arg1);
-			if (query_const->consttype != scan_stub_oids.bioseq_seq_type_oid
-				|| query_const->constisnull)
+			if (query_const->consttype != scan_stub_oids.bioseq_seq_type_oid)
 			{
-				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a non-null bioseq.seq Const (type={}, null={})",
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 is not a bioseq.seq Const (type={}, null={})",
 						query_const->consttype, query_const->constisnull);
 				continue;
 			}
@@ -6115,74 +6322,11 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			continue;
 		}
 
-		/*
-		 * Subsequent mmsearch quals get treated as additional AND
-		 * filters. We require: (a) the primary was Const-driven,
-		 * (b) the extra is also Const-driven, (c) same seq column,
-		 * (d) matching typmod. Anything else is rejected with ERROR: leaving
-		 * the qual in `scan.plan.qual` would evaluate mmsearch via the
-		 * always-true SQL rendezvous stub and silently weaken the AND.
-		 */
 		if (primary_configured)
 		{
-			/*
-			 * Multi-mmsearch stacking rules:
-			 *   - Primary Const + Extra Const   ✓  AND-filter (already worked)
-			 *   - Primary Param + Extra Const   ✓  AND-filter — the
-			 *     primary query rebinds per-rescan via the Param
-			 *     path; the Const extras stay fixed and ride along
-			 *     as additional row filters. This was historically
-			 *     rejected with NOTICE but does not actually
-			 *     conflict with the Param-rebind path: the const
-			 *     extras only contribute to match_map filtering
-			 *     after the primary batch ran.
-			 *   - Primary Const + Extra Param   ✗  rejected (Param
-			 *     extras would need their own per-rescan resolve;
-			 *     the buffer's `extra_query_varlenas` is bytes-only
-			 *     today, no Param-coords slot exists).
-			 *   - Primary Param + Extra Param   ✗  rejected (would
-			 *     need multi-Param rebind machinery — see §9.7 of
-			 *     REPORT_POSTGRES_QUERY_BUGFIXING_1.md for the
-			 *     follow-up plan).
-			 */
-			if (!arg1_is_const) {
-				ereport(ERROR,
-					(errmsg("bioseq: additional mmsearch qual is unsupported: only Const-typed extras are supported beyond the primary qual (extra_is_const=%d)",
-							arg1_is_const),
-					 errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errhint("Combine quals with the same column and a literal query to AND-filter rows.")));
-			}
-			if (col_var->varattno != primary_seq_attno) {
-				ereport(ERROR,
-					(errmsg("bioseq: additional mmsearch qual is unsupported: column attno=%d differs from primary attno=%d",
-							static_cast<int>(col_var->varattno),
-							static_cast<int>(primary_seq_attno)),
-					 errcode(ERRCODE_FEATURE_NOT_SUPPORTED)));
-			}
-			if (col_var->vartypmod != primary_typmod_packed) {
-				ereport(ERROR,
-					(errmsg("bioseq: additional mmsearch qual is unsupported: typmod=%d differs from primary=%d",
-							col_var->vartypmod, primary_typmod_packed),
-					 errcode(ERRCODE_FEATURE_NOT_SUPPORTED)));
-			}
-			Const* query_const = reinterpret_cast<Const*>(arg1);
-			pgseq_t* extra_query_hdr = reinterpret_cast<pgseq_t*>(
-				PG_DETOAST_DATUM(query_const->constvalue));
-			const size_t extra_total_bytes = static_cast<size_t>(VARSIZE(extra_query_hdr));
-			std::vector<char> extra_varlena_bytes(extra_total_bytes);
-			std::memcpy(extra_varlena_bytes.data(), extra_query_hdr, extra_total_bytes);
-			if (reinterpret_cast<void*>(extra_query_hdr)
-				!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue)))
-			{
-				pfree(extra_query_hdr);
-			}
-			runtime.buffer.add_extra_const_query(std::move(extra_varlena_bytes));
-			extra_mmsearch_fes.push_back(fe);
-			++consumed_mmsearch_qual_count;
-			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registered additional mmsearch (extra count now {})",
-					runtime.buffer.extra_query_count());
-			pfree(attname_cstr);
-			continue;
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("Bioseq scan reached a second owned mmsearch expression")));
 		}
 
 		if (arg1_is_const)
@@ -6194,6 +6338,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			 * copy so the bytes outlive the planner's per-query memory context.
 			 */
 			Const* query_const = reinterpret_cast<Const*>(arg1);
+			if (query_const->constisnull) {
+				runtime.mmsearch_null_input = true;
+			} else {
 			pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
 				PG_DETOAST_DATUM(query_const->constvalue));
 			const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
@@ -6262,7 +6409,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 					}
 				}
 			}
-			primary_is_const = true;
+			}
 		}
 		else if (arg1_is_param)
 		{
@@ -6289,7 +6436,6 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 					runtime, cscanstate->ss.ps.ps_ExprContext,
 					"BeginCustomScan");
 			}
-			primary_is_const = false;
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering param-driven mmsearch rebind paramid={} paramkind={} typmod=({},{})",
 					query_param->paramid, static_cast<int>(query_param->paramkind),
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
@@ -6316,7 +6462,6 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				unpacked_typmod.alphabet_code,
 				unpacked_typmod.storage_unit_byte_width,
 				primary_key_attno);
-			primary_is_const = false;
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
 					static_cast<int>(col_var->varattno),
 					static_cast<int>(query_var->varattno),
@@ -6327,7 +6472,6 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		++consumed_mmsearch_qual_count;
 		primary_mmsearch_fe = fe;
 		primary_seq_attno = col_var->varattno;
-		primary_typmod_packed = col_var->vartypmod;
 		runtime.match_sequence_varno = col_var->varno;
 		runtime.match_sequence_attno = col_var->varattno;
 
@@ -6373,6 +6517,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	 */
 	BioseqScanFeatureFlags features = detect_feature_flags(
 		cscan->scan.plan.targetlist, cscan->scan.plan.qual, scan_stub_oids);
+	features.has_mmsearch = owned_mmsearch_quals != NIL;
 	features.uses_edit = features.uses_edit || runtime.edit_predicate_active;
 	features.any_match_projection =
 		features.any_match_projection || runtime.edit_predicate_active;
@@ -6388,78 +6533,18 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			 errdetail("statement execution attestation is backend-local and DSM aggregation is not implemented")));
 	}
 	bioseq::simd::active_target::Minimap2Params aligner_params = build_params_from_gucs();
-	std::optional<bioseq::indexing::IndexReadRequirement>
-		explicit_index_read_requirement;
-	std::optional<bool> explicit_vulkan_enabled;
 	bioseq::indexing::IndexReadRequirement primary_requirement =
 		bioseq::indexing::IndexReadRequirement::allow;
 	bool primary_vulkan_enabled_explicit = false;
-	const bool primary_requirement_explicit = apply_aligner_options_override(
+	(void)apply_aligner_options_override(
 		primary_mmsearch_fe,
 		aligner_params,
 		primary_requirement,
 		scan_stub_oids,
 		&primary_vulkan_enabled_explicit);
 	finalize_simd_chaining_policy(aligner_params);
-	if (primary_requirement_explicit) {
-		explicit_index_read_requirement = primary_requirement;
-	}
-	if (primary_vulkan_enabled_explicit) {
-		explicit_vulkan_enabled = aligner_params.vulkan_enabled;
-	}
-	for (FuncExpr* extra_fe : extra_mmsearch_fes) {
-		bioseq::simd::active_target::Minimap2Params ignored_extra_params =
-			aligner_params;
-		bioseq::indexing::IndexReadRequirement extra_requirement =
-			bioseq::indexing::IndexReadRequirement::allow;
-		bool extra_vulkan_enabled_explicit = false;
-		const bool extra_requirement_explicit = apply_aligner_options_override(
-			extra_fe,
-			ignored_extra_params,
-			extra_requirement,
-			scan_stub_oids,
-			&extra_vulkan_enabled_explicit);
-		finalize_simd_chaining_policy(ignored_extra_params);
-		if (extra_vulkan_enabled_explicit) {
-			if (explicit_vulkan_enabled.has_value()
-				&& ignored_extra_params.vulkan_enabled
-					!= *explicit_vulkan_enabled) {
-				ereport(ERROR,
-					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-					 errmsg("stacked mmsearch vulkan_enabled conflicts: explicit values differ"),
-					 errdetail("first_explicit=%s next_explicit=%s",
-						 *explicit_vulkan_enabled ? "true" : "false",
-						 ignored_extra_params.vulkan_enabled
-							 ? "true" : "false")));
-			}
-			explicit_vulkan_enabled = ignored_extra_params.vulkan_enabled;
-		}
-		if (!extra_requirement_explicit) {
-			continue;
-		}
-		if (explicit_index_read_requirement.has_value()
-			&& extra_requirement != *explicit_index_read_requirement) {
-			ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("stacked mmsearch index_read_requirement conflicts: explicit values differ"),
-				 errdetail("first_explicit=%.*s next_explicit=%.*s",
-					 static_cast<int>(bioseq::indexing::index_read_requirement_name(
-						 *explicit_index_read_requirement).size()),
-					 bioseq::indexing::index_read_requirement_name(
-						 *explicit_index_read_requirement).data(),
-					 static_cast<int>(bioseq::indexing::index_read_requirement_name(
-						 extra_requirement).size()),
-					 bioseq::indexing::index_read_requirement_name(
-						 extra_requirement).data())));
-		}
-		explicit_index_read_requirement = extra_requirement;
-	}
-	if (explicit_vulkan_enabled.has_value()) {
-		aligner_params.vulkan_enabled = *explicit_vulkan_enabled;
-	}
 	const bioseq::indexing::IndexReadRequirement index_read_requirement =
-		explicit_index_read_requirement.value_or(
-			bioseq::indexing::IndexReadRequirement::allow);
+		primary_requirement;
 	aligner_params.do_cigar           = features.uses_cigar || features.uses_edit;
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
@@ -6485,7 +6570,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			|| aligner_params.vulkan_gpu_index_build_enabled
 			|| aligner_params.vulkan_extend_enabled;
 		const bool standalone_vulkan_prefilter_requested =
-			explicit_vulkan_enabled.value_or(false);
+			primary_vulkan_enabled_explicit && aligner_params.vulkan_enabled;
 		aligner_params.prefilter_backend =
 			(existing_vulkan_route || standalone_vulkan_prefilter_requested)
 			? bioseq::prefilter_stats::PrefilterBackendType::VULKAN
@@ -6583,9 +6668,17 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		using TR_default = sequence_custom_alphabet<seq::dna4, uint64_t>;
 		compact_sequence_range<QR_default> empty_query_proto{};
 		compact_sequence_range<TR_default> empty_target_proto{};
+		auto empty_query_owner =
+			bioseq::storage::make_lazy_in_memory(empty_query_proto);
+		auto empty_target_owner =
+			bioseq::storage::make_lazy_in_memory(empty_target_proto);
+		const auto empty_query_view =
+			bioseq::storage::as_lazy_sequence_view(empty_query_owner);
+		const auto empty_target_view =
+			bioseq::storage::as_lazy_sequence_view(empty_target_owner);
 		runtime.aligner_state.pipeline_desc =
 			bioseq::simd::active_target::pipe::describe_pipeline_for(
-				aligner_params, empty_query_proto, empty_target_proto);
+				aligner_params, empty_query_view, empty_target_view);
 	}
 
 	/*
@@ -7271,9 +7364,8 @@ static void batch_join_materialize_queries(
 		bool query_is_null = source->tts_isnull[
 			runtime.query_slot_seq_resno - 1];
 		if (query_is_null) {
-			ereport(ERROR,
-				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
-				 errmsg("BioseqBatchJoin query sequence is NULL")));
+			/* Strict INNER predicate: a NULL query cannot produce a match. */
+			continue;
 		}
 		const Datum original = source->tts_values[
 			runtime.query_slot_seq_resno - 1];
@@ -8275,6 +8367,11 @@ static TupleTableSlot* BioseqBatchJoin_ExecCustomScanImpl(
 			runtime->alphabet_code,
 			runtime->storage_unit_byte_width,
 			"target");
+		slot_getallattrs(target);
+		if (target->tts_isnull[runtime->target_slot_seq_resno - 1]) {
+			/* Strict INNER predicate: do not hand a NULL target to dispatch. */
+			continue;
+		}
 		runtime->current_target_slot = target;
 		runtime->buffer.begin_join_target(target);
 		runtime->buffer.prepare_join_target_queries(
@@ -8803,8 +8900,10 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 						site.column_attno, loc, pad, registered_snapshot,
 						resources->caches,
 						resources->scratch, [&](auto& lazy) {
+							const auto lazy_view =
+								bioseq::storage::as_lazy_sequence_view(lazy);
 							auto counts =
-								bioseq::indexing::tally_symbol_counts(lazy);
+								bioseq::indexing::tally_symbol_counts(lazy_view);
 							if (static_cast<std::size_t>(site.rank)
 								< counts.size())
 								cnt = counts[site.rank];
@@ -8812,7 +8911,10 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 				} else {
 					compact_sequence_range<S> range{*hdr};
 					auto lazy = bioseq::storage::make_lazy_in_memory(range);
-					auto counts = bioseq::indexing::tally_symbol_counts(lazy);
+					const auto lazy_view =
+						bioseq::storage::as_lazy_sequence_view(lazy);
+					auto counts =
+						bioseq::indexing::tally_symbol_counts(lazy_view);
 					if (static_cast<std::size_t>(site.rank) < counts.size())
 						cnt = counts[site.rank];
 				}
@@ -9089,7 +9191,20 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 		bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
 		if (qual == NULL || ExecQual(qual, econtext))
 		{
+			if (runtime.mmsearch_null_input) {
+				/* mmsearch is strict: a NULL owned query yields no rows, while
+				 * ordinary sibling quals above retain their normal evaluation. */
+				continue;
+			}
 				if (runtime.buffer.mmsearch_active()) {
+					bool target_is_null = false;
+					(void)slot_getattr(
+						econtext->ecxt_scantuple,
+						runtime.match_sequence_attno,
+						&target_is_null);
+					if (target_is_null) {
+						continue;
+					}
 					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
 					runtime.buffer.submit_scan(econtext->ecxt_scantuple);
 					if (runtime.buffer.ready_to_dispatch()) {
@@ -10055,11 +10170,17 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 * accurate.
 		 */
 		const BioseqStubOids& explain_oids = get_cached_stub_oids();
+		List* explain_owned_mmsearch = cscan != nullptr
+			&& list_length(cscan->custom_exprs) >= 4
+			? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 3))
+			: NIL;
 		BioseqScanFeatureFlags features =
 			(aligner_snapshot != nullptr && aligner_snapshot->params_captured)
 				? aligner_snapshot->features
 				: detect_feature_flags(node->ss.ps.plan->targetlist,
 									   node->ss.ps.plan->qual, explain_oids);
+		features.has_mmsearch = features.has_mmsearch
+			|| explain_owned_mmsearch != NIL;
 
 		/*
 		 * Only the WHERE mmsearch(...) pipeline consults the minimizer
@@ -10080,7 +10201,10 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 			 */
 			{
 				const ExplainTypmodCoalesce coalesce_hint =
-					explain_detect_typmod_coalesce(node->ss.ps.plan->qual, explain_oids);
+					explain_detect_typmod_coalesce(
+						explain_owned_mmsearch != NIL
+							? explain_owned_mmsearch : node->ss.ps.plan->qual,
+						explain_oids);
 				if (coalesce_hint.active) {
 					const auto coa_name =
 						pgseq_supported_alphabets::name_of_alphabet_code(coalesce_hint.col_alpha);

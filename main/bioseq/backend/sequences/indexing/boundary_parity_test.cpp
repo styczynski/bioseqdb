@@ -134,10 +134,16 @@ void check_segment_parity(std::size_t n, std::uint64_t seed) {
 
     if constexpr (Scanner::supports_fragments()) {
         lazy_compact_sequence<dna4_u64, Scanner> lazy{Scanner::from_range(range)};
-        bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>::build(storage, lazy);
+        const auto fragmented_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
+        bioseq::indexing::MinimizersPerFragmentIndex<
+            FakeFragmentStorage<>>::build(storage, fragmented_view);
     } else {
         auto lazy = make_lazy_in_memory(range);
-        bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>::build(storage, lazy);
+        const auto in_memory_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
+        bioseq::indexing::MinimizersPerFragmentIndex<
+            FakeFragmentStorage<>>::build(storage, in_memory_view);
     }
     assembled = bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>::assemble_segment(
         storage, /*frag_lo*/ 0, /*frag_hi*/ nfrag, /*frag_bp*/ (bioseq::storage::sequence_size_t)kFragBp,

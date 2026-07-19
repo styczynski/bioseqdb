@@ -6,8 +6,8 @@
 //     just contains a substring match.
 //   * Every scan-toggling GUC (`enable_bioseq_index_scan`,
 //     `enable_vectorization`, `enable_column_cache`) keeps the custom scan
-//     winning over a heap scan, because the planner-support cost penalty is
-//     -100000 * wehavemagic_cnt (per CODE_GUIDELINES §8).
+//     winning over a heap scan through exact RestrictInfo ownership and
+//     structural pruning, while reported costs stay finite and nonnegative.
 //   * `EXPLAIN (FORMAT JSON, ANALYZE, ...)` returns a JSON document whose
 //     plan tree references "BioseqScan" as the custom plan provider.
 
@@ -36,6 +36,7 @@ TEST_CASE("EXPLAIN names the custom scan on a USING bioseq table",
 
     const auto plan = explain_text<false>(ctx, explain_target_sql());
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
 }
 
 TEST_CASE("EXPLAIN's Bioseq Projected Columns property lists exactly the SELECTed attrs",

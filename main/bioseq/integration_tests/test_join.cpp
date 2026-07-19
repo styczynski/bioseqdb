@@ -744,21 +744,12 @@ TEST_CASE("PARAM_EXEC rescan clears NULL and restores the next primary query",
     REQUIRE(restored_matches == first_matches);
 }
 
-TEST_CASE("Many-to-many mmsearch as join filter pins documented NULL-projection behaviour",
-          "[join][documented_limitation][many_to_many]") {
-    // Pinning the documented limitation from REPORT §6: fully
-    // many-to-many produces NULL projections and no crash. If a
-    // future fix lifts this limitation the test will fail
-    // INTENTIONALLY and we update it. If the limitation accidentally
-    // changes from "NULL projections" to "garbage projections" or
-    // "crash" we catch it immediately.
+TEST_CASE("Many-to-many mmsearch join owns the predicate and projections",
+          "[join][many_to_many][ownership]") {
     auto ctx = fresh_context({kHoeJoinLeft, kHoeJoinRight});
     seed_hoe_fixture(ctx, kHoeJoinLeft);
     seed_hoe_fixture(ctx, kHoeJoinRight);
 
-    // Comma-join + WHERE rather than INNER JOIN ... ON to suppress
-    // the planner's parameterised inner-side rewrite — this hits
-    // the join-filter shape the report describes.
     const auto rows = query_rows(
         ctx,
         fmt::format(
@@ -767,15 +758,12 @@ TEST_CASE("Many-to-many mmsearch as join filter pins documented NULL-projection 
             " WHERE mmsearch(t1.seq0, t2.seq1) "
             " ORDER BY t1.pk, t2.pk;",
             kHoeJoinLeft, kHoeJoinRight));
-    // Server did not crash — that's already a non-trivial
-    // assertion. Now verify the documented projection NULLs.
+    REQUIRE_FALSE(rows.empty());
     for (const auto& row : rows) {
         REQUIRE(row.size() == 3);
-        if (row[2].has_value()) {
-            // Documented behaviour: when no parameterised path
-            // applies, projections are either NULL or empty.
-            REQUIRE(row[2].value().empty());
-        }
+        REQUIRE(row[2].has_value());
+        REQUIRE_FALSE(row[2]->empty());
+        REQUIRE(is_valid_cigar(*row[2]));
     }
     // Session must still be usable.
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
@@ -904,9 +892,8 @@ TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
     // Post-fix:
     //   1. ExtractPushdownClause accepts mmsearch FuncExprs so the
     //      planner generates a parameterised inner-side path.
-    //   2. AddBioseqColumnScanPath counts mmsearch in scan quals as
-    //      an additional wehavemagic unit so the parameterised
-    //      path's cost beats the unparameterised competitor.
+    //   2. AddBioseqColumnScanPath claims the exact RestrictInfo and
+    //      structurally removes paths that would execute the SQL stub.
     //   3. run_batch_and_build_cursors filters out matches whose
     //      cigar would come back empty (when do_cigar=true), since
     //      those are the aligner's "found a chain but the base
@@ -949,76 +936,18 @@ TEST_CASE("Cross-table mmsearch (mmsearch as join filter) returns rows only "
     }
 }
 
-TEST_CASE("Multiple Const mmsearch quals AND-filter the same column",
-          "[mmsearch][multi_qual][regression]") {
-    // Tests the new multi-mmsearch-per-scan support. Two
-    // mmsearch quals on the same column with different literal
-    // queries should AND together: a row is returned iff BOTH
-    // queries align against its sequence. The first mmsearch
-    // drives projections; the second is a pure filter.
-    //
-    // For the test to discriminate "AND is honoured" vs "second
-    // qual is a silent no-op via the C stub", the two probes
-    // must match DIFFERENT subsets of rows. We pick:
-    //   probe_1 = canonical probe (matches a known set)
-    //   probe_2 = a probe rooted in a different region of the
-    //             seeded sequences, hence matching a different
-    //             set. The intersection should be a strict
-    //             subset of the union — and the AND result must
-    //             equal the per-row intersection.
+TEST_CASE("Multiple Const mmsearch quals fail closed",
+          "[mmsearch][multi_qual][error]") {
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
-
-    // Probe 2 matches a different subset than the canonical probe
-    // (overlapping but not identical), so the AND result is a
-    // strict intersection. If the test runner ignored the second
-    // qual it would observe `set_a` (canonical's matches) instead
-    // of the intersection — and the equality assertion below would
-    // fail.
     constexpr std::string_view second_probe = "TTCATCATCATCATCTACTCCT";
-
-    const auto rows_a = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "ORDER BY pk;",
-            kHoeJoin, kHoeProbeSequence));
-    const auto rows_b = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "ORDER BY pk;",
-            kHoeJoin, second_probe));
-    REQUIRE_FALSE(rows_a.empty());
-    REQUIRE_FALSE(rows_b.empty());
-
-    // Build the expected intersection (set semantics over pk).
-    std::set<std::string> set_a, set_b, expected_intersection;
-    for (const auto& r : rows_a) if (r[0].has_value()) set_a.insert(*r[0]);
-    for (const auto& r : rows_b) if (r[0].has_value()) set_b.insert(*r[0]);
-    for (const auto& key : set_a) {
-        if (set_b.count(key) > 0) expected_intersection.insert(key);
-    }
-
-    const auto and_rows = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} "
-            " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "   AND mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            " ORDER BY pk;",
-            kHoeJoin, kHoeProbeSequence, second_probe));
-    std::set<std::string> set_and;
-    for (const auto& r : and_rows) if (r[0].has_value()) set_and.insert(*r[0]);
-
-    // The AND result MUST be exactly the intersection of A and B.
-    // If the second qual were silently a no-op (C-stub TRUE), the
-    // AND result would equal A — possibly a strict superset of
-    // A∩B. Asserting equality with the intersection is what makes
-    // this test discriminating.
-    REQUIRE(set_and == expected_intersection);
-    REQUIRE(set_and.size() <= set_a.size());
-    REQUIRE(set_and.size() <= set_b.size());
+    const auto error = sql_error(ctx, fmt::format(
+        "SELECT pk FROM {} WHERE "
+        "mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) AND "
+        "mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
+        kHoeJoin, kHoeProbeSequence, second_probe));
+    REQUIRE(error.sqlstate == "0A000");
+    REQUIRE(error.contains("stacked mmsearch"));
 }
 
 TEST_CASE("Aggregate over bioseq.cigar projection (MAX) returns the "
@@ -1103,99 +1032,19 @@ TEST_CASE("GROUP BY pk with bioseq aggregate returns one row per matching pk",
     }
 }
 
-TEST_CASE("Param-driven primary + Const-extra mmsearch AND-stack works",
-          "[mmsearch][multi_qual][param_plus_const]") {
-    // Param + Const-extra: the primary mmsearch is a parametrized
-    // inner-side qual (Param-rebind path) AND there is an
-    // additional Const-driven mmsearch on the same column. The
-    // expected behaviour is logical AND: rows must match BOTH the
-    // per-outer-row Param query AND the literal extra.
-    //
-    // This was historically rejected with NOTICE ("Const+Const
-    // stacking only"). §9.7 of REPORT_POSTGRES_QUERY_BUGFIXING_1.md
-    // documents the relaxation: the extras (Const) live in
-    // `extra_query_varlenas` independently of the primary's
-    // rebind-on-rescan, so the AND-filter still works correctly
-    // each time the Param resolves.
+TEST_CASE("Param-driven primary plus Const mmsearch fails closed",
+          "[mmsearch][multi_qual][param_plus_const][error]") {
     auto ctx = fresh_context({kHoeJoinLeft, kHoeJoinRight});
     seed_hoe_fixture(ctx, kHoeJoinLeft);
     seed_hoe_fixture(ctx, kHoeJoinRight);
-
-    // First, baseline: Param-only — find the matches per outer
-    // row. We use mmsearch(t2.seq0, t1.seq1) — t1 is outer, t2 is
-    // inner with Param-rebind.
-    const auto rows_param_only = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT t1.pk, t2.pk "
-            "  FROM {} t1 INNER JOIN {} t2 ON mmsearch(t2.seq0, t1.seq1) "
-            " ORDER BY t1.pk, t2.pk;",
-            kHoeJoinLeft, kHoeJoinRight));
-    REQUIRE_FALSE(rows_param_only.empty());
-
-    // What rows does the Const-extra probe match in isolation?
-    // We use a probe rooted in a different region of seq0 so the
-    // intersection with the Param-only set is provably STRICT —
-    // the goal is to catch a regression where the Const-extra is
-    // silently dropped (we'd see rows_param_plus_const equal to
-    // rows_param_only, which is a SUBSET of itself, so a plain
-    // subset-check is a tautology). The probe below matches a
-    // proper subset of pk values; combined with the Param qual,
-    // the AND must produce strictly fewer rows than Param-only.
-    constexpr std::string_view kStrictSubsetProbe =
-        "TCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCT";  // matches t2.pk=4 only
-    const auto rows_const_only = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk FROM {} WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32)) "
-            "ORDER BY pk;",
-            kHoeJoinRight, kStrictSubsetProbe));
-    REQUIRE_FALSE(rows_const_only.empty());
-    std::set<std::string> const_only_t2_pks;
-    for (const auto& row : rows_const_only) {
-        if (row[0].has_value()) const_only_t2_pks.insert(*row[0]);
-    }
-    // Sanity: const-only matches FEWER rows of t2 than the universe;
-    // otherwise our AND test below collapses to "param only".
-    REQUIRE(const_only_t2_pks.size() < 5);
-
-    const auto rows_param_plus_const = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT t1.pk, t2.pk "
-            "  FROM {} t1 INNER JOIN {} t2 "
-            "    ON mmsearch(t2.seq0, t1.seq1) "
-            " WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 32)) "
-            " ORDER BY t1.pk, t2.pk;",
-            kHoeJoinLeft, kHoeJoinRight, kStrictSubsetProbe));
-
-    std::set<std::pair<std::string, std::string>> param_only_set;
-    for (const auto& row : rows_param_only) {
-        if (row.size() == 2 && row[0].has_value() && row[1].has_value()) {
-            param_only_set.emplace(*row[0], *row[1]);
-        }
-    }
-    // The AND-stack result MUST be a subset of the Param-only
-    // result AND every emitted t2.pk must be in the const-only
-    // matching set. If §9.4's Const-extra was silently dropped,
-    // we'd see entries with t2.pk NOT in const_only_t2_pks —
-    // catching the regression directly.
-    for (const auto& row : rows_param_plus_const) {
-        REQUIRE(row.size() == 2);
-        REQUIRE(row[0].has_value());
-        REQUIRE(row[1].has_value());
-        const auto key = std::make_pair(*row[0], *row[1]);
-        REQUIRE(param_only_set.count(key) > 0);
-        // Load-bearing assertion: t2.pk MUST also be in the
-        // const-only matching set. A regression that silently
-        // drops the Const extra would fail here.
-        REQUIRE(const_only_t2_pks.count(*row[1]) > 0);
-    }
-    // Strict-subset property: the AND result must be SMALLER than
-    // the Param-only result (the const probe matches strictly
-    // fewer rows). If they're equal, the Const extra was a
-    // no-op — the bug we're guarding against.
-    REQUIRE(rows_param_plus_const.size() < rows_param_only.size());
+	const auto stacked_error = sql_error(ctx, fmt::format(
+		"SELECT t1.pk, t2.pk FROM {} t1 INNER JOIN {} t2 "
+		"ON mmsearch(t2.seq0, t1.seq1) "
+		"WHERE mmsearch(t2.seq0, '{}'::bioseq.seq('dna4', 32));",
+		kHoeJoinLeft, kHoeJoinRight,
+		"TCATCATCATCATCTACTCCTATCTATCATCATCATCATCTACTCCT"));
+	REQUIRE(stacked_error.sqlstate == "0A000");
+	REQUIRE(stacked_error.contains("stacked mmsearch"));
 }
 
 TEST_CASE("Cross-table mmsearch via INNER JOIN with bioseq.cigar projection",

@@ -1570,8 +1570,6 @@ static_assert(!std::is_move_assignable_v<PendingSequenceSource>,
 // DOC0264 R0 / §1.1#10).
 // ---------------------------------------------------------------------------
 
-constexpr std::uint8_t kLocatorStubMarker = 0x80;
-
 // DOC0260 §12.1 + DOC0264 §5 — `kLocatorVersion` and the `seq_locator` POD
 // (with its 32-byte / offset static_asserts) live in the PG-free
 // `bioseq_bucket_math` module so the unit-test TU can link them; they are
@@ -1586,8 +1584,8 @@ static_assert(kLocatorStubVarlenaBytes == 56,
 [[nodiscard]] [[gnu::always_inline]]
 inline bool is_locator_stub(const pgseq_t* hdr) noexcept {
     return hdr != nullptr
-        && (static_cast<std::uint8_t>(hdr->storage_unit_byte_width)
-            & kLocatorStubMarker) != 0u;
+        && is_seq_locator_stub_width(
+            static_cast<std::uint8_t>(hdr->storage_unit_byte_width));
 }
 
 [[nodiscard]] [[gnu::always_inline]]
@@ -1605,15 +1603,20 @@ inline seq_locator decode_locator_from_stub(const pgseq_t* hdr) {
                "is_locator_stub(hdr) first.",
                static_cast<unsigned>(hdr->storage_unit_byte_width));
     }
-    seq_locator out{};
-    std::memcpy(&out, hdr->data, sizeof(out));
-    if (out.version != kLocatorVersion) {
+    if (VARSIZE(hdr) != kLocatorStubVarlenaBytes) {
         bioseq_log<ERR, PG>(
-               "bioseq storage: locator version mismatch (got {}, expected {})",
-               static_cast<unsigned>(out.version),
-               static_cast<unsigned>(kLocatorVersion));
+               "bioseq storage: locator stub size mismatch (got {}, expected {})",
+               static_cast<unsigned long long>(VARSIZE(hdr)),
+               static_cast<unsigned long long>(kLocatorStubVarlenaBytes));
     }
-    return out;
+    const auto payload = std::span<std::byte const>{
+        reinterpret_cast<std::byte const*>(hdr->data), sizeof(seq_locator)};
+    const auto decoded = decode_seq_locator_payload(payload);
+    if (!decoded.has_value()) {
+        bioseq_log<ERR, PG>(
+               "bioseq storage: locator payload is not canonical v3 data");
+    }
+    return *decoded;
 }
 
 [[gnu::always_inline]]
@@ -1635,13 +1638,18 @@ inline void encode_locator_into_stub(
     SET_VARSIZE(dst, kLocatorStubVarlenaBytes);
     dst->alphabet_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
     dst->storage_unit_byte_width = static_cast<std::uint8_t>(
-        kLocatorStubMarker | logical_byte_width);
+        k_seq_locator_stub_marker | logical_byte_width);
     dst->padding_letters = padding_letters;
     constexpr sequence_size_t kBpSizeFieldMax =
         static_cast<sequence_size_t>(std::numeric_limits<pgseq_t::bp_size_t>::max());
     dst->bp_size = static_cast<pgseq_t::bp_size_t>(
         std::min<sequence_size_t>(total_bp_size, kBpSizeFieldMax));
-    std::memcpy(dst->data, &loc, sizeof(loc));
+    const auto payload = std::span<std::byte>{
+        reinterpret_cast<std::byte*>(dst->data), sizeof(seq_locator)};
+    if (!encode_seq_locator_payload(payload, loc)) {
+        bioseq_log<ERR, PG>(
+            "bioseq storage: failed to encode canonical v3 locator payload");
+    }
 }
 
 [[nodiscard]] [[gnu::always_inline]]
@@ -3678,7 +3686,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         static_cast<std::uint8_t>(first_raw->alphabet_code);
     const std::uint8_t logical_byte_width =
         static_cast<std::uint8_t>(first_raw->storage_unit_byte_width);
-    if ((logical_byte_width & kLocatorStubMarker) != 0u) {
+    if (is_seq_locator_stub_width(logical_byte_width)) {
         bioseq_log<ERR, PG>(
                "bioseq storage Phase C: fragment-row header carries the stub marker "
                "(sub_w={}) — corruption", static_cast<unsigned>(logical_byte_width));

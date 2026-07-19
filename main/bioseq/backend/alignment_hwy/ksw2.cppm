@@ -637,21 +637,18 @@ template<KswAlignerMode mode, typename D, typename StateT>
 template<
     KswAlignerMode mode,
     bool is_reversed,
-    supports_compact_sequence_range QueryRange,
-    supports_compact_sequence_range TargetRange,
-    size_t AlphabetDim = compact_sequence_range<QueryRange>::traits::alphabet_size_n,
+    sequence_alphabet Alphabet,
+    size_t AlphabetDim = seqan3::alphabet_size<Alphabet> + 1u,
     typename partial_score_t = int8_t,
-    typename full_score_t    = int32_t,
-    class Scanner = bioseq::storage::sequence_scanner_none<
-        typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+    typename full_score_t    = int32_t>
 [[nodiscard]] KswAlignResult ksw2_core_align(
-    const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query_seq,
-    const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> query_seq,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_seq,
     size_t query_start,
     size_t query_end,
     size_t target_start,
     size_t target_end,
-    const ScoringMatrix<QueryRange>& scoring_matrix,
+    const ScoringMatrix<Alphabet>& scoring_matrix,
     int8_t gap_open,
     int8_t gap_extend,
     int8_t gap_open_long,
@@ -1413,24 +1410,17 @@ class HwyKsw2Aligner {
 public:
     template<
         bool is_reversed,
-        supports_compact_sequence_range QueryRange,
-        supports_compact_sequence_range TargetRange,
-        class Scanner = bioseq::storage::sequence_scanner_none<
-            typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+        sequence_alphabet Alphabet>
     [[nodiscard]] static KswAlignResult z2_align(
-        const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query,
-        const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> query,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const ScoringMatrix<QueryRange>& scoring_matrix,
+        const ScoringMatrix<Alphabet>& scoring_matrix,
         const KswZ2Params& params)
     {
-        static_assert(std::is_same_v<
-            typename compact_sequence_range<QueryRange>::traits::alphabet_type,
-            typename compact_sequence_range<TargetRange>::traits::alphabet_type>,
-            "KSW2 requires query and target to share the same alphabet type.");
         return ksw2_core_align<KswAlignerMode::SINGLE_AFFINE, is_reversed>(
             query, target, query_start, query_end, target_start, target_end,
             scoring_matrix,
@@ -1441,24 +1431,17 @@ public:
 
     template<
         bool is_reversed,
-        supports_compact_sequence_range QueryRange,
-        supports_compact_sequence_range TargetRange,
-        class Scanner = bioseq::storage::sequence_scanner_none<
-            typename compact_sequence_range<QueryRange>::traits::storage_unit>>
+        sequence_alphabet Alphabet>
     [[nodiscard]] static KswAlignResult d2_align(
-        const bioseq::storage::lazy_compact_sequence<QueryRange, Scanner>& query,
-        const bioseq::storage::lazy_compact_sequence<TargetRange, Scanner>& target,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> query,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target,
         size_t query_start,
         size_t query_end,
         size_t target_start,
         size_t target_end,
-        const ScoringMatrix<QueryRange>& scoring_matrix,
+        const ScoringMatrix<Alphabet>& scoring_matrix,
         KswD2Params params)
     {
-        static_assert(std::is_same_v<
-            typename compact_sequence_range<QueryRange>::traits::alphabet_type,
-            typename compact_sequence_range<TargetRange>::traits::alphabet_type>,
-            "KSW2 requires query and target to share the same alphabet type.");
         if (params.gap_open_long + params.gap_extend_long
             < params.gap_open_short + params.gap_extend_short)
         {

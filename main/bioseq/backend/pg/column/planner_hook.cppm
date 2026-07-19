@@ -214,7 +214,13 @@ struct plan_tree_mutator {
 		{
 			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered CustomScan");
 
-			if (custom_scan->methods == bioseq_customscan_methods())
+			const char* custom_name = custom_scan->methods == nullptr
+				? nullptr : custom_scan->methods->CustomName;
+			const bool is_bioseq_scan =
+				custom_scan->methods == bioseq_customscan_methods()
+				|| (custom_name != nullptr
+					&& strcmp(custom_name, "BioseqScan") == 0);
+			if (is_bioseq_scan)
 			{
 				Const* vectorized_aggregate_execution = makeNode(Const);
 
@@ -225,9 +231,15 @@ struct plan_tree_mutator {
 
 				custom_scan->custom_private = lappend(custom_scan->custom_private, vectorized_aggregate_execution);
 			}
-			else
+			else if (custom_name != nullptr
+				&& (strcmp(custom_name, "BioseqBatchJoin") == 0
+					|| strcmp(custom_name, "BioseqBatchSortScan") == 0
+					|| strcmp(custom_name, "BioseqSliceProject") == 0
+					|| strcmp(custom_name, "BioseqIndexScan") == 0
+					|| strcmp(custom_name, "BioseqExternalScan") == 0
+					|| strcmp(custom_name, "VectorAggNode") == 0))
 			{
-				bioseq_log<ERR, PG>( "Custom Scan type is not BioseqColumnScan.");
+				bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() traversing Bioseq custom scan {}", custom_name);
 			}
 
 			return pg_plan_mutation::descend();
@@ -238,7 +250,7 @@ struct plan_tree_mutator {
 			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered Agg");
 
 			if (!bioseq_enable_vectorization)
-				return pg_plan_mutation::skip();
+				return pg_plan_mutation::descend();
 
 			if (agg_node->plan.lefttree->type == T_CustomScan)
 			{
@@ -267,7 +279,7 @@ struct plan_tree_mutator {
 						reinterpret_cast<Node*>(agg_node->plan.lefttree->qual));
 				if (agg_input_uses_bioseq_projection) {
 					bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
-					return pg_plan_mutation::skip();
+					return pg_plan_mutation::descend();
 				}
 				if (agg_node->aggstrategy == AGG_PLAIN)
 				{
@@ -312,7 +324,7 @@ struct plan_tree_mutator {
 					return pg_plan_mutation::with(reinterpret_cast<Plan*>(vectorized_agg_node));
 				}
 
-				return pg_plan_mutation::skip();
+				return pg_plan_mutation::descend();
 			}
 
 			return pg_plan_mutation::descend();

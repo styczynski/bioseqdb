@@ -3419,9 +3419,12 @@ void process_mps_build_claim_cpp(
                                             static_cast<unsigned long long>(
                                                 resident->packed_bytes),
                                             lazy_worker_shareable);
+                                    const auto resident_view =
+                                        bioseq::storage::as_lazy_sequence_view(
+                                            resident_lazy);
                                     bioseq::indexing::MinimizerSequenceMergedIndex<
                                         bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                            store, resident_lazy, worker_backend);
+                                            store, resident_view, worker_backend);
                                     return;
                                 }
                             }
@@ -3431,9 +3434,11 @@ void process_mps_build_claim_cpp(
                                         target.sequence_rowno),
                                     meta->index_name,
                                     lazy_worker_shareable);
+                            const auto source_view =
+                                bioseq::storage::as_lazy_sequence_view(lazy);
                             bioseq::indexing::MinimizerSequenceMergedIndex<
                                 bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
-                                    store, lazy, worker_backend);
+                                    store, source_view, worker_backend);
                         });
                     store.close_checked();
                 } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {

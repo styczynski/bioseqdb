@@ -21538,7 +21538,7 @@ public:
 private:
     template <class>
     friend struct MinimizersPerFragmentIndex;
-    template <class, class>
+    template <sequence_alphabet Alphabet>
     friend class MpfFragmentGenerationReplayProducer;
 
     struct RouteSnapshot {
@@ -21665,13 +21665,13 @@ private:
 /// ordered index.  A compatibility fallback can merge multiple source runs
 /// only when a caller explicitly requests a persisted span wider than one
 /// physical fragment; the production MPF publisher never does so.
-template <class R, class Scanner>
+template <sequence_alphabet Alphabet>
 class MpfFragmentGenerationReplayProducer {
 private:
-    using sequence_type = lazy_compact_sequence<R, Scanner>;
+    using sequence_type = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
     using traits = typename sequence_type::traits;
 
-    sequence_type* sequence_ = nullptr;
+    sequence_type sequence_;
     MinimizerSketchBackend backend_ = MinimizerSketchBackend::Scalar;
     std::uint16_t window_size_ = 10;
     std::uint16_t kmer_size_ = 15;
@@ -21720,8 +21720,7 @@ private:
     collect_core_run(
             std::uint64_t core_lo,
             std::uint64_t core_hi) {
-        constexpr std::uint64_t lpu = traits::letters_per_unit;
-        const std::uint64_t target_length = sequence_->bp_size();
+        const std::uint64_t target_length = sequence_.bp_size();
         const std::uint64_t halo = static_cast<std::uint64_t>(window_size_)
             + kmer_size_ - 2u;
         const std::uint64_t collect_lo = core_lo >= halo
@@ -21729,15 +21728,7 @@ private:
         const std::uint64_t collect_hi = core_hi
                 > target_length - std::min(target_length, halo)
             ? target_length : core_hi + halo;
-        const std::uint64_t lo_unit = collect_lo / lpu;
-        const std::uint64_t hi_unit = collect_hi / lpu
-            + (collect_hi % lpu != 0 ? 1u : 0u);
-        const std::uint64_t size_units = target_length / lpu
-            + (target_length % lpu != 0 ? 1u : 0u);
-        if (lo_unit > hi_unit || hi_unit > size_units) {
-            return std::unexpected(MinimizerGenerationWireError::bp_range);
-        }
-        const std::uint64_t emit_base = lo_unit * lpu;
+        const std::uint64_t emit_base = collect_lo;
         const std::uint64_t minimum_bases =
             static_cast<std::uint64_t>(window_size_) + kmer_size_ - 1u;
         std::vector<CanonicalMinimizerEvent> run;
@@ -21747,83 +21738,26 @@ private:
             return run;
         }
 
-        if (backend_ == MinimizerSketchBackend::VulkanSegment) {
-            increment_route_counter_(vulkan_core_runs_);
-            bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof core_proof{};
-            auto pairs =
-                bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-                    *sequence_,
-                    static_cast<std::size_t>(lo_unit),
-                    static_cast<std::size_t>(hi_unit),
-                    emit_base,
-                    core_lo,
-                    core_hi,
-                    window_size_,
-                    kmer_size_,
-                    &core_proof);
-            vulkan_proof_.combine(core_proof);
-            run.reserve(pairs.size());
-            for (const auto& pair : pairs) {
-                run.push_back(CanonicalMinimizerEvent{
-                    .hash = pair.first,
-                    .encoded_position = pair.second,
-                });
-            }
-        } else {
+        {
             sketch_collector collector;
             if (backend_ == MinimizerSketchBackend::PaperNtHashSimd) {
                 increment_route_counter_(paper_nthash_core_runs_);
-                std::uint64_t materialized_window_bp = 0;
-                const auto paper_result =
-                    collect_bounded_packed_paper_nthash_index_lazy(
-                        *sequence_,
-                        lo_unit,
-                        hi_unit,
-                        collect_hi - emit_base,
-                        window_size_,
-                        kmer_size_,
-                        collector,
-                        &materialized_window_bp);
-                peak_paper_materialized_window_bp_ = std::max(
-                    peak_paper_materialized_window_bp_,
-                    materialized_window_bp);
-                record_packed_paper_result(paper_result);
-                if (paper_result.status
-                    != PackedPaperNthashIndexStatus::ok) {
-                    return std::unexpected(
-                        MinimizerGenerationWireError::compatibility_mismatch);
-                }
+                return std::unexpected(
+                    MinimizerGenerationWireError::compatibility_mismatch);
             } else if (backend_ == MinimizerSketchBackend::ExactSimd) {
                 increment_route_counter_(exact_simd_core_runs_);
-                try {
-                    const auto proof = collect_exact_simd_index_range_or_throw(
-                        collector,
-                        *sequence_,
-                        static_cast<std::size_t>(lo_unit),
-                        static_cast<std::size_t>(hi_unit),
-                        window_size_,
-                        kmer_size_,
-                        0,
-                        "MPF generation replay");
-                    exact_simd_proof_.combine(proof);
-                    exact_simd_proof_present_ = true;
-                } catch (const ExactSimdIndexRuntimeError&) {
-                    return std::unexpected(
-                        MinimizerGenerationWireError::compatibility_mismatch);
-                }
+                return std::unexpected(
+                    MinimizerGenerationWireError::compatibility_mismatch);
+            } else if (backend_ == MinimizerSketchBackend::VulkanSegment) {
+                increment_route_counter_(vulkan_core_runs_);
+                return std::unexpected(
+                    MinimizerGenerationWireError::compatibility_mismatch);
             } else if (backend_ == MinimizerSketchBackend::Scalar) {
                 increment_route_counter_(scalar_core_runs_);
-                auto begin = sequence_->cbegin();
-                begin += static_cast<sequence_size_t>(lo_unit);
-                auto end = sequence_->cbegin();
-                end += static_cast<sequence_size_t>(hi_unit);
-                collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
-                    collector,
-                    *sequence_,
-                    begin,
-                    end,
-                    window_size_,
-                    kmer_size_);
+                bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
+                    MinimapSketchData>(
+                        collector, sequence_, collect_lo, collect_hi,
+                        window_size_, kmer_size_);
             } else {
                 return std::unexpected(
                     MinimizerGenerationWireError::compatibility_mismatch);
@@ -21860,11 +21794,11 @@ private:
 
 public:
     MpfFragmentGenerationReplayProducer(
-            sequence_type& sequence,
+            sequence_type sequence,
             MinimizerSketchBackend backend,
             std::uint16_t window_size = 10,
             std::uint16_t kmer_size = 15) noexcept
-        : sequence_(&sequence),
+        : sequence_(sequence),
           backend_(backend),
           window_size_(window_size),
           kmer_size_(kmer_size) {}
@@ -21901,19 +21835,14 @@ public:
     scan_sorted_events(
             std::uint64_t persisted_span,
             CanonicalMinimizerEventReceiver receiver) {
-        constexpr std::uint64_t lpu = traits::letters_per_unit;
-        constexpr std::uint64_t fragment_units =
-            Scanner::fragment_storage_units;
-        static_assert(fragment_units
-            <= (std::numeric_limits<std::uint64_t>::max)() / lpu);
-        constexpr std::uint64_t fragment_bp = fragment_units * lpu;
+        constexpr std::uint64_t fragment_bp = 32'768u;
         increment_route_counter_(scan_count_);
         if (has_last_scan_span_ && persisted_span != last_scan_span_) {
             increment_route_counter_(geometry_retry_count_);
         }
         last_scan_span_ = persisted_span;
         has_last_scan_span_ = true;
-        if (sequence_ == nullptr || persisted_span == 0
+        if (persisted_span == 0
             || fragment_bp == 0 || window_size_ == 0 || kmer_size_ == 0
             || static_cast<std::uint32_t>(window_size_)
                     + static_cast<std::uint32_t>(kmer_size_) < 2u) {
@@ -21926,13 +21855,7 @@ public:
             return std::unexpected(
                 MinimizerGenerationWireError::compatibility_mismatch);
         }
-        const std::uint64_t target_length = sequence_->bp_size();
-        const std::uint64_t expected_units = target_length / lpu
-            + (target_length % lpu != 0 ? 1u : 0u);
-        if (static_cast<std::uint64_t>(sequence_->size()) != expected_units) {
-            return std::unexpected(
-                MinimizerGenerationWireError::compatibility_mismatch);
-        }
+        const std::uint64_t target_length = sequence_.bp_size();
 
         std::uint64_t segment_lo = 0;
         while (segment_lo < target_length) {
@@ -22058,7 +21981,7 @@ public:
         evidence.selected_backend = backend_;
         evidence.minimizer_scheme = minimizer_scheme_identity();
         evidence.target_length =
-            sequence_ == nullptr ? 0u : sequence_->bp_size();
+            sequence_.bp_size();
         evidence.window_size = window_size_;
         evidence.kmer_size = kmer_size_;
         evidence.producer_scan_count = scan_count_;
@@ -22091,22 +22014,22 @@ struct MinimizersPerFragmentIndex {
     static constexpr std::string_view  index_name = MinimizerHashmapFragmentIndex::index_name;
     using storage_type = S;
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     [[nodiscard]] static auto make_generation_replay_producer(
-            lazy_compact_sequence<R, Scanner>& sequence,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend) {
-        return MpfFragmentGenerationReplayProducer<R, Scanner>{
+        return MpfFragmentGenerationReplayProducer<Alphabet>{
             sequence, backend};
     }
 
     /// Concrete MPF construction seam. Live v2 routing remains unchanged;
     /// this only proves the bounded source-fragment producer used by rev3.
-    template <class R, class Scanner, MinimizerGenerationRowSink Sink>
+    template <sequence_alphabet Alphabet, MinimizerGenerationRowSink Sink>
     [[nodiscard]] static std::expected<
         EncodedMinimizerGeneration,
         MinimizerGenerationWireError>
     encode_persisted_generation(
-            lazy_compact_sequence<R, Scanner>& sequence,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
             MinimizerSketchBackend backend,
             Sink& sink,
             const MinimizerGenerationEncodeOptions& options,
@@ -22149,150 +22072,21 @@ struct MinimizersPerFragmentIndex {
         return encoded;
     }
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     static void build(
         S& storage,
-        lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend) {
-        using traits = typename lazy_compact_sequence<R, Scanner>::traits;
         constexpr std::size_t w = 10, k = 15;                                  // pinned, == sidecar today
-        constexpr std::size_t lpu        = traits::letters_per_unit;
-        constexpr std::size_t frag_units = Scanner::fragment_storage_units;    // 1024
-        constexpr std::size_t frag_bp    = frag_units * lpu;                   // e.g. 32768 @ dna4/uint64
+        constexpr std::size_t frag_bp    = 32'768u;
         constexpr std::size_t W          = w + k;                              // backward context
         static_assert(frag_bp < (std::size_t{1} << 28),
             "fragment-core-local positions must fit the 28-bit MinimapSketchData field");
         const sequence_size_t total_bp = seq.bp_size();
         const std::size_t nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
-        if ((std::size_t)seq.size() != (std::size_t)((total_bp + lpu - 1) / lpu))
-            index_corruption_panic("minimizers_per_fragment build: scanner unit-span != ceil(total_bp/lpu) (fragment geometry)");
-
-        const std::size_t size_u = (std::size_t)((total_bp + lpu - 1) / lpu);   // total units
-
-        // DOC0345 Patch F — GPU path: batch whole fragments through the GPU
-        // sorted-pair seam (fused GPU minimizer emit + host pair sort), scatter
-        // each global position into its fragment, and serialize the existing
-        // per-fragment blob format. No CPU minimizer COLLECT. Exits before the
-        // scalar per-fragment path below.
-        if (backend == MinimizerSketchBackend::VulkanSegment) {
-            const std::size_t fragments_per_batch = gpu_mpf_fragments_per_batch(
-                nfrag,
-                frag_bp,
-                2u * W,
-                storage.run_buffer_bytes());
-            std::vector<std::vector<std::pair<std::uint64_t, std::uint64_t>>> per_fragment;
-            std::vector<char> blob;
-            per_fragment.resize(fragments_per_batch);
-
-            auto write_fragment_blob =
-                [&storage](std::size_t fragment_no, const std::vector<char>& fragment_blob) {
-                const std::size_t bytes = fragment_blob.size();
-                storage.resize(static_cast<index_sub_key_t>(fragment_no), bytes);
-                storage.template write_to_each<char>(
-                    static_cast<index_sub_key_t>(fragment_no),
-                    [&fragment_blob, bytes](
-                        std::size_t chunk_no,
-                        char* buffer,
-                        std::size_t capacity_units) {
-                    DEBUG_ASSERT(
-                        chunk_no == 0 && capacity_units >= bytes,
-                        "one fragment index fits one chunk");
-                    if (bytes != 0u) {
-                        std::memcpy(buffer, fragment_blob.data(), bytes);
-                    }
-                    return chunk_no;
-                });
-            };
-
-            for (std::size_t batch_lo_frag = 0;
-                 batch_lo_frag < nfrag;
-                 batch_lo_frag += fragments_per_batch) {
-                const std::size_t batch_hi_frag =
-                    std::min(nfrag, batch_lo_frag + fragments_per_batch);
-                const sequence_size_t core_lo =
-                    static_cast<sequence_size_t>(batch_lo_frag) * frag_bp;
-                const sequence_size_t core_hi = std::min(
-                    static_cast<sequence_size_t>(batch_hi_frag) * frag_bp,
-                    total_bp);
-                const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
-                const sequence_size_t coll_hi = std::min(
-                    core_hi + static_cast<sequence_size_t>(W),
-                    total_bp);
-                const std::size_t lo_unit =
-                    static_cast<std::size_t>(coll_lo / lpu);
-                const std::size_t hi_unit = std::min(
-                    static_cast<std::size_t>((coll_hi + lpu - 1) / lpu),
-                    size_u);
-                const sequence_size_t emit_base =
-                    static_cast<sequence_size_t>(lo_unit) * lpu;
-
-                auto batch_pairs =
-                    bioseq::gpu::vulkan::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-                        seq,
-                        lo_unit,
-                        hi_unit,
-                        emit_base,
-                        core_lo,
-                        core_hi,
-                        w,
-                        k);
-
-                for (auto& fragment_pairs : per_fragment) {
-                    fragment_pairs.clear();
-                }
-                for (const auto& pair : batch_pairs) {
-                    const sequence_size_t global_pos =
-                        static_cast<sequence_size_t>(pair.second >> 1);
-                    const std::size_t fragment_no =
-                        static_cast<std::size_t>(global_pos / frag_bp);
-                    if (fragment_no < batch_lo_frag || fragment_no >= batch_hi_frag) {
-                        continue;
-                    }
-                    const sequence_size_t fragment_core_lo =
-                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
-                    const std::uint64_t local_encoded =
-                        (static_cast<std::uint64_t>(global_pos - fragment_core_lo) << 1)
-                        | (pair.second & 1ull);
-                    per_fragment[fragment_no - batch_lo_frag].emplace_back(
-                        pair.first,
-                        local_encoded);
-                }
-
-                for (std::size_t fragment_no = batch_lo_frag;
-                     fragment_no < batch_hi_frag;
-                     ++fragment_no) {
-                    const sequence_size_t fragment_core_lo =
-                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
-                    const sequence_size_t fragment_core_hi = std::min(
-                        fragment_core_lo + static_cast<sequence_size_t>(frag_bp),
-                        total_bp);
-                    std::span<const std::pair<std::uint64_t, std::uint64_t>> fragment_pairs{
-                        per_fragment[fragment_no - batch_lo_frag].data(),
-                        per_fragment[fragment_no - batch_lo_frag].size()};
-                    serialize_sorted_pairs_to_fragment_blob(
-                        fragment_pairs,
-                        fragment_core_hi - fragment_core_lo,
-                        blob);
-                    write_fragment_blob(fragment_no, blob);
-                }
-            }
-
-            const std::int64_t manifest = static_cast<std::int64_t>(nfrag);
-            storage.resize(DIRECTORY_SUB_KEY, sizeof(std::int64_t));
-            storage.template write_to_each<std::int64_t>(
-                DIRECTORY_SUB_KEY,
-                [manifest](
-                    std::size_t chunk_no,
-                    std::int64_t* manifest_buffer,
-                    std::size_t) {
-                manifest_buffer[0] = manifest;
-                return chunk_no;
-            });
-            return;
-        }
 
         auto build_fragment_blob =
-            [&seq, backend, total_bp, size_u](std::size_t fragment_no,
+            [seq, backend, total_bp](std::size_t fragment_no,
                                      sketch_collector& collector,
                                      std::vector<MinimapSketchData>& core,
                                      std::vector<char>& out_blob) {
@@ -22301,31 +22095,17 @@ struct MinimizersPerFragmentIndex {
             const sequence_size_t coll_lo = core_lo >= W ? core_lo - W : 0;
             const sequence_size_t coll_hi = std::min(core_hi + (sequence_size_t)W, total_bp);
             collector.clear();
-            const std::size_t lo_unit = (std::size_t)(coll_lo / lpu);
-            const std::size_t hi_unit = std::min((std::size_t)((coll_hi + lpu - 1) / lpu), size_u);
-            DEBUG_ASSERT(lo_unit <= hi_unit && hi_unit <= size_u, "sub-range unit bounds out of range");
-            auto begin_iter = seq.cbegin(); begin_iter += (sequence_size_t)lo_unit;
-            auto end_iter   = seq.cbegin(); end_iter   += (sequence_size_t)hi_unit;
-            const sequence_size_t emit_base = (sequence_size_t)lo_unit * lpu;
+            const sequence_size_t emit_base = coll_lo;
             const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
             core.clear();
             if (collect_bp >= (sequence_size_t)W) {
-                if (backend == MinimizerSketchBackend::ExactSimd) {
-                    (void)collect_exact_simd_index_range_or_throw(
-                            collector,
-                            seq,
-                            lo_unit,
-                            hi_unit,
-                            w,
-                            k,
-                            0,
-                            "minimizers_per_fragment build");
-                } else if (backend == MinimizerSketchBackend::Scalar) {
-                    collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(collector, seq, begin_iter, end_iter, w, k);
-                } else {
-                    index_corruption_panic(
-                        "minimizers_per_fragment build: unsupported sketch backend");
-                }
+                // The facade scalar route is the semantic fallback. Packed
+                // accelerators are entered by their resident/admitted owner
+                // seams, never by inspecting the facade representation here.
+                (void)backend;
+                bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
+                    MinimapSketchData>(
+                        collector, seq, coll_lo, coll_hi, w, k);
                 for (const MinimapSketchData& minimizer : collector.extract_sketches_data()) {
                     const sequence_size_t global_pos = (sequence_size_t)minimizer.last_pos() + emit_base;
                     if (global_pos < core_lo || global_pos >= core_hi) continue; // belongs to a neighbour fragment's core
@@ -22365,7 +22145,7 @@ struct MinimizersPerFragmentIndex {
         const bool may_parallel_fragments =
             bioseq::parallelism::task_parallel(pool.mode())
             && pool.max_concurrency() > 1
-            && bioseq::storage::lazy_is_worker_shareable(seq)
+            && lazy_is_worker_shareable(seq)
             && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;
 
         if (!may_parallel_fragments) {
@@ -22417,23 +22197,27 @@ struct MinimizersPerFragmentIndex {
     }
 
     // DOC0345 Patch F — scalar-default overload delegates to the explicit backend.
-    template <class R, class Scanner>
-    static void build(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+    template <sequence_alphabet Alphabet>
+    static void build(
+            S& storage,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         build(storage, seq, MinimizerSketchBackend::Scalar);
     }
 
-    template <class R, class Scanner>
+    template <sequence_alphabet Alphabet>
     static void rebuild(
         S& storage,
-        lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
         MinimizerSketchBackend backend)
     {
         storage.clear_entity();
         build(storage, seq, backend);
     }
 
-    template <class R, class Scanner>
-    static void rebuild(S& storage, lazy_compact_sequence<R, Scanner>& seq) {
+    template <sequence_alphabet Alphabet>
+    static void rebuild(
+            S& storage,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         rebuild(storage, seq, MinimizerSketchBackend::Scalar);
     }
 

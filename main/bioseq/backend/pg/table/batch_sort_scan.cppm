@@ -62,6 +62,9 @@ import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
 import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
 import bioseq.pg_utils;                 // PostgresErrorAsCpp at the PG callback seam
 
+export using BioseqSliceProjectUpperPathProvider = void (*)(
+    PlannerInfo*, UpperRelationKind, RelOptInfo*, RelOptInfo*, void*);
+
 namespace {
 
 /* GUC backing var: opt-in switch for the prototype sort node. Default OFF so
@@ -193,8 +196,12 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	try {
 	pgseq_t::dispatch_instance(alphabet_code, byte_width, [&]<class S>() {
         using unit_t = typename compact_sequence_range<S>::traits::storage_unit;
+        using alphabet_t = typename compact_sequence_range<S>::traits::alphabet_type;
         using scanner_t = bioseq::storage::sequence_scanner_none<unit_t>;
         using lazy_t = bioseq::storage::lazy_compact_sequence<S, scanner_t>;
+        using view_t = bioseq::storage::basic_lazy_sequence_view<alphabet_t>;
+        using processor_t =
+            bioseq::storage::lazy_compact_sequence_batch_processor<alphabet_t>;
 
         /* Detoast every row's sequence header. For inline (non-stub) values
          * PG_DETOAST_DATUM returns a pointer into the buffered MinimalTuple,
@@ -256,7 +263,15 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
             lazies.push_back(bioseq::storage::make_lazy_in_memory(ranges[i]));
 	        }
 
-	        std::span<lazy_t> batch(lazies.data(), lazies.size());
+	        /* The canonical views borrow their concrete lazy owners. Construct
+	         * them only after the owner vector is complete, and keep both arrays
+	         * alive for the synchronous batch-processor call below. */
+	        std::vector<view_t> views;
+	        views.reserve(row_count);
+	        for (const lazy_t& lazy : lazies) {
+	            views.push_back(bioseq::storage::as_lazy_sequence_view(lazy));
+	        }
+	        const std::span<const view_t> batch(views.data(), views.size());
 	        auto& gpu_rt =
 	            bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
 	        const std::uint64_t dispatch_before = gpu_rt.seq_sort_dispatch_count();
@@ -264,8 +279,7 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 	        const std::uint64_t dense_before = gpu_rt.seq_sort_dense_scatter_dispatch_count();
 	        const std::uint64_t uploaded_before = gpu_rt.seq_sort_uploaded_bytes_count();
 	        const auto sort_start = std::chrono::steady_clock::now();
-	        order = bioseq::storage::lazy_compact_sequence_batch_processor<S, scanner_t>::
-	                    lazy_compact_sequence_batch_sort(batch, rt->spec);
+	        order = processor_t::lazy_compact_sequence_batch_sort(batch, rt->spec);
 	        const auto sort_end = std::chrono::steady_clock::now();
 	        const std::uint64_t dispatch_after = gpu_rt.seq_sort_dispatch_count();
 	        const std::uint64_t global_after = gpu_rt.seq_sort_global_compare_dispatch_count();
@@ -565,6 +579,7 @@ const CustomPathMethods BioseqBatchSortPathMethods = {
 /* ================================================================== */
 
 create_upper_paths_hook_type PreviousCreateUpperPathsHook = nullptr;
+BioseqSliceProjectUpperPathProvider SliceProjectUpperPathProvider = nullptr;
 
 /* The first ORDER BY pathkey whose key is of type bioseq.seq, or nullptr. */
 [[nodiscard]] PathKey* sort_sequence_pathkey(PlannerInfo* root, Oid seq_oid)
@@ -604,6 +619,11 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
     if (PreviousCreateUpperPathsHook != nullptr) {
         PreviousCreateUpperPathsHook(root, stage, input_rel, output_rel, extra);
     }
+	/* One dispatcher owns create_upper_paths_hook. SliceProject registers a
+	 * provider here instead of replacing/chaining the global hook itself. */
+	if (SliceProjectUpperPathProvider != nullptr) {
+		SliceProjectUpperPathProvider(root, stage, input_rel, output_rel, extra);
+	}
 
     if (stage != UPPERREL_ORDERED || root->sort_pathkeys == NIL) {
         return;
@@ -668,6 +688,24 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
 }
 
 }  // anonymous namespace
+
+export void
+bioseq_register_slice_project_upper_path_provider(
+        BioseqSliceProjectUpperPathProvider provider)
+{
+	if (provider == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("Bioseq SliceProject upper-path provider is NULL")));
+	}
+	if (SliceProjectUpperPathProvider != nullptr
+		&& SliceProjectUpperPathProvider != provider) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DUPLICATE_OBJECT),
+			 errmsg("Bioseq SliceProject upper-path provider is already registered")));
+	}
+	SliceProjectUpperPathProvider = provider;
+}
 
 /* ------------------------------------------------------------------ */
 /* Public init — install the hook + register the scan methods. Called   */

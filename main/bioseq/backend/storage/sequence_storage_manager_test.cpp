@@ -14,8 +14,11 @@
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <span>
 
 import bioseq.storage.bucket_math;
 
@@ -142,4 +145,50 @@ TEST_CASE("DOC0371 — seq_locator v3 is a 40-byte standard-layout POD that roun
     REQUIRE(offsetof(seq_locator, total_bp_size)    == 16u);
     REQUIRE(offsetof(seq_locator, first_sub_row_no) == 24u);
     REQUIRE(offsetof(seq_locator, source_epoch)     == 32u);
+}
+
+TEST_CASE("DOC0377 — canonical locator payload codec validates exact frozen framing",
+          "[storage][locator][unit]") {
+    seq_locator locator{
+        .version = bioseq::storage::kLocatorVersion,
+        .bucket_idx = (std::numeric_limits<std::uint8_t>::max)(),
+        .shard_idx = (std::numeric_limits<std::uint32_t>::max)(),
+        .num_fragments = (std::numeric_limits<std::uint32_t>::max)(),
+        .total_bp_size = (std::numeric_limits<std::uint64_t>::max)(),
+        .first_sub_row_no = (std::numeric_limits<std::uint64_t>::max)(),
+        .source_epoch = 0u,
+    };
+    std::array<std::byte, sizeof(seq_locator)> payload{};
+    REQUIRE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+    const auto decoded = bioseq::storage::decode_seq_locator_payload(payload);
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded->bucket_idx == locator.bucket_idx);
+    REQUIRE(decoded->shard_idx == locator.shard_idx);
+    REQUIRE(decoded->num_fragments == locator.num_fragments);
+    REQUIRE(decoded->total_bp_size == locator.total_bp_size);
+    REQUIRE(decoded->first_sub_row_no == locator.first_sub_row_no);
+    REQUIRE(decoded->source_epoch == 0u);
+
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(
+        std::span<std::byte>(payload).first(payload.size() - 1u), locator));
+    REQUIRE_FALSE(bioseq::storage::decode_seq_locator_payload(
+        std::span<const std::byte>(payload).first(payload.size() - 1u))
+                      .has_value());
+
+    locator.version = 2u;
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+    payload[0] = std::byte{2u};
+    REQUIRE_FALSE(bioseq::storage::decode_seq_locator_payload(payload)
+                      .has_value());
+
+    locator.version = bioseq::storage::kLocatorVersion;
+    locator._pad_2 = 1u;
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+    locator._pad_2 = 0u;
+    locator._pad_4 = 1u;
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+
+    REQUIRE(bioseq::storage::is_seq_locator_stub_width(
+        bioseq::storage::k_seq_locator_stub_marker));
+    REQUIRE_FALSE(bioseq::storage::is_seq_locator_stub_width(8u));
 }

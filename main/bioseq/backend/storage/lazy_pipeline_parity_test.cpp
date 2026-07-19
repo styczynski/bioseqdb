@@ -83,12 +83,18 @@ void check_pipeline_parity(std::size_t qn, std::size_t tn, std::uint64_t seed) {
     // Baseline — no-fragment lazy wrappers.
     auto base_q = bioseq::storage::make_lazy_in_memory(q_range);
     auto base_t = bioseq::storage::make_lazy_in_memory(t_range);
-    const auto baseline = canon(minimap_port(base_q, base_t, Minimap2Params{}));
+    const auto base_q_view = bioseq::storage::as_lazy_sequence_view(base_q);
+    const auto base_t_view = bioseq::storage::as_lazy_sequence_view(base_t);
+    const auto baseline = canon(
+        minimap_port(base_q_view, base_t_view, Minimap2Params{}));
 
     // Fragmented — chunked scanners (whole pipeline runs over fragments).
     bioseq::storage::lazy_compact_sequence<dna4_u64, chunked> frag_q{chunked::from_range(q_range)};
     bioseq::storage::lazy_compact_sequence<dna4_u64, chunked> frag_t{chunked::from_range(t_range)};
-    const auto fragmented = canon(minimap_port(frag_q, frag_t, Minimap2Params{}));
+    const auto frag_q_view = bioseq::storage::as_lazy_sequence_view(frag_q);
+    const auto frag_t_view = bioseq::storage::as_lazy_sequence_view(frag_t);
+    const auto fragmented = canon(
+        minimap_port(frag_q_view, frag_t_view, Minimap2Params{}));
 
     INFO("qn=" << qn << " tn=" << tn << " frag_units=" << FragUnits
                << " baseline_matches=" << baseline.size()
@@ -134,7 +140,9 @@ TEST_CASE("DOC0286 — two_stack_nthash minimap_port handles small fragmented ta
         chunked::from_range(q_range)};
     bioseq::storage::lazy_compact_sequence<dna4_u64, chunked> frag_t{
         chunked::from_range(t_range)};
-    const auto matches = canon(minimap_port(frag_q, frag_t, params));
+    const auto frag_q_view = bioseq::storage::as_lazy_sequence_view(frag_q);
+    const auto frag_t_view = bioseq::storage::as_lazy_sequence_view(frag_t);
+    const auto matches = canon(minimap_port(frag_q_view, frag_t_view, params));
 
     REQUIRE_FALSE(matches.empty());
 }

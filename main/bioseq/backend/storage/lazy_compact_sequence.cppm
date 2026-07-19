@@ -38,16 +38,26 @@
  */
 module;
 
+#include <hwy/aligned_allocator.h>
+
 #include "common.h"
 
+#include <algorithm>
 #include <array>
+#include <climits>
+#include <compare>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <ranges>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -56,14 +66,406 @@ module;
 export module bioseq.storage.lazy;
 
 import bioseq.common.mlogging;
+import bioseq.common.sequan_compat;
 import bioseq.storage.scanner;
 import bioseq.storage.size;
 import bioseq.common.fragment_cache;
+import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
+import bioseq.sequences.rank_pack;
 
 static_assert(__cplusplus >= 202302L, "DOC0263 requires C++23-or-later");
 
 export namespace bioseq::storage {
+
+// =====================================================================
+// DOC0377 §9 — one alphabet-specialized, representation-erased facade.
+// =====================================================================
+
+template <sequence_alphabet Alphabet>
+struct lazy_rank_stream_traits {
+    using alphabet_type = Alphabet;
+    using storage_unit = std::uint8_t;
+    using packed_alphabet_range = compact_sequence_range<sequence_custom_alphabet<
+        Alphabet,
+        std::uint8_t,
+        seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>)>>;
+    using packed_traits = typename packed_alphabet_range::traits;
+
+    static constexpr std::size_t logical_bits_per_symbol =
+        seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>);
+    static constexpr std::size_t rank_stream_bytes_per_symbol = 1;
+    static constexpr std::size_t alphabet_size = seqan3::alphabet_size<Alphabet>;
+    static_assert(logical_bits_per_symbol > 0
+                  && logical_bits_per_symbol <= CHAR_BIT);
+
+    [[nodiscard]] static storage_unit letter_complement(storage_unit rank) {
+        return static_cast<storage_unit>(packed_traits::letter_complement(rank));
+    }
+};
+
+template <sequence_alphabet Alphabet>
+class basic_lazy_sequence_view {
+public:
+    using alphabet_type = Alphabet;
+    using traits = lazy_rank_stream_traits<Alphabet>;
+    using lazy_slice_tag = lazy_compact_sequence_slice_tag;
+
+    using ptr_at_fn = std::uint8_t const* (*)(
+        void const*, sequence_size_t, std::size_t, std::span<std::uint8_t>);
+
+    enum class packed_bit_order : std::uint8_t {
+        least_significant_symbol_first,
+    };
+
+    struct resident_packed_region {
+        void const* units{};
+        std::size_t unit_count{};
+        sequence_size_t bp_length{};
+        std::uint8_t storage_unit_byte_width{};
+        std::uint8_t bits_per_symbol{};
+        std::uint16_t leading_symbol_offset{};
+        std::uint16_t trailing_padding_letters{};
+        packed_bit_order bit_order{
+            packed_bit_order::least_significant_symbol_first};
+    };
+
+    using resident_probe_result = std::optional<resident_packed_region>;
+    using try_resident_packed_fn = resident_probe_result (*)(
+        void const*, sequence_size_t, sequence_size_t, std::uint8_t) noexcept;
+
+    struct backend_ops {
+        sequence_size_t (*bp_size)(void const*) noexcept;
+        std::array<ptr_at_fn, 4> ptr_at;
+        try_resident_packed_fn try_resident_packed;
+        bool (*worker_shareable)(void const*) noexcept;
+    };
+
+    explicit basic_lazy_sequence_view(
+            void const* state,
+            backend_ops const* ops) noexcept
+        : state_(state), ops_(ops) {
+        DEBUG_ASSERT(
+            ops_ != nullptr && ops_->bp_size != nullptr
+                && ops_->worker_shareable != nullptr
+                && std::ranges::all_of(
+                    ops_->ptr_at,
+                    [](ptr_at_fn callback) { return callback != nullptr; }),
+            "lazy sequence backend table must be complete");
+    }
+
+    [[nodiscard]] sequence_size_t bp_size() const noexcept {
+        return ops_->bp_size(state_);
+    }
+
+    [[nodiscard]] sequence_size_t size() const noexcept { return bp_size(); }
+
+    [[nodiscard]] friend bool lazy_is_worker_shareable(
+            basic_lazy_sequence_view value) noexcept {
+        return value.ops_->worker_shareable(value.state_);
+    }
+
+    [[nodiscard]] resident_probe_result try_resident_packed(
+            sequence_size_t from,
+            sequence_size_t to,
+            std::uint8_t requested_width) const noexcept {
+        if (from > to || to > bp_size()
+            || !(requested_width == 1u || requested_width == 2u
+                 || requested_width == 4u || requested_width == 8u)
+            || ops_->try_resident_packed == nullptr) {
+            return std::nullopt;
+        }
+
+        resident_probe_result result = ops_->try_resident_packed(
+            state_, from, to, requested_width);
+        if (!result.has_value()) {
+            return std::nullopt;
+        }
+
+        const sequence_size_t length = to - from;
+        constexpr std::uint8_t bits = static_cast<std::uint8_t>(
+            traits::logical_bits_per_symbol);
+        const sequence_size_t letters_per_unit =
+            static_cast<sequence_size_t>(requested_width * CHAR_BIT / bits);
+        const resident_packed_region& region = *result;
+
+        if (letters_per_unit == 0u || region.bp_length != length
+            || region.storage_unit_byte_width != requested_width
+            || region.bits_per_symbol != bits
+            || region.bit_order
+                != packed_bit_order::least_significant_symbol_first) {
+            return std::nullopt;
+        }
+        if (length == 0u) {
+            if (region.units != nullptr || region.unit_count != 0u
+                || region.leading_symbol_offset != 0u
+                || region.trailing_padding_letters != 0u) {
+                return std::nullopt;
+            }
+            return result;
+        }
+
+        if (region.units == nullptr
+            || reinterpret_cast<std::uintptr_t>(region.units)
+                    % requested_width
+                != 0u
+            || region.unit_count
+                    > (std::numeric_limits<std::size_t>::max)()
+                        / requested_width
+            || region.leading_symbol_offset >= letters_per_unit
+            || length
+                    > (std::numeric_limits<sequence_size_t>::max)()
+                        - region.leading_symbol_offset) {
+            return std::nullopt;
+        }
+
+        const sequence_size_t occupied =
+            length + region.leading_symbol_offset;
+        const sequence_size_t expected_units =
+            occupied / letters_per_unit
+            + static_cast<sequence_size_t>(occupied % letters_per_unit != 0u);
+        if (expected_units
+                > static_cast<sequence_size_t>(
+                    (std::numeric_limits<std::size_t>::max)())
+            || region.unit_count != static_cast<std::size_t>(expected_units)
+            || expected_units
+                    > (std::numeric_limits<sequence_size_t>::max)()
+                        / letters_per_unit) {
+            return std::nullopt;
+        }
+        const sequence_size_t trailing =
+            expected_units * letters_per_unit - occupied;
+        if (region.trailing_padding_letters != trailing) {
+            return std::nullopt;
+        }
+        return result;
+    }
+
+    template <bool IsReversed, bool WriteReversed = false>
+    void to_encoded_into(std::span<std::uint8_t> output,
+                         std::size_t from,
+                         std::size_t to) const {
+        if (from > to || to > bp_size() || output.size() < to - from) {
+            lazy_fragment_panic("lazy sequence rank range is invalid");
+        }
+        if (from == to) {
+            return;
+        }
+        auto cursor = encoded_iter<IsReversed, WriteReversed, std::uint8_t, 2>();
+        const std::size_t length = to - from;
+        const std::uint8_t* source = cursor.ptr_at(
+            static_cast<sequence_size_t>(from), length, output);
+        if (source != output.data()) {
+            std::memcpy(output.data(), source, length);
+        }
+    }
+
+    template <bool IsReversed,
+              bool WriteReversed,
+              typename StoredType,
+              std::size_t MaxLoadedSlots = 2>
+    struct encoded_iterator {
+        basic_lazy_sequence_view const* parent{};
+
+        [[nodiscard]] StoredType const* ptr_at(
+                sequence_size_t bp_from,
+                std::size_t required_length,
+                std::span<StoredType> scratch) const {
+            static_assert(std::same_as<StoredType, std::uint8_t>);
+            static_assert(MaxLoadedSlots == 2,
+                          "facade backends implement the two-slot API");
+            if (bp_from > parent->bp_size()
+                || required_length > parent->bp_size() - bp_from
+                || scratch.size() < required_length) {
+                lazy_fragment_panic("lazy sequence ptr_at range is invalid");
+            }
+            constexpr std::size_t orientation =
+                (IsReversed ? 2u : 0u) | (WriteReversed ? 1u : 0u);
+            const std::uint8_t* result = parent->ops_->ptr_at[orientation](
+                parent->state_, bp_from, required_length, scratch);
+            if (required_length != 0u && result == nullptr) {
+                lazy_fragment_panic("lazy sequence backend returned null");
+            }
+            return result;
+        }
+    };
+
+    template <bool IsReversed,
+              bool WriteReversed,
+              typename StoredType,
+              std::size_t MaxLoadedSlots = 2>
+    [[nodiscard]] auto encoded_iter() const noexcept {
+        return encoded_iterator<IsReversed, WriteReversed,
+                                StoredType, MaxLoadedSlots>{this};
+    }
+
+    class rank_iterator {
+        static constexpr std::size_t chunk_size = 256;
+
+        basic_lazy_sequence_view const* parent_{};
+        sequence_size_t position_{};
+        mutable sequence_size_t loaded_from_{};
+        mutable std::size_t loaded_count_{};
+        mutable std::array<std::uint8_t, chunk_size> scratch_{};
+        mutable std::uint8_t const* loaded_{};
+
+        void ensure_loaded() const {
+            if (position_ >= loaded_from_
+                && position_ < loaded_from_ + loaded_count_) {
+                return;
+            }
+            loaded_from_ = position_;
+            loaded_count_ = static_cast<std::size_t>(
+                std::min<sequence_size_t>(
+                    chunk_size, parent_->bp_size() - position_));
+            loaded_ = parent_->ops_->ptr_at[0](
+                parent_->state_, loaded_from_, loaded_count_, scratch_);
+            if (loaded_count_ != 0u && loaded_ == nullptr) {
+                lazy_fragment_panic("lazy rank backend returned null");
+            }
+        }
+
+    public:
+        using value_type = std::uint8_t;
+        using difference_type = std::ptrdiff_t;
+        using reference = std::uint8_t;
+        using iterator_concept = std::forward_iterator_tag;
+        using iterator_category = std::forward_iterator_tag;
+
+        rank_iterator() = default;
+        rank_iterator(basic_lazy_sequence_view const* parent,
+                      sequence_size_t position) noexcept
+            : parent_(parent), position_(position) {}
+        rank_iterator(rank_iterator const& other) noexcept
+            : parent_(other.parent_), position_(other.position_) {}
+        rank_iterator& operator=(rank_iterator const& other) noexcept {
+            if (this != &other) {
+                parent_ = other.parent_;
+                position_ = other.position_;
+                loaded_from_ = 0u;
+                loaded_count_ = 0u;
+                loaded_ = nullptr;
+            }
+            return *this;
+        }
+
+        [[nodiscard]] std::uint8_t operator*() const {
+            ensure_loaded();
+            return loaded_[static_cast<std::size_t>(position_ - loaded_from_)];
+        }
+        rank_iterator& operator++() noexcept {
+            ++position_;
+            return *this;
+        }
+        rank_iterator operator++(int) noexcept {
+            rank_iterator previous = *this;
+            ++*this;
+            return previous;
+        }
+        rank_iterator& operator+=(difference_type delta) {
+            if (delta >= 0) {
+                const auto magnitude = static_cast<sequence_size_t>(delta);
+                if (position_ > parent_->bp_size()
+                    || magnitude > parent_->bp_size() - position_) {
+                    lazy_fragment_panic(
+                        "lazy rank iterator advanced past end");
+                }
+                position_ += magnitude;
+            } else {
+                const sequence_size_t magnitude = sequence_size_t{0}
+                    - static_cast<sequence_size_t>(delta);
+                if (magnitude > position_) {
+                    lazy_fragment_panic(
+                        "lazy rank iterator advanced before begin");
+                }
+                position_ -= magnitude;
+            }
+            loaded_count_ = 0u;
+            loaded_ = nullptr;
+            return *this;
+        }
+        [[nodiscard]] friend bool operator==(
+                rank_iterator const& left,
+                rank_iterator const& right) noexcept {
+            return left.parent_ == right.parent_
+                && left.position_ == right.position_;
+        }
+    };
+
+    [[nodiscard]] rank_iterator begin() const noexcept { return {this, 0u}; }
+    [[nodiscard]] rank_iterator end() const noexcept { return {this, bp_size()}; }
+
+    template <IteratorMode Mode>
+    [[nodiscard]] rank_iterator iter(rank_iterator value) const noexcept {
+        static_assert(Mode == BP,
+                      "facade iter supports logical BP coordinates only");
+        return value;
+    }
+
+    template <IteratorMode Mode>
+    [[nodiscard]] auto iterable() const noexcept {
+        static_assert(Mode == BP,
+                      "facade iteration is a logical-rank BP range");
+        return std::ranges::subrange(begin(), end());
+    }
+
+private:
+    void const* state_{};
+    backend_ops const* ops_{};
+};
+
+static_assert(supports_lazy_compact_sequence_slice<
+              basic_lazy_sequence_view<seq::dna4>>);
+static_assert(supports_resident_packed_probe<
+              basic_lazy_sequence_view<seq::dna4>>);
+
+template <sequence_alphabet Alphabet>
+class lazy_sequence_call_owner {
+public:
+    using release_fn = void (*)(void*) noexcept;
+
+    lazy_sequence_call_owner(basic_lazy_sequence_view<Alphabet> view,
+                             void* lifetime_state,
+                             release_fn release) noexcept
+        : view_(view), lifetime_state_(lifetime_state), release_(release) {
+        DEBUG_ASSERT(lifetime_state_ != nullptr && release_ != nullptr,
+                     "lazy view owner requires an adopted backing retain");
+    }
+
+    lazy_sequence_call_owner(lazy_sequence_call_owner const&) = delete;
+    lazy_sequence_call_owner& operator=(lazy_sequence_call_owner const&) = delete;
+    lazy_sequence_call_owner& operator=(lazy_sequence_call_owner&&) = delete;
+
+    lazy_sequence_call_owner(lazy_sequence_call_owner&& other) noexcept
+        : view_(other.view_),
+          lifetime_state_(other.lifetime_state_),
+          release_(other.release_) {
+        other.lifetime_state_ = nullptr;
+        other.release_ = nullptr;
+    }
+
+    ~lazy_sequence_call_owner() noexcept { release_noexcept(); }
+
+    [[nodiscard]] basic_lazy_sequence_view<Alphabet> view() const noexcept {
+        return view_;
+    }
+
+    void release_noexcept() noexcept {
+        if (release_ == nullptr) {
+            return;
+        }
+        void* state = lifetime_state_;
+        release_fn release = release_;
+        lifetime_state_ = nullptr;
+        release_ = nullptr;
+        release(state);
+    }
+
+private:
+    basic_lazy_sequence_view<Alphabet> view_;
+    void* lifetime_state_{};
+    release_fn release_{};
+};
 
 template <class R, class Scanner>
 struct lazy_compact_sequence;
@@ -650,6 +1052,732 @@ template <class R, class Scanner>
     return !Scanner::supports_fragments();
 }
 
+namespace lazy_view_detail {
+
+template <class Alphabet>
+concept complementable_sequence_alphabet = requires (Alphabet value) {
+    seqan3::complement(std::move(value));
+};
+
+static_assert(complementable_sequence_alphabet<seq::dna4>);
+static_assert(complementable_sequence_alphabet<seq::dna5>);
+static_assert(!complementable_sequence_alphabet<seq::aa27>);
+
+template <bool IsReversed, bool WriteReversed, class R, class Scanner>
+[[nodiscard]] const std::uint8_t* existing_lazy_ptr_at(
+        void const* state,
+        sequence_size_t bp_from,
+        std::size_t required_length,
+        std::span<std::uint8_t> scratch) {
+    const auto& sequence =
+        *static_cast<const lazy_compact_sequence<R, Scanner>*>(state);
+    if (required_length == 0u) {
+        return scratch.data();
+    }
+    using alphabet_type =
+        typename compact_sequence_range<R>::traits::alphabet_type;
+    if constexpr (IsReversed
+                  && !complementable_sequence_alphabet<alphabet_type>) {
+        throw std::invalid_argument(
+            "reverse-complement encoding requires a complementable alphabet");
+    } else {
+        auto cursor = sequence.template encoded_iter<
+            IsReversed, WriteReversed, std::uint8_t, 2>();
+        const std::uint8_t* result = cursor.ptr_at(
+            bp_from, required_length, scratch);
+        // A fragmented encoded iterator owns its resident slot ring. The named
+        // temporary dies at callback return, so only caller scratch may escape.
+        if (result != scratch.data()) {
+            std::memcpy(scratch.data(), result, required_length);
+        }
+        return scratch.data();
+    }
+}
+
+template <class R, class Scanner>
+[[nodiscard]] sequence_size_t existing_lazy_bp_size(
+        void const* state) noexcept {
+    return static_cast<const lazy_compact_sequence<R, Scanner>*>(state)
+        ->bp_size();
+}
+
+template <class R, class Scanner>
+[[nodiscard]] bool existing_lazy_worker_shareable(
+        void const* state) noexcept {
+    const auto& sequence =
+        *static_cast<const lazy_compact_sequence<R, Scanner>*>(state);
+    return lazy_is_worker_shareable(sequence);
+}
+
+template <class R, class Scanner>
+[[nodiscard]] auto existing_lazy_resident_probe(
+        void const* state,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width) noexcept
+    -> typename basic_lazy_sequence_view<
+        typename compact_sequence_range<R>::traits::alphabet_type>::
+        resident_probe_result {
+    using range_traits = typename compact_sequence_range<R>::traits;
+    using alphabet_type = typename range_traits::alphabet_type;
+    using view_type = basic_lazy_sequence_view<alphabet_type>;
+    using descriptor_type = typename view_type::resident_packed_region;
+
+    if constexpr (Scanner::supports_fragments()) {
+        // Fragment-cache slots can be evicted by later reads and therefore do
+        // not meet the facade-lifetime stability contract.
+        (void)state;
+        (void)from;
+        (void)to;
+        (void)requested_width;
+        return std::nullopt;
+    } else {
+        constexpr std::uint8_t physical_width =
+            static_cast<std::uint8_t>(sizeof(typename range_traits::storage_unit));
+        constexpr std::uint8_t logical_bits = static_cast<std::uint8_t>(
+            lazy_rank_stream_traits<alphabet_type>::logical_bits_per_symbol);
+        if (requested_width != physical_width
+            || range_traits::bits_per_char != logical_bits) {
+            return std::nullopt;
+        }
+
+        const sequence_size_t length = to - from;
+        if (length == 0u) {
+            return descriptor_type{
+                .units = nullptr,
+                .unit_count = 0u,
+                .bp_length = 0u,
+                .storage_unit_byte_width = physical_width,
+                .bits_per_symbol = logical_bits,
+                .leading_symbol_offset = 0u,
+                .trailing_padding_letters = 0u,
+                .bit_order = view_type::packed_bit_order::
+                    least_significant_symbol_first,
+            };
+        }
+
+        constexpr sequence_size_t letters_per_unit =
+            range_traits::letters_per_unit;
+        const sequence_size_t first_unit = from / letters_per_unit;
+        const sequence_size_t leading = from % letters_per_unit;
+        const sequence_size_t occupied = leading + length;
+        const sequence_size_t unit_count =
+            occupied / letters_per_unit
+            + static_cast<sequence_size_t>(occupied % letters_per_unit != 0u);
+        const sequence_size_t trailing =
+            unit_count * letters_per_unit - occupied;
+
+        const auto& sequence =
+            *static_cast<const lazy_compact_sequence<R, Scanner>*>(state);
+        const auto& range = sequence.underlying();
+        if (first_unit > range.size()
+            || unit_count > range.size() - first_unit
+            || unit_count
+                    > static_cast<sequence_size_t>(
+                        (std::numeric_limits<std::size_t>::max)())) {
+            return std::nullopt;
+        }
+        const auto* base = range.read_cptr(range.cbegin());
+        return descriptor_type{
+            .units = base + static_cast<std::size_t>(first_unit),
+            .unit_count = static_cast<std::size_t>(unit_count),
+            .bp_length = length,
+            .storage_unit_byte_width = physical_width,
+            .bits_per_symbol = logical_bits,
+            .leading_symbol_offset = static_cast<std::uint16_t>(leading),
+            .trailing_padding_letters = static_cast<std::uint16_t>(trailing),
+            .bit_order = view_type::packed_bit_order::
+                least_significant_symbol_first,
+        };
+    }
+}
+
+template <class R, class Scanner>
+struct existing_lazy_adapter {
+    using alphabet_type =
+        typename compact_sequence_range<R>::traits::alphabet_type;
+    using view_type = basic_lazy_sequence_view<alphabet_type>;
+
+    static inline const typename view_type::backend_ops ops{
+        .bp_size = &existing_lazy_bp_size<R, Scanner>,
+        .ptr_at = {
+            &existing_lazy_ptr_at<false, false, R, Scanner>,
+            &existing_lazy_ptr_at<false, true, R, Scanner>,
+            &existing_lazy_ptr_at<true, false, R, Scanner>,
+            &existing_lazy_ptr_at<true, true, R, Scanner>,
+        },
+        .try_resident_packed = &existing_lazy_resident_probe<R, Scanner>,
+        .worker_shareable = &existing_lazy_worker_shareable<R, Scanner>,
+    };
+};
+
+}  // namespace lazy_view_detail
+
+template <class R, class Scanner>
+[[nodiscard]] inline auto as_lazy_sequence_view(
+        const lazy_compact_sequence<R, Scanner>& owner) noexcept {
+    using adapter = lazy_view_detail::existing_lazy_adapter<R, Scanner>;
+    return typename adapter::view_type{
+        std::addressof(owner), std::addressof(adapter::ops)};
+}
+
+// One chunk-independent lexicographic core. Chunk boundaries carry no semantic
+// weight; views::join naturally continues across unequal chunk sizes.
+template <class LeftChunks, class RightChunks>
+[[nodiscard]] int compare_logical_rank_streams(
+        LeftChunks&& left,
+        RightChunks&& right) {
+    auto left_ranks = std::views::join(
+        std::views::all(std::forward<LeftChunks>(left)));
+    auto right_ranks = std::views::join(
+        std::views::all(std::forward<RightChunks>(right)));
+    auto left_it = left_ranks.begin();
+    auto right_it = right_ranks.begin();
+    const auto left_end = left_ranks.end();
+    const auto right_end = right_ranks.end();
+    while (left_it != left_end && right_it != right_end) {
+        const auto left_rank = static_cast<std::uint8_t>(*left_it);
+        const auto right_rank = static_cast<std::uint8_t>(*right_it);
+        if (left_rank < right_rank) {
+            return -1;
+        }
+        if (left_rank > right_rank) {
+            return 1;
+        }
+        ++left_it;
+        ++right_it;
+    }
+    if (left_it == left_end && right_it == right_end) {
+        return 0;
+    }
+    return left_it == left_end ? -1 : 1;
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] int compare_sequence_views(
+        basic_lazy_sequence_view<Alphabet> left,
+        basic_lazy_sequence_view<Alphabet> right) {
+    auto left_chunks = std::array{
+        std::ranges::subrange(left.begin(), left.end())};
+    auto right_chunks = std::array{
+        std::ranges::subrange(right.begin(), right.end())};
+    return compare_logical_rank_streams(left_chunks, right_chunks);
+}
+
+template <std::ranges::input_range RankRange>
+[[nodiscard]] std::uint64_t sequence_logical_hash_bytes_v1(
+        RankRange&& ranks,
+        std::uint64_t logical_length,
+        std::uint64_t seed) {
+    constexpr std::uint64_t fnv_offset_basis = 14695981039346656037ull;
+    constexpr std::uint64_t fnv_prime = 1099511628211ull;
+    std::uint64_t hash = fnv_offset_basis ^ seed;
+    for (auto&& rank : ranks) {
+        hash ^= static_cast<std::uint8_t>(rank);
+        hash *= fnv_prime;
+    }
+    for (unsigned shift = 0u; shift < 64u; shift += 8u) {
+        hash ^= static_cast<std::uint8_t>(logical_length >> shift);
+        hash *= fnv_prime;
+    }
+    hash ^= hash >> 30u;
+    hash *= 0xbf58476d1ce4e5b9ull;
+    hash ^= hash >> 27u;
+    hash *= 0x94d049bb133111ebull;
+    hash ^= hash >> 31u;
+    return hash;
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint64_t sequence_logical_hash_v1(
+        basic_lazy_sequence_view<Alphabet> view,
+        std::uint64_t seed) {
+    return sequence_logical_hash_bytes_v1(
+        view.template iterable<BP>(), view.bp_size(), seed);
+}
+
+namespace lazy_view_detail {
+
+class aligned_packed_storage {
+public:
+    aligned_packed_storage() = default;
+    aligned_packed_storage(aligned_packed_storage const&) = delete;
+    aligned_packed_storage& operator=(aligned_packed_storage const&) = delete;
+    aligned_packed_storage(aligned_packed_storage&&) noexcept = default;
+    aligned_packed_storage& operator=(aligned_packed_storage&&) noexcept = default;
+
+    [[nodiscard]] static aligned_packed_storage allocate(std::size_t bytes) {
+        aligned_packed_storage storage;
+        if (bytes == 0u) {
+            return storage;
+        }
+        storage.data_ = hwy::AllocateAligned<std::uint8_t>(bytes);
+        if (storage.data_ == nullptr) {
+            throw std::bad_alloc{};
+        }
+        storage.size_ = bytes;
+        std::memset(storage.data_.get(), 0, bytes);
+        return storage;
+    }
+
+    [[nodiscard]] std::uint8_t* data() noexcept { return data_.get(); }
+    [[nodiscard]] const std::uint8_t* data() const noexcept {
+        return data_.get();
+    }
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+
+private:
+    hwy::AlignedFreeUniquePtr<std::uint8_t[]> data_{};
+    std::size_t size_{};
+};
+
+template <sequence_alphabet Alphabet>
+struct resident_view_ops_context {
+    using descriptor_type =
+        typename basic_lazy_sequence_view<Alphabet>::resident_packed_region;
+    descriptor_type const* descriptor{};
+};
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint64_t load_resident_unit(
+        resident_view_ops_context<Alphabet> const& context,
+        std::size_t unit_index) noexcept {
+    const auto& descriptor = *context.descriptor;
+    const auto* bytes = static_cast<const std::uint8_t*>(descriptor.units)
+        + unit_index * descriptor.storage_unit_byte_width;
+    switch (descriptor.storage_unit_byte_width) {
+        case 1u: {
+            std::uint8_t value{};
+            std::memcpy(&value, bytes, sizeof(value));
+            return value;
+        }
+        case 2u: {
+            std::uint16_t value{};
+            std::memcpy(&value, bytes, sizeof(value));
+            return value;
+        }
+        case 4u: {
+            std::uint32_t value{};
+            std::memcpy(&value, bytes, sizeof(value));
+            return value;
+        }
+        case 8u: {
+            std::uint64_t value{};
+            std::memcpy(&value, bytes, sizeof(value));
+            return value;
+        }
+        default:
+            return 0u;
+    }
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint8_t resident_rank_at(
+        resident_view_ops_context<Alphabet> const& context,
+        sequence_size_t position) noexcept {
+    const auto& descriptor = *context.descriptor;
+    const sequence_size_t letters_per_unit =
+        descriptor.storage_unit_byte_width * CHAR_BIT
+        / descriptor.bits_per_symbol;
+    const sequence_size_t slot =
+        descriptor.leading_symbol_offset + position;
+    const std::size_t unit_index = static_cast<std::size_t>(
+        slot / letters_per_unit);
+    const auto shift = static_cast<unsigned>(
+        (slot % letters_per_unit) * descriptor.bits_per_symbol);
+    const std::uint64_t mask =
+        (std::uint64_t{1} << descriptor.bits_per_symbol) - 1u;
+    return static_cast<std::uint8_t>(
+        (load_resident_unit(context, unit_index) >> shift) & mask);
+}
+
+template <bool IsReversed, bool WriteReversed, sequence_alphabet Alphabet>
+[[nodiscard]] const std::uint8_t* resident_ptr_at(
+        void const* state,
+        sequence_size_t bp_from,
+        std::size_t required_length,
+        std::span<std::uint8_t> scratch) {
+    const auto& context =
+        *static_cast<const resident_view_ops_context<Alphabet>*>(state);
+    if (required_length == 0u) {
+        return scratch.data();
+    }
+    const sequence_size_t total = context.descriptor->bp_length;
+    if constexpr (IsReversed
+                  && !complementable_sequence_alphabet<Alphabet>) {
+        throw std::invalid_argument(
+            "reverse-complement encoding requires a complementable alphabet");
+    }
+    const sequence_size_t forward_from = IsReversed
+        ? total - (bp_from + required_length)
+        : bp_from;
+    constexpr bool descending_write =
+        (IsReversed && !WriteReversed) || (!IsReversed && WriteReversed);
+    for (std::size_t index = 0u; index < required_length; ++index) {
+        std::uint8_t rank = resident_rank_at(
+            context, forward_from + index);
+        if constexpr (IsReversed
+                      && complementable_sequence_alphabet<Alphabet>) {
+            rank = lazy_rank_stream_traits<Alphabet>::letter_complement(rank);
+        }
+        scratch[descending_write ? required_length - 1u - index : index] = rank;
+    }
+    return scratch.data();
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] sequence_size_t resident_bp_size(void const* state) noexcept {
+    const auto& context =
+        *static_cast<const resident_view_ops_context<Alphabet>*>(state);
+    return context.descriptor->bp_length;
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] auto resident_probe(
+        void const* state,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width) noexcept
+    -> typename basic_lazy_sequence_view<Alphabet>::resident_probe_result {
+    using view_type = basic_lazy_sequence_view<Alphabet>;
+    using descriptor_type = typename view_type::resident_packed_region;
+    const auto& context =
+        *static_cast<const resident_view_ops_context<Alphabet>*>(state);
+    const descriptor_type& source = *context.descriptor;
+    if (requested_width != source.storage_unit_byte_width) {
+        return std::nullopt;
+    }
+    const sequence_size_t length = to - from;
+    if (length == 0u) {
+        return descriptor_type{
+            .units = nullptr,
+            .unit_count = 0u,
+            .bp_length = 0u,
+            .storage_unit_byte_width = source.storage_unit_byte_width,
+            .bits_per_symbol = source.bits_per_symbol,
+            .leading_symbol_offset = 0u,
+            .trailing_padding_letters = 0u,
+            .bit_order = source.bit_order,
+        };
+    }
+
+    const sequence_size_t letters_per_unit =
+        source.storage_unit_byte_width * CHAR_BIT / source.bits_per_symbol;
+    const sequence_size_t absolute_slot =
+        source.leading_symbol_offset + from;
+    const sequence_size_t first_unit = absolute_slot / letters_per_unit;
+    const sequence_size_t leading = absolute_slot % letters_per_unit;
+    const sequence_size_t occupied = leading + length;
+    const sequence_size_t unit_count =
+        occupied / letters_per_unit
+        + static_cast<sequence_size_t>(occupied % letters_per_unit != 0u);
+    if (first_unit > source.unit_count
+        || unit_count > source.unit_count - first_unit
+        || unit_count
+                > static_cast<sequence_size_t>(
+                    (std::numeric_limits<std::size_t>::max)())) {
+        return std::nullopt;
+    }
+    const auto* units = static_cast<const std::uint8_t*>(source.units)
+        + first_unit * source.storage_unit_byte_width;
+    return descriptor_type{
+        .units = units,
+        .unit_count = static_cast<std::size_t>(unit_count),
+        .bp_length = length,
+        .storage_unit_byte_width = source.storage_unit_byte_width,
+        .bits_per_symbol = source.bits_per_symbol,
+        .leading_symbol_offset = static_cast<std::uint16_t>(leading),
+        .trailing_padding_letters = static_cast<std::uint16_t>(
+            unit_count * letters_per_unit - occupied),
+        .bit_order = source.bit_order,
+    };
+}
+
+[[nodiscard]] inline bool resident_worker_shareable(void const*) noexcept {
+    return true;
+}
+
+template <sequence_alphabet Alphabet>
+struct resident_adapter {
+    using view_type = basic_lazy_sequence_view<Alphabet>;
+    static inline const typename view_type::backend_ops ops{
+        .bp_size = &resident_bp_size<Alphabet>,
+        .ptr_at = {
+            &resident_ptr_at<false, false, Alphabet>,
+            &resident_ptr_at<false, true, Alphabet>,
+            &resident_ptr_at<true, false, Alphabet>,
+            &resident_ptr_at<true, true, Alphabet>,
+        },
+        .try_resident_packed = &resident_probe<Alphabet>,
+        .worker_shareable = &resident_worker_shareable,
+    };
+};
+
+template <sequence_alphabet Alphabet, class Unit>
+[[nodiscard]] bioseq::sequences::rank_pack_result pack_view_region_into(
+        basic_lazy_sequence_view<Alphabet> view,
+        sequence_size_t from,
+        sequence_size_t to,
+        void* output,
+        std::size_t unit_count) {
+    constexpr std::size_t bits =
+        lazy_rank_stream_traits<Alphabet>::logical_bits_per_symbol;
+    using output_instance = sequence_custom_alphabet<Alphabet, Unit, bits>;
+    using unit_sink = bioseq::sequences::fixed_rank_pack_unit_sink<Unit>;
+    using packer = bioseq::sequences::checked_rank_pack_sink<
+        output_instance,
+        bioseq::sequences::invalid_rank_policy::reject,
+        bioseq::sequences::pack_capacity_policy::fixed_span,
+        unit_sink>;
+
+    auto units = std::span<Unit>(static_cast<Unit*>(output), unit_count);
+    packer writer{unit_sink{units}};
+    std::array<std::uint8_t, 256> scratch{};
+    sequence_size_t position = from;
+    while (position < to) {
+        const std::size_t count = static_cast<std::size_t>(
+            std::min<sequence_size_t>(scratch.size(), to - position));
+        view.template to_encoded_into<false, false>(
+            std::span<std::uint8_t>(scratch.data(), count),
+            static_cast<std::size_t>(position),
+            static_cast<std::size_t>(position + count));
+        const auto status = writer.append_ranks(
+            std::span<const std::uint8_t>(scratch.data(), count));
+        if (status != bioseq::sequences::rank_pack_status::ok) {
+            break;
+        }
+        position += count;
+    }
+    return writer.finish(to - from, unit_count);
+}
+
+}  // namespace lazy_view_detail
+
+template <sequence_alphabet Alphabet>
+class admitted_packed_region;
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint64_t packed_region_admission_bytes(
+    sequence_size_t logical_length,
+    std::uint8_t requested_width);
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] admitted_packed_region<Alphabet> materialize_packed_region(
+    basic_lazy_sequence_view<Alphabet> view,
+    sequence_size_t from,
+    sequence_size_t to,
+    std::uint8_t requested_width,
+    bioseq::parallelism::MemoryPermit&& permit);
+
+template <sequence_alphabet Alphabet>
+class admitted_packed_region {
+public:
+    using view_type = basic_lazy_sequence_view<Alphabet>;
+    using descriptor_type = typename view_type::resident_packed_region;
+
+    admitted_packed_region(admitted_packed_region&&) noexcept = default;
+    admitted_packed_region& operator=(admitted_packed_region&&) = delete;
+    admitted_packed_region(admitted_packed_region const&) = delete;
+    admitted_packed_region& operator=(admitted_packed_region const&) = delete;
+
+    [[nodiscard]] descriptor_type const& descriptor() const noexcept {
+        if (state_ == nullptr) {
+            lazy_fragment_panic("access to moved admitted packed region");
+        }
+        return state_->descriptor_;
+    }
+
+    [[nodiscard]] view_type view() const noexcept {
+        if (state_ == nullptr) {
+            lazy_fragment_panic("view of moved admitted packed region");
+        }
+        using adapter = lazy_view_detail::resident_adapter<Alphabet>;
+        return view_type{std::addressof(state_->view_context_),
+                         std::addressof(adapter::ops)};
+    }
+
+private:
+    struct stable_state {
+        bioseq::parallelism::MemoryPermit permit_;
+        lazy_view_detail::aligned_packed_storage units_;
+        descriptor_type descriptor_;
+        lazy_view_detail::resident_view_ops_context<Alphabet> view_context_;
+
+        stable_state(bioseq::parallelism::MemoryPermit&& permit,
+                     std::size_t allocation_bytes,
+                     descriptor_type descriptor)
+            : permit_(std::move(permit)),
+              units_(lazy_view_detail::aligned_packed_storage::allocate(
+                  allocation_bytes)),
+              descriptor_(descriptor),
+              view_context_{std::addressof(descriptor_)} {
+            descriptor_.units = units_.data();
+        }
+    };
+
+    explicit admitted_packed_region(std::unique_ptr<stable_state> state) noexcept
+        : state_(std::move(state)) {}
+
+    template <sequence_alphabet OtherAlphabet>
+    friend admitted_packed_region<OtherAlphabet> materialize_packed_region(
+        basic_lazy_sequence_view<OtherAlphabet>,
+        sequence_size_t,
+        sequence_size_t,
+        std::uint8_t,
+        bioseq::parallelism::MemoryPermit&&);
+
+    template <sequence_alphabet OtherAlphabet>
+    friend std::uint64_t packed_region_admission_bytes(
+        sequence_size_t,
+        std::uint8_t);
+
+    std::unique_ptr<stable_state> state_;
+};
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::uint64_t packed_region_admission_bytes(
+        sequence_size_t logical_length,
+        std::uint8_t requested_width) {
+    using owner_type = admitted_packed_region<Alphabet>;
+    constexpr std::uint8_t bits = static_cast<std::uint8_t>(
+        lazy_rank_stream_traits<Alphabet>::logical_bits_per_symbol);
+    if (!(requested_width == 1u || requested_width == 2u
+          || requested_width == 4u || requested_width == 8u)) {
+        throw std::invalid_argument("invalid packed storage-unit width");
+    }
+    const sequence_size_t letters_per_unit =
+        requested_width * CHAR_BIT / bits;
+    const sequence_size_t unit_count =
+        logical_length / letters_per_unit
+        + static_cast<sequence_size_t>(
+            logical_length % letters_per_unit != 0u);
+    if (unit_count
+            > static_cast<sequence_size_t>(
+                (std::numeric_limits<std::size_t>::max)())
+        || unit_count
+                > (std::numeric_limits<std::size_t>::max)()
+                    / requested_width) {
+        throw std::overflow_error("packed materialization size overflow");
+    }
+    const std::uint64_t allocation_bytes =
+        static_cast<std::uint64_t>(unit_count) * requested_width;
+    if (allocation_bytes
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - sizeof(typename owner_type::stable_state)) {
+        throw std::overflow_error("packed materialization admission overflow");
+    }
+    return sizeof(typename owner_type::stable_state) + allocation_bytes;
+}
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] admitted_packed_region<Alphabet> materialize_packed_region(
+        basic_lazy_sequence_view<Alphabet> view,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width,
+        bioseq::parallelism::MemoryPermit&& permit) {
+    using owner_type = admitted_packed_region<Alphabet>;
+    using descriptor_type = typename owner_type::descriptor_type;
+    using bit_order_type =
+        typename basic_lazy_sequence_view<Alphabet>::packed_bit_order;
+    constexpr std::uint8_t bits = static_cast<std::uint8_t>(
+        lazy_rank_stream_traits<Alphabet>::logical_bits_per_symbol);
+
+    if (from > to || to > view.bp_size()) {
+        throw std::invalid_argument("invalid lazy packed materialization range");
+    }
+    if (!(requested_width == 1u || requested_width == 2u
+          || requested_width == 4u || requested_width == 8u)) {
+        throw std::invalid_argument("invalid packed storage-unit width");
+    }
+    if (to > static_cast<sequence_size_t>(
+                 (std::numeric_limits<std::size_t>::max)())) {
+        throw std::overflow_error("packed materialization coordinate overflow");
+    }
+
+    const sequence_size_t length = to - from;
+    const sequence_size_t letters_per_unit =
+        requested_width * CHAR_BIT / bits;
+    const sequence_size_t unit_count =
+        length / letters_per_unit
+        + static_cast<sequence_size_t>(length % letters_per_unit != 0u);
+    if (unit_count
+            > static_cast<sequence_size_t>(
+                (std::numeric_limits<std::size_t>::max)())
+        || unit_count
+                > (std::numeric_limits<std::size_t>::max)()
+                    / requested_width) {
+        throw std::overflow_error("packed materialization size overflow");
+    }
+    const std::size_t allocation_bytes =
+        static_cast<std::size_t>(unit_count) * requested_width;
+    const std::uint64_t admitted_bytes = packed_region_admission_bytes<Alphabet>(
+        length, requested_width);
+    if (!permit || permit.bytes() < admitted_bytes) {
+        throw std::length_error(
+            "packed materialization permit is smaller than retained storage");
+    }
+
+    const sequence_size_t trailing =
+        unit_count * letters_per_unit - length;
+    descriptor_type descriptor{
+        .units = nullptr,
+        .unit_count = static_cast<std::size_t>(unit_count),
+        .bp_length = length,
+        .storage_unit_byte_width = requested_width,
+        .bits_per_symbol = bits,
+        .leading_symbol_offset = 0u,
+        .trailing_padding_letters = static_cast<std::uint16_t>(trailing),
+        .bit_order = bit_order_type::least_significant_symbol_first,
+    };
+    auto state = std::make_unique<typename owner_type::stable_state>(
+        std::move(permit), allocation_bytes, descriptor);
+
+    bioseq::sequences::rank_pack_result packed{};
+    switch (requested_width) {
+        case 1u:
+            packed = lazy_view_detail::pack_view_region_into<
+                Alphabet, std::uint8_t>(
+                    view, from, to, state->units_.data(),
+                    static_cast<std::size_t>(unit_count));
+            break;
+        case 2u:
+            packed = lazy_view_detail::pack_view_region_into<
+                Alphabet, std::uint16_t>(
+                    view, from, to, state->units_.data(),
+                    static_cast<std::size_t>(unit_count));
+            break;
+        case 4u:
+            packed = lazy_view_detail::pack_view_region_into<
+                Alphabet, std::uint32_t>(
+                    view, from, to, state->units_.data(),
+                    static_cast<std::size_t>(unit_count));
+            break;
+        case 8u:
+            packed = lazy_view_detail::pack_view_region_into<
+                Alphabet, std::uint64_t>(
+                    view, from, to, state->units_.data(),
+                    static_cast<std::size_t>(unit_count));
+            break;
+        default:
+            throw std::invalid_argument("invalid packed storage-unit width");
+    }
+    if (packed.status != bioseq::sequences::rank_pack_status::ok
+        || packed.emitted_symbols != length
+        || packed.written_units != unit_count
+        || packed.padding_letters != trailing) {
+        throw std::runtime_error("checked lazy rank packing failed");
+    }
+    return owner_type{std::move(state)};
+}
+
+static_assert(std::is_move_constructible_v<
+              admitted_packed_region<seq::dna4>>);
+static_assert(!std::is_move_assignable_v<
+              admitted_packed_region<seq::dna4>>);
+static_assert(!std::is_copy_constructible_v<
+              admitted_packed_region<seq::dna4>>);
+
 /// Construct a fragmented lazy wrapper from a scanner factory and invoke
 /// `fn(lazy)`. The (non-movable) wrapper is held by reference inside the
 /// callback and never escapes (DOC0263 §4.2 — replaces the broken
@@ -669,9 +1797,32 @@ inline void with_lazy_fragmented(ScannerFactory&& scanner_fn, Fn&& fn) {
 /// slot for the §5 plain-forward zero-copy fast path, otherwise the caller's
 /// `dst`. When it is a slot we copy into `dst` so the aligner's padded/
 /// contiguous layout is preserved. `eit` is a named local so its slot ring
-/// outlives the copy. One definition shared by every aligner module (both
+/// outlives the copy. One overload set is shared by every aligner module (both
 /// `bioseq_alignment_hwy.block_aligner` and `bioseq_alignment_hwy.ksw2`
 /// import this).
+template <bool is_reversed, bool write_reversed = false,
+          sequence_alphabet Alphabet>
+[[gnu::always_inline]] inline void encode_region_via_ptr_at(
+    basic_lazy_sequence_view<Alphabet> seq,
+    std::span<std::uint8_t> dst,
+    std::size_t bp_from, std::size_t bp_to)
+{
+    if (bp_from > bp_to) {
+        lazy_fragment_panic("lazy sequence encoded region is inverted");
+    }
+    if (bp_from == bp_to) return;
+    const std::size_t len = bp_to - bp_from;
+    auto eit = seq.template encoded_iter<
+        is_reversed, write_reversed, std::uint8_t, 2>();
+    const std::uint8_t* p = eit.ptr_at(
+        static_cast<sequence_size_t>(bp_from), len, dst);
+    if (p != dst.data()) {
+        std::memcpy(dst.data(), p, len * sizeof(std::uint8_t));
+    }
+}
+
+/// Concrete-owner compatibility overload. Keep the resident no-fragment
+/// direct encoder fast path; fragmented owners retain their named slot cursor.
 template <bool is_reversed, bool write_reversed = false,
           class R, class Scanner>
 [[gnu::always_inline]] inline void encode_region_via_ptr_at(

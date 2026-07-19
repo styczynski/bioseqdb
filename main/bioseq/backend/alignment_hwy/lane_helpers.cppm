@@ -178,9 +178,9 @@ template <class D, bool Reverse, class FillT, class Range>
  * portable code path; on AVX-512BW the inner loop unrolls and packs
  * into the same int16_t vector lane width as the DP state.
  */
-template <class D, class Range>
+template <class D, sequence_alphabet Alphabet>
 [[gnu::always_inline]] inline hn::Vec<D> lane_gather_score(
-    const ScoringMatrix<Range>& sm,
+    const ScoringMatrix<Alphabet>& sm,
     hn::Vec<D>                  vq,
     hn::Vec<D>                  vt,
     D                           d)
@@ -191,8 +191,7 @@ template <class D, class Range>
     hn::Store(vq, d, q_lanes);
     hn::Store(vt, d, t_lanes);
 
-    constexpr std::size_t dim =
-        compact_sequence_range<Range>::traits::alphabet_size_n;
+    constexpr std::size_t dim = ScoringMatrix<Alphabet>::alphabet_dim;
     const std::size_t lanes = hn::Lanes(d);
     for (std::size_t l = 0; l < lanes; ++l) {
         const auto qi = static_cast<int>(q_lanes[l]);

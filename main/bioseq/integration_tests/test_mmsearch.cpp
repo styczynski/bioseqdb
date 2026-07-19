@@ -1223,8 +1223,8 @@ TEST_CASE("one executor root aggregates two invoked alignment nodes",
     REQUIRE(stats_i64(rows.front(), 33) == 10);
 }
 
-TEST_CASE("multiple broadcast queries keep target outcomes once per primary batch",
-          "[mmsearch][columnar][pipeline-stats][multi-query]") {
+TEST_CASE("multiple broadcast queries fail closed",
+          "[mmsearch][columnar][multi-query][error]") {
     auto ctx = fresh_context({kHoe});
     seed_hoe_fixture(ctx, kHoe);
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
@@ -1239,15 +1239,9 @@ TEST_CASE("multiple broadcast queries keep target outcomes once per primary batc
         kHoe,
         hoe_probe_literal(),
         distinct_probe);
-    const auto plan = explain_text<true>(ctx, sql);
-
-    REQUIRE(plan_contains(plan, "actual_backend=mixed_invalid"));
-    REQUIRE(plan_contains(
-        plan, "attempted=10 fully_attested=0 unattested=10"));
-    REQUIRE(plan_contains(plan, "Index outcomes [targets=5"));
-    REQUIRE(plan_contains(plan, "recomputed=5]"));
-    REQUIRE(plan_contains(plan, "First unattested [target_row="));
-    REQUIRE(plan_contains(plan, "query_ordinal=0]"));
+    const auto error = sql_error(ctx, sql);
+    REQUIRE(error.sqlstate == "0A000");
+    REQUIRE(error.contains("stacked mmsearch"));
 }
 
 TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpers",
@@ -1361,16 +1355,15 @@ TEST_CASE("BioseqBatchJoin headline evidence is one target crossed with 16 queri
 	REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
 	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
 	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 1"));
-	/* The ordinary parameterized BioseqScan carries a -100000 selection
-	 * sentinel which Nested Loop multiplies by query rows. The eligible owner
-	 * path must dominate that incumbent while retaining its honest cost. */
+	/* Ownership is structural; all exposed cost evidence remains finite and
+	 * nonnegative. */
 	REQUIRE(plan_contains(plan, "Bioseq Honest Startup Cost"));
 	REQUIRE(plan_contains(plan, "Bioseq Honest Total Cost"));
 	REQUIRE(plan_contains(plan, "Bioseq Incumbent Cost Floor"));
 	const auto incumbent_floor = find_explain_property(
 		plan, "Bioseq Incumbent Cost Floor");
 	REQUIRE(incumbent_floor.has_value());
-	REQUIRE(std::stod(*incumbent_floor) < 0.0);
+	REQUIRE(std::stod(*incumbent_floor) >= 0.0);
 	require_batch_join_aligned_query_rows(ctx, sql, 16, "t");
     require_batch_join_stats(ctx, 1, 16);
 }
@@ -3402,8 +3395,9 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
             kGatekeeperEdits, query_literal, query_literal),
     };
     for (const auto& stacked_sql : stacked_explicit_sqls) {
-        require_gatekeeper_explain_selection(
-            explain_text<false>(ctx, stacked_sql));
+        const auto stacked_error = sql_error(ctx, stacked_sql);
+        REQUIRE(stacked_error.sqlstate == "0A000");
+        REQUIRE(stacked_error.contains("stacked mmsearch"));
     }
     const auto conflicting_vulkan_options = sql_error(ctx, fmt::format(
         "SELECT pk, bioseq.edit(seq0) FROM {} WHERE "
@@ -3411,8 +3405,8 @@ TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
         "AND mmsearch(seq0, {}, aligner_options(vulkan_enabled => false)) "
         "AND bioseq.edit(seq0) < 5 ORDER BY pk;",
         kGatekeeperEdits, query_literal, query_literal));
-    REQUIRE(conflicting_vulkan_options.sqlstate == "22023");
-    REQUIRE(conflicting_vulkan_options.contains("vulkan_enabled conflicts"));
+    REQUIRE(conflicting_vulkan_options.sqlstate == "0A000");
+    REQUIRE(conflicting_vulkan_options.contains("stacked mmsearch"));
     exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = on;");
 
     if (selected_vulkan_runtime_untrusted(ctx)) {
@@ -3567,8 +3561,9 @@ TEST_CASE("mmsearch rejects a non-Const aligner_options third argument",
         ctx,
         "EXECUTE mmsearch_nonconst_options("
         "aligner_options(index_read_requirement => 1));");
-    REQUIRE(err.sqlstate == "22023");
-    REQUIRE(err.contains("must be a plan-time constant"));
+    REQUIRE(err.sqlstate == "0A000");
+    REQUIRE((err.contains("not owned")
+             || err.contains("no Bioseq executor owner")));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
@@ -3593,7 +3588,7 @@ TEST_CASE("index read requirement allow ordinal preserves production policy",
     REQUIRE(plan_contains(enabled_plan, "Index outcomes [targets=5 persisted=5"));
 }
 
-TEST_CASE("stacked mmsearch rejects conflicting index read requirements",
+TEST_CASE("stacked mmsearch rejects multiple index read requirements",
           "[mmsearch][aligner_options][index-read-requirement][stacked][error]") {
     auto ctx = fresh_context({kHoe});
     seed_hoe_fixture(ctx, kHoe);
@@ -3609,12 +3604,38 @@ TEST_CASE("stacked mmsearch rejects conflicting index read requirements",
         hoe_probe_literal(),
         second_probe);
     const auto err = sql_error(ctx, sql);
-    REQUIRE(err.sqlstate == "22023");
-    REQUIRE(err.contains("index_read_requirement conflicts"));
+    REQUIRE(err.sqlstate == "0A000");
+    REQUIRE(err.contains("stacked mmsearch"));
 }
 
-TEST_CASE("stacked mmsearch resolves one explicit requirement independent of order",
-          "[mmsearch][aligner_options][index-read-requirement][stacked]") {
+TEST_CASE("nested mmsearch Boolean shape fails closed",
+          "[mmsearch][planner][ownership][error]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    const auto error = sql_error(ctx, fmt::format(
+        "SELECT pk FROM {} WHERE NOT mmsearch(seq0, {});",
+        kHoe, hoe_probe_literal()));
+    REQUIRE(error.sqlstate == "0A000");
+    REQUIRE((error.contains("not owned")
+             || error.contains("no Bioseq executor owner")));
+}
+
+TEST_CASE("owned mmsearch is strict for NULL target and query",
+          "[mmsearch][planner][ownership][null]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx, fmt::format("UPDATE {} SET seq0 = NULL WHERE pk = 1;", kHoe));
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} WHERE seq0 IS NULL AND mmsearch(seq0, {});",
+        kHoe, hoe_probe_literal())) == 0);
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT count(*) FROM {} WHERE mmsearch("
+        "seq0, NULL::bioseq.seq('dna4', 32));",
+        kHoe)) == 0);
+}
+
+TEST_CASE("stacked mmsearch fails closed independent of order",
+          "[mmsearch][aligner_options][index-read-requirement][stacked][error]") {
     auto ctx = fresh_context({kHoe});
     seed_hoe_fixture(ctx, kHoe);
     exec_sql(ctx, "SET bioseq.read_sequence_index = on;");
@@ -3639,11 +3660,9 @@ TEST_CASE("stacked mmsearch resolves one explicit requirement independent of ord
             second_probe),
     };
     for (const auto& sql : sqls) {
-        const auto plan = explain_text<true>(ctx, sql);
-        REQUIRE(plan_contains(
-            plan,
-            "requested_index_source=recomputed actual_index_source=recomputed"));
-        REQUIRE(plan_contains(plan, "persisted=0"));
+        const auto error = sql_error(ctx, sql);
+        REQUIRE(error.sqlstate == "0A000");
+        REQUIRE(error.contains("stacked mmsearch"));
     }
 }
 

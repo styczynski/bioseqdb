@@ -109,7 +109,9 @@ using range_t  = compact_sequence_range<dna4_u64>;
     range_t t_range(td);
     auto lazy_q = bioseq::storage::make_lazy_in_memory(q_range);
     auto lazy_t = bioseq::storage::make_lazy_in_memory(t_range);
-    return minimap_port(lazy_q, lazy_t, params);
+    const auto query_view = bioseq::storage::as_lazy_sequence_view(lazy_q);
+    const auto target_view = bioseq::storage::as_lazy_sequence_view(lazy_t);
+    return minimap_port(query_view, target_view, params);
 }
 
 [[nodiscard]] ch::Anchor make_anchor(

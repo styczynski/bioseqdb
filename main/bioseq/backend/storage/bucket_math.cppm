@@ -22,7 +22,11 @@ module;
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <span>
 #include <type_traits>
 
 export module bioseq.storage.bucket_math;
@@ -48,6 +52,12 @@ export namespace bioseq::storage {
 // ---------------------------------------------------------------------------
 
 constexpr std::uint8_t kLocatorVersion = 3;
+inline constexpr std::uint8_t k_seq_locator_stub_marker = 0x80u;
+
+[[nodiscard]] constexpr bool
+is_seq_locator_stub_width(std::uint8_t width) noexcept {
+    return (width & k_seq_locator_stub_marker) != 0u;
+}
 
 struct seq_locator {
     std::uint8_t    version = kLocatorVersion;
@@ -64,6 +74,8 @@ static_assert(sizeof(seq_locator) == 40,
               "DOC0371: seq_locator v3 layout must stay 40 bytes.");
 static_assert(std::is_standard_layout_v<seq_locator>,
               "seq_locator must be standard-layout (memcpy'd in/out of pgseq_t).");
+static_assert(std::is_trivially_copyable_v<seq_locator>,
+              "seq_locator must remain trivially copyable for its frozen v3 payload.");
 static_assert(offsetof(seq_locator, num_fragments) == 8,
               "seq_locator::num_fragments offset must stay 8 bytes.");
 static_assert(offsetof(seq_locator, total_bp_size) == 16,
@@ -79,6 +91,42 @@ static_assert((static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::ma
                * std::uint64_t{32768})
               >= std::uint64_t{1'000'000'000'000ULL},
               "DOC0264 R13: v2 num_fragments capacity insufficient for 1 Tbp ceiling");
+
+/// Encode the frozen v3 payload without owning PostgreSQL framing.  This keeps
+/// the existing host-byte-order on-disk bytes unchanged; callers supply an
+/// exact-size span and add any surrounding varlena header themselves.
+[[nodiscard]] inline bool encode_seq_locator_payload(
+    std::span<std::byte> output,
+    seq_locator const& locator) noexcept
+{
+    if (output.size() != sizeof(seq_locator)
+        || locator.version != kLocatorVersion
+        || locator._pad_2 != 0u
+        || locator._pad_4 != 0u) {
+        return false;
+    }
+    std::memcpy(output.data(), std::addressof(locator), sizeof(locator));
+    return true;
+}
+
+/// Decode and validate the frozen v3 payload.  Ordinary fields, including a
+/// zero source_epoch, deliberately remain in the PG-free codec domain; the PG
+/// storage framing layer applies its stronger live-source policy.
+[[nodiscard]] inline std::optional<seq_locator> decode_seq_locator_payload(
+    std::span<std::byte const> payload) noexcept
+{
+    if (payload.size() != sizeof(seq_locator)) {
+        return std::nullopt;
+    }
+    seq_locator locator{};
+    std::memcpy(std::addressof(locator), payload.data(), sizeof(locator));
+    if (locator.version != kLocatorVersion
+        || locator._pad_2 != 0u
+        || locator._pad_4 != 0u) {
+        return std::nullopt;
+    }
+    return locator;
+}
 
 // ---------------------------------------------------------------------------
 // §4 — bucket cut-points. One bucket for L in [0, min_bits], one bucket each

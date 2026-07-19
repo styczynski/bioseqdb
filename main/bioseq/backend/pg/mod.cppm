@@ -68,6 +68,68 @@ import bioseq.pg_utils.nodes;   // DOC0333 — pg_node_try_as (support-request d
 import bioseq.table.scan_state;
 import bioseq.sequences.pipe;
 
+/* The split compact-sequence module keeps the C entrypoint bodies in its
+ * sql_entrypoints partition.  Keep fmgr V1 metadata centralized in the
+ * extension module so every symbol named by bioseq--1.0.sql is exported. */
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_in);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_out);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_in);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_out);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_recv);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_send);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cast);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cmp);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_lt);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_le);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_eq);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ne);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ge);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_gt);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_unit_len);
+CXX_PG_FUNCTION_INFO_V1(seq_hash);
+CXX_PG_FUNCTION_INFO_V1(seq_hash_extended);
+
+CXX_PG_FUNCTION_INFO_V1(letter_typmod_in);
+CXX_PG_FUNCTION_INFO_V1(letter_typmod_out);
+CXX_PG_FUNCTION_INFO_V1(letter_in);
+CXX_PG_FUNCTION_INFO_V1(letter_out);
+CXX_PG_FUNCTION_INFO_V1(letter_recv);
+CXX_PG_FUNCTION_INFO_V1(letter_send);
+CXX_PG_FUNCTION_INFO_V1(letter_typmod_cast);
+CXX_PG_FUNCTION_INFO_V1(letter_to_text);
+CXX_PG_FUNCTION_INFO_V1(letter_cmp);
+CXX_PG_FUNCTION_INFO_V1(letter_eq);
+CXX_PG_FUNCTION_INFO_V1(letter_ne);
+CXX_PG_FUNCTION_INFO_V1(letter_lt);
+CXX_PG_FUNCTION_INFO_V1(letter_le);
+CXX_PG_FUNCTION_INFO_V1(letter_gt);
+CXX_PG_FUNCTION_INFO_V1(letter_ge);
+CXX_PG_FUNCTION_INFO_V1(letter_hash);
+CXX_PG_FUNCTION_INFO_V1(letter_hash_extended);
+
+CXX_PG_FUNCTION_INFO_V1(seq_subscript_handler);
+CXX_PG_FUNCTION_INFO_V1(seq_concat);
+CXX_PG_FUNCTION_INFO_V1(seq_concat_text);
+CXX_PG_FUNCTION_INFO_V1(text_concat_seq);
+CXX_PG_FUNCTION_INFO_V1(seq_concat_varchar);
+CXX_PG_FUNCTION_INFO_V1(varchar_concat_seq);
+CXX_PG_FUNCTION_INFO_V1(seq_concat_text_array);
+CXX_PG_FUNCTION_INFO_V1(text_array_concat_seq);
+CXX_PG_FUNCTION_INFO_V1(seq_concat_letter_array);
+CXX_PG_FUNCTION_INFO_V1(letter_array_concat_seq);
+CXX_PG_FUNCTION_INFO_V1(seq_reverse);
+CXX_PG_FUNCTION_INFO_V1(seq_reverse_complement);
+CXX_PG_FUNCTION_INFO_V1(seq_array_length);
+CXX_PG_FUNCTION_INFO_V1(seq_cardinality);
+CXX_PG_FUNCTION_INFO_V1(seq_to_text);
+CXX_PG_FUNCTION_INFO_V1(seq_to_varchar);
+CXX_PG_FUNCTION_INFO_V1(seq_to_array);
+CXX_PG_FUNCTION_INFO_V1(seq_from_letter_array_infer);
+CXX_PG_FUNCTION_INFO_V1(seq_from_letter_array_named);
+}
+
 using namespace bioseq::pg_utils;   // DOC0333 — node view/walker helpers live in bioseq::pg_utils
 
 namespace {
@@ -2555,16 +2617,18 @@ _PG_init()
 }
 
 /*
- * mmsearch is a BOOLEAN stub used as a WHERE-clause predicate. Always
- * returns true so every scanned row passes the qual; the custom scan
- * only cares that the FuncExpr exists in the plan so we can walk its
- * args at BeginCustomScan time to discover the column and the query
- * literal.
+ * mmsearch is a planner/executor rendezvous. A supported plan removes the
+ * exact owned FuncExpr before ExecInitQual; reaching this SQL function means
+ * no executor proved ownership and must fail closed.
  */
 CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
-	bioseq_log<DBG>("[bioseq] pg: mmsearch() stub invoked, always returning true");
-	PG_RETURN_BOOL(true);
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("mmsearch qualifier has no Bioseq executor owner"),
+		 errdetail("Executing the SQL rendezvous function as a Boolean predicate is forbidden."),
+		 errhint("Use exactly one top-level mmsearch predicate with supported operands, or split the query into separate levels.")));
+	PG_RETURN_BOOL(false);
 }
 
 /*
@@ -2851,7 +2915,9 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
 		[&]<class S>() {
 			compact_sequence_range<S> range{*hdr};
 			auto lazy = bioseq::storage::make_lazy_in_memory(range);
-			auto counts = bioseq::indexing::tally_symbol_counts(lazy);  // std::array<int64,N=2^bits_per_char>
+			const auto lazy_view =
+				bioseq::storage::as_lazy_sequence_view(lazy);
+			auto counts = bioseq::indexing::tally_symbol_counts(lazy_view);  // std::array<int64,N=2^bits_per_char>
 			if (static_cast<size_t>(rank) < counts.size()) {
 				computed_result = static_cast<int64_t>(counts[rank]);
 			}
@@ -2867,11 +2933,9 @@ Datum bioseq_symbol_count(PG_FUNCTION_ARGS) {
  * cheaper alternative (the bioseq columnar custom scan) is preferred by the
  * optimiser. The cost is lower than mmsearch_support's (100000) because the
  * scalar symbol_count implementation is O(n) where n is the sequence
- * length, while mmsearch's scalar path is ~O(n^2). The ordering matters
- * because both paths use the same "inflate to make plain scan look
- * expensive" trick in AddBioseqColumnScanPath — see columnar_customscan.cppm's
- * `wehavemagic_cnt` scan which translates every detected cost inflator
- * into a negative custom-scan startup cost.
+ * length, while alignment is substantially more expensive. Custom-scan
+ * ownership is selected structurally; these support costs describe only the
+ * ordinary scalar alternative.
  */
 /*
  * Hand-rolled walker that returns the first Var in a node tree without

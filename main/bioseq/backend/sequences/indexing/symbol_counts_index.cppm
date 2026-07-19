@@ -19,7 +19,7 @@ export module bioseq.indexing.symbol_counts;
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
-import bioseq.storage.lazy;     // lazy_compact_sequence + make_lazy_in_memory
+import bioseq.storage.lazy;     // canonical basic_lazy_sequence_view
 import bioseq.storage.size;     // sequence_size_t
 import bioseq.sequences;        // compact_sequence_range, IteratorMode{BP,SYMBOL}
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
@@ -28,15 +28,16 @@ export namespace bioseq::indexing {
 
 /// Real per-rank histogram over a lazy sequence. The BP-iterator deref already
 /// masks `& char_mask`, so it yields a raw integer rank in [0, 2^bits_per_char).
-template <class R, class Scanner>
-auto tally_symbol_counts(bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
-    using traits = typename bioseq::storage::lazy_compact_sequence<R, Scanner>::traits;
-    constexpr std::size_t N = std::size_t{1} << traits::bits_per_char;
-    static_assert(traits::char_mask == N - 1,
-        "tally_symbol_counts: char_mask must be 2^bits_per_char-1 so (bp & char_mask) < counts.size() in release");
+template <sequence_alphabet Alphabet>
+auto tally_symbol_counts(
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
+    using traits = typename bioseq::storage::basic_lazy_sequence_view<
+        Alphabet>::traits;
+    constexpr std::size_t N =
+        std::size_t{1} << traits::logical_bits_per_symbol;
     std::array<std::int64_t, N> counts{};
     for (auto bp : seq.template iterable<BP>()) {
-        const std::size_t rank = static_cast<std::size_t>(bp) & traits::char_mask;
+        const std::size_t rank = static_cast<std::size_t>(bp);
         DEBUG_ASSERT(rank < N, "tally_symbol_counts: rank in range");
         ++counts[rank];
     }
@@ -51,16 +52,23 @@ struct SymbolCountsIndex {
     static constexpr std::string_view  index_name = SYMBOL_COUNTS_INDEX_NAME;
     using storage_type = S;
 
-    template <class R, class Scanner>
-    static void build(S& storage, bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) {
+    template <sequence_alphabet Alphabet>
+    static void build(
+            S& storage,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
         auto counts = tally_symbol_counts(seq);                      // std::array<int64,N=2^bits_per_char>
         storage.resize(counts.size() * sizeof(std::int64_t));        // ONE chunk, N*sizeof(int64) bytes << MAX
-        storage.template write_to_each<std::int64_t>([&](std::size_t c, std::int64_t* buf, std::size_t cap){
+        storage.template write_to_each<std::int64_t>([&counts](std::size_t c, std::int64_t* buf, std::size_t cap){
             DEBUG_ASSERT(c == 0 && cap == counts.size(), "symbol_counts: one inline chunk");
             std::copy(counts.begin(), counts.end(), buf); return c; });
     }
-    template <class R, class Scanner>
-    static void rebuild(S& storage, bioseq::storage::lazy_compact_sequence<R, Scanner>& seq) { storage.clear_entity(); build(storage, seq); }
+    template <sequence_alphabet Alphabet>
+    static void rebuild(
+            S& storage,
+            bioseq::storage::basic_lazy_sequence_view<Alphabet> seq) {
+        storage.clear_entity();
+        build(storage, seq);
+    }
 
     /// SQL-facing read. Returns nullopt when the index is ABSENT for this
     /// sequence (chunk_byte_size()==0) so the caller recomputes.
