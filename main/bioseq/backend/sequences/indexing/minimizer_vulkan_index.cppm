@@ -1374,11 +1374,11 @@ materialize_sorted_dense_from_presorted_minimizers(
 
     proof.fully_touched_bytes =
         resident->materialization.evidence.fully_touched_bytes;
-    proof.reflected_footprint_bytes =
-        resident->materialization.reflected_delta_bytes;
     if (resident->materialization.permit_released) {
         proof.authority = GpuResidentAccountingAuthority::
             reflected_process_footprint;
+        proof.reflected_footprint_bytes =
+            resident->materialization.reflected_delta_bytes;
     } else if (resident_permit
                && resident_permit.bytes()
                     == proof.actual_allocation_bytes) {

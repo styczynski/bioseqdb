@@ -3487,6 +3487,41 @@ struct PartialVulkanExecutionProof {
     std::uint64_t gpu_index_arena_trimmed_before_permit_shrink = 0;
     std::uint64_t gpu_index_retained_minimizer_count = 0;
     std::uint64_t gpu_index_distinct_minimizer_count = 0;
+    // DOC0384 §34.17 query-independent source-direct sorted-dense route.
+    // These fields are copied from the operation ledger only after its
+    // terminal predicate accepts.  They therefore describe completed work,
+    // including the canonical-empty bypass which intentionally has no GPU
+    // dispatch and cannot be represented by the legacy dispatch counters.
+    std::uint64_t gpu_index_source_direct_operations = 0;
+    std::uint64_t gpu_index_source_direct_empty_bypasses = 0;
+    std::uint64_t gpu_index_source_direct_planning_receipts = 0;
+    std::uint64_t gpu_index_source_direct_terminal_receipts = 0;
+    std::uint64_t gpu_index_source_direct_materializations = 0;
+    std::uint64_t gpu_index_source_direct_resident_publications = 0;
+    std::uint64_t gpu_index_source_direct_source_releases = 0;
+    std::uint64_t gpu_index_source_direct_source_released_bytes = 0;
+    std::uint64_t gpu_index_source_direct_checksum_matches = 0;
+    std::uint64_t gpu_index_source_direct_source_traversals = 0;
+    std::uint64_t gpu_index_source_direct_mapped_traversals = 0;
+    std::uint64_t gpu_index_source_direct_reflected_authorities = 0;
+    std::uint64_t gpu_index_source_direct_retained_authorities = 0;
+    std::uint64_t gpu_index_source_direct_retained_resident_permit_bytes = 0;
+    std::uint64_t gpu_index_source_direct_cache_preinsertions = 0;
+    std::uint64_t gpu_index_source_direct_required_lookups = 0;
+    std::uint64_t gpu_index_source_direct_required_hits = 0;
+    std::uint64_t gpu_index_source_direct_mapped_prefix_passes = 0;
+    std::uint64_t gpu_index_source_direct_mapped_prefix_lookups = 0;
+    std::uint64_t gpu_index_source_direct_mapped_prefix_comparisons = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_requested_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_actual_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_retained_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_permit_releases = 0;
+    std::uint64_t gpu_index_source_direct_seed_roundtrips = 0;
+    std::uint64_t gpu_index_source_direct_zero_anchor_bypasses = 0;
+    std::uint64_t gpu_index_source_direct_seed_fence_completions = 0;
+    std::uint64_t gpu_index_source_direct_cache_cleanup_releases = 0;
+    std::uint64_t gpu_index_source_direct_resident_cleanup_bytes = 0;
+    std::uint64_t gpu_index_source_direct_pipeline_completions = 0;
     // Owned-only last-seed retirement evidence. These counters are populated
     // only after the completed seed operation has dropped its local resident
     // handle and the operation-owned lifetime coordinator has actually
@@ -3616,6 +3651,67 @@ struct PartialVulkanExecutionProof {
             other.gpu_index_retained_minimizer_count, overflow);
         add(gpu_index_distinct_minimizer_count,
             other.gpu_index_distinct_minimizer_count, overflow);
+        add(gpu_index_source_direct_operations,
+            other.gpu_index_source_direct_operations, overflow);
+        add(gpu_index_source_direct_empty_bypasses,
+            other.gpu_index_source_direct_empty_bypasses, overflow);
+        add(gpu_index_source_direct_planning_receipts,
+            other.gpu_index_source_direct_planning_receipts, overflow);
+        add(gpu_index_source_direct_terminal_receipts,
+            other.gpu_index_source_direct_terminal_receipts, overflow);
+        add(gpu_index_source_direct_materializations,
+            other.gpu_index_source_direct_materializations, overflow);
+        add(gpu_index_source_direct_resident_publications,
+            other.gpu_index_source_direct_resident_publications, overflow);
+        add(gpu_index_source_direct_source_releases,
+            other.gpu_index_source_direct_source_releases, overflow);
+        add(gpu_index_source_direct_source_released_bytes,
+            other.gpu_index_source_direct_source_released_bytes, overflow);
+        add(gpu_index_source_direct_checksum_matches,
+            other.gpu_index_source_direct_checksum_matches, overflow);
+        add(gpu_index_source_direct_source_traversals,
+            other.gpu_index_source_direct_source_traversals, overflow);
+        add(gpu_index_source_direct_mapped_traversals,
+            other.gpu_index_source_direct_mapped_traversals, overflow);
+        add(gpu_index_source_direct_reflected_authorities,
+            other.gpu_index_source_direct_reflected_authorities, overflow);
+        add(gpu_index_source_direct_retained_authorities,
+            other.gpu_index_source_direct_retained_authorities, overflow);
+        add(gpu_index_source_direct_retained_resident_permit_bytes,
+            other.gpu_index_source_direct_retained_resident_permit_bytes,
+            overflow);
+        add(gpu_index_source_direct_cache_preinsertions,
+            other.gpu_index_source_direct_cache_preinsertions, overflow);
+        add(gpu_index_source_direct_required_lookups,
+            other.gpu_index_source_direct_required_lookups, overflow);
+        add(gpu_index_source_direct_required_hits,
+            other.gpu_index_source_direct_required_hits, overflow);
+        add(gpu_index_source_direct_mapped_prefix_passes,
+            other.gpu_index_source_direct_mapped_prefix_passes, overflow);
+        add(gpu_index_source_direct_mapped_prefix_lookups,
+            other.gpu_index_source_direct_mapped_prefix_lookups, overflow);
+        add(gpu_index_source_direct_mapped_prefix_comparisons,
+            other.gpu_index_source_direct_mapped_prefix_comparisons, overflow);
+        add(gpu_index_source_direct_seed_slab_requested_bytes,
+            other.gpu_index_source_direct_seed_slab_requested_bytes, overflow);
+        add(gpu_index_source_direct_seed_slab_actual_bytes,
+            other.gpu_index_source_direct_seed_slab_actual_bytes, overflow);
+        add(gpu_index_source_direct_seed_slab_retained_bytes,
+            other.gpu_index_source_direct_seed_slab_retained_bytes, overflow);
+        add(gpu_index_source_direct_seed_slab_permit_releases,
+            other.gpu_index_source_direct_seed_slab_permit_releases, overflow);
+        add(gpu_index_source_direct_seed_roundtrips,
+            other.gpu_index_source_direct_seed_roundtrips, overflow);
+        add(gpu_index_source_direct_zero_anchor_bypasses,
+            other.gpu_index_source_direct_zero_anchor_bypasses, overflow);
+        add(gpu_index_source_direct_seed_fence_completions,
+            other.gpu_index_source_direct_seed_fence_completions, overflow);
+        add(gpu_index_source_direct_cache_cleanup_releases,
+            other.gpu_index_source_direct_cache_cleanup_releases, overflow);
+        add(gpu_index_source_direct_resident_cleanup_bytes,
+            other.gpu_index_source_direct_resident_cleanup_bytes, overflow);
+        add(gpu_index_source_direct_pipeline_completions,
+            other.gpu_index_source_direct_pipeline_completions, overflow);
         add(post_seed_owned_gpu_cache_evictions,
             other.post_seed_owned_gpu_cache_evictions, overflow);
         add(post_seed_owned_gpu_resident_bytes_released,

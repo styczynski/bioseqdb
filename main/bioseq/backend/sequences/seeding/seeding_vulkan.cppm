@@ -786,6 +786,11 @@ template <class MinimizerT>
 
     const bool mapped_prefix_authority =
         resident_index->key.source_direct_sorted_dense;
+    if (mapped_prefix_authority && anchors_out.capacity() != 0u) {
+        decline(VulkanSeedLookupDeclineReason::
+            mapped_prefix_authority_invalid);
+        return false;
+    }
     SeedPrefixPlan prefix_plan;
     try {
         prefix_plan = mapped_prefix_authority
@@ -932,19 +937,8 @@ template <class MinimizerT>
         return false;
     }
 
-    if (mapped_prefix_authority
-        && (anchors_out.capacity() != 0u
-            || retained_anchor_permit_out == nullptr
-            || static_cast<bool>(*retained_anchor_permit_out))) {
-        decline(retained_anchor_permit_out == nullptr
-            ? VulkanSeedLookupDeclineReason::
-                seed_arena_permit_owner_unavailable
-            : VulkanSeedLookupDeclineReason::
-                mapped_prefix_authority_invalid);
-        return false;
-    }
-
     std::uint64_t actual_slab_growth_bytes = 0u;
+    bool post_allocation_invariant_failed = false;
     try {
         {
             std::vector<std::uint32_t> prefix;
@@ -999,6 +993,11 @@ template <class MinimizerT>
                 exact_anchors,
                 sort_plan);
 
+            if (mapped_prefix_authority
+                && anchors.count != exact_anchors) {
+                throw MappedPrefixAuthorityInvalid{};
+            }
+
             const std::uint64_t slab_capacity_before =
                 anchors_out.capacity();
             anchors_out.reserve(anchors.count);
@@ -1012,10 +1011,9 @@ template <class MinimizerT>
                     anchors_out.capacity() - slab_capacity_before,
                     sizeof(bioseq::chaining::Anchor));
             if (mapped_prefix_authority
-                && (anchors.count != exact_anchors
-                    || actual_slab_growth_bytes
-                        != anchors_out_growth_bytes)) {
-                throw MappedPrefixAuthorityInvalid{};
+                && actual_slab_growth_bytes
+                    != anchors_out_growth_bytes) {
+                post_allocation_invariant_failed = true;
             }
             if (decline_out != nullptr) {
                 decline_out->seed_lookup_dispatches =
@@ -1035,15 +1033,23 @@ template <class MinimizerT>
         if (mapped_prefix_authority) {
             permit->shrink_to(actual_slab_growth_bytes);
             if (permit->bytes() != actual_slab_growth_bytes) {
-                throw MappedPrefixAuthorityInvalid{};
+                post_allocation_invariant_failed = true;
             }
-            *retained_anchor_permit_out = std::move(*permit);
             if (decline_out != nullptr) {
                 decline_out->anchors_out_actual_growth_bytes =
                     actual_slab_growth_bytes;
                 decline_out->anchors_out_retained_permit_bytes =
-                    retained_anchor_permit_out->bytes();
+                    permit->bytes();
             }
+            VulkanSeedLookupCompletion completion{
+                !post_allocation_invariant_failed};
+            completion.retained_anchor_bytes = permit->bytes();
+            completion.retained_anchor_permit = std::move(*permit);
+            if (post_allocation_invariant_failed) {
+                decline(VulkanSeedLookupDeclineReason::
+                    mapped_prefix_authority_invalid);
+            }
+            return completion;
         }
         return true;
     } catch (const MappedPrefixAuthorityInvalid&) {

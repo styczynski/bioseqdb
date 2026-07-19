@@ -6550,6 +6550,8 @@ struct DirectResidentOperationLedger {
     std::uint64_t logical_control_bytes = 0u;
     std::uint64_t logical_position_bytes = 0u;
     std::uint64_t logical_resident_bytes = 0u;
+    std::uint64_t control_allowance_bytes = 0u;
+    std::uint64_t position_allowance_bytes = 0u;
     std::uint64_t conservative_allowance_bytes = 0u;
     std::uint64_t conservative_request_bytes = 0u;
     std::uint64_t reserved_before_bytes = 0u;
@@ -6568,66 +6570,305 @@ struct DirectResidentOperationLedger {
     std::uint64_t mapped_prefix_passes = 0u;
     std::uint64_t mapped_prefix_lookups = 0u;
     std::uint64_t mapped_prefix_comparisons = 0u;
+    std::uint64_t expected_seed_consumers = 0u;
+    std::uint64_t completed_seed_consumers = 0u;
     std::uint64_t slab_capacity_before = 0u;
     std::uint64_t slab_requested_bytes = 0u;
     std::uint64_t slab_actual_bytes = 0u;
     std::uint64_t slab_retained_permit_bytes = 0u;
     std::uint64_t slab_permit_releases = 0u;
+    std::uint64_t seed_roundtrips = 0u;
+    std::uint64_t zero_query_bypasses = 0u;
+    std::uint64_t zero_anchor_bypasses = 0u;
+    std::uint64_t seed_fence_completions = 0u;
     std::uint64_t seed_dispatches = 0u;
     std::uint64_t cache_cleanup_releases = 0u;
     std::uint64_t resident_cleanup_bytes = 0u;
+    std::uint64_t cpu_index_releases = 0u;
+    std::uint64_t cpu_position_bytes_released = 0u;
     std::uint64_t planning_receipts = 0u;
     std::uint64_t terminal_receipts = 0u;
     bioseq::indexing::GpuSourceDirectMaterializationProof materialization{};
     SourceDirectHostAuthority source_authority =
         SourceDirectHostAuthority::none;
+    bool phase_c_checked = false;
+    bool phase_c_compatible = false;
+    bool source_authority_checked = false;
+    bool source_authority_accepted = false;
+    bool runtime_checked = false;
+    bool runtime_available = false;
+    bool hardware_checked = false;
+    bool hardware_available = false;
+    bool sorted_shape_checked = false;
+    bool sorted_shape_accepted = false;
+    bool identity_checked = false;
+    bool identity_accepted = false;
+    bool u32_shape_checked = false;
+    bool u32_shape_accepted = false;
+    bool storage_ranges_checked = false;
+    bool control_range_accepted = false;
+    bool position_range_accepted = false;
+    bool mapping_plan_checked = false;
+    bool mapping_plan_accepted = false;
+    bool admission_snapshot_taken = false;
     bool canonical_empty = false;
     bool planning_accepted = false;
+    bool route_committed = false;
+    bool materialization_started = false;
+    bool materialization_completed = false;
     bool resident_published = false;
+    bool source_release_completed = false;
     bool source_released_after_publication = false;
     bool empty_bypass = false;
+    bool cache_lookup_started = false;
+    bool mapped_prefix_started = false;
+    bool slab_admission_started = false;
+    bool seed_dispatch_started = false;
+    bool pipeline_completed = false;
+    bool planning_log_failed = false;
     bool terminal_success = false;
 
-    void log_planning(std::string_view decision, std::string_view reason) {
-        if (planning_receipts != 0u) {
-            throw bioseq::gpu::vulkan::VulkanRuntimeError{
-                "source-direct planning receipt emitted more than once"};
-        }
-        planning_receipts = 1u;
-        bioseq_log<INF>(
-            "[gpu_source_direct_operation_planning] operation={} "
-            "source_authority={} N={} D={} control_bytes={} "
-            "position_bytes={} logical_bytes={} allowance_bytes={} "
-            "conservative_request_bytes={} reserved_before_bytes={} "
-            "allocatable_before_bytes={} margin_bytes={} shortfall_bytes={} "
-            "max_storage_buffer_range={} route={} gate_enabled=0 "
-            "decision={} reason={}",
-            operation_identity,
-            static_cast<std::uint32_t>(source_authority),
-            minimizer_count,
-            distinct_count,
-            logical_control_bytes,
-            logical_position_bytes,
-            logical_resident_bytes,
-            conservative_allowance_bytes,
-            conservative_request_bytes,
-            reserved_before_bytes,
-            allocatable_before_bytes,
-            margin_bytes,
-            shortfall_bytes,
-            max_storage_buffer_range,
-            canonical_empty
-                ? "empty_no_resident_zero_anchor"
-                : "source_direct_mapped_sorted_dense",
-            decision,
-            reason);
+    [[nodiscard]] static constexpr std::string_view check_status(
+        bool checked, bool accepted) noexcept
+    {
+        if (!checked) return "not_reached";
+        return accepted ? "accepted" : "rejected";
     }
 
-    void log_terminal(std::string_view status, std::string_view reason) {
+    [[nodiscard]] static constexpr std::string_view source_authority_name(
+        SourceDirectHostAuthority authority) noexcept
+    {
+        switch (authority) {
+            case SourceDirectHostAuthority::canonical_empty:
+                return "canonical_empty";
+            case SourceDirectHostAuthority::reflected_process_footprint:
+                return "reflected_process_footprint";
+            case SourceDirectHostAuthority::retained_exact_permit:
+                return "retained_exact_permit";
+            case SourceDirectHostAuthority::none:
+                return "none";
+        }
+        return "unknown";
+    }
+
+    [[nodiscard]] static constexpr std::string_view resident_authority_name(
+        bioseq::indexing::GpuResidentAccountingAuthority authority) noexcept
+    {
+        switch (authority) {
+            case bioseq::indexing::GpuResidentAccountingAuthority::
+                    reflected_process_footprint:
+                return "reflected_process_footprint";
+            case bioseq::indexing::GpuResidentAccountingAuthority::
+                    retained_exact_permit:
+                return "retained_exact_permit";
+            case bioseq::indexing::GpuResidentAccountingAuthority::none:
+                return "none";
+        }
+        return "unknown";
+    }
+
+    void log_planning(
+        std::string_view decision, std::string_view reason) noexcept
+    {
+        if (planning_receipts != 0u) {
+            planning_log_failed = true;
+            return;
+        }
+        planning_receipts = 1u;
+        try {
+            bioseq_log<INF>(
+                "[gpu_source_direct_operation_planning] operation={} "
+                "route=full_sorted_dense_direct_mapped "
+                "source_authority={} source_authority_status={} "
+                "phase_c_status={} runtime_status={} device_status={} "
+                "sorted_shape_status={} abi_identity_status={} "
+                "u32_shape_status={} control_range_status={} "
+                "position_range_status={} mapping_plan_status={} "
+                "N={} D={} control_bytes={} position_bytes={} "
+                "logical_bytes={} control_allowance_bytes={} "
+                "position_allowance_bytes={} allowance_bytes={} "
+                "conservative_request_bytes={} reserved_before_bytes={} "
+                "allocatable_before_bytes={} margin_bytes={} "
+                "shortfall_bytes={} max_storage_buffer_range={} "
+                "canonical_empty_bypass={} gate_enabled=0 "
+                "decision={} reason={}",
+                operation_identity,
+                source_authority_name(source_authority),
+                check_status(source_authority_checked,
+                             source_authority_accepted),
+                check_status(phase_c_checked, phase_c_compatible),
+                check_status(runtime_checked, runtime_available),
+                check_status(hardware_checked, hardware_available),
+                check_status(sorted_shape_checked, sorted_shape_accepted),
+                check_status(identity_checked, identity_accepted),
+                check_status(u32_shape_checked, u32_shape_accepted),
+                check_status(storage_ranges_checked,
+                             control_range_accepted),
+                check_status(storage_ranges_checked,
+                             position_range_accepted),
+                check_status(mapping_plan_checked,
+                             mapping_plan_accepted),
+                minimizer_count,
+                distinct_count,
+                logical_control_bytes,
+                logical_position_bytes,
+                logical_resident_bytes,
+                control_allowance_bytes,
+                position_allowance_bytes,
+                conservative_allowance_bytes,
+                conservative_request_bytes,
+                reserved_before_bytes,
+                allocatable_before_bytes,
+                margin_bytes,
+                shortfall_bytes,
+                max_storage_buffer_range,
+                canonical_empty ? 1 : 0,
+                decision,
+                reason);
+        } catch (...) {
+            planning_log_failed = true;
+        }
+    }
+
+    [[nodiscard]] bool terminal_success_invariants() const noexcept {
+        if (planning_receipts != 1u || planning_log_failed
+            || !planning_accepted || !route_committed
+            || !source_release_completed || !pipeline_completed
+            || completed_seed_consumers != expected_seed_consumers
+            || cpu_index_releases != 0u
+            || cpu_position_bytes_released != 0u) {
+            return false;
+        }
+        if (canonical_empty) {
+            return empty_bypass
+                && !materialization_started
+                && !materialization_completed
+                && !resident_published
+                && minimizer_count == 0u
+                && distinct_count == 0u
+                && logical_control_bytes == 0u
+                && logical_position_bytes == 0u
+                && logical_resident_bytes == 0u
+                && control_allowance_bytes == 0u
+                && position_allowance_bytes == 0u
+                && conservative_allowance_bytes == 0u
+                && conservative_request_bytes == 0u
+                && source_capacity_bytes == 0u
+                && source_reflected_bytes == 0u
+                && source_retained_permit_bytes == 0u
+                && source_releases == 0u
+                && source_released_bytes == 0u
+                && cache_preinsertions == 0u
+                && cache_required_lookups == 0u
+                && cache_required_hits == 0u
+                && mapped_prefix_passes == 0u
+                && mapped_prefix_lookups == 0u
+                && mapped_prefix_comparisons == 0u
+                && slab_requested_bytes == 0u
+                && slab_actual_bytes == 0u
+                && slab_retained_permit_bytes == 0u
+                && slab_permit_releases == 0u
+                && seed_roundtrips == 0u
+                && zero_anchor_bypasses == 0u
+                && seed_fence_completions == 0u
+                && seed_dispatches == 0u
+                && cache_cleanup_releases == 0u
+                && resident_cleanup_bytes == 0u;
+        }
+        if (!materialization_started || !materialization_completed
+            || !resident_published || empty_bypass) {
+            return false;
+        }
+        const std::uint64_t allocation_sum =
+            bioseq::parallelism::saturating_add(
+                materialization.actual_slot_allocation_bytes,
+                materialization.actual_position_allocation_bytes);
+        const bool exact_materialization = allocation_sum
+                == materialization.actual_allocation_bytes
+            && allocation_sum
+                != (std::numeric_limits<std::uint64_t>::max)()
+            && materialization.logical_slot_bytes
+                == logical_control_bytes
+            && materialization.logical_position_bytes
+                == logical_position_bytes
+            && materialization.logical_resident_bytes
+                == logical_resident_bytes
+            && materialization.conservative_allowance_bytes
+                == conservative_allowance_bytes
+            && materialization.conservative_request_bytes
+                == conservative_request_bytes
+            && materialization.fully_touched_bytes
+                >= materialization.actual_allocation_bytes
+            && materialization.permit_reconciliations == 1u;
+        const bool reflected = materialization.authority
+                == bioseq::indexing::GpuResidentAccountingAuthority::
+                    reflected_process_footprint
+            && materialization.reflected_footprint_bytes
+                >= materialization.actual_allocation_bytes
+            && materialization.retained_permit_bytes == 0u;
+        const bool retained = materialization.authority
+                == bioseq::indexing::GpuResidentAccountingAuthority::
+                    retained_exact_permit
+            && materialization.retained_permit_bytes
+                == materialization.actual_allocation_bytes
+            && materialization.reflected_footprint_bytes == 0u;
+        const bool slab_exact = slab_requested_bytes == slab_actual_bytes
+            && slab_actual_bytes == slab_retained_permit_bytes
+            && (slab_actual_bytes == 0u
+                ? slab_permit_releases == 0u
+                : slab_permit_releases == 1u);
+        const bool zero_query = zero_query_bypasses == 1u;
+        const bool lookup_exact = zero_query
+            ? cache_required_hits == cache_required_lookups
+                && cache_required_lookups == completed_seed_consumers
+                && mapped_prefix_passes == 0u
+            : cache_required_lookups >= 1u
+                && cache_required_hits == cache_required_lookups
+                && cache_required_lookups == completed_seed_consumers
+                && mapped_prefix_passes
+                    == 2u * cache_required_lookups;
+        const bool seed_completion_exact = seed_roundtrips
+                == cache_required_lookups
+            && (zero_query
+                ? slab_actual_bytes == 0u
+                    && slab_requested_bytes == 0u
+                    && zero_anchor_bypasses == 0u
+                    && seed_dispatches == 0u
+                    && seed_fence_completions == 0u
+                : slab_actual_bytes == 0u
+                ? zero_anchor_bypasses == seed_roundtrips
+                    && seed_dispatches == 0u
+                    && seed_fence_completions == 0u
+                : zero_anchor_bypasses == 0u
+                    && seed_dispatches == seed_roundtrips
+                    && seed_fence_completions == seed_roundtrips);
+        return exact_materialization
+            && source_releases == 1u
+            && source_released_bytes == source_capacity_bytes
+            && source_released_after_publication
+            && cache_preinsertions == 1u
+            && lookup_exact
+            && (reflected != retained)
+            && slab_exact
+            && seed_completion_exact
+            && cache_cleanup_releases == 1u
+            && resident_cleanup_bytes
+                == materialization.actual_allocation_bytes
+            && materialization.source_checksum != 0u
+            && materialization.source_checksum
+                == materialization.mapped_checksum
+            && materialization.complete_source_traversals == 1u
+            && materialization.complete_mapped_traversals == 1u;
+    }
+
+    void log_terminal(
+        std::string_view status,
+        std::string_view reason) noexcept {
         if (terminal_receipts != 0u) return;
         terminal_receipts = 1u;
         terminal_success = status == "success";
-        bioseq_log<INF>(
+        try {
+            bioseq_log<INF>(
             "[gpu_source_direct_operation_terminal] operation={} status={} "
             "reason={} route={} N={} D={} actual_control_allocation_bytes={} "
             "actual_position_allocation_bytes={} actual_allocation_bytes={} "
@@ -6680,6 +6921,9 @@ struct DirectResidentOperationLedger {
             empty_bypass ? 1 : 0,
             cache_cleanup_releases,
             resident_cleanup_bytes);
+        } catch (...) {
+            terminal_success = false;
+        }
     }
 };
 
@@ -6739,18 +6983,32 @@ struct PostSeedOwnedLifetime {
     ~PostSeedOwnedLifetime() noexcept {
         if (owned_cpu_index.direct_ledger == nullptr) return;
         auto& ledger = *owned_cpu_index.direct_ledger;
+        if (owned_gpu_cache != nullptr) {
+            const std::uint64_t resident_bytes =
+                owned_gpu_cache->resident_bytes();
+            owned_gpu_cache->clear();
+            if (resident_bytes != 0u) {
+                ledger.cache_cleanup_releases = 1u;
+                ledger.resident_cleanup_bytes = resident_bytes;
+            }
+        }
         if (retained_seed_arena_permit) {
             ledger.slab_retained_permit_bytes =
                 retained_seed_arena_permit.bytes();
             retained_seed_arena_permit.release();
             ledger.slab_permit_releases = 1u;
         }
+        const bool users_completed =
+            remaining_seed_users.load(std::memory_order_relaxed) == 0u;
+        const bool accepted = users_completed
+            && ledger.terminal_success_invariants();
         ledger.log_terminal(
-            remaining_seed_users.load(std::memory_order_relaxed) == 0u
-                ? "success" : "failure",
-            remaining_seed_users.load(std::memory_order_relaxed) == 0u
+            accepted ? "success" : "failure",
+            accepted
                 ? "completed_after_last_seed_fence_and_arena_unwind"
-                : "seed_user_not_completed");
+                : users_completed
+                    ? "route_specific_terminal_invariant_failed"
+                    : "seed_user_not_completed");
     }
 
     PostSeedOwnedLifetime(const PostSeedOwnedLifetime&) = delete;
@@ -6977,7 +7235,15 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                         }
                     }
                     if (resident_index
-                        && bioseq::gpu::vulkan::
+                        && gpu_index_identity.source_direct_sorted_dense
+                        && post_seed_owned_lifetime == nullptr) {
+                        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                            "source-direct seed route has no arena permit owner"};
+                    }
+                    bioseq::gpu::vulkan::VulkanSeedLookupCompletion
+                        seed_completion{false};
+                    if (resident_index) {
+                        seed_completion = bioseq::gpu::vulkan::
                             collect_seed_hits_vulkan<MinimizerT>(
                                 sketch_span,
                                 device_span,
@@ -6989,12 +7255,24 @@ struct SeedHitStage : StageBase<SeedHitStage, ::bioseq::chaining::Anchor> {
                                 kmer_size,
                                 anchors_slab,
                                 params.vulkan_fused_frontend_enabled,
-                                &seed_decline,
-                                post_seed_owned_lifetime == nullptr
-                                    ? nullptr
-                                    : &post_seed_owned_lifetime->
-                                        retained_seed_arena_permit))
-                    {
+                                &seed_decline);
+                    }
+                    if (seed_completion.retained_anchor_permit) {
+                        if (post_seed_owned_lifetime == nullptr
+                            || post_seed_owned_lifetime->
+                                retained_seed_arena_permit
+                            || seed_completion.retained_anchor_bytes
+                                != seed_completion.
+                                    retained_anchor_permit.bytes()) {
+                            bioseq_log<ERR>(
+                                "source-direct seed permit owner is invalid");
+                            std::abort();
+                        }
+                        post_seed_owned_lifetime->
+                            retained_seed_arena_permit = std::move(
+                                seed_completion.retained_anchor_permit);
+                    }
+                    if (resident_index && seed_completion) {
                         if (proof_dst == nullptr) {
                             bioseq_log<ERR>(
                                 "Vulkan seed stage has no execution-proof sink");
@@ -8662,9 +8940,6 @@ template <is_constexpr_aligner_params Cep,
         owned_context.emplace();
         install.emplace(*owned_context);
     }
-    // Declared before the Arena::Chain scope so any exact retained anchor
-    // permit is released only after that arena has physically unwound.
-    std::optional<PostSeedOwnedLifetime> post_seed_owned_lifetime;
     auto outer_chain_scope = context::current().push<context::Arena::Chain>();
 
     bioseq_log<DBG>("[bioseq] pipe: pipeline_run_impl_batch entry — Cep(L={},K={},W={},fallback={}) "
@@ -8954,6 +9229,9 @@ template <is_constexpr_aligner_params Cep,
         owned_context.emplace();
         install.emplace(*owned_context);
     }
+    // Declared before the Arena::Chain scope so any exact retained anchor
+    // permit is released only after that arena has physically unwound.
+    std::optional<PostSeedOwnedLifetime> post_seed_owned_lifetime;
     auto outer_chain_scope = context::current().push<context::Arena::Chain>();
 
     const sequence_size_t target_len = target_seq.bp_size();
@@ -10149,6 +10427,33 @@ struct FixedVulkanTargetHostOwner {
     }
 };
 
+template <class MinimizerT>
+void release_fixed_vulkan_source_after_resident_publication(
+    FixedVulkanTargetHostOwner<MinimizerT>& source,
+    pipe::DirectResidentOperationLedger& ledger,
+    bool resident_published)
+{
+    const std::uint64_t released_bytes =
+        bioseq::parallelism::saturating_mul(
+            source.minimizers.capacity(), sizeof(MinimizerT));
+    {
+        std::vector<MinimizerT> empty;
+        source.minimizers.swap(empty);
+    }
+    if (source.host_permit.has_value()) {
+        if (source.minimizers.capacity() != 0u) {
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "source-direct host permit release preceded source storage"};
+        }
+        source.host_permit.reset();
+    }
+    source.adoption = {};
+    ledger.source_released_bytes = released_bytes;
+    ledger.source_releases = released_bytes != 0u ? 1u : 0u;
+    ledger.source_release_completed = true;
+    ledger.source_released_after_publication = resident_published;
+}
+
 /// Exact accounting returned by the fixed Vulkan host-vector -> CPU index
 /// handoff.  Keeping the transaction in one helper lets tests exercise the
 /// same reserve/build/validate path used by `minimap2_port` instead of merely
@@ -10610,12 +10915,11 @@ template <class MinimizerT,
 
 namespace pipe_entry_detail {
 
-/// Fixed Vulkan target handoff with a non-escapable local admission lifetime.
-/// The permit is declared before the transient index, so reverse destruction
-/// always frees table/position storage before returning the reservation.  A
-/// separate entry avoids a nullable output parameter on the legacy public
-/// `minimap2_port` shape and prevents ordinary callers from accidentally
-/// selecting exact-allocation accounting without ownership authority.
+/// Fixed Vulkan target handoff for the selected query-independent source-direct
+/// sorted-dense resident.  The adopted source is radix-sorted in place, counted
+/// exactly, streamed into final mapped buffers, published under an
+/// operation-unique key, and only then released.  No CPU FOA table or CPU
+/// positions vector is constructed on this route.
 template <class MinimizerT,
           supports_compact_sequence_range QueryRange,
           supports_compact_sequence_range TargetRange,
@@ -10639,36 +10943,214 @@ minimap2_port_with_fixed_vulkan_target_handoff(
         bioseq::instr::register_region_static("minimap2_port");
     auto _scope = bioseq::instr::region(_desc);
     const sequence_size_t target_len = target_seq.bp_size();
-    VulkanAdmittedTargetIndex target_index =
-        admit_and_build_fixed_vulkan_target_index(
-            std::move(target_host), target_len);
-    if (!target_index.accepted()) {
+    if (!target_host.ownership_authority_accepted()) {
         throw bioseq::gpu::vulkan::VulkanRuntimeError{
-            "fixed Vulkan target-index handoff receipt was rejected"};
+            "source-direct target handoff lacks source authority"};
+    }
+    auto& runtime = bioseq::gpu::vulkan::Runtime::instance();
+    if (!bioseq::gpu::vulkan::hardware_device_available(runtime)) {
+        throw bioseq::gpu::vulkan::VulkanRuntimeError{
+            "source-direct target handoff has no Vulkan device"};
     }
 
-    static const auto* _with_index_desc =
-        bioseq::instr::register_region_static("minimap2_port_with_index");
-    auto _with_index_scope = bioseq::instr::region(_with_index_desc);
-    return ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
-        ::bioseq::simd::HWY_NAMESPACE::pipe::EntryPoint::WithPrebuiltMinimizers,
-            QueryRange, TargetRange, MinimizerT,
-            MinimizerHashmapFragmentIndex, Scanner>(
-                query_seq,
-                target_seq,
-                query_minimizers,
-                target_index.index,
-                params,
-                nullptr,
-                {},
-                /*allow_gpu_target_index_build=*/false,
-                ::bioseq::simd::HWY_NAMESPACE::pipe::
-                    TransientTargetIndexReleaseAuthority{
-                        .index = &target_index.index,
-                        .permit = &*target_index.index_permit,
-                        .expected_permit_bytes =
-                            target_index.receipt.retained_index_permit_bytes,
-                        .require_exact_permit_bytes = true});
+    pipe::DirectResidentOperationLedger ledger{};
+    ledger.operation_identity = bioseq::indexing::
+        next_gpu_source_direct_operation_identity();
+    ledger.source_capacity_bytes =
+        target_host.adoption.host_capacity_bytes;
+    ledger.source_reflected_bytes =
+        target_host.adoption.host_footprint_reflected_delta_bytes;
+    ledger.source_retained_permit_bytes =
+        target_host.host_permit.has_value()
+            ? target_host.host_permit->bytes() : 0u;
+    ledger.source_authority = target_host.minimizers.empty()
+        ? pipe::SourceDirectHostAuthority::canonical_empty
+        : target_host.adoption.host_permit_released_to_process_footprint
+            ? pipe::SourceDirectHostAuthority::
+                reflected_process_footprint
+            : pipe::SourceDirectHostAuthority::retained_exact_permit;
+
+    std::optional<bioseq::indexing::GpuMinimizerIndexCache>
+        operation_gpu_cache;
+    std::shared_ptr<bioseq::indexing::GpuResidentMinimizerIndex>
+        construction_handle;
+    MinimizerHashmapFragmentIndex empty_target_index;
+    empty_target_index.target_len = target_len;
+    bioseq::indexing::GpuIndexCacheIdentity cache_identity{};
+    bioseq::indexing::GpuMinimizerIndexCacheKey cache_key{};
+
+    try {
+        MinimizerHashmapFragmentIndex::sort_source_by_hash_in_place(
+            target_host.minimizers);
+        const auto inspected = bioseq::indexing::
+            inspect_presorted_minimizer_source<MinimizerT>(
+                std::span<const MinimizerT>{
+                    target_host.minimizers.data(),
+                    target_host.minimizers.size()});
+        if (!inspected) {
+            ledger.log_planning("reject", "sorted_source_shape_invalid");
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "source-direct sorted source shape is invalid"};
+        }
+        ledger.minimizer_count = inspected->minimizer_count;
+        ledger.distinct_count = inspected->distinct_count;
+        const auto preflight = bioseq::indexing::
+            plan_gpu_source_direct_sorted_dense(
+                ledger.minimizer_count,
+                ledger.distinct_count,
+                runtime.features().max_storage_buffer_range);
+        const auto snapshot = bioseq::parallelism::
+            MemoryAdmissionController::instance().diagnostic_snapshot();
+        ledger.reserved_before_bytes = snapshot.reserved_bytes;
+        ledger.allocatable_before_bytes =
+            snapshot.allocatable_after_reservations_bytes;
+        ledger.max_storage_buffer_range =
+            runtime.features().max_storage_buffer_range;
+        if (!preflight) {
+            ledger.log_planning("reject", "shape_or_storage_range_rejected");
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "source-direct resident preflight rejected"};
+        }
+        ledger.canonical_empty = preflight->canonical_empty;
+        ledger.logical_control_bytes = preflight->control_bytes;
+        ledger.logical_position_bytes = preflight->position_bytes;
+        ledger.logical_resident_bytes =
+            preflight->logical_resident_bytes;
+        ledger.conservative_allowance_bytes = preflight->allowance_bytes;
+        ledger.conservative_request_bytes =
+            preflight->conservative_request_bytes;
+        if (ledger.allocatable_before_bytes
+            >= ledger.conservative_request_bytes) {
+            ledger.margin_bytes = ledger.allocatable_before_bytes
+                - ledger.conservative_request_bytes;
+        } else {
+            ledger.shortfall_bytes = ledger.conservative_request_bytes
+                - ledger.allocatable_before_bytes;
+        }
+        ledger.planning_accepted = ledger.shortfall_bytes == 0u;
+        ledger.log_planning(
+            ledger.planning_accepted ? "proceed" : "reject",
+            ledger.planning_accepted
+                ? "exact_shape_and_range_preflight_passed"
+                : "resident_memory_shortfall");
+        if (!ledger.planning_accepted) {
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "source-direct resident planning admission rejected"};
+        }
+
+        using TargetAlphabet = typename compact_sequence_range<
+            TargetRange>::traits::alphabet_type;
+        cache_identity = bioseq::indexing::
+            make_gpu_source_direct_sorted_dense_identity<MinimizerT>(
+                runtime,
+                ledger.operation_identity,
+                ledger.minimizer_count,
+                ledger.distinct_count,
+                static_cast<std::uint32_t>(
+                    seqan3::alphabet_size<TargetAlphabet>),
+                static_cast<std::uint32_t>(params.kmer_size),
+                static_cast<std::uint32_t>(params.window_size));
+        if (!bioseq::indexing::gpu_source_direct_identity_well_formed(
+                cache_identity)) {
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "source-direct cache identity is ineligible"};
+        }
+        cache_key = bioseq::indexing::make_gpu_index_cache_key(
+            empty_target_index, cache_identity);
+
+        if (!ledger.canonical_empty) {
+            bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
+            auto resident_permit = bioseq::parallelism::
+                MemoryAdmissionController::instance().try_reserve(
+                    ledger.conservative_request_bytes,
+                    &admission_failure);
+            if (!resident_permit) {
+                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                    "source-direct resident admission failed"};
+            }
+            auto materialized = bioseq::indexing::
+                materialize_sorted_dense_from_presorted_minimizers(
+                    runtime,
+                    std::span<const MinimizerT>{
+                        target_host.minimizers.data(),
+                        target_host.minimizers.size()},
+                    target_len,
+                    cache_key,
+                    *resident_permit);
+            if (!materialized) {
+                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                    "source-direct resident materialization failed"};
+            }
+            ledger.materialization = materialized->proof;
+            construction_handle = std::move(materialized->resident);
+            operation_gpu_cache.emplace(
+                ledger.materialization.actual_allocation_bytes);
+            auto inserted = operation_gpu_cache->insert_built(
+                cache_key, construction_handle);
+            if (!inserted) {
+                throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                    "source-direct resident preinsert failed"};
+            }
+            ledger.cache_preinsertions = 1u;
+            ledger.resident_published = true;
+            construction_handle.reset();
+        } else {
+            ledger.resident_published = true;
+        }
+
+        release_fixed_vulkan_source_after_resident_publication(
+            target_host, ledger, ledger.resident_published);
+
+        static const auto* _with_index_desc =
+            bioseq::instr::register_region_static(
+                "minimap2_port_with_index");
+        auto _with_index_scope = bioseq::instr::region(_with_index_desc);
+        auto result = ::bioseq::simd::HWY_NAMESPACE::pipe::dispatch_pipeline<
+            ::bioseq::simd::HWY_NAMESPACE::pipe::
+                EntryPoint::WithPrebuiltMinimizers,
+                QueryRange, TargetRange, MinimizerT,
+                MinimizerHashmapFragmentIndex, Scanner>(
+                    query_seq,
+                    target_seq,
+                    query_minimizers,
+                    empty_target_index,
+                    params,
+                    operation_gpu_cache
+                        ? &*operation_gpu_cache : nullptr,
+                    cache_identity,
+                    /*allow_gpu_target_index_build=*/false,
+                    ::bioseq::simd::HWY_NAMESPACE::pipe::
+                        TransientTargetIndexReleaseAuthority{
+                            .operation_owned_gpu_cache =
+                                operation_gpu_cache
+                                    ? &*operation_gpu_cache : nullptr,
+                            .direct_ledger = &ledger});
+        if (ledger.terminal_receipts != 1u || !ledger.terminal_success) {
+            throw bioseq::gpu::vulkan::VulkanRuntimeError{
+                "source-direct operation terminal receipt rejected"};
+        }
+        return result;
+    } catch (const std::exception& error) {
+        construction_handle.reset();
+        if (operation_gpu_cache) {
+            const std::uint64_t resident_bytes =
+                operation_gpu_cache->resident_bytes();
+            operation_gpu_cache->clear();
+            if (resident_bytes != 0u) {
+                ledger.cache_cleanup_releases = 1u;
+                ledger.resident_cleanup_bytes = resident_bytes;
+            }
+        }
+        if (!ledger.source_release_completed) {
+            release_fixed_vulkan_source_after_resident_publication(
+                target_host, ledger, ledger.resident_published);
+        }
+        if (ledger.planning_receipts == 0u) {
+            ledger.log_planning("reject", "not_reached_sort_or_count_failure");
+        }
+        ledger.log_terminal("failure", error.what());
+        throw;
+    }
 }
 
 // =============================================================================
