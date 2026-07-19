@@ -6137,9 +6137,13 @@ template <class S>
                         compact_sequence_range<S>::traits::letters_per_unit;
                     for (std::size_t target_index = 0;
                          target_index < targets.size();
-                         ++target_index) {
+                        ++target_index) {
                         GpuBatchTargetSidecar& target = targets[target_index];
                         compact_sequence_range<S> target_seq{*target.hdr};
+                        auto lazy_target =
+                            bioseq::storage::make_lazy_in_memory(target_seq);
+                        const auto target_view =
+                            bioseq::storage::as_lazy_sequence_view(lazy_target);
                         const std::uint64_t gpu_target_plan_begin_ns =
                             gpu_batch_now_ns();
                         constexpr sequence_size_t kGpuBatchHugeTargetBp =
@@ -6202,27 +6206,36 @@ template <class S>
                              ++segment_index) {
                             const ::bioseq::indexing::SegmentUnitRange& range =
                                 target.ranges[segment_index];
+                            const auto [segment_lo_bp, segment_hi_bp] =
+                                pipe::validated_segment_bp_bounds(
+                                    range, lpu, target.target_len);
                             const std::uint64_t gpu_index_build_begin_ns =
                                 gpu_batch_now_ns();
                             const bool full_target_range =
-                                range.cs_u == 0
-                                && static_cast<std::size_t>(range.ce_u)
-                                    >= target_seq.size();
+                                segment_lo_bp == 0u
+                                && segment_hi_bp == target.target_len;
+                            bioseq::gpu::vulkan::VulkanSketchDecline decline{};
                             auto built = full_target_range
                                 ? bioseq::gpu::vulkan::build_gpu_index_on_device<
                                     MinimizerT>(
-                                    target_seq, w, k, frozen_query_gate)
-                                : bioseq::gpu::vulkan::build_gpu_segment_index_on_device<
-                                    MinimizerT>(
-                                    target_seq,
-                                    static_cast<std::size_t>(range.cs_u),
-                                    static_cast<std::size_t>(range.ce_u),
+                                    target_view,
                                     w,
                                     k,
-                                    frozen_query_gate);
+                                    frozen_query_gate,
+                                    &decline)
+                                : bioseq::gpu::vulkan::build_gpu_segment_index_on_device<
+                                    MinimizerT>(
+                                    target_view,
+                                    segment_lo_bp,
+                                    segment_hi_bp,
+                                    w,
+                                    k,
+                                    frozen_query_gate,
+                                    &decline);
                             if (!built) {
-                                pipe::throw_vulkan_declined(
-                                    "Vulkan batched segment index build");
+                                pipe::throw_vulkan_sketch_declined(
+                                    "Vulkan batched segment index build",
+                                    decline);
                             }
                             if (!built->valid || built->position_count == 0u
                                 || built->occupied_slots == 0u) {
@@ -6260,7 +6273,7 @@ template <class S>
                                                 adopted.error())));
                             }
                             auto resident = std::move(*adopted);
-                            resident->target_position_offset = range.cs_u * lpu;
+                            resident->target_position_offset = segment_lo_bp;
                             target.residents.push_back(resident);
                             add_stage_host_time(
                                 stats,

@@ -225,9 +225,12 @@ template <class MinimizerT, class Alphabet>
     std::size_t k) {
     using seq_type = sequence_custom_alphabet<Alphabet, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(data);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(seq);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     auto result =
         vk::collect_minimizers_vulkan_result<MinimizerT>(
-            seq, w, k);
+            sequence_view, w, k);
     if (!result) return {};
     return std::move(result->host_minimizers);
 }
@@ -719,6 +722,9 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
     auto sequence = compact_sequence_range<seq_type>(test_data);
     const vk::SequenceUploadView upload =
         vk::make_sequence_upload_view(sequence);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     const std::uint64_t max_minimizers =
         vk::estimate_vulkan_minimizer_capacity(
             upload.bp_size,
@@ -784,7 +790,7 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
     admission.set_index_memory_cap_bytes(permissive_cap);
 
     auto calibration = vk::collect_minimizers_vulkan_result<MinimizerT>(
-        sequence,
+        sequence_view,
         window_size,
         kmer_size);
     REQUIRE(calibration.has_value());
@@ -855,7 +861,7 @@ TEST_CASE("vulkan minimizer: two-phase admission retains exact device and host b
                 budget_exhausted);
 
     auto result = vk::collect_minimizers_vulkan_result<MinimizerT>(
-        sequence,
+        sequence_view,
         window_size,
         kmer_size);
     REQUIRE(result.has_value());
@@ -1393,7 +1399,11 @@ TEST_CASE("vulkan minimizer: generic alphabet functional superset",
     constexpr std::uint32_t k = 7;
     std::vector<seq::dna5> data = DNA5_WITH_T;
     auto seq = compact_sequence_range<seq_type>(data);
-    auto result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(seq, w, k);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(seq);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
+    auto result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(
+        sequence_view, w, k);
     REQUIRE(result.has_value());
     auto cpu = cpu_sketch<MinimapSketchData>(data, w, k);
     require_gpu_minimizer_superset_with_bounded_tile_extras(
@@ -1416,14 +1426,17 @@ TEST_CASE("vulkan minimizer: oversized k declines before dispatch (no throw)",
     // guard for dna4 (step_bits=2).
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto seq = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(seq);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     vk::VulkanSketchDecline decline{};
     auto big_k = vk::collect_minimizers_vulkan_result<MinimapSketchData>(
-        seq, 10, 40, &decline);
+        sequence_view, 10, 40, &decline);
     ASSERT(!big_k.has_value(), "oversized k must decline (nullopt)", 0);
     REQUIRE(decline.reason == vk::VulkanSketchDeclineReason::kmer_size_unsupported);
     REQUIRE(decline.kmer_size == 40u);
     auto big_w = vk::collect_minimizers_vulkan_result<MinimapSketchData>(
-        seq, 300, 15, &decline);
+        sequence_view, 300, 15, &decline);
     ASSERT(!big_w.has_value(), "oversized window must decline (nullopt)", 0);
     REQUIRE(decline.reason == vk::VulkanSketchDeclineReason::window_size_unsupported);
     REQUIRE(decline.window_size == 300u);
@@ -1519,9 +1532,12 @@ TEST_CASE("vulkan minimizer: target-index decline identity survives wrappers",
 
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     vk::VulkanSketchDecline decline{};
     auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        sequence,
+        sequence_view,
         10u,
         40u,
         {},
@@ -1566,9 +1582,12 @@ TEST_CASE("vulkan minimizer: target-index count admission covers persistent aren
         true};
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     vk::VulkanSketchDecline decline{};
     auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        sequence, 10u, 15u, gate, &decline);
+        sequence_view, 10u, 15u, gate, &decline);
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
@@ -1659,6 +1678,9 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
     const vk::SequenceUploadView upload =
         vk::make_sequence_upload_view(sequence);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     const vk::VulkanSketchParams target_index_params{
         .bp_size = static_cast<std::uint32_t>(upload.bp_size),
         .window_size = 10u,
@@ -1690,7 +1712,7 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
         vk::estimate_vulkan_minimizer_capacity(sequence.bp_size(), 10u);
     vk::VulkanSketchDecline decline{};
     auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        sequence, 10u, 15u, {}, &decline);
+        sequence_view, 10u, 15u, {}, &decline);
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
@@ -1840,9 +1862,12 @@ TEST_CASE("vulkan minimizer: ungated all-N target publishes proven empty index",
     std::vector<seq::dna5> all_n =
         "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"_dna5;
     auto sequence = compact_sequence_range<seq_type>(all_n);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     vk::VulkanSketchDecline decline{};
     auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        sequence, 10u, 15u, {}, &decline);
+        sequence_view, 10u, 15u, {}, &decline);
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
@@ -1908,8 +1933,11 @@ TEST_CASE("vulkan minimizer: gated empty target retains count-dominant pretrim p
     std::vector<seq::dna5> all_n(256u);
     for (auto& letter : all_n) letter.assign_rank(4u);
     compact_sequence_range<seq_type> sequence{all_n};
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        sequence, 10u, 15u, gate);
+        sequence_view, 10u, 15u, gate);
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
     REQUIRE(built->position_count == 0u);
@@ -1945,9 +1973,12 @@ TEST_CASE("vulkan minimizer: exact target count may exceed planning estimate",
 
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(repeated_a);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     vk::VulkanSketchDecline decline{};
     auto built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        sequence, window_size, kmer_size, {}, &decline);
+        sequence_view, window_size, kmer_size, {}, &decline);
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
@@ -1991,9 +2022,12 @@ TEST_CASE("vulkan minimizer: fragmented target scratch dies before main and pres
     using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
 
     range_t contiguous{DNA4_FIXTURE};
+    auto contiguous_owner = bioseq::storage::make_lazy_in_memory(contiguous);
+    const auto contiguous_view =
+        bioseq::storage::as_lazy_sequence_view(contiguous_owner);
     vk::VulkanSketchDecline contiguous_decline{};
     auto contiguous_built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        contiguous, 10u, 15u, {}, &contiguous_decline);
+        contiguous_view, 10u, 15u, {}, &contiguous_decline);
     INFO(vk::format_vulkan_sketch_decline(contiguous_decline));
     REQUIRE(contiguous_built.has_value());
     REQUIRE(contiguous_built->valid);
@@ -2016,9 +2050,11 @@ TEST_CASE("vulkan minimizer: fragmented target scratch dies before main and pres
     contiguous_built.reset();
 
     lazy_t fragmented{scanner_t::from_range(contiguous)};
+    const auto fragmented_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented);
     vk::VulkanSketchDecline fragmented_decline{};
     auto fragmented_built = vk::build_gpu_index_on_device<MinimapSketchData>(
-        fragmented, 10u, 15u, {}, &fragmented_decline);
+        fragmented_view, 10u, 15u, {}, &fragmented_decline);
     INFO(vk::format_vulkan_sketch_decline(fragmented_decline));
     REQUIRE(fragmented_built.has_value());
     REQUIRE(fragmented_built->valid);
@@ -2065,8 +2101,11 @@ TEST_CASE("vulkan minimizer: direct target copy zeroes one through three tail by
             letters[index].assign_rank(static_cast<std::uint8_t>(index & 3u));
         }
         compact_sequence_range<packed64_t> packed64{letters};
+        auto packed64_owner = bioseq::storage::make_lazy_in_memory(packed64);
+        const auto packed64_view =
+            bioseq::storage::as_lazy_sequence_view(packed64_owner);
         auto baseline = vk::build_gpu_index_on_device<MinimapSketchData>(
-            packed64, 10u, 15u);
+            packed64_view, 10u, 15u);
         REQUIRE(baseline.has_value());
         REQUIRE(baseline->valid);
         const std::size_t slot_bytes =
@@ -2089,8 +2128,11 @@ TEST_CASE("vulkan minimizer: direct target copy zeroes one through three tail by
         REQUIRE(upload.byte_size % 4u != 0u);
         const std::uint64_t expected_padding =
             4u - upload.byte_size % 4u;
+        auto packed8_owner = bioseq::storage::make_lazy_in_memory(packed8);
+        const auto packed8_view =
+            bioseq::storage::as_lazy_sequence_view(packed8_owner);
         auto candidate = vk::build_gpu_index_on_device<MinimapSketchData>(
-            packed8, 10u, 15u);
+            packed8_view, 10u, 15u);
         REQUIRE(candidate.has_value());
         REQUIRE(candidate->valid);
         REQUIRE(candidate->ownership.sequence_padding_zeroed_bytes
@@ -2116,12 +2158,15 @@ TEST_CASE("vulkan minimizer: truncated query gate fails before target-index disp
     }
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
     const std::array<std::uint32_t, 1> truncated_words{1u};
     const vk::VulkanSketchQueryGate truncated_gate{
         std::span<const std::uint32_t>{truncated_words}, 31u};
     REQUIRE_THROWS_AS(
         vk::build_gpu_index_on_device<MinimapSketchData>(
-            sequence, 10u, 15u, truncated_gate),
+            sequence_view, 10u, 15u, truncated_gate),
         vk::VulkanRuntimeError);
 }
 
@@ -2138,14 +2183,16 @@ TEST_CASE("vulkan minimizer: selected segment preserves typed strict cause",
 
     range_t range(DNA4_FIXTURE);
     lazy_t fragmented{scanner_t::from_range(range)};
+    const auto fragmented_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented);
     sketch_collector_t<MinimapSketchData> collector;
     bool caught = false;
     try {
         vk::collect_minimizers_vulkan_segment_or_throw<MinimapSketchData>(
             collector,
-            fragmented,
+            fragmented_view,
             0u,
-            static_cast<std::size_t>(fragmented.size()),
+            fragmented.bp_size(),
             10u,
             40u);
     } catch (const vk::VulkanRuntimeError& error) {
@@ -2205,15 +2252,21 @@ TEST_CASE("vulkan minimizer: software device declines selected paths",
     using lazy_t = bioseq::storage::lazy_compact_sequence<config_t, scanner_t>;
 
     range_t range(DNA4_FIXTURE);
-    auto result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(range, 10, 15);
+    auto range_owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto range_view =
+        bioseq::storage::as_lazy_sequence_view(range_owner);
+    auto result = vk::collect_minimizers_vulkan_result<MinimapSketchData>(
+        range_view, 10, 15);
     REQUIRE_FALSE(result.has_value());
 
     lazy_t fragmented{scanner_t::from_range(range)};
+    const auto fragmented_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented);
     REQUIRE_THROWS_AS(
         vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-            fragmented,
+            fragmented_view,
             0,
-            static_cast<std::size_t>(fragmented.size()),
+            fragmented.bp_size(),
             0,
             0,
             static_cast<bioseq::storage::sequence_size_t>(fragmented.bp_size()),
@@ -2312,6 +2365,8 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
         }
         range_t range(letters);
         lazy_t fragmented{scanner_t::from_range(range)};
+        const auto fragmented_view =
+            bioseq::storage::as_lazy_sequence_view(fragmented);
 
         const std::array<std::pair<std::size_t, std::size_t>, 4> windows{{
             {0, 4096},
@@ -2338,7 +2393,16 @@ TEST_CASE("Vulkan segment minimizer sketch matches scalar fragmented windows",
                 scalar, fragmented, begin_iter, end_iter, w, k);
 
             vk::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
-                gpu, fragmented, lo_unit, hi_unit, w, k);
+                gpu,
+                fragmented_view,
+                static_cast<bioseq::storage::sequence_size_t>(lo_unit)
+                    * range_t::traits::letters_per_unit,
+                std::min<bioseq::storage::sequence_size_t>(
+                    static_cast<bioseq::storage::sequence_size_t>(hi_unit)
+                        * range_t::traits::letters_per_unit,
+                    fragmented.bp_size()),
+                w,
+                k);
 
             auto scalar_values = scalar.extract_sketches_data();
             auto gpu_values = gpu.extract_sketches_data();
@@ -2407,6 +2471,8 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
         }
         range_t range(letters);
         lazy_t fragmented{scanner_t::from_range(range)};
+        const auto fragmented_view =
+            bioseq::storage::as_lazy_sequence_view(fragmented);
 
         sketch_collector_t<MinimapSketchData> scalar;
         collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
@@ -2428,9 +2494,9 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
         vk::VulkanSegmentPairExecutionProof execution_proof{};
         const auto pairs =
             vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-                fragmented,
+                fragmented_view,
                 0,
-                static_cast<std::size_t>(fragmented.size()),
+                fragmented.bp_size(),
                 0,
                 0,
                 static_cast<bioseq::storage::sequence_size_t>(fragmented.bp_size()),
@@ -2468,6 +2534,8 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
     }
     range_t range(letters);
     lazy_t fragmented{scanner_t::from_range(range)};
+    const auto fragmented_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented);
 
     sketch_collector_t<MinimapSketchData> scalar;
     collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
@@ -2488,9 +2556,9 @@ TEST_CASE("Vulkan segment sorted pairs are ordered by kmer then encoded position
 
     const auto pairs =
         vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-            fragmented,
+            fragmented_view,
             0,
-            static_cast<std::size_t>(fragmented.size()),
+            fragmented.bp_size(),
             0,
             0,
             static_cast<bioseq::storage::sequence_size_t>(fragmented.bp_size()),
@@ -2541,12 +2609,14 @@ TEST_CASE("Vulkan borrowed segment-pair admission covers arena high-water",
 
     range_t range(DNA4_FIXTURE);
     lazy_t fragmented{scanner_t::from_range(range)};
+    const auto fragmented_view =
+        bioseq::storage::as_lazy_sequence_view(fragmented);
     vk::VulkanSegmentPairExecutionProof execution_proof{};
     const auto pairs =
         vk::collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
-            fragmented,
+            fragmented_view,
             0u,
-            static_cast<std::size_t>(fragmented.size()),
+            fragmented.bp_size(),
             0u,
             0u,
             static_cast<bioseq::storage::sequence_size_t>(

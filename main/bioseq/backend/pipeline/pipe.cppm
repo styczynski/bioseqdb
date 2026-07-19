@@ -4596,86 +4596,6 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VU
 // ---------------------------------------------------------------------------
 enum class MinKernelKind { Scalar, Simd, ExactSimd };
 
-template<class MinimizerT, class ResidentRange>
-inline constexpr bool resident_vector_stream_shape_v = [] {
-    using range_type = std::remove_cvref_t<ResidentRange>;
-    if constexpr (requires { typename range_type::traits; }) {
-        using traits = typename range_type::traits;
-        return exact_simd_minimizer_representation<MinimizerT>
-            && std::same_as<typename traits::alphabet_type, seq::dna4>
-            && std::same_as<typename traits::storage_unit, std::uint32_t>;
-    } else {
-        return false;
-    }
-}();
-
-// The legacy reference-SIMD kernel retains its historical non-2-bit scalar
-// fallback. ExactSimd deliberately bypasses this helper: unsupported
-// alphabet/storage/target shapes are rejected by the checked continuation
-// driver and can never be relabelled scalar work.
-template <MinKernelKind Kind, class Seq>
-inline constexpr MinKernelKind effective_min_kernel() {
-    using seq_traits = typename std::remove_cvref_t<Seq>::traits;
-    return (Kind == MinKernelKind::Simd && seq_traits::bits_per_char != 2)
-               ? MinKernelKind::Scalar
-               : Kind;
-}
-
-template <MinKernelKind Kind, class MinimizerT, class Seq, class Collector>
-[[gnu::always_inline]] inline void run_minimizer_inram(
-    Collector& c, Seq& seq, std::size_t w, std::size_t k)
-{
-    // The legacy minimizer kernels take a non-const compact_sequence_range& but
-    // only ever read it;  here may be a const& (e.g. lazy.underlying()).
-    auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
-    constexpr MinKernelKind EffKind = effective_min_kernel<Kind, Seq>();
-    if constexpr (EffKind == MinKernelKind::Scalar) {
-        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers<minimap_int_hasher, MinimizerT>(
-            c, m, m.begin(), m.end(), w, k);
-    } else if constexpr (EffKind == MinKernelKind::Simd) {
-        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd<minimap_int_hasher, MinimizerT>(
-            c, m, m.begin(), m.end(), w, k);
-    } else {
-        (void)::bioseq::simd::HWY_NAMESPACE::
-            collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                0, 0, MinimizerT>(
-                    c,
-                    m,
-                    0,
-                    static_cast<std::size_t>(m.size()),
-                    w,
-                    k,
-                    0,
-                    "query minimizer sketch");
-    }
-}
-
-template <MinKernelKind Kind, std::size_t W, std::size_t K, class MinimizerT, class Seq, class Collector>
-[[gnu::always_inline]] inline void run_minimizer_inram_constexpr(Collector& c, Seq& seq)
-{
-    auto& m = const_cast<std::remove_cvref_t<Seq>&>(seq);
-    constexpr MinKernelKind EffKind = effective_min_kernel<Kind, Seq>();
-    if constexpr (EffKind == MinKernelKind::Scalar) {
-        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_constexpr<W, K, minimap_int_hasher, MinimizerT>(
-            c, m, m.begin(), m.end());
-    } else if constexpr (EffKind == MinKernelKind::Simd) {
-        ::bioseq::simd::HWY_NAMESPACE::collect_minimizers_simd_constexpr<W, K, minimap_int_hasher, MinimizerT>(
-            c, m, m.begin(), m.end());
-    } else {
-        (void)::bioseq::simd::HWY_NAMESPACE::
-            collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                W, K, MinimizerT>(
-                    c,
-                    m,
-                    0,
-                    static_cast<std::size_t>(m.size()),
-                    W,
-                    K,
-                    0,
-                    "constexpr query minimizer sketch");
-    }
-}
-
 template <MinKernelKind Kind, class MinimizerT,
           sequence_alphabet Alphabet, class Collector>
 [[gnu::always_inline]] inline TwoStackExecutionProof minimizer_dispatch(
@@ -4891,405 +4811,6 @@ enum class ExactSimdRangeRoute : std::uint8_t {
     return false;
 }
 
-template <class MinimizerT, class Seq, class Collector>
-[[gnu::always_inline]] inline MinimizerRangeExecutionProof
-minimizer_dispatch_range_legacy_resident_impl(
-    Collector& collector,
-    Seq& seq,
-    sequence_size_t lo_unit,
-    sequence_size_t hi_unit,
-    std::size_t window_size,
-    std::size_t kmer_size,
-    MinimizerSketchBackend backend,
-    ExactSimdRangeRoute exact_simd_route =
-        ExactSimdRangeRoute::require_continuation)
-{
-    if (backend == MinimizerSketchBackend::VulkanSegment) {
-        bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
-            collector,
-            seq,
-            static_cast<std::size_t>(lo_unit),
-            static_cast<std::size_t>(hi_unit),
-            window_size,
-            kmer_size);
-        return {};
-    }
-
-    if (backend == MinimizerSketchBackend::ExactSimd) {
-        using sequence_type = std::remove_cvref_t<Seq>;
-        if constexpr (requires { typename sequence_type::scanner_type; }) {
-            if constexpr (!sequence_type::scanner_type::supports_fragments()) {
-                auto& resident = const_cast<std::remove_cvref_t<
-                    decltype(seq.underlying())>&>(seq.underlying());
-                if constexpr (resident_vector_stream_shape_v<
-                        MinimizerT, decltype(resident)>) {
-                    const bool is_whole_resident_range = lo_unit == 0u
-                        && static_cast<std::size_t>(hi_unit)
-                            == static_cast<std::size_t>(resident.size());
-                    if (exact_simd_route
-                            == ExactSimdRangeRoute::require_resident_vector_stream
-                        && is_whole_resident_range
-                        && window_size == 10u && kmer_size == 15u) [[likely]] {
-                        TwoStackExecutionProof proof =
-                            collect_minimizers_two_stack_nthash_resident_or_throw<
-                                MinimizerT>(
-                                    collector, resident, window_size, kmer_size);
-                        return MinimizerRangeExecutionProof{
-                            .exact_simd = proof,
-                            .exact_simd_present = true,
-                        };
-                    }
-                }
-            }
-        } else {
-            auto& resident = const_cast<sequence_type&>(seq);
-            if constexpr (resident_vector_stream_shape_v<
-                    MinimizerT, decltype(resident)>) {
-                const bool is_whole_resident_range = lo_unit == 0u
-                    && static_cast<std::size_t>(hi_unit)
-                        == static_cast<std::size_t>(resident.size());
-                if (exact_simd_route
-                        == ExactSimdRangeRoute::require_resident_vector_stream
-                    && is_whole_resident_range
-                    && window_size == 10u && kmer_size == 15u) [[likely]] {
-                    TwoStackExecutionProof proof =
-                        collect_minimizers_two_stack_nthash_resident_or_throw<
-                            MinimizerT>(
-                                collector, resident, window_size, kmer_size);
-                    return MinimizerRangeExecutionProof{
-                        .exact_simd = proof,
-                        .exact_simd_present = true,
-                    };
-                }
-            }
-        }
-        if (exact_simd_route
-            == ExactSimdRangeRoute::require_resident_vector_stream) {
-            throw std::invalid_argument(
-                "resident ExactSimd vector_stream route was required, but the "
-                "range/storage shape is not eligible; continuation fallback "
-                "is forbidden");
-        }
-        TwoStackExecutionProof proof = ::bioseq::simd::HWY_NAMESPACE::
-            collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                0, 0, MinimizerT>(
-                    collector,
-                    seq,
-                    static_cast<std::size_t>(lo_unit),
-                    static_cast<std::size_t>(hi_unit),
-                    window_size,
-                    kmer_size,
-                    0,
-                    "target minimizer range sketch");
-        return MinimizerRangeExecutionProof{
-            .exact_simd = proof,
-            .exact_simd_present = true,
-        };
-    }
-
-    if (backend == MinimizerSketchBackend::PaperNtHashSimd) {
-        if (window_size != 10u || kmer_size != 15u) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd currently requires W=10 and K=15; "
-                "no scalar/ExactSimd fallback is permitted");
-        }
-        using sequence_type = std::remove_cvref_t<Seq>;
-        using sequence_traits = typename sequence_type::traits;
-        using storage_unit = typename sequence_traits::storage_unit;
-        constexpr bool paper_alphabet_supported = std::same_as<
-            typename sequence_traits::alphabet_type, ::seq::dna4>;
-        constexpr bool paper_storage_supported =
-            std::same_as<storage_unit, std::uint32_t>
-            || std::same_as<storage_unit, std::uint64_t>;
-        constexpr bool paper_packing_supported =
-            paper_nthash_has_canonical_two_bit_packing<sequence_type>;
-        if constexpr (!paper_alphabet_supported) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd requires the DNA4 alphabet; fallback is forbidden");
-        } else if constexpr (!paper_storage_supported) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd requires packed uint32 or uint64 storage; "
-                "fallback is forbidden");
-        } else if constexpr (!paper_packing_supported) {
-            throw PaperNtHashRuntimeError(
-                "PaperNtHashSimd requires canonical 2-bit DNA4 packing with "
-                "no leftover storage-unit bits; relabeling another packed "
-                "representation is forbidden");
-        } else {
-            const sequence_size_t total_units =
-                static_cast<sequence_size_t>(seq.size());
-            constexpr sequence_size_t sequence_size_max =
-                (std::numeric_limits<sequence_size_t>::max)();
-            constexpr std::size_t size_max =
-                (std::numeric_limits<std::size_t>::max)();
-            constexpr std::size_t letters_per_unit =
-                sequence_traits::letters_per_unit;
-            const std::size_t source_padding =
-                static_cast<std::size_t>(seq.padding());
-
-            if (lo_unit > hi_unit || hi_unit > total_units) {
-                throw PaperNtHashRuntimeError(fmt::format(
-                    "invalid packed unit range: lo_unit={} hi_unit={} total_units={}",
-                    lo_unit, hi_unit, total_units));
-            }
-            if (letters_per_unit == 0u
-                || total_units > sequence_size_max / letters_per_unit) {
-                throw PaperNtHashRuntimeError(
-                    "source packed-shape arithmetic overflow");
-            }
-            const sequence_size_t nominal_total_bp =
-                total_units * letters_per_unit;
-            if ((total_units == 0u && source_padding != 0u)
-                || (total_units != 0u
-                    && source_padding >= letters_per_unit)
-                || source_padding > nominal_total_bp
-                || static_cast<sequence_size_t>(seq.bp_size())
-                    != nominal_total_bp - source_padding) {
-                throw PaperNtHashRuntimeError(
-                    "source packed shape has inconsistent size, bp_size, or padding");
-            }
-            if (lo_unit > sequence_size_max / letters_per_unit) {
-                throw PaperNtHashRuntimeError(
-                    "packed range base-position arithmetic overflow");
-            }
-
-            auto run_resident = [&](auto& resident,
-                                    sequence_size_t resident_lo_unit,
-                                    sequence_size_t resident_hi_unit) {
-                if (resident_lo_unit > resident_hi_unit
-                    || resident_hi_unit
-                        > static_cast<sequence_size_t>(resident.size())
-                    || resident_lo_unit
-                        > static_cast<sequence_size_t>(
-                            (std::numeric_limits<std::ptrdiff_t>::max)())
-                    || resident_hi_unit
-                        > static_cast<sequence_size_t>(
-                            (std::numeric_limits<std::ptrdiff_t>::max)())) {
-                    throw PaperNtHashRuntimeError(
-                        "invalid or non-addressable resident packed unit range");
-                }
-                auto begin = resident.begin();
-                auto end = resident.begin();
-                begin += static_cast<std::ptrdiff_t>(resident_lo_unit);
-                end += static_cast<std::ptrdiff_t>(resident_hi_unit);
-                return collect_minimizers_packed_paper_nthash_simd_checked<
-                    15, 10, MinimizerT>(collector, resident, begin, end);
-            };
-
-            PackedPaperNthashResult result{};
-            constexpr bool fragmented = [] {
-                if constexpr (requires { typename Seq::scanner_type; }) {
-                    return Seq::scanner_type::supports_fragments();
-                } else {
-                    return false;
-                }
-            }();
-            if constexpr (fragmented) {
-                const sequence_size_t local_units_64 = hi_unit - lo_unit;
-                if (local_units_64
-                    > static_cast<sequence_size_t>(size_max)) {
-                    throw PaperNtHashRuntimeError(
-                        "fragmented packed range cannot be represented by size_t");
-                }
-                const std::size_t local_units =
-                    static_cast<std::size_t>(local_units_64);
-                if (local_units > size_max / sizeof(storage_unit)
-                    || local_units > size_max / letters_per_unit
-                    || local_units
-                        > static_cast<std::size_t>(
-                            (std::numeric_limits<std::ptrdiff_t>::max)())
-                    || local_units
-                        > (std::numeric_limits<std::uint64_t>::max)()
-                            / sizeof(storage_unit)) {
-                    throw PaperNtHashRuntimeError(
-                        "fragmented packed-range materialization arithmetic overflow");
-                }
-                const std::size_t local_padding = hi_unit == total_units
-                    ? source_padding
-                    : 0u;
-                const std::size_t local_nominal_bp =
-                    local_units * letters_per_unit;
-                if (local_padding > local_nominal_bp) {
-                    throw PaperNtHashRuntimeError(
-                        "fragmented packed range has invalid local padding");
-                }
-                const std::size_t local_bp =
-                    local_nominal_bp - local_padding;
-                if (local_bp < 15u + 10u - 1u) {
-                    throw PaperNtHashRuntimeError(
-                        "fragmented packed range is too short for W=10/K=15");
-                }
-                if (local_bp
-                    > static_cast<std::size_t>(
-                        (std::numeric_limits<std::uint32_t>::max)())) {
-                    throw PaperNtHashRuntimeError(
-                        "fragmented packed range exceeds Paper's uint32 position domain");
-                }
-
-                const std::uint64_t materialized_bytes =
-                    static_cast<std::uint64_t>(local_units)
-                    * sizeof(storage_unit);
-                bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
-                auto admitted =
-                    bioseq::parallelism::MemoryAdmissionController::instance()
-                        .try_reserve(materialized_bytes, &admission_failure);
-                if (!admitted) {
-                    throw PaperNtHashRuntimeError(fmt::format(
-                        "fragmented packed-range admission failed: reason={} "
-                        "requested_bytes={} reserved_bytes={} budget_bytes={}",
-                        bioseq::parallelism::memory_admission_failure_reason_name(
-                            admission_failure.reason),
-                        admission_failure.requested_bytes,
-                        admission_failure.reserved_bytes,
-                        admission_failure.budget_ceiling_bytes));
-                }
-                try {
-                    // The permit is the first field so normal or explicit
-                    // destruction frees the vector before releasing its exact
-                    // reservation.  It intentionally remains live through
-                    // checked-kernel consumption.
-                    struct MaterializationState {
-                        bioseq::parallelism::MemoryPermit permit;
-                        std::vector<storage_unit> packed;
-                        Seq* sequence = nullptr;
-                        sequence_size_t lo = 0;
-                        std::size_t units = 0;
-                        std::size_t bytes = 0;
-                    } materialization{
-                        .permit = std::move(*admitted),
-                        .packed = std::vector<storage_unit>(local_units),
-                        .sequence = &seq,
-                        .lo = lo_unit,
-                        .units = local_units,
-                        .bytes = static_cast<std::size_t>(materialized_bytes),
-                    };
-
-                    using read_callback = void (*)(void*);
-                    constexpr read_callback read_body = +[](void* opaque)
-                        {
-                        auto* state =
-                            static_cast<MaterializationState*>(opaque);
-                        auto source = state->sequence->begin();
-                        source += state->lo;
-                        const storage_unit* source_words =
-                            state->sequence->read_cptr(
-                                source,
-                                std::span<storage_unit>{
-                                    state->packed.data(),
-                                    state->packed.size()},
-                                state->units);
-                        if (source_words != state->packed.data()) {
-                            std::memcpy(
-                                state->packed.data(),
-                                source_words,
-                                state->bytes);
-                        }
-                    };
-                    // Production scanner_pg converts each PostgreSQL leaf
-                    // ERROR to a C++ exception inside read_fragment. Ordinary
-                    // unwinding therefore destroys this caller-owned vector
-                    // and permit. Native/fake scanners execute the same body
-                    // directly and retain their no-PostgreSQL API.
-                    using scanner_type = typename sequence_type::scanner_type;
-                    if constexpr (requires {
-                        scanner_type::
-                            run_fragment_reads_with_error_cleanup(
-                                static_cast<void*>(nullptr),
-                                static_cast<read_callback>(nullptr),
-                                static_cast<read_callback>(nullptr));
-                    }) {
-                        scanner_type::run_fragment_reads_with_error_cleanup(
-                            &materialization,
-                            read_body,
-                            /*cleanup_after_error=*/nullptr);
-                    } else {
-                        read_body(&materialization);
-                    }
-                    using resident_sequence = sequence_custom_alphabet<
-                        ::seq::dna4, storage_unit, 2>;
-                    auto resident = compact_sequence_range<resident_sequence>::
-                        from_packed(
-                            std::move(materialization.packed),
-                            local_padding);
-                    result = run_resident(
-                        resident,
-                        0u,
-                        static_cast<sequence_size_t>(resident.size()));
-                } catch (const std::bad_alloc&) {
-                    throw PaperNtHashRuntimeError(fmt::format(
-                        "fragmented packed-range allocation failed after admitting {} bytes",
-                        materialized_bytes));
-                } catch (const std::length_error& err) {
-                    throw PaperNtHashRuntimeError(fmt::format(
-                        "fragmented packed-range allocation shape was rejected: {}",
-                        err.what()));
-                }
-            } else if constexpr (requires { typename Seq::scanner_type; }) {
-                auto& resident = const_cast<std::remove_cvref_t<
-                    decltype(seq.underlying())>&>(seq.underlying());
-                result = run_resident(resident, lo_unit, hi_unit);
-            } else {
-                result = run_resident(seq, lo_unit, hi_unit);
-            }
-            if (!result.ok()
-                || !result.proof.accepted(
-                    /*require_nonempty_vector_work=*/false)) {
-                throw PaperNtHashRuntimeError(fmt::format(
-                    "checked range kernel declined without fallback: "
-                    "status={} lo_unit={} hi_unit={} w={} k={}",
-                    static_cast<unsigned>(result.status),
-                    lo_unit, hi_unit, window_size, kmer_size));
-            }
-            return MinimizerRangeExecutionProof{
-                .paper_nthash = result.proof,
-                .paper_nthash_present = true,
-            };
-        }
-    }
-
-    if (backend != MinimizerSketchBackend::Scalar) {
-        throw std::invalid_argument(
-            "minimizer_dispatch_range received an unsupported backend; "
-            "scalar fallback is forbidden");
-    }
-    using sequence_type = std::remove_cvref_t<Seq>;
-    using sequence_traits = typename sequence_type::traits;
-    constexpr std::uint64_t letters_per_unit =
-        sequence_traits::letters_per_unit;
-    const std::uint64_t total_units =
-        static_cast<std::uint64_t>(seq.size());
-    if (lo_unit > hi_unit
-        || static_cast<std::uint64_t>(hi_unit) > total_units
-        || letters_per_unit == 0u
-        || static_cast<std::uint64_t>(lo_unit)
-            > (std::numeric_limits<std::uint64_t>::max)()
-                / letters_per_unit
-        || static_cast<std::uint64_t>(hi_unit)
-            > (std::numeric_limits<std::uint64_t>::max)()
-                / letters_per_unit) {
-        throw std::invalid_argument(
-            "scalar minimizer range has an invalid packed-unit shape");
-    }
-    const std::uint64_t lo_bp =
-        static_cast<std::uint64_t>(lo_unit) * letters_per_unit;
-    const std::uint64_t hi_bp = std::min(
-        static_cast<std::uint64_t>(hi_unit) * letters_per_unit,
-        static_cast<std::uint64_t>(seq.bp_size()));
-    collect_minimizers_segment_scalar<MinimizerT>(
-        collector,
-        seq,
-        lo_unit,
-        hi_unit,
-        window_size,
-        kmer_size);
-    ScalarMinimizerExecutionProof proof{};
-    proof.record(hi_bp >= lo_bp ? hi_bp - lo_bp : 0u);
-    return MinimizerRangeExecutionProof{
-        .scalar = proof,
-        .scalar_present = true,
-    };
-}
-
 template <class MinimizerT, sequence_alphabet Alphabet, class Collector>
 [[gnu::always_inline]] inline MinimizerRangeExecutionProof
 minimizer_dispatch_range(
@@ -5312,15 +4833,114 @@ minimizer_dispatch_range(
             "Vulkan minimizer range requires an admitted GPU upload owner");
     }
     if (backend == MinimizerSketchBackend::PaperNtHashSimd) {
-        throw PaperNtHashRuntimeError(
-            "PaperNtHashSimd facade range requires its admitted resident owner");
+        if (window_size != 10u || kmer_size != 15u) {
+            throw PaperNtHashRuntimeError(
+                "PaperNtHashSimd currently requires W=10 and K=15; "
+                "fallback is forbidden");
+        }
+        if constexpr (!std::same_as<Alphabet, ::seq::dna4>) {
+            throw PaperNtHashRuntimeError(
+                "PaperNtHashSimd requires the DNA4 alphabet; fallback is forbidden");
+        } else {
+            const sequence_size_t length = hi_bp - lo_bp;
+            auto run_paper = [&collector](const auto& descriptor) {
+                return collect_minimizers_packed_paper_nthash_resident_descriptor_checked<
+                    15u, 10u, MinimizerT, Alphabet>(collector, descriptor);
+            };
+            PackedPaperNthashResult result{};
+            const auto resident = seq.try_resident_packed(
+                lo_bp, hi_bp, sizeof(std::uint32_t));
+            if (resident.has_value()
+                && resident->leading_symbol_offset == 0u) {
+                result = run_paper(*resident);
+            } else {
+                const std::uint64_t admitted_bytes =
+                    bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                        length, sizeof(std::uint32_t));
+                bioseq::parallelism::MemoryAdmissionFailure failure{};
+                auto permit =
+                    bioseq::parallelism::MemoryAdmissionController::instance()
+                        .try_reserve(admitted_bytes, &failure);
+                if (!permit) {
+                    throw PaperNtHashRuntimeError(fmt::format(
+                        "packed-range admission failed: reason={} "
+                        "requested_bytes={} reserved_bytes={} budget_bytes={}",
+                        bioseq::parallelism::memory_admission_failure_reason_name(
+                            failure.reason),
+                        failure.requested_bytes,
+                        failure.reserved_bytes,
+                        failure.budget_ceiling_bytes));
+                }
+                auto owner = bioseq::storage::materialize_packed_region(
+                    seq, lo_bp, hi_bp, sizeof(std::uint32_t),
+                    std::move(*permit));
+                result = run_paper(owner.descriptor());
+            }
+            if (!result.ok()
+                || !result.proof.accepted(
+                    /*require_nonempty_vector_work=*/false)) {
+                throw PaperNtHashRuntimeError(fmt::format(
+                    "checked resident kernel declined without fallback: "
+                    "status={} lo_bp={} hi_bp={} w={} k={}",
+                    static_cast<unsigned>(result.status),
+                    lo_bp, hi_bp, window_size, kmer_size));
+            }
+            return MinimizerRangeExecutionProof{
+                .paper_nthash = result.proof,
+                .paper_nthash_present = true,
+            };
+        }
     }
     if (backend == MinimizerSketchBackend::ExactSimd) {
         if (exact_simd_route
                 == ExactSimdRangeRoute::require_resident_vector_stream) {
-            throw std::invalid_argument(
-                "the legacy resident vector-stream selection route is not a "
-                "canonical facade route");
+            if constexpr (!std::same_as<Alphabet, ::seq::dna4>
+                          || !exact_simd_minimizer_representation<MinimizerT>) {
+                throw std::invalid_argument(
+                    "resident ExactSimd vector_stream requires DNA4 and an "
+                    "exact SIMD minimizer representation");
+            } else {
+                if (lo_bp != 0u || hi_bp != seq.bp_size()
+                    || window_size != 10u || kmer_size != 15u) {
+                    throw std::invalid_argument(
+                        "resident ExactSimd vector_stream requires the whole "
+                        "W=10/K=15 range");
+                }
+                auto run_resident = [&collector, window_size, kmer_size](
+                        const auto& descriptor) {
+                    return collect_minimizers_two_stack_nthash_resident_descriptor_or_throw<
+                        MinimizerT, Alphabet>(
+                            collector, descriptor, window_size, kmer_size);
+                };
+                TwoStackExecutionProof proof{};
+                const auto resident = seq.try_resident_packed(
+                    lo_bp, hi_bp, sizeof(std::uint32_t));
+                if (resident.has_value()
+                    && resident->leading_symbol_offset == 0u) {
+                    proof = run_resident(*resident);
+                } else {
+                    const sequence_size_t length = hi_bp - lo_bp;
+                    const std::uint64_t admitted_bytes =
+                        bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                            length, sizeof(std::uint32_t));
+                    auto permit =
+                        bioseq::parallelism::MemoryAdmissionController::instance()
+                            .try_reserve(admitted_bytes);
+                    if (!permit) {
+                        throw ExactSimdRuntimeError{
+                            TwoStackContinuationStatus::non_contiguous_range,
+                            "resident vector_stream admission"};
+                    }
+                    auto owner = bioseq::storage::materialize_packed_region(
+                        seq, lo_bp, hi_bp, sizeof(std::uint32_t),
+                        std::move(*permit));
+                    proof = run_resident(owner.descriptor());
+                }
+                return MinimizerRangeExecutionProof{
+                    .exact_simd = proof,
+                    .exact_simd_present = true,
+                };
+            }
         }
         const sequence_size_t length = hi_bp - lo_bp;
         if (length > static_cast<sequence_size_t>(
@@ -5581,6 +5201,34 @@ segment_core_floor_for_backend(MinimizerSketchBackend backend) noexcept {
         lpu,
         segment_geometry_divisor_for_backend(backend, query_len),
         segment_core_floor_for_backend(backend));
+}
+
+[[nodiscard]] inline std::pair<sequence_size_t, sequence_size_t>
+validated_segment_bp_bounds(
+        const ::bioseq::indexing::SegmentUnitRange& range,
+        std::size_t letters_per_unit,
+        sequence_size_t total_bp) {
+    const sequence_size_t lpu =
+        static_cast<sequence_size_t>(letters_per_unit);
+    if (letters_per_unit == 0u
+        || static_cast<std::size_t>(lpu) != letters_per_unit) {
+        throw std::invalid_argument(
+            "segment letters-per-unit is not representable");
+    }
+    constexpr sequence_size_t max_bp =
+        (std::numeric_limits<sequence_size_t>::max)();
+    if (range.cs_u > max_bp / lpu || range.ce_u > max_bp / lpu) {
+        throw std::overflow_error(
+            "segment packed-unit bounds overflow biological coordinates");
+    }
+    const sequence_size_t lo_bp = range.cs_u * lpu;
+    const sequence_size_t hi_bp =
+        std::min<sequence_size_t>(range.ce_u * lpu, total_bp);
+    if (lo_bp > hi_bp || lo_bp > total_bp) {
+        throw std::invalid_argument(
+            "segment packed-unit bounds exceed the biological sequence");
+    }
+    return {lo_bp, hi_bp};
 }
 
 // ---------------------------------------------------------------------------
@@ -12559,21 +12207,6 @@ template <class MinimizerT, sequence_alphabet Alphabet>
     return result;
 }
 
-template <class MinimizerT, class R, class Scanner>
-[[nodiscard]] BudgetedSketchVector<MinimizerT> sketch_query_for_index_selection(
-    const bioseq::storage::lazy_compact_sequence<R, Scanner>& query_owner,
-    const Minimap2Params& params,
-    std::size_t w,
-    std::size_t k)
-{
-    // The facade borrows `query_owner`; the delegated core is synchronous, so
-    // the caller-owned lazy sequence remains live for every view read.
-    const auto query_view =
-        bioseq::storage::as_lazy_sequence_view(query_owner);
-    return sketch_query_for_index_selection<MinimizerT>(
-        query_view, params, w, k);
-}
-
 template <sequence_alphabet Alphabet,
           class FragmentIndexStorage = std::nullptr_t>
 [[nodiscard]] MatchResultCollection minimap_port_segmented(
@@ -12974,13 +12607,17 @@ template <sequence_alphabet Alphabet,
                      segment_index < ranges.size();
                      ++segment_index) {
                     const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+                    const auto [segment_lo_bp, segment_hi_bp] =
+                        pipe::validated_segment_bp_bounds(
+                            range, lpu, target_len);
                     seg_collector.clear();
                     seg_collector.reserve(
                         (range.ce_u - range.cs_u) * lpu
                             / std::max<std::size_t>(w, 1) + 64);
                     const auto range_proof =
                         pipe::minimizer_dispatch_range<MinimizerT>(
-                        seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                        seg_collector, target_seq,
+                        segment_lo_bp, segment_hi_bp, w, k,
                         target_sketch_backend);
                     record_target_range_proof(merged_collection, range_proof);
                     const std::vector<MinimizerT>& seg_minimizers =
@@ -13002,7 +12639,7 @@ template <sequence_alphabet Alphabet,
                             seg_minimizers.data(), seg_minimizers.size()},
                         seg_index,
                         filtered_pairs);
-                    seg_index.add_position_offset(range.cs_u * lpu);
+                    seg_index.add_position_offset(segment_lo_bp);
 
                     MatchResultCollection seg_res = minimap2_port_with_index(
                         query_seq, target_seq, query_minimizers, seg_index, params,
@@ -13027,19 +12664,21 @@ template <sequence_alphabet Alphabet,
              segment_index < ranges.size();
              ++segment_index) {
             const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+            const auto [segment_lo_bp, segment_hi_bp] =
+                pipe::validated_segment_bp_bounds(range, lpu, target_len);
             bioseq::indexing::GpuIndexCacheIdentity gpu_identity =
                 segment_gpu_identity(segment_index);
             std::size_t seg_result_count = 0;
             if (target_sketch_backend == MinimizerSketchBackend::VulkanSegment) {
-                filtered_pair_collector.position_offset = range.cs_u * lpu;
+                filtered_pair_collector.position_offset = segment_lo_bp;
                 filtered_pair_collector.clear();
                 filtered_pair_collector.reserve(
                     (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
                 bioseq::gpu::vulkan::collect_minimizers_vulkan_segment_or_throw<MinimizerT>(
                     filtered_pair_collector,
                     target_seq,
-                    static_cast<std::size_t>(range.cs_u),
-                    static_cast<std::size_t>(range.ce_u),
+                    segment_lo_bp,
+                    segment_hi_bp,
                     w,
                     k,
                     query_kmer_gate.vulkan_gate());
@@ -13069,7 +12708,8 @@ template <sequence_alphabet Alphabet,
                     (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
                 const auto range_proof =
                     pipe::minimizer_dispatch_range<MinimizerT>(
-                    seg_collector, target_seq, range.cs_u, range.ce_u, w, k,
+                    seg_collector, target_seq,
+                    segment_lo_bp, segment_hi_bp, w, k,
                     target_sketch_backend);
                 record_target_range_proof(merged_collection, range_proof);
                 const std::vector<MinimizerT>& seg_minimizers =
@@ -13078,7 +12718,7 @@ template <sequence_alphabet Alphabet,
                     std::span<const MinimizerT>{seg_minimizers.data(), seg_minimizers.size()},
                     seg_index,
                     filtered_pairs);
-                seg_index.add_position_offset(range.cs_u * lpu);
+                seg_index.add_position_offset(segment_lo_bp);
 
                 MatchResultCollection seg_res = minimap2_port_with_index(
                     query_seq, target_seq, query_minimizers, seg_index, params,
@@ -13138,11 +12778,13 @@ template <sequence_alphabet Alphabet,
              segment_index < ranges.size();
              ++segment_index) {
             const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+            const auto [segment_lo_bp, segment_hi_bp] =
+                pipe::validated_segment_bp_bounds(range, lpu, target_len);
             bioseq::gpu::vulkan::VulkanSketchDecline decline{};
             auto built = bioseq::gpu::vulkan::build_gpu_segment_index_on_device<MinimizerT>(
                 target_seq,
-                static_cast<std::size_t>(range.cs_u),
-                static_cast<std::size_t>(range.ce_u),
+                segment_lo_bp,
+                segment_hi_bp,
                 w,
                 k,
                 frozen_query_gate,
@@ -13174,7 +12816,7 @@ template <sequence_alphabet Alphabet,
                         adopted.error())));
             }
             auto resident = std::move(*adopted);
-            resident->target_position_offset = range.cs_u * lpu;
+            resident->target_position_offset = segment_lo_bp;
             residents.push_back(resident);
             jobs.push_back(bioseq::gpu::vulkan::PhaseCSeedCoordinateJob{
                 .slots = &resident->slots,
@@ -13437,12 +13079,16 @@ template <sequence_alphabet Alphabet,
                 sketch_collector_t<MinimizerT> collector;
                 MinimizerHashmapFragmentIndex index;
                 const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+                const auto [segment_lo_bp, segment_hi_bp] =
+                    pipe::validated_segment_bp_bounds(
+                        range, lpu, target_len);
                 collector.reserve(
                     (range.ce_u - range.cs_u) * lpu
                         / std::max<std::size_t>(w, 1) + 64);
                 const auto range_proof =
                     pipe::minimizer_dispatch_range<MinimizerT>(
-                    collector, target_seq, range.cs_u, range.ce_u, w, k,
+                    collector, target_seq,
+                    segment_lo_bp, segment_hi_bp, w, k,
                     target_sketch_backend);
                 record_target_range_proof(merged_collection, range_proof);
                 const std::vector<MinimizerT>& minimizers =
@@ -13458,7 +13104,7 @@ template <sequence_alphabet Alphabet,
                 acc.flush_ready(range.core_hi_bp);
 
                 index.build(minimizers, target_len);
-                index.add_position_offset(range.cs_u * lpu);
+                index.add_position_offset(segment_lo_bp);
                 MatchResultCollection seg_res = minimap2_port_with_index(
                     query_seq, target_seq, query_minimizers, index, params,
                     segmented_gpu_index_cache_ptr,
@@ -13517,6 +13163,9 @@ template <sequence_alphabet Alphabet,
                              ++segment_index) {
                             const ::bioseq::indexing::SegmentUnitRange& range =
                                 ranges[segment_index];
+                            const auto [segment_lo_bp, segment_hi_bp] =
+                                pipe::validated_segment_bp_bounds(
+                                    range, lpu, target_len);
                             const std::size_t rel = segment_index - current_wave_lo;
                             collector.clear();
                             collector.reserve(
@@ -13524,7 +13173,8 @@ template <sequence_alphabet Alphabet,
                                     / std::max<std::size_t>(w, 1) + 64);
                             const auto range_proof =
                                 pipe::minimizer_dispatch_range<MinimizerT>(
-                                collector, target_seq, range.cs_u, range.ce_u, w, k,
+                                collector, target_seq,
+                                segment_lo_bp, segment_hi_bp, w, k,
                                 target_sketch_backend);
                             const std::vector<MinimizerT>& minimizers =
                                 collector.extract_sketches_data();
@@ -13537,7 +13187,7 @@ template <sequence_alphabet Alphabet,
                                     frag_bp,
                                     lpu);
                             index.build(minimizers, target_len);
-                            index.add_position_offset(range.cs_u * lpu);
+                            index.add_position_offset(segment_lo_bp);
                             wave_seg_out[rel] = minimap2_port_with_index(
                                 query_seq,
                                 target_seq,
@@ -13588,11 +13238,14 @@ template <sequence_alphabet Alphabet,
         MinimizerHashmapFragmentIndex index;
         std::vector<FilteredMinimizerPair> filtered_pairs;
         const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+        const auto [segment_lo_bp, segment_hi_bp] =
+            pipe::validated_segment_bp_bounds(range, lpu, target_len);
         collector.reserve(
             (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
         const auto range_proof =
             pipe::minimizer_dispatch_range<MinimizerT>(
-            collector, target_seq, range.cs_u, range.ce_u, w, k,
+            collector, target_seq,
+            segment_lo_bp, segment_hi_bp, w, k,
             target_sketch_backend);
         const std::vector<MinimizerT>& minimizers =
             collector.extract_sketches_data();
@@ -13602,7 +13255,7 @@ template <sequence_alphabet Alphabet,
                 std::span<const MinimizerT>{minimizers.data(), minimizers.size()},
                 index,
                 filtered_pairs);
-        index.add_position_offset(range.cs_u * lpu);
+        index.add_position_offset(segment_lo_bp);
         seg_out[segment_index] = minimap2_port_with_index(
             query_seq, target_seq, query_minimizers, index, params,
             segmented_gpu_index_cache_ptr,
@@ -13680,12 +13333,16 @@ template <sequence_alphabet Alphabet,
                 std::vector<FilteredMinimizerPair> filtered_pairs;
                 for (std::size_t segment_index = lo; segment_index < hi; ++segment_index) {
                     const ::bioseq::indexing::SegmentUnitRange& range = ranges[segment_index];
+                    const auto [segment_lo_bp, segment_hi_bp] =
+                        pipe::validated_segment_bp_bounds(
+                            range, lpu, target_len);
                     collector.clear();
                     collector.reserve(
                         (range.ce_u - range.cs_u) * lpu / std::max<std::size_t>(w, 1) + 64);
                     const auto range_proof =
                         pipe::minimizer_dispatch_range<MinimizerT>(
-                        collector, target_seq, range.cs_u, range.ce_u, w, k,
+                        collector, target_seq,
+                        segment_lo_bp, segment_hi_bp, w, k,
                         target_sketch_backend);
                     const std::vector<MinimizerT>& minimizers =
                         collector.extract_sketches_data();
@@ -13696,7 +13353,7 @@ template <sequence_alphabet Alphabet,
                                 minimizers.data(), minimizers.size()},
                             index,
                             filtered_pairs);
-                    index.add_position_offset(range.cs_u * lpu);
+                    index.add_position_offset(segment_lo_bp);
                     seg_out[segment_index] = minimap2_port_with_index(
                         query_seq, target_seq, query_minimizers, index, params,
                         segmented_gpu_index_cache_ptr,

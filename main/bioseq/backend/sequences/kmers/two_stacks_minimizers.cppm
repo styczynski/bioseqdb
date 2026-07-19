@@ -83,6 +83,47 @@ enum class ExactSimdKernelKind : std::uint8_t {
     k15_w10_b8_u32_hash,
 };
 
+namespace resident_descriptor_detail {
+
+struct borrowed_packed_header {
+    const void* data = nullptr;
+    bioseq::storage::sequence_size_t bp_size = 0;
+    std::uint8_t storage_unit_byte_width = 0;
+    std::uint16_t padding_letters = 0;
+};
+
+template <sequence_alphabet Alphabet, class StorageUnit>
+struct borrowed_packed_instance {
+    using alphabet_type = Alphabet;
+    using storage_unit = StorageUnit;
+    using compact_sequence_stdc_type = borrowed_packed_header;
+
+    static constexpr std::size_t letter_bit_width =
+        bioseq::storage::basic_lazy_sequence_view<Alphabet>::traits::
+            logical_bits_per_symbol;
+    static constexpr std::size_t byte_width = sizeof(StorageUnit);
+    static constexpr bool is_valid_compact_sequence_stdc_instance = true;
+};
+
+template <sequence_alphabet Alphabet, class StorageUnit, class Fn>
+decltype(auto) with_borrowed_compact_range(
+        const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region& descriptor,
+        Fn&& fn) {
+    using instance = borrowed_packed_instance<Alphabet, StorageUnit>;
+    using range_type = compact_sequence_range<instance>;
+    borrowed_packed_header header{
+        .data = descriptor.units,
+        .bp_size = descriptor.bp_length,
+        .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+        .padding_letters = descriptor.trailing_padding_letters,
+    };
+    range_type range{header};
+    return std::forward<Fn>(fn)(range);
+}
+
+}  // namespace resident_descriptor_detail
+
 [[nodiscard]] constexpr std::string_view two_stack_status_name(
     TwoStackContinuationStatus status) noexcept
 {
@@ -1660,6 +1701,37 @@ collect_minimizers_two_stack_nthash_resident_or_throw(
     return two_stack_internal::resident_vector_stream_proof(
         seq, collector, records_before, used_dual_streams, w, k);
 #endif
+}
+
+template<
+    class MinimizerT,
+    sequence_alphabet Alphabet,
+    class Collector = sketch_collector_t<MinimizerT>>
+requires (
+    exact_simd_minimizer_representation<MinimizerT>
+    && std::same_as<Alphabet, seq::dna4>)
+[[nodiscard]] inline TwoStackExecutionProof
+collect_minimizers_two_stack_nthash_resident_descriptor_or_throw(
+    Collector& collector,
+    const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+        resident_packed_region& descriptor,
+    std::size_t w,
+    std::size_t k)
+{
+    if (descriptor.storage_unit_byte_width != sizeof(std::uint32_t)
+        || descriptor.bits_per_symbol != 2u
+        || descriptor.leading_symbol_offset != 0u) {
+        throw ExactSimdRuntimeError(
+            TwoStackContinuationStatus::non_contiguous_range,
+            "resident vector_stream minimizer descriptor");
+    }
+    return resident_descriptor_detail::with_borrowed_compact_range<
+        Alphabet, std::uint32_t>(
+            descriptor,
+            [&collector, w, k]<class Range>(Range& range) {
+                return collect_minimizers_two_stack_nthash_resident_or_throw<
+                    MinimizerT>(collector, range, w, k);
+            });
 }
 
 template<
@@ -3385,6 +3457,38 @@ collect_minimizers_packed_paper_nthash_simd(
     return collect_minimizers_packed_paper_nthash_simd_checked<
         K, W, MinimizerT>(
             collector, sequence, sequence.begin(), sequence.end());
+}
+
+template<
+    std::size_t K = 15,
+    std::size_t W = 10,
+    class MinimizerT = MinimapSketchData,
+    sequence_alphabet Alphabet,
+    class Collector = sketch_collector_t<MinimizerT>>
+[[nodiscard]] inline PackedPaperNthashResult
+collect_minimizers_packed_paper_nthash_resident_descriptor_checked(
+    Collector& collector,
+    const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+        resident_packed_region& descriptor)
+{
+    if (descriptor.storage_unit_byte_width != sizeof(std::uint32_t)
+        || descriptor.leading_symbol_offset != 0u
+        || descriptor.bits_per_symbol
+            != bioseq::storage::basic_lazy_sequence_view<Alphabet>::traits::
+                logical_bits_per_symbol) {
+        PackedPaperNthashResult result;
+        result.status = PackedPaperNthashStatus::unsupported_storage;
+        result.proof.fail_closed_rejections = 1u;
+        return result;
+    }
+    return resident_descriptor_detail::with_borrowed_compact_range<
+        Alphabet, std::uint32_t>(
+            descriptor,
+            [&collector]<class Range>(Range& range) {
+                return collect_minimizers_packed_paper_nthash_simd_checked<
+                    K, W, MinimizerT>(
+                        collector, range, range.begin(), range.end());
+            });
 }
 
 

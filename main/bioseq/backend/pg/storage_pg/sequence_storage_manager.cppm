@@ -29,9 +29,11 @@ extern "C" {
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/genam.h"
+#include "access/xact.h"
 #include "executor/spi.h"
 #include "storage/lmgr.h"
 #include "utils/snapmgr.h"
+#include "utils/resowner.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/builtins.h"
@@ -86,6 +88,7 @@ import bioseq.sequences.simd;
 import bioseq.indexing.storage;
 import bioseq.common.sequan_compat;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
 import bioseq.storage.size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
+import bioseq.storage.coordinates;
 // DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
 // module so the unit-test TU can link them without the Postgres backend.
 // Re-exported here so existing `import bioseq_storage` consumers are unchanged.
@@ -1760,6 +1763,13 @@ struct seq_caches {
 
     MemoryContext read_state_mctx = nullptr;
 
+    // Optional explicit owner for read-side caches whose lifetime is longer
+    // than the executor scan that first opened them.  Ordinary scan caches
+    // leave this null and continue to use CurrentResourceOwner.  Locator
+    // source domains set it to their transaction-owned child so a retained
+    // expanded datum can finish reading after the provider scan has ended.
+    ResourceOwner read_resource_owner = nullptr;
+
     sequence_size_t cap_bytes_snapshot = std::numeric_limits<sequence_size_t>::max();
 
     Oid main_database_oid   = InvalidOid;
@@ -1804,6 +1814,39 @@ void destroy_seq_caches(seq_caches* caches) noexcept;
 }
 
 void close_and_destroy_seq_caches(seq_caches* caches, bool commit) noexcept;
+
+/**
+ * Opaque registry owned by one locator-producing table scan.  The registry
+ * creates exact, epoch-bound source domains and owns the registry reference to
+ * each domain; source leaves retain an independent reference through the
+ * compact-sequence source ABI.
+ */
+struct pg_sequence_source_provider;
+
+[[nodiscard]] pg_sequence_source_provider*
+create_pg_sequence_source_provider(
+    Relation owning_relation,
+    Snapshot authoritative_registered_snapshot);
+
+/**
+ * Close the provider side of the registry.  Leaf-held domains remain usable
+ * until their expanded values are flattened/released or the transaction ends.
+ */
+void close_pg_sequence_source_provider(
+    pg_sequence_source_provider* provider,
+    bool is_commit) noexcept;
+
+/**
+ * Promote one canonical locator stub from the provider's owning relation into
+ * a read-only expanded bioseq.seq backed by a verified immutable source
+ * domain.  No whole-sequence payload is read here.
+ */
+[[nodiscard]] Datum promote_pg_sequence_locator(
+    pg_sequence_source_provider* provider,
+    AttrNumber column_attno,
+    Datum locator_datum,
+    MemoryContext result_context,
+    slice_trace_attachment* trace = nullptr);
 
 // DOC0286 §4.3 — public alias for the per-fragment storage-unit count
 // (detail::kFragmentStorageUnits below aliases this so the two never drift).
@@ -2244,8 +2287,15 @@ void seq_caches::close_all(bool commit) noexcept {
                 } else {
                     if (e.read_state != nullptr) {
                         BioseqColumnReadState* read_state = e.read_state;
-                        bioseq::pg_utils::invoke_pg_as_cpp([read_state] {
+                        const ResourceOwner saved_owner = CurrentResourceOwner;
+                        bioseq::pg_utils::invoke_pg_as_cpp([read_state,
+                                                           saved_owner,
+                                                           this] {
+                            if (read_resource_owner != nullptr) {
+                                CurrentResourceOwner = read_resource_owner;
+                            }
                             BioseqColumnEndRead(read_state);
+                            CurrentResourceOwner = saved_owner;
                         });
                         e.read_state = nullptr;
                     }
@@ -2259,6 +2309,14 @@ void seq_caches::close_all(bool commit) noexcept {
                             [relation, saved_owner, this] {
                                 CurrentResourceOwner =
                                     TopTransactionResourceOwner;
+                                relation_close(relation, lock_mode);
+                                CurrentResourceOwner = saved_owner;
+                            });
+                    } else if (read_resource_owner != nullptr) {
+                        const ResourceOwner saved_owner = CurrentResourceOwner;
+                        bioseq::pg_utils::invoke_pg_as_cpp(
+                            [relation, saved_owner, this] {
+                                CurrentResourceOwner = read_resource_owner;
                                 relation_close(relation, lock_mode);
                                 CurrentResourceOwner = saved_owner;
                             });
@@ -2361,6 +2419,16 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
             rel = bioseq::pg_utils::invoke_pg_as_cpp(
                 [sub_table_relid, lock_mode, saved_owner] {
                     CurrentResourceOwner = TopTransactionResourceOwner;
+                    Relation result = try_safe_relation_open(
+                        sub_table_relid, lock_mode);
+                    CurrentResourceOwner = saved_owner;
+                    return result;
+                });
+        } else if (cache->read_resource_owner != nullptr) {
+            const ResourceOwner saved_owner = CurrentResourceOwner;
+            rel = bioseq::pg_utils::invoke_pg_as_cpp(
+                [sub_table_relid, lock_mode, saved_owner, cache] {
+                    CurrentResourceOwner = cache->read_resource_owner;
                     Relation result = try_safe_relation_open(
                         sub_table_relid, lock_mode);
                     CurrentResourceOwner = saved_owner;
@@ -4086,6 +4154,822 @@ void sidecar_read_blob_bulk(
             column_attno, req.locator, cache);
     }
 }
+
+// ---------------------------------------------------------------------------
+// DOC0377 -- transaction-safe locator source domains.
+// ---------------------------------------------------------------------------
+
+namespace pg_sequence_source_detail {
+struct pg_sequence_source_domain;
+}
+
+struct pg_sequence_source_provider {
+    pg_sequence_backend_thread_token backend_thread;
+    Oid user_relid = InvalidOid;
+    Oid database_oid = InvalidOid;
+    Oid tablespace_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    std::uint64_t main_storage_id = 0;
+    Snapshot authoritative_snapshot = nullptr;
+    SubTransactionId creating_subxid = InvalidSubTransactionId;
+    std::uint64_t generation = 0;
+    pg_sequence_source_detail::pg_sequence_source_domain* domains = nullptr;
+    pg_sequence_source_provider* next = nullptr;
+    bool open = false;
+};
+
+namespace pg_sequence_source_detail {
+
+struct pg_sequence_source_domain {
+    pg_sequence_backend_thread_token backend_thread;
+    pg_sequence_source_provider* provider = nullptr;
+    pg_sequence_source_domain* next_provider = nullptr;
+    pg_sequence_source_domain* next_global = nullptr;
+    MemoryContext payload_context = nullptr;
+    ResourceOwner resource_owner = nullptr;
+    Snapshot registered_snapshot = nullptr;
+    seq_caches* caches = nullptr;
+    SequenceSourceVersionRow binding{};
+    compact_sequence_stdc_type_params stored_type{};
+    std::uint16_t last_padding_letters = 0;
+    SubTransactionId creating_subxid = InvalidSubTransactionId;
+    std::uint64_t generation = 0;
+    std::uint32_t refcount = 0;
+    bool registry_reference = false;
+    bool valid = false;
+};
+
+struct source_read_entry {
+    pg_sequence_source_domain* domain = nullptr;
+    MemoryContext payload_context = nullptr;
+};
+
+inline pg_sequence_source_provider* providers = nullptr;
+inline pg_sequence_source_domain* domains = nullptr;
+inline std::uint64_t next_generation = 1;
+inline bool xact_callback_registered = false;
+inline bool subxact_callback_registered = false;
+
+[[nodiscard]] inline bool same_locator(
+        const seq_locator& left, const seq_locator& right) noexcept {
+    return std::memcmp(&left, &right, sizeof(seq_locator)) == 0;
+}
+
+[[nodiscard]] inline std::uint64_t allocate_generation() {
+    if (next_generation == 0
+        || next_generation == std::numeric_limits<std::uint64_t>::max()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("bioseq locator source generation space exhausted")));
+    }
+    return next_generation++;
+}
+
+inline void retain_domain(void* opaque) noexcept {
+    auto* domain = static_cast<pg_sequence_source_domain*>(opaque);
+    if (domain != nullptr && domain->refcount != UINT32_MAX) {
+        ++domain->refcount;
+    }
+}
+
+inline void release_domain(void* opaque) noexcept {
+    auto* domain = static_cast<pg_sequence_source_domain*>(opaque);
+    if (domain != nullptr && domain->refcount != 0) {
+        --domain->refcount;
+    }
+    // Cleanup is deferred to a provider/xact sweep.  Arena reset may call this
+    // function, so it must remain a pure backend-local decrement.
+}
+
+[[nodiscard]] inline pg_sequence_source_identity domain_identity(
+        const void* opaque) noexcept {
+    auto const* domain = static_cast<pg_sequence_source_domain const*>(opaque);
+    return domain == nullptr
+        ? pg_sequence_source_identity{}
+        : pg_sequence_source_identity{
+            .control_address = reinterpret_cast<std::uintptr_t>(domain),
+            .generation = domain->generation,
+        };
+}
+
+[[nodiscard]] inline bool domain_worker_shareable(const void*) noexcept {
+    return false;
+}
+
+inline void remove_domain_from_global(
+        pg_sequence_source_domain* victim) noexcept {
+    auto** link = &domains;
+    while (*link != nullptr) {
+        if (*link == victim) {
+            *link = victim->next_global;
+            victim->next_global = nullptr;
+            return;
+        }
+        link = &(*link)->next_global;
+    }
+}
+
+inline void destroy_domain_control(
+        pg_sequence_source_domain* domain) noexcept {
+    if (domain == nullptr) return;
+    remove_domain_from_global(domain);
+    domain->~pg_sequence_source_domain();
+    pfree(domain);
+}
+
+inline void invalidate_domain(pg_sequence_source_domain* domain,
+                              bool is_commit) {
+    if (domain == nullptr || !domain->valid) return;
+    domain->valid = false;
+
+    if (domain->caches != nullptr) {
+        close_and_destroy_seq_caches(domain->caches, is_commit);
+        domain->caches = nullptr;
+    }
+    if (domain->registered_snapshot != nullptr
+        && domain->resource_owner != nullptr) {
+        const ResourceOwner saved_owner = CurrentResourceOwner;
+        CurrentResourceOwner = domain->resource_owner;
+        UnregisterSnapshotFromOwner(
+            domain->registered_snapshot, domain->resource_owner);
+        CurrentResourceOwner = saved_owner;
+        domain->registered_snapshot = nullptr;
+    }
+    if (domain->resource_owner != nullptr) {
+        ResourceOwnerDelete(domain->resource_owner);
+        domain->resource_owner = nullptr;
+    }
+    if (domain->payload_context != nullptr) {
+        MemoryContext payload = domain->payload_context;
+        domain->payload_context = nullptr;
+        MemoryContextDelete(payload);
+    }
+}
+
+inline void sweep_dead_domains() noexcept {
+    auto* domain = domains;
+    while (domain != nullptr) {
+        auto* next = domain->next_global;
+        if (!domain->valid && domain->refcount == 0) {
+            destroy_domain_control(domain);
+        }
+        domain = next;
+    }
+}
+
+inline void invalidate_unreferenced_domains(bool is_commit) {
+    for (auto* domain = domains; domain != nullptr;
+         domain = domain->next_global) {
+        if (domain->valid && domain->refcount == 0) {
+            invalidate_domain(domain, is_commit);
+        }
+    }
+}
+
+inline void remove_provider_from_global(
+        pg_sequence_source_provider* victim) noexcept {
+    auto** link = &providers;
+    while (*link != nullptr) {
+        if (*link == victim) {
+            *link = victim->next;
+            victim->next = nullptr;
+            return;
+        }
+        link = &(*link)->next;
+    }
+}
+
+inline void release_provider_registry(
+        pg_sequence_source_provider* provider) noexcept {
+    auto* domain = provider->domains;
+    provider->domains = nullptr;
+    while (domain != nullptr) {
+        auto* next = domain->next_provider;
+        domain->next_provider = nullptr;
+        domain->provider = nullptr;
+        if (domain->registry_reference) {
+            domain->registry_reference = false;
+            release_domain(domain);
+        }
+        domain = next;
+    }
+}
+
+inline void destroy_provider_control(
+        pg_sequence_source_provider* provider) noexcept {
+    if (provider == nullptr) return;
+    remove_provider_from_global(provider);
+    provider->~pg_sequence_source_provider();
+    pfree(provider);
+}
+
+void xact_callback(XactEvent event, void*);
+void subxact_callback(SubXactEvent event, SubTransactionId my_subid,
+                      SubTransactionId parent_subid, void*);
+
+inline void ensure_callbacks() {
+    if (!xact_callback_registered) {
+        RegisterXactCallback(xact_callback, nullptr);
+        xact_callback_registered = true;
+    }
+    if (!subxact_callback_registered) {
+        RegisterSubXactCallback(subxact_callback, nullptr);
+        subxact_callback_registered = true;
+    }
+}
+
+[[nodiscard]] inline bool domain_matches(
+        const pg_sequence_source_domain& domain,
+        AttrNumber column_attno,
+        const seq_locator& locator,
+        compact_sequence_stdc_type_params stored_type,
+        std::uint16_t last_padding_letters) noexcept {
+    return domain.valid
+        && domain.binding.column_attno == column_attno
+        && same_locator(domain.binding.locator, locator)
+        && domain.stored_type == stored_type
+        && domain.last_padding_letters == last_padding_letters;
+}
+
+[[nodiscard]] inline bool binding_matches(
+        const pg_sequence_source_provider& provider,
+        AttrNumber column_attno,
+        const seq_locator& locator,
+        compact_sequence_stdc_type_params stored_type,
+        std::uint16_t last_padding_letters,
+        const SequenceSourceVersionRow& row) noexcept {
+    return row.state == kSequenceSourceStateReady
+        && row.source_epoch == locator.source_epoch
+        && row.user_relid == provider.user_relid
+        && row.database_oid == provider.database_oid
+        && row.tablespace_oid == provider.tablespace_oid
+        && row.main_relfilenode == provider.main_relfilenode
+        && row.main_storage_id == provider.main_storage_id
+        && row.column_attno == column_attno
+        && same_locator(row.locator, locator)
+        && row.alphabet_code == stored_type.alphabet_code
+        && row.storage_unit_byte_width == stored_type.storage_unit_byte_width
+        && row.padding_letters == last_padding_letters;
+}
+
+[[nodiscard]] pg_sequence_source_domain* create_domain(
+        pg_sequence_source_provider& provider,
+        AttrNumber column_attno,
+        const seq_locator& locator,
+        compact_sequence_stdc_type_params stored_type,
+        std::uint16_t last_padding_letters) {
+    const auto source_row = bioseq::pg_utils::invoke_pg_as_cpp([
+            source_epoch = locator.source_epoch,
+            authoritative_snapshot = provider.authoritative_snapshot] {
+        return SequenceSourceVersionManager::lookup(
+            source_epoch, authoritative_snapshot,
+            /*require_ready=*/true);
+    });
+    if (!source_row.has_value()
+        || !binding_matches(provider, column_attno, locator, stored_type,
+                            last_padding_letters, *source_row)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq locator no longer matches its immutable source"),
+             errdetail("relation, column, snapshot, storage identity, source epoch, or type metadata changed")));
+    }
+
+    auto* domain = static_cast<pg_sequence_source_domain*>(
+        MemoryContextAllocZero(TopMemoryContext,
+                               sizeof(pg_sequence_source_domain)));
+    ::new (static_cast<void*>(domain)) pg_sequence_source_domain{};
+    try {
+        domain->provider = &provider;
+        domain->binding = *source_row;
+        domain->stored_type = stored_type;
+        domain->last_padding_letters = last_padding_letters;
+        domain->creating_subxid = GetCurrentSubTransactionId();
+        domain->generation = allocate_generation();
+        domain->refcount = 1;
+        domain->registry_reference = true;
+        domain->backend_thread = pg_sequence_backend_thread_token::capture();
+        domain->payload_context = AllocSetContextCreate(
+            TopTransactionContext, "bioseq locator source domain",
+            ALLOCSET_DEFAULT_SIZES);
+        domain->resource_owner = ResourceOwnerCreate(
+            TopTransactionResourceOwner, "bioseq locator source domain");
+        domain->registered_snapshot = RegisterSnapshotOnOwner(
+            provider.authoritative_snapshot, domain->resource_owner);
+        domain->caches = alloc_seq_caches(domain->payload_context);
+        domain->caches->side = seq_caches::Side::Read;
+        domain->caches->lock_mode = AccessShareLock;
+        domain->caches->read_state_mctx = domain->payload_context;
+        domain->caches->read_resource_owner = domain->resource_owner;
+        domain->caches->main_database_oid = provider.database_oid;
+        domain->caches->main_tablespace_oid = provider.tablespace_oid;
+        domain->caches->main_relfilenode = provider.main_relfilenode;
+        domain->valid = true;
+    } catch (...) {
+        if (domain->caches != nullptr) {
+            close_and_destroy_seq_caches(domain->caches, false);
+            domain->caches = nullptr;
+        }
+        if (domain->registered_snapshot != nullptr
+            && domain->resource_owner != nullptr) {
+            UnregisterSnapshotFromOwner(
+                domain->registered_snapshot, domain->resource_owner);
+        }
+        if (domain->resource_owner != nullptr) {
+            ResourceOwnerDelete(domain->resource_owner);
+        }
+        if (domain->payload_context != nullptr) {
+            MemoryContextDelete(domain->payload_context);
+        }
+        domain->~pg_sequence_source_domain();
+        pfree(domain);
+        throw;
+    }
+
+    domain->next_provider = provider.domains;
+    provider.domains = domain;
+    domain->next_global = domains;
+    domains = domain;
+    return domain;
+}
+
+[[nodiscard]] inline pg_sequence_source_domain* find_or_create_domain(
+        pg_sequence_source_provider& provider,
+        AttrNumber column_attno,
+        const seq_locator& locator,
+        compact_sequence_stdc_type_params stored_type,
+        std::uint16_t last_padding_letters) {
+    for (auto* domain = provider.domains; domain != nullptr;
+         domain = domain->next_provider) {
+        if (domain_matches(*domain, column_attno, locator, stored_type,
+                           last_padding_letters)) {
+            return domain;
+        }
+    }
+    return create_domain(provider, column_attno, locator, stored_type,
+                         last_padding_letters);
+}
+
+[[nodiscard]] void* create_read_entry(
+        void* factory_argument, MemoryContext payload_context) {
+    auto* domain = static_cast<pg_sequence_source_domain*>(factory_argument);
+    auto* entry = static_cast<source_read_entry*>(
+        MemoryContextAllocZero(payload_context, sizeof(source_read_entry)));
+    entry->domain = domain;
+    entry->payload_context = payload_context;
+    retain_domain(domain);
+    return entry;
+}
+
+inline void finish_read_entry(void* opaque, bool) {
+    auto* entry = static_cast<source_read_entry*>(opaque);
+    if (entry != nullptr) {
+        release_domain(entry->domain);
+        entry->domain = nullptr;
+    }
+}
+
+inline void abort_read_entry(void* opaque) noexcept {
+    auto* entry = static_cast<source_read_entry*>(opaque);
+    if (entry != nullptr) {
+        release_domain(entry->domain);
+        entry->domain = nullptr;
+    }
+}
+
+[[nodiscard]] inline pgseq_t* read_fragment(
+        source_read_entry& reader,
+        std::uint32_t fragment_no) {
+    auto& domain = *reader.domain;
+    const auto& locator = domain.binding.locator;
+    if (fragment_no >= locator.num_fragments) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq source fragment number is outside its locator")));
+    }
+
+    Relation shard = bioseq::pg_utils::invoke_pg_as_cpp([
+            resource_owner = domain.resource_owner,
+            database_oid = domain.binding.database_oid,
+            tablespace_oid = domain.binding.tablespace_oid,
+            main_relfilenode = domain.binding.main_relfilenode,
+            column_attno = domain.binding.column_attno,
+            locator,
+            caches = domain.caches] {
+        const ResourceOwner saved_owner = CurrentResourceOwner;
+        CurrentResourceOwner = resource_owner;
+        Relation result = open_sub_table_for_locator(
+            database_oid, tablespace_oid, main_relfilenode, column_attno,
+            locator, AccessShareLock, caches);
+        CurrentResourceOwner = saved_owner;
+        return result;
+    });
+    if (RelationGetRelid(shard) != domain.binding.fragment_relid
+        || bioseq::pg_utils::invoke_pg_as_cpp([shard] {
+               return BioseqColumnStorageGetStorageId(shard, false);
+           }) != domain.binding.fragment_storage_id) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq locator fragment storage identity changed")));
+    }
+
+    const std::uint64_t cache_key = seq_caches::key_for(
+        domain.binding.column_attno,
+        static_cast<std::int16_t>(locator.bucket_idx),
+        static_cast<std::int32_t>(locator.shard_idx));
+    seq_caches::entry& cache_entry = domain.caches->entries[cache_key];
+    cache_entry.rel = shard;
+    if (cache_entry.read_state == nullptr) {
+        cache_entry.read_state = bioseq::pg_utils::invoke_pg_as_cpp([
+                resource_owner = domain.resource_owner,
+                shard,
+                payload_context = domain.payload_context,
+                registered_snapshot = domain.registered_snapshot] {
+            const ResourceOwner saved_owner = CurrentResourceOwner;
+            CurrentResourceOwner = resource_owner;
+            BioseqColumnReadState* result = begin_sequence_payload_read(
+                shard, payload_context, registered_snapshot);
+            CurrentResourceOwner = saved_owner;
+            return result;
+        });
+        cache_entry.read_snapshot_source = domain.registered_snapshot;
+    } else if (cache_entry.read_snapshot_source
+               != domain.registered_snapshot) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq source reader snapshot identity changed")));
+    }
+
+    Datum values[1] = {0};
+    bool nulls[1] = {true};
+    const std::uint64_t row_no = locator.first_sub_row_no + fragment_no;
+    const bool visible = bioseq::pg_utils::invoke_pg_as_cpp([
+            payload_context = reader.payload_context,
+            resource_owner = domain.resource_owner,
+            read_state = cache_entry.read_state,
+            row_no,
+            &values,
+            &nulls] {
+        const MemoryContext saved_context = CurrentMemoryContext;
+        const ResourceOwner saved_owner = CurrentResourceOwner;
+        MemoryContextSwitchTo(payload_context);
+        CurrentResourceOwner = resource_owner;
+        const bool result = BioseqColumnReadRowByRowNumber(
+            read_state, row_no, values, nulls);
+        CurrentResourceOwner = saved_owner;
+        MemoryContextSwitchTo(saved_context);
+        return result;
+    });
+    if (!visible || nulls[0]) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq source fragment row is missing or null"),
+             errdetail("row=%llu fragment=%u epoch=%llu",
+                static_cast<unsigned long long>(row_no), fragment_no,
+                static_cast<unsigned long long>(locator.source_epoch))));
+    }
+    auto* raw = bioseq::pg_utils::invoke_pg_as_cpp([
+            payload_context = reader.payload_context,
+            fragment_datum = values[0]] {
+        const MemoryContext saved_context = CurrentMemoryContext;
+        MemoryContextSwitchTo(payload_context);
+        auto* result = reinterpret_cast<pgseq_t*>(
+            PG_DETOAST_DATUM(fragment_datum));
+        MemoryContextSwitchTo(saved_context);
+        return result;
+    });
+    if (VARSIZE(raw) < pgseq_t::header_bytes() || is_locator_stub(raw)
+        || static_cast<std::uint8_t>(raw->alphabet_code)
+            != domain.stored_type.alphabet_code
+        || static_cast<std::uint8_t>(raw->storage_unit_byte_width)
+            != domain.stored_type.storage_unit_byte_width) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq source fragment header does not match its binding")));
+    }
+    return raw;
+}
+
+[[nodiscard]] pg_sequence_source_read_status read_domain_ranks(
+        const void* opaque,
+        pg_sequence_read_session& session,
+        const seq_locator& locator,
+        compact_sequence_stdc_type_params stored_type,
+        sequence_transform transform,
+        std::uint64_t source_from,
+        std::span<std::uint8_t> output) {
+    auto* domain = const_cast<pg_sequence_source_domain*>(
+        static_cast<pg_sequence_source_domain const*>(opaque));
+    if (domain == nullptr || !domain->backend_thread.is_current()
+        || !session.backend_thread.is_current()) {
+        return pg_sequence_source_read_status::wrong_thread;
+    }
+    if (!domain->valid || domain->registered_snapshot == nullptr
+        || domain->resource_owner == nullptr || domain->caches == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq locator source is no longer live"),
+             errhint("materialize locator-backed values before the transaction ends")));
+    }
+    if (!same_locator(domain->binding.locator, locator)
+        || domain->stored_type != stored_type
+        || source_from > locator.total_bp_size
+        || output.size() > locator.total_bp_size - source_from) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq source read request does not match its binding")));
+    }
+    if (output.empty()) return pg_sequence_source_read_status::ok;
+
+    const pg_sequence_read_entry_key key{
+        .source = domain_identity(domain),
+        .locator = locator,
+        .stored_type_params = stored_type,
+    };
+    auto* reader = static_cast<source_read_entry*>(
+        find_or_create_pg_sequence_read_entry(
+            session, key, domain, create_read_entry,
+            finish_read_entry, abort_read_entry));
+    if (reader == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq source read session is not accepting readers")));
+    }
+
+    bool dispatched = false;
+    pgseq_t::dispatch_instance(
+        stored_type.alphabet_code,
+        stored_type.storage_unit_byte_width,
+        [transform, locator, domain, reader, source_from, output,
+         &dispatched]<class Instance>() {
+            using range = compact_sequence_range<Instance>;
+            using traits = typename range::traits;
+            using unit = typename traits::storage_unit;
+            constexpr std::uint64_t letters_per_fragment =
+                static_cast<std::uint64_t>(kSequenceFragmentStorageUnits)
+                * traits::letters_per_unit;
+            const bool reverse = has_reverse(transform);
+            const bool complement = has_complement(transform);
+            std::uint32_t resident_fragment = UINT32_MAX;
+            pgseq_t* raw = nullptr;
+
+            for (std::size_t output_index = 0;
+                 output_index < output.size(); ++output_index) {
+                const std::uint64_t physical = source_from
+                    + (reverse ? output.size() - 1u - output_index
+                               : output_index);
+                const auto fragment_no = static_cast<std::uint32_t>(
+                    physical / letters_per_fragment);
+                if (fragment_no != resident_fragment) {
+                    raw = read_fragment(*reader, fragment_no);
+                    resident_fragment = fragment_no;
+                    const bool is_last =
+                        fragment_no + 1u == locator.num_fragments;
+                    const auto padding = static_cast<std::uint16_t>(
+                        raw->padding_letters);
+                    if ((!is_last && padding != 0u)
+                        || (is_last
+                            && padding != domain->last_padding_letters)) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq source fragment padding does not match its binding")));
+                    }
+                }
+
+                const std::uint64_t local_symbol =
+                    physical % letters_per_fragment;
+                const std::uint64_t unit_index =
+                    local_symbol / traits::letters_per_unit;
+                const std::size_t byte_offset =
+                    static_cast<std::size_t>(unit_index) * sizeof(unit);
+                const std::size_t payload_bytes =
+                    static_cast<std::size_t>(VARSIZE(raw))
+                    - pgseq_t::header_bytes();
+                if (byte_offset > payload_bytes
+                    || sizeof(unit) > payload_bytes - byte_offset) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq source fragment payload is truncated")));
+                }
+                unit word{};
+                std::memcpy(&word,
+                    reinterpret_cast<std::byte const*>(raw->data)
+                        + byte_offset,
+                    sizeof(unit));
+                const std::size_t shift = static_cast<std::size_t>(
+                    local_symbol % traits::letters_per_unit)
+                    * traits::bits_per_char;
+                std::uint8_t rank = static_cast<std::uint8_t>(
+                    (word >> shift) & traits::char_mask);
+                if (rank >= seqan3::alphabet_size<
+                                typename Instance::alphabet_type>) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq source fragment contains an invalid alphabet rank")));
+                }
+                if (complement) {
+                    rank = static_cast<std::uint8_t>(
+                        traits::letter_complement(static_cast<unit>(rank)));
+                }
+                output[output_index] = rank;
+            }
+            dispatched = true;
+        });
+    if (!dispatched) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("bioseq source binding uses an unsupported sequence type")));
+    }
+    return pg_sequence_source_read_status::ok;
+}
+
+inline constexpr pg_sequence_source_backend_ops source_ops{
+    .retain = retain_domain,
+    .release = release_domain,
+    .identity = domain_identity,
+    .worker_shareable = domain_worker_shareable,
+    .read_ranks = read_domain_ranks,
+};
+
+inline void close_provider_impl(
+        pg_sequence_source_provider* provider,
+        bool destroy_control) noexcept {
+    if (provider == nullptr) return;
+    if (provider->open) {
+        provider->open = false;
+        provider->authoritative_snapshot = nullptr;
+        release_provider_registry(provider);
+    }
+    if (destroy_control) {
+        destroy_provider_control(provider);
+    }
+}
+
+void xact_callback(XactEvent event, void*) {
+    const bool terminal_commit = event == XACT_EVENT_PRE_COMMIT
+        || event == XACT_EVENT_PARALLEL_PRE_COMMIT
+        || event == XACT_EVENT_PRE_PREPARE;
+    const bool terminal_abort = event == XACT_EVENT_ABORT
+        || event == XACT_EVENT_PARALLEL_ABORT;
+    if (!terminal_commit && !terminal_abort) return;
+
+    while (providers != nullptr) {
+        close_provider_impl(providers, /*destroy_control=*/true);
+    }
+    for (auto* domain = domains; domain != nullptr;
+         domain = domain->next_global) {
+        invalidate_domain(domain, terminal_commit);
+    }
+    sweep_dead_domains();
+}
+
+void subxact_callback(SubXactEvent event, SubTransactionId my_subid,
+                      SubTransactionId parent_subid, void*) {
+    if (event == SUBXACT_EVENT_COMMIT_SUB) {
+        for (auto* provider = providers; provider != nullptr;
+             provider = provider->next) {
+            if (provider->creating_subxid == my_subid) {
+                provider->creating_subxid = parent_subid;
+            }
+        }
+        for (auto* domain = domains; domain != nullptr;
+             domain = domain->next_global) {
+            if (domain->creating_subxid == my_subid) {
+                domain->creating_subxid = parent_subid;
+            }
+        }
+        return;
+    }
+    if (event != SUBXACT_EVENT_ABORT_SUB) return;
+
+    auto* provider = providers;
+    while (provider != nullptr) {
+        auto* next = provider->next;
+        if (provider->creating_subxid == my_subid) {
+            close_provider_impl(provider, /*destroy_control=*/false);
+        }
+        provider = next;
+    }
+    for (auto* domain = domains; domain != nullptr;
+         domain = domain->next_global) {
+        if (domain->creating_subxid == my_subid) {
+            invalidate_domain(domain, false);
+        }
+    }
+    sweep_dead_domains();
+}
+
+} // namespace pg_sequence_source_detail
+
+pg_sequence_source_provider* create_pg_sequence_source_provider(
+        Relation owning_relation,
+        Snapshot authoritative_registered_snapshot) {
+    using namespace pg_sequence_source_detail;
+    if (owning_relation == nullptr
+        || authoritative_registered_snapshot == nullptr
+        || !IsMVCCSnapshot(authoritative_registered_snapshot)
+        || authoritative_registered_snapshot->regd_count == 0) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq locator source provider requires an owning relation and registered MVCC snapshot")));
+    }
+    ensure_callbacks();
+    sweep_dead_domains();
+
+    const std::uint64_t storage_id =
+        bioseq::pg_utils::invoke_pg_as_cpp([owning_relation] {
+            return BioseqColumnStorageGetStorageId(
+                owning_relation, false);
+        });
+    if (storage_id == 0) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq locator source relation has no physical storage identity")));
+    }
+
+    auto* provider = static_cast<pg_sequence_source_provider*>(
+        MemoryContextAllocZero(TopMemoryContext,
+                               sizeof(pg_sequence_source_provider)));
+    ::new (static_cast<void*>(provider)) pg_sequence_source_provider{};
+    provider->backend_thread = pg_sequence_backend_thread_token::capture();
+    provider->user_relid = RelationGetRelid(owning_relation);
+    provider->database_oid = owning_relation->rd_locator.dbOid;
+    provider->tablespace_oid = owning_relation->rd_locator.spcOid;
+    provider->main_relfilenode = owning_relation->rd_locator.relNumber;
+    provider->main_storage_id = storage_id;
+    provider->authoritative_snapshot = authoritative_registered_snapshot;
+    provider->creating_subxid = GetCurrentSubTransactionId();
+    provider->generation = allocate_generation();
+    provider->open = true;
+    provider->next = providers;
+    providers = provider;
+    return provider;
+}
+
+void close_pg_sequence_source_provider(
+        pg_sequence_source_provider* provider,
+        bool /*is_commit*/) noexcept {
+    using namespace pg_sequence_source_detail;
+    if (provider == nullptr) return;
+    if (!provider->backend_thread.is_current()) {
+        return;
+    }
+    close_provider_impl(provider, /*destroy_control=*/false);
+    invalidate_unreferenced_domains(/*is_commit=*/false);
+    sweep_dead_domains();
+}
+
+Datum promote_pg_sequence_locator(
+        pg_sequence_source_provider* provider,
+        AttrNumber column_attno,
+        Datum locator_datum,
+        MemoryContext result_context,
+        slice_trace_attachment* trace) {
+    using namespace pg_sequence_source_detail;
+    if (provider == nullptr || !provider->open
+        || !provider->backend_thread.is_current()
+        || result_context == nullptr || column_attno <= 0) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq locator promotion has no live owning scan")));
+    }
+
+    auto* header = bioseq::pg_utils::invoke_pg_as_cpp([locator_datum] {
+        return reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(locator_datum));
+    });
+    const pg_sequence_descriptor descriptor =
+        classify_and_describe_sequence(PointerGetDatum(header));
+    if (descriptor.kind != pg_sequence_datum_kind::locator) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("bioseq source promotion requires a locator stub")));
+    }
+    const seq_locator locator = decode_locator_from_stub(header);
+    const compact_sequence_stdc_type_params stored_type{
+        .alphabet_code = descriptor.alphabet_code,
+        .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+    };
+    const auto last_padding_letters = static_cast<std::uint16_t>(
+        header->padding_letters);
+    auto* domain = find_or_create_domain(
+        *provider, column_attno, locator, stored_type,
+        last_padding_letters);
+    const pg_sequence_source_handle handle{
+        .state = domain,
+        .ops = &source_ops,
+    };
+    return bioseq::pg_utils::invoke_pg_as_cpp([
+            result_context, handle, locator, stored_type,
+            last_padding_letters, trace] {
+        const MemoryContext saved_context = CurrentMemoryContext;
+        MemoryContextSwitchTo(result_context);
+        Datum result = make_source_backed_pg_sequence(
+            handle, locator, stored_type, last_padding_letters, trace);
+        MemoryContextSwitchTo(saved_context);
+        return result;
+    });
+}
+
+
 
 // ---------------------------------------------------------------------------
 // §11.3 — Orphan reaper.

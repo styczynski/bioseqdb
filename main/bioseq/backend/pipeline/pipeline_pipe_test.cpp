@@ -784,9 +784,12 @@ TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and buil
         }
     }
     auto sequence = compact_sequence_range<PackedSequence>(letters);
+    auto sequence_owner = bioseq::storage::make_lazy_in_memory(sequence);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(sequence_owner);
 
     auto result = vk::collect_minimizers_vulkan_result<Sketch>(
-        sequence,
+        sequence_view,
         window_size,
         kmer_size,
         nullptr,
@@ -5763,8 +5766,10 @@ TEST_CASE("Indexed dna4 u64 queries use zero-copy u32 B8 continuation with scala
         CAPTURE(fixture, data.size());
         query_range resident(data);
         auto lazy_query = bioseq::storage::make_lazy_in_memory(resident);
+        const auto query_view =
+            bioseq::storage::as_lazy_sequence_view(lazy_query);
         auto fast = sketch_query_for_index_selection<MinimapSketchData>(
-            lazy_query, params, 10u, 15u);
+            query_view, params, 10u, 15u);
 
         sketch_collector_t<MinimapSketchData> scalar_collector;
         collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
@@ -6898,10 +6903,18 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
             target_letters.begin() + 6'500);
         doc0307_e2e::range_t query_range(query_letters);
         doc0307_e2e::range_t target_range(target_letters);
+        auto gpu_query_owner =
+            bioseq::storage::make_lazy_in_memory(query_range);
+        auto gpu_target_owner =
+            bioseq::storage::make_lazy_in_memory(target_range);
+        const auto gpu_query_view =
+            bioseq::storage::as_lazy_sequence_view(gpu_query_owner);
+        const auto gpu_target_view =
+            bioseq::storage::as_lazy_sequence_view(gpu_target_owner);
 
         auto target_sketch =
             vk::collect_minimizers_vulkan_result<DirectMinimizer>(
-                target_range,
+                gpu_target_view,
                 /*window_size=*/10u,
                 /*kmer_size=*/15u,
                 nullptr,
@@ -6918,7 +6931,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
 
         auto query_sketch =
             vk::collect_minimizers_vulkan_result<DirectMinimizer>(
-                query_range,
+                gpu_query_view,
                 /*window_size=*/10u,
                 /*kmer_size=*/15u);
         REQUIRE(query_sketch.has_value());
@@ -6984,9 +6997,13 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         std::vector<seq::dna4> short_query_letters(
             target_letters.begin(), target_letters.begin() + 8);
         doc0307_e2e::range_t short_query_range(short_query_letters);
+        auto short_query_owner =
+            bioseq::storage::make_lazy_in_memory(short_query_range);
+        const auto short_query_view =
+            bioseq::storage::as_lazy_sequence_view(short_query_owner);
         auto empty_query_sketch =
             vk::collect_minimizers_vulkan_result<DirectMinimizer>(
-                short_query_range,
+                short_query_view,
                 /*window_size=*/10u,
                 /*kmer_size=*/15u);
         REQUIRE(empty_query_sketch.has_value());
@@ -6994,7 +7011,7 @@ TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase 
         REQUIRE(empty_query_sketch->host_minimizers.empty());
         auto second_target_sketch =
             vk::collect_minimizers_vulkan_result<DirectMinimizer>(
-                target_range,
+                gpu_target_view,
                 /*window_size=*/10u,
                 /*kmer_size=*/15u,
                 nullptr,

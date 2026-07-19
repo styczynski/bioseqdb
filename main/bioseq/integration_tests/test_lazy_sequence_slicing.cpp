@@ -123,16 +123,41 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
         "SELECT s::text = repeat('ACGT',32) "
         "FROM doc0377_slice_dst;") == "t");
 
-    const auto plan = query_rows(
+    const auto plan = explain_text(
         ctx,
-        "EXPLAIN (ANALYZE, COSTS OFF) "
         "SELECT s[500000:500064] FROM doc0377_slice_src;");
-    bool saw_slice_project = false;
-    for (const auto& line : plan) {
-        if (line[0].has_value()
-            && line[0]->find("BioseqSliceProject") != std::string::npos) {
-            saw_slice_project = true;
-        }
-    }
-    REQUIRE(saw_slice_project);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(plan, "Projection Mode: source-backed lazy"));
+    REQUIRE(plan_contains(plan, "Normalized Interval: [500000, 500064)"));
+    REQUIRE(plan_contains(plan, "Planned Materialized Symbols"));
+    REQUIRE(plan_contains(plan, "Planned Materialized Bytes"));
+    REQUIRE(plan_contains(plan, "Actual Rows Published: 1"));
+}
+
+TEST_CASE("DOC0377 SliceProject selection is exact and fail-closed",
+          "[seq][slice][planner][explain]") {
+    auto ctx = fresh_context({"doc0377_slice_plan"});
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_slice_plan "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+    exec_sql(ctx,
+        "INSERT INTO doc0377_slice_plan VALUES "
+        " (1, 'ACGTACGT'::bioseq.seq('dna4',32));");
+
+    const auto array_plan = explain_text<false>(
+        ctx,
+        "SELECT (ARRAY[1,2,3])[1] FROM doc0377_slice_plan;");
+    REQUIRE_FALSE(plan_contains(array_plan, "BioseqSliceProject"));
+
+    const auto volatile_plan = explain_text<false>(
+        ctx,
+        "SELECT s[0:(random() * 4)::bigint] "
+        "FROM doc0377_slice_plan;");
+    REQUIRE_FALSE(plan_contains(volatile_plan, "BioseqSliceProject"));
+
+    exec_sql(ctx, "SET bioseq.enable_custom_scan = off;");
+    const auto disabled_plan = explain_text<false>(
+        ctx,
+        "SELECT s[1:3] FROM doc0377_slice_plan;");
+    REQUIRE_FALSE(plan_contains(disabled_plan, "BioseqSliceProject"));
 }
