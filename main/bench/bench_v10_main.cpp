@@ -94,6 +94,7 @@ using bioseq::bench_framework::RunConstraints;
 using bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
 using bioseq::simd::HWY_NAMESPACE::MatchResult;
+using bioseq::simd::HWY_NAMESPACE::MatchResultBiologicalFingerprint;
 using bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
 using bioseq::simd::HWY_NAMESPACE::Minimap2Params;
 using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
@@ -177,7 +178,13 @@ struct AlignerOutput {
     bool prefilter_execution_proof_present = false;
     bool prefilter_execution_proof_accepted = false;
     bool        phase_c_gpu_index_ownership_proof_accepted = false;
+    /// True only when every completed pair in a source-direct row passed the
+    /// single-operation validator before its proof was folded into the row
+    /// aggregate.  The aggregate counters are additive and therefore cannot
+    /// be reinterpreted as one operation after a multi-pair run.
+    bool        source_direct_gpu_index_materialization_proof_accepted = false;
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
+    MatchResultBiologicalFingerprint biological_fingerprint{};
     TwoStackExecutionProof exact_simd_query_execution_proof{};
     TwoStackExecutionProof exact_simd_target_execution_proof{};
     PackedPaperNthashExecutionProof paper_nthash_query_execution_proof{};
@@ -2155,12 +2162,13 @@ struct AlgorithmDispatch {
         dispatch.params.minimizer_algorithm      = MinimizerAlgorithmType::PAPER_NTHASH_SIMD;
         dispatch.params.do_cigar                 = true;
     } else if (algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
-        // Historical PARTIAL-GPU probe: Vulkan minimap-int minimizers and seed
-        // lookup, CPU target-index construction, Vulkan tiled-DP score
-        // generation, CPU backtracking, and CPU Block Aligner. The minimizer
-        // sketch is always the fused tiled Phase-C path
-        // after DOC0351; this row keeps the older seed/index frontend settings
-        // for comparison. The only varied
+        // Historical PARTIAL-GPU probe: Vulkan minimap-int minimizers, a
+        // source-direct mapped sorted-dense resident target index, Vulkan seed
+        // lookup, and Vulkan tiled-DP score generation, followed by CPU mapped
+        // prefix authority reads, backtracking, and CPU Block Aligner. The
+        // minimizer sketch is always the fused tiled Phase-C path after
+        // DOC0351; this row keeps the non-fused direct-resident seed/index
+        // frontend for comparison. The only varied
         // dimensions versus bioseq_block_simd_dp_two_stack_nthash (SIMD
         // minimizers + SIMD chaining + block aligner) are the seeding (GPU
         // sketch + GPU seed-hit lookup) and the chaining backend; the base
@@ -2321,6 +2329,670 @@ static_assert([] {
     return !legacy_gpu_index_materialization_proof_accepted(proof);
 }());
 
+[[nodiscard]] constexpr bool
+phase_c_target_index_evidence_absent(
+        const PartialVulkanExecutionProof& proof) noexcept {
+    return proof.target_index_build_dispatches == 0u
+        && proof.gpu_index_count_phase_admissions == 0u
+        && proof.gpu_index_main_peak_admissions == 0u
+        && proof.gpu_index_resident_transfers == 0u
+        && proof.gpu_index_adoption_rereserve_attempts == 0u
+        && proof.gpu_index_adoption_successes == 0u
+        && proof.gpu_index_owned_resident_bytes == 0u
+        && proof.gpu_index_gate_enabled == 0u
+        && proof.gpu_index_gate_word_count == 0u
+        && proof.gpu_index_gate_mask == 0u
+        && proof.gpu_index_gate_set_bits == 0u
+        && proof.gpu_index_gate_digest_lo == 0u
+        && proof.gpu_index_gate_digest_hi == 0u
+        && proof.gpu_index_gate_count_dispatches == 0u
+        && proof.gpu_index_gated_emit_dispatches == 0u
+        && proof.gpu_index_ungated_emit_dispatches == 0u
+        && proof.gpu_index_exact_count_dispatches == 0u
+        && proof.gpu_index_exact_count_prefix_scan_dispatches == 0u
+        && proof.gpu_index_exact_count_control_readbacks == 0u
+        && proof.gpu_index_deterministic_tile_emit_dispatches == 0u
+        && proof.gpu_index_atomic_append_dispatches == 0u
+        && proof.gpu_index_emit_validation_control_readbacks == 0u
+        && proof.gpu_index_counted_minimizer_count == 0u
+        && proof.gpu_index_verified_emit_count == 0u
+        && proof.gpu_index_count_emit_parity_verified == 0u
+        && proof.gpu_index_target_minimizer_capacity_estimate == 0u
+        && proof.gpu_index_capacity_estimate_underestimated == 0u
+        && proof.gpu_index_arena_trimmed_before_permit_shrink == 0u;
+}
+
+[[nodiscard]] constexpr bool seed_sort_evidence_absent(
+        const PartialVulkanExecutionProof& proof) noexcept {
+    return proof.seed_bitonic_sort_dispatches == 0u
+        && proof.seed_radix_sort_operations == 0u
+        && proof.seed_radix_anchor_count == 0u
+        && proof.seed_radix_passes == 0u
+        && proof.seed_radix_histogram_dispatches == 0u
+        && proof.seed_radix_scan_dispatches == 0u
+        && proof.seed_radix_scatter_dispatches == 0u
+        && proof.seed_host_sort_fallbacks == 0u;
+}
+
+/// Accept the DOC0384 source-direct sorted-dense operation proof without
+/// applying the contradictory legacy CPU-index-release ownership contract.
+/// The operation ledger publishes these source-direct counters only after its
+/// terminal predicate succeeds. Generic layout/shape/allocation fields remain
+/// cross-checks for N, D, layout identity, and the direct split-byte totals.
+[[nodiscard]] constexpr bool
+source_direct_gpu_index_materialization_proof_accepted(
+        const PartialVulkanExecutionProof& proof) noexcept {
+    if (proof.saturated
+        || proof.gpu_index_source_direct_operations != 1u
+        || proof.gpu_index_source_direct_planning_receipts != 1u
+        || proof.gpu_index_source_direct_terminal_receipts != 1u
+        || proof.gpu_index_source_direct_terminal_successes != 1u
+        || proof.gpu_index_source_direct_required_misses != 0u
+        || proof.gpu_index_source_direct_fallback_attempts != 0u
+        || proof.gpu_index_source_direct_seed_slab_initial_capacity != 0u
+        || !phase_c_target_index_evidence_absent(proof)
+        || proof.seed_host_sort_fallbacks != 0u
+        || proof.post_seed_owned_cpu_index_releases != 0u
+        || proof.post_seed_owned_cpu_position_bytes_released != 0u) {
+        return false;
+    }
+
+    if (proof.gpu_index_source_direct_empty_bypasses == 1u) {
+        return proof.gpu_index_source_direct_materializations == 0u
+            && proof.gpu_index_source_direct_zero_query_bypasses == 0u
+            && proof.gpu_index_source_direct_resident_publications == 0u
+            && proof.gpu_index_source_direct_logical_control_bytes == 0u
+            && proof.gpu_index_source_direct_logical_position_bytes == 0u
+            && proof.gpu_index_source_direct_control_requirement_bytes == 0u
+            && proof.gpu_index_source_direct_position_requirement_bytes == 0u
+            && proof.gpu_index_source_direct_allocation_request_bytes == 0u
+            && proof.gpu_index_source_direct_actual_control_bytes == 0u
+            && proof.gpu_index_source_direct_actual_position_bytes == 0u
+            && proof.gpu_index_source_direct_source_releases == 0u
+            && proof.gpu_index_source_direct_source_released_bytes == 0u
+            && proof.gpu_index_source_direct_checksum_matches == 0u
+            && proof.gpu_index_source_direct_source_traversals == 0u
+            && proof.gpu_index_source_direct_mapped_traversals == 0u
+            && proof.gpu_index_source_direct_reflected_authorities == 0u
+            && proof.gpu_index_source_direct_retained_authorities == 0u
+            && proof.gpu_index_source_direct_retained_resident_permit_bytes
+                == 0u
+            && proof.gpu_index_source_direct_cache_preinsertions == 0u
+            && proof.gpu_index_source_direct_expected_seed_consumers == 0u
+            && proof.gpu_index_source_direct_completed_seed_consumers == 0u
+            && proof.gpu_index_source_direct_required_lookups == 0u
+            && proof.gpu_index_source_direct_required_hits == 0u
+            && proof.gpu_index_source_direct_mapped_prefix_passes == 0u
+            && proof.gpu_index_source_direct_mapped_prefix_lookups == 0u
+            && proof.gpu_index_source_direct_mapped_prefix_comparisons == 0u
+            && proof.gpu_index_source_direct_seed_slab_requested_bytes == 0u
+            && proof.gpu_index_source_direct_seed_slab_actual_bytes == 0u
+            && proof.gpu_index_source_direct_seed_slab_retained_bytes == 0u
+            && proof.gpu_index_source_direct_seed_slab_permit_releases == 0u
+            && proof.gpu_index_source_direct_seed_reserved_bytes == 0u
+            && proof.gpu_index_source_direct_seed_planned_vulkan_bytes == 0u
+            && proof.gpu_index_source_direct_seed_actual_vulkan_bytes == 0u
+            && proof.gpu_index_source_direct_seed_roundtrips == 0u
+            && proof.gpu_index_source_direct_zero_anchor_bypasses == 0u
+            && proof.gpu_index_source_direct_seed_fence_completions == 0u
+            && proof.gpu_index_source_direct_cache_cleanup_releases == 0u
+            && proof.gpu_index_source_direct_resident_cleanup_bytes == 0u
+            && proof.gpu_index_source_direct_pipeline_completions == 0u
+            && proof.chain_score_dispatches == 0u
+            && seed_sort_evidence_absent(proof)
+            && proof.seed_lookup_dispatches == 0u
+            && proof.seed_open_addressed_lookup_dispatches == 0u
+            && proof.seed_sorted_dense_lookup_dispatches == 0u
+            && proof.seed_anchor_proof_operations == 0u
+            && proof.seed_canonical_anchor_count == 0u
+            && proof.seed_canonical_anchor_order_checks == 0u
+            && proof.seed_canonical_anchor_order_accepts == 0u
+            && proof.seed_canonical_tie_normalization_runs == 0u
+            && proof.seed_canonical_tie_normalization_anchors == 0u
+            && proof.seed_anchor_digest_lane0 == 0u
+            && proof.seed_anchor_digest_lane1 == 0u
+            && proof.gpu_index_materializations == 0u
+            && proof.gpu_index_open_addressed_materializations == 0u
+            && proof.gpu_index_sorted_dense_materializations == 0u
+            && proof.gpu_index_unique_keys == 0u
+            && proof.gpu_index_slot_capacity == 0u
+            && proof.gpu_index_logical_resident_bytes == 0u
+            && proof.gpu_index_actual_allocation_bytes == 0u
+            && proof.gpu_index_fully_touched_bytes == 0u
+            && proof.gpu_index_staging_bytes == 0u
+            && proof.gpu_index_permit_releases == 0u
+            && proof.gpu_index_process_footprint_reflections == 0u
+            && proof.gpu_index_reflected_footprint_bytes == 0u
+            && proof.gpu_index_max_load_ppm == 0u
+            && proof.gpu_index_max_probe == 0u
+            && proof.gpu_index_retained_minimizer_count == 0u
+            && proof.gpu_index_distinct_minimizer_count == 0u
+            && proof.post_seed_owned_gpu_cache_evictions == 0u
+            && proof.post_seed_owned_gpu_resident_bytes_released == 0u;
+    }
+    if (proof.gpu_index_source_direct_empty_bypasses != 0u) {
+        return false;
+    }
+
+    const auto max_u64 = (std::numeric_limits<std::uint64_t>::max)();
+    const bool exact_direct_allocation =
+        proof.gpu_index_distinct_minimizer_count != 0u
+        && proof.gpu_index_distinct_minimizer_count <= max_u64 / 16u
+        && proof.gpu_index_source_direct_logical_control_bytes
+            == 16u * proof.gpu_index_distinct_minimizer_count
+        && proof.gpu_index_retained_minimizer_count != 0u
+        && proof.gpu_index_retained_minimizer_count <= max_u64 / 8u
+        && proof.gpu_index_source_direct_logical_position_bytes
+            == 8u * proof.gpu_index_retained_minimizer_count
+        && proof.gpu_index_source_direct_logical_control_bytes
+            <= max_u64
+                - proof.gpu_index_source_direct_logical_position_bytes
+        && proof.gpu_index_logical_resident_bytes
+            == proof.gpu_index_source_direct_logical_control_bytes
+                + proof.gpu_index_source_direct_logical_position_bytes
+        && proof.gpu_index_source_direct_control_requirement_bytes
+            == proof.gpu_index_source_direct_actual_control_bytes
+        && proof.gpu_index_source_direct_actual_control_bytes
+            >= proof.gpu_index_source_direct_logical_control_bytes
+        && proof.gpu_index_source_direct_position_requirement_bytes
+            == proof.gpu_index_source_direct_actual_position_bytes
+        && proof.gpu_index_source_direct_actual_position_bytes
+            >= proof.gpu_index_source_direct_logical_position_bytes
+        && proof.gpu_index_source_direct_control_requirement_bytes
+            <= max_u64
+                - proof.gpu_index_source_direct_position_requirement_bytes
+        && proof.gpu_index_source_direct_allocation_request_bytes
+            == proof.gpu_index_source_direct_control_requirement_bytes
+                + proof.gpu_index_source_direct_position_requirement_bytes
+        && proof.gpu_index_source_direct_actual_control_bytes
+            <= max_u64 - proof.gpu_index_source_direct_actual_position_bytes
+        && proof.gpu_index_source_direct_allocation_request_bytes
+            == proof.gpu_index_source_direct_actual_control_bytes
+                + proof.gpu_index_source_direct_actual_position_bytes
+        && proof.gpu_index_actual_allocation_bytes
+            == proof.gpu_index_source_direct_allocation_request_bytes;
+    const bool exact_sorted_dense_shape =
+        proof.gpu_index_source_direct_materializations == 1u
+        && proof.gpu_index_materializations == 1u
+        && proof.gpu_index_open_addressed_materializations == 0u
+        && proof.gpu_index_sorted_dense_materializations == 1u
+        && proof.gpu_index_retained_minimizer_count != 0u
+        && proof.gpu_index_distinct_minimizer_count != 0u
+        && proof.gpu_index_distinct_minimizer_count
+            <= proof.gpu_index_retained_minimizer_count
+        && proof.gpu_index_unique_keys
+            == proof.gpu_index_distinct_minimizer_count
+        && proof.gpu_index_slot_capacity == proof.gpu_index_unique_keys
+        && proof.gpu_index_logical_resident_bytes != 0u
+        && proof.gpu_index_actual_allocation_bytes
+            >= proof.gpu_index_logical_resident_bytes
+        && proof.gpu_index_fully_touched_bytes
+            == proof.gpu_index_actual_allocation_bytes
+        && proof.gpu_index_staging_bytes == 0u
+        && proof.gpu_index_max_load_ppm == 1'000'000u
+        && proof.gpu_index_max_probe == 0u;
+    const bool reflected_authority =
+        proof.gpu_index_source_direct_reflected_authorities == 1u
+        && proof.gpu_index_source_direct_retained_authorities == 0u
+        && proof.gpu_index_source_direct_retained_resident_permit_bytes == 0u
+        && proof.gpu_index_permit_releases == 1u
+        && proof.gpu_index_process_footprint_reflections == 1u
+        && proof.gpu_index_reflected_footprint_bytes
+            >= proof.gpu_index_actual_allocation_bytes;
+    const bool retained_authority =
+        proof.gpu_index_source_direct_reflected_authorities == 0u
+        && proof.gpu_index_source_direct_retained_authorities == 1u
+        && proof.gpu_index_source_direct_retained_resident_permit_bytes
+            == proof.gpu_index_actual_allocation_bytes
+        && proof.gpu_index_permit_releases == 0u
+        && proof.gpu_index_process_footprint_reflections == 0u
+        && proof.gpu_index_reflected_footprint_bytes == 0u;
+    const bool exact_required_cache_use =
+        proof.gpu_index_source_direct_zero_query_bypasses == 0u
+        && proof.gpu_index_source_direct_expected_seed_consumers != 0u
+        && proof.gpu_index_source_direct_completed_seed_consumers
+            == proof.gpu_index_source_direct_expected_seed_consumers
+        && proof.gpu_index_source_direct_required_lookups
+            == proof.gpu_index_source_direct_completed_seed_consumers
+        && proof.gpu_index_source_direct_required_hits
+            == proof.gpu_index_source_direct_required_lookups
+        && proof.gpu_index_source_direct_required_lookups
+            <= (std::numeric_limits<std::uint64_t>::max)() / 2u
+        && proof.gpu_index_source_direct_mapped_prefix_passes
+            == 2u * proof.gpu_index_source_direct_required_lookups
+        && (proof.gpu_index_source_direct_mapped_prefix_lookups == 0u
+            ? proof.gpu_index_source_direct_mapped_prefix_comparisons == 0u
+            : proof.gpu_index_source_direct_mapped_prefix_comparisons
+                >= proof.gpu_index_source_direct_mapped_prefix_lookups);
+    const bool exact_anchor_proof =
+        proof.seed_anchor_proof_operations
+            == proof.gpu_index_source_direct_seed_roundtrips
+        && proof.seed_canonical_anchor_order_checks
+            == proof.seed_anchor_proof_operations
+        && proof.seed_canonical_anchor_order_accepts
+            == proof.seed_canonical_anchor_order_checks
+        && (proof.seed_anchor_proof_operations == 0u
+            ? proof.seed_anchor_digest_lane0 == 0u
+                && proof.seed_anchor_digest_lane1 == 0u
+            : proof.seed_anchor_digest_lane0 != 0u
+                && proof.seed_anchor_digest_lane1 != 0u);
+    const bool positive_seed_slab =
+        proof.gpu_index_source_direct_mapped_prefix_lookups != 0u
+        && proof.gpu_index_source_direct_seed_slab_requested_bytes != 0u
+        && proof.gpu_index_source_direct_seed_slab_requested_bytes
+            == proof.gpu_index_source_direct_seed_slab_actual_bytes
+        && proof.gpu_index_source_direct_seed_slab_actual_bytes
+            == proof.gpu_index_source_direct_seed_slab_retained_bytes
+        && proof.gpu_index_source_direct_seed_slab_permit_releases == 1u
+        && proof.gpu_index_source_direct_seed_planned_vulkan_bytes != 0u
+        && proof.gpu_index_source_direct_seed_planned_vulkan_bytes
+            == proof.gpu_index_source_direct_seed_actual_vulkan_bytes
+        && proof.gpu_index_source_direct_seed_planned_vulkan_bytes
+            <= max_u64
+                - proof.gpu_index_source_direct_seed_slab_actual_bytes
+        && proof.gpu_index_source_direct_seed_reserved_bytes
+            >= proof.gpu_index_source_direct_seed_planned_vulkan_bytes
+                + proof.gpu_index_source_direct_seed_slab_actual_bytes
+        && proof.gpu_index_source_direct_seed_roundtrips
+            == proof.gpu_index_source_direct_required_lookups
+        && proof.gpu_index_source_direct_zero_anchor_bypasses == 0u
+        && proof.seed_canonical_anchor_count != 0u
+        && proof.seed_lookup_dispatches
+            == proof.gpu_index_source_direct_seed_roundtrips
+        && proof.seed_open_addressed_lookup_dispatches == 0u
+        && proof.seed_sorted_dense_lookup_dispatches
+            == proof.seed_lookup_dispatches
+        && proof.gpu_index_source_direct_seed_fence_completions
+            == proof.gpu_index_source_direct_seed_roundtrips;
+    const bool zero_anchor_seed =
+        proof.gpu_index_source_direct_seed_slab_requested_bytes == 0u
+        && proof.gpu_index_source_direct_seed_slab_actual_bytes == 0u
+        && proof.gpu_index_source_direct_seed_slab_retained_bytes == 0u
+        && proof.gpu_index_source_direct_seed_slab_permit_releases == 0u
+        && proof.gpu_index_source_direct_seed_reserved_bytes == 0u
+        && proof.gpu_index_source_direct_seed_planned_vulkan_bytes == 0u
+        && proof.gpu_index_source_direct_seed_actual_vulkan_bytes == 0u
+        && proof.gpu_index_source_direct_seed_roundtrips
+            == proof.gpu_index_source_direct_required_lookups
+        && proof.gpu_index_source_direct_zero_anchor_bypasses
+            == proof.gpu_index_source_direct_seed_roundtrips
+        && proof.seed_canonical_anchor_count == 0u
+        && proof.seed_lookup_dispatches == 0u
+        && proof.seed_open_addressed_lookup_dispatches == 0u
+        && proof.seed_sorted_dense_lookup_dispatches == 0u
+        && seed_sort_evidence_absent(proof)
+        && proof.gpu_index_source_direct_seed_fence_completions == 0u;
+
+    const bool zero_query_seed =
+        proof.gpu_index_source_direct_zero_query_bypasses == 1u
+        && proof.gpu_index_source_direct_expected_seed_consumers == 0u
+        && proof.gpu_index_source_direct_completed_seed_consumers == 0u
+        && proof.gpu_index_source_direct_required_lookups == 0u
+        && proof.gpu_index_source_direct_required_hits == 0u
+        && proof.gpu_index_source_direct_required_misses == 0u
+        && proof.gpu_index_source_direct_mapped_prefix_passes == 0u
+        && proof.gpu_index_source_direct_mapped_prefix_lookups == 0u
+        && proof.gpu_index_source_direct_mapped_prefix_comparisons == 0u
+        && proof.gpu_index_source_direct_seed_slab_requested_bytes == 0u
+        && proof.gpu_index_source_direct_seed_slab_actual_bytes == 0u
+        && proof.gpu_index_source_direct_seed_slab_retained_bytes == 0u
+        && proof.gpu_index_source_direct_seed_slab_permit_releases == 0u
+        && proof.gpu_index_source_direct_seed_reserved_bytes == 0u
+        && proof.gpu_index_source_direct_seed_planned_vulkan_bytes == 0u
+        && proof.gpu_index_source_direct_seed_actual_vulkan_bytes == 0u
+        && proof.gpu_index_source_direct_seed_roundtrips == 0u
+        && proof.gpu_index_source_direct_zero_anchor_bypasses == 0u
+        && proof.gpu_index_source_direct_seed_fence_completions == 0u
+        && proof.seed_lookup_dispatches == 0u
+        && proof.seed_open_addressed_lookup_dispatches == 0u
+        && proof.seed_sorted_dense_lookup_dispatches == 0u
+        && seed_sort_evidence_absent(proof)
+        && proof.chain_score_dispatches == 0u
+        && proof.seed_anchor_proof_operations == 0u
+        && proof.seed_canonical_anchor_count == 0u
+        && proof.seed_canonical_anchor_order_checks == 0u
+        && proof.seed_canonical_anchor_order_accepts == 0u
+        && proof.seed_canonical_tie_normalization_runs == 0u
+        && proof.seed_canonical_tie_normalization_anchors == 0u
+        && proof.seed_anchor_digest_lane0 == 0u
+        && proof.seed_anchor_digest_lane1 == 0u
+        && proof.gpu_index_source_direct_pipeline_completions == 0u;
+    const bool seeded_pipeline =
+        proof.gpu_index_source_direct_pipeline_completions == 1u
+        && exact_required_cache_use
+        && exact_anchor_proof
+        && (positive_seed_slab || zero_anchor_seed);
+
+    return exact_direct_allocation
+        && exact_sorted_dense_shape
+        && proof.gpu_index_source_direct_resident_publications == 1u
+        && proof.gpu_index_source_direct_source_releases == 1u
+        && proof.gpu_index_source_direct_source_released_bytes != 0u
+        && proof.gpu_index_source_direct_checksum_matches == 1u
+        && proof.gpu_index_source_direct_source_traversals == 1u
+        && proof.gpu_index_source_direct_mapped_traversals == 1u
+        && (reflected_authority != retained_authority)
+        && proof.gpu_index_source_direct_cache_preinsertions == 1u
+        && (seeded_pipeline || zero_query_seed)
+        && proof.gpu_index_source_direct_cache_cleanup_releases == 1u
+        && proof.gpu_index_source_direct_resident_cleanup_bytes
+            == proof.gpu_index_actual_allocation_bytes;
+}
+
+static_assert([] {
+    const auto valid_reflected = [] {
+        PartialVulkanExecutionProof proof{};
+        proof.seed_lookup_dispatches = 1u;
+        proof.seed_sorted_dense_lookup_dispatches = 1u;
+        proof.seed_anchor_proof_operations = 1u;
+        proof.seed_canonical_anchor_count = 1'337u;
+        proof.seed_canonical_anchor_order_checks = 1u;
+        proof.seed_canonical_anchor_order_accepts = 1u;
+        proof.seed_anchor_digest_lane0 = 0x0123456789abcdefull;
+        proof.seed_anchor_digest_lane1 = 0xfedcba9876543210ull;
+        proof.gpu_index_materializations = 1u;
+        proof.gpu_index_sorted_dense_materializations = 1u;
+        proof.gpu_index_unique_keys = 17u;
+        proof.gpu_index_slot_capacity = 17u;
+        proof.gpu_index_logical_resident_bytes = 696u;
+        proof.gpu_index_actual_allocation_bytes = 4'096u;
+        proof.gpu_index_fully_touched_bytes = 4'096u;
+        proof.gpu_index_permit_releases = 1u;
+        proof.gpu_index_process_footprint_reflections = 1u;
+        proof.gpu_index_reflected_footprint_bytes = 4'096u;
+        proof.gpu_index_max_load_ppm = 1'000'000u;
+        proof.gpu_index_retained_minimizer_count = 53u;
+        proof.gpu_index_distinct_minimizer_count = 17u;
+        proof.gpu_index_source_direct_operations = 1u;
+        proof.gpu_index_source_direct_planning_receipts = 1u;
+        proof.gpu_index_source_direct_terminal_receipts = 1u;
+        proof.gpu_index_source_direct_terminal_successes = 1u;
+        proof.gpu_index_source_direct_materializations = 1u;
+        proof.gpu_index_source_direct_resident_publications = 1u;
+        proof.gpu_index_source_direct_logical_control_bytes = 272u;
+        proof.gpu_index_source_direct_logical_position_bytes = 424u;
+        proof.gpu_index_source_direct_control_requirement_bytes = 1'024u;
+        proof.gpu_index_source_direct_position_requirement_bytes = 3'072u;
+        proof.gpu_index_source_direct_allocation_request_bytes = 4'096u;
+        proof.gpu_index_source_direct_actual_control_bytes = 1'024u;
+        proof.gpu_index_source_direct_actual_position_bytes = 3'072u;
+        proof.gpu_index_source_direct_source_releases = 1u;
+        proof.gpu_index_source_direct_source_released_bytes = 512u;
+        proof.gpu_index_source_direct_checksum_matches = 1u;
+        proof.gpu_index_source_direct_source_traversals = 1u;
+        proof.gpu_index_source_direct_mapped_traversals = 1u;
+        proof.gpu_index_source_direct_reflected_authorities = 1u;
+        proof.gpu_index_source_direct_cache_preinsertions = 1u;
+        proof.gpu_index_source_direct_expected_seed_consumers = 1u;
+        proof.gpu_index_source_direct_completed_seed_consumers = 1u;
+        proof.gpu_index_source_direct_required_lookups = 1u;
+        proof.gpu_index_source_direct_required_hits = 1u;
+        proof.gpu_index_source_direct_mapped_prefix_passes = 2u;
+        proof.gpu_index_source_direct_mapped_prefix_lookups = 20u;
+        proof.gpu_index_source_direct_mapped_prefix_comparisons = 80u;
+        proof.gpu_index_source_direct_seed_slab_requested_bytes = 1'024u;
+        proof.gpu_index_source_direct_seed_slab_actual_bytes = 1'024u;
+        proof.gpu_index_source_direct_seed_slab_retained_bytes = 1'024u;
+        proof.gpu_index_source_direct_seed_slab_permit_releases = 1u;
+        proof.gpu_index_source_direct_seed_reserved_bytes = 4'096u;
+        proof.gpu_index_source_direct_seed_planned_vulkan_bytes = 2'048u;
+        proof.gpu_index_source_direct_seed_actual_vulkan_bytes = 2'048u;
+        proof.gpu_index_source_direct_seed_roundtrips = 1u;
+        proof.gpu_index_source_direct_seed_fence_completions = 1u;
+        proof.gpu_index_source_direct_cache_cleanup_releases = 1u;
+        proof.gpu_index_source_direct_resident_cleanup_bytes = 4'096u;
+        proof.gpu_index_source_direct_pipeline_completions = 1u;
+        return proof;
+    };
+    const auto reflected = valid_reflected();
+    if (!source_direct_gpu_index_materialization_proof_accepted(reflected)) {
+        return false;
+    }
+    auto strict_reflected = reflected;
+    strict_reflected.query_sketch_dispatches = 1u;
+    strict_reflected.target_sketch_dispatches = 1u;
+    strict_reflected.chain_score_dispatches = 1u;
+    if (!strict_reflected.exact_source_direct_stage_mask_accepted(
+            true, true, true, true)
+        || strict_reflected.exact_stage_mask_accepted(
+            true, true, false, true, true)) {
+        return false;
+    }
+
+    auto retained = reflected;
+    retained.gpu_index_source_direct_reflected_authorities = 0u;
+    retained.gpu_index_source_direct_retained_authorities = 1u;
+    retained.gpu_index_source_direct_retained_resident_permit_bytes = 4'096u;
+    retained.gpu_index_permit_releases = 0u;
+    retained.gpu_index_process_footprint_reflections = 0u;
+    retained.gpu_index_reflected_footprint_bytes = 0u;
+    if (!source_direct_gpu_index_materialization_proof_accepted(retained)) {
+        return false;
+    }
+
+    auto zero_anchor = reflected;
+    zero_anchor.seed_lookup_dispatches = 0u;
+    zero_anchor.seed_sorted_dense_lookup_dispatches = 0u;
+    zero_anchor.gpu_index_source_direct_seed_slab_requested_bytes = 0u;
+    zero_anchor.gpu_index_source_direct_seed_slab_actual_bytes = 0u;
+    zero_anchor.gpu_index_source_direct_seed_slab_retained_bytes = 0u;
+    zero_anchor.gpu_index_source_direct_seed_slab_permit_releases = 0u;
+    zero_anchor.gpu_index_source_direct_seed_reserved_bytes = 0u;
+    zero_anchor.gpu_index_source_direct_seed_planned_vulkan_bytes = 0u;
+    zero_anchor.gpu_index_source_direct_seed_actual_vulkan_bytes = 0u;
+    zero_anchor.gpu_index_source_direct_zero_anchor_bypasses = 1u;
+    zero_anchor.gpu_index_source_direct_seed_fence_completions = 0u;
+    zero_anchor.seed_canonical_anchor_count = 0u;
+    if (!source_direct_gpu_index_materialization_proof_accepted(zero_anchor)) {
+        return false;
+    }
+    auto empty_minimizer_zero_anchor = zero_anchor;
+    empty_minimizer_zero_anchor.
+        gpu_index_source_direct_mapped_prefix_lookups = 0u;
+    empty_minimizer_zero_anchor.
+        gpu_index_source_direct_mapped_prefix_comparisons = 0u;
+    if (!source_direct_gpu_index_materialization_proof_accepted(
+            empty_minimizer_zero_anchor)) {
+        return false;
+    }
+    empty_minimizer_zero_anchor.
+        gpu_index_source_direct_mapped_prefix_passes = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(
+            empty_minimizer_zero_anchor)) {
+        return false;
+    }
+    auto invalid_zero_anchor_sort = zero_anchor;
+    invalid_zero_anchor_sort.seed_bitonic_sort_dispatches = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(
+            invalid_zero_anchor_sort)) {
+        return false;
+    }
+    auto invalid_zero_anchor_allocation = zero_anchor;
+    invalid_zero_anchor_allocation.
+        gpu_index_source_direct_seed_reserved_bytes = 1u;
+    invalid_zero_anchor_allocation.
+        gpu_index_source_direct_seed_planned_vulkan_bytes = 1u;
+    invalid_zero_anchor_allocation.
+        gpu_index_source_direct_seed_actual_vulkan_bytes = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(
+            invalid_zero_anchor_allocation)) {
+        return false;
+    }
+
+    auto zero_query = reflected;
+    zero_query.seed_lookup_dispatches = 0u;
+    zero_query.seed_sorted_dense_lookup_dispatches = 0u;
+    zero_query.seed_anchor_proof_operations = 0u;
+    zero_query.seed_canonical_anchor_count = 0u;
+    zero_query.seed_canonical_anchor_order_checks = 0u;
+    zero_query.seed_canonical_anchor_order_accepts = 0u;
+    zero_query.seed_anchor_digest_lane0 = 0u;
+    zero_query.seed_anchor_digest_lane1 = 0u;
+    zero_query.gpu_index_source_direct_zero_query_bypasses = 1u;
+    zero_query.gpu_index_source_direct_expected_seed_consumers = 0u;
+    zero_query.gpu_index_source_direct_completed_seed_consumers = 0u;
+    zero_query.gpu_index_source_direct_required_lookups = 0u;
+    zero_query.gpu_index_source_direct_required_hits = 0u;
+    zero_query.gpu_index_source_direct_mapped_prefix_passes = 0u;
+    zero_query.gpu_index_source_direct_mapped_prefix_lookups = 0u;
+    zero_query.gpu_index_source_direct_mapped_prefix_comparisons = 0u;
+    zero_query.gpu_index_source_direct_seed_slab_requested_bytes = 0u;
+    zero_query.gpu_index_source_direct_seed_slab_actual_bytes = 0u;
+    zero_query.gpu_index_source_direct_seed_slab_retained_bytes = 0u;
+    zero_query.gpu_index_source_direct_seed_slab_permit_releases = 0u;
+    zero_query.gpu_index_source_direct_seed_reserved_bytes = 0u;
+    zero_query.gpu_index_source_direct_seed_planned_vulkan_bytes = 0u;
+    zero_query.gpu_index_source_direct_seed_actual_vulkan_bytes = 0u;
+    zero_query.gpu_index_source_direct_seed_roundtrips = 0u;
+    zero_query.gpu_index_source_direct_seed_fence_completions = 0u;
+    zero_query.gpu_index_source_direct_pipeline_completions = 0u;
+    if (!source_direct_gpu_index_materialization_proof_accepted(zero_query)) {
+        return false;
+    }
+    auto invalid_zero_query_sort = zero_query;
+    invalid_zero_query_sort.seed_radix_sort_operations = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(
+            invalid_zero_query_sort)) {
+        return false;
+    }
+    auto invalid_zero_query_chain = zero_query;
+    invalid_zero_query_chain.chain_score_dispatches = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(
+            invalid_zero_query_chain)) {
+        return false;
+    }
+    zero_query.gpu_index_source_direct_required_hits = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(zero_query)) {
+        return false;
+    }
+
+    auto invalid = reflected;
+    invalid.post_seed_owned_cpu_index_releases = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_required_hits = 0u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_required_misses = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_completed_seed_consumers = 0u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_mapped_prefix_passes = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_retained_authorities = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_permit_releases = 0u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = retained;
+    invalid.gpu_index_permit_releases = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_gate_enabled = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_terminal_receipts = 0u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_seed_slab_actual_bytes = 1'023u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_actual_position_bytes = 3'071u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+    invalid = reflected;
+    invalid.gpu_index_source_direct_seed_slab_initial_capacity = 1u;
+    if (source_direct_gpu_index_materialization_proof_accepted(invalid)) {
+        return false;
+    }
+
+    PartialVulkanExecutionProof empty{};
+    empty.gpu_index_source_direct_operations = 1u;
+    empty.gpu_index_source_direct_empty_bypasses = 1u;
+    empty.gpu_index_source_direct_planning_receipts = 1u;
+    empty.gpu_index_source_direct_terminal_receipts = 1u;
+    empty.gpu_index_source_direct_terminal_successes = 1u;
+    if (!source_direct_gpu_index_materialization_proof_accepted(empty)) {
+        return false;
+    }
+    constexpr std::array empty_zero_fields{
+        &PartialVulkanExecutionProof::chain_score_dispatches,
+        &PartialVulkanExecutionProof::seed_bitonic_sort_dispatches,
+        &PartialVulkanExecutionProof::seed_radix_sort_operations,
+        &PartialVulkanExecutionProof::seed_radix_anchor_count,
+        &PartialVulkanExecutionProof::seed_radix_passes,
+        &PartialVulkanExecutionProof::seed_radix_histogram_dispatches,
+        &PartialVulkanExecutionProof::seed_radix_scan_dispatches,
+        &PartialVulkanExecutionProof::seed_radix_scatter_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_permit_releases,
+        &PartialVulkanExecutionProof::gpu_index_max_load_ppm,
+        &PartialVulkanExecutionProof::gpu_index_max_probe,
+        &PartialVulkanExecutionProof::gpu_index_count_phase_admissions,
+        &PartialVulkanExecutionProof::gpu_index_main_peak_admissions,
+        &PartialVulkanExecutionProof::gpu_index_resident_transfers,
+        &PartialVulkanExecutionProof::gpu_index_adoption_rereserve_attempts,
+        &PartialVulkanExecutionProof::gpu_index_adoption_successes,
+        &PartialVulkanExecutionProof::gpu_index_owned_resident_bytes,
+        &PartialVulkanExecutionProof::gpu_index_gate_enabled,
+        &PartialVulkanExecutionProof::gpu_index_gate_word_count,
+        &PartialVulkanExecutionProof::gpu_index_gate_mask,
+        &PartialVulkanExecutionProof::gpu_index_gate_set_bits,
+        &PartialVulkanExecutionProof::gpu_index_gate_digest_lo,
+        &PartialVulkanExecutionProof::gpu_index_gate_digest_hi,
+        &PartialVulkanExecutionProof::gpu_index_gate_count_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_gated_emit_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_ungated_emit_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_exact_count_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_exact_count_prefix_scan_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_exact_count_control_readbacks,
+        &PartialVulkanExecutionProof::gpu_index_deterministic_tile_emit_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_atomic_append_dispatches,
+        &PartialVulkanExecutionProof::gpu_index_emit_validation_control_readbacks,
+        &PartialVulkanExecutionProof::gpu_index_counted_minimizer_count,
+        &PartialVulkanExecutionProof::gpu_index_verified_emit_count,
+        &PartialVulkanExecutionProof::gpu_index_count_emit_parity_verified,
+        &PartialVulkanExecutionProof::gpu_index_target_minimizer_capacity_estimate,
+        &PartialVulkanExecutionProof::gpu_index_capacity_estimate_underestimated,
+        &PartialVulkanExecutionProof::gpu_index_arena_trimmed_before_permit_shrink,
+    };
+    for (const auto field : empty_zero_fields) {
+        auto contradictory_empty = empty;
+        contradictory_empty.*field = 1u;
+        if (source_direct_gpu_index_materialization_proof_accepted(
+                contradictory_empty)) {
+            return false;
+        }
+    }
+    empty.gpu_index_source_direct_resident_publications = 1u;
+    return !source_direct_gpu_index_materialization_proof_accepted(empty);
+}());
+
 static_assert(bioseq::gpu::vulkan::kPhaseCQueryGateWordCount == 2'097'152u);
 static_assert(bioseq::gpu::vulkan::kPhaseCQueryGateMask == 67'108'863u);
 
@@ -2335,6 +3007,15 @@ phase_c_gpu_index_ownership_proof_accepted(
         && proof.seed_open_addressed_lookup_dispatches == 0u
         && proof.seed_sorted_dense_lookup_dispatches
             == proof.seed_lookup_dispatches
+        && proof.seed_anchor_proof_operations
+            == proof.seed_lookup_dispatches
+        && proof.seed_canonical_anchor_count != 0u
+        && proof.seed_canonical_anchor_order_checks
+            == proof.seed_anchor_proof_operations
+        && proof.seed_canonical_anchor_order_accepts
+            == proof.seed_canonical_anchor_order_checks
+        && proof.seed_anchor_digest_lane0 != 0u
+        && proof.seed_anchor_digest_lane1 != 0u
         && proof.gpu_index_count_phase_admissions == 1u
         && proof.gpu_index_main_peak_admissions == 1u
         && proof.gpu_index_resident_transfers == 1u
@@ -2365,6 +3046,12 @@ static_assert([] {
     proof.target_index_build_dispatches = 1u;
     proof.seed_lookup_dispatches = 1u;
     proof.seed_sorted_dense_lookup_dispatches = 1u;
+    proof.seed_anchor_proof_operations = 1u;
+    proof.seed_canonical_anchor_count = 53u;
+    proof.seed_canonical_anchor_order_checks = 1u;
+    proof.seed_canonical_anchor_order_accepts = 1u;
+    proof.seed_anchor_digest_lane0 = 0x0123456789abcdefull;
+    proof.seed_anchor_digest_lane1 = 0xfedcba9876543210ull;
     proof.gpu_index_count_phase_admissions = 1u;
     proof.gpu_index_main_peak_admissions = 1u;
     proof.gpu_index_resident_transfers = 1u;
@@ -2953,6 +3640,7 @@ static_assert([] {
         bool expect_query_sketch = false;
         bool expect_target_sketch = false;
         bool expect_target_index_build = false;
+        bool expect_source_direct_target_index = false;
         bool expect_seed_lookup = false;
         bool expect_chain_score = true;
         if (algo == "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash") {
@@ -2961,6 +3649,7 @@ static_assert([] {
                    == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
             expect_query_sketch = true;
             expect_target_sketch = true;
+            expect_source_direct_target_index = true;
             expect_seed_lookup = true;
         } else if (algo == "bioseq_block_vulkan_phase_c_frontend") {
             expect_query_sketch = true;
@@ -2971,23 +3660,33 @@ static_assert([] {
             throw std::logic_error(fmt::format(
                 "explicit Vulkan row '{}' has no proof-stage contract", algo));
         }
-        if (strict_xxl_gate
-            && !results.partial_vulkan_execution_proof
-                    .exact_stage_mask_accepted(
-                        expect_query_sketch,
-                        expect_target_sketch,
-                        expect_target_index_build,
-                        expect_seed_lookup,
-                        expect_chain_score)) {
+        const auto& partial_vulkan_proof =
+            results.partial_vulkan_execution_proof;
+        const bool exact_stage_mask_accepted =
+            expect_source_direct_target_index
+            ? partial_vulkan_proof.exact_source_direct_stage_mask_accepted(
+                expect_query_sketch,
+                expect_target_sketch,
+                expect_seed_lookup,
+                expect_chain_score)
+            : partial_vulkan_proof.exact_stage_mask_accepted(
+                expect_query_sketch,
+                expect_target_sketch,
+                expect_target_index_build,
+                expect_seed_lookup,
+                expect_chain_score);
+        if (strict_xxl_gate && !exact_stage_mask_accepted) {
             const auto& proof = results.partial_vulkan_execution_proof;
             throw std::runtime_error(fmt::format(
                 "strict XXL Vulkan row '{}' lacks exact positive dispatch proof: "
                 "query_sketch={} target_sketch={} target_index_build={} "
-                "seed_lookup={} chain_score={} saturated={}",
+                "source_direct_target_index={} seed_lookup={} chain_score={} "
+                "saturated={}",
                 algo,
                 proof.query_sketch_dispatches,
                 proof.target_sketch_dispatches,
                 proof.target_index_build_dispatches,
+                expect_source_direct_target_index,
                 proof.seed_lookup_dispatches,
                 proof.chain_score_dispatches,
                 proof.saturated));
@@ -2996,39 +3695,75 @@ static_assert([] {
             && algo == "bioseq_block_vulkan_dp_vulkan_minimap_int") {
             const auto& proof = results.partial_vulkan_execution_proof;
             const bool materialization_proof_accepted =
-                legacy_gpu_index_materialization_proof_accepted(proof);
+                source_direct_gpu_index_materialization_proof_accepted(proof);
             if (!materialization_proof_accepted) {
                 throw std::runtime_error(fmt::format(
-                    "strict XXL legacy Vulkan row lacks exact GPU-index "
-                    "materialization proof: materializations={} open={} "
-                    "sorted={} seed_lookup={} seed_open={} seed_sorted={} "
-                    "D={} capacity={} load_ppm={} max_probe={} "
-                    "logical_bytes={} actual_bytes={} touched_bytes={} "
-                    "staging_bytes={} permit_releases={} reflections={} "
-                    "reflected_delta_bytes={} post_seed_gpu_evictions={} "
-                    "post_seed_gpu_bytes={} post_seed_cpu_releases={} "
-                    "post_seed_cpu_position_bytes={}",
-                    proof.gpu_index_materializations,
-                    proof.gpu_index_open_addressed_materializations,
-                    proof.gpu_index_sorted_dense_materializations,
-                    proof.seed_lookup_dispatches,
-                    proof.seed_open_addressed_lookup_dispatches,
-                    proof.seed_sorted_dense_lookup_dispatches,
-                    proof.gpu_index_unique_keys,
-                    proof.gpu_index_slot_capacity,
-                    proof.gpu_index_max_load_ppm,
-                    proof.gpu_index_max_probe,
-                    proof.gpu_index_logical_resident_bytes,
+                    "strict XXL direct-resident Vulkan row lacks exact "
+                    "source-direct GPU-index proof: operations={} empty={} "
+                    "planning_receipts={} terminal_receipts={} "
+                    "terminal_successes={} zero_query_bypasses={} "
+                    "direct_materializations={} publications={} "
+                    "source_releases={} source_bytes={} checksum_matches={} "
+                    "source_traversals={} mapped_traversals={} reflected={} "
+                    "retained={} retained_bytes={} cache_preinsertions={} "
+                    "expected_consumers={} completed_consumers={} "
+                    "required_lookups={} required_hits={} required_misses={} "
+                    "fallback_attempts={} prefix_passes={} "
+                    "prefix_lookups={} prefix_comparisons={} slab_requested={} "
+                    "slab_initial_capacity={} slab_actual={} slab_retained={} "
+                    "slab_releases={} "
+                    "roundtrips={} zero_anchor_bypasses={} fences={} "
+                    "cache_cleanup={} resident_cleanup_bytes={} "
+                    "pipeline_completions={} N={} D={} actual_bytes={} "
+                    "seed_lookup={} seed_sorted={} host_sort_fallbacks={} "
+                    "post_seed_cpu_releases={} post_seed_cpu_bytes={} "
+                    "saturated={}",
+                    proof.gpu_index_source_direct_operations,
+                    proof.gpu_index_source_direct_empty_bypasses,
+                    proof.gpu_index_source_direct_planning_receipts,
+                    proof.gpu_index_source_direct_terminal_receipts,
+                    proof.gpu_index_source_direct_terminal_successes,
+                    proof.gpu_index_source_direct_zero_query_bypasses,
+                    proof.gpu_index_source_direct_materializations,
+                    proof.gpu_index_source_direct_resident_publications,
+                    proof.gpu_index_source_direct_source_releases,
+                    proof.gpu_index_source_direct_source_released_bytes,
+                    proof.gpu_index_source_direct_checksum_matches,
+                    proof.gpu_index_source_direct_source_traversals,
+                    proof.gpu_index_source_direct_mapped_traversals,
+                    proof.gpu_index_source_direct_reflected_authorities,
+                    proof.gpu_index_source_direct_retained_authorities,
+                    proof.gpu_index_source_direct_retained_resident_permit_bytes,
+                    proof.gpu_index_source_direct_cache_preinsertions,
+                    proof.gpu_index_source_direct_expected_seed_consumers,
+                    proof.gpu_index_source_direct_completed_seed_consumers,
+                    proof.gpu_index_source_direct_required_lookups,
+                    proof.gpu_index_source_direct_required_hits,
+                    proof.gpu_index_source_direct_required_misses,
+                    proof.gpu_index_source_direct_fallback_attempts,
+                    proof.gpu_index_source_direct_mapped_prefix_passes,
+                    proof.gpu_index_source_direct_mapped_prefix_lookups,
+                    proof.gpu_index_source_direct_mapped_prefix_comparisons,
+                    proof.gpu_index_source_direct_seed_slab_requested_bytes,
+                    proof.gpu_index_source_direct_seed_slab_initial_capacity,
+                    proof.gpu_index_source_direct_seed_slab_actual_bytes,
+                    proof.gpu_index_source_direct_seed_slab_retained_bytes,
+                    proof.gpu_index_source_direct_seed_slab_permit_releases,
+                    proof.gpu_index_source_direct_seed_roundtrips,
+                    proof.gpu_index_source_direct_zero_anchor_bypasses,
+                    proof.gpu_index_source_direct_seed_fence_completions,
+                    proof.gpu_index_source_direct_cache_cleanup_releases,
+                    proof.gpu_index_source_direct_resident_cleanup_bytes,
+                    proof.gpu_index_source_direct_pipeline_completions,
+                    proof.gpu_index_retained_minimizer_count,
+                    proof.gpu_index_distinct_minimizer_count,
                     proof.gpu_index_actual_allocation_bytes,
-                    proof.gpu_index_fully_touched_bytes,
-                    proof.gpu_index_staging_bytes,
-                    proof.gpu_index_permit_releases,
-                    proof.gpu_index_process_footprint_reflections,
-                    proof.gpu_index_reflected_footprint_bytes,
-                    proof.post_seed_owned_gpu_cache_evictions,
-                    proof.post_seed_owned_gpu_resident_bytes_released,
+                    proof.seed_lookup_dispatches,
+                    proof.seed_sorted_dense_lookup_dispatches,
+                    proof.seed_host_sort_fallbacks,
                     proof.post_seed_owned_cpu_index_releases,
-                    proof.post_seed_owned_cpu_position_bytes_released));
+                    proof.post_seed_owned_cpu_position_bytes_released,
+                    proof.saturated));
             }
         }
         if (strict_xxl_gate
@@ -3165,6 +3900,10 @@ static_assert([] {
         return output;
     }
     bool every_pair_route_proven = !input.pairs.empty();
+    const bool source_direct_selected =
+        algo == "bioseq_block_vulkan_dp_vulkan_minimap_int";
+    bool every_source_direct_pair_proven =
+        source_direct_selected && !input.pairs.empty();
     for (std::size_t pair_index = 0; pair_index < input.pairs.size(); ++pair_index) {
         auto& pair = input.pairs[pair_index];     // pairs are `mutable` in AlignerInput; see field comment
         MatchResultCollection results;
@@ -3245,6 +3984,11 @@ static_assert([] {
         if (!pair_route_proven) {
             every_pair_route_proven = false;
         }
+        if (source_direct_selected
+            && !source_direct_gpu_index_materialization_proof_accepted(
+                results.partial_vulkan_execution_proof)) {
+            every_source_direct_pair_proven = false;
+        }
         if (results.paper_nthash_query_execution_proof_present) {
             output.paper_nthash_query_execution_proof.combine(
                 results.paper_nthash_query_execution_proof);
@@ -3294,6 +4038,8 @@ static_assert([] {
         }
         output.partial_vulkan_execution_proof.combine(
             results.partial_vulkan_execution_proof);
+        output.biological_fingerprint.combine(
+            results.biological_fingerprint());
         bool found_primary = false;
         for (const auto& match : results.view()) {
             if (dispatch.enforce_edit_threshold
@@ -3314,10 +4060,28 @@ static_assert([] {
             }
         }
     }
+    if (strict_xxl_gate
+        && (!output.biological_fingerprint.computed
+            || output.biological_fingerprint.saturated
+            || output.biological_fingerprint.collection_count
+                != output.total_pairs)) {
+        throw std::runtime_error(fmt::format(
+            "strict XXL biological fingerprint rejected algo='{}': "
+            "computed={} saturated={} collections={} pairs={}",
+            algo,
+            output.biological_fingerprint.computed,
+            output.biological_fingerprint.saturated,
+            output.biological_fingerprint.collection_count,
+            output.total_pairs));
+    }
     output.phase_c_gpu_index_ownership_proof_accepted =
         algo == "bioseq_block_vulkan_phase_c_frontend"
         && phase_c_gpu_index_ownership_proof_accepted(
             output.partial_vulkan_execution_proof);
+    output.source_direct_gpu_index_materialization_proof_accepted =
+        source_direct_selected
+        && every_pair_route_proven
+        && every_source_direct_pair_proven;
     output.selected_route_execution_proof_accepted =
         every_pair_route_proven;
     if (dispatch.enforce_edit_threshold && !every_pair_route_proven) {
@@ -3909,6 +4673,20 @@ record_prefilter_pipeline_match_count_parity(
 /// config. The framework drops keys that aren't declared on the active
 /// benchmark, so we always emit the full set; only the keys the running
 /// benchmark consumes land in the report.
+[[nodiscard]] constexpr double uint64_hi32_metric(
+        std::uint64_t value) noexcept {
+    return static_cast<double>(static_cast<std::uint32_t>(value >> 32u));
+}
+
+[[nodiscard]] constexpr double uint64_lo32_metric(
+        std::uint64_t value) noexcept {
+    return static_cast<double>(static_cast<std::uint32_t>(value));
+}
+
+[[nodiscard]] std::string uint64_hex(std::uint64_t value) {
+    return fmt::format("{:016x}", value);
+}
+
 [[nodiscard]] std::map<std::string, double> evaluate_aligner(
     std::string_view algorithm,
     const ParamMap& params,
@@ -4011,6 +4789,35 @@ record_prefilter_pipeline_match_count_parity(
         output.scalar_pipeline_execution_proof.ksw2_input_cell_area));
     metrics.emplace("selected_route_execution_proof_accepted",
         output.selected_route_execution_proof_accepted ? 1.0 : 0.0);
+    const auto& biological = output.biological_fingerprint;
+    metrics.emplace("biological_fingerprint_computed",
+        biological.computed ? 1.0 : 0.0);
+    metrics.emplace("biological_fingerprint_saturated",
+        biological.saturated ? 1.0 : 0.0);
+    metrics.emplace("biological_collection_count",
+        static_cast<double>(biological.collection_count));
+    metrics.emplace("biological_match_result_count",
+        static_cast<double>(biological.match_result_count));
+    metrics.emplace("biological_cigar_result_count",
+        static_cast<double>(biological.cigar_result_count));
+    metrics.emplace("biological_cigar_operation_count",
+        static_cast<double>(biological.cigar_operation_count));
+    metrics.emplace("biological_match_digest_lane0_hi32",
+        uint64_hi32_metric(biological.match_digest_lane0));
+    metrics.emplace("biological_match_digest_lane0_lo32",
+        uint64_lo32_metric(biological.match_digest_lane0));
+    metrics.emplace("biological_match_digest_lane1_hi32",
+        uint64_hi32_metric(biological.match_digest_lane1));
+    metrics.emplace("biological_match_digest_lane1_lo32",
+        uint64_lo32_metric(biological.match_digest_lane1));
+    metrics.emplace("biological_cigar_digest_lane0_hi32",
+        uint64_hi32_metric(biological.cigar_digest_lane0));
+    metrics.emplace("biological_cigar_digest_lane0_lo32",
+        uint64_lo32_metric(biological.cigar_digest_lane0));
+    metrics.emplace("biological_cigar_digest_lane1_hi32",
+        uint64_hi32_metric(biological.cigar_digest_lane1));
+    metrics.emplace("biological_cigar_digest_lane1_lo32",
+        uint64_lo32_metric(biological.cigar_digest_lane1));
     metrics.emplace("ksw2_batched_execution_proof_accepted",
         output.ksw2_batched_execution_proof_present
             && output.ksw2_batched_execution_proof.accepted(true)
@@ -4246,6 +5053,28 @@ record_prefilter_pipeline_match_count_parity(
                     static_cast<double>(output.partial_vulkan_execution_proof
                                             .seed_host_sort_fallbacks));
     const auto& gpu_index = output.partial_vulkan_execution_proof;
+    metrics.emplace("vulkan_seed_anchor_proof_operations",
+        static_cast<double>(gpu_index.seed_anchor_proof_operations));
+    metrics.emplace("vulkan_seed_canonical_anchor_count",
+        static_cast<double>(gpu_index.seed_canonical_anchor_count));
+    metrics.emplace("vulkan_seed_canonical_anchor_order_checks",
+        static_cast<double>(gpu_index.seed_canonical_anchor_order_checks));
+    metrics.emplace("vulkan_seed_canonical_anchor_order_accepts",
+        static_cast<double>(gpu_index.seed_canonical_anchor_order_accepts));
+    metrics.emplace("vulkan_seed_canonical_tie_normalization_runs",
+        static_cast<double>(
+            gpu_index.seed_canonical_tie_normalization_runs));
+    metrics.emplace("vulkan_seed_canonical_tie_normalization_anchors",
+        static_cast<double>(
+            gpu_index.seed_canonical_tie_normalization_anchors));
+    metrics.emplace("vulkan_seed_anchor_digest_lane0_hi32",
+        uint64_hi32_metric(gpu_index.seed_anchor_digest_lane0));
+    metrics.emplace("vulkan_seed_anchor_digest_lane0_lo32",
+        uint64_lo32_metric(gpu_index.seed_anchor_digest_lane0));
+    metrics.emplace("vulkan_seed_anchor_digest_lane1_hi32",
+        uint64_hi32_metric(gpu_index.seed_anchor_digest_lane1));
+    metrics.emplace("vulkan_seed_anchor_digest_lane1_lo32",
+        uint64_lo32_metric(gpu_index.seed_anchor_digest_lane1));
     metrics.emplace("gpu_index_materializations",
                     static_cast<double>(gpu_index.gpu_index_materializations));
     metrics.emplace("gpu_index_open_addressed_materializations",
@@ -4342,6 +5171,150 @@ record_prefilter_pipeline_match_count_parity(
         static_cast<double>(gpu_index.gpu_index_retained_minimizer_count));
     metrics.emplace("gpu_index_distinct_minimizer_count",
         static_cast<double>(gpu_index.gpu_index_distinct_minimizer_count));
+    metrics.emplace("source_direct_gpu_index_materialization_proof_accepted",
+        output.source_direct_gpu_index_materialization_proof_accepted
+            ? 1.0 : 0.0);
+    metrics.emplace("gpu_index_source_direct_operations",
+        static_cast<double>(gpu_index.gpu_index_source_direct_operations));
+    metrics.emplace("gpu_index_source_direct_terminal_successes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_terminal_successes));
+    metrics.emplace("gpu_index_source_direct_empty_bypasses",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_empty_bypasses));
+    metrics.emplace("gpu_index_source_direct_zero_query_bypasses",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_zero_query_bypasses));
+    metrics.emplace("gpu_index_source_direct_planning_receipts",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_planning_receipts));
+    metrics.emplace("gpu_index_source_direct_terminal_receipts",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_terminal_receipts));
+    metrics.emplace("gpu_index_source_direct_materializations",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_materializations));
+    metrics.emplace("gpu_index_source_direct_resident_publications",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_resident_publications));
+    metrics.emplace("gpu_index_source_direct_logical_control_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_logical_control_bytes));
+    metrics.emplace("gpu_index_source_direct_logical_position_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_logical_position_bytes));
+    metrics.emplace("gpu_index_source_direct_control_requirement_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_control_requirement_bytes));
+    metrics.emplace("gpu_index_source_direct_position_requirement_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_position_requirement_bytes));
+    metrics.emplace("gpu_index_source_direct_allocation_request_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_allocation_request_bytes));
+    metrics.emplace("gpu_index_source_direct_actual_control_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_actual_control_bytes));
+    metrics.emplace("gpu_index_source_direct_actual_position_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_actual_position_bytes));
+    metrics.emplace("gpu_index_source_direct_source_releases",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_source_releases));
+    metrics.emplace("gpu_index_source_direct_source_released_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_source_released_bytes));
+    metrics.emplace("gpu_index_source_direct_checksum_matches",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_checksum_matches));
+    metrics.emplace("gpu_index_source_direct_source_traversals",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_source_traversals));
+    metrics.emplace("gpu_index_source_direct_mapped_traversals",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_mapped_traversals));
+    metrics.emplace("gpu_index_source_direct_reflected_authorities",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_reflected_authorities));
+    metrics.emplace("gpu_index_source_direct_retained_authorities",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_retained_authorities));
+    metrics.emplace(
+        "gpu_index_source_direct_retained_resident_permit_bytes",
+        static_cast<double>(gpu_index
+            .gpu_index_source_direct_retained_resident_permit_bytes));
+    metrics.emplace("gpu_index_source_direct_cache_preinsertions",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_cache_preinsertions));
+    metrics.emplace("gpu_index_source_direct_expected_seed_consumers",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_expected_seed_consumers));
+    metrics.emplace("gpu_index_source_direct_completed_seed_consumers",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_completed_seed_consumers));
+    metrics.emplace("gpu_index_source_direct_required_lookups",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_required_lookups));
+    metrics.emplace("gpu_index_source_direct_required_hits",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_required_hits));
+    metrics.emplace("gpu_index_source_direct_required_misses",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_required_misses));
+    metrics.emplace("gpu_index_source_direct_fallback_attempts",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_fallback_attempts));
+    metrics.emplace("gpu_index_source_direct_mapped_prefix_passes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_mapped_prefix_passes));
+    metrics.emplace("gpu_index_source_direct_mapped_prefix_lookups",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_mapped_prefix_lookups));
+    metrics.emplace("gpu_index_source_direct_mapped_prefix_comparisons",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_mapped_prefix_comparisons));
+    metrics.emplace("gpu_index_source_direct_seed_slab_requested_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_slab_requested_bytes));
+    metrics.emplace("gpu_index_source_direct_seed_slab_initial_capacity",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_slab_initial_capacity));
+    metrics.emplace("gpu_index_source_direct_seed_slab_actual_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_slab_actual_bytes));
+    metrics.emplace("gpu_index_source_direct_seed_slab_retained_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_slab_retained_bytes));
+    metrics.emplace("gpu_index_source_direct_seed_slab_permit_releases",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_slab_permit_releases));
+    metrics.emplace("gpu_index_source_direct_seed_reserved_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_reserved_bytes));
+    metrics.emplace("gpu_index_source_direct_seed_planned_vulkan_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_planned_vulkan_bytes));
+    metrics.emplace("gpu_index_source_direct_seed_actual_vulkan_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_actual_vulkan_bytes));
+    metrics.emplace("gpu_index_source_direct_seed_roundtrips",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_roundtrips));
+    metrics.emplace("gpu_index_source_direct_zero_anchor_bypasses",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_zero_anchor_bypasses));
+    metrics.emplace("gpu_index_source_direct_seed_fence_completions",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_seed_fence_completions));
+    metrics.emplace("gpu_index_source_direct_cache_cleanup_releases",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_cache_cleanup_releases));
+    metrics.emplace("gpu_index_source_direct_resident_cleanup_bytes",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_resident_cleanup_bytes));
+    metrics.emplace("gpu_index_source_direct_pipeline_completions",
+        static_cast<double>(
+            gpu_index.gpu_index_source_direct_pipeline_completions));
     metrics.emplace("post_seed_owned_gpu_cache_evictions",
         static_cast<double>(
             gpu_index.post_seed_owned_gpu_cache_evictions));
@@ -4734,15 +5707,16 @@ record_prefilter_pipeline_match_count_parity(
 /// backend change; repeat zero is also summarized separately as first-repeat
 /// evidence by the framework raw manifest (not claimed globally cold).
 [[nodiscard]] std::string serialize_xxl_paired_sample(
-    std::string_view /*algo*/,
+    std::string_view algorithm,
     const ParamMap& /*params*/,
     const AlignerInput& /*input*/,
     const AlignerOutput& output)
 {
     const auto& proof = output.partial_vulkan_execution_proof;
+    const auto& biological = output.biological_fingerprint;
     return nlohmann::json{
         {"payload_schema", "bioseq.xxl_hifi.route_proof"},
-        {"payload_schema_version", 5},
+        {"payload_schema_version", 7},
         {"total_pairs", output.total_pairs},
         {"total_results", output.total_results},
         {"correct_pairs", output.correct_pairs},
@@ -4754,6 +5728,26 @@ record_prefilter_pipeline_match_count_parity(
             output.all_gpu_acceptance_eligible},
         {"phase_c_gpu_index_ownership_proof_accepted",
             output.phase_c_gpu_index_ownership_proof_accepted},
+        {"source_direct_gpu_index_materialization_proof_accepted",
+            algorithm == "bioseq_block_vulkan_dp_vulkan_minimap_int"
+                && output
+                    .source_direct_gpu_index_materialization_proof_accepted},
+        {"biological_fingerprint", {
+            {"computed", biological.computed},
+            {"saturated", biological.saturated},
+            {"collection_count", biological.collection_count},
+            {"match_result_count", biological.match_result_count},
+            {"cigar_result_count", biological.cigar_result_count},
+            {"cigar_operation_count", biological.cigar_operation_count},
+            {"match_digest_lane0_hex",
+                uint64_hex(biological.match_digest_lane0)},
+            {"match_digest_lane1_hex",
+                uint64_hex(biological.match_digest_lane1)},
+            {"cigar_digest_lane0_hex",
+                uint64_hex(biological.cigar_digest_lane0)},
+            {"cigar_digest_lane1_hex",
+                uint64_hex(biological.cigar_digest_lane1)},
+        }},
         {"exact_simd_query_execution_proof", two_stack_proof_json(
             output.exact_simd_query_execution_proof,
             output.exact_simd_query_execution_proof_present)},
@@ -4803,6 +5797,22 @@ record_prefilter_pipeline_match_count_parity(
             {"seed_radix_scatter_dispatches",
                 proof.seed_radix_scatter_dispatches},
             {"seed_host_sort_fallbacks", proof.seed_host_sort_fallbacks},
+            {"seed_anchor_proof_operations",
+                proof.seed_anchor_proof_operations},
+            {"seed_canonical_anchor_count",
+                proof.seed_canonical_anchor_count},
+            {"seed_canonical_anchor_order_checks",
+                proof.seed_canonical_anchor_order_checks},
+            {"seed_canonical_anchor_order_accepts",
+                proof.seed_canonical_anchor_order_accepts},
+            {"seed_canonical_tie_normalization_runs",
+                proof.seed_canonical_tie_normalization_runs},
+            {"seed_canonical_tie_normalization_anchors",
+                proof.seed_canonical_tie_normalization_anchors},
+            {"seed_anchor_digest_lane0_hex",
+                uint64_hex(proof.seed_anchor_digest_lane0)},
+            {"seed_anchor_digest_lane1_hex",
+                uint64_hex(proof.seed_anchor_digest_lane1)},
             {"gpu_index_materializations", proof.gpu_index_materializations},
             {"gpu_index_open_addressed_materializations",
                 proof.gpu_index_open_addressed_materializations},
@@ -4876,6 +5886,101 @@ record_prefilter_pipeline_match_count_parity(
                 proof.gpu_index_retained_minimizer_count},
             {"gpu_index_distinct_minimizer_count",
                 proof.gpu_index_distinct_minimizer_count},
+            {"gpu_index_source_direct_operations",
+                proof.gpu_index_source_direct_operations},
+            {"gpu_index_source_direct_terminal_successes",
+                proof.gpu_index_source_direct_terminal_successes},
+            {"gpu_index_source_direct_empty_bypasses",
+                proof.gpu_index_source_direct_empty_bypasses},
+            {"gpu_index_source_direct_zero_query_bypasses",
+                proof.gpu_index_source_direct_zero_query_bypasses},
+            {"gpu_index_source_direct_planning_receipts",
+                proof.gpu_index_source_direct_planning_receipts},
+            {"gpu_index_source_direct_terminal_receipts",
+                proof.gpu_index_source_direct_terminal_receipts},
+            {"gpu_index_source_direct_materializations",
+                proof.gpu_index_source_direct_materializations},
+            {"gpu_index_source_direct_resident_publications",
+                proof.gpu_index_source_direct_resident_publications},
+            {"gpu_index_source_direct_logical_control_bytes",
+                proof.gpu_index_source_direct_logical_control_bytes},
+            {"gpu_index_source_direct_logical_position_bytes",
+                proof.gpu_index_source_direct_logical_position_bytes},
+            {"gpu_index_source_direct_control_requirement_bytes",
+                proof.gpu_index_source_direct_control_requirement_bytes},
+            {"gpu_index_source_direct_position_requirement_bytes",
+                proof.gpu_index_source_direct_position_requirement_bytes},
+            {"gpu_index_source_direct_allocation_request_bytes",
+                proof.gpu_index_source_direct_allocation_request_bytes},
+            {"gpu_index_source_direct_actual_control_bytes",
+                proof.gpu_index_source_direct_actual_control_bytes},
+            {"gpu_index_source_direct_actual_position_bytes",
+                proof.gpu_index_source_direct_actual_position_bytes},
+            {"gpu_index_source_direct_source_releases",
+                proof.gpu_index_source_direct_source_releases},
+            {"gpu_index_source_direct_source_released_bytes",
+                proof.gpu_index_source_direct_source_released_bytes},
+            {"gpu_index_source_direct_checksum_matches",
+                proof.gpu_index_source_direct_checksum_matches},
+            {"gpu_index_source_direct_source_traversals",
+                proof.gpu_index_source_direct_source_traversals},
+            {"gpu_index_source_direct_mapped_traversals",
+                proof.gpu_index_source_direct_mapped_traversals},
+            {"gpu_index_source_direct_reflected_authorities",
+                proof.gpu_index_source_direct_reflected_authorities},
+            {"gpu_index_source_direct_retained_authorities",
+                proof.gpu_index_source_direct_retained_authorities},
+            {"gpu_index_source_direct_retained_resident_permit_bytes",
+                proof
+                    .gpu_index_source_direct_retained_resident_permit_bytes},
+            {"gpu_index_source_direct_cache_preinsertions",
+                proof.gpu_index_source_direct_cache_preinsertions},
+            {"gpu_index_source_direct_expected_seed_consumers",
+                proof.gpu_index_source_direct_expected_seed_consumers},
+            {"gpu_index_source_direct_completed_seed_consumers",
+                proof.gpu_index_source_direct_completed_seed_consumers},
+            {"gpu_index_source_direct_required_lookups",
+                proof.gpu_index_source_direct_required_lookups},
+            {"gpu_index_source_direct_required_hits",
+                proof.gpu_index_source_direct_required_hits},
+            {"gpu_index_source_direct_required_misses",
+                proof.gpu_index_source_direct_required_misses},
+            {"gpu_index_source_direct_fallback_attempts",
+                proof.gpu_index_source_direct_fallback_attempts},
+            {"gpu_index_source_direct_mapped_prefix_passes",
+                proof.gpu_index_source_direct_mapped_prefix_passes},
+            {"gpu_index_source_direct_mapped_prefix_lookups",
+                proof.gpu_index_source_direct_mapped_prefix_lookups},
+            {"gpu_index_source_direct_mapped_prefix_comparisons",
+                proof.gpu_index_source_direct_mapped_prefix_comparisons},
+            {"gpu_index_source_direct_seed_slab_requested_bytes",
+                proof.gpu_index_source_direct_seed_slab_requested_bytes},
+            {"gpu_index_source_direct_seed_slab_initial_capacity",
+                proof.gpu_index_source_direct_seed_slab_initial_capacity},
+            {"gpu_index_source_direct_seed_slab_actual_bytes",
+                proof.gpu_index_source_direct_seed_slab_actual_bytes},
+            {"gpu_index_source_direct_seed_slab_retained_bytes",
+                proof.gpu_index_source_direct_seed_slab_retained_bytes},
+            {"gpu_index_source_direct_seed_slab_permit_releases",
+                proof.gpu_index_source_direct_seed_slab_permit_releases},
+            {"gpu_index_source_direct_seed_reserved_bytes",
+                proof.gpu_index_source_direct_seed_reserved_bytes},
+            {"gpu_index_source_direct_seed_planned_vulkan_bytes",
+                proof.gpu_index_source_direct_seed_planned_vulkan_bytes},
+            {"gpu_index_source_direct_seed_actual_vulkan_bytes",
+                proof.gpu_index_source_direct_seed_actual_vulkan_bytes},
+            {"gpu_index_source_direct_seed_roundtrips",
+                proof.gpu_index_source_direct_seed_roundtrips},
+            {"gpu_index_source_direct_zero_anchor_bypasses",
+                proof.gpu_index_source_direct_zero_anchor_bypasses},
+            {"gpu_index_source_direct_seed_fence_completions",
+                proof.gpu_index_source_direct_seed_fence_completions},
+            {"gpu_index_source_direct_cache_cleanup_releases",
+                proof.gpu_index_source_direct_cache_cleanup_releases},
+            {"gpu_index_source_direct_resident_cleanup_bytes",
+                proof.gpu_index_source_direct_resident_cleanup_bytes},
+            {"gpu_index_source_direct_pipeline_completions",
+                proof.gpu_index_source_direct_pipeline_completions},
             {"post_seed_owned_gpu_cache_evictions",
                 proof.post_seed_owned_gpu_cache_evictions},
             {"post_seed_owned_gpu_resident_bytes_released",

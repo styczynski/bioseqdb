@@ -44,6 +44,7 @@ export module bioseq.indexing.minimizer_vulkan;
 import bioseq.indexing.minimizer_hashmap;
 import bioseq.indexing.storage;
 import bioseq.indexing.type;
+import bioseq.storage.size;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
 import bioseq.common.radix_sort;
@@ -511,6 +512,48 @@ make_gpu_source_direct_sorted_dense_identity(
     };
 }
 
+/// Return whether a target sketch tuple is compatible with the fixed
+/// source-direct sorted-dense device ABI.  Route selection and published
+/// identity validation share this predicate so an ineligible large target
+/// remains on the collector/CPU-index route instead of entering a transaction
+/// that must reject it later.
+[[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
+    std::uint32_t alphabet_size,
+    std::int64_t kmer_size,
+    std::int64_t window_size,
+    std::size_t minimizer_size,
+    std::size_t minimizer_alignment,
+    std::uint32_t minimizer_hash_bits,
+    std::uint32_t minimizer_position_bits) noexcept
+{
+    return (alphabet_size == 4u || alphabet_size == 5u)
+        && kmer_size == 15
+        && window_size == 10
+        && minimizer_size == 8u
+        && minimizer_alignment == 8u
+        && minimizer_hash_bits == 30u
+        && minimizer_position_bits == 33u;
+}
+
+/// Typed form used before the target sketch is materialized.  The layout is
+/// inspected at compile time without adding a new dispatch/template axis.
+template <class MinimizerT>
+[[nodiscard]] inline constexpr bool gpu_source_direct_tuple_supported(
+    std::uint32_t alphabet_size,
+    std::int64_t kmer_size,
+    std::int64_t window_size) noexcept
+{
+    using Layout = typename MinimizerT::layout_t;
+    return gpu_source_direct_tuple_supported(
+        alphabet_size,
+        kmer_size,
+        window_size,
+        sizeof(MinimizerT),
+        alignof(MinimizerT),
+        Layout::hash_bits,
+        Layout::pos_bits);
+}
+
 [[nodiscard]] inline bool gpu_source_direct_identity_well_formed(
     const GpuIndexCacheIdentity& identity) noexcept
 {
@@ -526,14 +569,14 @@ make_gpu_source_direct_sorted_dense_identity(
         && identity.operation_identity != 0u
         && (empty != nonempty)
         && identity.canonical_empty == empty
-        && (identity.alphabet_size == 4u
-            || identity.alphabet_size == 5u)
-        && identity.kmer_size == 15u
-        && identity.window_size == 10u
-        && identity.minimizer_size == 8u
-        && identity.minimizer_alignment == 8u
-        && identity.minimizer_hash_bits == 30u
-        && identity.minimizer_position_bits == 33u
+        && gpu_source_direct_tuple_supported(
+            identity.alphabet_size,
+            identity.kmer_size,
+            identity.window_size,
+            identity.minimizer_size,
+            identity.minimizer_alignment,
+            identity.minimizer_hash_bits,
+            identity.minimizer_position_bits)
         && identity.sorted_dense_abi_version
             == kMinimizerSortedDenseGpuAbiVersion
         && identity.representation == GpuIndexRepresentation::sorted_dense
@@ -643,8 +686,10 @@ struct GpuIndexMaterializationPlan {
     std::uint32_t load_ppm = 0;
 };
 
-inline constexpr std::uint64_t
-    kGpuSourceDirectPerBufferAllocationAllowance = 64u << 10u;
+inline constexpr VkBufferUsageFlags kGpuSourceDirectBufferUsage =
+    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+    | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+    | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
 struct GpuSortedSourceShape {
     std::uint64_t minimizer_count = 0u;
@@ -656,6 +701,11 @@ struct GpuSourceDirectPreflight {
     std::uint64_t control_bytes = 0u;
     std::uint64_t position_bytes = 0u;
     std::uint64_t logical_resident_bytes = 0u;
+    std::uint64_t control_allocation_requirement_bytes = 0u;
+    std::uint64_t position_allocation_requirement_bytes = 0u;
+    std::uint64_t control_allocation_allowance_bytes = 0u;
+    std::uint64_t position_allocation_allowance_bytes = 0u;
+    std::uint64_t allocation_requirement_bytes = 0u;
     std::uint64_t allowance_bytes = 0u;
     std::uint64_t conservative_request_bytes = 0u;
     bool canonical_empty = false;
@@ -682,6 +732,10 @@ struct GpuSourceDirectMaterializationProof {
     std::uint64_t logical_slot_bytes = 0u;
     std::uint64_t logical_position_bytes = 0u;
     std::uint64_t logical_resident_bytes = 0u;
+    std::uint64_t control_allocation_requirement_bytes = 0u;
+    std::uint64_t position_allocation_requirement_bytes = 0u;
+    std::uint64_t control_allocation_allowance_bytes = 0u;
+    std::uint64_t position_allocation_allowance_bytes = 0u;
     std::uint64_t conservative_allowance_bytes = 0u;
     std::uint64_t conservative_request_bytes = 0u;
     std::uint64_t actual_slot_allocation_bytes = 0u;
@@ -743,7 +797,7 @@ plan_gpu_exact_permit_reconciliation(
             != (std::numeric_limits<std::uint64_t>::max)()
         && actual == actual_allocation_sum
         && materialization.admitted_bytes == actual
-        && materialization.evidence.fully_touched_bytes >= actual
+        && materialization.evidence.fully_touched_bytes == actual
         && materialization.evidence.host_visible
         && materialization.evidence.host_coherent;
     const bool reflected = common
@@ -762,14 +816,21 @@ plan_gpu_exact_permit_reconciliation(
 
 [[nodiscard]] inline std::expected<GpuSourceDirectPreflight,
     GpuSourceDirectMaterializationError>
-plan_gpu_source_direct_sorted_dense(
+plan_gpu_source_direct_sorted_dense_with_requirements(
     std::uint64_t minimizer_count,
     std::uint64_t distinct_count,
-    std::uint64_t max_storage_buffer_range) noexcept
+    std::uint64_t max_storage_buffer_range,
+    std::uint64_t control_allocation_requirement_bytes,
+    std::uint64_t position_allocation_requirement_bytes) noexcept
 {
     const bool empty = minimizer_count == 0u && distinct_count == 0u;
     const bool nonempty = minimizer_count != 0u && distinct_count != 0u;
     if (empty) {
+        if (control_allocation_requirement_bytes != 0u
+            || position_allocation_requirement_bytes != 0u) {
+            return std::unexpected{
+                GpuSourceDirectMaterializationError::invalid_shape};
+        }
         return GpuSourceDirectPreflight{.canonical_empty = true};
     }
     if (!nonempty || distinct_count > minimizer_count) {
@@ -801,12 +862,27 @@ plan_gpu_source_direct_sorted_dense(
     }
     const std::uint64_t logical = bioseq::parallelism::saturating_add(
         control_bytes, position_bytes);
-    constexpr std::uint64_t allowance =
-        2u * kGpuSourceDirectPerBufferAllocationAllowance;
-    const std::uint64_t conservative =
-        bioseq::parallelism::saturating_add(logical, allowance);
     if (logical == (std::numeric_limits<std::uint64_t>::max)()
-        || conservative == (std::numeric_limits<std::uint64_t>::max)()) {
+        || control_allocation_requirement_bytes < control_bytes
+        || position_allocation_requirement_bytes < position_bytes) {
+        return std::unexpected{
+            GpuSourceDirectMaterializationError::device_abi_overflow};
+    }
+    const std::uint64_t control_allowance =
+        control_allocation_requirement_bytes - control_bytes;
+    const std::uint64_t position_allowance =
+        position_allocation_requirement_bytes - position_bytes;
+    const std::uint64_t allowance = bioseq::parallelism::saturating_add(
+        control_allowance, position_allowance);
+    const std::uint64_t allocation_requirement =
+        bioseq::parallelism::saturating_add(
+            control_allocation_requirement_bytes,
+            position_allocation_requirement_bytes);
+    if (allowance == (std::numeric_limits<std::uint64_t>::max)()
+        || allocation_requirement
+            == (std::numeric_limits<std::uint64_t>::max)()
+        || allocation_requirement
+            != bioseq::parallelism::saturating_add(logical, allowance)) {
         return std::unexpected{
             GpuSourceDirectMaterializationError::device_abi_overflow};
     }
@@ -818,10 +894,71 @@ plan_gpu_source_direct_sorted_dense(
         .control_bytes = control_bytes,
         .position_bytes = position_bytes,
         .logical_resident_bytes = logical,
+        .control_allocation_requirement_bytes =
+            control_allocation_requirement_bytes,
+        .position_allocation_requirement_bytes =
+            position_allocation_requirement_bytes,
+        .control_allocation_allowance_bytes = control_allowance,
+        .position_allocation_allowance_bytes = position_allowance,
+        .allocation_requirement_bytes = allocation_requirement,
         .allowance_bytes = allowance,
-        .conservative_request_bytes = conservative,
+        .conservative_request_bytes = allocation_requirement,
         .canonical_empty = false,
     };
+}
+
+[[nodiscard]] inline constexpr bool gpu_source_direct_preflight_fits(
+    const GpuSourceDirectPreflight& preflight,
+    std::uint64_t allocatable_bytes) noexcept
+{
+    return preflight.canonical_empty
+        ? preflight.conservative_request_bytes == 0u
+        : preflight.conservative_request_bytes != 0u
+            && preflight.conservative_request_bytes <= allocatable_bytes;
+}
+
+[[nodiscard]] inline std::expected<GpuSourceDirectPreflight,
+    GpuSourceDirectMaterializationError>
+plan_gpu_source_direct_sorted_dense(
+    bioseq::gpu::vulkan::Runtime& runtime,
+    std::uint64_t minimizer_count,
+    std::uint64_t distinct_count)
+{
+    const std::uint64_t max_storage_buffer_range =
+        runtime.features().max_storage_buffer_range;
+    const bool nonempty = minimizer_count != 0u && distinct_count != 0u;
+    const std::uint64_t control_bytes = nonempty
+        ? bioseq::parallelism::saturating_mul(
+            distinct_count, sizeof(GpuMinimizerSlot))
+        : 0u;
+    const std::uint64_t position_bytes = nonempty
+        ? bioseq::parallelism::saturating_mul(
+            minimizer_count, sizeof(std::uint64_t))
+        : 0u;
+    const auto logical_preflight =
+        plan_gpu_source_direct_sorted_dense_with_requirements(
+            minimizer_count,
+            distinct_count,
+            max_storage_buffer_range,
+            control_bytes,
+            position_bytes);
+    if (!logical_preflight || logical_preflight->canonical_empty) {
+        return logical_preflight;
+    }
+    const std::uint64_t control_requirement =
+        runtime.buffer_allocation_requirement(
+            logical_preflight->control_bytes,
+            kGpuSourceDirectBufferUsage);
+    const std::uint64_t position_requirement =
+        runtime.buffer_allocation_requirement(
+            logical_preflight->position_bytes,
+            kGpuSourceDirectBufferUsage);
+    return plan_gpu_source_direct_sorted_dense_with_requirements(
+        minimizer_count,
+        distinct_count,
+        max_storage_buffer_range,
+        control_requirement,
+        position_requirement);
 }
 
 template <class MinimizerT>
@@ -1026,6 +1163,9 @@ direct_fill_gpu_minimizer_index_sorted_dense(
     return splitmix64(checksum ^ splitmix64(word));
 }
 
+inline constexpr std::uint64_t kGpuSourceDirectChecksumSeed =
+    0x534f555243454450ULL;
+
 template <class MinimizerT>
 [[nodiscard]] inline GpuSourceDirectMaterializationProof
 direct_fill_gpu_minimizer_index_from_presorted_source(
@@ -1043,8 +1183,7 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
         throw GpuIndexDirectFillInvariant{};
     }
 
-    constexpr std::uint64_t checksum_seed = 0x534f555243454450ULL;
-    std::uint64_t source_checksum = checksum_seed;
+    std::uint64_t source_checksum = kGpuSourceDirectChecksumSeed;
     std::size_t source_offset = 0u;
     std::size_t control_index = 0u;
     std::uint64_t previous_hash = 0u;
@@ -1055,6 +1194,10 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             throw GpuIndexDirectFillInvariant{};
         }
         const std::size_t group_begin = source_offset;
+        source_checksum = gpu_source_direct_checksum_word(
+            source_checksum, hash);
+        source_checksum = gpu_source_direct_checksum_word(
+            source_checksum, group_begin);
         while (source_offset < source.size()
             && source[source_offset].kmer() == hash) {
             const std::uint64_t encoded =
@@ -1064,6 +1207,8 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
                 throw GpuIndexDirectFillInvariant{};
             }
             positions[source_offset] = encoded;
+            source_checksum = gpu_source_direct_checksum_word(
+                source_checksum, encoded);
             ++source_offset;
         }
         const std::uint64_t count = source_offset - group_begin;
@@ -1079,17 +1224,7 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             .pos_count = static_cast<std::uint32_t>(count),
         };
         source_checksum = gpu_source_direct_checksum_word(
-            source_checksum, hash);
-        source_checksum = gpu_source_direct_checksum_word(
-            source_checksum, group_begin);
-        source_checksum = gpu_source_direct_checksum_word(
             source_checksum, count);
-        for (std::size_t position_index = group_begin;
-             position_index < source_offset; ++position_index) {
-            source_checksum = gpu_source_direct_checksum_word(
-                source_checksum,
-                source[position_index].pos_strand_encoded());
-        }
         previous_hash = hash;
         have_previous_hash = true;
         ++control_index;
@@ -1099,7 +1234,7 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
         throw GpuIndexDirectFillInvariant{};
     }
 
-    std::uint64_t mapped_checksum = checksum_seed;
+    std::uint64_t mapped_checksum = kGpuSourceDirectChecksumSeed;
     std::uint64_t covered_positions = 0u;
     previous_hash = 0u;
     have_previous_hash = false;
@@ -1116,8 +1251,6 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             mapped_checksum, control.hash);
         mapped_checksum = gpu_source_direct_checksum_word(
             mapped_checksum, offset);
-        mapped_checksum = gpu_source_direct_checksum_word(
-            mapped_checksum, count);
         for (std::uint64_t position_index = offset;
              position_index < offset + count; ++position_index) {
             const std::uint64_t encoded =
@@ -1129,6 +1262,8 @@ direct_fill_gpu_minimizer_index_from_presorted_source(
             mapped_checksum = gpu_source_direct_checksum_word(
                 mapped_checksum, encoded);
         }
+        mapped_checksum = gpu_source_direct_checksum_word(
+            mapped_checksum, count);
         covered_positions += count;
         previous_hash = control.hash;
         have_previous_hash = true;
@@ -1154,6 +1289,7 @@ materialize_sorted_dense_from_presorted_minimizers(
     bioseq::gpu::vulkan::Runtime& runtime,
     std::span<const MinimizerT> source,
     bioseq::storage::sequence_size_t target_len,
+    const GpuSourceDirectPreflight& preflight,
     const GpuMinimizerIndexCacheKey& key,
     bioseq::parallelism::MemoryPermit& resident_permit)
 {
@@ -1179,6 +1315,9 @@ materialize_sorted_dense_from_presorted_minimizers(
         key.device_uuid.begin(), key.device_uuid.end(),
         [](std::uint8_t byte) noexcept { return byte != 0u; });
     if (shape.minimizer_count == 0u || shape.distinct_count == 0u
+        || preflight.canonical_empty
+        || preflight.shape.minimizer_count != shape.minimizer_count
+        || preflight.shape.distinct_count != shape.distinct_count
         || key.target_len != static_cast<std::uint64_t>(target_len)
         || key.position_count != shape.minimizer_count
         || key.table_size != shape.distinct_count
@@ -1223,16 +1362,48 @@ materialize_sorted_dense_from_presorted_minimizers(
             .error = GpuSourceDirectMaterializationError::
                 storage_buffer_range_exceeded}};
     }
+    if (preflight.control_bytes != plan.slot_bytes
+        || preflight.position_bytes != plan.position_bytes
+        || preflight.logical_resident_bytes != plan.resident_bytes
+        || preflight.control_allocation_requirement_bytes
+            < preflight.control_bytes
+        || preflight.position_allocation_requirement_bytes
+            < preflight.position_bytes
+        || preflight.control_allocation_allowance_bytes
+            != preflight.control_allocation_requirement_bytes
+                - preflight.control_bytes
+        || preflight.position_allocation_allowance_bytes
+            != preflight.position_allocation_requirement_bytes
+                - preflight.position_bytes
+        || preflight.allowance_bytes
+            != bioseq::parallelism::saturating_add(
+                preflight.control_allocation_allowance_bytes,
+                preflight.position_allocation_allowance_bytes)
+        || preflight.allocation_requirement_bytes
+            != bioseq::parallelism::saturating_add(
+                preflight.control_allocation_requirement_bytes,
+                preflight.position_allocation_requirement_bytes)
+        || preflight.conservative_request_bytes
+            != preflight.allocation_requirement_bytes) {
+        return std::unexpected{GpuSourceDirectMaterializationFailure{
+            .error = GpuSourceDirectMaterializationError::invariant_failed}};
+    }
     GpuSourceDirectMaterializationProof proof{
         .shape = shape,
         .logical_slot_bytes = plan.slot_bytes,
         .logical_position_bytes = plan.position_bytes,
         .logical_resident_bytes = plan.resident_bytes,
-        .conservative_allowance_bytes =
-            2u * kGpuSourceDirectPerBufferAllocationAllowance,
-        .conservative_request_bytes = bioseq::parallelism::saturating_add(
-            plan.resident_bytes,
-            2u * kGpuSourceDirectPerBufferAllocationAllowance),
+        .control_allocation_requirement_bytes =
+            preflight.control_allocation_requirement_bytes,
+        .position_allocation_requirement_bytes =
+            preflight.position_allocation_requirement_bytes,
+        .control_allocation_allowance_bytes =
+            preflight.control_allocation_allowance_bytes,
+        .position_allocation_allowance_bytes =
+            preflight.position_allocation_allowance_bytes,
+        .conservative_allowance_bytes = preflight.allowance_bytes,
+        .conservative_request_bytes =
+            preflight.allocation_requirement_bytes,
     };
     if (!resident_permit
         || resident_permit.bytes() != proof.conservative_request_bytes) {
@@ -1241,27 +1412,36 @@ materialize_sorted_dense_from_presorted_minimizers(
                 resident_memory_admission_denied}};
     }
 
-    constexpr VkBufferUsageFlags usage =
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT;
     auto resident = std::make_shared<GpuResidentMinimizerIndex>();
-    bool reconciliation_failed = false;
+    bool allocation_requirement_mismatch = false;
     bool non_host_visible = false;
-    bioseq::parallelism::MemoryAdmissionFailure growth_failure{};
     auto* const runtime_ptr = &runtime;
     try {
         const auto materialization =
             bioseq::parallelism::MemoryAdmissionController::instance().materialize(
                 resident_permit,
-                [resident, source, target_len, shape, plan, usage, runtime_ptr,
-                 &resident_permit, &proof, &reconciliation_failed,
-                 &non_host_visible, &growth_failure]()
+                [resident, source, target_len, shape, plan, preflight,
+                 runtime_ptr,
+                 &resident_permit, &proof,
+                 &allocation_requirement_mismatch, &non_host_visible]()
                     -> bioseq::parallelism::MemoryMaterializationEvidence {
                     resident->slots = runtime_ptr->create_device_buffer(
-                        plan.slot_buffer_bytes, usage);
+                        plan.slot_buffer_bytes,
+                        kGpuSourceDirectBufferUsage);
                     resident->positions = runtime_ptr->create_device_buffer(
-                        plan.position_buffer_bytes, usage);
+                        plan.position_buffer_bytes,
+                        kGpuSourceDirectBufferUsage);
+                    if (resident->slots.allocation_bytes
+                            != preflight.
+                                control_allocation_requirement_bytes
+                        || resident->positions.allocation_bytes
+                            != preflight.
+                                position_allocation_requirement_bytes) {
+                        allocation_requirement_mismatch = true;
+                        resident->positions.reset();
+                        resident->slots.reset();
+                        return {};
+                    }
                     const std::uint64_t actual_allocation_bytes =
                         bioseq::parallelism::saturating_add(
                             resident->slots.allocation_bytes,
@@ -1271,20 +1451,10 @@ materialize_sorted_dense_from_presorted_minimizers(
                             resident_permit.bytes(),
                             actual_allocation_bytes);
                     if (reconciliation
-                        == GpuPermitReconciliationAction::grow) {
-                        if (!resident_permit.grow_to(
-                                actual_allocation_bytes, &growth_failure)) {
-                            reconciliation_failed = true;
-                            resident->positions.reset();
-                            resident->slots.reset();
-                            return {};
-                        }
-                    } else if (reconciliation
-                               == GpuPermitReconciliationAction::shrink) {
-                        resident_permit.shrink_to(actual_allocation_bytes);
-                    } else if (reconciliation
-                               == GpuPermitReconciliationAction::invalid) {
-                        reconciliation_failed = true;
+                            != GpuPermitReconciliationAction::unchanged
+                        || actual_allocation_bytes
+                            != preflight.allocation_requirement_bytes) {
+                        allocation_requirement_mismatch = true;
                         resident->positions.reset();
                         resident->slots.reset();
                         return {};
@@ -1360,11 +1530,9 @@ materialize_sorted_dense_from_presorted_minimizers(
         return std::unexpected{GpuSourceDirectMaterializationFailure{
             .error = GpuSourceDirectMaterializationError::invariant_failed}};
     }
-    if (reconciliation_failed) {
+    if (allocation_requirement_mismatch) {
         return std::unexpected{GpuSourceDirectMaterializationFailure{
-            .error = GpuSourceDirectMaterializationError::
-                resident_memory_admission_denied,
-            .admission = growth_failure}};
+            .error = GpuSourceDirectMaterializationError::invariant_failed}};
     }
     if (non_host_visible) {
         return std::unexpected{GpuSourceDirectMaterializationFailure{
@@ -1764,6 +1932,7 @@ public:
         resident_limit,
         gate_identity_mismatch,
         resident_key_mismatch,
+        duplicate_direct_key,
     };
     enum class RequiredPreinsertLookupError : std::uint8_t {
         invalid_key,
@@ -1846,6 +2015,10 @@ public:
         if (decline_out != nullptr) {
             *decline_out = GpuIndexUploadDecline{};
         }
+        if (key.source_direct_sorted_dense) {
+            throw bioseq::gpu::vulkan::VulkanRuntimeError(
+                "source-direct sorted-dense keys require preinsert lookup");
+        }
         std::lock_guard<std::mutex> guard(mu_);
         validate_key_gate_locked(key);
         if (cache_enabled) {
@@ -1912,6 +2085,9 @@ public:
         }
         if (!(handle->key == key)) {
             return std::unexpected{BuiltInsertError::resident_key_mismatch};
+        }
+        if (key.source_direct_sorted_dense && entries_.contains(key)) {
+            return std::unexpected{BuiltInsertError::duplicate_direct_key};
         }
         const std::uint64_t handle_bytes = handle_resident_bytes(*handle);
         if (resident_limit_bytes_ != 0u

@@ -1607,7 +1607,8 @@ TEST_CASE("vulkan minimizer: target-index count admission covers persistent aren
 }
 
 TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve adopted index",
-          "[vulkan][seeding][phase-c][target-index][arena][ownership]") {
+          "[vulkan][seeding][phase-c][target-index][arena][ownership]"
+          "[pipeline-preflight]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
         return;
@@ -1656,6 +1657,35 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
         runtime.pipeline_cache_metadata_reserved_bytes();
     using seq_type = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     auto sequence = compact_sequence_range<seq_type>(DNA4_FIXTURE);
+    const vk::SequenceUploadView upload =
+        vk::make_sequence_upload_view(sequence);
+    const vk::VulkanSketchParams target_index_params{
+        .bp_size = static_cast<std::uint32_t>(upload.bp_size),
+        .window_size = 10u,
+        .kmer_size = 15u,
+        .hash_bits = vk::minimizer_wire_traits<MinimapSketchData>::hash_bits,
+        .hash_shift = vk::minimizer_wire_traits<MinimapSketchData>::hash_shift,
+        .pos_bits = vk::minimizer_wire_traits<MinimapSketchData>::pos_bits,
+        .minimizer_word_kind = static_cast<std::uint32_t>(
+            vk::minimizer_wire_traits<MinimapSketchData>::word_kind),
+        .minimizer_words32 = vk::minimizer_wire_traits<
+            MinimapSketchData>::words32_per_minimizer,
+        .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
+        .unit_bits = upload.unit_bits,
+        .bits_per_char = upload.bits_per_char,
+        .letters_per_unit = upload.letters_per_unit,
+        .alphabet_size = upload.alphabet_size,
+        .seq_word_offset = 0u,
+        .char_mask = upload.char_mask,
+        .padding_letters = upload.padding_letters,
+    };
+    runtime.prepare_phase_c_target_index_pipelines(target_index_params);
+    const std::uint64_t target_index_pipeline_metadata =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    REQUIRE(target_index_pipeline_metadata >= cache_metadata_before);
+    runtime.prepare_phase_c_target_index_pipelines(target_index_params);
+    REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes()
+            == target_index_pipeline_metadata);
     const std::uint64_t pessimistic_capacity =
         vk::estimate_vulkan_minimizer_capacity(sequence.bp_size(), 10u);
     vk::VulkanSketchDecline decline{};
@@ -1664,6 +1694,10 @@ TEST_CASE("vulkan minimizer: exact ungated count and seed arena trim preserve ad
     INFO(vk::format_vulkan_sketch_decline(decline));
     REQUIRE(built.has_value());
     REQUIRE(built->valid);
+    // The build's count/radix/mark/emit route must not discover any pipeline
+    // metadata after the caller has acquired its transient allocation permit.
+    REQUIRE(runtime.pipeline_cache_metadata_reserved_bytes()
+            == target_index_pipeline_metadata);
     REQUIRE(built->ownership.count_phase_admissions == 1u);
     REQUIRE(built->ownership.main_peak_admissions == 1u);
     REQUIRE(built->ownership.exact_count_dispatches == 1u);

@@ -1956,6 +1956,34 @@ build_gpu_index_from_upload_on_device(
         decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
         return std::nullopt;
     }
+
+    const auto query_gate_identity = query_gate.canonical_identity();
+    const VulkanSketchParams sketch_params{
+        .bp_size = static_cast<std::uint32_t>(upload.bp_size),
+        .window_size = static_cast<std::uint32_t>(window_size),
+        .kmer_size = static_cast<std::uint32_t>(kmer_size),
+        .hash_bits = minimizer_wire_traits<MinimizerT>::hash_bits,
+        .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
+        .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
+        .minimizer_word_kind = static_cast<std::uint32_t>(
+            minimizer_wire_traits<MinimizerT>::word_kind),
+        .minimizer_words32 =
+            minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+        .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
+        .unit_bits = upload.unit_bits,
+        .bits_per_char = upload.bits_per_char,
+        .letters_per_unit = upload.letters_per_unit,
+        .alphabet_size = upload.alphabet_size,
+        .seq_word_offset = 0u,
+        .char_mask = upload.char_mask,
+        .padding_letters = upload.padding_letters,
+    };
+    // Pipeline-cache metadata is process-lived authority. Resolve the exact
+    // target-index key set before reserving the transient count/main peak so a
+    // cold pipeline cannot nest a metadata admission after large mapped Vulkan
+    // allocations have become visible in the process footprint.
+    runtime.prepare_phase_c_target_index_pipelines(sketch_params);
+
     auto& admission = MemoryAdmissionController::instance();
     bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
     auto permit = admission.try_reserve(admission_bytes, &admission_failure);
@@ -1989,27 +2017,6 @@ build_gpu_index_from_upload_on_device(
     }
 
     try {
-        const auto query_gate_identity = query_gate.canonical_identity();
-        const VulkanSketchParams sketch_params{
-            .bp_size = static_cast<std::uint32_t>(upload.bp_size),
-            .window_size = static_cast<std::uint32_t>(window_size),
-            .kmer_size = static_cast<std::uint32_t>(kmer_size),
-            .hash_bits = minimizer_wire_traits<MinimizerT>::hash_bits,
-            .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
-            .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
-            .minimizer_word_kind = static_cast<std::uint32_t>(
-                minimizer_wire_traits<MinimizerT>::word_kind),
-            .minimizer_words32 =
-                minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
-            .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
-            .unit_bits = upload.unit_bits,
-            .bits_per_char = upload.bits_per_char,
-            .letters_per_unit = upload.letters_per_unit,
-            .alphabet_size = upload.alphabet_size,
-            .seq_word_offset = 0u,
-            .char_mask = upload.char_mask,
-            .padding_letters = upload.padding_letters,
-        };
         GpuBuiltIndex built{};
         const auto materialization = admission.materialize(
             *permit,

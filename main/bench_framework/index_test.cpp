@@ -1844,6 +1844,11 @@ TEST_CASE("bench_framework end-to-end happy path", "[bench_framework]") {
     REQUIRE(meta.contains("timestamp"));
     REQUIRE(meta.contains("created"));
     REQUIRE(meta.contains("fast"));
+    REQUIRE(meta.contains("history_eligible"));
+    REQUIRE(meta.at("history_eligible") == true);
+    auto promotion_path = outcome.report_path;
+    promotion_path += ".history-promotion.tmp";
+    REQUIRE_FALSE(std::filesystem::exists(promotion_path));
     {
         const auto commit = meta["commit"].get<std::string>();
         const bool empty_or_hex_40 =
@@ -2466,12 +2471,75 @@ TEST_CASE("paired rules aggregate repeat-wise ratios and fail closed on schedule
     (void)paired_dir;
     REQUIRE(paired.exit_code == 1);
     REQUIRE(paired.report["rule_violations"].size() == 1);
+    REQUIRE(paired.report["meta"]["history_eligible"] == false);
     const auto& violation = paired.report["rule_violations"][0];
     REQUIRE(violation["comparison_mode"] == "paired_iteration_ratio");
     REQUIRE(violation["warmup_repetitions"] == 0);
     REQUIRE(violation["args"][0].get<double>()
             == Catch::Approx(70.0 / 60.0));
     REQUIRE(violation["args"][1] == 1.0);
+    REQUIRE(paired.report["paired_rule_evidence"].size() == 1);
+    const auto& paired_evidence =
+        paired.report["paired_rule_evidence"][0];
+    REQUIRE(paired_evidence["rule_name"] == "paired_p50");
+    REQUIRE(paired_evidence["numerator_route"]["region"]
+            == "all_regions");
+    REQUIRE(paired_evidence["denominator_route"]["region"]
+            == "all_regions");
+    REQUIRE(paired_evidence["observed_paired_ratio"].get<double>()
+            == Catch::Approx(70.0 / 60.0));
+    REQUIRE(paired_evidence["accepted"] == false);
+
+    static constexpr std::string_view independent_min_equality_rules = R"json([
+      ["independent_min_equality",{"key":"lhs"},{"compare":"=","tolerance%":0,"aggregate":"min"},{"key":"rhs"}]
+    ])json";
+    static constexpr std::string_view exact_iteration_rules = R"json([
+      ["exact_iteration_equality",{"key":"lhs"},{"compare":"=","tolerance%":0,"aggregate":"min","pairing":"by_iteration_exact"},{"key":"rhs"}]
+    ])json";
+    const std::array<std::int64_t, 3> equal_min_lhs{{10, 10, 11}};
+    const std::array<std::int64_t, 3> equal_min_rhs{{10, 10, 12}};
+
+    // Independent minima hide the later mismatch. Exact iteration pairing
+    // must retain each logical repeat and report the first unequal witnesses.
+    auto [equal_min_dir, equal_min] = run_fixture(
+        independent_min_equality_rules, true,
+        equal_min_lhs, equal_min_rhs);
+    (void)equal_min_dir;
+    REQUIRE(equal_min.exit_code == 0);
+    REQUIRE(equal_min.report["rule_violations"].empty());
+
+    auto [exact_dir, exact] = run_fixture(
+        exact_iteration_rules, true, equal_min_lhs, equal_min_rhs);
+    (void)exact_dir;
+    REQUIRE(exact.exit_code == 1);
+    REQUIRE(exact.report["rule_violations"].size() == 1);
+    const auto& exact_violation = exact.report["rule_violations"][0];
+    REQUIRE(exact_violation["comparison_mode"] == "paired_iteration_exact");
+    REQUIRE(exact_violation["warmup_repetitions"] == 0);
+    REQUIRE(exact_violation["args"]
+            == nlohmann::json::array({11.0, 12.0}));
+    REQUIRE(exact_violation["args_present"]
+            == nlohmann::json::array({true, true}));
+
+    auto [exact_equal_dir, exact_equal] = run_fixture(
+        exact_iteration_rules, true,
+        std::array<std::int64_t, 3>{{0, 10, 12}},
+        std::array<std::int64_t, 3>{{0, 10, 12}});
+    (void)exact_equal_dir;
+    REQUIRE(exact_equal.exit_code == 0);
+    REQUIRE(exact_equal.report["rule_violations"].empty());
+
+    static constexpr std::string_view invalid_exact_tolerance_rules = R"json([
+      ["invalid_exact_tolerance",{"key":"lhs"},{"compare":"=","tolerance%":1,"aggregate":"min","pairing":"by_iteration_exact"},{"key":"rhs"}]
+    ])json";
+    auto [invalid_exact_dir, invalid_exact] = run_fixture(
+        invalid_exact_tolerance_rules, true,
+        equal_min_lhs, equal_min_rhs);
+    (void)invalid_exact_dir;
+    REQUIRE(invalid_exact.exit_code == 1);
+    REQUIRE(stderr_contains(
+        invalid_exact.captured_stderr,
+        "exact_iteration_rule_requires_zero_tolerance_equality"));
 
     static constexpr std::string_view diagnostic_rules = R"json([
       ["paired_diagnostic",{"key":"lhs"},{"compare":"<","tolerance%":10,"aggregate":"p50","pairing":"by_iteration_ratio","blocking":false},{"key":"rhs"}]
@@ -2482,6 +2550,7 @@ TEST_CASE("paired rules aggregate repeat-wise ratios and fail closed on schedule
     REQUIRE(diagnostic.exit_code == 0);
     REQUIRE(diagnostic.report["rule_violations"].size() == 1);
     REQUIRE(diagnostic.report["rule_violations"][0]["blocking"] == false);
+    REQUIRE(diagnostic.report["meta"]["history_eligible"] == true);
 
     // Pairing cannot be enabled on a benchmark that may contend with a
     // sibling benchmark. Configuration validation rejects it before work.
@@ -2512,6 +2581,66 @@ TEST_CASE("paired rules aggregate repeat-wise ratios and fail closed on schedule
     (void)warm_dir;
     REQUIRE(warm.exit_code == 0);
     REQUIRE(warm.report["rule_violations"].empty());
+    REQUIRE(warm.report["paired_rule_evidence"].size() == 1);
+    const auto& warm_evidence = warm.report["paired_rule_evidence"][0];
+    REQUIRE(warm_evidence["rule_name"] == "paired_max_after_cold");
+    REQUIRE(warm_evidence["comparison_mode"]
+            == "paired_iteration_ratio");
+    REQUIRE(warm_evidence["metric"] == "synthetic_ns");
+    REQUIRE(warm_evidence["numerator_route"]["region"] == "all_regions");
+    REQUIRE(warm_evidence["denominator_route"]["region"] == "all_regions");
+    REQUIRE(warm_evidence["comparator"]["warmup_repetitions"] == 1);
+    REQUIRE(warm_evidence["inputs_present"]
+            == nlohmann::json::array({true, true}));
+    REQUIRE(warm_evidence["repeats"].size() == 3);
+    REQUIRE(warm_evidence["repeats"][0]["included_after_warmup"]
+            == false);
+    REQUIRE(warm_evidence["repeats"][1]["included_after_warmup"]
+            == true);
+    REQUIRE(warm_evidence["repeats"][2]["included_after_warmup"]
+            == true);
+    for (const auto& repeat : warm_evidence["repeats"]) {
+        REQUIRE(repeat["numerator_samples"].size() == 1);
+        REQUIRE(repeat["denominator_samples"].size() == 1);
+        REQUIRE(repeat["numerator_schedule"].is_object());
+        REQUIRE(repeat["denominator_schedule"].is_object());
+        REQUIRE(repeat["schedule_identity_matches"] == true);
+    }
+    REQUIRE(warm_evidence["observed_paired_ratio"].get<double>()
+            == Catch::Approx(0.5));
+    REQUIRE(warm_evidence["accepted"] == true);
+
+    // All-region evidence is part of acceptance, not a post-hoc numeric
+    // decoration. Corrupting an actual scheduler coordinate must therefore
+    // fail closed even when the repeat-wise numeric ratio would pass.
+    {
+        PairedScheduleEvidenceFaultReset reset_fault;
+        set_paired_schedule_evidence_fault_for_testing(
+            PairedScheduleEvidenceFaultForTesting::wrong_shuffle_seed);
+        auto [corrupt_dir, corrupt] = run_fixture(
+            paired_rules, true,
+            std::array<std::int64_t, 3>{{50, 50, 50}},
+            std::array<std::int64_t, 3>{{100, 100, 100}});
+        (void)corrupt_dir;
+        REQUIRE(corrupt.exit_code == 1);
+        REQUIRE(corrupt.report["paired_rule_evidence"].size() == 1);
+        const auto& corrupt_evidence =
+            corrupt.report["paired_rule_evidence"][0];
+        REQUIRE(corrupt_evidence["numerator_route"]["region"]
+                == "all_regions");
+        REQUIRE(corrupt_evidence["denominator_route"]["region"]
+                == "all_regions");
+        REQUIRE(corrupt_evidence["inputs_present"]
+                == nlohmann::json::array({true, true}));
+        REQUIRE(corrupt_evidence["observed_paired_ratio"].is_null());
+        REQUIRE(corrupt_evidence["accepted"] == false);
+        for (const auto& repeat : corrupt_evidence["repeats"]) {
+            REQUIRE(repeat["schedule_identity_matches"] == false);
+        }
+        REQUIRE(corrupt.report["rule_violations"].size() == 1);
+        REQUIRE(corrupt.report["rule_violations"][0]["args_present"]
+                == nlohmann::json::array({false, false}));
+    }
 }
 
 TEST_CASE("paired named-region rules rebuild duplicate descriptors per repeat",
@@ -3365,6 +3494,7 @@ TEST_CASE("regression rule fires after value drift", "[bench_framework][regressi
         REQUIRE(entry["regression_since"].get<std::string>() == "report_1.json");
         REQUIRE(entry["previously"].get<double>() == 2.0);   // 1.0 + 1.0
         REQUIRE(entry["now"].get<double>()        == 4.0);   // 2.0 + 2.0
+        REQUIRE(outcome.report["meta"]["history_eligible"] == false);
     }
 }
 
@@ -3409,9 +3539,6 @@ TEST_CASE("regression history skips every ineligible candidate",
     const auto evaluate_one = [](
         std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return {{"value", 1.0}}; };
-    const auto evaluate_one_and_half = [](
-        std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
-        -> std::map<std::string, double> { return {{"value", 1.5}}; };
     const auto evaluate_two = [](
         std::string_view, const ParamMap&, const ToyInput&, const ToyOutput&)
         -> std::map<std::string, double> { return {{"value", 2.0}}; };
@@ -3436,6 +3563,10 @@ TEST_CASE("regression history skips every ineligible candidate",
         malformed_record_count,
         missing_fast,
         mismatched_fast,
+        malformed_history_seal,
+        malformed_legacy_findings,
+        malformed_legacy_finding_entry,
+        legacy_finding_without_blocking,
         sample_count,
         finite_count,
         aggregate,
@@ -3444,7 +3575,7 @@ TEST_CASE("regression history skips every ineligible candidate",
         Mutation mutation;
         std::string_view reason;
     };
-    static constexpr std::array<MutationCase, 8> mutations{{
+    static constexpr std::array<MutationCase, 12> mutations{{
         {Mutation::incomplete_raw, "raw_evidence.complete is false"},
         {Mutation::missing_raw_complete,
          "raw_evidence.complete is missing or malformed"},
@@ -3452,6 +3583,14 @@ TEST_CASE("regression history skips every ineligible candidate",
          "raw_evidence.record_count is missing or malformed"},
         {Mutation::missing_fast, "meta.fast is missing or malformed"},
         {Mutation::mismatched_fast, "does not match current meta.fast"},
+        {Mutation::malformed_history_seal,
+         "meta.history_eligible is malformed"},
+        {Mutation::malformed_legacy_findings,
+         "legacy rule_violations is malformed"},
+        {Mutation::malformed_legacy_finding_entry,
+         "legacy rule_violations entry is malformed"},
+        {Mutation::legacy_finding_without_blocking,
+         "legacy rule_violations entry lacks a valid blocking flag"},
         {Mutation::sample_count, "sample cardinality"},
         {Mutation::finite_count, "finite histogram count"},
         {Mutation::aggregate,
@@ -3467,8 +3606,9 @@ TEST_CASE("regression history skips every ineligible candidate",
         REQUIRE(oldest.report_path.filename() == "report_1.json");
         auto candidate = run_one_bench(
             "bench_history_eligibility", "candidate", config_text,
-            report_dir, build_toy_input, on_run, evaluate_two);
+            report_dir, build_toy_input, on_run, evaluate_one);
         REQUIRE(candidate.report_path.filename() == "report_2.json");
+        REQUIRE(candidate.report["meta"]["history_eligible"] == true);
 
         if (mutation.mutation == Mutation::incomplete_raw) {
             candidate.report["raw_evidence"] = {
@@ -3483,6 +3623,21 @@ TEST_CASE("regression history skips every ineligible candidate",
         } else if (mutation.mutation == Mutation::mismatched_fast) {
             candidate.report["meta"]["fast"] =
                 !candidate.report["meta"]["fast"].get<bool>();
+        } else if (mutation.mutation == Mutation::malformed_history_seal) {
+            candidate.report["meta"]["history_eligible"] = "yes";
+        } else if (mutation.mutation == Mutation::malformed_legacy_findings) {
+            candidate.report["meta"].erase("history_eligible");
+            candidate.report["rule_violations"] = "not-an-array";
+        } else if (mutation.mutation
+                   == Mutation::malformed_legacy_finding_entry) {
+            candidate.report["meta"].erase("history_eligible");
+            candidate.report["rule_violations"] =
+                nlohmann::json::array({"not-an-object"});
+        } else if (mutation.mutation
+                   == Mutation::legacy_finding_without_blocking) {
+            candidate.report["meta"].erase("history_eligible");
+            candidate.report["rule_violations"] =
+                nlohmann::json::array({nlohmann::json::object()});
         } else {
             auto* aggregate = mutable_aggregate_at(
                 candidate.report, "bench_history_eligibility", "identity",
@@ -3514,33 +3669,100 @@ TEST_CASE("regression history skips every ineligible candidate",
                 != std::string::npos);
     }
 
-    // Attribution must skip an incomplete report that would otherwise become
-    // the oldest failing origin.
+    // A newly written blocking regression carries an explicit false seal and
+    // can neither become the nearest baseline nor a regression_since origin.
     {
         TempReportDir report_dir;
-        const auto report_one = run_one_bench(
-            "bench_history_eligibility", "passing origin", config_text,
-            report_dir, build_toy_input, on_run, evaluate_two);
-        REQUIRE(report_one.report_path.filename() == "report_1.json");
-        auto report_two = run_one_bench(
-            "bench_history_eligibility", "incomplete origin", config_text,
-            report_dir, build_toy_input, on_run, evaluate_one_and_half);
-        report_two.report["raw_evidence"] = {
-            {"complete", false}, {"record_count", 2}};
-        REQUIRE(rewrite_report_json(report_two.report_path, report_two.report));
-        const auto report_three = run_one_bench(
-            "bench_history_eligibility", "nearest valid baseline", config_text,
+        const auto accepted = run_one_bench(
+            "bench_history_eligibility", "accepted baseline", config_text,
             report_dir, build_toy_input, on_run, evaluate_one);
-        REQUIRE(report_three.report_path.filename() == "report_3.json");
+        REQUIRE(accepted.report["meta"]["history_eligible"] == true);
+        const auto failed = run_one_bench(
+            "bench_history_eligibility", "blocking regression", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(failed.exit_code == 1);
+        REQUIRE(failed.report["meta"]["history_eligible"] == false);
         const auto current = run_one_bench(
-            "bench_history_eligibility", "attribution current", config_text,
+            "bench_history_eligibility", "skip failed baseline", config_text,
             report_dir, build_toy_input, on_run, evaluate_two);
         REQUIRE(current.report["regressions"].size() == 1);
+        REQUIRE(current.report["regressions"][0]["previously"] == 2.0);
         REQUIRE(current.report["regressions"][0]["regression_since"]
-                == "report_3.json");
+                == "report_1.json");
         REQUIRE(current.captured_stderr.find(
-                    "skipped report_2.json as a regression-history candidate")
+                    "meta.history_eligible is false")
                 != std::string::npos);
+    }
+
+    // A clean pre-seal report remains eligible for backward compatibility.
+    {
+        TempReportDir report_dir;
+        auto legacy = run_one_bench(
+            "bench_history_eligibility", "legacy clean", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        legacy.report["meta"].erase("history_eligible");
+        REQUIRE(rewrite_report_json(legacy.report_path, legacy.report));
+        const auto current = run_one_bench(
+            "bench_history_eligibility", "legacy clean current", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(current.report["regressions"].size() == 1);
+        REQUIRE(current.report["regressions"][0]["previously"] == 2.0);
+    }
+
+    // Legacy reports derive authority from their finding arrays. Blocking
+    // within-run and regression findings fail closed; nonblocking findings
+    // remain usable diagnostics.
+    for (const std::string_view finding_key :
+         {std::string_view{"rule_violations"},
+          std::string_view{"regressions"}}) {
+        INFO("legacy blocking finding key " << finding_key);
+        TempReportDir report_dir;
+        const auto accepted = run_one_bench(
+            "bench_history_eligibility", "legacy accepted", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        (void)accepted;
+        auto legacy_failed = run_one_bench(
+            "bench_history_eligibility", "legacy failed", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        legacy_failed.report["meta"].erase("history_eligible");
+        legacy_failed.report[std::string{finding_key}] =
+            nlohmann::json::array({{{"blocking", true}}});
+        REQUIRE(rewrite_report_json(
+            legacy_failed.report_path, legacy_failed.report));
+        const auto current = run_one_bench(
+            "bench_history_eligibility", "legacy failed current", config_text,
+            report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(current.report["regressions"].size() == 1);
+        REQUIRE(current.report["regressions"][0]["previously"] == 2.0);
+        REQUIRE(current.captured_stderr.find(fmt::format(
+                    "legacy {} contains a blocking finding", finding_key))
+                != std::string::npos);
+    }
+
+    {
+        TempReportDir report_dir;
+        const auto accepted = run_one_bench(
+            "bench_history_eligibility", "nonblocking oldest", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        (void)accepted;
+        auto nonblocking = run_one_bench(
+            "bench_history_eligibility", "nonblocking legacy", config_text,
+            report_dir, build_toy_input, on_run, evaluate_one);
+        nonblocking.report["meta"].erase("history_eligible");
+        nonblocking.report["rule_violations"] =
+            nlohmann::json::array({{{"blocking", false}}});
+        auto* aggregate = mutable_aggregate_at(
+            nonblocking.report, "bench_history_eligibility", "identity",
+            "ONE", "all_regions", "value");
+        REQUIRE(aggregate != nullptr);
+        (*aggregate)["stats"]["sum"] = 3.0;
+        REQUIRE(rewrite_report_json(
+            nonblocking.report_path, nonblocking.report));
+        const auto current = run_one_bench(
+            "bench_history_eligibility", "nonblocking legacy current",
+            config_text, report_dir, build_toy_input, on_run, evaluate_two);
+        REQUIRE(current.report["regressions"].size() == 1);
+        REQUIRE(current.report["regressions"][0]["previously"] == 3.0);
     }
 }
 
@@ -4662,6 +4884,9 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     REQUIRE(for_each.at("XXL_HIFI").get<std::size_t>() == 4);
     REQUIRE(config.at("test_cases").at("XXL_HIFI")
                 .at("concurrency").get<std::size_t>() == 1);
+    REQUIRE(config.at("test_cases").at("XXL_HIFI").at("data")
+                .at("reference_length").get<std::uint64_t>()
+            >= (std::uint64_t{256} << 20u));
 
     const std::set<std::string> expected_algorithms{
         "minimap2_dp",
@@ -4741,7 +4966,7 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     }
 
     const auto& metrics = matrix.at("metrics");
-    REQUIRE(metrics.at("wall_clock_ns").at("rules").size() == 7);
+    REQUIRE(metrics.at("wall_clock_ns").at("rules").size() == 8);
     REQUIRE(metrics.at("region_total_ns").at("rules").size() == 4);
     REQUIRE(metrics.at("match_count").at("rules").size() == 8);
     REQUIRE(metrics.at("primary_correct_fraction").at("rules").size() == 8);
@@ -4749,6 +4974,8 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     REQUIRE(metrics.contains("all_gpu_acceptance_eligible"));
     REQUIRE(relative.at("description").get<std::string>().find(
                 "historical partial-GPU") != std::string::npos);
+    REQUIRE(relative.at("description").get<std::string>().find(
+                "route-proven Phase C") != std::string::npos);
     for (const auto* partial_gpu_algorithm : {
             "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
             "bioseq_block_vulkan_dp_vulkan_minimap_int",
@@ -4766,6 +4993,7 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
         "report76_xxl_hifi_vulkan_tiled_over_ksw2_simd_wall_ratio_max_1_011221",
         "report76_xxl_hifi_legacy_block_vulkan_over_block_simd_wall_ratio_max_1_714040",
         "report76_xxl_hifi_phase_c_block_vulkan_over_block_simd_wall_ratio_max_1_722027",
+        "doc0384_xxl_phase_c_wall_less_than_route_proven_source_direct",
         "report76_xxl_hifi_ksw2_simd_over_minimap2_wall_ratio_max_0_797045",
         "report76_xxl_hifi_ksw2_simd_over_scalar_wall_ratio_max_0_540314",
         "complete_paired_medians_xxl_hifi_nthash_simd_over_scalar_sketch_ratio_max_0_214000",
@@ -4781,6 +5009,27 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
     }
     REQUIRE(configured_rule_names == expected_rule_names);
 
+    const auto& xxl_wall_rules =
+        metrics.at("wall_clock_ns").at("rules");
+    const auto direct_comparison = std::find_if(
+        xxl_wall_rules.begin(), xxl_wall_rules.end(),
+        [](const auto& rule) {
+            return rule.at(0)
+                == "doc0384_xxl_phase_c_wall_less_than_route_proven_source_direct";
+        });
+    REQUIRE(direct_comparison != xxl_wall_rules.end());
+    REQUIRE(direct_comparison->at(1).at("key")
+            == "bioseq_block_vulkan_phase_c_frontend");
+    REQUIRE(direct_comparison->at(1).at("test_case") == "XXL_HIFI");
+    REQUIRE(direct_comparison->at(2).at("compare") == "<");
+    REQUIRE(direct_comparison->at(2).at("threshold%") == 0);
+    REQUIRE(direct_comparison->at(2).at("tolerance%") == 0);
+    REQUIRE(direct_comparison->at(2).at("aggregate") == "p50");
+    REQUIRE_FALSE(direct_comparison->at(2).contains("blocking"));
+    REQUIRE(direct_comparison->at(3).at("key")
+            == "bioseq_block_vulkan_dp_vulkan_minimap_int");
+    REQUIRE(direct_comparison->at(3).at("test_case") == "XXL_HIFI");
+
     const std::map<std::string, double> expected_policy_max_ratios{
         {"report76_xxl_hifi_block_simd_over_ksw2_simd_wall_ratio_max_1_057921",
          Report76XxlHifiP50::block_wall / Report76XxlHifiP50::simd_wall},
@@ -4792,6 +5041,8 @@ TEST_CASE("XXL_HIFI relative benchmark config has one input and nine rows",
          17'180'439'666.0 / Report76XxlHifiP50::block_wall},
         {"report76_xxl_hifi_phase_c_block_vulkan_over_block_simd_wall_ratio_max_1_722027",
          17'260'490'000.0 / Report76XxlHifiP50::block_wall},
+        {"doc0384_xxl_phase_c_wall_less_than_route_proven_source_direct",
+         1.0},
         {"report76_xxl_hifi_ksw2_simd_over_minimap2_wall_ratio_max_0_797045",
          Report76XxlHifiP50::simd_wall / Report76XxlHifiP50::minimap2_wall},
         {"report76_xxl_hifi_ksw2_simd_over_scalar_wall_ratio_max_0_540314",
@@ -4993,6 +5244,8 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     const auto& compatibility =
         config.at("bench_aligners_xxl_hifi_relative");
     REQUIRE(compatibility.at("matrix").at("for").at("XXL_HIFI") == 4);
+    REQUIRE(compatibility.at("concurrency").at("bench_lock") == true);
+    REQUIRE(compatibility.at("concurrency").at("concurrency") == false);
     for (const auto& metric_name : {"wall_clock_ns", "region_total_ns"}) {
         for (const auto& rule :
              compatibility.at("matrix").at("metrics")
@@ -5063,15 +5316,21 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     }
 
     const auto& metrics = matrix.at("metrics");
-    REQUIRE(metrics.at("wall_clock_ns").at("rules").size() == 8);
+    REQUIRE(metrics.at("wall_clock_ns").at("rules").size() == 9);
     REQUIRE(metrics.at("region_total_ns").at("rules").size() == 4);
     std::set<std::string> paired_rule_names;
     for (const auto& metric_name : {"wall_clock_ns", "region_total_ns"}) {
         for (const auto& rule : metrics.at(metric_name).at("rules")) {
-            paired_rule_names.insert(rule.at(0).get<std::string>());
+            const std::string rule_name = rule.at(0).get<std::string>();
+            paired_rule_names.insert(rule_name);
             const auto& comparator = rule.at(2);
             REQUIRE(comparator.at("pairing") == "by_iteration_ratio");
-            REQUIRE(comparator.at("blocking") == false);
+            if (rule_name
+                == "doc0384_paired_phase_c_over_source_direct_wall_ratio_lt_1") {
+                REQUIRE(comparator.value("blocking", true) == true);
+            } else {
+                REQUIRE(comparator.at("blocking") == false);
+            }
             REQUIRE(comparator.at("warmup_repetitions") == 1);
             REQUIRE(comparator.at("aggregate") == "p50");
             REQUIRE(comparator.at("compare") == "<");
@@ -5084,6 +5343,9 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     }
     REQUIRE(paired_rule_names.contains(
         "paired_diagnostic_simd_chain_scalar_mm_no_material_wall_reversal"));
+    REQUIRE(paired_rule_names.contains(
+        "doc0384_paired_phase_c_over_source_direct_wall_ratio_lt_1"));
+    REQUIRE(paired_rule_names.size() == 13);
 
     const auto require_max_ratio = [&metrics](
         const std::string_view rule_name,
@@ -5115,6 +5377,8 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     };
     const std::map<std::string, std::pair<double, double>>
         expected_baseline_and_noise{
+            {"doc0384_paired_phase_c_over_source_direct_wall_ratio_lt_1",
+             {1.0, 0.0}},
             {"paired_report76_block_simd_over_ksw2_simd_wall_with_10pct_noise",
              {Report76XxlHifiP50::block_wall
                   / Report76XxlHifiP50::simd_wall, 0.10}},
@@ -5193,6 +5457,8 @@ TEST_CASE("XXL_HIFI paired companion is serial interleaved and ratio-paired",
     REQUIRE(description.find("first-repeat") != std::string::npos);
     REQUIRE(description.find("not a globally cold") != std::string::npos);
     REQUIRE(description.find("Raw evidence") != std::string::npos);
+    REQUIRE(description.find("DOC0384 Phase-C/source-direct ratio")
+            != std::string::npos);
 }
 
 TEST_CASE("Paper ntHash unequal-work sketch comparisons are prototype diagnostics",
@@ -5241,7 +5507,7 @@ TEST_CASE("Paper ntHash unequal-work sketch comparisons are prototype diagnostic
 }
 
 TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block Vulkan ratios",
-          "[bench_framework][xxl-relative][configuration][vulkan]") {
+          "[bench_framework][xxl-relative][configuration][vulkan][filter][regression]") {
     const auto source_path = std::filesystem::path{__FILE__};
     auto config_path = source_path.parent_path().parent_path()
         / "bench" / "bench_v10_configuration.json";
@@ -5256,6 +5522,73 @@ TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block V
     const nlohmann::json config = nlohmann::json::parse(config_stream);
     const auto& metrics = config.at("bench_aligners_xxl_hifi_relative")
                               .at("matrix").at("metrics");
+    const auto& paired_metrics = config.at("bench_aligners_xxl_hifi_paired")
+                                     .at("matrix").at("metrics");
+
+    const std::set<std::string> source_direct_metrics{
+        "source_direct_gpu_index_materialization_proof_accepted",
+        "gpu_index_source_direct_operations",
+        "gpu_index_source_direct_terminal_successes",
+        "gpu_index_source_direct_empty_bypasses",
+        "gpu_index_source_direct_zero_query_bypasses",
+        "gpu_index_source_direct_planning_receipts",
+        "gpu_index_source_direct_terminal_receipts",
+        "gpu_index_source_direct_materializations",
+        "gpu_index_source_direct_resident_publications",
+        "gpu_index_source_direct_logical_control_bytes",
+        "gpu_index_source_direct_logical_position_bytes",
+        "gpu_index_source_direct_control_requirement_bytes",
+        "gpu_index_source_direct_position_requirement_bytes",
+        "gpu_index_source_direct_allocation_request_bytes",
+        "gpu_index_source_direct_actual_control_bytes",
+        "gpu_index_source_direct_actual_position_bytes",
+        "gpu_index_source_direct_source_releases",
+        "gpu_index_source_direct_source_released_bytes",
+        "gpu_index_source_direct_checksum_matches",
+        "gpu_index_source_direct_source_traversals",
+        "gpu_index_source_direct_mapped_traversals",
+        "gpu_index_source_direct_reflected_authorities",
+        "gpu_index_source_direct_retained_authorities",
+        "gpu_index_source_direct_retained_resident_permit_bytes",
+        "gpu_index_source_direct_cache_preinsertions",
+        "gpu_index_source_direct_expected_seed_consumers",
+        "gpu_index_source_direct_completed_seed_consumers",
+        "gpu_index_source_direct_required_lookups",
+        "gpu_index_source_direct_required_hits",
+        "gpu_index_source_direct_required_misses",
+        "gpu_index_source_direct_fallback_attempts",
+        "gpu_index_source_direct_mapped_prefix_passes",
+        "gpu_index_source_direct_mapped_prefix_lookups",
+        "gpu_index_source_direct_mapped_prefix_comparisons",
+        "gpu_index_source_direct_seed_slab_requested_bytes",
+        "gpu_index_source_direct_seed_slab_initial_capacity",
+        "gpu_index_source_direct_seed_slab_actual_bytes",
+        "gpu_index_source_direct_seed_slab_retained_bytes",
+        "gpu_index_source_direct_seed_slab_permit_releases",
+        "gpu_index_source_direct_seed_reserved_bytes",
+        "gpu_index_source_direct_seed_planned_vulkan_bytes",
+        "gpu_index_source_direct_seed_actual_vulkan_bytes",
+        "gpu_index_source_direct_seed_roundtrips",
+        "gpu_index_source_direct_zero_anchor_bypasses",
+        "gpu_index_source_direct_seed_fence_completions",
+        "gpu_index_source_direct_cache_cleanup_releases",
+        "gpu_index_source_direct_resident_cleanup_bytes",
+        "gpu_index_source_direct_pipeline_completions",
+    };
+    for (const auto& metric_name : source_direct_metrics) {
+        INFO(metric_name);
+        REQUIRE(metrics.contains(metric_name));
+        REQUIRE(metrics.at(metric_name).at("type") == "evaluation");
+        REQUIRE(paired_metrics.contains(metric_name));
+        REQUIRE(paired_metrics.at(metric_name).at("type") == "evaluation");
+    }
+
+    const std::string direct_description = config.at("params")
+        .at("bioseq_block_vulkan_dp_vulkan_minimap_int")
+        .at("_").at("description").get<std::string>();
+    REQUIRE(direct_description.find("source-direct") != std::string::npos);
+    REQUIRE(direct_description.find("CPU target-index build")
+            == std::string::npos);
 
     const std::set<std::string> partial_gpu_algorithms{
         "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
@@ -5274,6 +5607,122 @@ TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block V
         REQUIRE(comparator.value("threshold%", 0.0) == 0.0);
         REQUIRE(comparator.value("tolerance%", 0.0) == 0.0);
     };
+
+    const std::string direct_row =
+        "bioseq_block_vulkan_dp_vulkan_minimap_int";
+    const std::set<std::string> source_direct_neutral_rows{
+        "minimap2_dp",
+        "bioseq_ksw2_scalar_dp_scalar_mm",
+        "bioseq_ksw2_simd_dp_scalar_mm",
+        "bioseq_ksw2_simd_dp_two_stack_nthash",
+        "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
+        "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
+        "bioseq_block_simd_dp_two_stack_nthash",
+        "bioseq_block_vulkan_phase_c_frontend",
+    };
+    const auto& accepted_direct_rules = metrics.at(
+        "source_direct_gpu_index_materialization_proof_accepted")
+        .at("rules");
+    REQUIRE(accepted_direct_rules.size() == 1u);
+    REQUIRE(accepted_direct_rules.at(0).at(1).at("key") == direct_row);
+    REQUIRE(accepted_direct_rules.at(0).at(2).at("compare") == ">");
+    REQUIRE(accepted_direct_rules.at(0).at(2).at("aggregate") == "min");
+    require_zero_knobs(accepted_direct_rules.at(0).at(2));
+    REQUIRE(accepted_direct_rules.at(0).at(3).at("key") == "minimap2_dp");
+
+    const auto& direct_operation_rules =
+        metrics.at("gpu_index_source_direct_operations").at("rules");
+    REQUIRE(direct_operation_rules.size()
+            == source_direct_neutral_rows.size() + 1u);
+    std::size_t positive_direct_rules = 0u;
+    std::set<std::string> neutral_rows;
+    for (const auto& rule : direct_operation_rules) {
+        REQUIRE(rule.size() == 4u);
+        const auto& comparator = rule.at(2);
+        require_zero_knobs(comparator);
+        if (comparator.at("compare") == ">") {
+            ++positive_direct_rules;
+            REQUIRE(rule.at(1).at("key") == direct_row);
+            REQUIRE(comparator.at("aggregate") == "min");
+            REQUIRE(rule.at(3).at("key") == "minimap2_dp");
+        } else {
+            REQUIRE(comparator.at("compare") == "<");
+            REQUIRE(comparator.at("aggregate") == "max");
+            REQUIRE(rule.at(3).at("key") == direct_row);
+            neutral_rows.insert(rule.at(1).at("key").get<std::string>());
+        }
+    }
+    REQUIRE(positive_direct_rules == 1u);
+    REQUIRE(neutral_rows == source_direct_neutral_rows);
+
+    const std::set<std::string> biological_parity_metrics{
+        "biological_collection_count",
+        "biological_match_result_count",
+        "biological_cigar_result_count",
+        "biological_cigar_operation_count",
+        "biological_match_digest_lane0_hi32",
+        "biological_match_digest_lane0_lo32",
+        "biological_match_digest_lane1_hi32",
+        "biological_match_digest_lane1_lo32",
+        "biological_cigar_digest_lane0_hi32",
+        "biological_cigar_digest_lane0_lo32",
+        "biological_cigar_digest_lane1_hi32",
+        "biological_cigar_digest_lane1_lo32",
+        "vulkan_seed_canonical_anchor_count",
+        "vulkan_seed_anchor_digest_lane0_hi32",
+        "vulkan_seed_anchor_digest_lane0_lo32",
+        "vulkan_seed_anchor_digest_lane1_hi32",
+        "vulkan_seed_anchor_digest_lane1_lo32",
+    };
+    const auto require_exact_iteration_parity_rule = [
+        &direct_row,
+        &require_zero_knobs](
+            const nlohmann::json& matrix_metrics,
+            const std::string& metric_name,
+            const char* test_case) {
+        REQUIRE(matrix_metrics.contains(metric_name));
+        const auto& rules = matrix_metrics.at(metric_name).at("rules");
+        REQUIRE(rules.size() == 1u);
+        const auto& rule = rules.at(0);
+        REQUIRE(rule.size() == 4u);
+        REQUIRE(rule.at(1).at("key") == direct_row);
+        REQUIRE(rule.at(1).at("test_case") == test_case);
+        REQUIRE(rule.at(2).at("compare") == "=");
+        REQUIRE(rule.at(2).at("aggregate") == "min");
+        REQUIRE(rule.at(2).at("pairing") == "by_iteration_exact");
+        require_zero_knobs(rule.at(2));
+        REQUIRE(rule.at(3).at("key")
+                == "bioseq_block_vulkan_phase_c_frontend");
+        REQUIRE(rule.at(3).at("test_case") == test_case);
+    };
+    for (const auto& metric_name : biological_parity_metrics) {
+        INFO(metric_name);
+        require_exact_iteration_parity_rule(
+            metrics, metric_name, "XXL_HIFI");
+        require_exact_iteration_parity_rule(
+            paired_metrics, metric_name, "XXL_HIFI_PAIRED");
+    }
+
+    const std::set<std::string> ordered_gpu_seed_rows{
+        direct_row,
+        "bioseq_block_vulkan_phase_c_frontend",
+    };
+    for (const std::string metric_name : {
+            "vulkan_seed_canonical_anchor_order_checks",
+            "vulkan_seed_canonical_anchor_order_accepts"}) {
+        INFO(metric_name);
+        const auto& rules = metrics.at(metric_name).at("rules");
+        REQUIRE(rules.size() == ordered_gpu_seed_rows.size());
+        std::set<std::string> covered;
+        for (const auto& rule : rules) {
+            REQUIRE(rule.at(2).at("compare") == ">");
+            REQUIRE(rule.at(2).at("aggregate") == "min");
+            require_zero_knobs(rule.at(2));
+            REQUIRE(rule.at(3).at("key") == "minimap2_dp");
+            covered.insert(rule.at(1).at("key").get<std::string>());
+        }
+        REQUIRE(covered == ordered_gpu_seed_rows);
+    }
 
     // The classification must be executable acceptance policy, not merely a
     // description or an otherwise-unused metric. A boolean partial-GPU row is
@@ -5443,8 +5892,10 @@ TEST_CASE("XXL_HIFI relative config fail-closes partial GPU evidence and Block V
     for (const auto& rule : metrics.at("wall_clock_ns").at("rules")) {
         const std::string lhs = rule.at(1).at("key").get<std::string>();
         if (!expected_ratios.contains(lhs)) continue;
-        REQUIRE(rule.at(3).at("key").get<std::string>()
-                == "bioseq_block_simd_dp_two_stack_nthash");
+        if (rule.at(3).at("key").get<std::string>()
+            != "bioseq_block_simd_dp_two_stack_nthash") {
+            continue;
+        }
         const auto& comparator = rule.at(2);
         REQUIRE(comparator.at("compare").get<std::string>() == "<");
         REQUIRE(comparator.at("aggregate").get<std::string>() == "p50");
@@ -6950,7 +7401,7 @@ TEST_CASE("bench_framework --debug abort backstop sweep", "[bench_framework][deb
     }
 }
 
-TEST_CASE("GPU historical timing policies keep centers blocking and tails scoped",
+TEST_CASE("GPU historical timing policies isolate curated concurrency diagnostics and serial gates",
           "[bench_framework][configuration][gpu][regression]") {
     const auto source_path = std::filesystem::path{__FILE__};
     auto config_path = source_path.parent_path().parent_path()
@@ -6979,9 +7430,136 @@ TEST_CASE("GPU historical timing policies keep centers blocking and tails scoped
     const auto& curated = config.at("bench_aligners_curated");
     REQUIRE(curated.at("concurrency").at("bench_lock") == false);
     REQUIRE(curated.at("concurrency").at("concurrency") == true);
+    const auto& curated_matrix = curated.at("matrix");
+    const auto& curated_acceptance = curated_matrix.at("acceptance");
+    const std::set<std::string> expected_curated_algorithms{
+        "minimap2_dp",
+        "bioseq_ksw2_scalar_dp_scalar_mm",
+        "bioseq_ksw2_simd_dp_two_stack_nthash",
+        "bioseq_ksw2_vulkan_tiled_dp_two_stack_nthash",
+        "bioseq_ksw2_batched_simd_dp_two_stack_nthash",
+        "bioseq_block_simd_dp_two_stack_nthash",
+        "bioseq_block_vulkan_dp_vulkan_minimap_int",
+        "bioseq_block_vulkan_phase_c_frontend",
+    };
+    std::set<std::string> curated_acceptance_algorithms;
+    for (const auto& algorithm :
+         curated_acceptance.at("exact_algorithm_rows")) {
+        curated_acceptance_algorithms.insert(algorithm.get<std::string>());
+    }
+    std::set<std::string> curated_configured_algorithms;
+    for (const auto& [algorithm, _params] :
+         curated_matrix.at("over").items()) {
+        (void)_params;
+        curated_configured_algorithms.insert(algorithm);
+    }
+    REQUIRE(curated_acceptance_algorithms == expected_curated_algorithms);
+    REQUIRE(curated_acceptance_algorithms
+            == curated_configured_algorithms);
+    REQUIRE(curated_acceptance.at("exact_test_case_iterations")
+            == curated_matrix.at("for"));
+    REQUIRE(curated_acceptance.at(
+                "require_named_region_iteration_coverage") == false);
+    REQUIRE(curated_acceptance.at(
+                "exact_named_region_sample_multiplicities").empty());
     REQUIRE(curated.at("description").get<std::string>().find(
-                "P50 remains a blocking historical gate")
+                "Wall timing is diagnostic only")
             != std::string::npos);
+    REQUIRE(curated.at("description").get<std::string>().find(
+                "Report163 is the first biologically correct")
+            != std::string::npos);
+    REQUIRE(curated.at("description").get<std::string>().find(
+                "Reports164, 170, and 171")
+            != std::string::npos);
+    REQUIRE(curated.at("description").get<std::string>().find(
+                "Blocking GPU speed acceptance")
+            != std::string::npos);
+    REQUIRE(curated.at("description").get<std::string>().find(
+                "below the 256 Mi-bp source-direct threshold")
+            != std::string::npos);
+
+    const auto& curated_metrics = curated.at("matrix").at("metrics");
+    auto find_curated_metric_rule = [&curated_metrics](
+        std::string_view metric_name,
+        std::string_view rule_name) -> const nlohmann::json& {
+        const auto& metric_rules =
+            curated_metrics.at(metric_name).at("rules");
+        const auto found = std::find_if(
+            metric_rules.begin(), metric_rules.end(),
+            [rule_name](const auto& rule) {
+                return rule.at(0).template get<std::string>() == rule_name;
+            });
+        REQUIRE(found != metric_rules.end());
+        return *found;
+    };
+
+    struct CuratedPhaseCCase {
+        std::string_view test_case;
+        std::string_view rule_suffix;
+    };
+    static constexpr std::array<CuratedPhaseCCase, 2> phase_c_cases{{
+        {"FAST_LONG", "fast_long"},
+        {"FAST_VERY_LONG", "fast_very_long"},
+    }};
+    for (const auto& phase_c_case : phase_c_cases) {
+        REQUIRE(config.at("test_cases").at(phase_c_case.test_case)
+                    .at("data").at("reference_length")
+                    .get<std::uint64_t>()
+                < (std::uint64_t{256} << 20u));
+        const auto& wall_rule = find_curated_metric_rule(
+            "wall_clock_ns",
+            "phase_c_" + std::string{phase_c_case.rule_suffix}
+                + "_wall_no_slower_than_small_target_vulkan_minimap_int_sibling");
+        REQUIRE(wall_rule.at(1).at("key")
+                == "bioseq_block_vulkan_phase_c_frontend");
+        REQUIRE(wall_rule.at(1).at("test_case")
+                == phase_c_case.test_case);
+        REQUIRE(wall_rule.at(2).at("compare") == "<");
+        REQUIRE(wall_rule.at(2).at("threshold%") == 0);
+        REQUIRE(wall_rule.at(2).at("tolerance%") == 0);
+        REQUIRE(wall_rule.at(2).at("aggregate") == "p50");
+        REQUIRE(wall_rule.at(2).at("blocking") == false);
+        REQUIRE(wall_rule.at(3).at("key")
+                == "bioseq_block_vulkan_dp_vulkan_minimap_int");
+        REQUIRE(wall_rule.at(3).at("test_case")
+                == phase_c_case.test_case);
+
+        auto require_parity_bound = [
+            &find_curated_metric_rule,
+            &phase_c_case
+        ](std::string_view metric_name,
+          std::string_view rule_metric_name,
+          std::string_view aggregate) {
+            const auto& parity_rule = find_curated_metric_rule(
+                metric_name,
+                "phase_c_" + std::string{phase_c_case.rule_suffix}
+                    + "_" + std::string{rule_metric_name}
+                    + "_equals_minimap2");
+            REQUIRE(parity_rule.at(1).at("key")
+                    == "bioseq_block_vulkan_phase_c_frontend");
+            REQUIRE(parity_rule.at(1).at("test_case")
+                    == phase_c_case.test_case);
+            REQUIRE(parity_rule.at(2).at("compare") == "=");
+            REQUIRE(parity_rule.at(2).at("tolerance%") == 0);
+            REQUIRE(parity_rule.at(2).at("aggregate") == aggregate);
+            REQUIRE_FALSE(parity_rule.at(2).contains("pairing"));
+            REQUIRE(parity_rule.at(2).value("blocking", true) == true);
+            REQUIRE(parity_rule.at(3).at("key") == "minimap2_dp");
+            REQUIRE(parity_rule.at(3).at("test_case")
+                    == phase_c_case.test_case);
+        };
+        require_parity_bound("match_count", "match_count_min", "min");
+        require_parity_bound("match_count", "match_count_max", "max");
+        require_parity_bound(
+            "primary_correct_fraction", "correct_fraction_min", "min");
+        require_parity_bound(
+            "mean_position_offset_bp", "position_offset_max", "max");
+    }
+    // Historical captures demonstrate why these independent, concurrently
+    // scheduled P50 values remain diagnostics rather than acceptance gates.
+    REQUIRE(559'625'166.0 < 754'953'708.0);
+    REQUIRE(1'122'048'084.0 < 2'969'685'750.0);
+    REQUIRE_FALSE(1'933'880'916.0 < 1'735'887'750.0);
 
     const auto& rules = config.at("regression_rules");
     auto find_rule = [&rules](std::string_view name) -> const nlohmann::json& {
@@ -6993,7 +7571,15 @@ TEST_CASE("GPU historical timing policies keep centers blocking and tails scoped
     const auto& p50 = find_rule("wall_clock_p50_no_blowup");
     REQUIRE(p50.at("aggregate") == "p50");
     REQUIRE_FALSE(p50.contains("blocking"));
-    REQUIRE_FALSE(p50.contains("exclude_benchmarks"));
+    REQUIRE(p50.at("exclude_benchmarks")
+            == nlohmann::json::array({"bench_aligners_curated"}));
+
+    const auto& curated_p50 =
+        find_rule("curated_wall_clock_p50_concurrency_diagnostic");
+    REQUIRE(curated_p50.at("aggregate") == "p50");
+    REQUIRE(curated_p50.at("blocking") == false);
+    REQUIRE(curated_p50.at("benchmarks")
+            == nlohmann::json::array({"bench_aligners_curated"}));
 
     const auto& global_p99 = find_rule("wall_clock_p99_no_runaway_outlier");
     REQUIRE(global_p99.at("aggregate") == "p99");
@@ -7005,13 +7591,13 @@ TEST_CASE("GPU historical timing policies keep centers blocking and tails scoped
         "bioseq_block_vulkan_dp_vulkan_minimap_int",
         "bioseq_block_vulkan_phase_c_frontend",
     };
-    const auto& curated_blocking =
+    const auto& curated_p99_diagnostic =
         find_rule("curated_wall_clock_p99_no_runaway_outlier");
-    REQUIRE(curated_blocking.at("aggregate") == "p99");
-    REQUIRE_FALSE(curated_blocking.contains("blocking"));
+    REQUIRE(curated_p99_diagnostic.at("aggregate") == "p99");
+    REQUIRE(curated_p99_diagnostic.at("blocking") == false);
     std::set<std::string> configured_gpu_exclusions;
     for (const auto& algorithm :
-         curated_blocking.at("exclude_algorithms")) {
+         curated_p99_diagnostic.at("exclude_algorithms")) {
         configured_gpu_exclusions.insert(algorithm.get<std::string>());
     }
     REQUIRE(configured_gpu_exclusions == high_variance_gpu);

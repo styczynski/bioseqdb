@@ -1080,8 +1080,9 @@ static_assert(std::is_nothrow_move_constructible_v<
 inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
 inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 11u;
 
-/// Exact 8-bit radix pass count for the persisted Shape-V5 target coordinate
-/// domain.  Kept public and allocation-free so portable contract tests can pin
+/// Exact 8-bit radix pass count for the persisted Shape-V5 Anchor ref_bits
+/// domain: every target-coordinate bit plus the one canonical reverse-strand
+/// bit. Kept public and allocation-free so portable contract tests can pin
 /// every byte-width boundary used by causal dispatch validation.
 [[nodiscard]] inline std::optional<std::uint32_t>
 runtime_shape_v5_radix_pass_count(
@@ -1102,7 +1103,7 @@ runtime_shape_v5_radix_pass_count(
         ? 1u
         : 64u - static_cast<std::uint32_t>(
             std::countl_zero(target_end));
-    return std::clamp<std::uint32_t>((bits + 7u) / 8u, 1u, 8u);
+    return std::clamp<std::uint32_t>((bits + 8u) / 8u, 1u, 8u);
 }
 
 enum class RuntimePipelineOperationKind : std::uint8_t {
@@ -2378,6 +2379,8 @@ self_test_causal_collector_contract(
         collector->begin(command(13u));
         for (std::size_t slot = 8u; slot < 11u; ++slot) {
             collector->use(command(13u), 1u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 1u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
             collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
             collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
         }
@@ -4851,7 +4854,8 @@ public:
         std::uint64_t query_len,
         std::uint32_t kmer_size,
         std::uint64_t exact_anchor_count,
-        const SeedAnchorSortPlan& sort_plan);
+        const SeedAnchorSortPlan& sort_plan,
+        std::uint64_t expected_vulkan_allocation_bytes);
 
     // DOC0310 Phase C — accessor for the per-runtime reusable arena (§7).
     [[nodiscard]] GpuArena& phase_c_arena();
@@ -4874,6 +4878,13 @@ public:
         std::span<const PhaseCSketchQueryLayoutWire> query_layouts,
         std::uint64_t max_minimizers,
         VulkanSketchHostMaterialization materialization);
+
+    // Resolve the complete, finite target-index pipeline set before the caller
+    // acquires the large count/main allocation permit. A cold cache miss must
+    // never grow process-lifetime metadata while that transient peak is both
+    // reserved and reflected in the process footprint.
+    void prepare_phase_c_target_index_pipelines(
+        const VulkanSketchParams& params);
 
     // DOC0310 Phase C — build the target minimizer index entirely on device
     // (§12): exact tile count/scan → deterministic emit → device radix sort →
@@ -5237,6 +5248,8 @@ private:
     // cache and transfer Vulkan handles exactly once across reallocation.
     PhaseBPipeline get_phase_b_pipeline_locked(
         ShaderKind kind, std::uint32_t local_size, std::uint32_t max_span);
+    void prepare_phase_c_target_index_pipelines_locked(
+        const VulkanSketchParams& params);
     void bind_phase_b_descriptors_locked(
         const PhaseBPipeline& entry,
         std::span<const VkBuffer> buffers);
@@ -11126,14 +11139,21 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     std::uint64_t query_len,
     std::uint32_t kmer_size,
     std::uint64_t exact_anchor_count,
-    const SeedAnchorSortPlan& sort_plan)
+    const SeedAnchorSortPlan& sort_plan,
+    std::uint64_t expected_vulkan_allocation_bytes)
 {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
         throw VulkanRuntimeError("run_seed_lookup_roundtrip on unavailable device");
     }
     if (prefix_counts.size() < 2 || exact_anchor_count == 0) {
-        return SeedLookupResult{};
+        if (expected_vulkan_allocation_bytes != 0u) {
+            throw VulkanRuntimeError(
+                "zero-anchor seed lookup carried a Vulkan allocation plan");
+        }
+        SeedLookupResult empty_result{};
+        empty_result.anchor_proof = make_seed_anchor_canonical_proof({}, 0u);
+        return empty_result;
     }
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw VulkanRuntimeError("seed lookup missing resident index buffers");
@@ -11243,6 +11263,31 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
             sort_plan.histogram_bytes, kPhaseBBufferUsage);
     }
 
+    std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    const auto add_allocation = [&actual_vulkan_allocation_bytes](
+            const Buffer& buffer) noexcept {
+        actual_vulkan_allocation_bytes = sat_add(
+            actual_vulkan_allocation_bytes,
+            buffer.allocation_bytes);
+    };
+    add_allocation(scratch);
+    add_allocation(uploaded_min_words);
+    add_allocation(prefix_buf);
+    add_allocation(anchors_buf);
+    add_allocation(anchor_keys_buf);
+    add_allocation(ranges_buf);
+    add_allocation(anchors_scratch_buf);
+    add_allocation(anchor_keys_scratch_buf);
+    add_allocation(histogram_buf);
+    if (actual_vulkan_allocation_bytes
+        != expected_vulkan_allocation_bytes) {
+        throw VulkanRuntimeError(fmt::format(
+            "seed lookup Vulkan allocation requirement mismatch "
+            "(planned={} actual={})",
+            expected_vulkan_allocation_bytes,
+            actual_vulkan_allocation_bytes));
+    }
+
     {
         const std::array<VkBuffer, 6> seed_bufs{
             min_words->buffer, inputs.slots->buffer, inputs.positions->buffer,
@@ -11346,6 +11391,8 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
 
     SeedLookupResult result;
     result.count = exact_anchor_count;
+    result.actual_vulkan_allocation_bytes =
+        actual_vulkan_allocation_bytes;
     result.seed_lookup_dispatches = 1u;
     result.open_addressed_lookup_dispatches =
         inputs.bucket_count == 0u ? 1u : 0u;
@@ -11356,6 +11403,29 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
         ? anchors_scratch_buf : anchors_buf;
     download_locked(scratch, sorted_anchors, std::span<std::byte>{
         result.host_bytes.data(), result.host_bytes.size()});
+    const auto tie_normalization = normalize_seed_anchor_equal_ref_ties(
+        std::span<std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!tie_normalization.gpu_ref_order_checked
+        || !tie_normalization.gpu_ref_order_accepted) {
+        throw VulkanRuntimeError(
+            "seed lookup GPU result is not ordered by Anchor ref_bits");
+    }
+    result.canonical_tie_normalization_runs =
+        tie_normalization.canonical_tie_run_count;
+    result.canonical_tie_normalization_anchors =
+        tie_normalization.canonical_tie_anchor_count;
+    result.anchor_proof = make_seed_anchor_canonical_proof(
+        std::span<const std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!result.anchor_proof.canonical_order_checked
+        || !result.anchor_proof.canonical_order_accepted
+        || result.anchor_proof.anchor_count != result.count) {
+        throw VulkanRuntimeError(
+            "seed lookup result is not in canonical Anchor order");
+    }
 
     if (sort_plan.backend == SeedAnchorSortBackend::bitonic) {
         result.sort_proof.bitonic_sort_dispatches = 1u;
@@ -12823,6 +12893,48 @@ void submit_and_wait(
 
 }  // namespace
 
+void Runtime::prepare_phase_c_target_index_pipelines_locked(
+    const VulkanSketchParams& params)
+{
+    // Keep this list identical to the complete target-index route. Pipeline
+    // owners and their exact metadata permits remain process-lived in Runtime;
+    // later getters in count, radix, mark, and bucket phases are cache hits
+    // under the operation's transient allocation permit.
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sketch_tile,
+        kPhaseCSketchLocal,
+        std::max<std::uint32_t>(params.window_size, 1u));
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sort_radix_histogram, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sort_radix_scan, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sort_radix_scatter, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_index_mark_runs, 128u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_index_emit_buckets, 128u, 1u);
+}
+
+void Runtime::prepare_phase_c_target_index_pipelines(
+    const VulkanSketchParams& params)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "prepare_phase_c_target_index_pipelines on unavailable device");
+    }
+    if (params.window_size == 0u) {
+        throw VulkanRuntimeError(
+            "prepare_phase_c_target_index_pipelines with zero window");
+    }
+    prepare_phase_c_target_index_pipelines_locked(params);
+}
+
 GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     std::span<const std::byte> packed_sequence,
     std::uint64_t padded_sequence_bytes,
@@ -12889,6 +13001,11 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         throw VulkanRuntimeError(
             "phase_c index query gate lacks matching immutable identity");
     }
+    // Fail-safe for direct Runtime callers. The production wrapper prepares
+    // this same set before reserving target-index memory, so these are normally
+    // cache hits. Keeping the invariant here prevents a future caller from
+    // reintroducing a cold miss under the much larger exact-main peak below.
+    prepare_phase_c_target_index_pipelines_locked(params);
     out.gate_identity = std::move(query_gate_identity);
     out.ownership.query_gate_enabled = query_gate_word_count != 0u ? 1u : 0u;
     out.ownership.query_gate_word_count = query_gate_word_count;
@@ -17214,6 +17331,8 @@ bool Runtime::self_test_persisted_shape_v5_finalizer_preclaim_contract(
         for (std::size_t slot = 8u; slot < 11u; ++slot) {
             shape_collector->use(
                 command(13u), 0u, keys[slot], &receipts[slot], 1u);
+            shape_collector->use(
+                command(13u), 0u, keys[slot], &receipts[slot], 1u);
         }
         shape_collector->use(
             command(13u), 0u, keys[5], &receipts[5], 1u);
@@ -18903,6 +19022,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
 {
     std::lock_guard<std::mutex> guard(mu_);
     SeedLookupResult result;
+    result.anchor_proof = make_seed_anchor_canonical_proof({}, 0u);
     if (!features_.available) throw VulkanRuntimeError("run_phase_c_seed_roundtrip on unavailable device");
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw VulkanRuntimeError("phase_c seed missing resident index buffers");
@@ -19140,6 +19260,31 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     std::memcpy(result.host_bytes.data(),
                 static_cast<const std::byte*>(sorted_anchors.buffer->mapped) + sorted_anchors.offset,
                 static_cast<std::size_t>(total * 24u));
+    const auto tie_normalization = normalize_seed_anchor_equal_ref_ties(
+        std::span<std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!tie_normalization.gpu_ref_order_checked
+        || !tie_normalization.gpu_ref_order_accepted) {
+        seed_arena_lifetime.release_or_throw();
+        throw VulkanRuntimeError(
+            "phase_c seed GPU result is not ordered by Anchor ref_bits");
+    }
+    result.canonical_tie_normalization_runs =
+        tie_normalization.canonical_tie_run_count;
+    result.canonical_tie_normalization_anchors =
+        tie_normalization.canonical_tie_anchor_count;
+    result.anchor_proof = make_seed_anchor_canonical_proof(
+        std::span<const std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!result.anchor_proof.canonical_order_checked
+        || !result.anchor_proof.canonical_order_accepted
+        || result.anchor_proof.anchor_count != result.count) {
+        seed_arena_lifetime.release_or_throw();
+        throw VulkanRuntimeError(
+            "phase_c seed result is not in canonical Anchor order");
+    }
     result.sort_proof.radix_sort_operations = 1u;
     result.sort_proof.radix_anchor_count = total;
     result.sort_proof.radix_passes = anchor_sort_plan.pass_count;
