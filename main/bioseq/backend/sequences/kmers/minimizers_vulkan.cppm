@@ -26,6 +26,7 @@ module;
 
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <concepts>
 #include <cstdint>
 #include <functional>
@@ -36,6 +37,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
 #include <utility>        // DOC0345 Patch C — std::pair / std::declval for segment pair path
 #include <vector>
@@ -51,6 +53,7 @@ import bioseq.gpu.vulkan.phase_b_abi;
 import bioseq.gpu.vulkan.phase_c_abi;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.parallelism.memory_admission;
+import bioseq.storage.scanner;
 import bioseq.storage.lazy;
 import bioseq.storage.size;  // DOC0345 Patch C — bioseq::storage::sequence_size_t
 import bioseq.instr;  // DOC0310 §21 — phase_c_* timing labels
@@ -549,118 +552,207 @@ template <class Seq>
     return lut;
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+struct VulkanAdmittedWindowTestSnapshot {
+  std::uint64_t admitted_materializations = 0u;
+  std::uint64_t live_admitted_windows = 0u;
+  std::uint64_t backend_thread_materializations = 0u;
+  std::uint64_t off_backend_materializations = 0u;
+};
+
+namespace admitted_window_test_detail {
+inline std::atomic<std::uint8_t> enabled{0u};
+inline std::atomic<std::uint64_t> admitted_materializations{0u};
+inline std::atomic<std::uint64_t> live_admitted_windows{0u};
+inline std::atomic<std::uint64_t> backend_thread_materializations{0u};
+inline std::atomic<std::uint64_t> off_backend_materializations{0u};
+inline std::thread::id backend_thread{};
+} // namespace admitted_window_test_detail
+
+inline void arm_vulkan_admitted_window_test_seam() noexcept {
+  using namespace admitted_window_test_detail;
+  enabled.store(0u, std::memory_order_release);
+  admitted_materializations.store(0u, std::memory_order_relaxed);
+  live_admitted_windows.store(0u, std::memory_order_relaxed);
+  backend_thread_materializations.store(0u, std::memory_order_relaxed);
+  off_backend_materializations.store(0u, std::memory_order_relaxed);
+  backend_thread = std::this_thread::get_id();
+  enabled.store(1u, std::memory_order_release);
+}
+
+inline void reset_vulkan_admitted_window_test_seam() noexcept {
+  admitted_window_test_detail::enabled.store(0u, std::memory_order_release);
+}
+
+[[nodiscard]] inline VulkanAdmittedWindowTestSnapshot
+vulkan_admitted_window_test_snapshot() noexcept {
+  using namespace admitted_window_test_detail;
+  return {
+      .admitted_materializations =
+          admitted_materializations.load(std::memory_order_acquire),
+      .live_admitted_windows =
+          live_admitted_windows.load(std::memory_order_acquire),
+      .backend_thread_materializations =
+          backend_thread_materializations.load(std::memory_order_acquire),
+      .off_backend_materializations =
+          off_backend_materializations.load(std::memory_order_acquire),
+  };
+}
+
+[[nodiscard]] inline bool note_vulkan_admitted_window_begin() noexcept {
+  using namespace admitted_window_test_detail;
+  if (enabled.load(std::memory_order_acquire) == 0u) {
+    return false;
+  }
+  admitted_materializations.fetch_add(1u, std::memory_order_relaxed);
+  live_admitted_windows.fetch_add(1u, std::memory_order_release);
+  if (std::this_thread::get_id() == backend_thread) {
+    backend_thread_materializations.fetch_add(1u, std::memory_order_relaxed);
+  } else {
+    off_backend_materializations.fetch_add(1u, std::memory_order_relaxed);
+  }
+  return true;
+}
+
+inline void note_vulkan_admitted_window_end(bool tracked) noexcept {
+  if (tracked) {
+    admitted_window_test_detail::live_admitted_windows.fetch_sub(
+        1u, std::memory_order_release);
+  }
+}
+#endif
+
 namespace admitted_sequence_detail {
 
 struct borrowed_packed_header {
-    const void* data = nullptr;
-    bioseq::storage::sequence_size_t bp_size = 0;
-    std::uint8_t storage_unit_byte_width = 0;
-    std::uint16_t padding_letters = 0;
+  const void *data = nullptr;
+  bioseq::storage::sequence_size_t bp_size = 0;
+  std::uint8_t storage_unit_byte_width = 0;
+  std::uint16_t padding_letters = 0;
 };
 
-template <sequence_alphabet Alphabet>
-struct borrowed_u32_instance {
-    using alphabet_type = Alphabet;
-    using storage_unit = std::uint32_t;
-    using compact_sequence_stdc_type = borrowed_packed_header;
+template <sequence_alphabet Alphabet> struct borrowed_u32_instance {
+  using alphabet_type = Alphabet;
+  using storage_unit = std::uint32_t;
+  using compact_sequence_stdc_type = borrowed_packed_header;
 
-    static constexpr std::size_t letter_bit_width =
-        bioseq::storage::basic_lazy_sequence_view<Alphabet>::traits::
-            logical_bits_per_symbol;
-    static constexpr std::size_t byte_width = sizeof(storage_unit);
-    static constexpr bool is_valid_compact_sequence_stdc_instance = true;
+  static constexpr std::size_t letter_bit_width =
+      bioseq::storage::basic_lazy_sequence_view<
+          Alphabet>::traits::logical_bits_per_symbol;
+  static constexpr std::size_t byte_width = sizeof(storage_unit);
+  static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
 
 template <sequence_alphabet Alphabet, class Fn>
 decltype(auto) with_borrowed_u32_range(
-        const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-            resident_packed_region& descriptor,
-        Fn&& fn) {
-    using instance = borrowed_u32_instance<Alphabet>;
-    using range_type = compact_sequence_range<instance>;
-    borrowed_packed_header header{
-        .data = descriptor.units,
-        .bp_size = descriptor.bp_length,
-        .storage_unit_byte_width = descriptor.storage_unit_byte_width,
-        .padding_letters = descriptor.trailing_padding_letters,
-    };
-    range_type range{header};
-    return std::forward<Fn>(fn)(range);
+    const typename bioseq::storage::basic_lazy_sequence_view<
+        Alphabet>::resident_packed_region &descriptor,
+    Fn &&fn) {
+  using instance = borrowed_u32_instance<Alphabet>;
+  using range_type = compact_sequence_range<instance>;
+  borrowed_packed_header header{
+      .data = descriptor.units,
+      .bp_size = descriptor.bp_length,
+      .storage_unit_byte_width = descriptor.storage_unit_byte_width,
+      .padding_letters = descriptor.trailing_padding_letters,
+  };
+  range_type range{header};
+  return std::forward<Fn>(fn)(range);
 }
 
 template <sequence_alphabet Alphabet>
 [[nodiscard]] bool descriptor_is_canonical_u32(
-        const typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-            resident_packed_region& descriptor) noexcept {
-    return descriptor.storage_unit_byte_width == sizeof(std::uint32_t)
-        && descriptor.bits_per_symbol
-            == bioseq::storage::basic_lazy_sequence_view<Alphabet>::traits::
-                logical_bits_per_symbol
-        && descriptor.leading_symbol_offset == 0u;
+    const typename bioseq::storage::basic_lazy_sequence_view<
+        Alphabet>::resident_packed_region &descriptor) noexcept {
+  return descriptor.storage_unit_byte_width == sizeof(std::uint32_t) &&
+         descriptor.bits_per_symbol ==
+             bioseq::storage::basic_lazy_sequence_view<
+                 Alphabet>::traits::logical_bits_per_symbol &&
+         descriptor.leading_symbol_offset == 0u;
 }
 
-template <sequence_alphabet Alphabet>
-struct canonical_u32_window {
-    using owner_type = bioseq::storage::admitted_packed_region<Alphabet>;
-    using descriptor_type = typename bioseq::storage::basic_lazy_sequence_view<
-        Alphabet>::resident_packed_region;
+template <sequence_alphabet Alphabet> struct canonical_u32_window {
+  using owner_type = bioseq::storage::admitted_packed_region<Alphabet>;
+  using descriptor_type = typename bioseq::storage::basic_lazy_sequence_view<
+      Alphabet>::resident_packed_region;
 
-    std::optional<owner_type> owner;
-    descriptor_type descriptor{};
+  std::optional<owner_type> owner;
+  descriptor_type descriptor{};
+#ifdef BIOSEQ_TEST_INDEXES
+  bool test_admitted_window_tracked = false;
+#endif
 
-    explicit canonical_u32_window(descriptor_type borrowed) noexcept
-        : descriptor(borrowed) {}
+  explicit canonical_u32_window(descriptor_type borrowed) noexcept
+      : descriptor(borrowed) {}
 
-    explicit canonical_u32_window(owner_type&& admitted)
-        : owner(std::in_place, std::move(admitted)),
-          descriptor(owner->descriptor()) {}
+  explicit canonical_u32_window(owner_type &&admitted)
+      : owner(std::in_place, std::move(admitted)),
+        descriptor(owner->descriptor())
+#ifdef BIOSEQ_TEST_INDEXES
+        ,
+        test_admitted_window_tracked(note_vulkan_admitted_window_begin())
+#endif
+  {
+  }
 
-    canonical_u32_window(canonical_u32_window&&) noexcept = default;
-    canonical_u32_window& operator=(canonical_u32_window&&) = delete;
-    canonical_u32_window(const canonical_u32_window&) = delete;
-    canonical_u32_window& operator=(const canonical_u32_window&) = delete;
+  canonical_u32_window(canonical_u32_window &&other) noexcept
+      : owner(std::move(other.owner)), descriptor(other.descriptor)
+#ifdef BIOSEQ_TEST_INDEXES
+        ,
+        test_admitted_window_tracked(
+            std::exchange(other.test_admitted_window_tracked, false))
+#endif
+  {
+  }
+  ~canonical_u32_window() {
+#ifdef BIOSEQ_TEST_INDEXES
+    note_vulkan_admitted_window_end(test_admitted_window_tracked);
+#endif
+  }
+  canonical_u32_window &operator=(canonical_u32_window &&) = delete;
+  canonical_u32_window(const canonical_u32_window &) = delete;
+  canonical_u32_window &operator=(const canonical_u32_window &) = delete;
 };
 
 template <sequence_alphabet Alphabet>
 [[nodiscard]] std::optional<canonical_u32_window<Alphabet>>
 prepare_canonical_u32_window(
-        bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
-        bioseq::storage::sequence_size_t from,
-        bioseq::storage::sequence_size_t to,
-        VulkanSketchDecline* decline_out) {
-    if (from > to || to > sequence.bp_size()) {
-        if (decline_out != nullptr) {
-            decline_out->reason =
-                VulkanSketchDeclineReason::sequence_type_unsupported;
-        }
-        return std::nullopt;
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    bioseq::storage::sequence_size_t from, bioseq::storage::sequence_size_t to,
+    VulkanSketchDecline *decline_out) {
+  if (from > to || to > sequence.bp_size()) {
+    if (decline_out != nullptr) {
+      decline_out->reason =
+          VulkanSketchDeclineReason::sequence_type_unsupported;
     }
-    if (auto resident = sequence.try_resident_packed(
-            from, to, sizeof(std::uint32_t));
-        resident.has_value() && descriptor_is_canonical_u32<Alphabet>(*resident)) {
-        return std::optional<canonical_u32_window<Alphabet>>{
-            std::in_place, *resident};
-    }
+    return std::nullopt;
+  }
+  const auto access = bioseq::storage::plan_sequence_access(
+      sequence,
+      bioseq::storage::sequence_access_requirement::contiguous_resident, from,
+      to, sizeof(std::uint32_t));
+  if (access.route == bioseq::storage::sequence_access_route::borrow_resident &&
+      access.resident.has_value() &&
+      descriptor_is_canonical_u32<Alphabet>(*access.resident)) {
+    return std::optional<canonical_u32_window<Alphabet>>{std::in_place,
+                                                         *access.resident};
+  }
 
-    const auto length = to - from;
-    const std::uint64_t admitted_bytes =
-        bioseq::storage::packed_region_admission_bytes<Alphabet>(
-            length, sizeof(std::uint32_t));
-    bioseq::parallelism::MemoryAdmissionFailure failure{};
-    auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-        .try_reserve(admitted_bytes, &failure);
-    if (!permit) {
-        if (decline_out != nullptr) {
-            decline_out->reason =
-                VulkanSketchDeclineReason::memory_admission_denied;
-            decline_out->admission = failure;
-        }
-        return std::nullopt;
+  bioseq::parallelism::MemoryAdmissionFailure failure{};
+  auto permit =
+      bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+          access.admission_bytes, &failure);
+  if (!permit) {
+    if (decline_out != nullptr) {
+      decline_out->reason = VulkanSketchDeclineReason::memory_admission_denied;
+      decline_out->admission = failure;
     }
-    auto owner = bioseq::storage::materialize_packed_region(
-        sequence, from, to, sizeof(std::uint32_t), std::move(*permit));
-    return std::optional<canonical_u32_window<Alphabet>>{
-        std::in_place, std::move(owner)};
+    return std::nullopt;
+  }
+  auto owner = bioseq::storage::materialize_packed_region(
+      sequence, from, to, sizeof(std::uint32_t), std::move(*permit));
+  return std::optional<canonical_u32_window<Alphabet>>{std::in_place,
+                                                       std::move(owner)};
 }
 
 template <sequence_alphabet Alphabet>
@@ -696,7 +788,7 @@ template <sequence_alphabet Alphabet>
     return true;
 }
 
-}  // namespace admitted_sequence_detail
+} // namespace admitted_sequence_detail
 
 // ===========================================================================
 // Sequence upload view (DOC0307 §4.3)

@@ -36,6 +36,15 @@ using namespace bioseq_int_tests;
 namespace {
 
 constexpr std::string_view kHoe = "hoe_int";
+constexpr std::string_view kHoeLazyNoInsert = "hoe_lazy_no_insert_int";
+constexpr std::string_view kDoc0377LazyQueries =
+    "doc0377_lazy_queries_int";
+constexpr std::string_view kDoc0377TransformTarget =
+    "doc0377_transform_target_int";
+constexpr std::string_view kDoc0377OracleTarget =
+    "doc0377_oracle_target_int";
+constexpr std::string_view kDoc0377OracleQueries =
+    "doc0377_oracle_queries_int";
 constexpr std::string_view kDuplicateTargets = "mmsearch_duplicate_targets_int";
 constexpr std::string_view kMissingIndex = "mmsearch_missing_index_int";
 constexpr std::string_view kBatchJoinTarget = "mmsearch_batch_join_target_int";
@@ -350,6 +359,154 @@ void require_no_current_compatible_persisted_index(
     return format_literal(
         hoe_seed_rows().front().sequences.front(),
         seq_typmod{.alphabet = "dna4", .width = 32});
+}
+
+[[nodiscard]] std::string transformed_mmsearch_sql(
+        std::string_view table) {
+    return fmt::format(
+        "SELECT t.pk, bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
+        "bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
+        "bioseq.cigar(t.pk) "
+        "FROM {} AS t INNER JOIN {} AS q ON mmsearch("
+        "bioseq.reverse(bioseq.reverse(t.seq0[0:16] || t.seq0[16:])), "
+        "q.seq[0:]) ORDER BY t.pk;",
+        table, kDoc0377LazyQueries);
+}
+
+[[nodiscard]] std::string plain_mmsearch_coordinate_sql(
+        std::string_view table) {
+    return fmt::format(
+        "SELECT t.pk, bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
+        "bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
+        "bioseq.cigar(t.pk) "
+        "FROM {} AS t INNER JOIN {} AS q "
+        "ON mmsearch(t.seq0, q.seq) ORDER BY t.pk;",
+        table, kDoc0377LazyQueries);
+}
+
+[[nodiscard]] std::string doc0377_high_entropy_sequence(
+        const std::size_t length) {
+    constexpr std::string_view bases = "ACGT";
+    std::string result(length, 'A');
+    std::uint64_t state = 0x243f6a8885a308d3ull;
+    for (char& base : result) {
+        state ^= state << 13u;
+        state ^= state >> 7u;
+        state ^= state << 17u;
+        base = bases[static_cast<std::size_t>(state & 3u)];
+    }
+    return result;
+}
+
+[[nodiscard]] std::string doc0377_reverse(
+        const std::string_view value) {
+    return std::string{value.rbegin(), value.rend()};
+}
+
+[[nodiscard]] std::string doc0377_reverse_complement(
+        const std::string_view value) {
+    std::string result;
+    result.reserve(value.size());
+    for (auto iterator = value.rbegin(); iterator != value.rend(); ++iterator) {
+        switch (*iterator) {
+            case 'A': result.push_back('T'); break;
+            case 'C': result.push_back('G'); break;
+            case 'G': result.push_back('C'); break;
+            case 'T': result.push_back('A'); break;
+            default: FAIL("DOC0377 DNA fixture contains an invalid base");
+        }
+    }
+    return result;
+}
+
+struct Doc0377TransformCase {
+    std::string_view name;
+    std::string target_expression;
+    std::string query_expression;
+    std::string logical_target;
+    std::string stored_query;
+    std::string logical_query;
+    std::size_t expected_target_start = 0u;
+    bool expected_reverse = false;
+};
+
+[[nodiscard]] std::vector<Doc0377TransformCase>
+doc0377_transform_cases(const std::string& source) {
+    std::vector<Doc0377TransformCase> cases;
+
+    std::string sliced_target = source.substr(17u, 200u);
+    std::string sliced_query = sliced_target.substr(47u, 80u);
+    cases.push_back({
+        .name = "nonzero target and bounded query slices",
+        .target_expression = "t.seq0[17:217]",
+        .query_expression = "q.source_seq[5:85]",
+        .logical_target = std::move(sliced_target),
+        .stored_query = "GTCAG" + sliced_query + "CTAGGCA",
+        .logical_query = std::move(sliced_query),
+        .expected_target_start = 47u,
+        .expected_reverse = false,
+    });
+
+    std::string concat_target = source.substr(10u, 80u)
+        + source.substr(150u, 80u);
+    std::string concat_query = concat_target.substr(65u, 60u);
+    cases.push_back({
+        .name = "hit crossing a concat join",
+        .target_expression = "t.seq0[10:90] || t.seq0[150:230]",
+        .query_expression = "q.source_seq",
+        .logical_target = std::move(concat_target),
+        .stored_query = concat_query,
+        .logical_query = std::move(concat_query),
+        .expected_target_start = 65u,
+        .expected_reverse = false,
+    });
+
+    std::string reversed_target = doc0377_reverse(
+        std::string_view{source}.substr(25u, 200u));
+    std::string reversed_forward_query = reversed_target.substr(55u, 80u);
+    std::string reversed_query = doc0377_reverse_complement(
+        reversed_forward_query);
+    cases.push_back({
+        .name = "single reverse with a reverse-strand hit",
+        .target_expression = "bioseq.reverse(t.seq0[25:225])",
+        .query_expression = "q.source_seq",
+        .logical_target = std::move(reversed_target),
+        .stored_query = reversed_query,
+        .logical_query = std::move(reversed_query),
+        .expected_target_start = 55u,
+        .expected_reverse = true,
+    });
+
+    std::string reverse_complement_target = doc0377_reverse_complement(
+        std::string_view{source}.substr(30u, 200u));
+    std::string reverse_complement_query =
+        reverse_complement_target.substr(40u, 90u);
+    cases.push_back({
+        .name = "reverse complement with forward logical coordinates",
+        .target_expression =
+            "bioseq.reverse_complement(t.seq0[30:230])",
+        .query_expression = "q.source_seq",
+        .logical_target = std::move(reverse_complement_target),
+        .stored_query = reverse_complement_query,
+        .logical_query = std::move(reverse_complement_query),
+        .expected_target_start = 40u,
+        .expected_reverse = false,
+    });
+    return cases;
+}
+
+[[nodiscard]] std::string doc0377_alignment_projection(
+        const std::string_view target_alias,
+        const std::string_view target_key) {
+    return fmt::format(
+        "q.id, bioseq.query_start({}.{}), bioseq.query_end({}.{}), "
+        "bioseq.target_start({}.{}), bioseq.target_end({}.{}), "
+        "bioseq.is_reverse({}.{}), bioseq.cigar({}.{}), "
+        "bioseq.has_cigar({}.{})",
+        target_alias, target_key, target_alias, target_key,
+        target_alias, target_key, target_alias, target_key,
+        target_alias, target_key, target_alias, target_key,
+        target_alias, target_key);
 }
 
 [[nodiscard]] std::string batch_join_wide_target_sequence() {
@@ -3111,6 +3268,429 @@ TEST_CASE(
     }
 }
 
+TEST_CASE("DOC0377 sliced concat reverse mmsearch preserves coordinates across GUCs",
+          "[mmsearch][slice][concat][reverse][parity]") {
+    auto ctx = fresh_context({kHoe, kHoeLazyNoInsert});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE {} "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));",
+        kDoc0377LazyQueries));
+    exec_sql(ctx, fmt::format(
+        "INSERT INTO {} VALUES (1, {});",
+        kDoc0377LazyQueries, hoe_probe_literal()));
+    exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kHoeLazyNoInsert},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 2,
+            .using_bioseq = true,
+        },
+        hoe_seed_rows());
+
+    for (const std::string_view table :
+         std::array{kHoe, kHoeLazyNoInsert}) {
+        const std::string plain = plain_mmsearch_coordinate_sql(table);
+        const std::string transformed = transformed_mmsearch_sql(table);
+        const auto expected = query_rows(ctx, plain);
+        const auto plan = explain_text<false>(ctx, transformed);
+        REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+        REQUIRE(plan_contains(
+            plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+        REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+
+        const auto actual = expect_query_invariant_under_options(
+            ctx, transformed,
+            {
+                {"bioseq.enable_vectorization", {"on", "off"}},
+                {"bioseq.enable_column_cache", {"on", "off"}},
+                {"bioseq.read_sequence_index", {"on", "off"}},
+                {"bioseq.index_async_persist", {"on", "off"}},
+                {"bioseq.recompute_async_persist", {"on", "off"}},
+            });
+        REQUIRE(actual == expected);
+        REQUIRE_FALSE(actual.empty());
+        for (const auto& row : actual) {
+            REQUIRE(row.size() == 6);
+            REQUIRE(row[1].has_value());
+            REQUIRE(row[2].has_value());
+            REQUIRE(row[3].has_value());
+            REQUIRE(row[4].has_value());
+            REQUIRE(std::stoll(*row[1]) <= std::stoll(*row[2]));
+            REQUIRE(std::stoll(*row[3]) <= std::stoll(*row[4]));
+            if (row[5].has_value() && !row[5]->empty()) {
+                REQUIRE(is_valid_cigar(*row[5]));
+            }
+        }
+    }
+}
+
+TEST_CASE("DOC0377 transformed base-relation mmsearch fails closed",
+          "[mmsearch][slice][base-relation][error]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    const auto error = sql_error(ctx, fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0[1:], {});",
+        kHoe, hoe_probe_literal()));
+    REQUIRE(error.sqlstate == "0A000");
+}
+
+TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",
+          "[mmsearch][slice][coordinates][algorithms]") {
+    auto ctx = fresh_context(
+        {kDoc0377TransformTarget, kDoc0377OracleTarget});
+    const std::string source = doc0377_high_entropy_sequence(320u);
+    const auto cases = doc0377_transform_cases(source);
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377TransformTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {source}}});
+    std::vector<seq_row> oracle_rows;
+    oracle_rows.reserve(cases.size());
+    for (std::size_t index = 0u; index < cases.size(); ++index) {
+        oracle_rows.push_back(seq_row{
+            .pk = static_cast<int>(index + 1u),
+            .sequences = {cases[index].logical_target},
+        });
+    }
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377OracleTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        oracle_rows);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE {} ("
+        "id int PRIMARY KEY, source_seq bioseq.seq('dna4',32), "
+        "oracle_seq bioseq.seq('dna4',32));",
+        kDoc0377OracleQueries));
+    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    for (std::size_t index = 0u; index < cases.size(); ++index) {
+        exec_sql(ctx, fmt::format(
+            "INSERT INTO {} VALUES ({}, {}, {});",
+            kDoc0377OracleQueries, index + 1u,
+            format_literal(cases[index].stored_query, dna4),
+            format_literal(cases[index].logical_query, dna4)));
+    }
+
+    exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+    exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner';");
+    exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 20;");
+
+    struct AlgorithmRoute {
+        std::string_view name;
+        std::string_view minimizer;
+        std::string_view chaining;
+        bool vulkan = false;
+    };
+    std::vector<AlgorithmRoute> routes{
+        {"scalar", "scalar", "scalar_mm2", false},
+        {"exact SIMD", "two_stack_nthash", "simd_mm2", false},
+        {"paper ntHash SIMD", "paper_nthash_simd", "simd_mm2", false},
+    };
+    if (!selected_vulkan_runtime_untrusted(ctx)) {
+        routes.push_back({
+            "Vulkan", "vulkan_minimap_int", "vulkan_tiled_dp", true});
+    }
+
+    for (const auto& route : routes) {
+        DYNAMIC_SECTION(route.name) {
+            exec_sql(ctx, fmt::format(
+                "SET bioseq.aligner.minimizer_algorithm = '{}';",
+                route.minimizer));
+            exec_sql(ctx, fmt::format(
+                "SET bioseq.aligner.chaining_algorithm = '{}';",
+                route.chaining));
+            exec_sql(ctx, fmt::format(
+                "SET bioseq.aligner.vulkan_enabled = {};",
+                route.vulkan ? "on" : "off"));
+            if (route.vulkan) {
+                exec_sql(ctx,
+                    "SET bioseq.aligner.vulkan_seed_hits_enabled = on;");
+                exec_sql(ctx,
+                    "SET bioseq.aligner.vulkan_index_cache_enabled = on;");
+                exec_sql(ctx,
+                    "SET bioseq.aligner.vulkan_fused_frontend_enabled = on;");
+                exec_sql(ctx,
+                    "SET bioseq.aligner.vulkan_gpu_index_build_enabled = on;");
+                exec_sql(ctx,
+                    "SET bioseq.aligner.vulkan_extend_enabled = on;");
+            }
+            for (std::size_t index = 0u; index < cases.size(); ++index) {
+                const auto& test_case = cases[index];
+                DYNAMIC_SECTION(test_case.name) {
+                    const std::size_t case_id = index + 1u;
+                    const std::string transformed = fmt::format(
+                        "SELECT {} FROM {} AS t INNER JOIN {} AS q "
+                        "ON q.id = {} AND mmsearch({}, {}) "
+                        "ORDER BY 2, 3, 4, 5, 6, 7;",
+                        doc0377_alignment_projection("t", "pk"),
+                        kDoc0377TransformTarget, kDoc0377OracleQueries,
+                        case_id, test_case.target_expression,
+                        test_case.query_expression);
+                    const std::string oracle = fmt::format(
+                        "SELECT {} FROM {} AS o INNER JOIN {} AS q "
+                        "ON o.pk = q.id AND mmsearch(o.seq0, q.oracle_seq) "
+                        "WHERE q.id = {} ORDER BY 2, 3, 4, 5, 6, 7;",
+                        doc0377_alignment_projection("o", "pk"),
+                        kDoc0377OracleTarget, kDoc0377OracleQueries,
+                        case_id);
+                    const auto plan = explain_text<false>(ctx, transformed);
+                    REQUIRE(plan_contains(
+                        plan, "Custom Scan (BioseqBatchJoin)"));
+                    REQUIRE(plan_contains(
+                        plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+                    REQUIRE(plan_contains(
+                        plan, "Custom Scan (BioseqSliceProject)"));
+                    REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+
+                    const rowset_t expected = query_rows(ctx, oracle);
+                    const rowset_t actual = query_rows(ctx, transformed);
+                    REQUIRE(actual == expected);
+                    REQUIRE_FALSE(actual.empty());
+                    bool found_exact_logical_hit = false;
+                    for (const auto& row : actual) {
+                        REQUIRE(row.size() == 8u);
+                        for (std::size_t column = 0u;
+                             column < row.size(); ++column) {
+                            REQUIRE(row[column].has_value());
+                        }
+                        REQUIRE(is_valid_cigar(*row[6]));
+                        REQUIRE(*row[7] == "t");
+                        const bool exact_coordinates =
+                            std::stoull(*row[1]) == 0u
+                            && std::stoull(*row[2])
+                                == test_case.logical_query.size()
+                            && std::stoull(*row[3])
+                                == test_case.expected_target_start
+                            && std::stoull(*row[4])
+                                == test_case.expected_target_start
+                                    + test_case.logical_query.size()
+                            && (*row[5] == (test_case.expected_reverse
+                                ? "t" : "f"));
+                        found_exact_logical_hit =
+                            found_exact_logical_hit || exact_coordinates;
+                    }
+                    REQUIRE(found_exact_logical_hit);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("DOC0377 transformed ownership reconstructs INNER join algorithms",
+          "[mmsearch][slice][join][nestloop][hash][merge][doc0377]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_join_shape_queries "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+    exec_sql(ctx, fmt::format(
+        "INSERT INTO doc0377_join_shape_queries VALUES (1, {});",
+        batch_join_target_literal()));
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.read_sequence_index=off;"
+        "SET bioseq.aligner.min_chain_score=20;");
+
+    struct JoinRoute {
+        std::string_view name;
+        std::string_view expected_plan;
+        std::string_view settings;
+    };
+    constexpr std::array<JoinRoute, 3u> routes{{
+        {"Nested Loop", "Nested Loop",
+         "SET enable_nestloop=on; SET enable_hashjoin=off; "
+         "SET enable_mergejoin=off;"},
+        {"Hash Join", "Hash Join",
+         "SET enable_nestloop=off; SET enable_hashjoin=on; "
+         "SET enable_mergejoin=off;"},
+        {"Merge Join", "Merge Join",
+         "SET enable_nestloop=off; SET enable_hashjoin=off; "
+         "SET enable_mergejoin=on;"},
+    }};
+    constexpr std::array<std::string_view, 2u> options_suffixes{
+        "", ", NULL::bioseq_aligner_options"};
+    for (const auto& route : routes) {
+        DYNAMIC_SECTION(route.name) {
+            exec_sql(ctx, route.settings);
+            for (const auto options_suffix : options_suffixes) {
+                DYNAMIC_SECTION(options_suffix.empty()
+                        ? "two-argument OID"
+                        : "three-argument OID") {
+                    const std::string sql = fmt::format(
+                        "SELECT t.pk, q.id FROM {} AS t INNER JOIN "
+                        "doc0377_join_shape_queries AS q "
+                        "ON t.pk=q.id AND mmsearch("
+                        "t.seq0[0:], q.seq[0:]{} ) ORDER BY t.pk, q.id;",
+                        kHoe, options_suffix);
+                    const auto plan = explain_text<false>(ctx, sql);
+                    REQUIRE(plan_contains(
+                        plan, "Custom Scan (BioseqBatchJoin)"));
+                    REQUIRE(plan_contains(
+                        plan, "Custom Scan (BioseqSliceProject)"));
+                    REQUIRE(plan_contains(plan, route.expected_plan));
+                    REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+                    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+                    REQUIRE_FALSE(plan_contains(
+                        plan, "One-Time Filter: mmsearch"));
+
+                    const auto rows = query_rows(ctx, sql);
+                    REQUIRE_FALSE(rows.empty());
+                    for (const auto& row : rows) {
+                        REQUIRE(row.size() == 2u);
+                        REQUIRE(row[0] == std::optional<std::string>{"1"});
+                        REQUIRE(row[1] == std::optional<std::string>{"1"});
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("DOC0377 transformed mmsearch owns cross-table concat",
+          "[mmsearch][slice][concat][cross-table][coordinates][doc0377]") {
+    auto ctx = fresh_context({kDoc0377TransformTarget});
+    const std::string source = doc0377_high_entropy_sequence(320u);
+    const std::string prefix = doc0377_high_entropy_sequence(96u);
+    const std::string needle = source.substr(16u, 16u)
+        + prefix.substr(0u, 16u);
+    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377TransformTarget},
+            .typmod = dna4,
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {source}}});
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_cross_concat_queries ("
+        "id int PRIMARY KEY, prefix bioseq.seq('dna4',32), "
+        "needle bioseq.seq('dna4',32));");
+    exec_sql(ctx, fmt::format(
+        "INSERT INTO doc0377_cross_concat_queries VALUES (1, {}, {});",
+        format_literal(prefix, dna4), format_literal(needle, dna4)));
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.read_sequence_index=off;"
+        "SET bioseq.aligner.vulkan_enabled=off;"
+        "SET bioseq.aligner.minimizer_algorithm='scalar';"
+        "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
+        "SET bioseq.aligner.min_chain_score=10;");
+
+    const std::string sql = fmt::format(
+        "SELECT t.pk, q.id, bioseq.target_start(t.pk), "
+        "bioseq.target_end(t.pk) FROM {} AS t INNER JOIN "
+        "doc0377_cross_concat_queries AS q "
+        "ON t.pk=q.id AND mmsearch("
+        "t.seq0[0:32] || q.prefix[0:32], q.needle[0:]) "
+        "ORDER BY 3, 4;",
+        kDoc0377TransformTarget);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+
+    const auto rows = query_rows(ctx, sql);
+    REQUIRE_FALSE(rows.empty());
+    bool found_boundary_hit = false;
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 4u);
+        for (const auto& value : row) REQUIRE(value.has_value());
+        found_boundary_hit = found_boundary_hit
+            || (std::stoull(*row[2]) == 16u
+                && std::stoull(*row[3]) == 48u);
+    }
+    REQUIRE(found_boundary_hit);
+}
+
+TEST_CASE("DOC0377 outer-join match quals fail closed",
+          "[mmsearch][slice][outer-join][fail-closed][doc0377]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_outer_match_queries "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+    exec_sql(ctx, fmt::format(
+        "INSERT INTO doc0377_outer_match_queries VALUES (1, {});",
+        batch_join_target_literal()));
+
+    constexpr std::array<std::string_view, 3u> join_types{
+        "LEFT", "RIGHT", "FULL"};
+    for (const auto join_type : join_types) {
+        const std::string sql = fmt::format(
+            "SELECT count(*) FROM {} AS t {} JOIN "
+            "doc0377_outer_match_queries AS q "
+            "ON t.pk=q.id AND mmsearch(t.seq0[0:], q.seq[0:]);",
+            kHoe, join_type);
+        const auto error = sql_error(ctx, sql);
+        REQUIRE(error.sqlstate == "0A000");
+        REQUIRE((error.contains("not owned")
+                 || error.contains("no Bioseq executor owner")));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    }
+}
+
+TEST_CASE("DOC0377 projection-only slicing is legal above outer joins",
+          "[slice][concat][outer-join][projection][doc0377]") {
+    connection_test_context ctx;
+    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_outer_projection_target "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));"
+        "CREATE TEMP TABLE doc0377_outer_projection_query "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
+    exec_sql(ctx, fmt::format(
+        "INSERT INTO doc0377_outer_projection_target VALUES "
+        "(1, {}), (2, {});"
+        "INSERT INTO doc0377_outer_projection_query VALUES "
+        "(1, {}), (3, {});",
+        format_literal("ACGTACGT", dna4),
+        format_literal("TTTTCCCC", dna4),
+        format_literal("GGGGAAAA", dna4),
+        format_literal("CCCCGGGG", dna4)));
+
+    struct OuterProjectionCase {
+        std::string_view join_type;
+        std::string_view expected;
+    };
+    constexpr std::array<OuterProjectionCase, 3u> cases{{
+        {"LEFT", "1:8,2:NULL"},
+        {"RIGHT", "1:8,3:NULL"},
+        {"FULL", "1:8,2:NULL,3:NULL"},
+    }};
+    for (const auto& test_case : cases) {
+        const std::string inner = fmt::format(
+            "SELECT COALESCE(t.id,q.id) AS id, "
+            "bioseq.len(t.seq[0:4] || q.seq[0:4]) AS n "
+            "FROM doc0377_outer_projection_target AS t {} JOIN "
+            "doc0377_outer_projection_query AS q ON t.id=q.id",
+            test_case.join_type);
+        const auto plan = explain_text<false>(ctx, inner);
+        REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE(query_scalar(ctx, fmt::format(
+            "SELECT string_agg(id::text || ':' || COALESCE(n::text,'NULL'), "
+            "',' ORDER BY id) FROM ({} ) AS projected;",
+            inner)) == test_case.expected);
+    }
+}
+
 namespace {
 void check_single_guc_parity(std::string_view guc) {
     auto ctx = fresh_context({kHoe});
@@ -3496,7 +4076,74 @@ TEST_CASE("mmsearch with all-NULL aligner_options matches the GUC defaults",
         kHoe,
         hoe_probe_literal());
 
+    const std::string null_options_sql = fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
+        "NULL::bioseq_aligner_options) ORDER BY pk;",
+        kHoe,
+        hoe_probe_literal());
+
     REQUIRE(query_rows(ctx, base_sql) == query_rows(ctx, overridden_sql));
+    REQUIRE(query_rows(ctx, base_sql) == query_rows(ctx, null_options_sql));
+}
+
+TEST_CASE("DOC0377 raw and folded Const aligner options retain ownership",
+          "[mmsearch][aligner_options][const][folding][doc0377]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+
+    // Composite input contains one value followed by the remaining 35 NULL
+    // fields.  A typed composite literal is a raw Const at parse time; the
+    // CASE/function spelling reaches the same Const through planner folding.
+    std::string raw_options = "(15";
+    raw_options.append(35u, ',');
+    raw_options.push_back(')');
+    const std::string raw_sql = fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
+        "'{}'::bioseq_aligner_options) ORDER BY pk;",
+        kHoe, hoe_probe_literal(), raw_options);
+    const std::string folded_sql = fmt::format(
+        "SELECT pk FROM {} WHERE mmsearch(seq0, {}, "
+        "CASE WHEN true THEN aligner_options(kmer_size => 15) "
+        "ELSE NULL::bioseq_aligner_options END) ORDER BY pk;",
+        kHoe, hoe_probe_literal());
+
+    for (const auto& sql : {raw_sql, folded_sql}) {
+        const auto plan = explain_text<false>(ctx, sql);
+        REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+        REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+        REQUIRE_FALSE(plan_contains(plan, "One-Time Filter: mmsearch"));
+    }
+    REQUIRE(query_rows(ctx, raw_sql) == query_rows(ctx, folded_sql));
+}
+
+TEST_CASE("DOC0377 NULL target and query bypass both mmsearch arities",
+          "[mmsearch][null][strict][pipeline-stats][doc0377]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
+    exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
+
+    REQUIRE_FALSE(query_rows(ctx, index_requirement_sql(kHoe, 1)).empty());
+    const long long prior_execution = stats_i64(
+        last_alignment_stats(ctx).front(), 0);
+    const std::array<std::string, 4u> null_calls{
+        fmt::format(
+            "mmsearch(NULL::bioseq.seq('dna4',32), {})",
+            hoe_probe_literal()),
+        "mmsearch(seq0, NULL::bioseq.seq('dna4',32))",
+        fmt::format(
+            "mmsearch(NULL::bioseq.seq('dna4',32), {}, "
+            "NULL::bioseq_aligner_options)",
+            hoe_probe_literal()),
+        "mmsearch(seq0, NULL::bioseq.seq('dna4',32), "
+        "NULL::bioseq_aligner_options)",
+    };
+    for (const auto& call : null_calls) {
+        REQUIRE(query_scalar_int(ctx, fmt::format(
+            "SELECT count(*) FROM {} WHERE {};", kHoe, call)) == 0);
+        REQUIRE(stats_i64(last_alignment_stats(ctx).front(), 0)
+            == prior_execution);
+    }
 }
 
 TEST_CASE("aligner_options rejects an invalid index read requirement ordinal",
@@ -3565,6 +4212,42 @@ TEST_CASE("mmsearch rejects a non-Const aligner_options third argument",
     REQUIRE((err.contains("not owned")
              || err.contains("no Bioseq executor owner")));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
+TEST_CASE("DOC0377 Var subquery and volatile aligner options fail closed",
+          "[mmsearch][aligner_options][shape][fail-closed][doc0377]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_options_shape "
+        "(id int PRIMARY KEY, value bioseq_aligner_options);"
+        "INSERT INTO doc0377_options_shape VALUES "
+        "(1, aligner_options(kmer_size => 15));"
+        "CREATE FUNCTION pg_temp.doc0377_volatile_options() "
+        "RETURNS bioseq_aligner_options LANGUAGE sql VOLATILE "
+        "AS $$ SELECT aligner_options(kmer_size => 15) $$;");
+
+    const std::array<std::string, 3u> unsupported_options{
+        "o.value",
+        "(SELECT value FROM doc0377_options_shape WHERE id=1)",
+        "pg_temp.doc0377_volatile_options()",
+    };
+    for (std::size_t index = 0u; index < unsupported_options.size(); ++index) {
+        const bool var_shape = index == 0u;
+        const std::string sql = fmt::format(
+            "SELECT t.pk FROM {} AS t {} WHERE mmsearch(t.seq0, {}, {}) "
+            "ORDER BY t.pk;",
+            kHoe,
+            var_shape
+                ? "CROSS JOIN doc0377_options_shape AS o"
+                : "",
+            hoe_probe_literal(), unsupported_options[index]);
+        const auto error = sql_error(ctx, sql);
+        REQUIRE(error.sqlstate == "0A000");
+        REQUIRE((error.contains("not owned")
+                 || error.contains("no Bioseq executor owner")));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    }
 }
 
 TEST_CASE("index read requirement allow ordinal preserves production policy",

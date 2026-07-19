@@ -7,12 +7,14 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
 #include <optional>
 #include <ranges>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -27,19 +29,79 @@ import :flat_abi;
 import :source_abi;
 import :tree_types;
 import :tree_ops;
+import bioseq.pg_utils;
 import bioseq.storage.bucket_math;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy;
 
+#ifdef BIOSEQ_TEST_INDEXES
+export enum class PgSequenceFacadeTestPoison : std::uint8_t {
+  none = 0u,
+  resident_probe = 1u,
+  materialization = 2u,
+  contiguous_access = 3u,
+};
+
+export struct PgSequenceFacadeTestCounters {
+  std::uint64_t source_stream_callbacks = 0u;
+  std::uint64_t source_resident_probes = 0u;
+  std::uint64_t declared_materializations = 0u;
+  std::uint64_t completed_materializations = 0u;
+  std::uint64_t poison_hits = 0u;
+};
+
+inline thread_local PgSequenceFacadeTestPoison
+    g_pg_sequence_facade_test_poison = PgSequenceFacadeTestPoison::none;
+inline thread_local PgSequenceFacadeTestCounters
+    g_pg_sequence_facade_test_counters{};
+
+[[nodiscard]] inline bool
+pg_sequence_facade_test_poison_has(PgSequenceFacadeTestPoison bit) noexcept {
+  return (static_cast<std::uint8_t>(g_pg_sequence_facade_test_poison) &
+          static_cast<std::uint8_t>(bit)) != 0u;
+}
+
+export inline void
+arm_pg_sequence_facade_test_poison(PgSequenceFacadeTestPoison poison) noexcept {
+  g_pg_sequence_facade_test_poison = poison;
+}
+
+export inline void disarm_pg_sequence_facade_test_poison() noexcept {
+  g_pg_sequence_facade_test_poison = PgSequenceFacadeTestPoison::none;
+}
+
+export inline void reset_pg_sequence_facade_test_counters() noexcept {
+  disarm_pg_sequence_facade_test_poison();
+  g_pg_sequence_facade_test_counters = {};
+}
+
+export [[nodiscard]] inline PgSequenceFacadeTestCounters
+pg_sequence_facade_test_counters() noexcept {
+  return g_pg_sequence_facade_test_counters;
+}
+
+export inline void note_pg_sequence_facade_materialization_begin() {
+  ++g_pg_sequence_facade_test_counters.declared_materializations;
+  if (pg_sequence_facade_test_poison_has(
+          PgSequenceFacadeTestPoison::materialization)) {
+    ++g_pg_sequence_facade_test_counters.poison_hits;
+    throw std::runtime_error(
+        "poisoned PostgreSQL sequence facade materialization");
+  }
+}
+
+export inline void note_pg_sequence_facade_materialization_complete() noexcept {
+  ++g_pg_sequence_facade_test_counters.completed_materializations;
+}
+#endif
+
 namespace {
 
-[[noreturn]] inline void invalid_flat_sequence(char const* detail)
-{
-    ereport(ERROR,
-            (errcode(ERRCODE_DATA_CORRUPTED),
-             errmsg("invalid flat bioseq.seq representation"),
-             errdetail("%s", detail)));
-    __builtin_unreachable();
+[[noreturn]] inline void invalid_flat_sequence(char const *detail) {
+  ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
+                  errmsg("invalid flat bioseq.seq representation"),
+                  errdetail("%s", detail)));
+  __builtin_unreachable();
 }
 
 [[noreturn]] inline void unresolved_locator_error()
@@ -476,156 +538,159 @@ template<class Alphabet>
         static_cast<std::uint8_t>(flat.alphabet_code),
         static_cast<std::uint8_t>(flat.storage_unit_byte_width),
         [&ok, &flat, from, to, output]<class Instance>() {
-            if constexpr (std::is_same_v<
-                              typename Instance::alphabet_type, Alphabet>) {
-                using range = compact_sequence_range<Instance>;
-                using traits = typename range::traits;
-                using unit = typename traits::storage_unit;
-                auto const* units = reinterpret_cast<unit const*>(flat.data);
-                for (std::uint64_t position = from; position < to; ++position) {
-                    unit word = units[position / traits::letters_per_unit];
-                    const std::size_t shift = static_cast<std::size_t>(
-                        position % traits::letters_per_unit)
-                        * traits::bits_per_char;
-                    output[static_cast<std::size_t>(position - from)] =
-                        static_cast<std::uint8_t>(
-                            (word >> shift) & traits::char_mask);
-                }
-                ok = true;
+          if constexpr (std::is_same_v<typename Instance::alphabet_type,
+                                       Alphabet>) {
+            using range = compact_sequence_range<Instance>;
+            using traits = typename range::traits;
+            using unit = typename traits::storage_unit;
+            auto const *units = reinterpret_cast<unit const *>(flat.data);
+            for (std::uint64_t position = from; position < to; ++position) {
+              unit word = units[position / traits::letters_per_unit];
+              const std::size_t shift =
+                  static_cast<std::size_t>(position %
+                                           traits::letters_per_unit) *
+                  traits::bits_per_char;
+              output[static_cast<std::size_t>(position - from)] =
+                  static_cast<std::uint8_t>((word >> shift) &
+                                            traits::char_mask);
             }
+            ok = true;
+          }
         });
     return ok;
 }
 
-template<class Alphabet>
-[[nodiscard]] std::uint8_t const* facade_ptr_at(
-    pg_sequence_facade_state const& state,
-    bioseq::storage::sequence_transform transform,
-    bioseq::storage::sequence_size_t from,
-    std::size_t count,
-    std::span<std::uint8_t> output)
-{
-    if (from > state.descriptor.bp_length
-        || count > state.descriptor.bp_length - from) {
-        return nullptr;
+template <class Alphabet>
+[[nodiscard]] std::uint8_t const *
+facade_ptr_at(pg_sequence_facade_state const &state,
+              bioseq::storage::sequence_transform transform,
+              bioseq::storage::sequence_size_t from, std::size_t count,
+              std::span<std::uint8_t> output) {
+  if (from > state.descriptor.bp_length ||
+      count > state.descriptor.bp_length - from) {
+    return nullptr;
+  }
+  const std::uint64_t to = from + count;
+  const bool reverse = bioseq::storage::has_reverse(transform);
+  const std::uint64_t base_from =
+      !reverse ? from : state.descriptor.bp_length - to;
+  const std::uint64_t base_to =
+      !reverse ? to : state.descriptor.bp_length - from;
+  bool ok = false;
+  if (state.flat != nullptr) {
+    ok = emit_flat_range<Alphabet>(*state.flat, base_from, base_to,
+                                   output.first(count));
+  } else {
+#ifdef BIOSEQ_TEST_INDEXES
+    ++g_pg_sequence_facade_test_counters.source_stream_callbacks;
+#endif
+    ok = emit_tree_range<Alphabet>(*state.session, state.tree, base_from,
+                                   base_to, output.first(count));
+  }
+  if (!ok) {
+    return nullptr;
+  }
+  if (reverse) {
+    std::reverse(output.begin(), output.begin() + count);
+  }
+  if (bioseq::storage::has_complement(transform)) {
+    for (std::size_t index = 0; index < count; ++index) {
+      output[index] = complement_rank<Alphabet>(output[index]);
     }
-    const std::uint64_t to = from + count;
-    const bool reverse = bioseq::storage::has_reverse(transform);
-    const std::uint64_t base_from = !reverse
-        ? from : state.descriptor.bp_length - to;
-    const std::uint64_t base_to = !reverse
-        ? to : state.descriptor.bp_length - from;
-    bool ok = state.flat != nullptr
-        ? emit_flat_range<Alphabet>(*state.flat, base_from, base_to,
-                                   output.first(count))
-        : emit_tree_range<Alphabet>(*state.session, state.tree,
-                                   base_from, base_to, output.first(count));
-    if (!ok) {
-        return nullptr;
-    }
-    if (reverse) {
-        std::reverse(output.begin(), output.begin() + count);
-    }
-    if (bioseq::storage::has_complement(transform)) {
-        for (std::size_t index = 0; index < count; ++index) {
-            output[index] = complement_rank<Alphabet>(output[index]);
-        }
-    }
-    return output.data();
+  }
+  return output.data();
 }
 
-template<class Alphabet, bool IsReversed, bool WriteReversed>
-[[nodiscard]] std::uint8_t const* facade_ptr_at_callback(
-    void const* opaque,
-    bioseq::storage::sequence_size_t from,
-    std::size_t count,
-    std::span<std::uint8_t> output)
-{
-    constexpr auto transform = IsReversed
-        ? (WriteReversed
-            ? bioseq::storage::sequence_transform::complemented
-            : bioseq::storage::sequence_transform::reverse_complement)
-        : (WriteReversed
-            ? bioseq::storage::sequence_transform::reversed
-            : bioseq::storage::sequence_transform::identity);
-    return facade_ptr_at<Alphabet>(
-        *static_cast<pg_sequence_facade_state const*>(opaque),
-        transform, from, count, output);
+template <class Alphabet, bool IsReversed, bool WriteReversed>
+[[nodiscard]] std::uint8_t const *
+facade_ptr_at_callback(void const *opaque,
+                       bioseq::storage::sequence_size_t from, std::size_t count,
+                       std::span<std::uint8_t> output) {
+  constexpr auto transform =
+      IsReversed
+          ? (WriteReversed
+                 ? bioseq::storage::sequence_transform::complemented
+                 : bioseq::storage::sequence_transform::reverse_complement)
+          : (WriteReversed ? bioseq::storage::sequence_transform::reversed
+                           : bioseq::storage::sequence_transform::identity);
+  return facade_ptr_at<Alphabet>(
+      *static_cast<pg_sequence_facade_state const *>(opaque), transform, from,
+      count, output);
 }
 
-[[nodiscard]] inline bioseq::storage::sequence_size_t facade_bp_size(
-    void const* opaque) noexcept
-{
-    return static_cast<pg_sequence_facade_state const*>(opaque)
-        ->descriptor.bp_length;
+[[nodiscard]] inline bioseq::storage::sequence_size_t
+facade_bp_size(void const *opaque) noexcept {
+  return static_cast<pg_sequence_facade_state const *>(opaque)
+      ->descriptor.bp_length;
 }
 
-[[nodiscard]] inline bool tree_worker_shareable(piece_edge edge) noexcept
-{
-    if (!edge) {
-        return true;
-    }
-    if (edge.node->node_kind == piece_node::kind::source) {
-        auto source = edge.node->payload.source.source;
-        return pg_sequence_source_handle_valid(source)
-            && source.ops->worker_shareable(source.state);
-    }
-    if (edge.node->node_kind == piece_node::kind::branch) {
-        return tree_worker_shareable(edge.node->payload.branch.left)
-            && tree_worker_shareable(edge.node->payload.branch.right);
-    }
+[[nodiscard]] inline bool tree_worker_shareable(piece_edge edge) noexcept {
+  if (!edge) {
     return true;
+  }
+  if (edge.node->node_kind == piece_node::kind::source) {
+    auto source = edge.node->payload.source.source;
+    return pg_sequence_source_handle_valid(source) &&
+           source.ops->worker_shareable(source.state);
+  }
+  if (edge.node->node_kind == piece_node::kind::branch) {
+    return tree_worker_shareable(edge.node->payload.branch.left) &&
+           tree_worker_shareable(edge.node->payload.branch.right);
+  }
+  return true;
 }
 
-[[nodiscard]] inline bool facade_worker_shareable(void const* opaque) noexcept
-{
-    auto const& state =
-        *static_cast<pg_sequence_facade_state const*>(opaque);
-    return state.flat != nullptr || tree_worker_shareable(state.tree);
+[[nodiscard]] inline bool facade_worker_shareable(void const *opaque) noexcept {
+  auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
+  return state.flat != nullptr || tree_worker_shareable(state.tree);
 }
 
-template<class Alphabet>
-[[nodiscard]] auto facade_resident_probe(
-    void const* opaque,
-    bioseq::storage::sequence_size_t from,
-    bioseq::storage::sequence_size_t to,
-    std::uint8_t requested_width) noexcept
-    -> typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
-        resident_probe_result
-{
-    using view = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
-    auto const& state =
-        *static_cast<pg_sequence_facade_state const*>(opaque);
-    if (state.flat == nullptr
-        || state.descriptor.storage_unit_byte_width != requested_width) {
-        return std::nullopt;
+template <class Alphabet>
+[[nodiscard]] auto facade_resident_probe(void const *opaque,
+                                         bioseq::storage::sequence_size_t from,
+                                         bioseq::storage::sequence_size_t to,
+                                         std::uint8_t requested_width) noexcept
+    -> typename bioseq::storage::basic_lazy_sequence_view<
+        Alphabet>::resident_probe_result {
+  using view = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
+  auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
+  if (state.flat == nullptr) {
+#ifdef BIOSEQ_TEST_INDEXES
+    ++g_pg_sequence_facade_test_counters.source_resident_probes;
+    if (pg_sequence_facade_test_poison_has(
+            PgSequenceFacadeTestPoison::resident_probe)) {
+      ++g_pg_sequence_facade_test_counters.poison_hits;
     }
-    using descriptor = typename view::resident_packed_region;
-    const auto length = to - from;
-    if (length == 0u) {
-        return descriptor{};
-    }
-    constexpr std::uint64_t bits =
-        bioseq::storage::lazy_rank_stream_traits<Alphabet>::
-            logical_bits_per_symbol;
-    const std::uint64_t letters_per_unit = requested_width * 8u / bits;
-    const std::uint64_t first_unit = from / letters_per_unit;
-    const std::uint64_t leading = from % letters_per_unit;
-    const std::uint64_t occupied = leading + length;
-    const std::uint64_t unit_count = occupied / letters_per_unit
-        + (occupied % letters_per_unit != 0u);
-    const std::uint64_t trailing =
-        unit_count * letters_per_unit - occupied;
-    return descriptor{
-        .units = state.flat->data + first_unit * requested_width,
-        .unit_count = static_cast<std::size_t>(unit_count),
-        .bp_length = length,
-        .storage_unit_byte_width = requested_width,
-        .bits_per_symbol = static_cast<std::uint8_t>(bits),
-        .leading_symbol_offset = static_cast<std::uint16_t>(leading),
-        .trailing_padding_letters = static_cast<std::uint16_t>(trailing),
-        .bit_order = view::packed_bit_order::least_significant_symbol_first,
-    };
+#endif
+    return std::nullopt;
+  }
+  if (state.descriptor.storage_unit_byte_width != requested_width) {
+    return std::nullopt;
+  }
+  using descriptor = typename view::resident_packed_region;
+  const auto length = to - from;
+  if (length == 0u) {
+    return descriptor{};
+  }
+  constexpr std::uint64_t bits = bioseq::storage::lazy_rank_stream_traits<
+      Alphabet>::logical_bits_per_symbol;
+  const std::uint64_t letters_per_unit = requested_width * 8u / bits;
+  const std::uint64_t first_unit = from / letters_per_unit;
+  const std::uint64_t leading = from % letters_per_unit;
+  const std::uint64_t occupied = leading + length;
+  const std::uint64_t unit_count =
+      occupied / letters_per_unit + (occupied % letters_per_unit != 0u);
+  const std::uint64_t trailing = unit_count * letters_per_unit - occupied;
+  return descriptor{
+      .units = state.flat->data + first_unit * requested_width,
+      .unit_count = static_cast<std::size_t>(unit_count),
+      .bp_length = length,
+      .storage_unit_byte_width = requested_width,
+      .bits_per_symbol = static_cast<std::uint8_t>(bits),
+      .leading_symbol_offset = static_cast<std::uint16_t>(leading),
+      .trailing_padding_letters = static_cast<std::uint16_t>(trailing),
+      .bit_order = view::packed_bit_order::least_significant_symbol_first,
+  };
 }
 
 template<class Alphabet>
@@ -640,6 +705,7 @@ struct facade_adapter {
             &facade_ptr_at_callback<Alphabet, true, true>,
         },
         .try_resident_packed = &facade_resident_probe<Alphabet>,
+        .copy_full_packed = nullptr,
         .worker_shareable = &facade_worker_shareable,
     };
 };
@@ -705,6 +771,54 @@ inline constexpr bool is_borrowed_view_result_v =
     std::ranges::view<std::remove_cvref_t<T>>
     || std::input_or_output_iterator<std::remove_cvref_t<T>>;
 
+/* Translate a C++ failure only after every inner PG_TRY scope has restored
+ * PostgreSQL's exception stack and every callback-scoped owner has unwound.
+ * PostgresErrorAsCpp carries the exact ErrorData (including SQLSTATE and
+ * context); do not replace it with a generic C++ error. */
+export [[noreturn]] inline void rethrow_pg_sequence_cpp_at_c_boundary(
+    std::exception_ptr failure)
+{
+    ErrorData* exact_error = nullptr;
+    bool standard_error = false;
+    bool unknown_error = false;
+    char detail[512] = "std::exception without detail";
+    try {
+        std::rethrow_exception(std::move(failure));
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        exact_error = error.release_error_data();
+    } catch (std::exception const& error) {
+        strlcpy(detail,
+                error.what() == nullptr
+                    ? "std::exception without detail"
+                    : error.what(),
+                sizeof(detail));
+        standard_error = true;
+    } catch (...) {
+        unknown_error = true;
+    }
+    if (exact_error != nullptr) {
+        ReThrowError(exact_error);
+    }
+    ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("bioseq sequence callback raised a C++ exception"),
+             errdetail("%s", unknown_error
+                     ? "unknown non-standard C++ exception"
+                     : (standard_error ? detail
+                                       : "empty C++ exception state"))));
+    pg_unreachable();
+}
+
+export template<class Invoke>
+Datum invoke_pg_sequence_fmgr_boundary(Invoke&& invoke)
+{
+    try {
+        return std::forward<Invoke>(invoke)();
+    } catch (...) {
+        rethrow_pg_sequence_cpp_at_c_boundary(std::current_exception());
+    }
+}
+
 export template <typename Result, typename Fn>
 Result with_pg_sequence_view(
     FunctionCallInfo fcinfo,
@@ -733,23 +847,30 @@ Result with_pg_sequence_view(
     }
 
     std::optional<Result> result;
+    std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
     {
         auto* local_session = begin_pg_sequence_read_session(
             CurrentMemoryContext);
         session = local_session;
-        pgseq_t::dispatch_instance(
-            descriptor.alphabet_code,
-            descriptor.storage_unit_byte_width,
-            [&result, &view_callback, dispatch_datum, descriptor,
-             local_session]<class Instance>() {
-                using alphabet = typename Instance::alphabet_type;
-                auto* owner = make_pg_sequence_call_owner<alphabet>(
-                    *local_session, dispatch_datum, descriptor);
-                result.emplace(std::forward<Fn>(view_callback)(owner->view()));
-            });
-        finish_pg_sequence_read_session(local_session, true);
+        try {
+            pgseq_t::dispatch_instance(
+                descriptor.alphabet_code,
+                descriptor.storage_unit_byte_width,
+                [&result, &view_callback, dispatch_datum, descriptor,
+                 local_session]<class Instance>() {
+                    using alphabet = typename Instance::alphabet_type;
+                    auto* owner = make_pg_sequence_call_owner<alphabet>(
+                        *local_session, dispatch_datum, descriptor);
+                    result.emplace(
+                        std::forward<Fn>(view_callback)(owner->view()));
+                });
+            finish_pg_sequence_read_session(local_session, true);
+        } catch (...) {
+            callback_failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local_session);
+        }
         session = nullptr;
     }
     PG_CATCH();
@@ -762,6 +883,9 @@ Result with_pg_sequence_view(
     PG_END_TRY();
     if (flat_copy != nullptr) {
         PG_FREE_IF_COPY(flat_copy, argument_index);
+    }
+    if (callback_failure != nullptr) {
+        std::rethrow_exception(std::move(callback_failure));
     }
     return std::move(*result);
 }
@@ -801,27 +925,33 @@ Result with_pg_sequence_views(
     }
 
     std::optional<Result> result;
+    std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
     {
         auto* local_session = begin_pg_sequence_read_session(
             CurrentMemoryContext);
         session = local_session;
-        pgseq_t::dispatch_instance(
-            left.alphabet_code,
-            left.storage_unit_byte_width,
-            [&result, &callback, local_session,
-             left_dispatch = dispatch[0],
-             right_dispatch = dispatch[1], left, right]<class Instance>() {
-                using alphabet = typename Instance::alphabet_type;
-                auto* left_owner = make_pg_sequence_call_owner<alphabet>(
-                    *local_session, left_dispatch, left);
-                auto* right_owner = make_pg_sequence_call_owner<alphabet>(
-                    *local_session, right_dispatch, right);
-                result.emplace(std::forward<Fn>(callback)(
-                    left_owner->view(), right_owner->view()));
-            });
-        finish_pg_sequence_read_session(local_session, true);
+        try {
+            pgseq_t::dispatch_instance(
+                left.alphabet_code,
+                left.storage_unit_byte_width,
+                [&result, &callback, local_session,
+                 left_dispatch = dispatch[0],
+                 right_dispatch = dispatch[1], left, right]<class Instance>() {
+                    using alphabet = typename Instance::alphabet_type;
+                    auto* left_owner = make_pg_sequence_call_owner<alphabet>(
+                        *local_session, left_dispatch, left);
+                    auto* right_owner = make_pg_sequence_call_owner<alphabet>(
+                        *local_session, right_dispatch, right);
+                    result.emplace(std::forward<Fn>(callback)(
+                        left_owner->view(), right_owner->view()));
+                });
+            finish_pg_sequence_read_session(local_session, true);
+        } catch (...) {
+            callback_failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local_session);
+        }
         session = nullptr;
     }
     PG_CATCH();
@@ -839,6 +969,9 @@ Result with_pg_sequence_views(
                 pfree(flat[side]);
             }
         }
+    }
+    if (callback_failure != nullptr) {
+        std::rethrow_exception(std::move(callback_failure));
     }
     return std::move(*result);
 }
@@ -952,28 +1085,34 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
         .alphabet_code = descriptor.alphabet_code,
         .rank = 0u,
     };
+    std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
     {
         auto* local_session = begin_pg_sequence_read_session(
             CurrentMemoryContext);
         session = local_session;
-        pgseq_t::dispatch_instance(
-            descriptor.alphabet_code,
-            descriptor.storage_unit_byte_width,
-            [&result, dispatch, descriptor, index,
-             local_session]<class Instance>() {
-                using alphabet = typename Instance::alphabet_type;
-                auto* owner = make_pg_sequence_call_owner<alphabet>(
-                    *local_session, dispatch, descriptor);
-                std::array<std::uint8_t, 1> scratch{};
-                owner->view().template to_encoded_into<false, false>(
-                    std::span<std::uint8_t>{scratch},
-                    static_cast<std::size_t>(index),
-                    static_cast<std::size_t>(index + 1u));
-                result.rank = scratch[0];
-            });
-        finish_pg_sequence_read_session(local_session, true);
+        try {
+            pgseq_t::dispatch_instance(
+                descriptor.alphabet_code,
+                descriptor.storage_unit_byte_width,
+                [&result, dispatch, descriptor, index,
+                 local_session]<class Instance>() {
+                    using alphabet = typename Instance::alphabet_type;
+                    auto* owner = make_pg_sequence_call_owner<alphabet>(
+                        *local_session, dispatch, descriptor);
+                    std::array<std::uint8_t, 1> scratch{};
+                    owner->view().template to_encoded_into<false, false>(
+                        std::span<std::uint8_t>{scratch},
+                        static_cast<std::size_t>(index),
+                        static_cast<std::size_t>(index + 1u));
+                    result.rank = scratch[0];
+                });
+            finish_pg_sequence_read_session(local_session, true);
+        } catch (...) {
+            callback_failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local_session);
+        }
         session = nullptr;
     }
     PG_CATCH();
@@ -984,6 +1123,9 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
         PG_RE_THROW();
     }
     PG_END_TRY();
+    if (callback_failure != nullptr) {
+        std::rethrow_exception(std::move(callback_failure));
+    }
     char symbol = '\0';
     if (!pgseq_symbol_for_rank(result.alphabet_code, result.rank, symbol)) {
         ereport(ERROR,

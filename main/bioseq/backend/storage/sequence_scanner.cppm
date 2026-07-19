@@ -214,6 +214,12 @@ concept supports_lazy_compact_sequence = requires {
 // on these operations instead of representation-specific nested types.
 struct lazy_compact_sequence_slice_tag {};
 
+enum class sequence_access_requirement : std::uint8_t {
+    sequential_symbols,
+    bounded_random_window,
+    contiguous_resident,
+};
+
 template <typename V, bool IsReversed, bool WriteReversed>
 concept supports_lazy_orientation =
     requires(V const& value,

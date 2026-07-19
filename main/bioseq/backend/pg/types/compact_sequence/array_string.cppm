@@ -29,6 +29,7 @@ import :packed_output;
 import :io;
 import :letter;
 import :subscript;
+import bioseq.sequences.rank_pack;
 
 namespace {
 
@@ -278,26 +279,118 @@ inline void validate_bridge_array_shape(
                 (errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
                  errmsg("alphabet-inferred bioseq.from_array requires a one-dimensional array")));
     }
-    const auto literal = letter_array_literal(array);
-    if (require_nonempty && literal.count == 0) {
+    validate_bridge_array_shape(array, "letter");
+    const auto elements = deconstruct_letter_values(array);
+    if (require_nonempty && elements.count == 0) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("cannot infer a bioseq alphabet from an empty letter array"),
                  errhint("use bioseq.from_array(letters, alphabet_name, width)")));
     }
-    if (literal.has_alphabet && literal.alphabet_code != alphabet) {
-        mixed_letter_alphabet_error(alphabet, literal.alphabet_code);
+    sequence_letter_value first{};
+    bool have_first = false;
+    if (elements.count != 0) {
+        if (elements.nulls != nullptr && elements.nulls[0]) {
+            array_null_error(array, 0);
+        }
+        first = validate_letter_datum(elements.values[0]);
+        have_first = true;
+        if (require_nonempty) {
+            alphabet = first.alphabet_code;
+        } else if (first.alphabet_code != alphabet) {
+            mixed_letter_alphabet_error(alphabet, first.alphabet_code);
+        }
     }
     const auto target = array_target_type(alphabet, width_bits);
-    if (literal.count == 0) {
-        return make_bound_sequence_from_ascii("", 0u, target);
+    pgseq_t* result = nullptr;
+    pgseq_t::dispatch_instance(
+        target.alphabet_code,
+        target.storage_unit_byte_width,
+        [&result, target, elements, array,
+         first, have_first]<class Instance>() {
+            using traits = typename compact_sequence_range<Instance>::traits;
+            using unit = typename traits::storage_unit;
+            const std::uint64_t length = static_cast<std::uint64_t>(
+                elements.count);
+            const std::uint64_t unit_count = length == 0u ? 0u
+                : length / traits::letters_per_unit
+                    + static_cast<std::uint64_t>(
+                        length % traits::letters_per_unit != 0u);
+            const Size total = bound_flat_size<Instance>(length);
+            result = pg_alloc(total);
+            if (result == nullptr) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_OUT_OF_MEMORY),
+                         errmsg("out of memory packing bioseq.letter array")));
+            }
+            std::memset(result, 0, total);
+            SET_VARSIZE(result, total);
+            result->alphabet_code = target.alphabet_code;
+            result->storage_unit_byte_width =
+                target.storage_unit_byte_width;
+            result->bp_size = static_cast<pgseq_t::bp_size_t>(length);
+
+            using sink = bioseq::sequences::
+                fixed_rank_pack_unit_sink<unit>;
+            using writer_type = bioseq::sequences::checked_rank_pack_sink<
+                Instance,
+                bioseq::sequences::invalid_rank_policy::reject,
+                bioseq::sequences::pack_capacity_policy::fixed_span,
+                sink>;
+            auto units = std::span<unit>{
+                reinterpret_cast<unit*>(result->data),
+                static_cast<std::size_t>(unit_count)};
+            writer_type writer{sink{units}};
+
+            int index = 0;
+            if (have_first) {
+                const auto status = writer.append_rank(first.rank);
+                if (status != bioseq::sequences::rank_pack_status::ok) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("invalid rank while packing "
+                                    "bioseq.letter array")));
+                }
+                index = 1;
+            }
+            for (; index < elements.count; ++index) {
+                if (elements.nulls != nullptr && elements.nulls[index]) {
+                    array_null_error(array, index);
+                }
+                const auto letter = validate_letter_datum(
+                    elements.values[index]);
+                if (letter.alphabet_code != target.alphabet_code) {
+                    mixed_letter_alphabet_error(
+                        target.alphabet_code, letter.alphabet_code);
+                }
+                const auto status = writer.append_rank(letter.rank);
+                if (status != bioseq::sequences::rank_pack_status::ok) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("invalid rank while packing "
+                                    "bioseq.letter array")));
+                }
+            }
+            const auto packed = writer.finish(length, unit_count);
+            if (!packed) {
+                ereport(ERROR,
+                        (errcode(packed.status
+                                == bioseq::sequences::rank_pack_status::
+                                    capacity_overflow
+                            ? ERRCODE_PROGRAM_LIMIT_EXCEEDED
+                            : ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq.letter array rank packing failed"),
+                         errdetail("rank_pack_status=%u",
+                                   static_cast<unsigned>(packed.status))));
+            }
+            result->padding_letters = packed.padding_letters;
+        });
+    if (result == nullptr) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq.letter array type dispatch produced no result")));
     }
-    auto* value = reinterpret_cast<pgseq_t*>(DatumGetPointer(literal.literal));
-    const Datum result = make_bound_sequence_from_ascii(
-        reinterpret_cast<char const*>(value->data),
-        static_cast<std::size_t>(value->bp_size), target);
-    pfree(value);
-    return result;
+    return PointerGetDatum(result);
 }
 
 } // namespace
@@ -455,20 +548,8 @@ export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
 export inline Datum seq_from_letter_array_infer_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
-    validate_bridge_array_shape(array, "letter");
-    const auto values = deconstruct_letter_values(array);
-    if (ARR_NDIM(array) != 1 || values.count == 0) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("cannot infer a bioseq alphabet from an empty letter array"),
-                 errhint("use bioseq.from_array(letters, alphabet_name, width)")));
-    }
-    if (values.nulls != nullptr && values.nulls[0]) {
-        array_null_error(array, 0);
-    }
-    const auto first = validate_letter_datum(values.values[0]);
     const Datum result = packed_from_letter_array(
-        array, first.alphabet_code, PG_GETARG_INT32(1), true);
+        array, pgseq_unbound_alphabet_code, PG_GETARG_INT32(1), true);
     PG_FREE_IF_COPY(array, 0);
     PG_RETURN_DATUM(result);
 }

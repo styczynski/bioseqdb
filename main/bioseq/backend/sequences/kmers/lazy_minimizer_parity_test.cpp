@@ -40,6 +40,7 @@ import bioseq.sequences.pipe;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
+import bioseq.storage.batch_processor;
 import bioseq.storage.size;
 
 using namespace seq::literals;
@@ -165,6 +166,7 @@ inline const facade_t::backend_ops composite_ops{
         &composite_ptr_at<true, true>,
     },
     .try_resident_packed = &composite_resident_probe,
+    .copy_full_packed = nullptr,
     .worker_shareable = &composite_worker_shareable,
 };
 
@@ -471,6 +473,47 @@ TEST_CASE("DOC0377 — Vulkan staging dispatches a sliced composite source range
             == fixture.selected_to - fixture.selected_from);
     require_partial_source_read(
         fixture.source, fixture.selected_to - fixture.selected_from);
+}
+
+TEST_CASE("DOC0377 — lazy batch sorting never requests whole composite sources",
+          "[lazy-view][source-backed][poison][batch-sort][vulkan]") {
+    auto high = make_composite_fixture();
+    auto low = make_composite_fixture();
+    auto middle = make_composite_fixture();
+    high.source.sources[0][100u] = 3u;
+    low.source.sources[0][100u] = 0u;
+    middle.source.sources[0][100u] = 1u;
+
+    const std::array<facade_t, 3> views{
+        make_composite_source_view(high.source),
+        make_composite_source_view(low.source),
+        make_composite_source_view(middle.source),
+    };
+    const std::span<const facade_t> batch{views};
+    using processor =
+        bioseq::storage::lazy_compact_sequence_batch_processor<seq::dna4>;
+
+    bioseq::storage::batch_sort_spec cpu{};
+    cpu.vulkan_enabled = false;
+    REQUIRE((processor::lazy_compact_sequence_batch_sort(batch, cpu)
+             == std::vector<std::size_t>{1u, 2u, 0u}));
+    REQUIRE(high.source.callback_count + low.source.callback_count
+                + middle.source.callback_count
+            > 0u);
+    REQUIRE(high.source.max_request < high.source.logical_size);
+    REQUIRE(low.source.max_request < low.source.logical_size);
+    REQUIRE(middle.source.max_request < middle.source.logical_size);
+
+    reset_source_observation(high.source);
+    reset_source_observation(low.source);
+    reset_source_observation(middle.source);
+    bioseq::storage::batch_sort_spec gpu{};
+    gpu.vulkan_enabled = true;
+    REQUIRE((processor::lazy_compact_sequence_batch_sort(batch, gpu)
+             == std::vector<std::size_t>{1u, 2u, 0u}));
+    REQUIRE(high.source.max_request < high.source.logical_size);
+    REQUIRE(low.source.max_request < low.source.logical_size);
+    REQUIRE(middle.source.max_request < middle.source.logical_size);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE

@@ -1292,7 +1292,8 @@ void parse_bioseq_rows(const it::rowset_t& rows, const E2eInput& in, E2eOutput& 
 void parse_bioseq_batch_rows(
         const it::rowset_t& rows,
         const E2eInput& in,
-        E2eOutput& out)
+        E2eOutput& out,
+        const std::int64_t target_coordinate_origin = 0)
 {
     std::vector<std::uint8_t> row_counts(in.queries.size(), 0);
     std::vector<double> offsets(in.queries.size(), kNoMatchOffsetSentinel);
@@ -1321,8 +1322,16 @@ void parse_bioseq_batch_rows(
         ++row_counts[qid];
         if (row_counts[qid] != 1) malformed_or_extra = true;
         const std::int64_t target_start = *target_start_value;
+        if (target_coordinate_origin < 0
+            || in.queries[qid].truth_target_start
+                < target_coordinate_origin) {
+            malformed_or_extra = true;
+            continue;
+        }
+        const std::int64_t expected_local_target_start =
+            in.queries[qid].truth_target_start - target_coordinate_origin;
         const double offset = static_cast<double>(
-            std::llabs(target_start - in.queries[qid].truth_target_start));
+            std::llabs(target_start - expected_local_target_start));
         offsets[qid] = offset;
         const bool coordinate_correct =
             offset < static_cast<double>(kPositionToleranceBp);
@@ -1338,7 +1347,7 @@ void parse_bioseq_batch_rows(
             ++out.correct_strand_count;
         }
         if (qid == 0) {
-            out.target_start = target_start;
+            out.target_start = target_start + target_coordinate_origin;
             out.is_reverse = is_reverse;
         }
         if (!in.cigar_projection) continue;
@@ -1363,7 +1372,8 @@ void parse_bioseq_batch_rows(
             && is_expected_benchmark_cigar(cigar, in)
             && replay_benchmark_cigar(
                 cigar, in, in.queries[qid], *query_start, *query_end,
-                target_start, *target_end, is_reverse)) {
+                target_start + target_coordinate_origin,
+                *target_end + target_coordinate_origin, is_reverse)) {
             ++out.correct_cigar_count;
             ++out.cigar_replay_count;
         }
@@ -7927,6 +7937,41 @@ void load_e2e_query_table(const it::connection_test_context& c,
         projection, target_table, index_read_requirement);
 }
 
+[[nodiscard]] std::string batched_transformed_coord_sql(
+        const std::string& target_table,
+        std::string_view projection,
+        const int index_read_requirement,
+        const std::int64_t target_coordinate_origin)
+{
+    const std::int64_t concat_join = target_coordinate_origin + 16;
+    return fmt::format(
+        "SELECT q.id, t.header, {} "
+        "FROM {} t JOIN e2e_queries q ON mmsearch("
+        "t.seq[{}:{}] || t.seq[{}:], "
+        "q.seq[0:], aligner_options(index_read_requirement => {})) "
+        "ORDER BY q.id, t.header",
+        projection, target_table, target_coordinate_origin, concat_join,
+        concat_join, index_read_requirement);
+}
+
+[[nodiscard]] std::int64_t doc0377_transformed_target_origin(
+        const E2eInput& in) {
+    if (in.queries.empty()) return 0;
+    std::int64_t minimum_truth = in.queries.front().truth_target_start;
+    for (const E2eQueryTruth& query : in.queries) {
+        minimum_truth = std::min(minimum_truth, query.truth_target_start);
+    }
+    if (minimum_truth <= 0) {
+        std::fputs(
+            "[bench_e2e] DOC0377 nonzero target slice requires every "
+            "generated truth_target_start to be positive\n",
+            stderr);
+        std::fflush(stderr);
+        std::abort();
+    }
+    return std::min<std::int64_t>(4096, minimum_truth);
+}
+
 [[nodiscard]] std::string e2e_projection_sql(const E2eInput& in) {
     if (!in.cigar_projection) {
         return "bioseq.target_start(header) AS tstart, "
@@ -8185,7 +8230,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             minimizer_index);
 
     } else if (algo == "bioseq_no_index"
-               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index") {
+               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index"
+               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced") {
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         if (recompute_async_persist) {
@@ -8208,8 +8254,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
         configure_no_index_storage_session(*in.conn);
         capture_cold_no_index_absence(
             *in.conn, in, out, ColdNoIndexAuditPhase::post_restart);
-        const std::string align_sql =
-            batched_coord_sql(in.no_index_table, proj, 1);
+        const bool transformed_recipe =
+            algo == "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced";
+        const std::int64_t transformed_target_origin = transformed_recipe
+            ? doc0377_transformed_target_origin(in) : 0;
+        const std::string align_sql = transformed_recipe
+            ? batched_transformed_coord_sql(
+                in.no_index_table, proj, 1, transformed_target_origin)
+            : batched_coord_sql(in.no_index_table, proj, 1);
         const AlignmentSnapshotIdentity prior_alignment =
             capture_prior_alignment_identity(*in.conn);
         ScopedResourceMonitor resources;
@@ -8218,7 +8270,8 @@ void load_e2e_query_table(const it::connection_test_context& c,
             auto _scope = bioseq::instr::region(kMeasuredRegion);
             load_e2e_query_table(*in.conn, in);
             parse_bioseq_batch_rows(
-                it::query_rows(*in.conn, align_sql), in, out);
+                it::query_rows(*in.conn, align_sql), in, out,
+                transformed_target_origin);
         }
         const auto end_ns = static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
         attach_resource_metrics(out, start_ns, end_ns, resources.stop());

@@ -516,31 +516,52 @@ dispatch_process_sequences_typed(
             scanner_pg_ctx);
     };
 
-    if (base_params.enable_profiling) {
-        /*
-         * Profiling pipeline. The ProfilerBlock is the persistent
-         * process-wide singleton (see global_state.cppm); aggregates
-         * accumulate across every batch in the current scan. The
-         * one-shot summary fires at scan end inside
-         * BioseqColumnScan_EndCustomScan (Part 48.5/48.8 of the
-         * design doc) — emitting it here would produce one summary
-         * per batch and accumulate duplicates on multi-batch scans.
-         */
-        using Args = bioseq::instr::context_args_profiling_full;
-        using TimingArgs = bioseq::instr::context_args_profiling_timing_only;
-        auto& profiler_block =
-            bioseq::instr::persistent_profiler_block<Args>();
-        auto& timing_profiler_block =
-            bioseq::instr::persistent_profiler_block<TimingArgs>();
-        bioseq::instr::installed_profiler_scope<Args> guard(profiler_block);
-        bioseq::instr::installed_profiler_scope<TimingArgs> timing_guard(timing_profiler_block);
-        static const auto* batch_desc =
-            bioseq::instr::register_region_static("BatchProcessor.process_sequences");
-        auto _batch_scope = bioseq::instr::region<Args>(batch_desc);
-        run_pipeline_body();
-    } else {
-        run_pipeline_body();
+    const auto inherited_observer =
+        bioseq::parallelism::current_tracked_job_observer();
+    const auto requested_observer = scanner_pg_ctx != nullptr
+            && scanner_pg_ctx->async_job_observer
+        ? scanner_pg_ctx->async_job_observer
+        : inherited_observer;
+    const auto previous_observer =
+        bioseq::parallelism::exchange_tracked_job_observer(
+            requested_observer);
+    try {
+        if (base_params.enable_profiling) {
+            /*
+             * Profiling pipeline. The ProfilerBlock is the persistent
+             * process-wide singleton (see global_state.cppm); aggregates
+             * accumulate across every batch in the current scan. The
+             * one-shot summary fires at scan end inside
+             * BioseqColumnScan_EndCustomScan (Part 48.5/48.8 of the
+             * design doc) — emitting it here would produce one summary
+             * per batch and accumulate duplicates on multi-batch scans.
+             */
+            using Args = bioseq::instr::context_args_profiling_full;
+            using TimingArgs =
+                bioseq::instr::context_args_profiling_timing_only;
+            auto& profiler_block =
+                bioseq::instr::persistent_profiler_block<Args>();
+            auto& timing_profiler_block =
+                bioseq::instr::persistent_profiler_block<TimingArgs>();
+            bioseq::instr::installed_profiler_scope<Args> guard(
+                profiler_block);
+            bioseq::instr::installed_profiler_scope<TimingArgs> timing_guard(
+                timing_profiler_block);
+            static const auto* batch_desc =
+                bioseq::instr::register_region_static(
+                    "BatchProcessor.process_sequences");
+            auto _batch_scope = bioseq::instr::region<Args>(batch_desc);
+            run_pipeline_body();
+        } else {
+            run_pipeline_body();
+        }
+    } catch (...) {
+        bioseq::parallelism::restore_tracked_job_observer(
+            previous_observer);
+        throw;
     }
+    bioseq::parallelism::restore_tracked_job_observer(
+        previous_observer);
 
     return results;
 }
@@ -1839,7 +1860,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			query_headers.size(),
 			ParallelPreparedQuerySketchStatus::pending);
 		std::vector<std::exception_ptr> exceptions(query_headers.size());
-		pool.parallel_for_with_context(
+		pool.parallel_for_with_context_tracked(
 			0u,
 			query_headers.size(),
 			1u,
@@ -1865,7 +1886,8 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 								std::current_exception();
 						}
 					}
-				}});
+				}},
+			bioseq::parallelism::current_tracked_job_observer());
 		for (std::size_t query_index = 0u;
 			 query_index < query_headers.size();
 			 ++query_index) {

@@ -47,6 +47,7 @@ import bioseq.sequences;                             // sequence_custom_alphabet
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
 import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
+import bioseq.storage.scanner;                       // access-requirement policy
 import bioseq.storage.lazy;                          // canonical basic_lazy_sequence_view
 import bioseq.storage.size;                          // sequence_size_t
 import bioseq.sequences.chaining.utils;              // Anchor, CanonicalAnchorLess
@@ -263,94 +264,74 @@ struct ExactSimdIndexBridgeResult {
 [[nodiscard]] ExactSimdIndexBridgeResult
 collect_exact_simd_index_erased(const ExactSimdIndexBridgeRequest& request);
 
-template<class Collector, class Sequence>
+template<class Collector, sequence_alphabet Alphabet>
 [[nodiscard]] inline ExactSimdIndexExecutionProof
 collect_exact_simd_index_range_or_throw(
         Collector& collector,
-        Sequence& sequence,
-        std::size_t lo_unit,
-        std::size_t hi_unit,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+        sequence_size_t lo_bp,
+        sequence_size_t hi_bp,
         std::size_t runtime_w,
         std::size_t runtime_k,
         std::size_t emitted_position_base,
         std::string_view operation) {
-    using sequence_type = std::remove_cvref_t<Sequence>;
-    using traits = typename sequence_type::traits;
-    using storage_unit = typename traits::storage_unit;
     static_assert(std::same_as<typename MinimapSketchData::storage_t, std::uint64_t>);
 
-    if constexpr (!std::same_as<typename traits::alphabet_type, seq::dna4>
-        && !std::same_as<typename traits::alphabet_type, seq::dna5>) {
+    if constexpr (!std::same_as<Alphabet, seq::dna4>
+                  && !std::same_as<Alphabet, seq::dna5>) {
         throw ExactSimdIndexRuntimeError{
             ExactSimdIndexStatus::unsupported_alphabet, operation};
-    } else if constexpr (!std::is_integral_v<storage_unit>
-        || !(sizeof(storage_unit) == 1 || sizeof(storage_unit) == 2
-             || sizeof(storage_unit) == 4 || sizeof(storage_unit) == 8)
-        || traits::bits_per_char == 0
-        || traits::bits_per_char > 8
-        || traits::letters_per_unit
-            != sizeof(storage_unit) * 8 / traits::bits_per_char) {
-        throw ExactSimdIndexRuntimeError{
-            ExactSimdIndexStatus::unsupported_storage, operation};
     } else {
-        struct SequenceContext {
-            sequence_type* sequence = nullptr;
-        } sequence_context{&sequence};
+        if (lo_bp > hi_bp || hi_bp > sequence.bp_size()
+            || hi_bp - lo_bp
+                > static_cast<sequence_size_t>(
+                    (std::numeric_limits<std::size_t>::max)())) {
+            throw ExactSimdIndexRuntimeError{
+                ExactSimdIndexStatus::invalid_range, operation};
+        }
+        constexpr std::uint8_t packed_width = sizeof(std::uint32_t);
+        const auto access = bioseq::storage::plan_sequence_access(
+            sequence,
+            bioseq::storage::sequence_access_requirement::contiguous_resident,
+            lo_bp,
+            hi_bp,
+            packed_width);
+        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
+        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region descriptor{};
+        if (access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value()) {
+            descriptor = *access.resident;
+        } else {
+            auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(access.admission_bytes);
+            if (!permit) {
+                throw ExactSimdIndexRuntimeError{
+                    ExactSimdIndexStatus::non_contiguous_range, operation};
+            }
+            owner.emplace(bioseq::storage::materialize_packed_region(
+                sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
+            descriptor = owner->descriptor();
+        }
 
-        constexpr bool has_scanner = requires { typename sequence_type::scanner_type; };
-        constexpr bool fragmented = [] {
-            if constexpr (requires { typename sequence_type::scanner_type; }) {
-                return sequence_type::scanner_type::supports_fragments();
-            } else {
-                return false;
-            }
-        }();
-        const std::size_t total_units = static_cast<std::size_t>(sequence.size());
-        const std::size_t fragment_units = [&]() {
-            if constexpr (fragmented) {
-                return sequence_type::scanner_type::fragment_storage_units;
-            } else {
-                return std::max<std::size_t>(total_units, 1);
-            }
-        }();
-        const std::size_t fragment_count = [&]() {
-            if constexpr (fragmented) {
-                return static_cast<std::size_t>(sequence.number_of_fragments());
-            } else {
-                return total_units == 0 ? 0u : 1u;
-            }
-        }();
+        struct SequenceContext {
+            const void* data{};
+            std::size_t unit_count{};
+        } sequence_context{descriptor.units, descriptor.unit_count};
 
         const auto read_fragment = +[](void* opaque, std::size_t fragment_no) {
-            auto& seq_ref = *static_cast<SequenceContext*>(opaque)->sequence;
-            if constexpr (fragmented) {
-                const auto packed = seq_ref.scanner().read_fragment(fragment_no);
-                return ExactSimdIndexPackedFragment{
-                    .data = packed.data(),
-                    .storage_units = packed.size(),
-                };
-            } else {
-                const auto& resident = [&]() -> const auto& {
-                    if constexpr (has_scanner) return seq_ref.underlying();
-                    else return seq_ref;
-                }();
-                const std::size_t units = static_cast<std::size_t>(resident.size());
-                return ExactSimdIndexPackedFragment{
-                    .data = units == 0
-                        ? nullptr
-                        : resident.read_cptr(resident.cbegin()),
-                    .storage_units = units,
-                };
+            const auto& context = *static_cast<SequenceContext*>(opaque);
+            if (fragment_no != 0u || context.unit_count == 0u) {
+                return ExactSimdIndexPackedFragment{};
             }
+            return ExactSimdIndexPackedFragment{
+                .data = context.data,
+                .storage_units = context.unit_count,
+            };
         };
-        const auto release_fragment = +[](void* opaque, std::size_t fragment_no) noexcept {
-            if constexpr (fragmented) {
-                auto& seq_ref = *static_cast<SequenceContext*>(opaque)->sequence;
-                seq_ref.scanner().release_fragment(fragment_no);
-            } else {
-                (void)opaque;
-                (void)fragment_no;
-            }
+        const auto release_fragment = +[](void*, std::size_t) noexcept {
         };
         const auto append_raw = +[](void* opaque,
                                     const std::uint64_t* raw,
@@ -365,18 +346,20 @@ collect_exact_simd_index_range_or_throw(
                 .release_fragment = release_fragment,
                 .collector_context = &collector,
                 .append_raw = append_raw,
-                .alphabet = std::same_as<
-                        typename traits::alphabet_type, seq::dna4>
+                .alphabet = std::same_as<Alphabet, seq::dna4>
                     ? ExactSimdIndexAlphabet::dna4
                     : ExactSimdIndexAlphabet::dna5,
-                .storage_unit_bytes = sizeof(storage_unit),
-                .letters_per_unit = traits::letters_per_unit,
-                .total_units = total_units,
-                .total_bp = static_cast<std::size_t>(sequence.bp_size()),
-                .fragment_units = fragment_units,
-                .fragment_count = fragment_count,
-                .lo_unit = lo_unit,
-                .hi_unit = hi_unit,
+                .storage_unit_bytes = packed_width,
+                .letters_per_unit = packed_width * 8u
+                    / bioseq::storage::lazy_rank_stream_traits<Alphabet>::
+                        logical_bits_per_symbol,
+                .total_units = descriptor.unit_count,
+                .total_bp = static_cast<std::size_t>(hi_bp - lo_bp),
+                .fragment_units = std::max<std::size_t>(
+                    descriptor.unit_count, 1u),
+                .fragment_count = descriptor.unit_count == 0u ? 0u : 1u,
+                .lo_unit = 0u,
+                .hi_unit = descriptor.unit_count,
                 .window_size = runtime_w,
                 .kmer_size = runtime_k,
                 .emitted_position_base = emitted_position_base,

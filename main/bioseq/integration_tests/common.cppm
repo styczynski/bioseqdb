@@ -178,6 +178,13 @@ public:
         install_notice_capture();
     }
 
+    explicit connection_test_context(std::string_view database_name) {
+        auto credentials = detail::make_default_credentials();
+        credentials.dbname = std::string(database_name);
+        _raw_conn = detail::connect_raw(credentials);
+        install_notice_capture();
+    }
+
     connection_test_context(const connection_test_context&) = delete;
     connection_test_context& operator=(const connection_test_context&) = delete;
 

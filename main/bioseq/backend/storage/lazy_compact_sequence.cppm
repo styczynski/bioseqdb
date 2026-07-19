@@ -68,6 +68,7 @@ export module bioseq.storage.lazy;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.storage.scanner;
+import bioseq.storage.coordinates;
 import bioseq.storage.size;
 import bioseq.common.fragment_cache;
 import bioseq.parallelism.memory_admission;
@@ -133,11 +134,14 @@ public:
     using resident_probe_result = std::optional<resident_packed_region>;
     using try_resident_packed_fn = resident_probe_result (*)(
         void const*, sequence_size_t, sequence_size_t, std::uint8_t) noexcept;
+    using copy_full_packed_fn = bool (*)(
+        void const*, void*, std::size_t, std::uint8_t);
 
     struct backend_ops {
         sequence_size_t (*bp_size)(void const*) noexcept;
         std::array<ptr_at_fn, 4> ptr_at;
         try_resident_packed_fn try_resident_packed;
+        copy_full_packed_fn copy_full_packed;
         bool (*worker_shareable)(void const*) noexcept;
     };
 
@@ -239,6 +243,32 @@ public:
             return std::nullopt;
         }
         return result;
+    }
+
+    /**
+     * Ask a backend with a native sequential packed-copy path to populate an
+     * exact, aligned full-sequence destination. Unsupported representations
+     * return false and leave generic rank streaming as the caller's fallback.
+     */
+    [[nodiscard]] bool try_copy_full_packed(
+            std::span<std::uint8_t> destination,
+            std::size_t unit_count,
+            std::uint8_t requested_width) const {
+        if (ops_->copy_full_packed == nullptr
+            || !(requested_width == 1u || requested_width == 2u
+                 || requested_width == 4u || requested_width == 8u)
+            || unit_count
+                    > (std::numeric_limits<std::size_t>::max)()
+                        / requested_width
+            || destination.size() != unit_count * requested_width
+            || (!destination.empty()
+                && reinterpret_cast<std::uintptr_t>(destination.data())
+                        % requested_width
+                    != 0u)) {
+            return false;
+        }
+        return ops_->copy_full_packed(
+            state_, destination.data(), unit_count, requested_width);
     }
 
     template <bool IsReversed, bool WriteReversed = false>
@@ -1193,6 +1223,57 @@ template <class R, class Scanner>
 }
 
 template <class R, class Scanner>
+[[nodiscard]] bool existing_lazy_copy_full_packed(
+        void const* state,
+        void* destination,
+        std::size_t unit_count,
+        std::uint8_t requested_width) {
+    using range_traits = typename compact_sequence_range<R>::traits;
+    using storage_unit = typename range_traits::storage_unit;
+    using alphabet_type = typename range_traits::alphabet_type;
+    if constexpr (requires (
+            const Scanner& scanner,
+            std::span<storage_unit> output) {
+                { scanner.copy_packed_to(output) } -> std::same_as<void>;
+            }) {
+        constexpr std::uint8_t physical_width =
+            static_cast<std::uint8_t>(sizeof(storage_unit));
+        constexpr std::size_t logical_bits =
+            lazy_rank_stream_traits<alphabet_type>::logical_bits_per_symbol;
+        constexpr std::size_t letters_per_unit = range_traits::letters_per_unit;
+        const auto& sequence =
+            *static_cast<const lazy_compact_sequence<R, Scanner>*>(state);
+        const sequence_size_t expected_units =
+            sequence.bp_size() / letters_per_unit
+            + static_cast<sequence_size_t>(
+                sequence.bp_size() % letters_per_unit != 0u);
+        if (requested_width != physical_width
+            || range_traits::bits_per_char != logical_bits
+            || expected_units
+                    > static_cast<sequence_size_t>(
+                        (std::numeric_limits<std::size_t>::max)())
+            || unit_count != static_cast<std::size_t>(expected_units)
+            || (unit_count != 0u && destination == nullptr)
+            || (unit_count != 0u
+                && reinterpret_cast<std::uintptr_t>(destination)
+                        % alignof(storage_unit)
+                    != 0u)) {
+            return false;
+        }
+        sequence.scanner().copy_packed_to(
+            std::span<storage_unit>{
+                static_cast<storage_unit*>(destination), unit_count});
+        return true;
+    } else {
+        (void)state;
+        (void)destination;
+        (void)unit_count;
+        (void)requested_width;
+        return false;
+    }
+}
+
+template <class R, class Scanner>
 struct existing_lazy_adapter {
     using alphabet_type =
         typename compact_sequence_range<R>::traits::alphabet_type;
@@ -1207,7 +1288,80 @@ struct existing_lazy_adapter {
             &existing_lazy_ptr_at<true, true, R, Scanner>,
         },
         .try_resident_packed = &existing_lazy_resident_probe<R, Scanner>,
+        .copy_full_packed = &existing_lazy_copy_full_packed<R, Scanner>,
         .worker_shareable = &existing_lazy_worker_shareable<R, Scanner>,
+    };
+};
+
+// Inline compact ranges are already stable owners. Adapt them directly so
+// callers do not need to name or retain the concrete no-fragment scanner
+// wrapper merely to cross the canonical facade boundary. Each data callback
+// creates the pointer-sized wrapper locally; encoded bytes are copied into the
+// caller scratch before it returns, while a resident probe points into the
+// range's own storage.
+template <bool IsReversed, bool WriteReversed, class R>
+[[nodiscard]] const std::uint8_t* compact_range_ptr_at(
+        void const* state,
+        sequence_size_t bp_from,
+        std::size_t required_length,
+        std::span<std::uint8_t> scratch) {
+    using scanner_type = sequence_scanner_none<
+        typename compact_sequence_range<R>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<R>*>(state);
+    const lazy_compact_sequence<R, scanner_type> owner{range};
+    return existing_lazy_ptr_at<IsReversed, WriteReversed, R, scanner_type>(
+        std::addressof(owner), bp_from, required_length, scratch);
+}
+
+template <class R>
+[[nodiscard]] sequence_size_t compact_range_bp_size(
+        void const* state) noexcept {
+    using scanner_type = sequence_scanner_none<
+        typename compact_sequence_range<R>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<R>*>(state);
+    const lazy_compact_sequence<R, scanner_type> owner{range};
+    return owner.bp_size();
+}
+
+template <class R>
+[[nodiscard]] bool compact_range_worker_shareable(void const*) noexcept {
+    return true;
+}
+
+template <class R>
+[[nodiscard]] auto compact_range_resident_probe(
+        void const* state,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width) noexcept
+    -> typename basic_lazy_sequence_view<
+        typename compact_sequence_range<R>::traits::alphabet_type>::
+        resident_probe_result {
+    using scanner_type = sequence_scanner_none<
+        typename compact_sequence_range<R>::traits::storage_unit>;
+    const auto& range = *static_cast<const compact_sequence_range<R>*>(state);
+    const lazy_compact_sequence<R, scanner_type> owner{range};
+    return existing_lazy_resident_probe<R, scanner_type>(
+        std::addressof(owner), from, to, requested_width);
+}
+
+template <class R>
+struct compact_range_adapter {
+    using alphabet_type =
+        typename compact_sequence_range<R>::traits::alphabet_type;
+    using view_type = basic_lazy_sequence_view<alphabet_type>;
+
+    static inline const typename view_type::backend_ops ops{
+        .bp_size = &compact_range_bp_size<R>,
+        .ptr_at = {
+            &compact_range_ptr_at<false, false, R>,
+            &compact_range_ptr_at<false, true, R>,
+            &compact_range_ptr_at<true, false, R>,
+            &compact_range_ptr_at<true, true, R>,
+        },
+        .try_resident_packed = &compact_range_resident_probe<R>,
+        .copy_full_packed = nullptr,
+        .worker_shareable = &compact_range_worker_shareable<R>,
     };
 };
 
@@ -1219,6 +1373,135 @@ template <class R, class Scanner>
     using adapter = lazy_view_detail::existing_lazy_adapter<R, Scanner>;
     return typename adapter::view_type{
         std::addressof(owner), std::addressof(adapter::ops)};
+}
+
+template <class R>
+[[nodiscard]] inline auto as_lazy_sequence_view(
+        const compact_sequence_range<R>& owner) noexcept {
+    using adapter = lazy_view_detail::compact_range_adapter<R>;
+    return typename adapter::view_type{
+        std::addressof(owner), std::addressof(adapter::ops)};
+}
+
+/**
+ * Invoke a callback through the synthetic fragmented scanner used by the
+ * integration parity GUC.  The concrete scanner and lazy owner remain inside
+ * the storage module; callers receive only the canonical facade by value and
+ * cannot accidentally flatten the route while migrating consumer types.
+ */
+template <std::size_t FragmentStorageUnits =
+              SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT,
+          class R, class Fn>
+inline void with_lazy_test_chunked(
+        const compact_sequence_range<R>& range,
+        Fn&& fn) {
+    using scanner_type = sequence_scanner_test_chunked<
+        typename compact_sequence_range<R>::traits::storage_unit,
+        FragmentStorageUnits>;
+    lazy_compact_sequence<R, scanner_type> owner{
+        scanner_type::from_range(range)};
+    std::forward<Fn>(fn)(as_lazy_sequence_view(owner));
+}
+
+/** Keep two synthetic fragmented owners alive for one facade-only callback. */
+template <std::size_t FragmentStorageUnits =
+              SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT,
+          class LeftR, class RightR, class Fn>
+inline void with_lazy_test_chunked(
+        const compact_sequence_range<LeftR>& left_range,
+        const compact_sequence_range<RightR>& right_range,
+        Fn&& fn) {
+    using left_alphabet =
+        typename compact_sequence_range<LeftR>::traits::alphabet_type;
+    using right_alphabet =
+        typename compact_sequence_range<RightR>::traits::alphabet_type;
+    static_assert(std::is_same_v<left_alphabet, right_alphabet>,
+                  "chunked facade pair must share one alphabet");
+    with_lazy_test_chunked<FragmentStorageUnits>(
+        left_range,
+        [&right_range, &fn](auto left_view) {
+            with_lazy_test_chunked<FragmentStorageUnits>(
+                right_range,
+                [left_view, &fn](auto right_view) {
+                    std::forward<Fn>(fn)(left_view, right_view);
+                });
+        });
+}
+
+template <sequence_transform Transform,
+          sequence_alphabet Alphabet,
+          class OutputWriter>
+void stream_transformed_packed(
+        basic_lazy_sequence_view<Alphabet> view,
+        std::uint64_t from,
+        std::uint64_t to,
+        OutputWriter& output) {
+    if (from > to || to > view.bp_size()) {
+        throw std::invalid_argument(
+            "transformed sequence stream range is invalid");
+    }
+    std::array<std::uint8_t, 256> scratch{};
+    auto append = [&output](std::span<const std::uint8_t> ranks) {
+        if constexpr (std::same_as<
+                          decltype(output.append_ranks(ranks)),
+                          bioseq::sequences::rank_pack_status>) {
+            return output.append_ranks(ranks)
+                == bioseq::sequences::rank_pack_status::ok;
+        } else if constexpr (std::same_as<
+                                 decltype(output.append_ranks(ranks)), bool>) {
+            return output.append_ranks(ranks);
+        } else {
+            output.append_ranks(ranks);
+            return true;
+        }
+    };
+
+    if constexpr (has_reverse(Transform)) {
+        std::uint64_t position = to;
+        while (position > from) {
+            const auto count = static_cast<std::size_t>(
+                std::min<std::uint64_t>(scratch.size(), position - from));
+            const std::uint64_t chunk_from = position - count;
+            view.template to_encoded_into<false, true>(
+                std::span<std::uint8_t>{scratch.data(), count},
+                static_cast<std::size_t>(chunk_from),
+                static_cast<std::size_t>(position));
+            if constexpr (has_complement(Transform)) {
+                static_assert(complementable_sequence_alphabet<Alphabet>);
+                for (std::size_t index = 0u; index < count; ++index) {
+                    scratch[index] = lazy_rank_stream_traits<Alphabet>::
+                        letter_complement(scratch[index]);
+                }
+            }
+            if (!append(
+                    std::span<const std::uint8_t>{scratch.data(), count})) {
+                return;
+            }
+            position = chunk_from;
+        }
+    } else {
+        std::uint64_t position = from;
+        while (position < to) {
+            const auto count = static_cast<std::size_t>(
+                std::min<std::uint64_t>(scratch.size(), to - position));
+            view.template to_encoded_into<false, false>(
+                std::span<std::uint8_t>{scratch.data(), count},
+                static_cast<std::size_t>(position),
+                static_cast<std::size_t>(position + count));
+            if constexpr (has_complement(Transform)) {
+                static_assert(complementable_sequence_alphabet<Alphabet>);
+                for (std::size_t index = 0u; index < count; ++index) {
+                    scratch[index] = lazy_rank_stream_traits<Alphabet>::
+                        letter_complement(scratch[index]);
+                }
+            }
+            if (!append(
+                    std::span<const std::uint8_t>{scratch.data(), count})) {
+                return;
+            }
+            position += count;
+        }
+    }
 }
 
 // One chunk-independent lexicographic core. Chunk boundaries carry no semantic
@@ -1257,43 +1540,99 @@ template <sequence_alphabet Alphabet>
 [[nodiscard]] int compare_sequence_views(
         basic_lazy_sequence_view<Alphabet> left,
         basic_lazy_sequence_view<Alphabet> right) {
-    auto left_chunks = std::array{
-        std::ranges::subrange(left.begin(), left.end())};
-    auto right_chunks = std::array{
-        std::ranges::subrange(right.begin(), right.end())};
-    return compare_logical_rank_streams(left_chunks, right_chunks);
+    struct comparison_writer {
+        typename basic_lazy_sequence_view<Alphabet>::rank_iterator cursor;
+        typename basic_lazy_sequence_view<Alphabet>::rank_iterator end;
+        int result{};
+
+        bool append_ranks(std::span<const std::uint8_t> ranks) {
+            if (result != 0) {
+                return false;
+            }
+            for (const std::uint8_t rank : ranks) {
+                if (cursor == end) {
+                    result = 1;
+                    return false;
+                }
+                const std::uint8_t other = *cursor;
+                if (rank < other) {
+                    result = -1;
+                    return false;
+                }
+                if (rank > other) {
+                    result = 1;
+                    return false;
+                }
+                ++cursor;
+            }
+            return true;
+        }
+    } writer{right.begin(), right.end(), 0};
+    stream_transformed_packed<sequence_transform::identity>(
+        left, 0u, left.bp_size(), writer);
+    if (writer.result != 0) {
+        return writer.result;
+    }
+    return writer.cursor == writer.end ? 0 : -1;
 }
+
+namespace lazy_view_detail {
+
+struct logical_hash_writer_v1 {
+    static constexpr std::uint64_t fnv_offset_basis =
+        14695981039346656037ull;
+    static constexpr std::uint64_t fnv_prime = 1099511628211ull;
+
+    explicit logical_hash_writer_v1(std::uint64_t seed) noexcept
+        : hash(fnv_offset_basis ^ seed) {}
+
+    void append_ranks(std::span<const std::uint8_t> ranks) noexcept {
+        for (const std::uint8_t rank : ranks) {
+            hash ^= rank;
+            hash *= fnv_prime;
+        }
+    }
+
+    [[nodiscard]] std::uint64_t finish(
+            std::uint64_t logical_length) noexcept {
+        for (unsigned shift = 0u; shift < 64u; shift += 8u) {
+            hash ^= static_cast<std::uint8_t>(logical_length >> shift);
+            hash *= fnv_prime;
+        }
+        hash ^= hash >> 30u;
+        hash *= 0xbf58476d1ce4e5b9ull;
+        hash ^= hash >> 27u;
+        hash *= 0x94d049bb133111ebull;
+        hash ^= hash >> 31u;
+        return hash;
+    }
+
+    std::uint64_t hash;
+};
+
+}  // namespace lazy_view_detail
 
 template <std::ranges::input_range RankRange>
 [[nodiscard]] std::uint64_t sequence_logical_hash_bytes_v1(
         RankRange&& ranks,
         std::uint64_t logical_length,
         std::uint64_t seed) {
-    constexpr std::uint64_t fnv_offset_basis = 14695981039346656037ull;
-    constexpr std::uint64_t fnv_prime = 1099511628211ull;
-    std::uint64_t hash = fnv_offset_basis ^ seed;
+    lazy_view_detail::logical_hash_writer_v1 writer{seed};
     for (auto&& rank : ranks) {
-        hash ^= static_cast<std::uint8_t>(rank);
-        hash *= fnv_prime;
+        const std::uint8_t value = static_cast<std::uint8_t>(rank);
+        writer.append_ranks(std::span<const std::uint8_t>{&value, 1u});
     }
-    for (unsigned shift = 0u; shift < 64u; shift += 8u) {
-        hash ^= static_cast<std::uint8_t>(logical_length >> shift);
-        hash *= fnv_prime;
-    }
-    hash ^= hash >> 30u;
-    hash *= 0xbf58476d1ce4e5b9ull;
-    hash ^= hash >> 27u;
-    hash *= 0x94d049bb133111ebull;
-    hash ^= hash >> 31u;
-    return hash;
+    return writer.finish(logical_length);
 }
 
 template <sequence_alphabet Alphabet>
 [[nodiscard]] std::uint64_t sequence_logical_hash_v1(
         basic_lazy_sequence_view<Alphabet> view,
         std::uint64_t seed) {
-    return sequence_logical_hash_bytes_v1(
-        view.template iterable<BP>(), view.bp_size(), seed);
+    lazy_view_detail::logical_hash_writer_v1 writer{seed};
+    stream_transformed_packed<sequence_transform::identity>(
+        view, 0u, view.bp_size(), writer);
+    return writer.finish(view.bp_size());
 }
 
 namespace lazy_view_detail {
@@ -1509,6 +1848,7 @@ struct resident_adapter {
             &resident_ptr_at<true, true, Alphabet>,
         },
         .try_resident_packed = &resident_probe<Alphabet>,
+        .copy_full_packed = nullptr,
         .worker_shareable = &resident_worker_shareable,
     };
 };
@@ -1532,22 +1872,8 @@ template <sequence_alphabet Alphabet, class Unit>
 
     auto units = std::span<Unit>(static_cast<Unit*>(output), unit_count);
     packer writer{unit_sink{units}};
-    std::array<std::uint8_t, 256> scratch{};
-    sequence_size_t position = from;
-    while (position < to) {
-        const std::size_t count = static_cast<std::size_t>(
-            std::min<sequence_size_t>(scratch.size(), to - position));
-        view.template to_encoded_into<false, false>(
-            std::span<std::uint8_t>(scratch.data(), count),
-            static_cast<std::size_t>(position),
-            static_cast<std::size_t>(position + count));
-        const auto status = writer.append_ranks(
-            std::span<const std::uint8_t>(scratch.data(), count));
-        if (status != bioseq::sequences::rank_pack_status::ok) {
-            break;
-        }
-        position += count;
-    }
+    stream_transformed_packed<sequence_transform::identity>(
+        view, from, to, writer);
     return writer.finish(to - from, unit_count);
 }
 
@@ -1669,6 +1995,70 @@ template <sequence_alphabet Alphabet>
     return sizeof(typename owner_type::stable_state) + allocation_bytes;
 }
 
+enum class sequence_access_route : std::uint8_t {
+    stream_symbols,
+    borrow_resident,
+    materialize_admitted,
+};
+
+template <sequence_alphabet Alphabet>
+struct sequence_access_plan {
+    using descriptor_type = typename basic_lazy_sequence_view<Alphabet>::
+        resident_packed_region;
+
+    sequence_access_requirement requirement{
+        sequence_access_requirement::sequential_symbols};
+    sequence_access_route route{sequence_access_route::stream_symbols};
+    std::optional<descriptor_type> resident{};
+    std::uint64_t admission_bytes{};
+    sequence_size_t from{};
+    sequence_size_t to{};
+    std::uint8_t requested_width{};
+};
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] sequence_access_plan<Alphabet> plan_sequence_access(
+        basic_lazy_sequence_view<Alphabet> view,
+        sequence_access_requirement requirement,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width = 0u) {
+    if (from > to || to > view.bp_size()) {
+        throw std::invalid_argument("invalid sequence access range");
+    }
+    sequence_access_plan<Alphabet> plan{
+        .requirement = requirement,
+        .route = sequence_access_route::stream_symbols,
+        .resident = std::nullopt,
+        .admission_bytes = 0u,
+        .from = from,
+        .to = to,
+        .requested_width = requested_width,
+    };
+    if (requirement == sequence_access_requirement::sequential_symbols) {
+        return plan;
+    }
+    if (!(requested_width == 1u || requested_width == 2u
+          || requested_width == 4u || requested_width == 8u)) {
+        throw std::invalid_argument(
+            "resident sequence access requires width 1, 2, 4, or 8");
+    }
+    if (requirement == sequence_access_requirement::contiguous_resident) {
+        plan.resident = view.try_resident_packed(
+            from, to, requested_width);
+        if (plan.resident.has_value()
+            && plan.resident->leading_symbol_offset == 0u) {
+            plan.route = sequence_access_route::borrow_resident;
+            return plan;
+        }
+        plan.resident.reset();
+    }
+    plan.route = sequence_access_route::materialize_admitted;
+    plan.admission_bytes = packed_region_admission_bytes<Alphabet>(
+        to - from, requested_width);
+    return plan;
+}
+
 template <sequence_alphabet Alphabet>
 [[nodiscard]] admitted_packed_region<Alphabet> materialize_packed_region(
         basic_lazy_sequence_view<Alphabet> view,
@@ -1733,40 +2123,48 @@ template <sequence_alphabet Alphabet>
     auto state = std::make_unique<typename owner_type::stable_state>(
         std::move(permit), allocation_bytes, descriptor);
 
-    bioseq::sequences::rank_pack_result packed{};
-    switch (requested_width) {
-        case 1u:
-            packed = lazy_view_detail::pack_view_region_into<
-                Alphabet, std::uint8_t>(
-                    view, from, to, state->units_.data(),
-                    static_cast<std::size_t>(unit_count));
-            break;
-        case 2u:
-            packed = lazy_view_detail::pack_view_region_into<
-                Alphabet, std::uint16_t>(
-                    view, from, to, state->units_.data(),
-                    static_cast<std::size_t>(unit_count));
-            break;
-        case 4u:
-            packed = lazy_view_detail::pack_view_region_into<
-                Alphabet, std::uint32_t>(
-                    view, from, to, state->units_.data(),
-                    static_cast<std::size_t>(unit_count));
-            break;
-        case 8u:
-            packed = lazy_view_detail::pack_view_region_into<
-                Alphabet, std::uint64_t>(
-                    view, from, to, state->units_.data(),
-                    static_cast<std::size_t>(unit_count));
-            break;
-        default:
-            throw std::invalid_argument("invalid packed storage-unit width");
-    }
-    if (packed.status != bioseq::sequences::rank_pack_status::ok
-        || packed.emitted_symbols != length
-        || packed.written_units != unit_count
-        || packed.padding_letters != trailing) {
-        throw std::runtime_error("checked lazy rank packing failed");
+    const bool bulk_copied = from == 0u && to == view.bp_size()
+        && view.try_copy_full_packed(
+            std::span<std::uint8_t>{
+                state->units_.data(), allocation_bytes},
+            static_cast<std::size_t>(unit_count), requested_width);
+    if (!bulk_copied) {
+        bioseq::sequences::rank_pack_result packed{};
+        switch (requested_width) {
+            case 1u:
+                packed = lazy_view_detail::pack_view_region_into<
+                    Alphabet, std::uint8_t>(
+                        view, from, to, state->units_.data(),
+                        static_cast<std::size_t>(unit_count));
+                break;
+            case 2u:
+                packed = lazy_view_detail::pack_view_region_into<
+                    Alphabet, std::uint16_t>(
+                        view, from, to, state->units_.data(),
+                        static_cast<std::size_t>(unit_count));
+                break;
+            case 4u:
+                packed = lazy_view_detail::pack_view_region_into<
+                    Alphabet, std::uint32_t>(
+                        view, from, to, state->units_.data(),
+                        static_cast<std::size_t>(unit_count));
+                break;
+            case 8u:
+                packed = lazy_view_detail::pack_view_region_into<
+                    Alphabet, std::uint64_t>(
+                        view, from, to, state->units_.data(),
+                        static_cast<std::size_t>(unit_count));
+                break;
+            default:
+                throw std::invalid_argument(
+                    "invalid packed storage-unit width");
+        }
+        if (packed.status != bioseq::sequences::rank_pack_status::ok
+            || packed.emitted_symbols != length
+            || packed.written_units != unit_count
+            || packed.padding_letters != trailing) {
+            throw std::runtime_error("checked lazy rank packing failed");
+        }
     }
     return owner_type{std::move(state)};
 }

@@ -341,6 +341,31 @@ constexpr int kBioseqMmsearchOwnerVersion = 1;
 constexpr int kBioseqBatchJoinPathPrivateFields = 13;
 constexpr int kBioseqBatchJoinPrivateFields = 17;
 
+/* One-child owner used when either mmsearch operand is a lazy recipe.  The
+ * child is a reconstructed core INNER join with the exact mmsearch
+ * RestrictInfo removed, wrapped in BioseqSliceProject to compute the two
+ * per-row operand Datums. */
+constexpr int kBioseqPerRowJoinPlanVersion = 1;
+constexpr int kBioseqPerRowJoinPathPrivateFields = 13;
+constexpr int kBioseqPerRowJoinPrivateFields = 14;
+
+enum BioseqPerRowJoinPrivateIndex : int {
+	kPerRowVersion = 0,
+	kPerRowTargetRelationOid = 1,
+	kPerRowTargetStorageAttno = 2,
+	kPerRowTargetSlotResno = 3,
+	kPerRowQuerySlotResno = 4,
+	kPerRowChildColumnCount = 5,
+	kPerRowAlphabetCode = 6,
+	kPerRowStorageUnitByteWidth = 7,
+	kPerRowPlaceholderSites = 8,
+	kPerRowMmsearchExpr = 9,
+	kPerRowIndexReadRequirement = 10,
+	kPerRowHonestStartupCost = 11,
+	kPerRowHonestTotalCost = 12,
+	kPerRowIncumbentCostFloor = 13,
+};
+
 enum BioseqBatchJoinPrivateIndex : int {
 	kBatchJoinVersion = 0,
 	kBatchJoinToken = 1,
@@ -430,6 +455,43 @@ struct BioseqBatchJoinState {
 
 static_assert(std::is_standard_layout_v<BioseqBatchJoinState>);
 static_assert(offsetof(BioseqBatchJoinState, custom_scanstate) == 0);
+
+struct BioseqPerRowJoinRuntime {
+	bioseq::scheduler::DispatchBufferRuntime buffer{kBioseqRuntimeBufferReserve};
+	bioseq::pg::alignment_execution::AlignmentNodeRegistrationHandle
+		alignment_registration{};
+	PlanState* child = nullptr;
+	Relation target_relation = nullptr;
+	std::vector<BioseqBatchJoinPlaceholderSite> placeholder_sites{};
+	AttrNumber target_slot_resno = InvalidAttrNumber;
+	AttrNumber query_slot_resno = InvalidAttrNumber;
+	int child_column_count = 0;
+	std::uint8_t alphabet_code = 0;
+	std::uint8_t storage_unit_byte_width = 0;
+	bool source_exhausted = false;
+	bool pass_fully_drained = false;
+	bool child_initialized = false;
+	bool child_ended = false;
+	bool cleanup_done = false;
+	Cost honest_startup_cost = 0;
+	Cost honest_total_cost = 0;
+	Cost incumbent_cost_floor = 0;
+	bioseq::pipeline_stats::PipelineExecutionStats aggregate_stats{};
+	MemoryContextCallback cleanup_callback{};
+	bool cleanup_callback_registered = false;
+};
+
+struct BioseqPerRowJoinState {
+	CustomScanState custom_scanstate;
+	void* runtime = nullptr;
+};
+
+static_assert(std::is_standard_layout_v<BioseqPerRowJoinState>);
+static_assert(offsetof(BioseqPerRowJoinState, custom_scanstate) == 0);
+
+static void promote_slice_project_sources(
+	BioseqScanState* state, TupleTableSlot* slot,
+	MemoryContext result_context, bool allow_locator_passthrough);
 
 /*
  * Centralised accessor: each BioseqScanState owns exactly one
@@ -1985,6 +2047,9 @@ static Plan* BioseqBatchJoin_PlanCustomPath(
 	PlannerInfo* root, RelOptInfo* rel, CustomPath* best_path,
 	List* tlist, List* clauses, List* custom_plans);
 static Node* BioseqBatchJoin_CreateCustomScanState(CustomScan* cscan);
+static Plan* BioseqPerRowJoin_PlanCustomPath(
+	PlannerInfo* root, RelOptInfo* rel, CustomPath* best_path,
+	List* tlist, List* clauses, List* custom_plans);
 
 static void BioseqColumnScan_BeginCustomScan(CustomScanState *node, EState *estate,
 										 int eflags);
@@ -2015,6 +2080,13 @@ static void BioseqBatchJoin_EndCustomScan(CustomScanState* node);
 static void BioseqBatchJoin_ReScanCustomScan(CustomScanState* node);
 static void BioseqBatchJoin_ExplainCustomScan(
 	CustomScanState* node, List* ancestors, ExplainState* es);
+static void BioseqPerRowJoin_BeginCustomScan(
+	CustomScanState* node, EState* estate, int eflags);
+static TupleTableSlot* BioseqPerRowJoin_ExecCustomScan(CustomScanState* node);
+static void BioseqPerRowJoin_EndCustomScan(CustomScanState* node);
+static void BioseqPerRowJoin_ReScanCustomScan(CustomScanState* node);
+static void BioseqPerRowJoin_ExplainCustomScan(
+	CustomScanState* node, List* ancestors, ExplainState* es);
 static void ExplainPipelineExecutionStats(
 	const bioseq::pipeline_stats::PipelineExecutionStats& stats,
 	ExplainState* es);
@@ -2039,6 +2111,23 @@ static bool EnableBioseqColumnQualPushdown = true;
 static double BioseqColumnQualPushdownCorrelationThreshold = 0.4;
 static int BioseqColumnMaxCustomScanPaths = 64;
 static int BioseqColumnPlannerDebugLevel = DEBUG3;
+
+#ifdef BIOSEQ_TEST_INDEXES
+enum SliceProjectDsmTestFixture : int {
+	kSliceDsmTestNone = 0,
+	kSliceDsmTestIncomplete = 1,
+	kSliceDsmTestMalformed = 2,
+};
+
+static int BioseqSliceDsmTestFixture = kSliceDsmTestNone;
+
+static const config_enum_entry slice_dsm_test_fixture_options[] = {
+	{"none", kSliceDsmTestNone, false},
+	{"incomplete", kSliceDsmTestIncomplete, false},
+	{"malformed", kSliceDsmTestMalformed, false},
+	{nullptr, 0, false},
+};
+#endif
 
 
 const CustomPathMethods BioseqColumnScanPathMethods = {
@@ -2069,6 +2158,11 @@ const CustomExecMethods BioseqBatchJoinExecuteMethods = {
 	.EndCustomScan = BioseqBatchJoin_EndCustomScan,
 	.ReScanCustomScan = BioseqBatchJoin_ReScanCustomScan,
 	.ExplainCustomScan = BioseqBatchJoin_ExplainCustomScan,
+};
+
+const CustomPathMethods BioseqPerRowJoinPathMethods = {
+	.CustomName = "BioseqBatchJoin",
+	.PlanCustomPath = BioseqPerRowJoin_PlanCustomPath,
 };
 
 const CustomExecMethods BioseqColumnScanExecuteMethods = {
@@ -2182,8 +2276,9 @@ enum class SliceProjectOpcode : std::uint8_t {
 };
 
 constexpr int kBioseqSliceProjectMagic = 0x42535031; /* BSP1 */
-constexpr int kBioseqSliceProjectCodecVersion = 2;
+constexpr int kBioseqSliceProjectCodecVersion = 3;
 constexpr int kBioseqSliceProjectHeaderFields = 10;
+constexpr int kBioseqSliceProjectNodeFields = 11;
 constexpr int kBioseqSliceProjectRecordFields = 9;
 
 enum SliceProjectHeaderIndex : int {
@@ -2209,6 +2304,25 @@ enum SliceProjectRecordIndex : int {
 	kSliceRecordEstimatedSymbols = 6,
 	kSliceRecordEncoding = 7,
 	kSliceRecordCacheScope = 8,
+};
+
+enum SliceProjectNodeIndex : int {
+	kSliceNodeStableId = 0,
+	kSliceNodeOpcode = 1,
+	kSliceNodeDependencies = 2,
+	kSliceNodeExpressionIndex = 3,
+	kSliceNodeLowerExpressionIndex = 4,
+	kSliceNodeUpperExpressionIndex = 5,
+	kSliceNodeOptionsExpressionIndex = 6,
+	kSliceNodeTransform = 7,
+	kSliceNodeMechanism = 8,
+	kSliceNodeReason = 9,
+	kSliceNodeFlags = 10,
+};
+
+enum SliceProjectNodeFlags : int {
+	kSliceNodeVolatile = 1 << 0,
+	kSliceNodeOpaque = 1 << 1,
 };
 
 [[nodiscard]] static Const* slice_project_int8_const(std::uint64_t value) {
@@ -2390,14 +2504,111 @@ slice_project_node_opcode(Node* node, const BioseqStubOids& oids) noexcept {
 	return 4096u;
 }
 
+struct owned_mmsearch_cost {
+	Cost startup = 0;
+	Cost per_input_tuple = 0;
+};
+
+/* Cost only executable operands, in SQL argument order.  In particular the
+ * rendezvous FuncExpr itself (whose support function deliberately costs
+ * 100000) must never enter an owning path's cost tree. */
+[[nodiscard]] static List* mmsearch_operand_cost_exprs(
+		FuncExpr const* expression, BioseqStubOids const& oids) {
+	if (expression == nullptr || !is_mmsearch_funcid(expression->funcid, oids)
+		|| (expression->funcid == oids.mmsearch_oid
+			&& list_length(expression->args) != 2)
+		|| (expression->funcid == oids.mmsearch_with_opts_oid
+			&& list_length(expression->args) != 3)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("owned mmsearch operand cost shape is invalid")));
+	}
+	List* operands = NIL;
+	for (Node* argument : PList<Node>(expression->args)) {
+		operands = lappend(operands, argument);
+	}
+	return operands;
+}
+
+[[nodiscard]] static std::uint64_t estimate_mmsearch_operand_symbols(
+		Node* expression, BioseqStubOids const& oids) {
+	if (expression == nullptr) return 4096u;
+	if (Const* constant = pg_node_try_as<Const>(expression)) {
+		if (constant->constisnull) return 0u;
+		if (constant->consttype == oids.bioseq_seq_type_oid) {
+			return classify_and_describe_sequence_header(
+				constant->constvalue).bp_length;
+		}
+	}
+	const auto opcode = slice_project_node_opcode(expression, oids);
+	if (opcode.has_value()) {
+		return slice_project_estimated_symbols(expression, oids);
+	}
+	return 4096u;
+}
+
+[[nodiscard]] static owned_mmsearch_cost estimate_owned_mmsearch_cost(
+		std::uint64_t target_length_estimate,
+		std::uint64_t query_length_estimate,
+		double input_rows,
+		bool index_read_requirement,
+		std::uint32_t planned_batch_size,
+		std::uint64_t planned_materialized_bytes) noexcept {
+	constexpr Cost maximum = std::numeric_limits<Cost>::max() / 32.0;
+	auto finite_cost = [](long double value) noexcept -> Cost {
+		constexpr long double limit = static_cast<long double>(
+			std::numeric_limits<Cost>::max() / 32.0);
+		if (!(value >= 0.0L)) return 0;
+		if (value >= limit) return static_cast<Cost>(limit);
+		return static_cast<Cost>(value);
+	};
+	const std::uint32_t batch_size = std::max<std::uint32_t>(
+		1u, planned_batch_size);
+	const long double target_units = static_cast<long double>(
+		target_length_estimate / 64u
+		+ (target_length_estimate % 64u != 0u));
+	const long double query_units = static_cast<long double>(
+		query_length_estimate / 64u
+		+ (query_length_estimate % 64u != 0u));
+	const long double byte_pages = static_cast<long double>(
+		planned_materialized_bytes / BLCKSZ)
+		+ (planned_materialized_bytes % BLCKSZ != 0u);
+	const long double rows = std::isfinite(input_rows) && input_rows > 0.0
+		? static_cast<long double>(input_rows) : 0.0L;
+	const long double batch_count = rows == 0.0L ? 1.0L
+		: std::ceil(rows / static_cast<long double>(batch_size));
+	const long double startup = static_cast<long double>(cpu_operator_cost)
+		* (8.0L + query_units + batch_count)
+		+ (index_read_requirement
+			? static_cast<long double>(random_page_cost) : 0.0L);
+	const long double per_input = static_cast<long double>(cpu_tuple_cost)
+		+ static_cast<long double>(cpu_operator_cost)
+			* (8.0L + target_units + query_units)
+		+ static_cast<long double>(seq_page_cost) * byte_pages
+			/ static_cast<long double>(batch_size);
+	owned_mmsearch_cost result{
+		finite_cost(startup), finite_cost(per_input)};
+	if (!std::isfinite(result.startup) || result.startup < 0) {
+		result.startup = maximum;
+	}
+	if (!std::isfinite(result.per_input_tuple)
+		|| result.per_input_tuple < 0) {
+		result.per_input_tuple = maximum;
+	}
+	return result;
+}
+
 struct SliceProjectIrBuilder {
 	const BioseqStubOids* oids = nullptr;
 	CmdType command_type = CMD_UNKNOWN;
 	List* expressions = NIL;
+	List* nodes = NIL;
 	List* records = NIL;
 	List* output_bindings = NIL;
 	std::vector<Node*> producer_expressions{};
+	std::vector<std::vector<std::uint32_t>> producer_dependencies{};
 	std::vector<std::pair<Node*, std::uint32_t>> source_bindings{};
+	bool source_bindings_only = false;
 	std::uint32_t next_boundary_id = 1u;
 	std::uint64_t piece_boundaries = 0u;
 	std::uint64_t source_pieces = 0u;
@@ -2420,11 +2631,15 @@ struct SliceProjectIrBuilder {
 
 [[nodiscard]] static std::uint32_t slice_project_add_producer(
 		SliceProjectIrBuilder& builder, Node* expression,
-		bool distinct_consumer = false) {
+		bool distinct_consumer = false, bool force_value = false) {
 	check_stack_depth();
-	if (expression == nullptr
-		|| exprType(expression) != builder.oids->bioseq_seq_type_oid) return 0u;
-	if (!distinct_consumer) {
+	if (expression == nullptr) return 0u;
+	const auto operation = slice_project_node_opcode(expression, *builder.oids);
+	if (exprType(expression) != builder.oids->bioseq_seq_type_oid
+		&& !operation.has_value() && !force_value) return 0u;
+	/* CSE is descriptive only, but even descriptive CSE would hide distinct
+	 * occurrences of a volatile expression from EXPLAIN. */
+	if (!distinct_consumer && !contain_volatile_functions(expression)) {
 		for (std::size_t index = 0u;
 			 index < builder.producer_expressions.size(); ++index) {
 			if (equal(builder.producer_expressions[index], expression)) {
@@ -2432,16 +2647,29 @@ struct SliceProjectIrBuilder {
 			}
 		}
 	}
-	/* Assign children first so producer ids remain deterministic topological
-	 * identities even though only allocation boundaries enter the plan codec. */
+	/* Assign children first so stable ids are deterministic and topological. */
+	std::vector<std::uint32_t> dependencies;
+	auto add_dependency = [&builder, &dependencies](
+			Node* child, bool force_child) {
+		const std::uint32_t dependency = slice_project_add_producer(
+			builder, child, false, force_child);
+		if (dependency == 0u
+			|| std::find(dependencies.begin(), dependencies.end(), dependency)
+				!= dependencies.end()) return;
+		dependencies.push_back(dependency);
+	};
 	if (IsA(expression, SubscriptingRef)) {
 		auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
-		(void)slice_project_add_producer(
-			builder, reinterpret_cast<Node*>(subscript->refexpr));
+		add_dependency(reinterpret_cast<Node*>(subscript->refexpr), false);
 	} else if (FuncExpr* function = pg_node_try_as<FuncExpr>(expression)) {
+		const bool all_arguments_are_values = operation.has_value()
+			&& (*operation == SliceProjectOpcode::concat
+				|| *operation == SliceProjectOpcode::bridge);
 		for (Node* argument : PList<Node>(function->args)) {
-			if (exprType(argument) == builder.oids->bioseq_seq_type_oid) {
-				(void)slice_project_add_producer(builder, argument);
+			if (exprType(argument) == builder.oids->bioseq_seq_type_oid
+				|| slice_project_node_opcode(argument, *builder.oids).has_value()
+				|| all_arguments_are_values) {
+				add_dependency(argument, all_arguments_are_values);
 			}
 		}
 	}
@@ -2451,13 +2679,68 @@ struct SliceProjectIrBuilder {
 			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 			 errmsg("BioseqSliceProject producer graph is too large")));
 	}
-	if (IsA(expression, Var) || IsA(expression, Const)) {
+	const std::uint32_t stable_id = static_cast<std::uint32_t>(
+		builder.producer_expressions.size() + 1u);
+	const int expression_index = slice_project_add_expression(
+		builder, expression);
+	const SliceProjectOpcode opcode = operation.has_value() ? *operation
+		: (IsA(expression, Const) ? SliceProjectOpcode::literal_expr
+			: SliceProjectOpcode::source_expr);
+	int lower_expression_index = -1;
+	int upper_expression_index = -1;
+	if (IsA(expression, SubscriptingRef)) {
+		auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
+		if (subscript->reflowerindexpr != NIL) {
+			lower_expression_index = slice_project_add_expression(builder,
+				reinterpret_cast<Node*>(linitial(subscript->reflowerindexpr)));
+		}
+		if (subscript->refupperindexpr != NIL) {
+			upper_expression_index = slice_project_add_expression(builder,
+				reinterpret_cast<Node*>(linitial(subscript->refupperindexpr)));
+		}
+	}
+	int transform = 0;
+	if (opcode == SliceProjectOpcode::reverse) transform = 1;
+	if (opcode == SliceProjectOpcode::reverse_complement) transform = 3;
+	int mechanism = -1;
+	int reason = -1;
+	if (opcode == SliceProjectOpcode::materialize) {
+		auto* function = reinterpret_cast<FuncExpr*>(expression);
+		mechanism = static_cast<int>(function->funcid
+			== builder.oids->seq_to_array_oid
+			? materialization_mechanism::letter_array
+			: materialization_mechanism::text);
+		reason = static_cast<int>(materialization_reason::sql_conversion);
+	}
+	int flags = 0;
+	if (contain_volatile_functions(expression)) flags |= kSliceNodeVolatile;
+	if (!operation.has_value() && !IsA(expression, Var)
+		&& !IsA(expression, Const)) flags |= kSliceNodeOpaque;
+	List* dependency_codec = NIL;
+	for (const std::uint32_t dependency : dependencies) {
+		dependency_codec = lappend(dependency_codec,
+			makeInteger(static_cast<int>(dependency)));
+	}
+	List* node = list_make5(
+		makeInteger(static_cast<int>(stable_id)),
+		makeInteger(static_cast<int>(opcode)), dependency_codec,
+		makeInteger(expression_index), makeInteger(lower_expression_index));
+	node = lappend(node, makeInteger(upper_expression_index));
+	node = lappend(node, makeInteger(-1)); /* optional mmsearch options Expr */
+	node = lappend(node, makeInteger(transform));
+	node = lappend(node, makeInteger(mechanism));
+	node = lappend(node, makeInteger(reason));
+	node = lappend(node, makeInteger(flags));
+	builder.nodes = lappend(builder.nodes, node);
+	if (opcode == SliceProjectOpcode::source_expr
+		|| opcode == SliceProjectOpcode::literal_expr) {
 		builder.source_pieces = bioseq::parallelism::saturating_add(
 			builder.source_pieces, 1u);
 	}
 	builder.producer_expressions.push_back(
 		reinterpret_cast<Node*>(copyObject(expression)));
-	return static_cast<std::uint32_t>(builder.producer_expressions.size());
+	builder.producer_dependencies.push_back(std::move(dependencies));
+	return stable_id;
 }
 
 static void slice_project_note_source_binding(
@@ -2488,6 +2771,31 @@ static void slice_project_note_source_binding(
 	}
 }
 
+[[nodiscard]] static bool slice_project_producer_depends_on(
+		SliceProjectIrBuilder const& builder, std::uint32_t producer_id,
+		std::uint32_t possible_ancestor) {
+	if (producer_id == 0u || possible_ancestor == 0u
+		|| producer_id > builder.producer_dependencies.size()
+		|| possible_ancestor >= producer_id) return false;
+	std::vector<std::uint8_t> visited(
+		builder.producer_dependencies.size() + 1u, 0u);
+	std::vector<std::uint32_t> pending(
+		builder.producer_dependencies[producer_id - 1u].begin(),
+		builder.producer_dependencies[producer_id - 1u].end());
+	while (!pending.empty()) {
+		const std::uint32_t candidate = pending.back();
+		pending.pop_back();
+		if (candidate == possible_ancestor) return true;
+		if (candidate == 0u
+			|| candidate > builder.producer_dependencies.size()
+			|| visited[candidate] != 0u) continue;
+		visited[candidate] = 1u;
+		auto const& dependencies = builder.producer_dependencies[candidate - 1u];
+		pending.insert(pending.end(), dependencies.begin(), dependencies.end());
+	}
+	return false;
+}
+
 static void slice_project_add_boundary(
 		SliceProjectIrBuilder& builder, Node* sequence_expression,
 		std::uint32_t producer_id, materialization_mechanism mechanism,
@@ -2513,10 +2821,20 @@ static void slice_project_add_boundary(
 	}
 	const std::uint64_t estimated_symbols = slice_project_estimated_symbols(
 		sequence_expression, *builder.oids);
+	List* dependencies = NIL;
+	for (Node* raw : PList<Node>(builder.records)) {
+		List* previous = reinterpret_cast<List*>(raw);
+		const auto previous_producer = static_cast<std::uint32_t>(intVal(
+			list_nth(previous, kSliceRecordProducerId)));
+		if (!slice_project_producer_depends_on(
+				builder, producer_id, previous_producer)) continue;
+		dependencies = lappend(dependencies, makeInteger(intVal(
+			list_nth(previous, kSliceRecordBoundaryId))));
+	}
 	List* record = list_make5(
 		makeInteger(static_cast<int>(builder.next_boundary_id++)),
 		makeInteger(static_cast<int>(producer_id)),
-		makeInteger(expression_index), NIL,
+		makeInteger(expression_index), dependencies,
 		makeInteger(static_cast<int>(mechanism)));
 	record = lappend(record, makeInteger(static_cast<int>(reason)));
 	record = lappend(record, slice_project_int8_const(estimated_symbols));
@@ -2564,7 +2882,7 @@ static void slice_project_add_boundary(
 			&& function->args != NIL) {
 			Node* source = reinterpret_cast<Node*>(linitial(function->args));
 			const std::uint32_t producer_id = slice_project_add_producer(
-				builder, source, true);
+				builder, source);
 			const bool as_array = function->funcid
 				== builder.oids->seq_to_array_oid;
 			slice_project_add_boundary(builder, source, producer_id,
@@ -2714,14 +3032,35 @@ struct SliceProjectRuntime {
 	slice_materialization_runtime trace_runtime{};
 	slice_trace_attachment* attachment = nullptr;
 	slice_async_owner_guard owner_guard{};
+	slice_async_job_slot* async_jobs = nullptr;
+	slice_dsm_counter* async_job_counters = nullptr;
+	bioseq::storage::pg_sequence_source_route_set source_routes{};
 	bool owner_initialized = false;
+	bool source_routes_acquired = false;
+	MemoryContextCallback source_routes_callback{};
+	bool source_routes_callback_registered = false;
 	slice_dsm_header* mapped_header = nullptr;
 	slice_dsm_worker_header* mapped_worker = nullptr;
 	std::uint64_t mapped_cycle = 0u;
 	slice_dsm_detach_state* detach_state = nullptr;
+	bool trace_initialization_attempted = false;
 	bool collect_actual = false;
 	bool timing = false;
+#ifdef BIOSEQ_TEST_INDEXES
+	bool dsm_test_fixture_applied = false;
+	bool dsm_test_fixture_validated = false;
+	bool dsm_test_async_validated = false;
+	int dsm_test_fixture_mode = kSliceDsmTestNone;
+	std::uint32_t dsm_test_checks = 0u;
+	std::uint32_t dsm_test_slot_headers_read = 0u;
+	std::uint32_t dsm_test_counter_records_read = 0u;
+	std::uint32_t dsm_test_cleanup_callbacks = 0u;
+#endif
 };
+
+/* slice_async_max_live_jobs is the one normative concurrency bound. Released
+ * slots advance their generation and are reused across arbitrarily many
+ * batches without multiplying every trace boundary by dispatch capacity. */
 
 struct BioseqSliceProjectState {
 	CustomScanState custom_scanstate;
@@ -2746,36 +3085,43 @@ bioseq_slice_project_scan_methods() noexcept;
 	header = lappend(header, slice_project_int8_const(builder.source_pieces));
 	header = lappend(header, slice_project_int8_const(builder.planned_symbols));
 	header = lappend(header, slice_project_int8_const(builder.planned_bytes));
-	header = lappend(header, makeInteger(static_cast<int>(
-		builder.producer_expressions.size())));
+	header = lappend(header, makeInteger(list_length(builder.nodes)));
 	header = lappend(header, makeString(pstrdup("none")));
 	return header;
 }
 
 [[nodiscard]] static List* slice_project_plan_header(CustomScan* scan) {
-	if (scan == nullptr || list_length(scan->custom_private) != 3) return NIL;
+	if (scan == nullptr || list_length(scan->custom_private) != 4) return NIL;
 	Node* header = reinterpret_cast<Node*>(linitial(scan->custom_private));
 	return header != nullptr && IsA(header, List)
 		? reinterpret_cast<List*>(header) : NIL;
 }
 
+[[nodiscard]] static List* slice_project_plan_nodes(CustomScan* scan) {
+	if (scan == nullptr || list_length(scan->custom_private) != 4) return NIL;
+	Node* nodes = reinterpret_cast<Node*>(lsecond(scan->custom_private));
+	return nodes != nullptr && IsA(nodes, List)
+		? reinterpret_cast<List*>(nodes) : NIL;
+}
+
 [[nodiscard]] static List* slice_project_plan_records(CustomScan* scan) {
-	if (scan == nullptr || list_length(scan->custom_private) != 3) return NIL;
-	Node* records = reinterpret_cast<Node*>(lsecond(scan->custom_private));
+	if (scan == nullptr || list_length(scan->custom_private) != 4) return NIL;
+	Node* records = reinterpret_cast<Node*>(lthird(scan->custom_private));
 	return records != nullptr && IsA(records, List)
 		? reinterpret_cast<List*>(records) : NIL;
 }
 
 [[nodiscard]] static List* slice_project_plan_output_bindings(
 		CustomScan* scan) {
-	if (scan == nullptr || list_length(scan->custom_private) != 3) return NIL;
-	Node* bindings = reinterpret_cast<Node*>(lthird(scan->custom_private));
+	if (scan == nullptr || list_length(scan->custom_private) != 4) return NIL;
+	Node* bindings = reinterpret_cast<Node*>(lfourth(scan->custom_private));
 	return bindings != nullptr && IsA(bindings, List)
 		? reinterpret_cast<List*>(bindings) : NIL;
 }
 
 static void slice_project_validate_codec(CustomScan* scan) {
 	List* header = slice_project_plan_header(scan);
+	List* nodes = slice_project_plan_nodes(scan);
 	List* records = slice_project_plan_records(scan);
 	List* output_bindings = slice_project_plan_output_bindings(scan);
 	if (header == NIL || list_length(header) != kBioseqSliceProjectHeaderFields
@@ -2807,20 +3153,17 @@ static void slice_project_validate_codec(CustomScan* scan) {
 		list_nth(header, kSliceHeaderProducerCount));
 	if (boundary_count < 0 || boundary_count != list_length(records)
 		|| expression_count < 0
-		|| expression_count != list_length(scan->custom_exprs)) {
+		|| expression_count != list_length(scan->custom_exprs)
+		|| producer_count < 1 || producer_count != list_length(nodes)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqSliceProject plan codec cardinality is invalid"),
 			 errdetail("boundary_count=%d record_count=%d "
 				 "expression_count=%d custom_expression_count=%d "
-				 "producer_count=%d",
+				 "producer_count=%d node_count=%d",
 				 boundary_count, list_length(records), expression_count,
-				 list_length(scan->custom_exprs), producer_count)));
-	}
-	if (producer_count < 1) {
-		ereport(ERROR,
-			(errcode(ERRCODE_DATA_CORRUPTED),
-			 errmsg("BioseqSliceProject producer graph is empty")));
+				 list_length(scan->custom_exprs), producer_count,
+				 list_length(nodes))));
 	}
 	(void)slice_project_int8_value(reinterpret_cast<Node*>(
 		list_nth(header, kSliceHeaderPieceBoundaries)));
@@ -2830,6 +3173,156 @@ static void slice_project_validate_codec(CustomScan* scan) {
 		list_nth(header, kSliceHeaderPlannedSymbols)));
 	(void)slice_project_int8_value(reinterpret_cast<Node*>(
 		list_nth(header, kSliceHeaderPlannedBytes)));
+
+	int expected_stable_id = 1;
+	for (Node* raw_node : PList<Node>(nodes)) {
+		List* node = raw_node != nullptr && IsA(raw_node, List)
+			? reinterpret_cast<List*>(raw_node) : NIL;
+		if (node == NIL || list_length(node) != kBioseqSliceProjectNodeFields) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqSliceProject IR node is invalid"),
+				 errdetail("stable_id=%d node_fields=%d expected_fields=%d",
+					 expected_stable_id, list_length(node),
+					 kBioseqSliceProjectNodeFields)));
+		}
+		constexpr std::array<int, 9> integer_fields{
+			kSliceNodeStableId, kSliceNodeOpcode,
+			kSliceNodeExpressionIndex, kSliceNodeLowerExpressionIndex,
+			kSliceNodeUpperExpressionIndex, kSliceNodeOptionsExpressionIndex,
+			kSliceNodeTransform, kSliceNodeMechanism, kSliceNodeReason};
+		for (const int field : integer_fields) {
+			Node* value = reinterpret_cast<Node*>(list_nth(node, field));
+			if (value == nullptr || !IsA(value, Integer)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqSliceProject IR integer field is invalid"),
+					 errdetail("stable_id=%d field=%d node_tag=%d",
+						 expected_stable_id, field, value == nullptr ? 0
+							 : static_cast<int>(nodeTag(value)))));
+			}
+		}
+		Node* flags_node = reinterpret_cast<Node*>(
+			list_nth(node, kSliceNodeFlags));
+		Node* dependencies_node = reinterpret_cast<Node*>(
+			list_nth(node, kSliceNodeDependencies));
+		if (flags_node == nullptr || !IsA(flags_node, Integer)
+			|| (dependencies_node != nullptr
+				&& !IsA(dependencies_node, List))) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqSliceProject IR topology field is invalid"),
+				 errdetail("stable_id=%d flags_tag=%d dependencies_tag=%d",
+					 expected_stable_id,
+					 flags_node == nullptr ? 0
+						 : static_cast<int>(nodeTag(flags_node)),
+					 dependencies_node == nullptr ? 0
+						 : static_cast<int>(nodeTag(dependencies_node)))));
+		}
+		List* dependencies = dependencies_node == nullptr ? NIL
+			: reinterpret_cast<List*>(dependencies_node);
+		const int stable_id = intVal(list_nth(node, kSliceNodeStableId));
+		const int opcode = intVal(list_nth(node, kSliceNodeOpcode));
+		const int expression_index = intVal(
+			list_nth(node, kSliceNodeExpressionIndex));
+		const int lower_expression_index = intVal(
+			list_nth(node, kSliceNodeLowerExpressionIndex));
+		const int upper_expression_index = intVal(
+			list_nth(node, kSliceNodeUpperExpressionIndex));
+		const int options_expression_index = intVal(
+			list_nth(node, kSliceNodeOptionsExpressionIndex));
+		const int transform = intVal(list_nth(node, kSliceNodeTransform));
+		const int mechanism = intVal(list_nth(node, kSliceNodeMechanism));
+		const int reason = intVal(list_nth(node, kSliceNodeReason));
+		const int flags = intVal(flags_node);
+		auto valid_optional_expression_index = [expression_count](int index) {
+			return index == -1 || (index >= 0 && index < expression_count);
+		};
+		if (stable_id != expected_stable_id
+			|| opcode < static_cast<int>(SliceProjectOpcode::source_expr)
+			|| opcode > static_cast<int>(SliceProjectOpcode::materialize)
+			|| expression_index < 0 || expression_index >= expression_count
+			|| !valid_optional_expression_index(lower_expression_index)
+			|| !valid_optional_expression_index(upper_expression_index)
+			|| !valid_optional_expression_index(options_expression_index)
+			|| transform < 0 || transform > 3
+			|| flags < 0
+			|| (flags & ~(kSliceNodeVolatile | kSliceNodeOpaque)) != 0) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqSliceProject IR node metadata is invalid"),
+				 errdetail("stable_id=%d expected_id=%d opcode=%d "
+					 "expression=%d lower=%d upper=%d options=%d "
+					 "transform=%d flags=%d",
+					 stable_id, expected_stable_id, opcode, expression_index,
+					 lower_expression_index, upper_expression_index,
+					 options_expression_index, transform, flags)));
+		}
+		Bitmapset* seen_dependencies = nullptr;
+		for (Node* dependency : PList<Node>(dependencies)) {
+			if (dependency == nullptr || !IsA(dependency, Integer)
+				|| intVal(dependency) <= 0 || intVal(dependency) >= stable_id
+				|| bms_is_member(intVal(dependency), seen_dependencies)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqSliceProject IR dependency is not topological"),
+					 errdetail("stable_id=%d dependency_id=%d dependency_tag=%d",
+						 stable_id,
+						 dependency != nullptr && IsA(dependency, Integer)
+							 ? intVal(dependency) : 0,
+						 dependency == nullptr ? 0
+							 : static_cast<int>(nodeTag(dependency)))));
+			}
+			seen_dependencies = bms_add_member(
+				seen_dependencies, intVal(dependency));
+		}
+		if (seen_dependencies != nullptr) bms_free(seen_dependencies);
+		const auto typed_opcode = static_cast<SliceProjectOpcode>(opcode);
+		const int dependency_count = list_length(dependencies);
+		const bool leaf = typed_opcode == SliceProjectOpcode::source_expr
+			|| typed_opcode == SliceProjectOpcode::literal_expr;
+		const bool unary = typed_opcode == SliceProjectOpcode::element
+			|| typed_opcode == SliceProjectOpcode::slice
+			|| typed_opcode == SliceProjectOpcode::reverse
+			|| typed_opcode == SliceProjectOpcode::reverse_complement
+			|| typed_opcode == SliceProjectOpcode::length
+			|| typed_opcode == SliceProjectOpcode::cardinality
+			|| typed_opcode == SliceProjectOpcode::materialize;
+		const bool materialize = typed_opcode
+			== SliceProjectOpcode::materialize;
+		const bool bounds_valid = (typed_opcode == SliceProjectOpcode::slice
+			|| typed_opcode == SliceProjectOpcode::element)
+			? (typed_opcode == SliceProjectOpcode::element
+				? lower_expression_index == -1 && upper_expression_index >= 0
+				: true)
+			: lower_expression_index == -1 && upper_expression_index == -1;
+		const int expected_transform = typed_opcode == SliceProjectOpcode::reverse
+			? 1 : (typed_opcode == SliceProjectOpcode::reverse_complement ? 3 : 0);
+		const bool boundary_metadata_valid = materialize
+			? mechanism >= static_cast<int>(materialization_mechanism::backing_copy)
+				&& mechanism <= static_cast<int>(materialization_mechanism::letter_array)
+				&& reason == static_cast<int>(materialization_reason::sql_conversion)
+			: mechanism == -1 && reason == -1;
+		if ((leaf && dependency_count != 0)
+			|| (unary && dependency_count != 1)
+			|| (typed_opcode == SliceProjectOpcode::concat
+				&& dependency_count < 1)
+			|| (typed_opcode == SliceProjectOpcode::bridge
+				&& dependency_count < 1)
+			|| !bounds_valid || transform != expected_transform
+			|| !boundary_metadata_valid || options_expression_index != -1) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqSliceProject IR opcode contract is invalid"),
+				 errdetail("stable_id=%d opcode=%d dependencies=%d "
+					 "lower=%d upper=%d options=%d transform=%d "
+					 "mechanism=%d reason=%d",
+					 stable_id, opcode, dependency_count,
+					 lower_expression_index, upper_expression_index,
+					 options_expression_index, transform, mechanism, reason)));
+		}
+		++expected_stable_id;
+	}
 
 	std::uint32_t expected_boundary_id = 1u;
 	int record_index = 0;
@@ -2992,7 +3485,7 @@ static void slice_project_validate_codec(CustomScan* scan) {
 		List* tlist, List* clauses, List* custom_plans) {
 	if (rel == nullptr || best_path == nullptr
 		|| list_length(custom_plans) != 1
-		|| list_length(best_path->custom_private) != 4) {
+		|| list_length(best_path->custom_private) != 5) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqSliceProject path shape is invalid")));
@@ -3001,12 +3494,15 @@ static void slice_project_validate_codec(CustomScan* scan) {
 		list_nth(best_path->custom_private, 0));
 	List* expressions = reinterpret_cast<List*>(
 		list_nth(best_path->custom_private, 1));
-	List* records = reinterpret_cast<List*>(
+	List* nodes = reinterpret_cast<List*>(
 		list_nth(best_path->custom_private, 2));
-	List* output_bindings = reinterpret_cast<List*>(
+	List* records = reinterpret_cast<List*>(
 		list_nth(best_path->custom_private, 3));
+	List* output_bindings = reinterpret_cast<List*>(
+		list_nth(best_path->custom_private, 4));
 	if (header == nullptr || !IsA(header, List)
 		|| (expressions != NIL && !IsA(expressions, List))
+		|| (nodes != NIL && !IsA(nodes, List))
 		|| (records != NIL && !IsA(records, List))
 		|| (output_bindings != NIL && !IsA(output_bindings, List))) {
 		ereport(ERROR,
@@ -3029,8 +3525,9 @@ static void slice_project_validate_codec(CustomScan* scan) {
 	scan->custom_scan_tlist = static_cast<List*>(
 		copyObject(child_plan->targetlist));
 	scan->custom_exprs = static_cast<List*>(copyObject(expressions));
-	scan->custom_private = list_make3(
-		copyObject(header), copyObject(records), copyObject(output_bindings));
+	scan->custom_private = list_make4(
+		copyObject(header), copyObject(nodes), copyObject(records),
+		copyObject(output_bindings));
 	scan->custom_relids = bms_copy(rel->relids);
 	scan->flags = best_path->flags;
 	return reinterpret_cast<Plan*>(scan);
@@ -3075,6 +3572,16 @@ struct SliceProjectDsmLayout {
 	Size header_bytes;
 	Size slot_stride;
 	Size total_bytes;
+};
+
+struct SliceProjectDsmMergeAudit {
+	std::uint32_t slot_headers_read = 0u;
+	std::uint32_t counter_records_read = 0u;
+	std::uint32_t merged_slots = 0u;
+	std::uint32_t incomplete_slots = 0u;
+	bool header_valid = false;
+	bool mapping_valid = false;
+	bool merged = false;
 };
 
 [[nodiscard]] static SliceProjectDsmLayout slice_project_dsm_layout(
@@ -3172,15 +3679,21 @@ static void slice_project_mark_trace_invalid_noexcept(
 }
 
 static void slice_project_merge_dsm_cycle_noexcept(
-		slice_dsm_header* header, ParallelContext* pcxt,
-		slice_trace_attachment* attachment,
-		std::uint64_t expected_cycle) noexcept {
-	if (!slice_trace_attachment_live(attachment)
-		|| header == nullptr || pcxt == nullptr || pcxt->seg == nullptr
-		|| pcxt->nworkers < 0) return;
+		slice_dsm_header* header, std::uintptr_t map_base, Size map_length,
+		std::uint32_t slot_count, slice_trace_attachment* attachment,
+		std::uint64_t expected_cycle,
+		SliceProjectDsmMergeAudit* audit = nullptr) noexcept {
+	if (audit != nullptr) *audit = {};
+	if (!slice_trace_attachment_live(attachment) || header == nullptr) return;
 	auto& trace = *attachment->runtime;
 	if (trace.last_merged_cycle >= expected_cycle) return;
-	const auto slot_count = static_cast<std::uint32_t>(pcxt->nworkers);
+	const auto coordinate = reinterpret_cast<std::uintptr_t>(header);
+	if (coordinate < map_base || coordinate - map_base > map_length
+		|| sizeof(slice_dsm_header)
+			> map_length - (coordinate - map_base)) {
+		slice_project_mark_trace_invalid_noexcept(attachment);
+		return;
+	}
 	SliceProjectDsmLayout layout{};
 	if (!slice_project_validate_dsm_header_noexcept(
 			header, trace.boundary_count, slot_count,
@@ -3188,21 +3701,18 @@ static void slice_project_merge_dsm_cycle_noexcept(
 		slice_project_mark_trace_invalid_noexcept(attachment);
 		return;
 	}
-	const auto map_base = reinterpret_cast<std::uintptr_t>(
-		dsm_segment_address(pcxt->seg));
-	const auto coordinate = reinterpret_cast<std::uintptr_t>(header);
-	const Size map_length = dsm_segment_map_length(pcxt->seg);
-	if (coordinate < map_base
-		|| coordinate - map_base > map_length
-		|| layout.total_bytes > map_length - (coordinate - map_base)) {
+	if (audit != nullptr) audit->header_valid = true;
+	if (layout.total_bytes > map_length - (coordinate - map_base)) {
 		slice_project_mark_trace_invalid_noexcept(attachment);
 		return;
 	}
+	if (audit != nullptr) audit->mapping_valid = true;
 	/* First pass validates the complete waited cycle before a single counter is
 	 * merged.  A malformed slot therefore cannot create a plausible prefix. */
 	for (std::uint32_t slot_index = 0u;
 		 slot_index < slot_count; ++slot_index) {
 		auto* worker = slice_project_worker_slot(header, slot_index);
+		if (audit != nullptr) ++audit->slot_headers_read;
 		const auto state = worker->publish_state;
 		if (state > slice_dsm_publish_state::published_incomplete) {
 			slice_project_mark_trace_invalid_noexcept(attachment);
@@ -3225,6 +3735,7 @@ static void slice_project_merge_dsm_cycle_noexcept(
 		auto* counters = slice_project_worker_counters(worker);
 		for (std::uint32_t counter_index = 0u;
 			 counter_index < trace.boundary_count; ++counter_index) {
+			if (audit != nullptr) ++audit->counter_records_read;
 			if (counters[counter_index].overflowed > 1u
 				|| !slice_dsm_counter_reserved_valid(
 					counters[counter_index])) {
@@ -3247,6 +3758,7 @@ static void slice_project_merge_dsm_cycle_noexcept(
 			}
 		}
 		if (state == slice_dsm_publish_state::never_launched) continue;
+		if (audit != nullptr) ++audit->merged_slots;
 		auto* counters = slice_project_worker_counters(worker);
 		for (std::uint32_t counter_index = 0u;
 			 counter_index < trace.boundary_count; ++counter_index) {
@@ -3266,7 +3778,321 @@ static void slice_project_merge_dsm_cycle_noexcept(
 		trace.incomplete_workers += incomplete;
 	}
 	trace.last_merged_cycle = expected_cycle;
+	if (audit != nullptr) {
+		audit->incomplete_slots = incomplete;
+		audit->merged = true;
+	}
 }
+
+static void slice_project_merge_dsm_cycle_noexcept(
+		slice_dsm_header* header, ParallelContext* pcxt,
+		slice_trace_attachment* attachment,
+		std::uint64_t expected_cycle) noexcept {
+	if (!slice_trace_attachment_live(attachment)
+		|| header == nullptr || pcxt == nullptr || pcxt->seg == nullptr
+		|| pcxt->nworkers < 0) return;
+	slice_project_merge_dsm_cycle_noexcept(
+		header,
+		reinterpret_cast<std::uintptr_t>(dsm_segment_address(pcxt->seg)),
+		dsm_segment_map_length(pcxt->seg),
+		static_cast<std::uint32_t>(pcxt->nworkers), attachment,
+		expected_cycle, nullptr);
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+enum class SliceProjectDsmCorruption : std::uint8_t {
+	version = 0u,
+	recipe_count,
+	header_offset,
+	truncated_mapping,
+	lifecycle,
+	stale_cycle,
+};
+
+struct SliceProjectDsmTestCaseResult {
+	bool validated = false;
+	SliceProjectDsmMergeAudit audit{};
+};
+
+static void slice_project_initialize_test_dsm(
+		slice_dsm_header* header, SliceProjectDsmLayout const& layout,
+		std::uint32_t recipe_count, std::uint32_t slot_count,
+		std::uint64_t cycle) noexcept {
+	header->magic = kBioseqSliceDsmMagic;
+	header->codec_version = kBioseqSliceDsmVersion;
+	header->header_bytes = static_cast<std::uint16_t>(layout.header_bytes);
+	header->recipe_count = recipe_count;
+	header->slot_count = slot_count;
+	header->cycle = cycle;
+	header->slot_stride = layout.slot_stride;
+}
+
+[[nodiscard]] static SliceProjectDsmTestCaseResult
+slice_project_run_corrupt_dsm_test(
+		SliceProjectRuntime const& source,
+		SliceProjectDsmCorruption corruption) {
+	SliceProjectDsmTestCaseResult result{};
+	if (source.boundary_count == 0u || source.boundaries == nullptr) return result;
+	constexpr std::uint32_t slot_count = 2u;
+	constexpr std::uint64_t cycle = 17u;
+	const SliceProjectDsmLayout layout = slice_project_dsm_layout(
+		source.boundary_count, slot_count);
+	auto* bytes = static_cast<std::byte*>(palloc0(layout.total_bytes));
+	auto* counters = static_cast<slice_dsm_counter*>(palloc0(
+		mul_size(source.boundary_count, sizeof(slice_dsm_counter))));
+	slice_materialization_runtime trace{
+		.boundaries = source.boundaries,
+		.boundary_count = source.boundary_count,
+		.cumulative_sink = {counters, source.boundary_count},
+		.last_merged_cycle = 0u,
+		.incomplete_workers = 0u,
+		.collection_enabled = true,
+		.timing_enabled = false,
+		.invalid = false,
+		.overflowed = false,
+	};
+	slice_trace_attachment attachment{
+		.refcount = 1u,
+		.generation = 1u,
+		.runtime = &trace,
+		.async_owner = nullptr,
+		.async_owner_generation = 0u,
+		.valid = true,
+	};
+	auto* header = reinterpret_cast<slice_dsm_header*>(bytes);
+	slice_project_initialize_test_dsm(
+		header, layout, source.boundary_count, slot_count, cycle);
+	auto* worker = slice_project_worker_slot(header, 0u);
+	worker->cycle = cycle;
+	worker->publish_state = slice_dsm_publish_state::published_complete;
+	auto* worker_counters = slice_project_worker_counters(worker);
+	worker_counters[0].calls = 99u;
+	Size mapped_length = layout.total_bytes;
+	switch (corruption) {
+		case SliceProjectDsmCorruption::version:
+			++header->codec_version;
+			break;
+		case SliceProjectDsmCorruption::recipe_count:
+			++header->recipe_count;
+			break;
+		case SliceProjectDsmCorruption::header_offset:
+			header->header_bytes = static_cast<std::uint16_t>(
+				header->header_bytes + MAXIMUM_ALIGNOF);
+			break;
+		case SliceProjectDsmCorruption::truncated_mapping:
+			--mapped_length;
+			break;
+		case SliceProjectDsmCorruption::lifecycle:
+			worker->publish_state = static_cast<slice_dsm_publish_state>(255u);
+			break;
+		case SliceProjectDsmCorruption::stale_cycle:
+			worker->cycle = cycle - 1u;
+			break;
+	}
+	slice_project_merge_dsm_cycle_noexcept(
+		header, reinterpret_cast<std::uintptr_t>(bytes), mapped_length,
+		slot_count, &attachment, cycle, &result.audit);
+	const bool zero_payload_reads = result.audit.counter_records_read == 0u;
+	const bool no_guessed_workers = trace.incomplete_workers == 0u;
+	const bool no_prefix_merge = trace.last_merged_cycle == 0u
+		&& counters[0].calls == 0u;
+	const bool rejected_before_slot =
+		corruption == SliceProjectDsmCorruption::version
+		|| corruption == SliceProjectDsmCorruption::recipe_count
+		|| corruption == SliceProjectDsmCorruption::header_offset
+		|| corruption == SliceProjectDsmCorruption::truncated_mapping;
+	result.validated = trace.invalid && trace.overflowed
+		&& zero_payload_reads && no_guessed_workers && no_prefix_merge
+		&& (!rejected_before_slot || result.audit.slot_headers_read == 0u);
+	pfree(counters);
+	pfree(bytes);
+	return result;
+}
+
+struct SliceProjectAsyncTestCallbacks {
+	std::uint32_t cancelled = 0u;
+	std::uint32_t joined = 0u;
+	std::uint32_t backings_released = 0u;
+};
+
+static void slice_project_test_cancel(void* argument) noexcept {
+	++static_cast<SliceProjectAsyncTestCallbacks*>(argument)->cancelled;
+}
+
+static void slice_project_test_join(void* argument) noexcept {
+	++static_cast<SliceProjectAsyncTestCallbacks*>(argument)->joined;
+}
+
+static void slice_project_test_release_backing(void* argument) noexcept {
+	++static_cast<SliceProjectAsyncTestCallbacks*>(argument)->backings_released;
+}
+
+[[nodiscard]] static bool slice_project_run_incomplete_async_test(
+		SliceProjectRuntime const& source,
+		std::uint32_t* cleanup_callbacks) {
+	if (cleanup_callbacks != nullptr) *cleanup_callbacks = 0u;
+	if (source.boundary_count == 0u || source.boundaries == nullptr) return false;
+	slice_materialization_boundary boundary = source.boundaries[0];
+	boundary.counter_index = 0u;
+	slice_dsm_counter cumulative{};
+	slice_materialization_runtime trace{};
+	if (!initialize_slice_materialization_runtime_noexcept(
+			&trace, &boundary, 1u, &cumulative, 1u, true, false)) return false;
+	auto* attachment = make_slice_trace_attachment(&trace);
+	slice_async_owner_guard guard{};
+	slice_async_job_slot jobs[slice_async_max_live_jobs]{};
+	slice_dsm_counter job_counters[slice_async_max_live_jobs]{};
+	if (!initialize_slice_async_owner_noexcept(
+			&guard, &trace, attachment, jobs, slice_async_max_live_jobs,
+			job_counters, 1u)) {
+		invalidate_slice_trace_attachment_noexcept(attachment);
+		release_slice_trace_attachment(attachment);
+		return false;
+	}
+	SliceProjectAsyncTestCallbacks callbacks{};
+	const slice_async_job_resources resources{
+		.cancel = {&callbacks, &slice_project_test_cancel},
+		.join = {&callbacks, &slice_project_test_join},
+		.backings = {&callbacks, &slice_project_test_release_backing},
+	};
+	slice_async_completion_handle handle{};
+	bool incomplete = false;
+	const bool enrolled = enroll_slice_async_job_noexcept(
+		&guard, resources, &handle);
+	const bool scheduled = enrolled
+		&& mark_slice_async_job_scheduled_noexcept(&guard, handle);
+	if (scheduled) {
+		update_slice_dsm_counter_noexcept(
+			guard.jobs[handle.slot_index].counters[0],
+			1u, 1u, 8u, false, 8u, 0u);
+	}
+	const bool drained = scheduled && drain_slice_async_job_noexcept(
+		&guard, handle, &incomplete);
+	const bool stale_rejected = !mark_slice_async_job_finished_noexcept(
+		&guard, handle);
+	const bool lifecycle_valid = drained && incomplete && stale_rejected
+		&& guard.enrolled_jobs == 0u
+		&& jobs[handle.slot_index].state == slice_async_job_state::unused
+		&& jobs[handle.slot_index].generation == handle.generation + 1u
+		&& cumulative.calls == 1u
+		&& callbacks.cancelled == 1u && callbacks.joined == 1u
+		&& callbacks.backings_released == 1u
+		&& attachment->refcount == 1u;
+	if (cleanup_callbacks != nullptr) {
+		*cleanup_callbacks = callbacks.cancelled + callbacks.joined
+			+ callbacks.backings_released;
+	}
+	finish_slice_async_owner_noexcept(
+		&guard, slice_shutdown_disposition::incomplete);
+	return lifecycle_valid
+		&& guard.phase == slice_async_owner_phase::terminal
+		&& trace.boundaries == nullptr && trace.cumulative_sink.entries == nullptr;
+}
+
+static void slice_project_apply_dsm_test_fixture(
+		BioseqSliceProjectState* state) {
+	if (state == nullptr || BioseqSliceDsmTestFixture == kSliceDsmTestNone) return;
+	auto& runtime = state->runtime;
+	if (runtime.dsm_test_fixture_applied) return;
+	runtime.dsm_test_fixture_applied = true;
+	runtime.dsm_test_fixture_mode = BioseqSliceDsmTestFixture;
+	runtime.dsm_test_async_validated = slice_project_run_incomplete_async_test(
+		runtime, &runtime.dsm_test_cleanup_callbacks);
+	if (BioseqSliceDsmTestFixture == kSliceDsmTestMalformed) {
+		constexpr std::array corruptions{
+			SliceProjectDsmCorruption::version,
+			SliceProjectDsmCorruption::recipe_count,
+			SliceProjectDsmCorruption::header_offset,
+			SliceProjectDsmCorruption::truncated_mapping,
+			SliceProjectDsmCorruption::lifecycle,
+			SliceProjectDsmCorruption::stale_cycle,
+		};
+		bool valid = true;
+		for (const auto corruption : corruptions) {
+			const auto result = slice_project_run_corrupt_dsm_test(
+				runtime, corruption);
+			valid = valid && result.validated;
+			++runtime.dsm_test_checks;
+			runtime.dsm_test_slot_headers_read +=
+				result.audit.slot_headers_read;
+			runtime.dsm_test_counter_records_read +=
+				result.audit.counter_records_read;
+		}
+		runtime.dsm_test_fixture_validated = valid
+			&& runtime.dsm_test_async_validated;
+		runtime.trace_runtime.invalid = true;
+		runtime.trace_runtime.overflowed = true;
+		return;
+	}
+
+	constexpr std::uint32_t slot_count = 3u;
+	constexpr std::uint64_t cycle = 23u;
+	const SliceProjectDsmLayout layout = slice_project_dsm_layout(
+		runtime.boundary_count, slot_count);
+	auto* bytes = static_cast<std::byte*>(palloc0(layout.total_bytes));
+	auto* local_counters = static_cast<slice_dsm_counter*>(palloc0(
+		mul_size(runtime.boundary_count, sizeof(slice_dsm_counter))));
+	slice_materialization_runtime trace{
+		.boundaries = runtime.boundaries,
+		.boundary_count = runtime.boundary_count,
+		.cumulative_sink = {local_counters, runtime.boundary_count},
+		.last_merged_cycle = 0u,
+		.incomplete_workers = 0u,
+		.collection_enabled = true,
+		.timing_enabled = false,
+		.invalid = false,
+		.overflowed = false,
+	};
+	slice_trace_attachment attachment{
+		.refcount = 1u, .generation = 1u, .runtime = &trace,
+		.async_owner = nullptr, .async_owner_generation = 0u, .valid = true};
+	auto* header = reinterpret_cast<slice_dsm_header*>(bytes);
+	slice_project_initialize_test_dsm(
+		header, layout, runtime.boundary_count, slot_count, cycle);
+	for (std::uint32_t slot_index = 0u; slot_index < 2u; ++slot_index) {
+		auto* worker = slice_project_worker_slot(header, slot_index);
+		worker->cycle = cycle;
+		worker->publish_state = slot_index == 0u
+			? slice_dsm_publish_state::published_complete
+			: slice_dsm_publish_state::attached_running;
+		auto* counters = slice_project_worker_counters(worker);
+		for (std::uint32_t index = 0u;
+			 index < runtime.boundary_count; ++index) {
+			counters[index].calls = slot_index == 0u ? 3u : 2u;
+			counters[index].bytes = slot_index == 0u ? 30u : 20u;
+		}
+	}
+	SliceProjectDsmMergeAudit audit{};
+	slice_project_merge_dsm_cycle_noexcept(
+		header, reinterpret_cast<std::uintptr_t>(bytes), layout.total_bytes,
+		slot_count, &attachment, cycle, &audit);
+	bool valid = audit.header_valid && audit.mapping_valid && audit.merged
+		&& audit.merged_slots == 2u && audit.incomplete_slots == 1u
+		&& trace.last_merged_cycle == cycle
+		&& trace.incomplete_workers == 1u && !trace.invalid
+		&& !trace.overflowed;
+	for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
+		valid = valid && local_counters[index].calls == 5u
+			&& local_counters[index].bytes == 50u;
+		if (runtime.counters != nullptr) {
+			merge_slice_dsm_counter_noexcept(
+				runtime.counters[index], local_counters[index]);
+		}
+	}
+	if (runtime.trace_runtime.incomplete_workers == UINT32_MAX) {
+		runtime.trace_runtime.overflowed = true;
+	} else {
+		++runtime.trace_runtime.incomplete_workers;
+	}
+	runtime.dsm_test_checks = 1u;
+	runtime.dsm_test_slot_headers_read = audit.slot_headers_read;
+	runtime.dsm_test_counter_records_read = audit.counter_records_read;
+	runtime.dsm_test_fixture_validated = valid
+		&& runtime.dsm_test_async_validated;
+	pfree(local_counters);
+	pfree(bytes);
+}
+#endif
 
 static void slice_project_release_detach_state(
 		slice_dsm_detach_state* state) noexcept {
@@ -3291,6 +4117,20 @@ static void slice_project_owner_reset(void* argument) noexcept {
 	}
 	runtime.mapped_header = nullptr;
 	runtime.mapped_worker = nullptr;
+}
+
+/* Registered before child initialization.  PostgreSQL invokes reset callbacks
+ * in reverse registration order, so child scan/provider callbacks run after
+ * the async-owner callback but before this upper-lease callback. */
+static void slice_project_source_routes_reset(void* argument) noexcept {
+	auto* state = static_cast<BioseqSliceProjectState*>(argument);
+	if (state == nullptr) return;
+	auto& runtime = state->runtime;
+	if (runtime.source_routes_acquired) {
+		bioseq::storage::release_pg_sequence_source_routes_noexcept(
+			runtime.source_routes);
+		runtime.source_routes_acquired = false;
+	}
 }
 
 static void slice_project_dsm_on_detach(
@@ -3384,6 +4224,91 @@ static void slice_project_publish_incomplete_noexcept(void* argument) noexcept {
 		slice_dsm_publish_state::published_incomplete);
 }
 
+static void slice_project_attach_sources_from_plan_state(
+		PlanState* child, BioseqSliceProjectState* state,
+		std::uint32_t& tagged_sources) {
+	if (child == nullptr || state == nullptr) return;
+	if (IsA(child, CustomScanState)) {
+		auto* child_custom = reinterpret_cast<CustomScanState*>(child);
+		if (child_custom->methods == &BioseqColumnScanExecuteMethods) {
+			auto* bioseq_state =
+				BioseqScanState::from_custom_scan_state(child_custom);
+			BioseqScanRuntime& child_runtime = bioseq_runtime(bioseq_state);
+			if (!child_runtime.lazy_source_projection) return;
+			++tagged_sources;
+			if (child_runtime.lazy_source_provider == nullptr
+				|| !bioseq::storage::add_pg_sequence_source_route(
+					state->runtime.source_routes,
+					child_runtime.lazy_source_provider)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("BioseqSliceProject source route is unavailable")));
+			}
+			state->runtime.source_routes_acquired = true;
+			if (child_runtime.lazy_trace_attachment != nullptr) {
+				release_slice_trace_attachment(
+					child_runtime.lazy_trace_attachment);
+				child_runtime.lazy_trace_attachment = nullptr;
+			}
+			if (slice_trace_attachment_live(state->runtime.attachment)) {
+				child_runtime.lazy_trace_attachment = state->runtime.attachment;
+				retain_slice_trace_attachment(
+					child_runtime.lazy_trace_attachment);
+				child_runtime.buffer.bind_slice_async_owner(
+					&state->runtime.owner_guard);
+			}
+			return;
+		}
+		for (PlanState* custom_child : PList<PlanState>(
+				child_custom->custom_ps)) {
+			slice_project_attach_sources_from_plan_state(
+				custom_child, state, tagged_sources);
+		}
+		return;
+	}
+	if (IsA(child, AppendState)) {
+		auto* append = reinterpret_cast<AppendState*>(child);
+		for (int index = 0; index < append->as_nplans; ++index) {
+			slice_project_attach_sources_from_plan_state(
+				append->appendplans[index], state, tagged_sources);
+		}
+		return;
+	}
+	if (IsA(child, MergeAppendState)) {
+		auto* append = reinterpret_cast<MergeAppendState*>(child);
+		for (int index = 0; index < append->ms_nplans; ++index) {
+			slice_project_attach_sources_from_plan_state(
+				append->mergeplans[index], state, tagged_sources);
+		}
+		return;
+	}
+	PlanState* outer = outerPlanState(child);
+	PlanState* inner = innerPlanState(child);
+	if (outer != nullptr) {
+		slice_project_attach_sources_from_plan_state(
+			outer, state, tagged_sources);
+	}
+	if (inner != nullptr && inner != outer) {
+		slice_project_attach_sources_from_plan_state(
+			inner, state, tagged_sources);
+	}
+}
+
+static void slice_project_attach_trace_to_child(
+		CustomScanState* custom, BioseqSliceProjectState* state) {
+	if (custom == nullptr || custom->custom_ps == NIL || state == nullptr) return;
+	std::uint32_t tagged_sources = 0u;
+	for (PlanState* child : PList<PlanState>(custom->custom_ps)) {
+		slice_project_attach_sources_from_plan_state(
+			child, state, tagged_sources);
+	}
+	if (tagged_sources == 0u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqSliceProject child did not accept source ownership")));
+	}
+}
+
 static void slice_project_initialize_trace(
 		BioseqSliceProjectState* state, CustomScan* scan, EState* estate) {
 	auto& runtime = state->runtime;
@@ -3396,14 +4321,15 @@ static void slice_project_initialize_trace(
 		&& state->custom_scanstate.ss.ps.instrument != nullptr;
 	runtime.timing = runtime.collect_actual
 		&& state->custom_scanstate.ss.ps.instrument->need_timer;
-	if (!runtime.collect_actual) return;
-	runtime.boundaries = static_cast<slice_materialization_boundary*>(
-		MemoryContextAllocZero(estate->es_query_cxt,
-			mul_size(runtime.boundary_count,
-				sizeof(slice_materialization_boundary))));
-	runtime.counters = static_cast<slice_dsm_counter*>(
-		MemoryContextAllocZero(estate->es_query_cxt,
-			mul_size(runtime.boundary_count, sizeof(slice_dsm_counter))));
+	if (runtime.boundary_count != 0u) {
+		runtime.boundaries = static_cast<slice_materialization_boundary*>(
+			MemoryContextAllocZero(estate->es_query_cxt,
+				mul_size(runtime.boundary_count,
+					sizeof(slice_materialization_boundary))));
+		runtime.counters = static_cast<slice_dsm_counter*>(
+			MemoryContextAllocZero(estate->es_query_cxt,
+				mul_size(runtime.boundary_count, sizeof(slice_dsm_counter))));
+	}
 	std::uint32_t index = 0u;
 	for (Node* raw_record : PList<Node>(records)) {
 		List* record = reinterpret_cast<List*>(raw_record);
@@ -3424,15 +4350,29 @@ static void slice_project_initialize_trace(
 	if (!initialize_slice_materialization_runtime_noexcept(
 			&runtime.trace_runtime, runtime.boundaries,
 			runtime.boundary_count, runtime.counters,
-			runtime.boundary_count, true, runtime.timing)) {
+			runtime.boundary_count, runtime.collect_actual, runtime.timing)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqSliceProject trace runtime is invalid")));
 	}
 	runtime.attachment = make_slice_trace_attachment(&runtime.trace_runtime);
+	runtime.async_jobs = static_cast<slice_async_job_slot*>(
+		MemoryContextAllocZero(estate->es_query_cxt,
+			mul_size(slice_async_max_live_jobs,
+				sizeof(slice_async_job_slot))));
+	if (runtime.boundary_count != 0u) {
+		const Size async_counter_count = mul_size(
+			static_cast<Size>(slice_async_max_live_jobs),
+			static_cast<Size>(runtime.boundary_count));
+		runtime.async_job_counters = static_cast<slice_dsm_counter*>(
+			MemoryContextAllocZero(estate->es_query_cxt,
+				mul_size(async_counter_count,
+					sizeof(slice_dsm_counter))));
+	}
 	if (!initialize_slice_async_owner_noexcept(
 			&runtime.owner_guard, &runtime.trace_runtime,
-			runtime.attachment, nullptr, 0u, nullptr,
+			runtime.attachment, runtime.async_jobs,
+			slice_async_max_live_jobs, runtime.async_job_counters,
 			runtime.boundary_count)) {
 		invalidate_slice_trace_attachment_noexcept(runtime.attachment);
 		release_slice_trace_attachment(runtime.attachment);
@@ -3467,9 +4407,27 @@ static void slice_project_initialize_trace(
 	}
 }
 
+static void slice_project_ensure_trace_initialized(CustomScanState* custom) {
+	if (custom == nullptr) return;
+	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+	auto& runtime = state->runtime;
+	if (runtime.trace_initialization_attempted) return;
+	runtime.trace_initialization_attempted = true;
+	EState* estate = custom->ss.ps.state;
+	auto* scan = reinterpret_cast<CustomScan*>(custom->ss.ps.plan);
+	if (estate == nullptr || scan == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqSliceProject trace initialization state is invalid")));
+	}
+	slice_project_initialize_trace(state, scan, estate);
+	slice_project_attach_trace_to_child(custom, state);
+}
+
 static Size SliceProjectEstimateDSM(
 		CustomScanState* custom, ParallelContext* pcxt) {
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+	slice_project_ensure_trace_initialized(custom);
 	if (!state->runtime.collect_actual) return 0u;
 	if (pcxt == nullptr || pcxt->nworkers < 0) {
 		ereport(ERROR,
@@ -3484,6 +4442,7 @@ static Size SliceProjectEstimateDSM(
 static void SliceProjectInitializeDSM(
 		CustomScanState* custom, ParallelContext* pcxt, void* coordinate) {
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+	slice_project_ensure_trace_initialized(custom);
 	auto& runtime = state->runtime;
 	if (!runtime.collect_actual) return;
 	if (coordinate == nullptr || pcxt == nullptr || pcxt->seg == nullptr
@@ -3530,6 +4489,7 @@ static void SliceProjectInitializeDSM(
 static void SliceProjectReInitializeDSM(
 		CustomScanState* custom, ParallelContext* pcxt, void* coordinate) {
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+	slice_project_ensure_trace_initialized(custom);
 	auto& runtime = state->runtime;
 	if (!runtime.collect_actual) return;
 	if (coordinate == nullptr || pcxt == nullptr || pcxt->seg == nullptr
@@ -3577,6 +4537,7 @@ static void SliceProjectReInitializeDSM(
 static void SliceProjectInitializeWorker(
 		CustomScanState* custom, shm_toc*, void* coordinate) {
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+	slice_project_ensure_trace_initialized(custom);
 	auto& runtime = state->runtime;
 	if (!runtime.collect_actual) return;
 	if (coordinate == nullptr || ParallelWorkerNumber < 0) {
@@ -3671,32 +4632,6 @@ static void SliceProjectInitializeWorker(
 	return !TupIsNull(slice_project_publish_child(custom, false));
 }
 
-static void slice_project_attach_trace_to_child(
-		CustomScanState* custom, BioseqSliceProjectState* state) {
-	if (custom->custom_ps == NIL || state == nullptr) return;
-	auto* child = reinterpret_cast<PlanState*>(linitial(custom->custom_ps));
-	if (child == nullptr || !IsA(child, CustomScanState)) return;
-	auto* child_custom = reinterpret_cast<CustomScanState*>(child);
-	if (child_custom->methods != &BioseqColumnScanExecuteMethods) return;
-	auto* bioseq_state = BioseqScanState::from_custom_scan_state(child_custom);
-	BioseqScanRuntime& child_runtime = bioseq_runtime(bioseq_state);
-	if (!child_runtime.lazy_source_projection) {
-		ereport(ERROR,
-			(errcode(ERRCODE_DATA_CORRUPTED),
-			 errmsg("BioseqSliceProject child did not accept source ownership")));
-	}
-	if (child_runtime.lazy_trace_attachment != nullptr) {
-		release_slice_trace_attachment(
-			child_runtime.lazy_trace_attachment);
-		child_runtime.lazy_trace_attachment = nullptr;
-	}
-	if (slice_trace_attachment_live(state->runtime.attachment)) {
-		child_runtime.lazy_trace_attachment = state->runtime.attachment;
-		retain_slice_trace_attachment(
-			child_runtime.lazy_trace_attachment);
-	}
-}
-
 static void SliceProjectBegin(
 		CustomScanState* custom, EState* estate, int eflags) {
 	auto* scan = reinterpret_cast<CustomScan*>(custom->ss.ps.plan);
@@ -3713,17 +4648,23 @@ static void SliceProjectBegin(
 		reinterpret_cast<Node*>(list_nth(header, kSliceHeaderPlannedSymbols)));
 	state->runtime.planned_bytes = slice_project_int8_value(
 		reinterpret_cast<Node*>(list_nth(header, kSliceHeaderPlannedBytes)));
-	/* Register the combined trace/owner reset callback before child Begin can
-	 * ERROR.  Source promotion itself happens later, after the attachment has
-	 * been injected into the initialized BioseqScan runtime. */
-	slice_project_initialize_trace(state, scan, estate);
+	/* Register the upper-lease reset callback before ExecInitNode registers
+	 * any child/provider callbacks.  Their reverse-order teardown then closes
+	 * providers before this callback drops the independently retained routes. */
+	state->runtime.source_routes_callback.func =
+		slice_project_source_routes_reset;
+	state->runtime.source_routes_callback.arg = state;
+	MemoryContextRegisterResetCallback(
+		estate->es_query_cxt,
+		&state->runtime.source_routes_callback);
+	state->runtime.source_routes_callback_registered = true;
 	Plan* child_plan = reinterpret_cast<Plan*>(linitial(scan->custom_plans));
 	custom->custom_ps = list_make1(ExecInitNode(child_plan, estate, eflags));
-	slice_project_attach_trace_to_child(custom, state);
 }
 
 [[nodiscard]] static TupleTableSlot* SliceProjectExec(
 		CustomScanState* custom) {
+	slice_project_ensure_trace_initialized(custom);
 	TupleTableSlot* result = ExecScan(
 		&custom->ss, SliceProjectAccess, SliceProjectRecheck);
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
@@ -3744,6 +4685,12 @@ static void SliceProjectBegin(
 				 errmsg("BioseqSliceProject result binding changed")));
 		}
 		if (result->tts_isnull[binding.resno - 1]) continue;
+		/* CASE/COALESCE may select a flat or literal arm even though another
+		 * arm caused this symbolic recipe to be planned.  Only an expanded
+		 * result can carry provenance; a skipped lazy arm is not an error and
+		 * must retain zero actual boundary calls. */
+		if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(
+				result->tts_values[binding.resno - 1]))) continue;
 		if (!attach_slice_trace_provenance(
 				result->tts_values[binding.resno - 1], runtime.attachment,
 				binding.producer_value_id)) {
@@ -3757,16 +4704,24 @@ static void SliceProjectBegin(
 
 static void SliceProjectEnd(CustomScanState* custom) {
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
-	if (custom->custom_ps != NIL) {
-		ExecEndNode(reinterpret_cast<PlanState*>(linitial(custom->custom_ps)));
-		custom->custom_ps = NIL;
-	}
-	ExecClearTuple(custom->ss.ss_ScanTupleSlot);
+	/* No source-backed task may outlive the owning upper executor. */
 	if (state->runtime.owner_initialized) {
 		finish_slice_async_owner_noexcept(
 			&state->runtime.owner_guard,
 			slice_shutdown_disposition::complete);
 		state->runtime.attachment = nullptr;
+	}
+	if (custom->custom_ps != NIL) {
+		ExecEndNode(reinterpret_cast<PlanState*>(linitial(custom->custom_ps)));
+		custom->custom_ps = NIL;
+	}
+	ExecClearTuple(custom->ss.ss_ScanTupleSlot);
+	/* Child End closes every provider first.  The independent upper leases
+	 * keep registries alive until this final release/sweep. */
+	if (state->runtime.source_routes_acquired) {
+		bioseq::storage::release_pg_sequence_source_routes(
+			state->runtime.source_routes, /*is_commit=*/true);
+		state->runtime.source_routes_acquired = false;
 	}
 	if (state->runtime.detach_state != nullptr) {
 		slice_project_release_detach_state(state->runtime.detach_state);
@@ -3778,6 +4733,7 @@ static void SliceProjectEnd(CustomScanState* custom) {
 
 static void SliceProjectReScan(CustomScanState* custom) {
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+	slice_project_ensure_trace_initialized(custom);
 	if (state->runtime.owner_initialized) {
 		quiesce_slice_async_owner_noexcept(
 			&state->runtime.owner_guard,
@@ -3785,6 +4741,15 @@ static void SliceProjectReScan(CustomScanState* custom) {
 	}
 	if (custom->custom_ps != NIL) {
 		ExecReScan(reinterpret_cast<PlanState*>(linitial(custom->custom_ps)));
+	}
+	if (state->runtime.source_routes_acquired) {
+		for (std::uint8_t index = 0u;
+			 index < state->runtime.source_routes.count; ++index) {
+			bioseq::storage::sweep_reclaimable_pg_sequence_source_domains(
+				state->runtime.source_routes.leases[index],
+				bioseq::storage::pg_sequence_source_sweep_boundary::rescan,
+				/*is_commit=*/true);
+		}
 	}
 	ExecClearTuple(custom->ss.ss_ScanTupleSlot);
 	state->runtime.rescans = bioseq::parallelism::saturating_add(
@@ -3823,6 +4788,39 @@ static void SliceProjectRestrPos(CustomScanState* custom) {
 	return deparse_expression(expression, es->deparse_cxt, true, false);
 }
 
+[[nodiscard]] static const char* slice_project_opcode_name(
+		SliceProjectOpcode opcode) noexcept {
+	switch (opcode) {
+		case SliceProjectOpcode::source_expr: return "source";
+		case SliceProjectOpcode::literal_expr: return "literal";
+		case SliceProjectOpcode::element: return "element";
+		case SliceProjectOpcode::slice: return "slice";
+		case SliceProjectOpcode::concat: return "concat";
+		case SliceProjectOpcode::reverse: return "reverse";
+		case SliceProjectOpcode::reverse_complement:
+			return "reverse complement";
+		case SliceProjectOpcode::length: return "length";
+		case SliceProjectOpcode::cardinality: return "cardinality";
+		case SliceProjectOpcode::bridge: return "literal bridge";
+		case SliceProjectOpcode::materialize: return "materialize";
+	}
+	return "invalid";
+}
+
+[[nodiscard]] static List* slice_project_node_dependency_names(List* node) {
+	List* names = NIL;
+	Node* dependency_node = reinterpret_cast<Node*>(
+		list_nth(node, kSliceNodeDependencies));
+	if (dependency_node == nullptr) return names;
+	for (Node* dependency : PList<Node>(
+			reinterpret_cast<List*>(dependency_node))) {
+		const std::string value = fmt::format(
+			"value_{}", intVal(dependency));
+		names = lappend(names, pstrdup(value.c_str()));
+	}
+	return names;
+}
+
 [[nodiscard]] static List* slice_project_dependency_names(List* record) {
 	List* names = NIL;
 	Node* dependency_node = reinterpret_cast<Node*>(
@@ -3837,6 +4835,70 @@ static void SliceProjectRestrPos(CustomScanState* custom) {
 	return names;
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+[[nodiscard]] static const char* slice_project_dsm_test_fixture_name(
+		int mode) noexcept {
+	switch (mode) {
+		case kSliceDsmTestIncomplete: return "incomplete";
+		case kSliceDsmTestMalformed: return "malformed";
+		default: return "none";
+	}
+}
+
+static void slice_project_explain_dsm_test_fixture(
+		BioseqSliceProjectState const* state, ExplainState* es) {
+	if (state == nullptr || es == nullptr
+		|| !state->runtime.dsm_test_fixture_applied) return;
+	auto const& runtime = state->runtime;
+	const char* mode = slice_project_dsm_test_fixture_name(
+		runtime.dsm_test_fixture_mode);
+	if (es->format == EXPLAIN_FORMAT_TEXT) {
+		auto property = [es](const char* name, const char* value) {
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str, "%s: %s\n", name, value);
+		};
+		property("DSM Test Fixture", mode);
+		property("DSM Fixture Validated",
+			runtime.dsm_test_fixture_validated ? "true" : "false");
+		property("DSM Async Lifecycle Validated",
+			runtime.dsm_test_async_validated ? "true" : "false");
+		const auto integer_property = [es](
+				const char* name, std::uint32_t value) {
+			appendStringInfoSpaces(es->str, es->indent * 2);
+			appendStringInfo(es->str, "%s: %u\n", name, value);
+		};
+		integer_property("DSM Fixture Checks", runtime.dsm_test_checks);
+		integer_property(
+			"DSM Fixture Slot Headers Read",
+			runtime.dsm_test_slot_headers_read);
+		integer_property(
+			"DSM Fixture Counter Records Read",
+			runtime.dsm_test_counter_records_read);
+		integer_property(
+			"DSM Async Cleanup Callbacks",
+			runtime.dsm_test_cleanup_callbacks);
+		return;
+	}
+	ExplainPropertyText("DSM Test Fixture", mode, es);
+	ExplainPropertyBool(
+		"DSM Fixture Validated", runtime.dsm_test_fixture_validated, es);
+	ExplainPropertyBool(
+		"DSM Async Lifecycle Validated",
+		runtime.dsm_test_async_validated, es);
+	ExplainPropertyUInteger(
+		"DSM Fixture Checks", nullptr, runtime.dsm_test_checks, es);
+	ExplainPropertyUInteger(
+		"DSM Fixture Slot Headers Read", nullptr,
+		runtime.dsm_test_slot_headers_read, es);
+	ExplainPropertyUInteger(
+		"DSM Fixture Counter Records Read", nullptr,
+		runtime.dsm_test_counter_records_read, es);
+	ExplainPropertyUInteger(
+		"DSM Async Cleanup Callbacks", nullptr,
+		runtime.dsm_test_cleanup_callbacks, es);
+}
+#endif
+
 [[nodiscard]] static slice_dsm_counter const& slice_project_explain_counter(
 		BioseqSliceProjectState const* state, std::uint32_t index) noexcept {
 	static const slice_dsm_counter zero{};
@@ -3848,7 +4910,48 @@ static void SliceProjectRestrPos(CustomScanState* custom) {
 
 static void slice_project_explain_text(
 		BioseqSliceProjectState* state, CustomScan* scan,
-		List* header, List* records, ExplainState* es) {
+		List* header, List* nodes, List* records, ExplainState* es) {
+	appendStringInfoSpaces(es->str, es->indent * 2);
+	appendStringInfoString(es->str, "Slice Recipe:\n");
+	for (Node* raw_node : PList<Node>(nodes)) {
+		List* node = reinterpret_cast<List*>(raw_node);
+		const int stable_id = intVal(list_nth(node, kSliceNodeStableId));
+		const auto opcode = static_cast<SliceProjectOpcode>(intVal(
+			list_nth(node, kSliceNodeOpcode)));
+		const int expression_index = intVal(
+			list_nth(node, kSliceNodeExpressionIndex));
+		appendStringInfoSpaces(es->str, (es->indent + 1) * 2);
+		appendStringInfo(es->str, "value_%d [%s] = %s\n", stable_id,
+			slice_project_opcode_name(opcode),
+			slice_project_deparse_expression(scan, expression_index, es));
+		List* dependencies = slice_project_node_dependency_names(node);
+		appendStringInfoSpaces(es->str, (es->indent + 2) * 2);
+		appendStringInfoString(es->str, "Depends On: ");
+		if (dependencies == NIL) {
+			appendStringInfoString(es->str, "none");
+		} else {
+			bool first = true;
+			for (char* name : PList<char>(dependencies)) {
+				if (!first) appendStringInfoString(es->str, ", ");
+				appendStringInfoString(es->str, name);
+				first = false;
+			}
+		}
+		appendStringInfoChar(es->str, '\n');
+		if (opcode == SliceProjectOpcode::slice
+			|| opcode == SliceProjectOpcode::element) {
+			const int lower = intVal(
+				list_nth(node, kSliceNodeLowerExpressionIndex));
+			const int upper = intVal(
+				list_nth(node, kSliceNodeUpperExpressionIndex));
+			appendStringInfoSpaces(es->str, (es->indent + 2) * 2);
+			appendStringInfo(es->str, "Bounds: lower=%s upper=%s\n",
+				lower < 0 ? "omitted"
+					: slice_project_deparse_expression(scan, lower, es),
+				upper < 0 ? "omitted"
+					: slice_project_deparse_expression(scan, upper, es));
+		}
+	}
 	appendStringInfoSpaces(es->str, es->indent * 2);
 	appendStringInfoString(es->str, "Slice Materialization:\n");
 	if (es->analyze && state != nullptr
@@ -3963,7 +5066,38 @@ static void slice_project_explain_text(
 
 static void slice_project_explain_structured(
 		BioseqSliceProjectState* state, CustomScan* scan,
-		List* records, ExplainState* es) {
+		List* nodes, List* records, ExplainState* es) {
+	ExplainOpenGroup("Slice Recipe", "Slice Recipe", false, es);
+	for (Node* raw_node : PList<Node>(nodes)) {
+		List* node = reinterpret_cast<List*>(raw_node);
+		const int stable_id = intVal(list_nth(node, kSliceNodeStableId));
+		const auto opcode = static_cast<SliceProjectOpcode>(intVal(
+			list_nth(node, kSliceNodeOpcode)));
+		const int expression_index = intVal(
+			list_nth(node, kSliceNodeExpressionIndex));
+		ExplainOpenGroup("Recipe Node", nullptr, true, es);
+		ExplainPropertyUInteger("Stable ID", nullptr,
+			static_cast<std::uint64_t>(stable_id), es);
+		ExplainPropertyText("Opcode", slice_project_opcode_name(opcode), es);
+		ExplainPropertyText("Expression", slice_project_deparse_expression(
+			scan, expression_index, es), es);
+		ExplainPropertyList("Depends On",
+			slice_project_node_dependency_names(node), es);
+		const int lower = intVal(
+			list_nth(node, kSliceNodeLowerExpressionIndex));
+		const int upper = intVal(
+			list_nth(node, kSliceNodeUpperExpressionIndex));
+		if (lower >= 0) {
+			ExplainPropertyText("Lower Bound", slice_project_deparse_expression(
+				scan, lower, es), es);
+		}
+		if (upper >= 0) {
+			ExplainPropertyText("Upper Bound", slice_project_deparse_expression(
+				scan, upper, es), es);
+		}
+		ExplainCloseGroup("Recipe Node", nullptr, true, es);
+	}
+	ExplainCloseGroup("Slice Recipe", "Slice Recipe", false, es);
 	ExplainOpenGroup(
 		"Slice Materialization", "Slice Materialization", false, es);
 	if (es->analyze && state != nullptr
@@ -4047,12 +5181,23 @@ static void slice_project_explain_structured(
 
 static void SliceProjectExplain(
 		CustomScanState* custom, List*, ExplainState* es) {
+	if (es->analyze) slice_project_ensure_trace_initialized(custom);
+#ifdef BIOSEQ_TEST_INDEXES
+	if (es->analyze) {
+		slice_project_apply_dsm_test_fixture(
+			reinterpret_cast<BioseqSliceProjectState*>(custom));
+	}
+#endif
 	auto* scan = reinterpret_cast<CustomScan*>(custom->ss.ps.plan);
 	List* header = slice_project_plan_header(scan);
+	List* nodes = slice_project_plan_nodes(scan);
 	List* records = slice_project_plan_records(scan);
 	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+#ifdef BIOSEQ_TEST_INDEXES
+	slice_project_explain_dsm_test_fixture(state, es);
+#endif
 	if (es->format == EXPLAIN_FORMAT_TEXT) {
-		slice_project_explain_text(state, scan, header, records, es);
+		slice_project_explain_text(state, scan, header, nodes, records, es);
 		return;
 	}
 	ExplainPropertyText("Projection Mode", "source-backed lazy", es);
@@ -4064,7 +5209,7 @@ static void SliceProjectExplain(
 			list_nth(header, kSliceHeaderPieceBoundaries))), es);
 	ExplainPropertyText("Fallback Reason",
 		strVal(list_nth(header, kSliceHeaderFallbackReason)), es);
-	slice_project_explain_structured(state, scan, records, es);
+	slice_project_explain_structured(state, scan, nodes, records, es);
 }
 
 static void SliceProjectShutdown(CustomScanState* custom) {
@@ -4116,6 +5261,12 @@ bioseq_slice_project_exec_methods() noexcept {
 		&& strcmp(custom->methods->CustomName, "BioseqScan") == 0;
 }
 
+[[nodiscard]] static bool slice_project_is_owner_path(Path* path) {
+	if (path == nullptr || !IsA(path, CustomPath)) return false;
+	auto* custom = reinterpret_cast<CustomPath*>(path);
+	return custom->methods == &bioseq_slice_project_path_methods();
+}
+
 [[nodiscard]] static Path* slice_project_tag_source_child(
 		Path* path, PathTarget* target,
 		SliceProjectIrBuilder const& builder) {
@@ -4151,11 +5302,17 @@ bioseq_slice_project_exec_methods() noexcept {
 				continue;
 			}
 			std::uint32_t producer_id = 0u;
+			bool binding_found = false;
 			for (auto const& binding : builder.source_bindings) {
 				if (equal(binding.first, expression)) {
 					producer_id = binding.second;
+					binding_found = true;
 					break;
 				}
+			}
+			if (builder.source_bindings_only && !binding_found) {
+				++resno;
+				continue;
 			}
 			bindings = lappend(bindings,
 				list_make3(makeInteger(resno),
@@ -4172,6 +5329,206 @@ bioseq_slice_project_exec_methods() noexcept {
 			makeInteger(kBioseqSliceSourceVersion), bindings));
 	copy->path.pathtarget = target;
 	return reinterpret_cast<Path*>(copy);
+}
+
+/* `path` is already a private copy.  Descend only core path shapes whose
+ * child ownership is part of PostgreSQL's public Path ABI; unknown custom and
+ * foreign providers remain unmodified unless they expose their own contract. */
+[[nodiscard]] static Path* slice_project_tag_owned_path_tree(
+		Path* path, SliceProjectIrBuilder const& builder,
+		bool& tagged_source) {
+	if (path == nullptr) return nullptr;
+	if (slice_project_is_bioseq_scan_path(path)) {
+		tagged_source = true;
+		return slice_project_tag_source_child(
+			path, copy_pathtarget(path->pathtarget), builder);
+	}
+	if (IsA(path, NestPath)) {
+		auto* join = &reinterpret_cast<NestPath*>(path)->jpath;
+		join->outerjoinpath = slice_project_tag_owned_path_tree(
+			join->outerjoinpath, builder, tagged_source);
+		join->innerjoinpath = slice_project_tag_owned_path_tree(
+			join->innerjoinpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, MergePath)) {
+		auto* join = &reinterpret_cast<MergePath*>(path)->jpath;
+		join->outerjoinpath = slice_project_tag_owned_path_tree(
+			join->outerjoinpath, builder, tagged_source);
+		join->innerjoinpath = slice_project_tag_owned_path_tree(
+			join->innerjoinpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, HashPath)) {
+		auto* join = &reinterpret_cast<HashPath*>(path)->jpath;
+		join->outerjoinpath = slice_project_tag_owned_path_tree(
+			join->outerjoinpath, builder, tagged_source);
+		join->innerjoinpath = slice_project_tag_owned_path_tree(
+			join->innerjoinpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, CustomPath)) {
+		auto* custom = reinterpret_cast<CustomPath*>(path);
+		for (ListCell* cell = list_head(custom->custom_paths);
+			 cell != nullptr; cell = lnext(custom->custom_paths, cell)) {
+			lfirst(cell) = slice_project_tag_owned_path_tree(
+				reinterpret_cast<Path*>(lfirst(cell)), builder, tagged_source);
+		}
+		return path;
+	}
+	if (IsA(path, ProjectionPath)) {
+		auto* projection = reinterpret_cast<ProjectionPath*>(path);
+		projection->subpath = slice_project_tag_owned_path_tree(
+			projection->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, ProjectSetPath)) {
+		auto* projection = reinterpret_cast<ProjectSetPath*>(path);
+		projection->subpath = slice_project_tag_owned_path_tree(
+			projection->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, SortPath)) {
+		auto* sort = reinterpret_cast<SortPath*>(path);
+		sort->subpath = slice_project_tag_owned_path_tree(
+			sort->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, IncrementalSortPath)) {
+		auto* sort = reinterpret_cast<IncrementalSortPath*>(path);
+		sort->spath.subpath = slice_project_tag_owned_path_tree(
+			sort->spath.subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, MaterialPath)) {
+		auto* material = reinterpret_cast<MaterialPath*>(path);
+		material->subpath = slice_project_tag_owned_path_tree(
+			material->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, MemoizePath)) {
+		auto* memoize = reinterpret_cast<MemoizePath*>(path);
+		memoize->subpath = slice_project_tag_owned_path_tree(
+			memoize->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, UniquePath)) {
+		auto* unique = reinterpret_cast<UniquePath*>(path);
+		unique->subpath = slice_project_tag_owned_path_tree(
+			unique->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, GatherPath)) {
+		auto* gather = reinterpret_cast<GatherPath*>(path);
+		gather->subpath = slice_project_tag_owned_path_tree(
+			gather->subpath, builder, tagged_source);
+		return path;
+	}
+	if (IsA(path, GatherMergePath)) {
+		auto* gather = reinterpret_cast<GatherMergePath*>(path);
+		gather->subpath = slice_project_tag_owned_path_tree(
+			gather->subpath, builder, tagged_source);
+		return path;
+	}
+	auto tag_path_list = [&builder, &tagged_source](List* subpaths) {
+		for (ListCell* cell = list_head(subpaths);
+			 cell != nullptr; cell = lnext(subpaths, cell)) {
+			lfirst(cell) = slice_project_tag_owned_path_tree(
+				reinterpret_cast<Path*>(lfirst(cell)), builder, tagged_source);
+		}
+	};
+	if (IsA(path, AppendPath)) {
+		tag_path_list(reinterpret_cast<AppendPath*>(path)->subpaths);
+	} else if (IsA(path, MergeAppendPath)) {
+		tag_path_list(reinterpret_cast<MergeAppendPath*>(path)->subpaths);
+	}
+	return path;
+}
+
+/* BatchSort is an upper owner rather than a SliceProject node, but it needs
+ * the same exact base-scan source contract: copy the owned input tree, attach
+ * BSS3 only to BioseqScan leaves, and leave unknown providers untouched. */
+[[nodiscard]] static Path* batch_sort_tag_source_path(
+		Path* path, Node* sort_expression, bool* tagged_out) {
+	if (tagged_out == nullptr) return nullptr;
+	*tagged_out = false;
+	if (path == nullptr || sort_expression == nullptr) return path;
+	const BioseqStubOids* oids = try_get_cached_stub_oids();
+	if (oids == nullptr
+		|| exprType(sort_expression) != oids->bioseq_seq_type_oid) return path;
+	SliceProjectIrBuilder builder{
+		.oids = oids,
+		.command_type = CMD_SELECT,
+		.source_bindings_only = true,
+	};
+	/* BatchSort has no SliceProject producer graph.  Producer zero therefore
+	 * truthfully means source ownership without boundary attribution. */
+	builder.source_bindings.emplace_back(
+		reinterpret_cast<Node*>(copyObject(sort_expression)), 0u);
+	Path* private_path = reinterpret_cast<Path*>(copyObject(path));
+	bool tagged = false;
+	private_path = slice_project_tag_owned_path_tree(
+		private_path, builder, tagged);
+	*tagged_out = tagged;
+	return tagged ? private_path : path;
+}
+
+static void batch_sort_collect_source_routes(
+		PlanState* plan, bioseq::storage::pg_sequence_source_route_set& routes,
+		std::uint32_t& provider_count) {
+	if (plan == nullptr) return;
+	if (IsA(plan, CustomScanState)) {
+		auto* custom = reinterpret_cast<CustomScanState*>(plan);
+		if (custom->methods == &BioseqColumnScanExecuteMethods) {
+			auto* scan = BioseqScanState::from_custom_scan_state(custom);
+			BioseqScanRuntime& runtime = bioseq_runtime(scan);
+			if (!runtime.lazy_source_projection) return;
+			if (runtime.lazy_source_provider == nullptr
+				|| !bioseq::storage::add_pg_sequence_source_route(
+					routes, runtime.lazy_source_provider)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("BioseqBatchSort source route is unavailable")));
+			}
+			provider_count = bioseq::parallelism::saturating_add(
+				provider_count, 1u);
+			return;
+		}
+		for (PlanState* child : PList<PlanState>(custom->custom_ps)) {
+			batch_sort_collect_source_routes(child, routes, provider_count);
+		}
+		return;
+	}
+	if (IsA(plan, AppendState)) {
+		auto* append = reinterpret_cast<AppendState*>(plan);
+		for (int index = 0; index < append->as_nplans; ++index) {
+			batch_sort_collect_source_routes(
+				append->appendplans[index], routes, provider_count);
+		}
+		return;
+	}
+	if (IsA(plan, MergeAppendState)) {
+		auto* append = reinterpret_cast<MergeAppendState*>(plan);
+		for (int index = 0; index < append->ms_nplans; ++index) {
+			batch_sort_collect_source_routes(
+				append->mergeplans[index], routes, provider_count);
+		}
+		return;
+	}
+	PlanState* outer = outerPlanState(plan);
+	PlanState* inner = innerPlanState(plan);
+	batch_sort_collect_source_routes(outer, routes, provider_count);
+	if (inner != outer) {
+		batch_sort_collect_source_routes(inner, routes, provider_count);
+	}
+}
+
+[[nodiscard]] static bool batch_sort_attach_source_routes(
+		PlanState* child,
+		bioseq::storage::pg_sequence_source_route_set& routes) {
+	std::uint32_t provider_count = 0u;
+	batch_sort_collect_source_routes(child, routes, provider_count);
+	return provider_count != 0u;
 }
 
 struct SliceProjectBaseTargetProof {
@@ -4302,6 +5659,7 @@ static void slice_project_try_install_base_owner(
 		owner->path.parallel_safe = child->parallel_safe;
 		owner->path.parallel_workers = child->parallel_workers;
 		owner->path.rows = child->rows;
+		owner->path.disabled_nodes = child->disabled_nodes;
 		owner->path.startup_cost = child->startup_cost
 			+ expression_cost.startup;
 		const double rows = std::max(0.0, child->rows);
@@ -4311,9 +5669,10 @@ static void slice_project_try_install_base_owner(
 		owner->path.pathkeys = child->pathkeys;
 		owner->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 		owner->custom_paths = list_make1(child);
-		owner->custom_private = list_make4(
+		owner->custom_private = list_make5(
 			slice_project_header(builder), copyObject(builder.expressions),
-			copyObject(builder.records), copyObject(builder.output_bindings));
+			copyObject(builder.nodes), copyObject(builder.records),
+			copyObject(builder.output_bindings));
 		owner->custom_restrictinfo = NIL;
 		owner->methods = &bioseq_slice_project_path_methods();
 		return reinterpret_cast<Path*>(owner);
@@ -4391,11 +5750,7 @@ static void BioseqSliceProject_CreateUpperPaths(
 			reinterpret_cast<Node*>(child->pathtarget->exprs))) {
 		child = reinterpret_cast<ProjectionPath*>(child)->subpath;
 	}
-	/* Only claim alternatives when the wrapper can tag the real source scan.
-	 * Complex upper/join paths remain untouched until they expose an explicit
-	 * cooperation API; forcing an untagged wrapper would be cosmetic and would
-	 * still hydrate the complete sequence. */
-	if (!slice_project_is_bioseq_scan_path(child)) return;
+	if (slice_project_is_owner_path(child)) return;
 
 	List* required = NIL;
 	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
@@ -4407,7 +5762,21 @@ static void BioseqSliceProject_CreateUpperPaths(
 	PathTarget* child_target = copy_pathtarget(child->pathtarget);
 	add_new_columns_to_pathtarget(child_target, required);
 	set_pathtarget_cost_width(root, child_target);
-	child = slice_project_tag_source_child(child, child_target, builder);
+	if (slice_project_is_bioseq_scan_path(child)) {
+		child = slice_project_tag_source_child(child, child_target, builder);
+	} else {
+		/* A join/upper child is immutable and may be shared by many candidates.
+		 * Deep-copy supported core path shapes and tag every BioseqScan source
+		 * below them before installing hidden leaf outputs through core's
+		 * projection constructor.  The final target remains wrapper-only. */
+		bool tagged_source = false;
+		Path* private_child = reinterpret_cast<Path*>(copyObject(child));
+		private_child = slice_project_tag_owned_path_tree(
+			private_child, builder, tagged_source);
+		if (!tagged_source) return;
+		child = reinterpret_cast<Path*>(create_projection_path(
+			root, private_child->parent, private_child, child_target));
+	}
 
 	QualCost expression_cost{};
 	cost_qual_eval(&expression_cost, projection_target->exprs, root);
@@ -4426,6 +5795,7 @@ static void BioseqSliceProject_CreateUpperPaths(
 	path->path.parallel_safe = child->parallel_safe;
 	path->path.parallel_workers = child->parallel_workers;
 	path->path.rows = child->rows;
+	path->path.disabled_nodes = child->disabled_nodes;
 	path->path.startup_cost = child->startup_cost + expression_cost.startup;
 	path->path.total_cost = child->total_cost + expression_cost.startup
 		+ rows * (expression_cost.per_tuple
@@ -4433,9 +5803,9 @@ static void BioseqSliceProject_CreateUpperPaths(
 	path->path.pathkeys = child->pathkeys;
 	path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	path->custom_paths = list_make1(child);
-	path->custom_private = list_make4(
-		slice_project_header(builder), builder.expressions, builder.records,
-		builder.output_bindings);
+	path->custom_private = list_make5(
+		slice_project_header(builder), builder.expressions, builder.nodes,
+		builder.records, builder.output_bindings);
 	path->custom_restrictinfo = NIL;
 	path->methods = &bioseq_slice_project_path_methods();
 
@@ -4529,12 +5899,28 @@ bioseq_customscan_init()
 		NULL,
 		NULL,
 		NULL);
+#ifdef BIOSEQ_TEST_INDEXES
+	DefineCustomEnumVariable(
+		"bioseq.test_slice_dsm_fixture",
+		"Injects an isolated SliceProject DSM lifecycle fixture for tests.",
+		NULL,
+		&BioseqSliceDsmTestFixture,
+		kSliceDsmTestNone,
+		slice_dsm_test_fixture_options,
+		PGC_USERSET,
+		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+		NULL,
+		NULL,
+		NULL);
+#endif
 
 	RegisterCustomScanMethods(&BioseqColumnScanScanMethods);
 	RegisterCustomScanMethods(&BioseqBatchJoinScanMethods);
 	RegisterCustomScanMethods(&bioseq_slice_project_scan_methods());
 	bioseq_register_slice_project_upper_path_provider(
 		BioseqSliceProject_CreateUpperPaths);
+	bioseq_register_batch_sort_source_providers(
+		batch_sort_tag_source_path, batch_sort_attach_source_routes);
 }
 
 static void
@@ -4753,9 +6139,50 @@ struct batch_join_target_projection_visitor {
 		case T_Sort:
 			return batch_join_path_contains_parallel_execution(
 				reinterpret_cast<const SortPath*>(path)->subpath);
-		case T_IncrementalSort:
+	case T_IncrementalSort:
 			return batch_join_path_contains_parallel_execution(
 				reinterpret_cast<const IncrementalSortPath*>(path)->spath.subpath);
+		case T_NestLoop:
+		case T_MergeJoin:
+		case T_HashJoin: {
+			auto const* join = reinterpret_cast<JoinPath const*>(path);
+			return batch_join_path_contains_parallel_execution(
+					join->outerjoinpath)
+				|| batch_join_path_contains_parallel_execution(
+					join->innerjoinpath);
+		}
+		case T_CustomScan: {
+			auto const* custom = reinterpret_cast<CustomPath const*>(path);
+			for (Path* child : PList<Path>(custom->custom_paths)) {
+				if (batch_join_path_contains_parallel_execution(child)) {
+					return true;
+				}
+			}
+			return false;
+		}
+		case T_Append: {
+			auto const* append = reinterpret_cast<AppendPath const*>(path);
+			for (Path* child : PList<Path>(append->subpaths)) {
+				if (batch_join_path_contains_parallel_execution(child)) {
+					return true;
+				}
+			}
+			for (Path* child : PList<Path>(append->partial_subpaths)) {
+				if (batch_join_path_contains_parallel_execution(child)) {
+					return true;
+				}
+			}
+			return false;
+		}
+		case T_MergeAppend: {
+			auto const* append = reinterpret_cast<MergeAppendPath const*>(path);
+			for (Path* child : PList<Path>(append->subpaths)) {
+				if (batch_join_path_contains_parallel_execution(child)) {
+					return true;
+				}
+			}
+			return false;
+		}
 		default:
 			return false;
 	}
@@ -5383,6 +6810,433 @@ static int next_batch_join_plan_token = 1;
 	return decoded;
 }
 
+struct PerRowOperandSourceProof {
+	RelOptInfo* joinrel = nullptr;
+	List* sequence_vars = NIL;
+	bool invalid = false;
+};
+
+struct per_row_operand_source_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			PerRowOperandSourceProof& proof) const {
+		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+			if (placeholder->phlevelsup != 0
+				|| !bms_is_empty(placeholder->phnullingrels)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::descend;
+		}
+		Var* var = node.try_as<Var>();
+		if (var == nullptr) return pg_walk_step::descend;
+		if (proof.joinrel == nullptr || var->varno == 0
+			|| var->varattno <= 0 || var->varlevelsup != 0
+			|| !bms_is_empty(var->varnullingrels)
+			|| !bms_is_member(static_cast<int>(var->varno),
+				proof.joinrel->relids)) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (var->vartype == get_cached_stub_oids().bioseq_seq_type_oid) {
+			bool seen = false;
+			for (Node* existing : PList<Node>(proof.sequence_vars)) {
+				if (equal(existing, var)) {
+					seen = true;
+					break;
+				}
+			}
+			if (!seen) proof.sequence_vars = lappend(
+				proof.sequence_vars, var);
+		}
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+[[nodiscard]] static bool per_row_collect_operand_sources(
+		Node* expression, RelOptInfo* joinrel,
+		PerRowOperandSourceProof& proof) {
+	if (expression == nullptr || joinrel == nullptr
+		|| contain_volatile_functions(expression)) return false;
+	proof.joinrel = joinrel;
+	per_row_operand_source_visitor visitor;
+	pg_walk_expression_including_root(expression, proof, visitor);
+	return !proof.invalid;
+}
+
+[[nodiscard]] static List* per_row_without_restriction(
+		List* restrictions, RestrictInfo* owned) {
+	List* filtered = NIL;
+	for (RestrictInfo* candidate : PList<RestrictInfo>(restrictions)) {
+		if (candidate != owned) filtered = lappend(filtered, candidate);
+	}
+	return filtered;
+}
+
+/* A RestrictInfo can migrate below a NestLoop through PathParamInfo (or sit
+ * in another custom/join child) while still appearing in the incumbent's
+ * joinrestrictinfo.  Removing only the top copy would leave a second live
+ * mmsearch rendezvous.  The post-join owner therefore accepts an incumbent
+ * only when the exact pointer is absent from every retained descendant. */
+[[nodiscard]] static bool per_row_descendant_owns_restriction(
+		Path const* path, RestrictInfo const* owned) noexcept {
+	if (path == nullptr || owned == nullptr) return false;
+	if (path->param_info != nullptr
+		&& list_member_ptr(path->param_info->ppi_clauses, owned)) return true;
+	if (IsA(path, CustomPath)) {
+		auto const* custom = reinterpret_cast<CustomPath const*>(path);
+		if (list_member_ptr(custom->custom_restrictinfo, owned)) return true;
+		for (Path* child : PList<Path>(custom->custom_paths)) {
+			if (per_row_descendant_owns_restriction(child, owned)) return true;
+		}
+		return false;
+	}
+	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath)) {
+		auto const* join = reinterpret_cast<JoinPath const*>(path);
+		if (list_member_ptr(join->joinrestrictinfo, owned)) return true;
+		return per_row_descendant_owns_restriction(
+				join->outerjoinpath, owned)
+			|| per_row_descendant_owns_restriction(
+				join->innerjoinpath, owned);
+	}
+	switch (path->pathtype) {
+		case T_Result:
+			return per_row_descendant_owns_restriction(
+				reinterpret_cast<ProjectionPath const*>(path)->subpath, owned);
+		case T_Material:
+			return per_row_descendant_owns_restriction(
+				reinterpret_cast<MaterialPath const*>(path)->subpath, owned);
+		case T_Memoize:
+			return per_row_descendant_owns_restriction(
+				reinterpret_cast<MemoizePath const*>(path)->subpath, owned);
+		case T_Sort:
+			return per_row_descendant_owns_restriction(
+				reinterpret_cast<SortPath const*>(path)->subpath, owned);
+		case T_IncrementalSort:
+			return per_row_descendant_owns_restriction(
+				reinterpret_cast<IncrementalSortPath const*>(path)->spath.subpath,
+				owned);
+		case T_Append: {
+			auto const* append = reinterpret_cast<AppendPath const*>(path);
+			for (Path* child : PList<Path>(append->subpaths)) {
+				if (per_row_descendant_owns_restriction(child, owned)) return true;
+			}
+			for (Path* child : PList<Path>(append->partial_subpaths)) {
+				if (per_row_descendant_owns_restriction(child, owned)) return true;
+			}
+			return false;
+		}
+		case T_MergeAppend: {
+			auto const* append = reinterpret_cast<MergeAppendPath const*>(path);
+			for (Path* child : PList<Path>(append->subpaths)) {
+				if (per_row_descendant_owns_restriction(child, owned)) return true;
+			}
+			return false;
+		}
+		default:
+			return false;
+	}
+}
+
+[[nodiscard]] static Path* per_row_reconstruct_inner_join_path(
+		PlannerInfo* root, RelOptInfo* joinrel, Path* incumbent,
+		RestrictInfo* owned, JoinPathExtraData const& original_extra) {
+	if (root == nullptr || joinrel == nullptr || incumbent == nullptr
+		|| owned == nullptr) return nullptr;
+	JoinPath* join = nullptr;
+	if (IsA(incumbent, NestPath)) {
+		join = &reinterpret_cast<NestPath*>(incumbent)->jpath;
+	} else if (IsA(incumbent, MergePath)) {
+		join = &reinterpret_cast<MergePath*>(incumbent)->jpath;
+	} else if (IsA(incumbent, HashPath)) {
+		join = &reinterpret_cast<HashPath*>(incumbent)->jpath;
+	} else {
+		return nullptr;
+	}
+	if (join->jointype != JOIN_INNER
+		|| !list_member_ptr(join->joinrestrictinfo, owned)
+		|| join->outerjoinpath == nullptr || join->innerjoinpath == nullptr
+		|| per_row_descendant_owns_restriction(join->outerjoinpath, owned)
+		|| per_row_descendant_owns_restriction(join->innerjoinpath, owned)
+		|| batch_join_path_contains_parallel_execution(incumbent)) {
+		return nullptr;
+	}
+	List* filtered_restrictions = per_row_without_restriction(
+		join->joinrestrictinfo, owned);
+	JoinPathExtraData filtered_extra = original_extra;
+	filtered_extra.restrictlist = per_row_without_restriction(
+		original_extra.restrictlist, owned);
+	filtered_extra.mergeclause_list = per_row_without_restriction(
+		original_extra.mergeclause_list, owned);
+	Relids required_outer = PATH_REQ_OUTER(&join->path);
+	JoinCostWorkspace workspace{};
+	if (IsA(incumbent, NestPath)) {
+		initial_cost_nestloop(root, &workspace, JOIN_INNER,
+			join->outerjoinpath, join->innerjoinpath, &filtered_extra);
+		return reinterpret_cast<Path*>(create_nestloop_path(
+			root, joinrel, JOIN_INNER, &workspace, &filtered_extra,
+			join->outerjoinpath, join->innerjoinpath,
+			filtered_restrictions, join->path.pathkeys, required_outer));
+	}
+	if (IsA(incumbent, MergePath)) {
+		auto* merge = reinterpret_cast<MergePath*>(incumbent);
+		List* mergeclauses = per_row_without_restriction(
+			merge->path_mergeclauses, owned);
+		if (mergeclauses == NIL) return nullptr;
+		initial_cost_mergejoin(root, &workspace, JOIN_INNER,
+			mergeclauses, join->outerjoinpath, join->innerjoinpath,
+			merge->outersortkeys, merge->innersortkeys, &filtered_extra);
+		return reinterpret_cast<Path*>(create_mergejoin_path(
+			root, joinrel, JOIN_INNER, &workspace, &filtered_extra,
+			join->outerjoinpath, join->innerjoinpath,
+			filtered_restrictions, join->path.pathkeys, required_outer,
+			mergeclauses, merge->outersortkeys, merge->innersortkeys));
+	}
+	auto* hash = reinterpret_cast<HashPath*>(incumbent);
+	List* hashclauses = per_row_without_restriction(
+		hash->path_hashclauses, owned);
+	if (hashclauses == NIL) return nullptr;
+	const bool parallel_hash = join->innerjoinpath->parallel_aware;
+	initial_cost_hashjoin(root, &workspace, JOIN_INNER,
+		hashclauses, join->outerjoinpath, join->innerjoinpath,
+		&filtered_extra, parallel_hash);
+	return reinterpret_cast<Path*>(create_hashjoin_path(
+		root, joinrel, JOIN_INNER, &workspace, &filtered_extra,
+		join->outerjoinpath, join->innerjoinpath, parallel_hash,
+		filtered_restrictions, required_outer, hashclauses));
+}
+
+[[nodiscard]] static bool per_row_add_transformed_mmsearch_paths(
+		PlannerInfo* root, RelOptInfo* joinrel, JoinPathExtraData* extra,
+		RestrictInfo* restriction, FuncExpr* mmsearch,
+		FuncExpr* executable_mmsearch,
+		bioseq::indexing::IndexReadRequirement requirement,
+		BioseqStubOids const& oids) {
+	if (root == nullptr || joinrel == nullptr || extra == nullptr
+		|| restriction == nullptr || mmsearch == nullptr
+		|| executable_mmsearch == nullptr) return false;
+	PList<Node> operands(mmsearch->args);
+	Node* target_expression = operands.first();
+	Node* query_expression = operands.second();
+	const bool transformed_target =
+		bioseq_expr_uses_lazy_sequence_projection(target_expression);
+	const bool transformed_query =
+		bioseq_expr_uses_lazy_sequence_projection(query_expression);
+	if (!transformed_target && !transformed_query) return false;
+	if (exprType(target_expression) != oids.bioseq_seq_type_oid
+		|| exprType(query_expression) != oids.bioseq_seq_type_oid
+		|| !batch_join_typmod_is_supported(exprTypmod(target_expression))
+		|| exprTypmod(target_expression) != exprTypmod(query_expression)
+		|| exprCollation(target_expression) != exprCollation(query_expression)
+		|| requirement
+			== bioseq::indexing::IndexReadRequirement::require_compatible_persisted) {
+		return false;
+	}
+	PerRowOperandSourceProof target_sources{};
+	PerRowOperandSourceProof query_sources{};
+	if (!per_row_collect_operand_sources(
+			target_expression, joinrel, target_sources)
+		|| !per_row_collect_operand_sources(
+			query_expression, joinrel, query_sources)) return false;
+	Var* target_source = nullptr;
+	RangeTblEntry* target_rte = nullptr;
+	for (Var* candidate : PList<Var>(target_sources.sequence_vars)) {
+		if (candidate->varno > static_cast<Index>(
+				list_length(root->parse->rtable))) continue;
+		RangeTblEntry* rte = rt_fetch(candidate->varno, root->parse->rtable);
+		if (rte != nullptr && rte->rtekind == RTE_RELATION
+			&& rte->securityQuals == NIL && OidIsValid(rte->relid)
+			&& IsBioseqColumnTableAmTable(rte->relid)) {
+			target_source = candidate;
+			target_rte = rte;
+			break;
+		}
+	}
+	if (target_source == nullptr || target_rte == nullptr) return false;
+	for (Var* source : PList<Var>(query_sources.sequence_vars)) {
+		if (source->varno > static_cast<Index>(
+				list_length(root->parse->rtable))) return false;
+		RangeTblEntry* rte = rt_fetch(source->varno, root->parse->rtable);
+		if (rte == nullptr || rte->rtekind != RTE_RELATION
+			|| rte->securityQuals != NIL) return false;
+	}
+
+	PathTarget* required_target = create_empty_pathtarget();
+	List* required_vars = NIL;
+	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	for (Node* expression : PList<Node>(joinrel->reltarget->exprs)) {
+		required_vars = list_concat(required_vars,
+			pull_var_clause(expression, pull_flags));
+	}
+	required_vars = list_concat(required_vars,
+		pull_var_clause(target_expression, pull_flags));
+	required_vars = list_concat(required_vars,
+		pull_var_clause(query_expression, pull_flags));
+	add_new_columns_to_pathtarget(required_target, required_vars);
+	set_pathtarget_cost_width(root, required_target);
+
+	PathTarget* recipe_target = copy_pathtarget(required_target);
+	if (!path_target_contains_expression(
+			recipe_target, reinterpret_cast<Expr*>(target_expression))) {
+		add_column_to_pathtarget(recipe_target,
+			reinterpret_cast<Expr*>(copyObject(target_expression)), 0);
+	}
+	if (!path_target_contains_expression(
+			recipe_target, reinterpret_cast<Expr*>(query_expression))) {
+		add_column_to_pathtarget(recipe_target,
+			reinterpret_cast<Expr*>(copyObject(query_expression)), 0);
+	}
+	set_pathtarget_cost_width(root, recipe_target);
+	SliceProjectIrBuilder builder{
+		.oids = &oids, .command_type = CMD_UNKNOWN};
+	if (!slice_project_discover_target(recipe_target, builder)) return false;
+	const std::uint32_t target_producer = slice_project_add_producer(
+		builder, target_expression);
+	const std::uint32_t query_producer = slice_project_add_producer(
+		builder, query_expression);
+	slice_project_add_boundary(builder, target_expression, target_producer,
+		materialization_mechanism::packed_full,
+		materialization_reason::mmsearch_target, true);
+	slice_project_add_boundary(builder, query_expression, query_producer,
+		materialization_mechanism::packed_full,
+		materialization_reason::mmsearch_query, true);
+
+	PList<Path> owners;
+	List* incumbent_paths = list_copy(joinrel->pathlist);
+	Cost incumbent_floor = std::numeric_limits<Cost>::max();
+	for (Path* incumbent : PList<Path>(incumbent_paths)) {
+		if (incumbent != nullptr && std::isfinite(incumbent->total_cost)
+			&& incumbent->total_cost >= 0) {
+			incumbent_floor = std::min(
+				incumbent_floor, incumbent->total_cost);
+		}
+	}
+	for (Path* incumbent : PList<Path>(incumbent_paths)) {
+		Path* reconstructed = per_row_reconstruct_inner_join_path(
+			root, joinrel, incumbent, restriction, *extra);
+		if (reconstructed == nullptr) continue;
+		Path* private_join = reinterpret_cast<Path*>(copyObject(reconstructed));
+		private_join->pathtarget = copy_pathtarget(required_target);
+		bool tagged_source = false;
+		private_join = slice_project_tag_owned_path_tree(
+			private_join, builder, tagged_source);
+		if (!tagged_source) continue;
+		Path* source_path = reinterpret_cast<Path*>(create_projection_path(
+			root, joinrel, private_join, required_target));
+
+		auto* recipe_path = makeNode(CustomPath);
+		recipe_path->path.pathtype = T_CustomScan;
+		recipe_path->path.parent = joinrel;
+		recipe_path->path.pathtarget = copy_pathtarget(recipe_target);
+		recipe_path->path.param_info = source_path->param_info;
+		recipe_path->path.parallel_aware = false;
+		recipe_path->path.parallel_safe = false;
+		recipe_path->path.parallel_workers = 0;
+		recipe_path->path.rows = source_path->rows;
+		recipe_path->path.disabled_nodes = source_path->disabled_nodes;
+		QualCost recipe_cost{};
+		cost_qual_eval(&recipe_cost, recipe_target->exprs, root);
+		recipe_path->path.startup_cost = source_path->startup_cost
+			+ recipe_cost.startup;
+		recipe_path->path.total_cost = source_path->total_cost
+			+ recipe_cost.startup + std::max(0.0, source_path->rows)
+				* recipe_cost.per_tuple;
+		recipe_path->path.pathkeys = source_path->pathkeys;
+		recipe_path->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+		recipe_path->custom_paths = list_make1(source_path);
+		recipe_path->custom_private = list_make5(
+			slice_project_header(builder), copyObject(builder.expressions),
+			copyObject(builder.nodes), copyObject(builder.records),
+			copyObject(builder.output_bindings));
+		recipe_path->custom_restrictinfo = NIL;
+		recipe_path->methods = &bioseq_slice_project_path_methods();
+
+		QualCost operand_cost{};
+		cost_qual_eval(&operand_cost,
+			mmsearch_operand_cost_exprs(executable_mmsearch, oids), root);
+		const std::uint64_t target_symbols =
+			estimate_mmsearch_operand_symbols(target_expression, oids);
+		const std::uint64_t query_symbols =
+			estimate_mmsearch_operand_symbols(query_expression, oids);
+		const owned_mmsearch_cost alignment_cost = estimate_owned_mmsearch_cost(
+			target_symbols, query_symbols, recipe_path->path.rows,
+			/*index_read_requirement=*/false,
+			static_cast<std::uint32_t>(kBioseqRuntimeBufferReserve),
+			bioseq::parallelism::saturating_add(
+				target_symbols, query_symbols));
+		const Cost startup = std::max<Cost>(0,
+			recipe_path->path.startup_cost + operand_cost.startup
+				+ alignment_cost.startup);
+		const Cost total = std::max(startup,
+			recipe_path->path.total_cost + operand_cost.startup
+				+ alignment_cost.startup
+				+ std::max(0.0, recipe_path->path.rows)
+					* (operand_cost.per_tuple
+						+ alignment_cost.per_input_tuple + cpu_tuple_cost));
+		if (!std::isfinite(startup) || !std::isfinite(total)) continue;
+
+		auto* owner = makeNode(CustomPath);
+		owner->path.pathtype = T_CustomScan;
+		owner->path.parent = joinrel;
+		owner->path.pathtarget = copy_pathtarget(joinrel->reltarget);
+		owner->path.param_info = recipe_path->path.param_info;
+		owner->path.parallel_aware = false;
+		owner->path.parallel_safe = false;
+		owner->path.parallel_workers = 0;
+		owner->path.rows = recipe_path->path.rows;
+		owner->path.disabled_nodes = recipe_path->path.disabled_nodes;
+		owner->path.startup_cost = startup;
+		owner->path.total_cost = total;
+		owner->path.pathkeys = recipe_path->path.pathkeys;
+		owner->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+		owner->custom_paths = list_make1(recipe_path);
+		owner->custom_restrictinfo = list_make1(restriction);
+		const auto typmod = compact_sequence_stdc_type_params::decode(
+			exprTypmod(target_expression));
+		owner->custom_private = list_make5(
+			makeInteger(kBioseqPerRowJoinPlanVersion),
+			makeInteger(static_cast<int>(target_rte->relid)),
+			makeInteger(static_cast<int>(target_source->varno)),
+			makeInteger(static_cast<int>(target_source->varattno)),
+			copyObject(target_expression));
+		owner->custom_private = lappend(
+			owner->custom_private, copyObject(query_expression));
+		owner->custom_private = lappend(
+			owner->custom_private, copyObject(executable_mmsearch));
+		owner->custom_private = lappend(owner->custom_private,
+			makeInteger(typmod.alphabet_code));
+		owner->custom_private = lappend(owner->custom_private,
+			makeInteger(typmod.storage_unit_byte_width));
+		owner->custom_private = lappend(owner->custom_private,
+			makeInteger(static_cast<int>(
+				bioseq::indexing::IndexReadRequirement::require_absent)));
+		owner->custom_private = lappend(owner->custom_private,
+			make_batch_join_cost_const(startup));
+		owner->custom_private = lappend(owner->custom_private,
+			make_batch_join_cost_const(total));
+		owner->custom_private = lappend(owner->custom_private,
+			make_batch_join_cost_const(std::isfinite(incumbent_floor)
+				? incumbent_floor : total));
+		Assert(list_length(owner->custom_private)
+			== kBioseqPerRowJoinPathPrivateFields);
+		owner->methods = &BioseqPerRowJoinPathMethods;
+		owners.append(reinterpret_cast<Path*>(owner));
+	}
+	if (owners.empty()) return false;
+	PList<Path> retained;
+	for (Path* incumbent : PList<Path>(joinrel->pathlist)) {
+		if (incumbent != nullptr && IsA(incumbent, CustomPath)
+			&& list_member_ptr(
+				reinterpret_cast<CustomPath*>(incumbent)->custom_restrictinfo,
+				restriction)) retained.append(incumbent);
+	}
+	joinrel->pathlist = retained.release();
+	joinrel->partial_pathlist = NIL;
+	for (Path* owner : owners) add_path(joinrel, owner);
+	return true;
+}
+
 static void
 BioseqBatchJoinSetJoinPathlistHook(
 		PlannerInfo* root,
@@ -5422,8 +7276,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 			 errmsg("stacked mmsearch join qualifiers are unsupported"),
 			 errhint("Split the alignment predicates into separate query levels.")));
 	}
-	if (semantic_calls != 1 || list_length(extra->restrictlist) != 1
-		|| restriction == nullptr) {
+	if (semantic_calls != 1 || restriction == nullptr) {
 		return;
 	}
 	FuncExpr* mmsearch = restriction == nullptr
@@ -5439,6 +7292,21 @@ BioseqBatchJoinSetJoinPathlistHook(
 		|| restriction->pseudoconstant || restriction->security_level != 0
 		|| !restriction_is_securely_promotable(restriction, joinrel)) {
 		return;
+	}
+	for (RestrictInfo* sibling : PList<RestrictInfo>(extra->restrictlist)) {
+		if (sibling != restriction && contain_volatile_functions(
+				reinterpret_cast<Node*>(sibling->clause))) {
+			/* The first release does not claim an evaluation-order-preserving
+			 * split around an effectful sibling. */
+			return;
+		}
+	}
+	List* residual_join_restrictions = NIL;
+	for (RestrictInfo* candidate : PList<RestrictInfo>(extra->restrictlist)) {
+		if (candidate != restriction) {
+			residual_join_restrictions = lappend(
+				residual_join_restrictions, candidate);
+		}
 	}
 	PList<Node> arguments(mmsearch->args);
 	Var* target_var = pg_node_try_as<Var>(arguments.first());
@@ -5456,6 +7324,24 @@ BioseqBatchJoinSetJoinPathlistHook(
 		}
 		lfirst(list_nth_cell(batch_mmsearch->args, 2)) = folded_options;
 	}
+	/* Decode options before choosing the raw two-child or transformed
+	 * one-child ownership shape. */
+	bioseq::simd::active_target::Minimap2Params planned_params =
+		build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement planned_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	(void)apply_aligner_options_override(
+		batch_mmsearch, planned_params, planned_requirement, oids);
+	finalize_simd_chaining_policy(planned_params);
+	const bool transformed_operands =
+		bioseq_expr_uses_lazy_sequence_projection(arguments.first())
+		|| bioseq_expr_uses_lazy_sequence_projection(arguments.second());
+	if (transformed_operands) {
+		(void)per_row_add_transformed_mmsearch_paths(
+			root, joinrel, extra, restriction, mmsearch,
+			batch_mmsearch, planned_requirement, oids);
+		return;
+	}
 	if (target_var == nullptr || query_var == nullptr
 		|| target_var->varattno <= 0 || query_var->varattno <= 0
 		|| target_var->varlevelsup != 0 || query_var->varlevelsup != 0
@@ -5468,17 +7354,6 @@ BioseqBatchJoinSetJoinPathlistHook(
 		|| target_var->varcollid != query_var->varcollid) {
 		return;
 	}
-	/* Decode the exact 36-field catalog layout while planning.  The persisted
-	 * requirement is retained as a plan marker; ordinal 2 remains visible to
-	 * plain EXPLAIN but execution rejects it before either child is initialized. */
-	bioseq::simd::active_target::Minimap2Params planned_params =
-		build_params_from_gucs();
-	bioseq::indexing::IndexReadRequirement planned_requirement =
-		bioseq::indexing::IndexReadRequirement::allow;
-	(void)apply_aligner_options_override(
-		batch_mmsearch, planned_params, planned_requirement, oids);
-	finalize_simd_chaining_policy(planned_params);
-
 	RelOptInfo* target_rel = nullptr;
 	RelOptInfo* query_rel = nullptr;
 	if (target_var->varno == outerrel->relid
@@ -5492,6 +7367,43 @@ BioseqBatchJoinSetJoinPathlistHook(
 	} else {
 		return;
 	}
+	List* target_residual_vars = NIL;
+	List* query_residual_vars = NIL;
+	bool unsupported_residual_var = false;
+	constexpr int residual_pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	for (RestrictInfo* residual : PList<RestrictInfo>(
+			residual_join_restrictions)) {
+		List* variables = pull_var_clause(
+			reinterpret_cast<Node*>(residual->clause), residual_pull_flags);
+		for (Node* variable : PList<Node>(variables)) {
+			Var* var = pg_node_try_as<Var>(variable);
+			if (var == nullptr || var->varlevelsup != 0
+				|| var->varattno <= 0 || !bms_is_empty(var->varnullingrels)) {
+				unsupported_residual_var = true;
+				break;
+			}
+			List** destination = var->varno == target_rel->relid
+				? &target_residual_vars
+				: (var->varno == query_rel->relid
+					? &query_residual_vars : nullptr);
+			if (destination == nullptr) {
+				unsupported_residual_var = true;
+				break;
+			}
+			bool seen = false;
+			for (Node* existing : PList<Node>(*destination)) {
+				if (equal(existing, variable)) {
+					seen = true;
+					break;
+				}
+			}
+			if (!seen) *destination = lappend(
+				*destination, copyObject(variable));
+		}
+		if (unsupported_residual_var) break;
+	}
+	if (unsupported_residual_var) return;
 	RangeTblEntry* target_rte = rt_fetch(target_var->varno, root->parse->rtable);
 	RangeTblEntry* query_rte = rt_fetch(query_var->varno, root->parse->rtable);
 	if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION
@@ -5534,6 +7446,13 @@ BioseqBatchJoinSetJoinPathlistHook(
 		|| batch_join_path_contains_parallel_execution(query_path)) {
 		return;
 	}
+	if (query_residual_vars != NIL) {
+		PathTarget* query_target = copy_pathtarget(query_path->pathtarget);
+		add_new_columns_to_pathtarget(query_target, query_residual_vars);
+		set_pathtarget_cost_width(root, query_target);
+		query_path = reinterpret_cast<Path*>(create_projection_path(
+			root, query_path->parent, query_path, query_target));
+	}
 
 	auto* locator_path = makeNode(CustomPath);
 	*locator_path = *target_path;
@@ -5564,6 +7483,8 @@ BioseqBatchJoinSetJoinPathlistHook(
 	 * parent-owned and handled by the recursive Var pass below. */
 	append_locator_target(target_path->path.pathtarget);
 	append_locator_target(target_candidate.locator_target);
+	add_new_columns_to_pathtarget(
+		locator_path->path.pathtarget, target_residual_vars);
 	/* A helper-bearing expression is intentionally not evaluated by the
 	 * locator child, but PostgreSQL setrefs still requires its underlying base
 	 * Vars to exist in the child/combined tlist.  The wrapper PathTarget is the
@@ -5598,6 +7519,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 	add_column_to_pathtarget(
 		locator_path->path.pathtarget,
 		reinterpret_cast<Expr*>(hidden_rowno), 0);
+	set_pathtarget_cost_width(root, locator_path->path.pathtarget);
 	if (next_batch_join_plan_token <= 0
 		|| next_batch_join_plan_token == (std::numeric_limits<int>::max)()) {
 		next_batch_join_plan_token = 1;
@@ -5637,16 +7559,51 @@ BioseqBatchJoinSetJoinPathlistHook(
 		* (cpu_tuple_cost
 			+ cpu_operator_cost * (1.0 + planned_query_width / 64.0));
 	const Cost output_cost = join_path->path.rows * cpu_tuple_cost;
+	QualCost residual_join_cost{};
+	if (residual_join_restrictions != NIL) {
+		List* residual_expressions = NIL;
+		for (RestrictInfo* residual : PList<RestrictInfo>(
+				residual_join_restrictions)) {
+			residual_expressions = lappend(
+				residual_expressions, residual->clause);
+		}
+		cost_qual_eval(&residual_join_cost, residual_expressions, root);
+	}
+	QualCost operand_cost{};
+	cost_qual_eval(&operand_cost,
+		mmsearch_operand_cost_exprs(batch_mmsearch, oids), root);
+	PList<Node> owned_operands(batch_mmsearch->args);
+	const std::uint64_t target_symbols = estimate_mmsearch_operand_symbols(
+		owned_operands.first(), oids);
+	const std::uint64_t query_symbols = estimate_mmsearch_operand_symbols(
+		owned_operands.second(), oids);
+	const std::uint64_t admitted_bytes =
+		bioseq::parallelism::saturating_add(target_symbols, query_symbols);
+	const owned_mmsearch_cost alignment_cost = estimate_owned_mmsearch_cost(
+		target_symbols, query_symbols, locator_path->path.rows,
+		planned_requirement
+			!= bioseq::indexing::IndexReadRequirement::require_absent,
+		static_cast<std::uint32_t>(std::min<std::size_t>(
+			kBioseqRuntimeBufferReserve,
+			(std::numeric_limits<std::uint32_t>::max)())),
+		admitted_bytes);
 	const Cost honest_startup_cost = std::max<Cost>(0,
 		query_path->total_cost
 			+ locator_path->path.startup_cost
-			+ query_materialization_cost);
+			+ query_materialization_cost + operand_cost.startup
+			+ alignment_cost.startup + residual_join_cost.startup);
 	const Cost honest_total_cost = std::max(
 		honest_startup_cost,
 		std::max<Cost>(0, query_path->total_cost
 			+ locator_path->path.total_cost
 			+ query_materialization_cost
-			+ output_cost));
+			+ operand_cost.startup + alignment_cost.startup
+			+ residual_join_cost.startup
+			+ output_cost + std::max(0.0, locator_path->path.rows)
+				* (operand_cost.per_tuple
+					+ alignment_cost.per_input_tuple)
+			+ std::max(0.0, join_path->path.rows)
+				* residual_join_cost.per_tuple));
 	if (!std::isfinite(honest_startup_cost)
 		|| !std::isfinite(honest_total_cost)) {
 		return;
@@ -5667,7 +7624,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 	join_path->path.total_cost = std::max(
 		join_path->path.startup_cost, std::max<Cost>(0, honest_total_cost));
 	join_path->flags = 0;
-	join_path->custom_restrictinfo = list_make1(restriction);
+	join_path->custom_restrictinfo = list_copy(extra->restrictlist);
 	join_path->custom_paths = list_make2(locator_path, query_path);
 	join_path->custom_private = list_make5(
 		makeInteger(kBioseqBatchJoinPlanVersion),
@@ -7187,16 +9144,39 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	if (owned_mmsearch.normalized_expr != nullptr) {
 		QualCost operand_cost{};
-		cost_qual_eval(&operand_cost,
-			owned_mmsearch.normalized_expr->args, root);
-		const Cost alignment_startup = std::max<Cost>(
-			0.0, operand_cost.startup + cpu_operator_cost * 8.0);
-		const Cost alignment_per_row = std::max<Cost>(
-			0.0, operand_cost.per_tuple + cpu_tuple_cost
-				+ cpu_operator_cost * 16.0);
-		path->startup_cost += alignment_startup;
-		path->total_cost += alignment_startup
-			+ alignment_per_row * std::max(0.0, path->rows);
+		List* operand_expressions = mmsearch_operand_cost_exprs(
+			owned_mmsearch.normalized_expr, stub_oids);
+		cost_qual_eval(&operand_cost, operand_expressions, root);
+		PList<Node> operands(owned_mmsearch.normalized_expr->args);
+		const std::uint64_t target_symbols =
+			estimate_mmsearch_operand_symbols(operands.first(), stub_oids);
+		const std::uint64_t query_symbols =
+			estimate_mmsearch_operand_symbols(operands.second(), stub_oids);
+		const std::uint64_t admitted_bytes =
+			bioseq::parallelism::saturating_add(
+				target_symbols, query_symbols);
+		bioseq::simd::active_target::Minimap2Params planned_params =
+			build_params_from_gucs();
+		bioseq::indexing::IndexReadRequirement planned_requirement =
+			bioseq::indexing::IndexReadRequirement::allow;
+		(void)apply_aligner_options_override(
+			owned_mmsearch.normalized_expr, planned_params,
+			planned_requirement, stub_oids);
+		const owned_mmsearch_cost alignment = estimate_owned_mmsearch_cost(
+			target_symbols, query_symbols, path->rows,
+			planned_requirement
+				!= bioseq::indexing::IndexReadRequirement::require_absent,
+			static_cast<std::uint32_t>(std::min<std::size_t>(
+				kBioseqRuntimeBufferReserve,
+				(std::numeric_limits<std::uint32_t>::max)())),
+			admitted_bytes);
+		const Cost owner_startup = std::max<Cost>(0,
+			operand_cost.startup + alignment.startup);
+		const Cost owner_per_row = std::max<Cost>(0,
+			operand_cost.per_tuple + alignment.per_input_tuple);
+		path->startup_cost += owner_startup;
+		path->total_cost += owner_startup
+			+ owner_per_row * std::max(0.0, path->rows);
 	}
 	if (!std::isfinite(path->startup_cost) || path->startup_cost < 0) {
 		path->startup_cost = 0;
@@ -7906,14 +9886,26 @@ BioseqBatchJoin_PlanCustomPath(
 	}
 	auto* target_custom = reinterpret_cast<CustomScan*>(target_plan);
 	if (target_custom->methods != &BioseqColumnScanScanMethods
-		|| target_custom->scan.scanrelid != target_var->varno
-		|| list_length(target_custom->custom_private) != 1) {
+		|| target_custom->scan.scanrelid != target_var->varno) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqBatchJoin target child lacks locator ownership")));
 	}
-	List* locator_tag = reinterpret_cast<List*>(
-		linitial(target_custom->custom_private));
+	List* locator_tag = nullptr;
+	for (Node* raw_tag : PList<Node>(target_custom->custom_private)) {
+		if (raw_tag == nullptr || !IsA(raw_tag, List)) continue;
+		List* candidate = reinterpret_cast<List*>(raw_tag);
+		if (list_length(candidate) != 4
+			|| !IsA(reinterpret_cast<Node*>(linitial(candidate)), Integer)
+			|| intVal(linitial(candidate))
+				!= kBioseqLocatorPassthroughMagic) continue;
+		if (locator_tag != nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin target has duplicate locator ownership")));
+		}
+		locator_tag = candidate;
+	}
 	if (locator_tag == nullptr || !IsA(locator_tag, List)
 		|| list_length(locator_tag) != 4
 		|| intVal(list_nth(locator_tag, 0))
@@ -8029,7 +10021,32 @@ BioseqBatchJoin_PlanCustomPath(
 	 * fixes any upper Result/Projection against this child targetlist before
 	 * it recurses and maps this CustomScan against custom_scan_tlist. */
 	cscan->scan.plan.targetlist = output_tlist;
-	cscan->scan.plan.qual = NIL;
+	PList<RestrictInfo> executable_join_restrictions;
+	std::size_t removed_mmsearch_restrictions = 0u;
+	for (RestrictInfo* candidate : PList<RestrictInfo>(clauses)) {
+		if (candidate != nullptr && count_mmsearch_occurrences(
+				reinterpret_cast<Node*>(candidate->clause), oids) != 0u) {
+			++removed_mmsearch_restrictions;
+			continue;
+		}
+		executable_join_restrictions.append(candidate);
+	}
+	if (removed_mmsearch_restrictions != 1u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqBatchJoin owned restriction identity is invalid"),
+			 errdetail("removed_mmsearch_restrictions=%zu",
+				 removed_mmsearch_restrictions)));
+	}
+	cscan->scan.plan.qual = extract_actual_clauses(
+		executable_join_restrictions.ptr(), false);
+	for (Node* executable : PList<Node>(cscan->scan.plan.qual)) {
+		if (contains_mmsearch_qualifier(executable, oids)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("owned mmsearch remained in BioseqBatchJoin quals")));
+		}
+	}
 	cscan->custom_exprs = NIL;
 	cscan->custom_plans = custom_plans;
 	cscan->custom_scan_tlist = combined_tlist;
@@ -8067,7 +10084,173 @@ BioseqBatchJoin_PlanCustomPath(
 		cscan->custom_private,
 		make_batch_join_cost_const(incumbent_cost_floor));
 	Assert(list_length(cscan->custom_private) == kBioseqBatchJoinPrivateFields);
-	(void)clauses; /* the sole consumed mmsearch restriction is intentionally absent */
+	return reinterpret_cast<Plan*>(cscan);
+}
+
+static Plan* BioseqPerRowJoin_PlanCustomPath(
+		PlannerInfo* root, RelOptInfo* rel, CustomPath* best_path,
+		List* tlist, List* clauses, List* custom_plans) {
+	if (root == nullptr || rel == nullptr || best_path == nullptr
+		|| list_length(custom_plans) != 1
+		|| list_length(best_path->custom_private)
+			!= kBioseqPerRowJoinPathPrivateFields) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch planner state is incomplete")));
+	}
+	auto private_integer = [best_path](const int index) -> int {
+		Node* node = reinterpret_cast<Node*>(
+			list_nth(best_path->custom_private, index));
+		if (node == nullptr || !IsA(node, Integer)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch private integer is invalid"),
+				 errdetail("field=%d", index)));
+		}
+		return intVal(node);
+	};
+	const int version = private_integer(0);
+	const Oid target_relation_oid = static_cast<Oid>(private_integer(1));
+	const Index target_varno = static_cast<Index>(private_integer(2));
+	const AttrNumber target_storage_attno = static_cast<AttrNumber>(
+		private_integer(3));
+	Node* target_expression = reinterpret_cast<Node*>(
+		list_nth(best_path->custom_private, 4));
+	Node* query_expression = reinterpret_cast<Node*>(
+		list_nth(best_path->custom_private, 5));
+	FuncExpr* mmsearch = pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(
+		list_nth(best_path->custom_private, 6)));
+	const int alphabet_code = private_integer(7);
+	const int storage_unit_byte_width = private_integer(8);
+	const int index_read_requirement = private_integer(9);
+	const Cost honest_startup_cost = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(list_nth(best_path->custom_private, 10)),
+		"honest_startup_cost");
+	const Cost honest_total_cost = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(list_nth(best_path->custom_private, 11)),
+		"honest_total_cost");
+	const Cost incumbent_cost_floor = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(list_nth(best_path->custom_private, 12)),
+		"incumbent_cost_floor");
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	if (version != kBioseqPerRowJoinPlanVersion
+		|| !OidIsValid(target_relation_oid) || target_varno == 0
+		|| target_storage_attno <= 0 || target_expression == nullptr
+		|| query_expression == nullptr || mmsearch == nullptr
+		|| !is_mmsearch_funcid(mmsearch->funcid, oids)
+		|| exprType(target_expression) != oids.bioseq_seq_type_oid
+		|| exprType(query_expression) != oids.bioseq_seq_type_oid
+		|| exprTypmod(target_expression) != exprTypmod(query_expression)
+		|| alphabet_code < 0 || alphabet_code > UINT8_MAX
+		|| (storage_unit_byte_width != 1 && storage_unit_byte_width != 2
+			&& storage_unit_byte_width != 4
+			&& storage_unit_byte_width != 8)
+		|| index_read_requirement != static_cast<int>(
+			bioseq::indexing::IndexReadRequirement::require_absent)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch private path ABI is invalid")));
+	}
+	Plan* child_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
+	if (child_plan == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch child plan is missing")));
+	}
+	const AttrNumber target_resno = find_plan_tlist_expression_resno(
+		child_plan->targetlist, target_expression);
+	const AttrNumber query_resno = find_plan_tlist_expression_resno(
+		child_plan->targetlist, query_expression);
+	if (target_resno <= 0 || query_resno <= 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch operand projection is missing"),
+			 errdetail("target_resno=%d query_resno=%d",
+				static_cast<int>(target_resno),
+				static_cast<int>(query_resno))));
+	}
+	List* combined_tlist = NIL;
+	for (TargetEntry* source : PList<TargetEntry>(child_plan->targetlist)) {
+		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(source));
+		copied->resno = static_cast<AttrNumber>(list_length(combined_tlist) + 1);
+		combined_tlist = lappend(combined_tlist, copied);
+	}
+	const int child_column_count = list_length(combined_tlist);
+	List* placeholder_sites = NIL;
+	List* output_tlist = NIL;
+	for (TargetEntry* output : PList<TargetEntry>(tlist)) {
+		if (output == nullptr) continue;
+		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(output));
+		BatchJoinPlaceholderRegistration registration{
+			&oids, target_varno, target_storage_attno,
+			&combined_tlist, &placeholder_sites, false, false};
+		batch_join_placeholder_registration_visitor visitor;
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(copied->expr), registration, visitor);
+		if (registration.edit_sequence_mismatch) {
+			ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("bioseq.edit projection must reference the mmsearch target source")));
+		}
+		if (registration.invalid) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch match helper identity is invalid")));
+		}
+		output_tlist = lappend(output_tlist, copied);
+	}
+	validate_batch_join_setrefs_coverage(output_tlist, combined_tlist);
+	std::size_t owned_restrictions = 0u;
+	for (RestrictInfo* candidate : PList<RestrictInfo>(clauses)) {
+		if (candidate != nullptr && count_mmsearch_occurrences(
+				reinterpret_cast<Node*>(candidate->clause), oids) != 0u) {
+			++owned_restrictions;
+		}
+	}
+	if (owned_restrictions != 1u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqPerRowMmsearch owned restriction is invalid"),
+			 errdetail("owned_restrictions=%zu", owned_restrictions)));
+	}
+	auto* cscan = makeNode(CustomScan);
+	/* Post-join-recipe mode is a versioned BioseqBatchJoin shape.  Reuse the
+	 * registered scan/executor method set so copied, cached, and deserialized
+	 * plans retain the same public owner identity as the raw-Var mode. */
+	cscan->methods = &BioseqBatchJoinScanMethods;
+	cscan->flags = best_path->flags;
+	cscan->scan.scanrelid = 0;
+	cscan->scan.plan.targetlist = output_tlist;
+	cscan->scan.plan.qual = NIL;
+	cscan->custom_exprs = NIL;
+	cscan->custom_plans = custom_plans;
+	cscan->custom_scan_tlist = combined_tlist;
+	cscan->custom_relids = bms_copy(rel->relids);
+	cscan->custom_private = list_make5(
+		makeInteger(kBioseqPerRowJoinPlanVersion),
+		makeInteger(static_cast<int>(target_relation_oid)),
+		makeInteger(static_cast<int>(target_storage_attno)),
+		makeInteger(static_cast<int>(target_resno)),
+		makeInteger(static_cast<int>(query_resno)));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(child_column_count));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(alphabet_code));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(storage_unit_byte_width));
+	cscan->custom_private = lappend(cscan->custom_private, placeholder_sites);
+	cscan->custom_private = lappend(
+		cscan->custom_private, copyObject(mmsearch));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(index_read_requirement));
+	cscan->custom_private = lappend(cscan->custom_private,
+		make_batch_join_cost_const(honest_startup_cost));
+	cscan->custom_private = lappend(cscan->custom_private,
+		make_batch_join_cost_const(honest_total_cost));
+	cscan->custom_private = lappend(cscan->custom_private,
+		make_batch_join_cost_const(incumbent_cost_floor));
+	Assert(list_length(cscan->custom_private)
+		== kBioseqPerRowJoinPrivateFields);
 	return reinterpret_cast<Plan*>(cscan);
 }
 
@@ -8402,9 +10585,11 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				const int relation_natts = RelationGetDescr(
 					cscanstate->ss.ss_currentRelation)->natts;
 				runtime.lazy_source_producer_ids.assign(
-					static_cast<std::size_t>(relation_natts + 1), 0u);
+					static_cast<std::size_t>(
+						list_length(cscan->scan.plan.targetlist) + 1), 0u);
 				runtime.lazy_source_column_attnos.assign(
-					static_cast<std::size_t>(relation_natts + 1),
+					static_cast<std::size_t>(
+						list_length(cscan->scan.plan.targetlist) + 1),
 					InvalidAttrNumber);
 				List* bindings = bindings_node == nullptr ? NIL
 					: reinterpret_cast<List*>(bindings_node);
@@ -8426,17 +10611,16 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 						|| resno > list_length(cscan->scan.plan.targetlist)
 						|| producer_id < 0
 						|| column_attno <= 0
-						|| column_attno >= static_cast<int>(
-							runtime.lazy_source_producer_ids.size())
-						|| runtime.lazy_source_column_attnos[column_attno]
+						|| column_attno > relation_natts
+						|| runtime.lazy_source_column_attnos[resno]
 							!= InvalidAttrNumber) {
 						ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg("Bioseq SliceProject source binding is out of range")));
 					}
-					runtime.lazy_source_producer_ids[column_attno] =
+					runtime.lazy_source_producer_ids[resno] =
 						static_cast<std::uint32_t>(producer_id);
-					runtime.lazy_source_column_attnos[column_attno] =
+					runtime.lazy_source_column_attnos[resno] =
 						static_cast<AttrNumber>(column_attno);
 				}
 		} else if (magic == kBioseqEditPredicateMagic) {
@@ -8578,19 +10762,14 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		FlushWriteStateWithNewSnapshot(relationOid, &bioseqScanState->snapshot,
 									   &bioseqScanState->snapshotRegisteredByUs);
 	}
-	if (runtime.locator_passthrough && runtime.lazy_source_projection) {
-		ereport(ERROR,
-			(errcode(ERRCODE_DATA_CORRUPTED),
-			 errmsg("Bioseq scan has conflicting locator owners")));
-	}
-	if (runtime.lazy_source_projection) {
+	if (runtime.lazy_source_projection || runtime.locator_passthrough) {
 		runtime.lazy_source_provider =
 			bioseq::storage::create_pg_sequence_source_provider(
 				cscanstate->ss.ss_currentRelation, bioseqScanState->snapshot);
 		if (runtime.lazy_source_provider == nullptr) {
 			ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("BioseqSliceProject source provider is unavailable")));
+				 errmsg("Bioseq source provider is unavailable")));
 		}
 	}
 
@@ -9822,7 +12001,7 @@ static void batch_join_runtime_cleanup(void* argument) {
 	batch_join_abandon_executor_resources_after_error(
 		&state->custom_scanstate, *runtime);
 	state->runtime = nullptr;
-	delete runtime;
+	std::destroy_at(runtime);
 }
 
 static void batch_join_clear_query_tuples(
@@ -10221,6 +12400,27 @@ static TupleTableSlot* batch_join_project_output(
 	ExecClearTuple(combined);
 	slot_getallattrs(output.scan_slot_copy);
 	slot_getallattrs(query_slot);
+	/* A locator target remains deferred while BatchJoin aligns it.  Once the
+	 * match has been produced, an enclosing SliceProject may consume that same
+	 * target through a source-backed recipe; promote the output copy only now,
+	 * into this output's per-tuple context. */
+	if (runtime.target_child != nullptr
+		&& IsA(runtime.target_child, CustomScanState)) {
+		auto* target_custom =
+			reinterpret_cast<CustomScanState*>(runtime.target_child);
+		if (target_custom->methods == &BioseqColumnScanExecuteMethods) {
+			auto* target_state =
+				BioseqScanState::from_custom_scan_state(target_custom);
+			BioseqScanRuntime& target_runtime = bioseq_runtime(target_state);
+			if (target_runtime.lazy_source_projection) {
+				promote_slice_project_sources(
+					target_state, output.scan_slot_copy,
+					expression_context->ecxt_per_tuple_memory,
+					/*allow_locator_passthrough=*/true);
+				slot_getallattrs(output.scan_slot_copy);
+			}
+		}
+	}
 	if (runtime.target_column_count
 		> output.scan_slot_copy->tts_tupleDescriptor->natts
 		|| runtime.query_column_count
@@ -10248,6 +12448,11 @@ static TupleTableSlot* batch_join_project_output(
 	}
 	ExecStoreVirtualTuple(combined);
 	expression_context->ecxt_scantuple = combined;
+	if (node->ss.ps.qual != nullptr
+		&& !ExecQual(node->ss.ps.qual, expression_context)) {
+		InstrCountFiltered1(&node->ss, 1);
+		return nullptr;
+	}
 	return node->ss.ps.ps_ProjInfo != nullptr
 		? ExecProject(node->ss.ps.ps_ProjInfo)
 		: combined;
@@ -10262,13 +12467,30 @@ static Node* BioseqBatchJoin_CreateCustomScanState(CustomScan* cscan) {
 	return reinterpret_cast<Node*>(&state->custom_scanstate);
 }
 
+[[nodiscard]] static bool bioseq_batch_join_is_post_join_recipe(
+		CustomScanState const* node) noexcept {
+	if (node == nullptr || node->ss.ps.plan == nullptr
+		|| !IsA(node->ss.ps.plan, CustomScan)) return false;
+	auto const* cscan = reinterpret_cast<CustomScan const*>(node->ss.ps.plan);
+	if (list_length(cscan->custom_plans) != 1
+		|| list_length(cscan->custom_private)
+			!= kBioseqPerRowJoinPrivateFields) return false;
+	Node* version = reinterpret_cast<Node*>(
+		linitial(cscan->custom_private));
+	return version != nullptr && IsA(version, Integer)
+		&& intVal(version) == kBioseqPerRowJoinPlanVersion;
+}
+
 static void BioseqBatchJoin_BeginCustomScan(
 		CustomScanState* node, EState* estate, int eflags) {
+	if (bioseq_batch_join_is_post_join_recipe(node)) {
+		BioseqPerRowJoin_BeginCustomScan(node, estate, eflags);
+		return;
+	}
 	auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
 	if (IsParallelWorker() || cscan == nullptr
 		|| cscan->scan.scanrelid != 0
 		|| list_length(cscan->custom_plans) != 2
-		|| cscan->scan.plan.qual != NIL
 		|| cscan->custom_exprs != NIL
 		|| node->custom_ps != NIL
 		|| list_length(cscan->custom_private)
@@ -10296,10 +12518,9 @@ static void BioseqBatchJoin_BeginCustomScan(
 		}
 	}
 	auto* state = reinterpret_cast<BioseqBatchJoinState*>(node);
-	auto* runtime = new BioseqBatchJoinRuntime{};
-	state->runtime = runtime;
-	runtime->cleanup_callback.func = batch_join_runtime_cleanup;
-	runtime->cleanup_callback.arg = state;
+	state->runtime = nullptr;
+	BioseqBatchJoinRuntime* volatile runtime = nullptr;
+	bool volatile cleanup_registered = false;
 	MemoryContext saved_context = CurrentMemoryContext;
 	ErrorData* volatile original_error = nullptr;
 	ErrorData* volatile converted_pg_error = nullptr;
@@ -10307,8 +12528,15 @@ static void BioseqBatchJoin_BeginCustomScan(
 	PG_TRY();
 	{
 	  try {
+		runtime = std::construct_at(static_cast<BioseqBatchJoinRuntime*>(
+			MemoryContextAlloc(
+				estate->es_query_cxt, sizeof(BioseqBatchJoinRuntime))));
+		state->runtime = runtime;
+		runtime->cleanup_callback.func = batch_join_runtime_cleanup;
+		runtime->cleanup_callback.arg = state;
 		MemoryContextRegisterResetCallback(
 			estate->es_query_cxt, &runtime->cleanup_callback);
+		cleanup_registered = true;
 		auto private_integer = [cscan](const int index) -> int {
 			Node* encoded = reinterpret_cast<Node*>(
 				list_nth(cscan->custom_private, index));
@@ -10519,8 +12747,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 		node->custom_ps = lappend(node->custom_ps, runtime->query_child);
 		auto* target_custom = reinterpret_cast<CustomScan*>(target_plan);
 		if (!IsA(target_plan, CustomScan)
-			|| target_custom->methods != &BioseqColumnScanScanMethods
-			|| list_length(target_custom->custom_private) != 1) {
+			|| target_custom->methods != &BioseqColumnScanScanMethods) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqBatchJoin target provider is invalid")));
@@ -10556,8 +12783,21 @@ static void BioseqBatchJoin_BeginCustomScan(
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqBatchJoin target provider relation is invalid")));
 		}
-		List* locator_tag = reinterpret_cast<List*>(
-			linitial(target_custom->custom_private));
+		List* locator_tag = nullptr;
+		for (Node* raw_tag : PList<Node>(target_custom->custom_private)) {
+			if (raw_tag == nullptr || !IsA(raw_tag, List)) continue;
+			List* candidate = reinterpret_cast<List*>(raw_tag);
+			if (list_length(candidate) != 4
+				|| !IsA(reinterpret_cast<Node*>(linitial(candidate)), Integer)
+				|| intVal(linitial(candidate))
+					!= kBioseqLocatorPassthroughMagic) continue;
+			if (locator_tag != nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqBatchJoin target has duplicate locator ownership")));
+			}
+			locator_tag = candidate;
+		}
 		if (locator_tag == nullptr || list_length(locator_tag) != 4
 			|| intVal(list_nth(locator_tag, 0))
 				!= kBioseqLocatorPassthroughMagic
@@ -10797,18 +13037,30 @@ static void BioseqBatchJoin_BeginCustomScan(
 		FlushErrorState();
 	}
 	PG_END_TRY();
+	BioseqBatchJoinRuntime* stable_runtime = runtime;
+	const bool stable_cleanup_registered = cleanup_registered;
+	auto abandon = [node, state, stable_runtime,
+		stable_cleanup_registered]() noexcept {
+		if (stable_runtime == nullptr) return;
+		batch_join_abandon_executor_resources_after_error(
+			node, *stable_runtime);
+		if (!stable_cleanup_registered) {
+			state->runtime = nullptr;
+			std::destroy_at(stable_runtime);
+		}
+	};
 	if (original_error != nullptr) {
-		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		abandon();
 		ErrorData* exact_error = original_error;
 		ReThrowError(exact_error);
 	}
 	if (converted_pg_error != nullptr) {
-		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		abandon();
 		ErrorData* exact_error = converted_pg_error;
 		ReThrowError(exact_error);
 	}
 	if (cpp_error != nullptr) {
-		batch_join_abandon_executor_resources_after_error(node, *runtime);
+		abandon();
 		char detail[512] = "unknown C++ exception";
 		try {
 			std::rethrow_exception(cpp_error);
@@ -10935,7 +13187,10 @@ static TupleTableSlot* BioseqBatchJoin_ExecCustomScanImpl(
 	for (;;) {
 		auto output = runtime->buffer.read_next_output();
 		if (output.has_value()) {
-			return batch_join_project_output(node, *runtime, *output);
+			TupleTableSlot* projected = batch_join_project_output(
+				node, *runtime, *output);
+			if (projected != nullptr) return projected;
+			continue;
 		}
 		if (runtime->target_active
 			&& runtime->next_query_batch < runtime->all_query_refs.size()) {
@@ -10999,6 +13254,9 @@ static TupleTableSlot* BioseqBatchJoin_ExecCustomScanImpl(
 
 static TupleTableSlot* BioseqBatchJoin_ExecCustomScan(
 		CustomScanState* node) {
+	if (bioseq_batch_join_is_post_join_recipe(node)) {
+		return BioseqPerRowJoin_ExecCustomScan(node);
+	}
 	TupleTableSlot* result = nullptr;
 	MemoryContext saved_context = CurrentMemoryContext;
 	ErrorData* volatile original_error = nullptr;
@@ -11065,6 +13323,10 @@ static TupleTableSlot* BioseqBatchJoin_ExecCustomScan(
 }
 
 static void BioseqBatchJoin_EndCustomScan(CustomScanState* node) {
+	if (bioseq_batch_join_is_post_join_recipe(node)) {
+		BioseqPerRowJoin_EndCustomScan(node);
+		return;
+	}
 	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
 	if (runtime == nullptr || runtime->cleanup_done) {
 		return;
@@ -11107,6 +13369,10 @@ static void BioseqBatchJoin_EndCustomScan(CustomScanState* node) {
 }
 
 static void BioseqBatchJoin_ReScanCustomScan(CustomScanState* node) {
+	if (bioseq_batch_join_is_post_join_recipe(node)) {
+		BioseqPerRowJoin_ReScanCustomScan(node);
+		return;
+	}
 	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
 	if (runtime == nullptr) {
 		ereport(ERROR,
@@ -11180,6 +13446,10 @@ static void BioseqBatchJoin_ReScanCustomScan(CustomScanState* node) {
 
 static void BioseqBatchJoin_ExplainCustomScan(
 		CustomScanState* node, List* ancestors, ExplainState* es) {
+	if (bioseq_batch_join_is_post_join_recipe(node)) {
+		BioseqPerRowJoin_ExplainCustomScan(node, ancestors, es);
+		return;
+	}
 	(void)ancestors;
 	BioseqBatchJoinRuntime* runtime = batch_join_runtime(node);
 	ExplainPropertyInteger(
@@ -11246,6 +13516,596 @@ static void BioseqBatchJoin_ExplainCustomScan(
 	ExplainPropertyInteger(
 		"Bioseq Query Batches", nullptr,
 		static_cast<std::int64_t>(runtime->query_batch_count), es);
+	ExplainPipelineExecutionStats(runtime->aggregate_stats, es);
+}
+
+[[nodiscard]] static BioseqPerRowJoinRuntime* per_row_join_runtime(
+		CustomScanState* node) noexcept {
+	auto* state = reinterpret_cast<BioseqPerRowJoinState*>(node);
+	return state == nullptr
+		? nullptr : static_cast<BioseqPerRowJoinRuntime*>(state->runtime);
+}
+
+static void per_row_join_abandon_after_error(
+		CustomScanState* node, BioseqPerRowJoinRuntime& runtime) noexcept {
+	if (runtime.cleanup_done) return;
+	runtime.buffer.abandon_join_runtime_after_pg_error_noexcept();
+	runtime.child = nullptr;
+	runtime.target_relation = nullptr;
+	runtime.child_initialized = false;
+	runtime.child_ended = true;
+	if (node != nullptr) node->custom_ps = NIL;
+	runtime.cleanup_done = true;
+}
+
+static void per_row_join_runtime_cleanup(void* argument) {
+	auto* state = static_cast<BioseqPerRowJoinState*>(argument);
+	if (state == nullptr || state->runtime == nullptr) return;
+	auto* runtime = static_cast<BioseqPerRowJoinRuntime*>(state->runtime);
+	per_row_join_abandon_after_error(&state->custom_scanstate, *runtime);
+	state->runtime = nullptr;
+	std::destroy_at(runtime);
+}
+
+static void per_row_join_release_checked(
+		CustomScanState* node, BioseqPerRowJoinRuntime& runtime) {
+	if (runtime.cleanup_done) return;
+	runtime.buffer.clear_slots();
+	if (runtime.child_initialized && !runtime.child_ended
+		&& runtime.child != nullptr) {
+		ExecEndNode(runtime.child);
+		runtime.child_ended = true;
+	}
+	if (runtime.target_relation != nullptr) {
+		table_close(runtime.target_relation, NoLock);
+		runtime.target_relation = nullptr;
+	}
+	runtime.child = nullptr;
+	if (node != nullptr) node->custom_ps = NIL;
+	runtime.cleanup_done = true;
+}
+
+static void BioseqPerRowJoin_BeginCustomScanImpl(
+		CustomScanState* node, EState* estate, int eflags) {
+	auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+	if (IsParallelWorker() || cscan == nullptr
+		|| cscan->scan.scanrelid != 0 || cscan->custom_exprs != NIL
+		|| list_length(cscan->custom_plans) != 1
+		|| list_length(cscan->custom_private)
+			!= kBioseqPerRowJoinPrivateFields
+		|| node->custom_ps != NIL) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("BioseqPerRowMmsearch executor shape is invalid or parallel")));
+	}
+	for (TargetEntry* output : PList<TargetEntry>(
+			cscan->scan.plan.targetlist)) {
+		if (output != nullptr && output->expr != nullptr
+			&& batch_join_expression_has_match_helper(
+				reinterpret_cast<Node*>(output->expr),
+				get_cached_stub_oids())) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch executable projection retained a match helper")));
+		}
+	}
+	auto* state = reinterpret_cast<BioseqPerRowJoinState*>(node);
+	auto* runtime = std::construct_at(static_cast<BioseqPerRowJoinRuntime*>(
+		MemoryContextAlloc(
+			estate->es_query_cxt, sizeof(BioseqPerRowJoinRuntime))));
+	state->runtime = runtime;
+	runtime->cleanup_callback.func = per_row_join_runtime_cleanup;
+	runtime->cleanup_callback.arg = state;
+	MemoryContextRegisterResetCallback(
+		estate->es_query_cxt, &runtime->cleanup_callback);
+	runtime->cleanup_callback_registered = true;
+	auto private_integer = [cscan](const int index) -> int {
+		Node* value = reinterpret_cast<Node*>(
+			list_nth(cscan->custom_private, index));
+		if (value == nullptr || !IsA(value, Integer)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch executor integer ABI is invalid"),
+				 errdetail("field=%d", index)));
+		}
+		return intVal(value);
+	};
+	const int version = private_integer(kPerRowVersion);
+	const Oid target_relation_oid = static_cast<Oid>(
+		private_integer(kPerRowTargetRelationOid));
+	const AttrNumber target_storage_attno = static_cast<AttrNumber>(
+		private_integer(kPerRowTargetStorageAttno));
+	runtime->target_slot_resno = static_cast<AttrNumber>(
+		private_integer(kPerRowTargetSlotResno));
+	runtime->query_slot_resno = static_cast<AttrNumber>(
+		private_integer(kPerRowQuerySlotResno));
+	runtime->child_column_count = private_integer(kPerRowChildColumnCount);
+	const int raw_alphabet = private_integer(kPerRowAlphabetCode);
+	const int raw_width = private_integer(kPerRowStorageUnitByteWidth);
+	const int raw_requirement = private_integer(kPerRowIndexReadRequirement);
+	runtime->honest_startup_cost = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(list_nth(cscan->custom_private,
+			kPerRowHonestStartupCost)), "honest_startup_cost");
+	runtime->honest_total_cost = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(list_nth(cscan->custom_private,
+			kPerRowHonestTotalCost)), "honest_total_cost");
+	runtime->incumbent_cost_floor = batch_join_cost_from_node(
+		reinterpret_cast<Node*>(list_nth(cscan->custom_private,
+			kPerRowIncumbentCostFloor)), "incumbent_cost_floor");
+	Node* sites_node = reinterpret_cast<Node*>(list_nth(
+		cscan->custom_private, kPerRowPlaceholderSites));
+	const bool sites_shape_valid = sites_node == nullptr || IsA(sites_node, List);
+	List* sites = sites_node == nullptr
+		? NIL : reinterpret_cast<List*>(sites_node);
+	FuncExpr* mmsearch = pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(
+		list_nth(cscan->custom_private, kPerRowMmsearchExpr)));
+	if (version != kBioseqPerRowJoinPlanVersion
+		|| !OidIsValid(target_relation_oid) || target_storage_attno <= 0
+		|| runtime->target_slot_resno <= 0 || runtime->query_slot_resno <= 0
+		|| runtime->child_column_count <= 0
+		|| raw_alphabet < 0 || raw_alphabet > UINT8_MAX
+		|| (raw_width != 1 && raw_width != 2
+			&& raw_width != 4 && raw_width != 8)
+		|| raw_requirement != static_cast<int>(
+			bioseq::indexing::IndexReadRequirement::require_absent)
+		|| !sites_shape_valid || mmsearch == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch executor private ABI is invalid")));
+	}
+	runtime->alphabet_code = static_cast<std::uint8_t>(raw_alphabet);
+	runtime->storage_unit_byte_width = static_cast<std::uint8_t>(raw_width);
+	TupleDesc scan_desc = node->ss.ss_ScanTupleSlot == nullptr
+		? nullptr : node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+	if (scan_desc == nullptr
+		|| runtime->child_column_count > scan_desc->natts
+		|| list_length(sites)
+			!= scan_desc->natts - runtime->child_column_count
+		|| runtime->target_slot_resno > runtime->child_column_count
+		|| runtime->query_slot_resno > runtime->child_column_count) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch scan tuple layout is invalid")));
+	}
+	const int32 expected_typmod = compact_sequence_stdc_type_params{
+		runtime->alphabet_code, runtime->storage_unit_byte_width}.encode();
+	for (AttrNumber resno : {runtime->target_slot_resno,
+			runtime->query_slot_resno}) {
+		Form_pg_attribute attribute = TupleDescAttr(scan_desc, resno - 1);
+		if (attribute->atttypid
+				!= get_cached_stub_oids().bioseq_seq_type_oid
+			|| attribute->atttypmod != expected_typmod) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqPerRowMmsearch operand type is invalid")));
+		}
+	}
+	Bitmapset* placeholder_resnos = nullptr;
+	for (List* encoded : PList<List>(sites)) {
+		if (encoded == nullptr || !IsA(encoded, List)
+			|| list_length(encoded) != 4) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch placeholder ABI is invalid")));
+		}
+		for (int index = 0; index < 4; ++index) {
+			Node* value = reinterpret_cast<Node*>(list_nth(encoded, index));
+			if (value == nullptr || !IsA(value, Integer)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqPerRowMmsearch placeholder scalar is invalid")));
+			}
+		}
+		const int raw_resno = intVal(linitial(encoded));
+		if (raw_resno <= runtime->child_column_count
+			|| raw_resno > scan_desc->natts
+			|| bms_is_member(raw_resno, placeholder_resnos)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch placeholder resno is invalid")));
+		}
+		placeholder_resnos = bms_add_member(placeholder_resnos, raw_resno);
+		const BioseqBatchJoinPlaceholderSite site{
+			.resno = static_cast<AttrNumber>(raw_resno),
+			.funcid = static_cast<Oid>(intVal(lsecond(encoded))),
+			.typmod = intVal(lthird(encoded)),
+			.collation = static_cast<Oid>(intVal(lfourth(encoded))),
+		};
+		Form_pg_attribute attribute = TupleDescAttr(
+			scan_desc, site.resno - 1);
+		if (!is_bioseq_projection_funcid(
+				site.funcid, get_cached_stub_oids())
+			|| attribute->atttypid != get_func_rettype(site.funcid)
+			|| attribute->atttypmod != site.typmod
+			|| attribute->attcollation != site.collation) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqBatchJoin post-join recipe placeholder type is invalid")));
+		}
+		runtime->placeholder_sites.push_back(site);
+	}
+	bms_free(placeholder_resnos);
+
+	bioseq::simd::active_target::Minimap2Params params =
+		build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement decoded_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	(void)apply_aligner_options_override(
+		mmsearch, params, decoded_requirement, get_cached_stub_oids());
+	finalize_simd_chaining_policy(params);
+	if (decoded_requirement
+			== bioseq::indexing::IndexReadRequirement::require_compatible_persisted) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("transformed mmsearch target cannot require a persisted index")));
+	}
+	params.do_cigar = false;
+	params.compute_divergence = false;
+	params.compute_mapq = false;
+	params.compute_edit_distance = false;
+	const BioseqStubOids& placeholder_oids = get_cached_stub_oids();
+	for (auto const& site : runtime->placeholder_sites) {
+		params.do_cigar = params.do_cigar
+			|| site.funcid == placeholder_oids.cigar_oid
+			|| site.funcid == placeholder_oids.has_cigar_oid
+			|| site.funcid == placeholder_oids.edit_oid;
+		params.compute_edit_distance = params.compute_edit_distance
+			|| site.funcid == placeholder_oids.edit_oid;
+		params.compute_divergence = params.compute_divergence
+			|| site.funcid == placeholder_oids.divergence_oid;
+		params.compute_mapq = params.compute_mapq
+			|| site.funcid == placeholder_oids.mapq_oid;
+	}
+	Plan* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
+	runtime->child = ExecInitNode(child_plan, estate, eflags);
+	runtime->child_initialized = true;
+	node->custom_ps = list_make1(runtime->child);
+	runtime->target_relation = table_open(target_relation_oid, NoLock);
+	if (runtime->target_relation == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_TABLE),
+			 errmsg("BioseqPerRowMmsearch target relation is unavailable")));
+	}
+	if (runtime->target_relation->rd_tableam
+			!= GetBioseqColumnTableAmRoutine()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+			 errmsg("BioseqPerRowMmsearch target relation changed table AM")));
+	}
+	TupleDesc relation_desc = RelationGetDescr(runtime->target_relation);
+	Form_pg_attribute storage_attribute =
+		target_storage_attno > relation_desc->natts
+		? nullptr : TupleDescAttr(relation_desc, target_storage_attno - 1);
+	if (storage_attribute == nullptr || storage_attribute->attisdropped
+		|| storage_attribute->atttypid
+			!= get_cached_stub_oids().bioseq_seq_type_oid
+		|| storage_attribute->atttypmod != expected_typmod) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("BioseqPerRowMmsearch target storage column changed")));
+	}
+	runtime->buffer.configure_params(
+		params, bioseq::indexing::IndexReadRequirement::require_absent,
+		/*read_sequence_index=*/false, target_relation_oid,
+		runtime->target_relation->rd_locator.dbOid,
+		runtime->target_relation->rd_locator.spcOid,
+		runtime->target_relation->rd_locator.relNumber,
+		runtime->target_relation, estate->es_snapshot);
+	char* column_name = get_attname(
+		target_relation_oid, target_storage_attno, /*missing_ok=*/false);
+	runtime->buffer.configure_mmsearch_per_row(
+		runtime->target_slot_resno, std::string{column_name},
+		runtime->query_slot_resno,
+		runtime->target_slot_resno == runtime->query_slot_resno,
+		runtime->alphabet_code, runtime->storage_unit_byte_width,
+		InvalidAttrNumber);
+	pfree(column_name);
+	const int plan_node_id = cscan->scan.plan.plan_node_id;
+	if (plan_node_id < 0) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch plan node id is invalid")));
+	}
+	runtime->alignment_registration =
+		bioseq::pg::alignment_execution::bind_alignment_node(
+			estate, static_cast<std::uint32_t>(plan_node_id));
+	runtime->buffer.bind_persisted_gpu_operation_evidence_sink(
+		*bioseq::pg::alignment_execution::
+			borrow_persisted_gpu_operation_evidence_sink(
+				runtime->alignment_registration));
+}
+
+static void BioseqPerRowJoin_BeginCustomScan(
+		CustomScanState* node, EState* estate, int eflags) {
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile original_error = nullptr;
+	ErrorData* volatile converted_pg_error = nullptr;
+	std::exception_ptr cpp_error;
+	PG_TRY();
+	{
+		try {
+			BioseqPerRowJoin_BeginCustomScanImpl(node, estate, eflags);
+		} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+			converted_pg_error = error.release_error_data();
+		} catch (...) {
+			cpp_error = std::current_exception();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		original_error = CopyErrorData();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	auto abandon = [node]() noexcept {
+		if (BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
+			runtime != nullptr) {
+			per_row_join_abandon_after_error(node, *runtime);
+			if (!runtime->cleanup_callback_registered) {
+				auto* state = reinterpret_cast<BioseqPerRowJoinState*>(node);
+				state->runtime = nullptr;
+				std::destroy_at(runtime);
+			}
+		}
+	};
+	if (original_error != nullptr) {
+		abandon();
+		ErrorData* exact = original_error;
+		ReThrowError(exact);
+	}
+	if (converted_pg_error != nullptr) {
+		abandon();
+		ErrorData* exact = converted_pg_error;
+		ReThrowError(exact);
+	}
+	if (cpp_error != nullptr) {
+		abandon();
+		char detail[512] = "unknown C++ exception";
+		try {
+			std::rethrow_exception(cpp_error);
+		} catch (const std::exception& error) {
+			strlcpy(detail,
+				error.what() == nullptr ? "std::exception without detail"
+					: error.what(),
+				sizeof(detail));
+		} catch (...) {
+		}
+		cpp_error = nullptr;
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin post-join recipe Begin raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+}
+
+[[nodiscard]] static TupleTableSlot* per_row_join_project_output(
+		CustomScanState* node, BioseqPerRowJoinRuntime& runtime,
+		bioseq::scheduler::DispatchNextOutput const& output) {
+	if (output.scan_slot_copy == nullptr || output.match == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqPerRowMmsearch output references invalid input")));
+	}
+	ExprContext* context = node->ss.ps.ps_ExprContext;
+	if (context == nullptr || context->ecxt_per_tuple_memory == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin post-join recipe expression context is missing")));
+	}
+	ResetExprContext(context);
+	TupleTableSlot* combined = node->ss.ss_ScanTupleSlot;
+	ExecClearTuple(combined);
+	slot_getallattrs(output.scan_slot_copy);
+	if (runtime.child_column_count
+			> output.scan_slot_copy->tts_tupleDescriptor->natts
+		|| runtime.child_column_count
+			> combined->tts_tupleDescriptor->natts) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch output tuple layout changed")));
+	}
+	for (int index = 0; index < runtime.child_column_count; ++index) {
+		combined->tts_values[index] = output.scan_slot_copy->tts_values[index];
+		combined->tts_isnull[index] = output.scan_slot_copy->tts_isnull[index];
+	}
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	for (auto const& site : runtime.placeholder_sites) {
+		batch_join_set_placeholder_value(
+			combined, site, *output.match, oids,
+			context->ecxt_per_tuple_memory);
+	}
+	ExecStoreVirtualTuple(combined);
+	context->ecxt_scantuple = combined;
+	return node->ss.ps.ps_ProjInfo != nullptr
+		? ExecProject(node->ss.ps.ps_ProjInfo) : combined;
+}
+
+static TupleTableSlot* BioseqPerRowJoin_ExecCustomScanImpl(
+		CustomScanState* node) {
+	BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
+	if (runtime == nullptr || runtime->child == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch runtime is missing")));
+	}
+	bioseq::pg::alignment_execution::ensure_alignment_node_registered(
+		runtime->alignment_registration);
+	for (;;) {
+		if (runtime->buffer.has_finished_writing()) {
+			auto output = runtime->buffer.read_next_output();
+			if (output.has_value()) {
+				return per_row_join_project_output(node, *runtime, *output);
+			}
+			if (runtime->source_exhausted) {
+				if (!runtime->pass_fully_drained) {
+					bioseq::pg::alignment_execution::
+						mark_alignment_pass_fully_drained(
+							runtime->alignment_registration);
+					runtime->pass_fully_drained = true;
+				}
+				return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+			}
+			runtime->buffer.clear_slots();
+			continue;
+		}
+		TupleTableSlot* child_slot = ExecProcNode(runtime->child);
+		if (TupIsNull(child_slot)) {
+			runtime->source_exhausted = true;
+			if (runtime->buffer.run_batch_and_build_cursors()) {
+				auto delta = runtime->buffer.execution_stats();
+				runtime->aggregate_stats.merge(delta);
+				bioseq::pg::alignment_execution::merge_alignment_batch(
+					runtime->alignment_registration, delta);
+			}
+			continue;
+		}
+		bool target_is_null = false;
+		bool query_is_null = false;
+		const Datum target = slot_getattr(child_slot,
+			runtime->target_slot_resno, &target_is_null);
+		const Datum query = slot_getattr(child_slot,
+			runtime->query_slot_resno, &query_is_null);
+		if (target_is_null || query_is_null) continue;
+		slice_async_owner_guard* async_owner = nullptr;
+		for (const Datum operand : std::array{target, query}) {
+			auto* attachment = pg_sequence_trace_attachment_for_datum(operand);
+			auto* candidate = borrow_slice_async_owner_noexcept(attachment);
+			if (candidate == nullptr) continue;
+			if (async_owner != nullptr && async_owner != candidate) {
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("BioseqPerRowMmsearch operands have distinct async owners")));
+			}
+			async_owner = candidate;
+		}
+		if (async_owner != nullptr) {
+			runtime->buffer.bind_slice_async_owner(async_owner);
+		}
+		runtime->buffer.submit_scan(child_slot);
+		if (runtime->buffer.ready_to_dispatch()) {
+			if (runtime->buffer.run_batch_and_build_cursors()) {
+				auto delta = runtime->buffer.execution_stats();
+				runtime->aggregate_stats.merge(delta);
+				bioseq::pg::alignment_execution::merge_alignment_batch(
+					runtime->alignment_registration, delta);
+			}
+		}
+	}
+}
+
+static TupleTableSlot* BioseqPerRowJoin_ExecCustomScan(
+		CustomScanState* node) {
+	TupleTableSlot* result = nullptr;
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile original_error = nullptr;
+	ErrorData* volatile converted_pg_error = nullptr;
+	std::exception_ptr cpp_error;
+	PG_TRY();
+	{
+		try {
+			result = BioseqPerRowJoin_ExecCustomScanImpl(node);
+		} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+			converted_pg_error = error.release_error_data();
+		} catch (...) {
+			cpp_error = std::current_exception();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		original_error = CopyErrorData();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	auto abandon = [node]() noexcept {
+		if (BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
+			runtime != nullptr) {
+			per_row_join_abandon_after_error(node, *runtime);
+		}
+	};
+	if (original_error != nullptr) {
+		abandon();
+		ErrorData* exact = original_error;
+		ReThrowError(exact);
+	}
+	if (converted_pg_error != nullptr) {
+		abandon();
+		ErrorData* exact = converted_pg_error;
+		ReThrowError(exact);
+	}
+	if (cpp_error != nullptr) {
+		abandon();
+		char detail[512] = "unknown C++ exception";
+		try {
+			std::rethrow_exception(cpp_error);
+		} catch (const std::exception& error) {
+			strlcpy(detail,
+				error.what() == nullptr ? "std::exception without detail"
+					: error.what(),
+				sizeof(detail));
+		} catch (...) {
+		}
+		cpp_error = nullptr;
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqBatchJoin post-join recipe Exec raised a C++ exception"),
+			 errdetail_internal("%s", detail)));
+	}
+	return result;
+}
+
+static void BioseqPerRowJoin_EndCustomScan(CustomScanState* node) {
+	BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
+	if (runtime == nullptr || runtime->cleanup_done) return;
+	try {
+		per_row_join_release_checked(node, *runtime);
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		per_row_join_abandon_after_error(node, *runtime);
+		ErrorData* exact = error.release_error_data();
+		ReThrowError(exact);
+	} catch (const std::exception& error) {
+		per_row_join_abandon_after_error(node, *runtime);
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch End raised a C++ exception"),
+			 errdetail_internal("%s", error.what())));
+	}
+}
+
+static void BioseqPerRowJoin_ReScanCustomScan(CustomScanState* node) {
+	BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
+	if (runtime == nullptr || runtime->child == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch rescan runtime is missing")));
+	}
+	bioseq::pg::alignment_execution::mark_alignment_rescan(
+		runtime->alignment_registration);
+	runtime->buffer.clear_slots();
+	runtime->source_exhausted = false;
+	runtime->pass_fully_drained = false;
+	ExecReScan(runtime->child);
+}
+
+static void BioseqPerRowJoin_ExplainCustomScan(
+		CustomScanState* node, List*, ExplainState* es) {
+	BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
+	ExplainPropertyText("Bioseq Mmsearch Ownership", "per-row recipe", es);
+	ExplainPropertyText("Bioseq Reconstructed Join", "child plan", es);
+	ExplainPropertyInteger("Bioseq Batch Capacity", nullptr,
+		static_cast<std::int64_t>(kBioseqRuntimeBufferReserve), es);
+	ExplainPropertyText("Bioseq Index Read Requirement",
+		"require_absent (transformed target)", es);
+	if (runtime == nullptr) return;
+	ExplainPropertyFloat("Bioseq Honest Startup Cost", nullptr,
+		runtime->honest_startup_cost, 2, es);
+	ExplainPropertyFloat("Bioseq Honest Total Cost", nullptr,
+		runtime->honest_total_cost, 2, es);
+	ExplainPropertyFloat("Bioseq Incumbent Cost Floor", nullptr,
+		runtime->incumbent_cost_floor, 2, es);
+	ExplainPropertyInteger("Bioseq Match Placeholder Sites", nullptr,
+		static_cast<std::int64_t>(runtime->placeholder_sites.size()), es);
 	ExplainPipelineExecutionStats(runtime->aggregate_stats, es);
 }
 
@@ -11504,19 +14364,16 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 			std::int64_t cnt = 0;
 			pgseq_t::dispatch_instance(alpha, bw, [&]<class S>() {
 				if (stub) {
-					constexpr std::size_t lpu =
-						compact_sequence_range<S>::traits::letters_per_unit;
-					const std::size_t pad = (loc.total_bp_size % lpu) == 0
-						? 0
-						: static_cast<std::size_t>(
-							lpu - loc.total_bp_size % lpu);
-					bioseq::storage::with_lazy_postgres<S>(
+					using SourceBinding =
+						bioseq::storage::postgres_lazy_sequence_binding<S>;
+					const SourceBinding source_binding{
 						rid.db_oid, rid.tablespace_oid, rid.relfilenode,
-						site.column_attno, loc, pad, registered_snapshot,
-						resources->caches,
-						resources->scratch, [&](auto& lazy) {
-							const auto lazy_view =
-								bioseq::storage::as_lazy_sequence_view(lazy);
+						site.column_attno, loc,
+						SourceBinding::expected_last_fragment_padding(loc),
+						registered_snapshot, resources->caches,
+						resources->scratch};
+					bioseq::storage::with_lazy_postgres<S>(
+						source_binding, [&site, &cnt](auto lazy_view) {
 							auto counts =
 								bioseq::indexing::tally_symbol_counts(lazy_view);
 							if (static_cast<std::size_t>(site.rank)
@@ -11574,9 +14431,12 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 
 
 static void promote_slice_project_sources(
-		BioseqScanState* state, TupleTableSlot* slot) {
+		BioseqScanState* state, TupleTableSlot* slot,
+		MemoryContext result_context,
+		const bool allow_locator_passthrough) {
 	BioseqScanRuntime& runtime = bioseq_runtime(state);
-	if (!runtime.lazy_source_projection) return;
+	if (!runtime.lazy_source_projection
+		|| (runtime.locator_passthrough && !allow_locator_passthrough)) return;
 	if (runtime.lazy_source_provider == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -11584,8 +14444,11 @@ static void promote_slice_project_sources(
 	}
 	slot_getallattrs(slot);
 	const Oid seq_oid = get_cached_stub_oids().bioseq_seq_type_oid;
-	MemoryContext result_context =
-		state->custom_scanstate.ss.ps.ps_ExprContext->ecxt_per_tuple_memory;
+	if (result_context == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("BioseqSliceProject result context is unavailable")));
+	}
 	for (int index = 0; index < slot->tts_tupleDescriptor->natts; ++index) {
 		if (slot->tts_isnull[index]
 			|| TupleDescAttr(slot->tts_tupleDescriptor, index)->atttypid
@@ -11840,8 +14703,13 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 				bioseq_hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
 			}
 			if (!runtime.buffer.mmsearch_active()
-				&& runtime.lazy_source_projection) {
-				promote_slice_project_sources(bioseqScanState, slot);
+				&& runtime.lazy_source_projection
+				&& !runtime.locator_passthrough) {
+				promote_slice_project_sources(
+					bioseqScanState, slot,
+					bioseqScanState->custom_scanstate.ss.ps.
+						ps_ExprContext->ecxt_per_tuple_memory,
+					/*allow_locator_passthrough=*/false);
 			}
 
 		/*

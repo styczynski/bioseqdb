@@ -305,22 +305,9 @@ void stream_view_to_wire(
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
     writer_type writer{sink{&buffer, expected_units}};
-    std::array<std::uint8_t, 256> scratch{};
-    std::uint64_t position = 0u;
-    while (position < length) {
-        const std::size_t count = static_cast<std::size_t>(
-            std::min<std::uint64_t>(scratch.size(), length - position));
-        view.template to_encoded_into<false, false>(
-            std::span<std::uint8_t>{scratch.data(), count},
-            static_cast<std::size_t>(position),
-            static_cast<std::size_t>(position + count));
-        const auto status = writer.append_ranks(
-            std::span<std::uint8_t const>{scratch.data(), count});
-        if (status != bioseq::sequences::rank_pack_status::ok) {
-            wire_rank_pack_error(status);
-        }
-        position += count;
-    }
+    bioseq::storage::stream_transformed_packed<
+        bioseq::storage::sequence_transform::identity>(
+            view, 0u, length, writer);
     const auto result = writer.finish(length, expected_units);
     if (!result) {
         wire_rank_pack_error(result.status);
@@ -594,7 +581,8 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
         PG_RETURN_DATUM(input);
     }
 
-    if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
+    if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))
+        || descriptor.alphabet_bound) {
         auto acquired = acquire_writable_pg_sequence(input);
         replace_root_error_safe(
             *acquired.value, target, acquired.value->bp_length, true,
@@ -609,20 +597,9 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
     auto* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
     (void) classify_and_describe_sequence(PointerGetDatum(flat));
 
-    if (!descriptor.alphabet_bound) {
-        pgseq_t* result = pack_ascii_for_target(
-            reinterpret_cast<char const*>(flat->data),
-            static_cast<std::size_t>(flat->bp_size), target);
-        PG_FREE_IF_COPY(flat, 0);
-        PG_RETURN_POINTER(result);
-    }
-    pgseq_t* result = ::bioseq::simd::active_target::
-        stdc_recode_to_type_params(*flat, target, pg_alloc);
-    if (result == nullptr) {
-        ereport(ERROR,
-                (errcode(ERRCODE_OUT_OF_MEMORY),
-                 errmsg("out of memory in bioseq.seq cast")));
-    }
+    pgseq_t* result = pack_ascii_for_target(
+        reinterpret_cast<char const*>(flat->data),
+        static_cast<std::size_t>(flat->bp_size), target);
     PG_FREE_IF_COPY(flat, 0);
     PG_RETURN_POINTER(result);
 }

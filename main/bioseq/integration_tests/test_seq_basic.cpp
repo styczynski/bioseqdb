@@ -28,44 +28,44 @@ namespace {
 
 constexpr std::string_view kTable = "test_seq_basic_t";
 
-}  // namespace
+} // namespace
 
 TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
           "[seq][basic]") {
-    auto ctx = fresh_context({kTable});
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 64},
-            .seq_columns = 1,
-            .using_bioseq = false,
-        },
-        {
-            seq_row{.pk = 23,  .sequences = {"ACTAGGCACAT"}},
-            seq_row{.pk = 101, .sequences = {"GGGGTTTTACTAGGCACATACTAGGCACATACT"}},
-            seq_row{.pk = 69,
-                    .sequences = {"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"}},
-            seq_row{.pk = 42,  .sequences = {"TTTTTT"}},
-        });
+  auto ctx = fresh_context({kTable});
+  create_seq_table(
+      ctx,
+      seq_table_spec{
+          .name = std::string(kTable),
+          .typmod = {.alphabet = "dna4", .width = 64},
+          .seq_columns = 1,
+          .using_bioseq = false,
+      },
+      {
+          seq_row{.pk = 23, .sequences = {"ACTAGGCACAT"}},
+          seq_row{.pk = 101,
+                  .sequences = {"GGGGTTTTACTAGGCACATACTAGGCACATACT"}},
+          seq_row{
+              .pk = 69,
+              .sequences = {"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"}},
+          seq_row{.pk = 42, .sequences = {"TTTTTT"}},
+      });
 
-    const auto rows = query_rows(
-        ctx,
-        fmt::format(
-            "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
-            "FROM {} ORDER BY pk;",
-            kTable));
+  const auto rows = query_rows(
+      ctx, fmt::format(
+               "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
+               "FROM {} ORDER BY pk;",
+               kTable));
 
-    REQUIRE(rows.size() == 4);
-    REQUIRE(rows[0][1].value() == "ACTAGGCACAT");
-    REQUIRE(rows[0][2].value() == "11");
-    REQUIRE(rows[1][1].value() == "TTTTTT");
-    REQUIRE(rows[1][2].value() == "6");
-    REQUIRE(rows[2][1].value() ==
-            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
-    REQUIRE(rows[2][2].value() == "44");
-    REQUIRE(rows[3][1].value() == "GGGGTTTTACTAGGCACATACTAGGCACATACT");
-    REQUIRE(rows[3][2].value() == "33");
+  REQUIRE(rows.size() == 4);
+  REQUIRE(rows[0][1].value() == "ACTAGGCACAT");
+  REQUIRE(rows[0][2].value() == "11");
+  REQUIRE(rows[1][1].value() == "TTTTTT");
+  REQUIRE(rows[1][2].value() == "6");
+  REQUIRE(rows[2][1].value() == "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+  REQUIRE(rows[2][2].value() == "44");
+  REQUIRE(rows[3][1].value() == "GGGGTTTTACTAGGCACATACTAGGCACATACT");
+  REQUIRE(rows[3][2].value() == "33");
 }
 
 // Heap-table ORDER BY drives the btree opclass at the planner level. We assert
@@ -73,59 +73,68 @@ TEST_CASE("bioseq.seq round-trips ASCII payloads on heap tables",
 // disagreement between opclass-cmp and operator `<` lights up immediately.
 TEST_CASE("ORDER BY bioseq.seq follows the documented lexicographic order",
           "[seq][basic][order_by]") {
-    auto ctx = fresh_context({kTable});
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 64},
-            .seq_columns = 1,
-        },
-        {
-            seq_row{.pk = 1, .sequences = {"ACGT"}},
-            seq_row{.pk = 2, .sequences = {"ACTA"}},
-            seq_row{.pk = 3, .sequences = {"AC"}},     // shorter prefix sorts first
-            seq_row{.pk = 4, .sequences = {"GGGG"}},
-            seq_row{.pk = 5, .sequences = {"AAAA"}},
-        });
+  auto ctx = fresh_context({kTable});
+  create_seq_table(
+      ctx,
+      seq_table_spec{
+          .name = std::string(kTable),
+          .typmod = {.alphabet = "dna4", .width = 64},
+          .seq_columns = 1,
+      },
+      {
+          seq_row{.pk = 1, .sequences = {"ACGT"}},
+          seq_row{.pk = 2, .sequences = {"ACTA"}},
+          seq_row{.pk = 3, .sequences = {"AC"}}, // shorter prefix sorts first
+          seq_row{.pk = 4, .sequences = {"GGGG"}},
+          seq_row{.pk = 5, .sequences = {"AAAA"}},
+      });
 
-    const auto pks = query_int_column(
-        ctx, fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable));
-    // Expected lexicographic order: AAAA, AC, ACGT, ACTA, GGGG -> pk 5,3,1,2,4.
-    REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+  const auto pks = query_int_column(
+      ctx, fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable));
+  // Expected lexicographic order: AAAA, AC, ACGT, ACTA, GGGG -> pk 5,3,1,2,4.
+  REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
 }
 
-TEST_CASE("BioseqBatchSortScan uses stdc_compare when Vulkan sorting is disabled",
-          "[seq][basic][order_by][sort_scan]") {
-    auto ctx = fresh_context({kTable});
-    create_seq_table(
-        ctx,
-        seq_table_spec{
-            .name = std::string(kTable),
-            .typmod = {.alphabet = "dna4", .width = 64},
-            .seq_columns = 1,
-        },
-        {
-            seq_row{.pk = 1, .sequences = {"ACGT"}},
-            seq_row{.pk = 2, .sequences = {"ACTA"}},
-            seq_row{.pk = 3, .sequences = {"AC"}},
-            seq_row{.pk = 4, .sequences = {"GGGG"}},
-            seq_row{.pk = 5, .sequences = {"AAAA"}},
-        });
+TEST_CASE("expanded sequence transfer and copy survive input-context reset",
+          "[seq][basic][expanded][ownership]") {
+  auto ctx = fresh_context();
+  REQUIRE(query_scalar(
+              ctx, "SELECT bioseq_internal.expanded_ownership_self_test();") ==
+          "t");
+}
 
-    exec_sql(ctx, "SET bioseq.enable_sequence_sort_scan = on;");
-    exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
+TEST_CASE(
+    "BioseqBatchSortScan uses stdc_compare when Vulkan sorting is disabled",
+    "[seq][basic][order_by][sort_scan]") {
+  auto ctx = fresh_context({kTable});
+  create_seq_table(ctx,
+                   seq_table_spec{
+                       .name = std::string(kTable),
+                       .typmod = {.alphabet = "dna4", .width = 64},
+                       .seq_columns = 1,
+                   },
+                   {
+                       seq_row{.pk = 1, .sequences = {"ACGT"}},
+                       seq_row{.pk = 2, .sequences = {"ACTA"}},
+                       seq_row{.pk = 3, .sequences = {"AC"}},
+                       seq_row{.pk = 4, .sequences = {"GGGG"}},
+                       seq_row{.pk = 5, .sequences = {"AAAA"}},
+                   });
 
-    const std::string sql = fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable);
-    const auto pks = query_int_column(ctx, sql);
-    REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+  exec_sql(ctx, "SET bioseq.enable_sequence_sort_scan = on;");
+  exec_sql(ctx, "SET bioseq.aligner.vulkan_enabled = off;");
 
-    const auto plan = explain_text<true>(ctx, sql);
-    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchSortScan)"));
-    REQUIRE(plan_contains(plan, "Bioseq Sort Accelerator: stdc_compare"));
-    REQUIRE(plan_contains(plan, "Bioseq GPU Sort Dispatches: 0"));
-    REQUIRE(plan_contains(plan, "Bioseq GPU Global Compare Dispatches: 0"));
-    REQUIRE(plan_contains(plan, "Bioseq GPU Dense Scatter Dispatches: 0"));
+  const std::string sql =
+      fmt::format("SELECT pk FROM {} ORDER BY seq0;", kTable);
+  const auto pks = query_int_column(ctx, sql);
+  REQUIRE(pks == std::vector<long long>{5, 3, 1, 2, 4});
+
+  const auto plan = explain_text<true>(ctx, sql);
+  REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchSortScan)"));
+  REQUIRE(plan_contains(plan, "Bioseq Sort Accelerator: stdc_compare"));
+  REQUIRE(plan_contains(plan, "Bioseq GPU Sort Dispatches: 0"));
+  REQUIRE(plan_contains(plan, "Bioseq GPU Global Compare Dispatches: 0"));
+  REQUIRE(plan_contains(plan, "Bioseq GPU Dense Scatter Dispatches: 0"));
 }
 
 TEMPLATE_TEST_CASE_SIG(

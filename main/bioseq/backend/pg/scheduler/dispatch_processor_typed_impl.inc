@@ -2693,18 +2693,15 @@ pg_segment_unit_ranges(
 // (lazy PG) target via the GPU sorted-pair seam (GPU Phase B emit on device +
 // host pair sort — see DOC0348) — no whole-target resident materialization, so
 // 2/4 Gbp targets do not OOM.
-template <class LazyQuery, class Target>
+template <sequence_alphabet Alphabet>
 [[nodiscard]] MatchResultCollection build_and_align_transient_mps(
-    LazyQuery& lazy_query,
-    Target& target,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> lazy_query_view,
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> target_view,
     const Minimap2Params& params,
-    sequence_size_t total_bp_size)
+    sequence_size_t total_bp_size,
+    std::size_t target_letters_per_unit)
 {
     MatchResultCollection collection;
-	const auto lazy_query_view =
-		bioseq::storage::as_lazy_sequence_view(lazy_query);
-	const auto target_view =
-		bioseq::storage::as_lazy_sequence_view(target);
 	// Every PostgreSQL terminal error below crosses a true
 	// invoke_pg_as_cpp leaf. Keep this orchestration in ordinary C++ so MPS
 	// chunks, sorted runs, GPU cache, query proof, assembled indexes, and
@@ -2792,10 +2789,10 @@ template <class LazyQuery, class Target>
         if (total_bp_size <= kPgSegmentationThresholdBp) {
             collection = run_mps_index(0, total_bp_size);
         } else {
-            constexpr std::size_t lpu = Target::traits::letters_per_unit;
+            const std::size_t lpu = target_letters_per_unit;
             MatchResultCollection merged_collection;
             std::vector<MatchResult>& merged = merged_collection.results;
-            const sequence_size_t query_len = lazy_query.bp_size();
+            const sequence_size_t query_len = lazy_query_view.bp_size();
             for (auto sr : pg_segment_unit_ranges(
                      total_bp_size, query_len, lpu, mps_params)) {
                 const sequence_size_t clip_lo_bp =
@@ -2986,11 +2983,11 @@ template <class LazyQuery, class Target>
             persist_chunks.data(), persist_chunks.size()));
 }
 
-template <class LazyQuery, class ResidentTarget>
+template <sequence_alphabet Alphabet>
 [[nodiscard]] MatchResultCollection
 run_recompute_with_deferred_minimizer_persist(
-        LazyQuery& lazy_query,
-        ResidentTarget& resident_target,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> lazy_query,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> resident_target,
         const Minimap2Params& params,
         const BatchProcessor::ScannerPgContext& ctx,
         const bioseq::storage::seq_locator& loc,
@@ -3011,7 +3008,10 @@ run_recompute_with_deferred_minimizer_persist(
             lazy_query,
             resident_target,
             params,
-            static_cast<sequence_size_t>(loc.total_bp_size));
+            static_cast<sequence_size_t>(loc.total_bp_size),
+            storage_unit_byte_width * CHAR_BIT
+                / bioseq::storage::lazy_rank_stream_traits<Alphabet>::
+                    logical_bits_per_symbol);
 
         bioseq_log<DBG>(
             "[bioseq] index: recompute real-mps-noindex row={} index={} "
@@ -3028,12 +3028,8 @@ run_recompute_with_deferred_minimizer_persist(
 	(void)alphabet_code;
 	(void)storage_unit_byte_width;
 	(void)last_fragment_padding;
-	const auto lazy_query_view =
-		bioseq::storage::as_lazy_sequence_view(lazy_query);
-	const auto resident_target_view =
-		bioseq::storage::as_lazy_sequence_view(resident_target);
 	MatchResultCollection collection = minimap_port_segmented_pg_checked(
-		lazy_query_view, resident_target_view, params);
+		lazy_query, resident_target, params);
 	bioseq_log<DBG>("[bioseq] index: recompute external-file persist prohibited row={} index={} target_bp={} constructor_entries={} writer_entries={} async_staged=false",
             static_cast<unsigned long long>(sequence_rowno),
             choice.index_name,
@@ -3049,125 +3045,59 @@ run_recompute_with_deferred_minimizer_persist(
     return collection;
 }
 
-template <class R>
+template <sequence_alphabet Alphabet>
 struct ResidentTargetForWorkers {
-    using traits = typename compact_sequence_range<R>::traits;
-    using storage_unit = typename traits::storage_unit;
-    using resident_config = sequence_custom_alphabet<
-        typename traits::alphabet_type,
-        storage_unit,
-        traits::bits_per_char>;
-    using resident_range = compact_sequence_range<resident_config>;
-
-    bioseq::parallelism::MemoryPermit permit;
-    resident_range range;
+    bioseq::storage::admitted_packed_region<Alphabet> owner;
 };
 
-template <class R, class Scanner>
-[[nodiscard]] std::optional<ResidentTargetForWorkers<R>>
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<ResidentTargetForWorkers<Alphabet>>
 try_materialize_target_for_segment_workers(
-        const bioseq::storage::lazy_compact_sequence<R, Scanner>& target_seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> target_view,
+        std::uint8_t requested_width,
         std::uint64_t sequence_rowno) {
-    if constexpr (!Scanner::supports_fragments()) {
+    const auto plan = bioseq::storage::plan_sequence_access(
+        target_view,
+        bioseq::storage::sequence_access_requirement::bounded_random_window,
+        0u,
+        target_view.bp_size(),
+        requested_width);
+    auto permit =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .try_reserve(plan.admission_bytes);
+    if (!permit) {
+        bioseq_log<DBG>(
+            "[bioseq] resident target: row={} target_bp={} admitted_bytes={} "
+            "not admitted; using scanner_pg serial fallback",
+            static_cast<unsigned long long>(sequence_rowno),
+            static_cast<unsigned long long>(target_view.bp_size()),
+            static_cast<unsigned long long>(plan.admission_bytes));
         return std::nullopt;
-    } else {
-        using resident_t = ResidentTargetForWorkers<R>;
-        using storage_unit = typename resident_t::storage_unit;
-
-        const std::uint64_t total_units64 =
-            static_cast<std::uint64_t>(target_seq.size());
-        if (total_units64
-            > static_cast<std::uint64_t>(
-                (std::numeric_limits<std::size_t>::max)())) {
-			bioseq::pg_utils::invoke_pg_as_cpp(
-				[sequence_rowno, total_units64] {
-					ereport(ERROR,
-						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-						 errmsg("bioseq resident target is too large to materialize"),
-						 errdetail("target_row=%llu packed_units=%llu",
-							static_cast<unsigned long long>(sequence_rowno),
-							static_cast<unsigned long long>(total_units64))));
-				});
-			pg_unreachable();
-        }
-        const std::size_t total_units =
-            static_cast<std::size_t>(total_units64);
-        const std::uint64_t packed_bytes =
-            bioseq::parallelism::saturating_mul(
-                total_units64,
-                static_cast<std::uint64_t>(sizeof(storage_unit)));
-        constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
-        const std::uint64_t reserve_bytes =
-            packed_bytes
-                    > (std::numeric_limits<std::uint64_t>::max)()
-                        - context_reserve_bytes
-                ? (std::numeric_limits<std::uint64_t>::max)()
-                : packed_bytes + context_reserve_bytes;
-
-        auto permit =
-            bioseq::parallelism::MemoryAdmissionController::instance()
-                .try_reserve(reserve_bytes);
-        if (!permit) {
-            bioseq_log<DBG>("[bioseq] resident target: row={} target_bp={} packed_bytes={} "
-                    "not admitted; using scanner_pg serial fallback",
-                    static_cast<unsigned long long>(sequence_rowno),
-                    static_cast<unsigned long long>(target_seq.bp_size()),
-                    static_cast<unsigned long long>(packed_bytes));
-            return std::nullopt;
-        }
-
-        typename resident_t::resident_range::base_container packed(total_units);
-        const std::uint64_t materialize_started_ns =
-            dispatch_host_now_ns();
-        if constexpr (requires {
-            target_seq.scanner().copy_packed_to(
-                std::span<storage_unit>{packed.data(), packed.size()});
-        }) {
-            target_seq.scanner().copy_packed_to(
-                std::span<storage_unit>{packed.data(), packed.size()});
-        } else {
-            const std::size_t fragment_units =
-                Scanner::fragment_storage_units;
-            for (std::size_t fragment_no = 0;
-                 fragment_no < target_seq.number_of_fragments();
-                ++fragment_no) {
-                if ((fragment_no & std::size_t{0x3ff}) == 0) {
-                    bioseq::pg_utils::invoke_pg_as_cpp(
-                        [] { CHECK_FOR_INTERRUPTS(); });
-                }
-                const std::span<const storage_unit> fragment =
-                    target_seq.scanner().read_fragment(fragment_no);
-                const std::size_t dst_offset =
-                    fragment_no * fragment_units;
-                if (dst_offset >= packed.size()) {
-                    target_seq.scanner().release_fragment(fragment_no);
-                    break;
-                }
-                const std::size_t copy_units =
-                    std::min(
-                        fragment.size(), packed.size() - dst_offset);
-                std::copy_n(
-                    fragment.data(), copy_units,
-                    packed.data() + dst_offset);
-                target_seq.scanner().release_fragment(fragment_no);
-            }
-        }
-        const std::uint64_t materialize_elapsed_ns =
-            elapsed_dispatch_host_ns(materialize_started_ns);
-
-        bioseq_log<DBG>("[bioseq] resident target: row={} target_bp={} fragments={} "
-                "packed_bytes={} materialize_ns={} materialized for segment workers",
-                static_cast<unsigned long long>(sequence_rowno),
-                static_cast<unsigned long long>(target_seq.bp_size()),
-                target_seq.number_of_fragments(),
-                static_cast<unsigned long long>(packed_bytes),
-                static_cast<unsigned long long>(materialize_elapsed_ns));
-
-        return resident_t{
-            std::move(*permit),
-            resident_t::resident_range::from_packed(
-                std::move(packed), target_seq.padding())};
     }
+
+    const std::uint64_t materialize_started_ns = dispatch_host_now_ns();
+    auto owner = bioseq::storage::materialize_packed_region(
+        target_view,
+        plan.from,
+        plan.to,
+        requested_width,
+        std::move(*permit));
+    const std::uint64_t materialize_elapsed_ns =
+        elapsed_dispatch_host_ns(materialize_started_ns);
+    const auto& descriptor = owner.descriptor();
+    const std::uint64_t packed_bytes =
+        static_cast<std::uint64_t>(descriptor.unit_count)
+        * descriptor.storage_unit_byte_width;
+
+    bioseq_log<DBG>(
+        "[bioseq] resident target: row={} target_bp={} packed_bytes={} "
+        "materialize_ns={} materialized for segment workers",
+        static_cast<unsigned long long>(sequence_rowno),
+        static_cast<unsigned long long>(target_view.bp_size()),
+        static_cast<unsigned long long>(packed_bytes),
+        static_cast<unsigned long long>(materialize_elapsed_ns));
+
+    return ResidentTargetForWorkers<Alphabet>{std::move(owner)};
 }
 
 #if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY)
@@ -3457,15 +3387,9 @@ template <class S>
         row_query_minimizer_proof;
     const BatchProcessor::CpuPreparedQuerySketch*
         retained_prepared_query_sketch = nullptr;
-    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     const auto lazy_query_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_query);
-    // DOC0264 §9.2 / DOC0274 — production scanner_pg path.
-    using SP = bioseq::storage::sequence_scanner_pg<S>;
-    bioseq::storage::lazy_compact_sequence<S, SP> fq_pg{
-        bioseq::storage::make_scanner_pg_in_memory<S>(query_seq)};
-    const auto fq_pg_view =
-        bioseq::storage::as_lazy_sequence_view(fq_pg);
+        bioseq::storage::as_lazy_sequence_view(query_seq);
+    const auto fq_pg_view = lazy_query_view;
     const auto& loc_opt = scanner_pg_ctx->target_locators[i];
     const bool persisted_required =
         scanner_pg_ctx->index_read_requirement
@@ -3504,7 +3428,9 @@ template <class S>
         const std::size_t _padding =
             static_cast<std::size_t>(
                 _total_units * _lpu - loc_opt->total_bp_size);
-        SP target_scanner(
+        using TargetBinding =
+            bioseq::storage::postgres_lazy_sequence_binding<S>;
+        const TargetBinding target_binding{
             scanner_pg_ctx->db_oid,
             scanner_pg_ctx->tablespace_oid,
             scanner_pg_ctx->main_relfilenode,
@@ -3513,11 +3439,19 @@ template <class S>
             _padding,
             scanner_pg_ctx->snapshot,
             scanner_pg_ctx->caches,
-            scanner_pg_ctx->parent_mctx);
-        bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
-            std::move(target_scanner)};
-        const auto ft_pg_view =
-            bioseq::storage::as_lazy_sequence_view(ft_pg);
+            scanner_pg_ctx->parent_mctx};
+        bioseq::storage::with_lazy_postgres<S>(
+            target_binding,
+            [scanner_pg_ctx, cpu_prepared_target, &dispatch_params, &params,
+             min_bp, per_row_query_mode, persisted_required,
+             &row_query_minimizers,
+             &cached_query_minimizers, &row_query_minimizer_proof,
+             &cached_query_minimizer_proof, &query_seq, lazy_query_view,
+             fq_pg_view, target_bp_size, alphabet_code,
+             storage_unit_byte_width, i, &loc_opt, _padding, &pool,
+             &collection, &row_consumed_persisted_query_sketch,
+             &retained_prepared_query_sketch,
+             &query_sketch_host_wall_ns](auto ft_pg_view) {
         // DOC0279 §11.3a — ASSEMBLE from the stored
         // per-fragment minimizer index if present
         // (deserialise + globalise, no re-collection);
@@ -3980,10 +3914,12 @@ template <class S>
 	                                    ensure_q();
 	                                    const sequence_size_t total_bp =
 	                                        loc_opt->total_bp_size;
-	                                    const std::size_t frag_units =
-	                                        SP::fragment_storage_units;
 	                                    const std::size_t a_lpu =
 	                                        compact_sequence_range<S>::traits::letters_per_unit;
+	                                    const std::size_t frag_units =
+	                                        static_cast<std::size_t>(
+	                                            TargetBinding::fragment_bp_capacity())
+	                                        / a_lpu;
 	                                    const sequence_size_t frag_bp =
 	                                        static_cast<sequence_size_t>(frag_units) * a_lpu;
 	                                    const std::size_t size_u =
@@ -4387,11 +4323,12 @@ template <class S>
             // path too (codex review 2026-06-22, dispatch_processor relabel).
             if (!assembled && want_seq) {
                 collection = build_and_align_transient_mps(
-                    fq_pg,
-                    ft_pg,
+                    fq_pg_view,
+                    ft_pg_view,
                     params,
                     static_cast<sequence_size_t>(
-                        loc_opt->total_bp_size));
+                        loc_opt->total_bp_size),
+                    compact_sequence_range<S>::traits::letters_per_unit);
                 assembled = true;
                 bioseq_log<DBG>("[bioseq] index: recompute real-mps-readindex row={} target_bp={} backend={}",
                         static_cast<unsigned long long>(
@@ -4440,9 +4377,12 @@ template <class S>
                             staged);
 
                     const sequence_size_t total_bp = loc_opt->total_bp_size;
-                    const std::size_t frag_units = SP::fragment_storage_units;
                     const std::size_t a_lpu =
                         compact_sequence_range<S>::traits::letters_per_unit;
+                    const std::size_t frag_units =
+                        static_cast<std::size_t>(
+                            TargetBinding::fragment_bp_capacity())
+                        / a_lpu;
                     const sequence_size_t frag_bp =
                         static_cast<sequence_size_t>(frag_units) * a_lpu;
                     const std::size_t size_u =
@@ -4593,11 +4533,12 @@ template <class S>
             // disabled here, but the active policy still
             // selects the algorithm shape.
             collection = build_and_align_transient_mps(
-                fq_pg,
-                ft_pg,
+                fq_pg_view,
+                ft_pg_view,
                 params,
                 static_cast<sequence_size_t>(
-                    loc_opt->total_bp_size));
+                    loc_opt->total_bp_size),
+                compact_sequence_range<S>::traits::letters_per_unit);
 			// build_and_align_transient_mps always builds and queries the
 			// persisted MPS scheme. Pass that concrete scheme to staging even
 			// when the short-query heuristic changed the outer alignment pair;
@@ -4647,11 +4588,12 @@ template <class S>
                 // sort — DOC0348) streams from lazy PG (no whole-target
                 // resident materialization, so 2/4 Gbp targets do not OOM).
                 collection = build_and_align_transient_mps(
-                    fq_pg,
-                    ft_pg,
+                    fq_pg_view,
+                    ft_pg_view,
                     params,
                     static_cast<sequence_size_t>(
-                        loc_opt->total_bp_size));
+                        loc_opt->total_bp_size),
+                    compact_sequence_range<S>::traits::letters_per_unit);
 				const bool async_staged =
 					stage_recompute_mps_build_if_selected(
 						*scanner_pg_ctx, *loc_opt, rowno,
@@ -4679,16 +4621,13 @@ template <class S>
             if (try_resident_segment_workers) {
                 auto resident =
                     try_materialize_target_for_segment_workers(
-                        ft_pg,
+                        ft_pg_view,
+                        storage_unit_byte_width,
                         static_cast<std::uint64_t>(
                             scanner_pg_ctx->target_rownos[i]));
                 if (resident.has_value()) {
-                    auto resident_target =
-                        bioseq::storage::make_lazy_in_memory(
-                            resident->range);
                     const auto resident_target_view =
-                        bioseq::storage::as_lazy_sequence_view(
-                            resident_target);
+                        resident->owner.view();
                     const bool can_defer_recompute_persist =
                         can_defer_recompute_minimizer_persist(
                             *scanner_pg_ctx, params);
@@ -4703,8 +4642,8 @@ template <class S>
                                 scanner_pg_ctx->target_rownos[i]);
                         collection =
                             run_recompute_with_deferred_minimizer_persist(
-                                lazy_query,
-                                resident_target,
+                                lazy_query_view,
+                                resident_target_view,
                                 params,
                                 *scanner_pg_ctx,
                                 *loc_opt,
@@ -4768,18 +4707,17 @@ template <class S>
                     "streaming_recompute");
             }
         }
+        });
     } else {
         compact_sequence_range<S> target_seq{*target_hdr};
-        bioseq::storage::lazy_compact_sequence<S, SP> ft_pg{
-            bioseq::storage::make_scanner_pg_in_memory<S>(target_seq)};
-        const auto ft_pg_view =
-            bioseq::storage::as_lazy_sequence_view(ft_pg);
+        const auto target_view =
+            bioseq::storage::as_lazy_sequence_view(target_seq);
         collection =
             (target_bp_size > kPgSegmentationThresholdBp)
                 ? minimap_port_segmented_pg_checked(
-                    fq_pg_view, ft_pg_view, params)
+                    lazy_query_view, target_view, params)
                 : minimap_port_pg_checked(
-                    fq_pg_view, ft_pg_view, params);
+                    lazy_query_view, target_view, params);
     }
 
     if (query_sketch_host_wall_ns != 0u) {
@@ -4847,13 +4785,11 @@ template <class S>
     const Minimap2Params& params)
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
-    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
-    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
     const auto lazy_query_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_query);
+        bioseq::storage::as_lazy_sequence_view(query_seq);
     const auto lazy_target_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_target);
+        bioseq::storage::as_lazy_sequence_view(target_seq);
     return minimap_port_pg_checked(
         lazy_query_view, lazy_target_view, params);
 }
@@ -4867,13 +4803,11 @@ template <class S>
     const Minimap2Params& params)
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
-    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
-    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
     const auto lazy_query_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_query);
+        bioseq::storage::as_lazy_sequence_view(query_seq);
     const auto lazy_target_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_target);
+        bioseq::storage::as_lazy_sequence_view(target_seq);
     return minimap_port_segmented_pg_checked(
         lazy_query_view, lazy_target_view, params);
 }
@@ -4888,16 +4822,14 @@ template <class S>
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
     compact_sequence_range<S> target_seq{*target_hdr};
-    using chunked = bioseq::storage::sequence_scanner_test_chunked<
-        typename compact_sequence_range<S>::traits::storage_unit,
-        bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-    bioseq::storage::lazy_compact_sequence<S, chunked> fq{
-        chunked::from_range(query_seq)};
-    bioseq::storage::lazy_compact_sequence<S, chunked> ft{
-        chunked::from_range(target_seq)};
-    const auto fq_view = bioseq::storage::as_lazy_sequence_view(fq);
-    const auto ft_view = bioseq::storage::as_lazy_sequence_view(ft);
-    return minimap_port_pg_checked(fq_view, ft_view, params);
+    MatchResultCollection collection;
+    bioseq::storage::with_lazy_test_chunked(
+        query_seq, target_seq,
+        [&collection, &params](auto query_view, auto target_view) {
+            collection = minimap_port_pg_checked(
+                query_view, target_view, params);
+        });
+    return collection;
 }
 #endif
 
@@ -4910,16 +4842,14 @@ template <class S>
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
     compact_sequence_range<S> target_seq{*target_hdr};
-    using chunked = bioseq::storage::sequence_scanner_test_chunked<
-        typename compact_sequence_range<S>::traits::storage_unit,
-        bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-    bioseq::storage::lazy_compact_sequence<S, chunked> fq{
-        chunked::from_range(query_seq)};
-    bioseq::storage::lazy_compact_sequence<S, chunked> ft{
-        chunked::from_range(target_seq)};
-    const auto fq_view = bioseq::storage::as_lazy_sequence_view(fq);
-    const auto ft_view = bioseq::storage::as_lazy_sequence_view(ft);
-    return minimap_port_segmented_pg_checked(fq_view, ft_view, params);
+    MatchResultCollection collection;
+    bioseq::storage::with_lazy_test_chunked(
+        query_seq, target_seq,
+        [&collection, &params](auto query_view, auto target_view) {
+            collection = minimap_port_segmented_pg_checked(
+                query_view, target_view, params);
+        });
+    return collection;
 }
 #endif
 
@@ -4950,27 +4880,25 @@ template <class S>
             row_query_hdr, target_hdr, params);
 #else
     compact_sequence_range<S> query_seq{*row_query_hdr};
-    auto lazy_query = bioseq::storage::make_lazy_in_memory(query_seq);
     compact_sequence_range<S> target_seq{*target_hdr};
-    auto lazy_target = bioseq::storage::make_lazy_in_memory(target_seq);
-    const auto lazy_query_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_query);
-    const auto lazy_target_view =
-        bioseq::storage::as_lazy_sequence_view(lazy_target);
     if (chunked_scanner_forced) {
-        using chunked = bioseq::storage::sequence_scanner_test_chunked<
-            typename compact_sequence_range<S>::traits::storage_unit,
-            bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
-        bioseq::storage::lazy_compact_sequence<S, chunked> fq{
-            chunked::from_range(query_seq)};
-        bioseq::storage::lazy_compact_sequence<S, chunked> ft{
-            chunked::from_range(target_seq)};
-        const auto fq_view = bioseq::storage::as_lazy_sequence_view(fq);
-        const auto ft_view = bioseq::storage::as_lazy_sequence_view(ft);
-        return (target_bp_size > kPgSegmentationThresholdBp)
-            ? minimap_port_segmented_pg_checked(fq_view, ft_view, params)
-            : minimap_port_pg_checked(fq_view, ft_view, params);
+        MatchResultCollection collection;
+        bioseq::storage::with_lazy_test_chunked(
+            query_seq, target_seq,
+            [&collection, &params, target_bp_size](
+                    auto query_view, auto target_view) {
+                collection = target_bp_size > kPgSegmentationThresholdBp
+                    ? minimap_port_segmented_pg_checked(
+                        query_view, target_view, params)
+                    : minimap_port_pg_checked(
+                        query_view, target_view, params);
+            });
+        return collection;
     }
+    const auto lazy_query_view =
+        bioseq::storage::as_lazy_sequence_view(query_seq);
+    const auto lazy_target_view =
+        bioseq::storage::as_lazy_sequence_view(target_seq);
     return (target_bp_size > kPgSegmentationThresholdBp)
         ? minimap_port_segmented_pg_checked(
             lazy_query_view, lazy_target_view, params)
@@ -5013,7 +4941,7 @@ template <class S>
             // DOC0264 §9.2 / DOC0274 — test parity knob. When on, the dispatch
             // loop forces the Phase B baseline (with_lazy_in_memory). Otherwise
             // (default) and given a non-null ScannerPgContext, the loop uses
-            // the Phase C `sequence_scanner_pg<S>` (PG-backed for stub targets,
+            // the canonical Phase C PG-backed facade (for stub targets,
             // in-memory for the query literal / inline targets).
 	    const std::optional<std::string> force_inmemory_guc =
 	        pg_guc_value_as_cpp("bioseq.test_force_inmemory_scanner");
@@ -6140,10 +6068,8 @@ template <class S>
                         ++target_index) {
                         GpuBatchTargetSidecar& target = targets[target_index];
                         compact_sequence_range<S> target_seq{*target.hdr};
-                        auto lazy_target =
-                            bioseq::storage::make_lazy_in_memory(target_seq);
                         const auto target_view =
-                            bioseq::storage::as_lazy_sequence_view(lazy_target);
+                            bioseq::storage::as_lazy_sequence_view(target_seq);
                         const std::uint64_t gpu_target_plan_begin_ns =
                             gpu_batch_now_ns();
                         constexpr sequence_size_t kGpuBatchHugeTargetBp =
@@ -6967,7 +6893,6 @@ template <class S>
                         || shape_v5_parallel_reader_identity_valid(
                             *native_group, shared_target_bp_size));
                 if (batch_identity_valid) {
-                    using SP = bioseq::storage::sequence_scanner_pg<S>;
                     constexpr std::size_t letters_per_unit =
                         compact_sequence_range<S>::traits::letters_per_unit;
                     const std::uint64_t total_units =
@@ -6976,7 +6901,9 @@ template <class S>
                     const std::size_t padding = static_cast<std::size_t>(
                         total_units * letters_per_unit
                         - shared_target_bp_size);
-                    SP target_scanner(
+                    using TargetBinding =
+                        bioseq::storage::postgres_lazy_sequence_binding<S>;
+                    const TargetBinding target_binding{
                         scanner_pg_ctx->db_oid,
                         scanner_pg_ctx->tablespace_oid,
                         scanner_pg_ctx->main_relfilenode,
@@ -6985,21 +6912,29 @@ template <class S>
                         padding,
                         scanner_pg_ctx->snapshot,
                         scanner_pg_ctx->caches,
-                        scanner_pg_ctx->parent_mctx);
-                    bioseq::storage::lazy_compact_sequence<S, SP>
-                        fragmented_target{std::move(target_scanner)};
+                        scanner_pg_ctx->parent_mctx};
+                    bool native_batch_completed = false;
+                    bioseq::storage::with_lazy_postgres<S>(
+                        target_binding,
+                        [shared_target_rowno, shared_target_bp_size,
+                         native_group, batch_size, &pool,
+                         &native_query_params, &retained_query_sketches,
+                         per_row_query_hdrs, scanner_pg_ctx, prepared_target,
+                         record_target_operational_outcomes, &stats,
+                         broadcast_query_ordinal,
+                         &cached_query_minimizer_proof_operation_accounted,
+                         &query_ids, &results, &native_batch_completed,
+                         storage_unit_byte_width](
+                                auto fragmented_target_view) {
                     auto resident =
                         try_materialize_target_for_segment_workers(
-                            fragmented_target,
+                            fragmented_target_view,
+                            storage_unit_byte_width,
                             static_cast<std::uint64_t>(
                                 shared_target_rowno));
                     if (resident.has_value()) {
-                        const auto resident_target =
-                            bioseq::storage::make_lazy_in_memory(
-                                resident->range);
                         const auto resident_target_view =
-                            bioseq::storage::as_lazy_sequence_view(
-                                resident_target);
+                            resident->owner.view();
                         const auto* const format6_reader =
                             native_group->persisted_format6_reader
                             ? &*native_group->persisted_format6_reader
@@ -7058,14 +6993,10 @@ template <class S>
                                         compact_sequence_range<S>
                                             query_seq{
                                                 *(*per_row_query_hdrs)[row]};
-                                        const auto lazy_query =
-                                            bioseq::storage::
-                                                make_lazy_in_memory(
-                                                    query_seq);
                                         const auto lazy_query_view =
                                             bioseq::storage::
                                                 as_lazy_sequence_view(
-                                                    lazy_query);
+                                                    query_seq);
                                         native_collections[row] =
                                             minimap2_port_with_index(
                                                 lazy_query_view,
@@ -7424,8 +7355,10 @@ template <class S>
                                         native_collections[row].results);
                             }
                         }
-                        return results;
+                        native_batch_completed = true;
                     }
+                    });
+                    if (native_batch_completed) return results;
                 }
 			}
 			if (scanner_pg_ctx != nullptr

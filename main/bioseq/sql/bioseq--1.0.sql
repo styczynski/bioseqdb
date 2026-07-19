@@ -1804,6 +1804,83 @@ CREATE FUNCTION bioseq_internal.slice_trace_self_test()
     LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
 REVOKE ALL ON FUNCTION bioseq_internal.slice_trace_self_test() FROM PUBLIC;
 
+CREATE FUNCTION bioseq_internal.synthetic_lazy_sequence(bigint)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'synthetic_lazy_sequence'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.synthetic_lazy_sequence(bigint)
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_piece_count(bioseq.seq)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'sequence_piece_count'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.sequence_piece_count(bioseq.seq)
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.piece_tree_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'piece_tree_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.piece_tree_self_test() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.expanded_ownership_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'expanded_ownership_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.expanded_ownership_self_test()
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.letter_wire_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_wire_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.letter_wire_self_test() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.arm_sequence_source_failure(text)
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_arm_sequence_source_failure'
+    LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.arm_sequence_source_failure(text) FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.disarm_sequence_source_failure()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_disarm_sequence_source_failure'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.disarm_sequence_source_failure() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.reset_sequence_source_counters()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_reset_sequence_source_counters'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.reset_sequence_source_counters() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_counters()
+    RETURNS jsonb
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_counters'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_counters() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_wrong_thread_probe()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_wrong_thread_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_wrong_thread_probe() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_fault_contract_probe()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_fault_contract_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_fault_contract_probe() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_pre_prepare_probe()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_pre_prepare_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_pre_prepare_probe() FROM PUBLIC;
+
 CREATE OPERATOR CLASS bioseq.seq_hash_ops
     DEFAULT FOR TYPE bioseq.seq USING hash AS
     OPERATOR 1 bioseq.=,

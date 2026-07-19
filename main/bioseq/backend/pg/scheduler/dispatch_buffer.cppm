@@ -927,6 +927,7 @@ private:
     // Borrowed from the statement-root AlignmentExecutionCollector.
     bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
         persisted_gpu_operation_evidence_sink = nullptr;
+    slice_async_owner_guard* slice_async_owner = nullptr;
     MemoryContext batch_payload_ctx = nullptr;
     std::array<std::vector<SM::fetch_request>, SM::bucket_count>
         per_bucket_target_requests{};
@@ -968,6 +969,21 @@ public:
                  errmsg("bioseq persisted GPU evidence sink changed during execution")));
         }
         persisted_gpu_operation_evidence_sink = &sink;
+    }
+
+    void bind_slice_async_owner(slice_async_owner_guard* owner) {
+        if (owner == nullptr
+            || !make_slice_async_pool_observer_noexcept(owner)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq async owner is not accepting tracked jobs")));
+        }
+        if (slice_async_owner != nullptr && slice_async_owner != owner) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq async owner changed during dispatch")));
+        }
+        slice_async_owner = owner;
     }
 
     /*
@@ -2110,6 +2126,8 @@ public:
             join_scanner_pg_cache->main_relfilenode = user_main_relfilenode;
 
             auto& scanner_pg_ctx = *join_scanner_pg_ctx;
+            scanner_pg_ctx.async_job_observer =
+                make_slice_async_pool_observer_noexcept(slice_async_owner);
             scanner_pg_ctx.db_oid = user_main_database_oid;
             scanner_pg_ctx.tablespace_oid = user_main_tablespace_oid;
             scanner_pg_ctx.main_relfilenode = user_main_relfilenode;
@@ -2925,6 +2943,8 @@ public:
         scanner_pg_cache->main_relfilenode    = user_main_relfilenode;
 
         typename ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext scanner_pg_ctx{};
+        scanner_pg_ctx.async_job_observer =
+            make_slice_async_pool_observer_noexcept(slice_async_owner);
         scanner_pg_ctx.db_oid             = user_main_database_oid;
         scanner_pg_ctx.tablespace_oid     = user_main_tablespace_oid;
         scanner_pg_ctx.main_relfilenode   = user_main_relfilenode;

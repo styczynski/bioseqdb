@@ -4618,14 +4618,18 @@ template <MinKernelKind Kind, class MinimizerT,
                     c, resident_view, 0u, size, w, k, 0u,
                     "query minimizer sketch");
         };
-        if (seq.try_resident_packed(0u, seq.bp_size(), 4u).has_value()) {
+        const auto access = bioseq::storage::plan_sequence_access(
+            seq,
+            bioseq::storage::sequence_access_requirement::contiguous_resident,
+            0u,
+            seq.bp_size(),
+            4u);
+        if (access.route
+            == bioseq::storage::sequence_access_route::borrow_resident) {
             return run_exact(seq);
         }
-        const std::uint64_t admitted_bytes =
-            bioseq::storage::packed_region_admission_bytes<Alphabet>(
-                seq.bp_size(), 4u);
         auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-            .try_reserve(admitted_bytes);
+            .try_reserve(access.admission_bytes);
         if (!permit) {
             throw ExactSimdRuntimeError{
                 TwoStackContinuationStatus::non_contiguous_range,
@@ -4664,14 +4668,18 @@ minimizer_dispatch_constexpr(
                     c, resident_view, 0u, size, w, k, 0u,
                     "constexpr query minimizer sketch");
         };
-        if (seq.try_resident_packed(0u, seq.bp_size(), 4u).has_value()) {
+        const auto access = bioseq::storage::plan_sequence_access(
+            seq,
+            bioseq::storage::sequence_access_requirement::contiguous_resident,
+            0u,
+            seq.bp_size(),
+            4u);
+        if (access.route
+            == bioseq::storage::sequence_access_route::borrow_resident) {
             return run_exact(seq);
         }
-        const std::uint64_t admitted_bytes =
-            bioseq::storage::packed_region_admission_bytes<Alphabet>(
-                seq.bp_size(), 4u);
         auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-            .try_reserve(admitted_bytes);
+            .try_reserve(access.admission_bytes);
         if (!permit) {
             throw ExactSimdRuntimeError{
                 TwoStackContinuationStatus::non_contiguous_range,
@@ -4842,25 +4850,27 @@ minimizer_dispatch_range(
             throw PaperNtHashRuntimeError(
                 "PaperNtHashSimd requires the DNA4 alphabet; fallback is forbidden");
         } else {
-            const sequence_size_t length = hi_bp - lo_bp;
             auto run_paper = [&collector](const auto& descriptor) {
                 return collect_minimizers_packed_paper_nthash_resident_descriptor_checked<
                     15u, 10u, MinimizerT, Alphabet>(collector, descriptor);
             };
             PackedPaperNthashResult result{};
-            const auto resident = seq.try_resident_packed(
-                lo_bp, hi_bp, sizeof(std::uint32_t));
-            if (resident.has_value()
-                && resident->leading_symbol_offset == 0u) {
-                result = run_paper(*resident);
+            const auto access = bioseq::storage::plan_sequence_access(
+                seq,
+                bioseq::storage::sequence_access_requirement::
+                    contiguous_resident,
+                lo_bp,
+                hi_bp,
+                sizeof(std::uint32_t));
+            if (access.route
+                    == bioseq::storage::sequence_access_route::borrow_resident
+                && access.resident.has_value()) {
+                result = run_paper(*access.resident);
             } else {
-                const std::uint64_t admitted_bytes =
-                    bioseq::storage::packed_region_admission_bytes<Alphabet>(
-                        length, sizeof(std::uint32_t));
                 bioseq::parallelism::MemoryAdmissionFailure failure{};
                 auto permit =
                     bioseq::parallelism::MemoryAdmissionController::instance()
-                        .try_reserve(admitted_bytes, &failure);
+                        .try_reserve(access.admission_bytes, &failure);
                 if (!permit) {
                     throw PaperNtHashRuntimeError(fmt::format(
                         "packed-range admission failed: reason={} "
@@ -4913,19 +4923,22 @@ minimizer_dispatch_range(
                             collector, descriptor, window_size, kmer_size);
                 };
                 TwoStackExecutionProof proof{};
-                const auto resident = seq.try_resident_packed(
-                    lo_bp, hi_bp, sizeof(std::uint32_t));
-                if (resident.has_value()
-                    && resident->leading_symbol_offset == 0u) {
-                    proof = run_resident(*resident);
+                const auto access = bioseq::storage::plan_sequence_access(
+                    seq,
+                    bioseq::storage::sequence_access_requirement::
+                        contiguous_resident,
+                    lo_bp,
+                    hi_bp,
+                    sizeof(std::uint32_t));
+                if (access.route
+                        == bioseq::storage::sequence_access_route::
+                            borrow_resident
+                    && access.resident.has_value()) {
+                    proof = run_resident(*access.resident);
                 } else {
-                    const sequence_size_t length = hi_bp - lo_bp;
-                    const std::uint64_t admitted_bytes =
-                        bioseq::storage::packed_region_admission_bytes<Alphabet>(
-                            length, sizeof(std::uint32_t));
                     auto permit =
                         bioseq::parallelism::MemoryAdmissionController::instance()
-                            .try_reserve(admitted_bytes);
+                            .try_reserve(access.admission_bytes);
                     if (!permit) {
                         throw ExactSimdRuntimeError{
                             TwoStackContinuationStatus::non_contiguous_range,
@@ -4960,18 +4973,22 @@ minimizer_dispatch_range(
                     "target minimizer range sketch");
         };
         TwoStackExecutionProof proof{};
-        if (seq.try_resident_packed(lo_bp, hi_bp, 4u).has_value()) {
+        const auto access = bioseq::storage::plan_sequence_access(
+            seq,
+            bioseq::storage::sequence_access_requirement::contiguous_resident,
+            lo_bp,
+            hi_bp,
+            4u);
+        if (access.route
+            == bioseq::storage::sequence_access_route::borrow_resident) {
             proof = run_exact(
                 seq,
                 static_cast<std::size_t>(lo_bp),
                 static_cast<std::size_t>(hi_bp));
         } else {
-            const std::uint64_t admitted_bytes =
-                bioseq::storage::packed_region_admission_bytes<Alphabet>(
-                    length, 4u);
             auto permit =
                 bioseq::parallelism::MemoryAdmissionController::instance()
-                    .try_reserve(admitted_bytes);
+                    .try_reserve(access.admission_bytes);
             if (!permit) {
                 throw ExactSimdRuntimeError{
                     TwoStackContinuationStatus::non_contiguous_range,
@@ -13147,7 +13164,7 @@ template <sequence_alphabet Alphabet,
                 std::vector<MatchResultCollection> wave_seg_out(wave_count);
                 std::vector<std::vector<SegmentFragmentEmission<MinimizerT>>>
                     wave_frag_out(wave_count);
-                pool.parallel_for_with_context(
+                pool.parallel_for_with_context_tracked(
                     wave_lo, wave_hi, 1,
                     bioseq::parallelism::range_body{
                         [&ranges, &wave_seg_out, &wave_frag_out,
@@ -13199,7 +13216,8 @@ template <sequence_alphabet Alphabet,
                             record_target_range_proof(
                                 wave_seg_out[rel], range_proof);
                         }
-                    }});
+                    }},
+                    bioseq::parallelism::current_tracked_job_observer());
 
                 for (std::size_t rel = 0; rel < wave_count; ++rel) {
                     const std::size_t segment_index = current_wave_lo + rel;
@@ -13319,7 +13337,7 @@ template <sequence_alphabet Alphabet,
         }
 
         const std::size_t wave_hi = wave_lo + wave_count;
-        pool.parallel_for_with_context(
+        pool.parallel_for_with_context_tracked(
             wave_lo, wave_hi, 1,
             bioseq::parallelism::range_body{
                 [&ranges, &seg_out, &target_seq, &query_seq, &query_minimizers,
@@ -13361,7 +13379,8 @@ template <sequence_alphabet Alphabet,
                     record_target_range_proof(
                         seg_out[segment_index], range_proof);
                 }
-            }});
+            }},
+            bioseq::parallelism::current_tracked_job_observer());
         wave_lo = wave_hi;
     }
 

@@ -23,6 +23,7 @@ import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.common.circular_append_buffer;
+import bioseq.storage.lazy;
 
 import bioseq.simd.utils;
 export import bioseq.simd.vector_stream;
@@ -2125,62 +2126,21 @@ inline std::strong_ordering stdc_compare(const StdcT& a, const StdcT& b)
         b.convert_to([&result, &ra]<class Sb>(const compact_sequence_range<Sb>& rb) {
             using TraitsA = typename compact_sequence_range<Sa>::traits;
             using TraitsB = typename compact_sequence_range<Sb>::traits;
-            // The dispatch_instance fanout synthesises every (alphabet,
-            // storage_unit) pair at compile time, but at runtime the
-            // DEBUG_ASSERT above pins same alphabet and the typmod pins
-            // same storage_unit_byte_width. Compile-time guards filter
-            // out unreachable pairs so we never try to instantiate
-            // bit_cast_to_storage_unit / compare_sequences_scalar on
-            // mismatched types (e.g. dna5 has 3 bits/char which doesn't
-            // pack evenly into smaller storage units, so the
-            // bit_cast_to_storage_unit constraint fails on dna5).
             if constexpr (
                 !std::is_same_v<typename TraitsA::alphabet_type,
                                 typename TraitsB::alphabet_type>
             ) {
                 (void)ra;
                 (void)rb;
-            } else if constexpr (
-                std::is_same_v<typename TraitsA::storage_unit,
-                               typename TraitsB::storage_unit>
-            ) {
-                result = compare_sequences_scalar(ra, rb);
-            } else if constexpr (
-                is_sequence_bit_castable_to<Sa, typename TraitsB::storage_unit>
-                && sizeof(typename TraitsA::storage_unit) >=
-                   sizeof(typename TraitsB::storage_unit)
-            ) {
-                const auto va =
-                    ra.template bit_cast_to_storage_unit<typename TraitsB::storage_unit>();
-                result = compare_sequences_scalar(va, rb);
-            } else if constexpr (
-                is_sequence_bit_castable_to<Sb, typename TraitsA::storage_unit>
-            ) {
-                const auto vb =
-                    rb.template bit_cast_to_storage_unit<typename TraitsA::storage_unit>();
-                result = compare_sequences_scalar(ra, vb);
             } else {
-                // Unreachable at runtime: same alphabet + different
-                // storage widths that can't bit-cast (e.g. dna5 with
-                // 3-bit leftover). This is a caller-contract
-                // violation, so per DOC0260 R8 raise a load-bearing
-                // bioseq_log<ERR, PG>( …) — DEBUG_ASSERT would be silent in
-                // release builds and return std::strong_ordering::equal
-                // on a value mismatch. NO_POSTGRES build path keeps the
-                // historical DEBUG_ASSERT (aligner exec never hits
-                // cross-storage-width compares with dna5).
-                (void)ra;
-                (void)rb;
-#ifndef NO_POSTGRES
-                bioseq_log<ERR, PG>(
-                    "stdc_compare: cross-storage-width same-alphabet pair "
-                    "with non-bit-castable layout (alphabet does not satisfy "
-                    "is_sequence_custom_alphabet_bit_castable_to)");
-#else
-                DEBUG_ASSERT(false,
-                    "stdc_compare: cross-storage-width same-alphabet pair "
-                    "with non-bit-castable layout (dna5 + mismatched width?)");
-#endif
+                const auto lazy_a = bioseq::storage::make_lazy_in_memory(ra);
+                const auto lazy_b = bioseq::storage::make_lazy_in_memory(rb);
+                const int comparison = bioseq::storage::compare_sequence_views(
+                    bioseq::storage::as_lazy_sequence_view(lazy_a),
+                    bioseq::storage::as_lazy_sequence_view(lazy_b));
+                result = comparison < 0 ? std::strong_ordering::less
+                    : comparison > 0 ? std::strong_ordering::greater
+                                     : std::strong_ordering::equal;
             }
         });
     });

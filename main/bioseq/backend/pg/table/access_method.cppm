@@ -40,6 +40,7 @@ import bioseq.table.io;
 import bioseq.pg_utils;
 import bioseq.storage.indexing_pg.admin;   // DOC0279 §11.2 — index_build_on_insert
 import bioseq.storage.manager;
+import bioseq.storage.scanner_pg;
 import bioseq.table.am_cache;
 import bioseq.types.pg_compact_sequence;
 import bioseq.column.tam;   // DOC0322 §7.4 — tid_to_row_number / row_number_to_tid /
@@ -164,11 +165,15 @@ static double BioseqColumnReadRowsIntoIndex(TableScanDesc scan,
 										bool progress,
 										IndexBuildCallback indexCallback,
 										void *indexCallbackState,
-										EState *estate, ExprState *predicate);
+										EState *estate, ExprState *predicate,
+										bioseq::storage::pg_sequence_source_provider*
+											sourceProvider);
 static void BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 											 IndexInfo *indexInfo, EState *estate,
 											 ExprState *predicate,
-											 ValidateIndexState *state);
+											 ValidateIndexState *state,
+											 bioseq::storage::pg_sequence_source_provider*
+												sourceProvider);
 static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort,
 														ItemPointer targetItemPointer);
 
@@ -2492,6 +2497,84 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 }
 
 
+/** Replace only locator stubs before generic predicate/index expression code. */
+static void
+promote_index_source_locators(
+	Relation relation,
+	TupleTableSlot *slot,
+	bioseq::storage::pg_sequence_source_provider *provider,
+	MemoryContext resultContext)
+{
+	if (provider == nullptr)
+		return;
+	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
+	for (const std::int16_t attno : amc.seq_attnos)
+	{
+		const int index = static_cast<int>(attno) - 1;
+		if (index < 0 || index >= slot->tts_tupleDescriptor->natts
+			|| slot->tts_isnull[index])
+			continue;
+		auto *header = reinterpret_cast<const pgseq_t *>(
+			DatumGetPointer(slot->tts_values[index]));
+		if (!bioseq::storage::is_locator_stub(header))
+			continue;
+		try
+		{
+			slot->tts_values[index] =
+				bioseq::storage::promote_pg_sequence_locator(
+					provider, attno, slot->tts_values[index], resultContext);
+		}
+		catch (bioseq::pg_utils::PostgresErrorAsCpp &error)
+		{
+			ReThrowError(error.release_error_data());
+		}
+		catch (const std::exception &error)
+		{
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq expression-index source promotion failed"),
+				 errdetail("%s", error.what())));
+		}
+		catch (...)
+		{
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq expression-index source promotion failed"),
+				 errdetail("unknown C++ exception")));
+		}
+	}
+}
+
+[[nodiscard]] static bioseq::storage::pg_sequence_source_provider *
+create_index_source_provider(Relation relation, Snapshot snapshot)
+{
+	try
+	{
+		return bioseq::storage::create_standalone_pg_sequence_source_provider(
+			relation, snapshot);
+	}
+	catch (bioseq::pg_utils::PostgresErrorAsCpp &error)
+	{
+		ReThrowError(error.release_error_data());
+	}
+	catch (const std::exception &error)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq expression-index source provider failed"),
+			 errdetail("%s", error.what())));
+	}
+	catch (...)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq expression-index source provider failed"),
+			 errdetail("unknown C++ exception")));
+	}
+	pg_unreachable();
+}
+
+
 static double
 bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 								Relation indexRelation,
@@ -2527,18 +2610,12 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
 
 	/*
-	 * In a normal index build, we use SnapshotAny to retrieve all tuples. In
-	 * a concurrent build or during bootstrap, we take a regular MVCC snapshot
-	 * and index whatever's live according to that.
+	 * Columnar tuples have no dead-row form, so outside bootstrap an explicitly
+	 * registered transaction snapshot is both complete and authoritative for
+	 * locator promotion.  Keeping the table scan, source catalog and fragments
+	 * on this exact snapshot prevents expression-index code from consulting a
+	 * different active snapshot.
 	 */
-	TransactionId OldestXmin = InvalidTransactionId;
-	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
-	{
-		/* ignore lazy VACUUM's */
-		OldestXmin = GetOldestNonRemovableTransactionId_compat(bioseqColumnRelation,
-															   PROCARRAY_FLAGS_VACUUM);
-	}
-
 	Snapshot snapshot = { 0 };
 	bool snapshotRegisteredByUs = false;
 
@@ -2546,7 +2623,7 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	 * For serial index build, we begin our own scan. We may also need to
 	 * register a snapshot whose lifetime is under our direct control.
 	 */
-	if (!TransactionIdIsValid(OldestXmin))
+	if (!IsBootstrapProcessingMode())
 	{
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
 		snapshotRegisteredByUs = true;
@@ -2561,6 +2638,14 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	bool allowAccessStrategy = true;
 	scan = table_beginscan_strat(bioseqColumnRelation, snapshot, nkeys, scanKey,
 								 allowAccessStrategy, allow_sync);
+	bioseq::storage::pg_sequence_source_provider *volatile sourceProvider = nullptr;
+	if (snapshotRegisteredByUs)
+	{
+		auto *bioseqScan = reinterpret_cast<BioseqColumnScanDesc>(scan);
+		bioseqScan->defer_seq_hydration = true;
+		sourceProvider =
+			create_index_source_provider(bioseqColumnRelation, snapshot);
+	}
 
 	if (progress)
 	{
@@ -2577,9 +2662,34 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	econtext->ecxt_scantuple = table_slot_create(bioseqColumnRelation, NULL);
 	ExprState *predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 
-	double reltuples = BioseqColumnReadRowsIntoIndex(scan, indexRelation, indexInfo,
-												 progress, callback, callback_state,
-												 estate, predicate);
+	double volatile reltuples = 0;
+	PG_TRY();
+	{
+		reltuples = BioseqColumnReadRowsIntoIndex(
+			scan, indexRelation, indexInfo, progress, callback,
+			callback_state, estate, predicate,
+			sourceProvider);
+		ResetExprContext(econtext);
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider,
+				/*is_commit=*/true);
+			sourceProvider = nullptr;
+		}
+	}
+	PG_CATCH();
+	{
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider,
+				/*is_commit=*/false);
+			sourceProvider = nullptr;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	table_endscan(scan);
 
 	if (progress)
@@ -2599,7 +2709,7 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
 
-	return reltuples;
+	return static_cast<double>(reltuples);
 }
 
 
@@ -2688,7 +2798,8 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 						  IndexInfo *indexInfo, bool progress,
 						  IndexBuildCallback indexCallback,
 						  void *indexCallbackState, EState *estate,
-						  ExprState *predicate)
+						  ExprState *predicate,
+						  bioseq::storage::pg_sequence_source_provider *sourceProvider)
 {
 	double reltuples = 0;
 
@@ -2716,6 +2827,9 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 		}
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
+		promote_index_source_locators(
+			scan->rs_rd, slot, sourceProvider,
+			econtext->ecxt_per_tuple_memory);
 
 		if (predicate != NULL && !ExecQual(predicate, econtext))
 		{
@@ -2767,9 +2881,40 @@ bioseq_index_validate_scan(Relation bioseqColumnRelation,
 	bool allowSyncScan = false;
 	TableScanDesc scan = table_beginscan_strat(bioseqColumnRelation, snapshot, nkeys, scanKey,
 											   allowAccessStrategy, allowSyncScan);
+	bioseq::storage::pg_sequence_source_provider *volatile sourceProvider = nullptr;
+	if (snapshot != nullptr && IsMVCCSnapshot(snapshot)
+		&& snapshot->regd_count > 0)
+	{
+		auto *bioseqScan = reinterpret_cast<BioseqColumnScanDesc>(scan);
+		bioseqScan->defer_seq_hydration = true;
+		sourceProvider =
+			create_index_source_provider(bioseqColumnRelation, snapshot);
+	}
 
-	BioseqColumnReadMissingRowsIntoIndex(scan, indexRelation, indexInfo, estate,
-									 predicate, validateIndexState);
+	PG_TRY();
+	{
+		BioseqColumnReadMissingRowsIntoIndex(
+			scan, indexRelation, indexInfo, estate, predicate,
+			validateIndexState, sourceProvider);
+		ResetExprContext(econtext);
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider, /*is_commit=*/true);
+			sourceProvider = nullptr;
+		}
+	}
+	PG_CATCH();
+	{
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider, /*is_commit=*/false);
+			sourceProvider = nullptr;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	table_endscan(scan);
 
@@ -2792,7 +2937,8 @@ static void
 BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 								 IndexInfo *indexInfo, EState *estate,
 								 ExprState *predicate,
-								 ValidateIndexState *validateIndexState)
+								 ValidateIndexState *validateIndexState,
+								 bioseq::storage::pg_sequence_source_provider *sourceProvider)
 {
 	BlockNumber lastReportedBlockNumber = InvalidBlockNumber;
 
@@ -2848,6 +2994,9 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 			   ItemPointerCompare(&indexedItemPointerData, bioseqColumnItemPointer) > 0);
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
+		promote_index_source_locators(
+			scan->rs_rd, slot, sourceProvider,
+			econtext->ecxt_per_tuple_memory);
 
 		if (predicate != NULL && !ExecQual(predicate, econtext))
 		{

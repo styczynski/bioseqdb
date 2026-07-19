@@ -71,6 +71,7 @@ import bioseq.indexing.type;
 import bioseq.indexing.minimizer_sequence;   // DOC0345 Patch K — re-exports MinimizerSketchBackend + minimizer_sketch_backend_name (no HWY_NAMESPACE macro needed here)
 import bioseq.storage.manager;
 import bioseq.storage.lazy;
+import bioseq.storage.scanner;
 import bioseq.storage.scanner_pg;
 import bioseq.types.pg_compact_sequence;
 import bioseq.sequences;
@@ -3071,167 +3072,95 @@ void finish_persist_claim(const PersistClaim& claim) noexcept {
     return spi.enabled && spi.update_on_insert;
 }
 
-template <class R>
+template <sequence_alphabet Alphabet>
 struct AsyncMpsResidentTarget {
-    using traits = typename compact_sequence_range<R>::traits;
-    using storage_unit = typename traits::storage_unit;
-    using resident_config = sequence_custom_alphabet<
-        typename traits::alphabet_type,
-        storage_unit,
-        traits::bits_per_char>;
-    using resident_range = compact_sequence_range<resident_config>;
-
-    bioseq::parallelism::MemoryPermit permit;
-    resident_range range;
+    bioseq::storage::admitted_packed_region<Alphabet> owner;
     std::uint64_t packed_bytes = 0;
 };
 
-template <class R, class Scanner>
-[[nodiscard]] std::optional<AsyncMpsResidentTarget<R>>
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<AsyncMpsResidentTarget<Alphabet>>
 try_materialize_async_mps_worker_target(
-        const bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+        std::uint8_t requested_width,
         std::uint64_t sequence_rowno,
         std::string_view index_name) {
-    if constexpr (!Scanner::supports_fragments()) {
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    if (!bioseq::parallelism::task_parallel(pool.mode())
+        || pool.max_concurrency() <= 1) {
         return std::nullopt;
-    } else {
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
-        if (!bioseq::parallelism::task_parallel(pool.mode())
-            || pool.max_concurrency() <= 1) {
-            return std::nullopt;
-        }
-
-        using resident_t = AsyncMpsResidentTarget<R>;
-        using storage_unit = typename resident_t::storage_unit;
-        static_assert(std::is_trivially_destructible_v<
-            std::span<const storage_unit>>);
-        const std::uint64_t total_units64 =
-            static_cast<std::uint64_t>(seq.size());
-        if (total_units64
-            > static_cast<std::uint64_t>(
-                (std::numeric_limits<std::size_t>::max)())) {
-            const std::string owned_index_name{index_name};
-            const char* const index_name_cstr = owned_index_name.c_str();
-            invoke_async_mps_worker_pg_leaf(
-                AsyncMpsWorkerPgFailure::materialize_error_log,
-                [sequence_rowno, index_name_cstr, total_units64] {
-                    inject_async_mps_worker_pg_failure_leaf(
-                        AsyncMpsWorkerPgFailure::materialize_error_log);
-                    ereport(ERROR,
-                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                         errmsg("asynchronous MPS worker target is too large to materialize"),
-                         errdetail("row=%llu index=%s packed_units=%llu",
-                            static_cast<unsigned long long>(sequence_rowno),
-                            index_name_cstr,
-                            static_cast<unsigned long long>(total_units64))));
-                });
-            pg_unreachable();
-        }
-        const std::size_t total_units =
-            static_cast<std::size_t>(total_units64);
+    }
+    const auto access = bioseq::storage::plan_sequence_access(
+        seq,
+        bioseq::storage::sequence_access_requirement::contiguous_resident,
+        0u,
+        seq.bp_size(),
+        requested_width);
+    if (access.route
+        == bioseq::storage::sequence_access_route::borrow_resident) {
+        return std::nullopt;
+    }
+    constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
+    const std::uint64_t reserve_bytes = access.admission_bytes
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - context_reserve_bytes
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : access.admission_bytes + context_reserve_bytes;
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    auto permit = admission.try_reserve(reserve_bytes);
+    if (!permit) {
+        bioseq_log<DBG>(
+            "[bioseq] index: async mps worker row={} index={} target_bp={} "
+            "admitted_bytes={} not admitted for resident materialization; "
+            "using rank stream",
+            static_cast<unsigned long long>(sequence_rowno), index_name,
+            static_cast<unsigned long long>(seq.bp_size()),
+            static_cast<unsigned long long>(access.admission_bytes));
+        return std::nullopt;
+    }
+    record_async_mps_materialize_admission();
+    try {
+        invoke_async_mps_worker_pg_leaf(
+            AsyncMpsWorkerPgFailure::materialize_error_log,
+            [] {
+                inject_async_mps_worker_pg_failure_leaf(
+                    AsyncMpsWorkerPgFailure::materialize_error_log);
+            });
+        invoke_async_mps_worker_pg_leaf(
+            AsyncMpsWorkerPgFailure::materialize_interrupt,
+            [] {
+                inject_async_mps_worker_pg_failure_leaf(
+                    AsyncMpsWorkerPgFailure::materialize_interrupt);
+                CHECK_FOR_INTERRUPTS();
+            });
+        invoke_async_mps_worker_pg_leaf(
+            AsyncMpsWorkerPgFailure::materialize_scanner_read,
+            [] {
+                inject_async_mps_worker_pg_failure_leaf(
+                    AsyncMpsWorkerPgFailure::materialize_scanner_read);
+            });
+        auto owner = bioseq::storage::materialize_packed_region(
+            seq, 0u, seq.bp_size(), requested_width, std::move(*permit));
+        const auto& descriptor = owner.descriptor();
         const std::uint64_t packed_bytes =
-            bioseq::parallelism::saturating_mul(
-                total_units64,
-                static_cast<std::uint64_t>(sizeof(storage_unit)));
-        constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
-        const std::uint64_t reserve_bytes =
-            packed_bytes
-                    > (std::numeric_limits<std::uint64_t>::max)()
-                        - context_reserve_bytes
-                ? (std::numeric_limits<std::uint64_t>::max)()
-                : packed_bytes + context_reserve_bytes;
-
-        auto& admission =
-            bioseq::parallelism::MemoryAdmissionController::instance();
-        const std::uint64_t reserved_before = admission.reserved_bytes();
-        auto permit = admission.try_reserve(reserve_bytes);
-        if (!permit) {
-            bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} target_bp={} "
-                    "fragments={} packed_bytes={} not admitted for resident "
-                    "materialization; using scanner_pg",
-                    static_cast<unsigned long long>(sequence_rowno),
-                    index_name,
-                    static_cast<unsigned long long>(seq.bp_size()),
-                    seq.number_of_fragments(),
-                    static_cast<unsigned long long>(packed_bytes));
-            return std::nullopt;
-        }
-        record_async_mps_materialize_admission();
-
-        /*
-         * The vector lives only inside this try block.  Therefore it is
-         * destroyed before the handler releases the permit and records the
-         * post-unwind admission balance.  Every PostgreSQL-capable operation
-         * in the loop is a leaf that first converts ERROR to a C++ exception.
-         */
-        try {
-			typename resident_t::resident_range::base_container packed(
-				total_units);
-			// Testable normal-size entry to the same error-diagnostic leaf used
-			// by the oversize guard. When armed, this proves a PostgreSQL ERROR
-			// unwinds through both the live packed vector and admission permit
-			// before any fallback.
-			invoke_async_mps_worker_pg_leaf(
-				AsyncMpsWorkerPgFailure::materialize_error_log,
-				[] {
-					inject_async_mps_worker_pg_failure_leaf(
-						AsyncMpsWorkerPgFailure::materialize_error_log);
-				});
-            const std::size_t fragment_units = Scanner::fragment_storage_units;
-            auto* const scanner = std::addressof(seq.scanner());
-            for (std::size_t fragment_no = 0;
-                 fragment_no < seq.number_of_fragments();
-                 ++fragment_no) {
-                if ((fragment_no & std::size_t{0x3ff}) == 0) {
-                    invoke_async_mps_worker_pg_leaf(
-                        AsyncMpsWorkerPgFailure::materialize_interrupt,
-                        [] {
-                            inject_async_mps_worker_pg_failure_leaf(
-                                AsyncMpsWorkerPgFailure::materialize_interrupt);
-                            CHECK_FOR_INTERRUPTS();
-                        });
-                }
-                const std::span<const storage_unit> fragment =
-                    invoke_async_mps_worker_pg_leaf(
-                        AsyncMpsWorkerPgFailure::materialize_scanner_read,
-                        [scanner, fragment_no] {
-                            inject_async_mps_worker_pg_failure_leaf(
-                                AsyncMpsWorkerPgFailure::materialize_scanner_read);
-                            return scanner->read_fragment(fragment_no);
-                        });
-                const std::size_t dst_offset = fragment_no * fragment_units;
-                if (dst_offset >= packed.size()) {
-                    scanner->release_fragment(fragment_no);
-                    break;
-                }
-                const std::size_t copy_units =
-                    std::min(fragment.size(), packed.size() - dst_offset);
-                std::copy_n(
-                    fragment.data(), copy_units, packed.data() + dst_offset);
-                scanner->release_fragment(fragment_no);
-            }
-
-            bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} target_bp={} "
-                    "fragments={} packed_bytes={} materialized resident target",
-                    static_cast<unsigned long long>(sequence_rowno),
-                    index_name,
-                    static_cast<unsigned long long>(seq.bp_size()),
-                    seq.number_of_fragments(),
-                    static_cast<unsigned long long>(packed_bytes));
-
-            return resident_t{
-                std::move(*permit),
-                resident_t::resident_range::from_packed(
-                    std::move(packed), seq.padding()),
-                packed_bytes};
-        } catch (...) {
-            /* `packed` is already gone; now return its admission exactly. */
-            permit->release();
-            const std::uint64_t reserved_after = admission.reserved_bytes();
-            record_async_mps_materialize_failure_unwind(
-                reserved_after == reserved_before);
-            throw;
-        }
+            static_cast<std::uint64_t>(descriptor.unit_count)
+            * descriptor.storage_unit_byte_width;
+        bioseq_log<DBG>(
+            "[bioseq] index: async mps worker row={} index={} target_bp={} "
+            "packed_bytes={} materialized resident target",
+            static_cast<unsigned long long>(sequence_rowno), index_name,
+            static_cast<unsigned long long>(seq.bp_size()),
+            static_cast<unsigned long long>(packed_bytes));
+        return AsyncMpsResidentTarget<Alphabet>{
+            std::move(owner), packed_bytes};
+    } catch (...) {
+        permit->release();
+        const std::uint64_t reserved_after = admission.reserved_bytes();
+        record_async_mps_materialize_failure_unwind(
+            reserved_after == reserved_before);
+        throw;
     }
 }
 
@@ -3383,33 +3312,33 @@ void process_mps_build_claim_cpp(
                     caches,
                     work);
                 try {
+                    const bioseq::storage::postgres_lazy_sequence_binding<S>
+                        source_binding{
+                            target.db_oid, target.tablespace_oid,
+                            target.main_relfilenode, target.column_attno,
+                            meta->locator, meta->last_fragment_padding,
+                            registered_snapshot, caches, work};
                     bioseq::storage::with_lazy_postgres<S>(
-                        target.db_oid,
-                        target.tablespace_oid,
-                        target.main_relfilenode,
-                        target.column_attno,
-                        meta->locator,
-                        meta->last_fragment_padding,
-                        registered_snapshot,
-                        caches,
-                        work,
-                        [&](auto& lazy) {
+                        source_binding,
+                        [&lazy_worker_shareable, meta, &target, &store,
+                         worker_backend](auto source_view) {
                             const bool pg_lazy_worker_shareable =
-                                bioseq::storage::lazy_is_worker_shareable(lazy);
+                                bioseq::storage::lazy_is_worker_shareable(
+                                    source_view);
                             lazy_worker_shareable = pg_lazy_worker_shareable;
                             if (!pg_lazy_worker_shareable) {
                                 if (auto resident =
                                         try_materialize_async_mps_worker_target(
-                                            lazy,
+                                            source_view,
+                                            meta->storage_unit_byte_width,
                                             target.sequence_rowno,
                                             meta->index_name);
                                     resident.has_value()) {
-                                    auto resident_lazy =
-                                        bioseq::storage::make_lazy_in_memory(
-                                            resident->range);
+                                    const auto resident_view =
+                                        resident->owner.view();
                                     lazy_worker_shareable =
                                         bioseq::storage::lazy_is_worker_shareable(
-                                            resident_lazy);
+                                            resident_view);
                                     bioseq_log<DBG>("[bioseq] index: async mps worker row={} index={} "
                                             "using resident target packed_bytes={} "
                                             "lazy_worker_shareable={}",
@@ -3419,9 +3348,6 @@ void process_mps_build_claim_cpp(
                                             static_cast<unsigned long long>(
                                                 resident->packed_bytes),
                                             lazy_worker_shareable);
-                                    const auto resident_view =
-                                        bioseq::storage::as_lazy_sequence_view(
-                                            resident_lazy);
                                     bioseq::indexing::MinimizerSequenceMergedIndex<
                                         bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
                                             store, resident_view, worker_backend);
@@ -3434,8 +3360,6 @@ void process_mps_build_claim_cpp(
                                         target.sequence_rowno),
                                     meta->index_name,
                                     lazy_worker_shareable);
-                            const auto source_view =
-                                bioseq::storage::as_lazy_sequence_view(lazy);
                             bioseq::indexing::MinimizerSequenceMergedIndex<
                                 bioseq::storage::indexing::IndexStorageFragmentPg>::rebuild(
                                     store, source_view, worker_backend);

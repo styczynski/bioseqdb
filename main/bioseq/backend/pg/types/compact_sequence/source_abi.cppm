@@ -191,21 +191,44 @@ inline void pg_sequence_read_session_reset(void* argument) noexcept
 export [[nodiscard]] inline pg_sequence_read_session*
 begin_pg_sequence_read_session(MemoryContext parent)
 {
-    auto* session = static_cast<pg_sequence_read_session*>(
-        MemoryContextAllocZero(parent, sizeof(pg_sequence_read_session)));
-    ::new (static_cast<void*>(&session->backend_thread))
-        pg_sequence_backend_thread_token(
-            pg_sequence_backend_thread_token::capture());
-    session->control_context = parent;
-    session->payload_context = AllocSetContextCreate(
-        parent, "bioseq sequence read session", ALLOCSET_SMALL_SIZES);
-    session->accepting_entries = true;
-    session->callback_armed = true;
-    session->reset_callback.func = pg_sequence_read_session_reset;
-    session->reset_callback.arg = session;
-    MemoryContextRegisterResetCallback(
-        session->payload_context, &session->reset_callback);
-    return session;
+    pg_sequence_read_session* volatile pending = nullptr;
+    bool volatile token_constructed = false;
+    PG_TRY();
+    {
+        auto* session = static_cast<pg_sequence_read_session*>(
+            MemoryContextAllocZero(parent, sizeof(pg_sequence_read_session)));
+        pending = session;
+        ::new (static_cast<void*>(&session->backend_thread))
+            pg_sequence_backend_thread_token(
+                pg_sequence_backend_thread_token::capture());
+        token_constructed = true;
+        session->control_context = parent;
+        session->payload_context = AllocSetContextCreate(
+            parent, "bioseq sequence read session", ALLOCSET_SMALL_SIZES);
+        session->accepting_entries = true;
+        session->callback_armed = true;
+        session->reset_callback.func = pg_sequence_read_session_reset;
+        session->reset_callback.arg = session;
+        MemoryContextRegisterResetCallback(
+            session->payload_context, &session->reset_callback);
+    }
+    PG_CATCH();
+    {
+        auto* session = const_cast<pg_sequence_read_session*>(pending);
+        if (session != nullptr) {
+            if (session->payload_context != nullptr) {
+                MemoryContextDelete(session->payload_context);
+                session->payload_context = nullptr;
+            }
+            if (token_constructed) {
+                session->backend_thread.~pg_sequence_backend_thread_token();
+            }
+            pfree(session);
+        }
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    return const_cast<pg_sequence_read_session*>(pending);
 }
 
 export inline void register_pg_sequence_call_owner(
@@ -216,10 +239,22 @@ export inline void register_pg_sequence_call_owner(
     if (!session.backend_thread.is_current() || !session.accepting_entries) {
         return;
     }
-    MemoryContext old = MemoryContextSwitchTo(session.payload_context);
-    auto* entry = static_cast<pg_sequence_session_owner_entry*>(
-        palloc0(sizeof(pg_sequence_session_owner_entry)));
-    MemoryContextSwitchTo(old);
+    pg_sequence_session_owner_entry* volatile pending = nullptr;
+    const MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        MemoryContextSwitchTo(session.payload_context);
+        pending = static_cast<pg_sequence_session_owner_entry*>(
+            palloc0(sizeof(pg_sequence_session_owner_entry)));
+        MemoryContextSwitchTo(saved_context);
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    auto* entry = const_cast<pg_sequence_session_owner_entry*>(pending);
     entry->owner = owner;
     entry->release_noexcept = release_noexcept;
     entry->next = session.owners;
@@ -245,6 +280,7 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     }
 
     void* volatile concrete = nullptr;
+    const MemoryContext saved_context = CurrentMemoryContext;
     PG_TRY();
     {
         concrete = create(factory_argument, session.payload_context);
@@ -253,10 +289,10 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
                     (errcode(ERRCODE_INTERNAL_ERROR),
                      errmsg("bioseq source read-session factory returned null")));
         }
-        MemoryContext old = MemoryContextSwitchTo(session.payload_context);
+        MemoryContextSwitchTo(session.payload_context);
         auto* entry = static_cast<pg_sequence_read_entry*>(
             palloc0(sizeof(pg_sequence_read_entry)));
-        MemoryContextSwitchTo(old);
+        MemoryContextSwitchTo(saved_context);
         entry->key = key;
         entry->concrete_state = concrete;
         entry->finish = finish;
@@ -266,15 +302,16 @@ export [[nodiscard]] inline void* find_or_create_pg_sequence_read_entry(
     }
     PG_CATCH();
     {
+        MemoryContextSwitchTo(saved_context);
         /* The concrete creator owns cleanup until it returns.  Once returned,
          * abort it here if publication/allocation failed. */
         if (concrete != nullptr) {
-            abort_noexcept(concrete);
+            abort_noexcept(const_cast<void*>(concrete));
         }
         PG_RE_THROW();
     }
     PG_END_TRY();
-    return concrete;
+    return const_cast<void*>(concrete);
 }
 
 export inline void finish_pg_sequence_read_session(
@@ -324,7 +361,15 @@ export inline void abort_pg_sequence_read_session_noexcept(
     MemoryContext payload = session->payload_context;
     session->payload_context = nullptr;
     if (payload != nullptr) {
-        MemoryContextDelete(payload);
+        PG_TRY();
+        {
+            MemoryContextDelete(payload);
+        }
+        PG_CATCH();
+        {
+            FlushErrorState();
+        }
+        PG_END_TRY();
     }
     session->backend_thread.~pg_sequence_backend_thread_token();
     pfree(session);

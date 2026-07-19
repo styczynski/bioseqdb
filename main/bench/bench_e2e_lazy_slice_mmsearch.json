@@ -1,0 +1,76 @@
+{
+  "params": {
+    "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced": {
+      "_": {
+        "type": "integer",
+        "default": 0,
+        "description": "DOC0377 nonzero sliced/concat mmsearch coordinate-rebasing proof"
+      },
+      "minimizer_index": {
+        "type": "string",
+        "default": "minimizers_per_fragment",
+        "enum": ["minimizers_per_fragment"]
+      },
+      "recompute_async_persist": {
+        "type": "string",
+        "default": "off",
+        "enum": ["off"]
+      },
+      "pipeline_mode": {
+        "type": "string",
+        "default": "task_parallel",
+        "enum": ["task_parallel"]
+      }
+    }
+  },
+  "test_cases": {
+    "E2E_LAZY_SLICE_DNA4": {
+      "concurrency": 1,
+      "data": {
+        "alphabet": "dna4",
+        "size_label": "lazy_slice_2mbp_dna4",
+        "reference_length": 2000000,
+        "fragment_count": 1,
+        "fragment_length_mean": 100000,
+        "fragment_length_stddev": 1000,
+        "substitution_rate": 0.001,
+        "insertion_rate": 0.0005,
+        "deletion_rate": 0.0005,
+        "insertion_length_mean": 1.0,
+        "deletion_length_mean": 1.0,
+        "reverse_complement_rate": 0.5,
+        "kmer_size": 15,
+        "window_size": 10,
+        "minimap2_split_bp": 2000000,
+        "seed": 3770377
+      },
+      "description": "One selective nonidentity target-slice/concat SQL run with generated coordinate, strand, and optional CIGAR validation."
+    }
+  },
+  "bench_e2e": {
+    "tags": ["e2e", "doc0377", "slice", "mmsearch"],
+    "description": "Selective DOC0377 nonzero target-slice/concat mmsearch run; slice-local hits are rebased and checked against generated logical coordinates, strand, and CIGAR truth.",
+    "fast": false,
+    "concurrency": {"bench_lock": true, "concurrency": false},
+    "matrix": {
+      "for": {"E2E_LAZY_SLICE_DNA4": 1},
+      "over": {
+        "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced": {
+          "minimizer_index": ["minimizers_per_fragment"],
+          "recompute_async_persist": ["off"],
+          "pipeline_mode": ["task_parallel"]
+        }
+      },
+      "by_regions": true,
+      "metrics": {
+        "wall_clock_ns": {"rules": []},
+        "region_total_ns": {"type": "region", "rules": []},
+        "match_count": {"type": "evaluation"},
+        "found_fraction": {"type": "evaluation", "rules": []},
+        "mean_position_offset_bp": {"type": "evaluation", "rules": []},
+        "measured_region_ns_manual": {"type": "evaluation", "rules": []}
+      }
+    }
+  },
+  "regression_rules": []
+}

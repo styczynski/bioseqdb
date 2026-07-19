@@ -30,6 +30,7 @@ import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
+import bioseq.types.pg_compact_sequence;
 
 namespace bioseq::scheduler {
 
@@ -102,6 +103,11 @@ void DispatchBufferRuntime::replace_executor_snapshot(
 void DispatchBufferRuntime::bind_persisted_gpu_operation_evidence_sink(
     bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink) {
     as_buffer(impl)->bind_persisted_gpu_operation_evidence_sink(sink);
+}
+
+void DispatchBufferRuntime::bind_slice_async_owner(
+    slice_async_owner_guard* owner) {
+    as_buffer(impl)->bind_slice_async_owner(owner);
 }
 
 void DispatchBufferRuntime::configure_mmsearch(

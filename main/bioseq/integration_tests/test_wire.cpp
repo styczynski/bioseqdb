@@ -63,10 +63,11 @@ TEST_CASE("COPY BINARY round-trip preserves bioseq.seq payloads",
                  "FROM {} ORDER BY pk;",
                  kSrc));
     const auto dst_rows = query_rows(
-        ctx, fmt::format(
-                 "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
-                 "FROM {} ORDER BY pk;",
-                 kDst));
+        ctx,
+        fmt::format(
+            "SELECT pk, seq0::text, bioseq.len(seq0), bioseq.unit_len(seq0) "
+            "FROM {} ORDER BY pk;",
+            kDst));
 
     REQUIRE(src_rows == dst_rows);
     REQUIRE(src_rows.size() == 4);
@@ -74,17 +75,24 @@ TEST_CASE("COPY BINARY round-trip preserves bioseq.seq payloads",
 
 TEST_CASE("seq_recv rejects malformed wire payloads (or refuses to be invoked)",
           "[seq][wire][recv][negative]") {
-    auto ctx = fresh_context();
-    // setup.sql Test 12: a wire layout with bp_size=99 but unit_count=0 must
-    // not match the alphabet/width-derived bp_size. Some builds declare
-    // seq_recv as `internal`-only; in that case the call itself fails. Both
-    // outcomes are acceptable — we only require that the connection stays
-    // healthy and the call did NOT silently succeed.
-    REQUIRE(sql_fails(
-        ctx,
-        "SELECT bioseq.seq_recv("
-        "    e'\\\\x0000000000000000630000000000'::bytea, 0::oid, -1);"));
+  auto ctx = fresh_context();
+  // setup.sql Test 12: a wire layout with bp_size=99 but unit_count=0 must
+  // not match the alphabet/width-derived bp_size. Some builds declare
+  // seq_recv as `internal`-only; in that case the call itself fails. Both
+  // outcomes are acceptable — we only require that the connection stays
+  // healthy and the call did NOT silently succeed.
+  REQUIRE(sql_fails(
+      ctx, "SELECT bioseq.seq_recv("
+           "    e'\\\\x0000000000000000630000000000'::bytea, 0::oid, -1);"));
 
-    // Sanity check: connection is still usable after the failed call.
-    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+  // Sanity check: connection is still usable after the failed call.
+  REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
+TEST_CASE(
+    "letter_recv rejects unknown versions, bad ranks, and typmod mismatch",
+    "[letter][wire][recv][negative]") {
+  auto ctx = fresh_context();
+  REQUIRE(query_scalar(
+              ctx, "SELECT bioseq_internal.letter_wire_self_test();") == "t");
 }

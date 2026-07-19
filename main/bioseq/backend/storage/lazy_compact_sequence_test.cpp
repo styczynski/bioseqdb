@@ -107,6 +107,10 @@ struct mock_lazy_state {
     std::vector<std::uint8_t> ranks;
     std::optional<facade_t::resident_packed_region> resident;
     std::size_t callback_count{};
+    std::size_t resident_probe_count{};
+    std::size_t bulk_copy_attempt_count{};
+    std::size_t bulk_copy_success_count{};
+    bool bulk_copy_enabled{};
     bool worker_shareable{};
 };
 
@@ -147,11 +151,44 @@ template <bool IsReversed, bool WriteReversed>
         sequence_size_t,
         sequence_size_t,
         std::uint8_t) noexcept {
-    return static_cast<const mock_lazy_state*>(opaque)->resident;
+    auto& state = *const_cast<mock_lazy_state*>(
+        static_cast<const mock_lazy_state*>(opaque));
+    ++state.resident_probe_count;
+    return state.resident;
 }
 
 [[nodiscard]] bool mock_worker_shareable(void const* opaque) noexcept {
     return static_cast<const mock_lazy_state*>(opaque)->worker_shareable;
+}
+
+[[nodiscard]] bool mock_copy_full_packed(
+        void const* opaque,
+        void* destination,
+        std::size_t unit_count,
+        std::uint8_t requested_width) {
+    auto& state = *const_cast<mock_lazy_state*>(
+        static_cast<const mock_lazy_state*>(opaque));
+    ++state.bulk_copy_attempt_count;
+    constexpr std::size_t letters_per_unit = 32u;
+    const std::size_t expected_units =
+        state.ranks.size() / letters_per_unit
+        + static_cast<std::size_t>(
+            state.ranks.size() % letters_per_unit != 0u);
+    if (!state.bulk_copy_enabled || requested_width != sizeof(std::uint64_t)
+        || unit_count != expected_units
+        || (unit_count != 0u && destination == nullptr)) {
+        return false;
+    }
+    auto units = std::span<std::uint64_t>{
+        static_cast<std::uint64_t*>(destination), unit_count};
+    std::fill(units.begin(), units.end(), std::uint64_t{});
+    for (std::size_t index = 0u; index < state.ranks.size(); ++index) {
+        units[index / letters_per_unit] |=
+            static_cast<std::uint64_t>(state.ranks[index])
+            << (2u * (index % letters_per_unit));
+    }
+    ++state.bulk_copy_success_count;
+    return true;
 }
 
 inline const facade_t::backend_ops mock_ops{
@@ -163,6 +200,7 @@ inline const facade_t::backend_ops mock_ops{
         &mock_ptr_at<true, true>,
     },
     .try_resident_packed = &mock_resident_probe,
+    .copy_full_packed = &mock_copy_full_packed,
     .worker_shareable = &mock_worker_shareable,
 };
 
@@ -170,9 +208,11 @@ inline const facade_t::backend_ops mock_ops{
     return facade_t{std::addressof(state), std::addressof(mock_ops)};
 }
 
-template <class Unit>
+template <class Alphabet, class Unit>
 void require_rank_pack_width() {
-    using instance_t = sequence_custom_alphabet<seq::dna4, Unit, 2>;
+    constexpr std::size_t bits =
+        seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>);
+    using instance_t = sequence_custom_alphabet<Alphabet, Unit, bits>;
     using grow_sink_t = bioseq::sequences::growing_rank_pack_unit_sink<Unit>;
     using fixed_sink_t = bioseq::sequences::fixed_rank_pack_unit_sink<Unit>;
     using grow_packer_t = bioseq::sequences::checked_rank_pack_sink<
@@ -185,15 +225,35 @@ void require_rank_pack_width() {
         bioseq::sequences::invalid_rank_policy::reject,
         bioseq::sequences::pack_capacity_policy::fixed_span,
         fixed_sink_t>;
-    constexpr std::size_t letters_per_unit = sizeof(Unit) * 4u;
+    constexpr std::size_t letters_per_unit =
+        std::numeric_limits<Unit>::digits / bits;
+    constexpr std::size_t alphabet_size = seqan3::alphabet_size<Alphabet>;
+    const std::array<std::size_t, 10> lengths{{
+        0u,
+        1u,
+        letters_per_unit - 1u,
+        letters_per_unit,
+        letters_per_unit + 1u,
+        letters_per_unit * 2u - 1u,
+        letters_per_unit * 2u,
+        letters_per_unit * 2u + 1u,
+        256u,
+        257u,
+    }};
 
-    for (std::size_t length = 0u; length <= letters_per_unit + 1u; ++length) {
+    for (const std::size_t length : lengths) {
         std::vector<std::uint8_t> ranks(length);
         for (std::size_t index = 0u; index < length; ++index) {
-            ranks[index] = static_cast<std::uint8_t>(index & 3u);
+            ranks[index] = static_cast<std::uint8_t>(index % alphabet_size);
         }
         const std::size_t expected_units =
             (length + letters_per_unit - 1u) / letters_per_unit;
+        std::vector<Unit> expected(expected_units);
+        for (std::size_t index = 0u; index < length; ++index) {
+            const auto shift = (index % letters_per_unit) * bits;
+            expected[index / letters_per_unit] |= static_cast<Unit>(
+                static_cast<Unit>(ranks[index]) << shift);
+        }
 
         std::vector<Unit> grown;
         grow_packer_t growing{grow_sink_t{grown}};
@@ -210,11 +270,45 @@ void require_rank_pack_width() {
         const auto fixed_result = fixed_writer.finish(length, expected_units);
         REQUIRE(fixed_result.status == bioseq::sequences::rank_pack_status::ok);
         REQUIRE(fixed == grown);
+        REQUIRE(fixed == expected);
         REQUIRE(fixed_result.padding_letters
                 == (length == 0u || length % letters_per_unit == 0u
                     ? 0u
                     : letters_per_unit - length % letters_per_unit));
     }
+}
+
+struct collecting_rank_writer {
+    std::vector<std::uint8_t> ranks;
+
+    void append_ranks(std::span<const std::uint8_t> chunk) {
+        ranks.insert(ranks.end(), chunk.begin(), chunk.end());
+    }
+};
+
+template <bioseq::storage::sequence_transform Transform>
+void require_stream_transform(
+        facade_t view,
+        std::span<const std::uint8_t> source,
+        std::size_t from,
+        std::size_t to) {
+    collecting_rank_writer writer;
+    bioseq::storage::stream_transformed_packed<Transform>(
+        view, from, to, writer);
+
+    std::vector<std::uint8_t> expected(to - from);
+    for (std::size_t index = 0u; index < expected.size(); ++index) {
+        const std::size_t source_index =
+            bioseq::storage::has_reverse(Transform)
+            ? to - 1u - index
+            : from + index;
+        std::uint8_t rank = source[source_index];
+        if constexpr (bioseq::storage::has_complement(Transform)) {
+            rank = facade_t::traits::letter_complement(rank);
+        }
+        expected[index] = rank;
+    }
+    REQUIRE(writer.ranks == expected);
 }
 
 template <class Unit>
@@ -545,12 +639,16 @@ TEST_CASE("DOC0377 — flat and fragmented backends erase to one canonical facad
     range_t range(data);
     auto flat_owner = make_lazy_in_memory(range);
     existing_fragmented_t fragmented_owner{chunked2::from_range(range)};
+    const auto range_view = as_lazy_sequence_view(range);
     const auto flat_view = as_lazy_sequence_view(flat_owner);
     const auto fragmented_view = as_lazy_sequence_view(fragmented_owner);
+    static_assert(std::same_as<decltype(range_view), decltype(flat_view)>);
     static_assert(std::same_as<decltype(flat_view), decltype(fragmented_view)>);
 
+    REQUIRE(range_view.bp_size() == 600u);
     REQUIRE(flat_view.bp_size() == 600u);
     REQUIRE(fragmented_view.bp_size() == 600u);
+    REQUIRE(lazy_is_worker_shareable(range_view));
     REQUIRE(lazy_is_worker_shareable(flat_view));
     REQUIRE_FALSE(lazy_is_worker_shareable(fragmented_view));
 
@@ -559,6 +657,10 @@ TEST_CASE("DOC0377 — flat and fragmented backends erase to one canonical facad
         {255u, 513u}, {0u, 600u},
     }};
     for (const auto [from, to] : windows) {
+        require_orientation_matches<false, false>(range, range_view, from, to);
+        require_orientation_matches<false, true>(range, range_view, from, to);
+        require_orientation_matches<true, false>(range, range_view, from, to);
+        require_orientation_matches<true, true>(range, range_view, from, to);
         require_orientation_matches<false, false>(range, flat_view, from, to);
         require_orientation_matches<false, true>(range, flat_view, from, to);
         require_orientation_matches<true, false>(range, flat_view, from, to);
@@ -583,6 +685,11 @@ TEST_CASE("DOC0377 — flat and fragmented backends erase to one canonical facad
     REQUIRE(resident->trailing_padding_letters == 23u);
     REQUIRE_FALSE(flat_view.try_resident_packed(3u, 70u, 4u).has_value());
     REQUIRE_FALSE(fragmented_view.try_resident_packed(3u, 70u, 8u).has_value());
+
+    const auto range_resident = range_view.try_resident_packed(3u, 70u, 8u);
+    REQUIRE(range_resident.has_value());
+    REQUIRE(range_resident->units == resident->units);
+    REQUIRE(range_resident->unit_count == resident->unit_count);
 
     const auto empty = flat_view.try_resident_packed(600u, 600u, 8u);
     REQUIRE(empty.has_value());
@@ -703,10 +810,14 @@ TEST_CASE("DOC0377 — exact resident probes support every physical width",
 
 TEST_CASE("DOC0377 — checked rank packing is byte-identical for grow and fixed sinks",
           "[lazy-view][rank-pack][unit]") {
-    require_rank_pack_width<std::uint8_t>();
-    require_rank_pack_width<std::uint16_t>();
-    require_rank_pack_width<std::uint32_t>();
-    require_rank_pack_width<std::uint64_t>();
+    require_rank_pack_width<seq::dna4, std::uint8_t>();
+    require_rank_pack_width<seq::dna4, std::uint16_t>();
+    require_rank_pack_width<seq::dna4, std::uint32_t>();
+    require_rank_pack_width<seq::dna4, std::uint64_t>();
+    require_rank_pack_width<seq::dna5, std::uint8_t>();
+    require_rank_pack_width<seq::dna5, std::uint16_t>();
+    require_rank_pack_width<seq::dna5, std::uint32_t>();
+    require_rank_pack_width<seq::dna5, std::uint64_t>();
 }
 
 TEST_CASE("DOC0377 — checked rank packing reports invalid input and capacity mismatches",
@@ -854,4 +965,254 @@ TEST_CASE("DOC0377 — logical comparison and hash ignore chunk and storage layo
     right_chunks.back().clear();
     REQUIRE(bioseq::storage::compare_logical_rank_streams(
                 left_chunks, right_chunks) > 0);
+}
+
+TEST_CASE("DOC0377 — transformed stream preserves subrange coordinates across chunks",
+          "[lazy-view][transform][rank-pack][unit]") {
+    auto data = make_dna4(777u);
+    range_t range(data);
+    auto flat_owner = make_lazy_in_memory(range);
+    existing_fragmented_t fragmented_owner{chunked2::from_range(range)};
+    const auto flat_view = as_lazy_sequence_view(flat_owner);
+    const auto fragmented_view = as_lazy_sequence_view(fragmented_owner);
+
+    std::vector<std::uint8_t> ranks(data.size());
+    for (std::size_t index = 0u; index < data.size(); ++index) {
+        ranks[index] = static_cast<std::uint8_t>(data[index].to_rank());
+    }
+    constexpr std::size_t from = 37u;
+    constexpr std::size_t to = 731u;
+
+    require_stream_transform<
+        bioseq::storage::sequence_transform::identity>(
+            flat_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::reversed>(
+            flat_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::complemented>(
+            flat_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::reverse_complement>(
+            flat_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::identity>(
+            fragmented_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::reversed>(
+            fragmented_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::complemented>(
+            fragmented_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::reverse_complement>(
+            fragmented_view, ranks, from, to);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::reverse_complement>(
+            fragmented_view, ranks, 256u, 257u);
+    require_stream_transform<
+        bioseq::storage::sequence_transform::identity>(
+            fragmented_view, ranks, 409u, 409u);
+
+    collecting_rank_writer writer;
+    REQUIRE_THROWS_AS(
+        bioseq::storage::stream_transformed_packed<
+            bioseq::storage::sequence_transform::identity>(
+                flat_view, 12u, 778u, writer),
+        std::invalid_argument);
+}
+
+TEST_CASE("DOC0377 — access policy borrows only aligned exact residents",
+          "[lazy-view][access-policy][resident][unit]") {
+    auto data = make_dna4(100u);
+    range_t range(data);
+    auto flat_owner = make_lazy_in_memory(range);
+    existing_fragmented_t fragmented_owner{chunked2::from_range(range)};
+    const auto flat_view = as_lazy_sequence_view(flat_owner);
+    const auto fragmented_view = as_lazy_sequence_view(fragmented_owner);
+    using bioseq::storage::sequence_access_requirement;
+    using bioseq::storage::sequence_access_route;
+
+    const auto streaming = bioseq::storage::plan_sequence_access(
+        fragmented_view,
+        sequence_access_requirement::sequential_symbols,
+        3u,
+        76u);
+    REQUIRE(streaming.route == sequence_access_route::stream_symbols);
+    REQUIRE(streaming.admission_bytes == 0u);
+    REQUIRE_FALSE(streaming.resident.has_value());
+
+    const auto resident = bioseq::storage::plan_sequence_access(
+        flat_view,
+        sequence_access_requirement::contiguous_resident,
+        0u,
+        100u,
+        8u);
+    REQUIRE(resident.route == sequence_access_route::borrow_resident);
+    REQUIRE(resident.resident.has_value());
+    REQUIRE(resident.resident->leading_symbol_offset == 0u);
+    REQUIRE(resident.admission_bytes == 0u);
+
+    const auto unaligned = bioseq::storage::plan_sequence_access(
+        flat_view,
+        sequence_access_requirement::contiguous_resident,
+        3u,
+        76u,
+        8u);
+    REQUIRE(unaligned.route == sequence_access_route::materialize_admitted);
+    REQUIRE_FALSE(unaligned.resident.has_value());
+    REQUIRE(unaligned.admission_bytes
+            == bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+                73u, 8u));
+
+    const auto fragmented = bioseq::storage::plan_sequence_access(
+        fragmented_view,
+        sequence_access_requirement::contiguous_resident,
+        0u,
+        100u,
+        8u);
+    REQUIRE(fragmented.route
+            == sequence_access_route::materialize_admitted);
+    REQUIRE_FALSE(fragmented.resident.has_value());
+
+    const auto bounded = bioseq::storage::plan_sequence_access(
+        flat_view,
+        sequence_access_requirement::bounded_random_window,
+        0u,
+        100u,
+        8u);
+    REQUIRE(bounded.route == sequence_access_route::materialize_admitted);
+    REQUIRE_FALSE(bounded.resident.has_value());
+
+    REQUIRE_THROWS_AS(
+        bioseq::storage::plan_sequence_access(
+            flat_view,
+            sequence_access_requirement::contiguous_resident,
+            0u,
+            100u,
+            3u),
+        std::invalid_argument);
+    REQUIRE_THROWS_AS(
+        bioseq::storage::plan_sequence_access(
+            flat_view,
+            sequence_access_requirement::sequential_symbols,
+            101u,
+            100u),
+        std::invalid_argument);
+}
+
+TEST_CASE("DOC0377 — streaming consumers never probe poison resident storage",
+          "[lazy-view][poison][stream][admission][unit]") {
+    mock_lazy_state state;
+    state.ranks.resize(777u);
+    for (std::size_t index = 0u; index < state.ranks.size(); ++index) {
+        state.ranks[index] = static_cast<std::uint8_t>(index & 3u);
+    }
+    const auto view = make_mock_view(state);
+
+    collecting_rank_writer streamed;
+    bioseq::storage::stream_transformed_packed<
+        bioseq::storage::sequence_transform::identity>(
+            view, 0u, view.bp_size(), streamed);
+    REQUIRE(streamed.ranks == state.ranks);
+    REQUIRE(state.resident_probe_count == 0u);
+    REQUIRE(state.callback_count == 4u);
+
+    const auto hash = bioseq::storage::sequence_logical_hash_v1(view, 19u);
+    REQUIRE(hash == bioseq::storage::sequence_logical_hash_bytes_v1(
+        state.ranks, state.ranks.size(), 19u));
+    REQUIRE(state.resident_probe_count == 0u);
+    REQUIRE(bioseq::storage::compare_sequence_views(view, view) == 0);
+    REQUIRE(state.resident_probe_count == 0u);
+
+    const auto counts = bioseq::indexing::tally_symbol_counts(view);
+    REQUIRE(counts.size() == 4u);
+    REQUIRE(counts[0] + counts[1] + counts[2] + counts[3]
+            == static_cast<std::int64_t>(state.ranks.size()));
+    REQUIRE(state.resident_probe_count == 0u);
+
+    const auto streaming = bioseq::storage::plan_sequence_access(
+        view,
+        bioseq::storage::sequence_access_requirement::sequential_symbols,
+        0u,
+        view.bp_size());
+    REQUIRE(streaming.route
+            == bioseq::storage::sequence_access_route::stream_symbols);
+    REQUIRE(state.resident_probe_count == 0u);
+
+    const auto resident = bioseq::storage::plan_sequence_access(
+        view,
+        bioseq::storage::sequence_access_requirement::contiguous_resident,
+        0u,
+        view.bp_size(),
+        4u);
+    REQUIRE(resident.route
+            == bioseq::storage::sequence_access_route::materialize_admitted);
+    REQUIRE(state.resident_probe_count == 1u);
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t reserved_before = admission.reserved_bytes();
+    auto permit = admission.try_reserve(resident.admission_bytes);
+    REQUIRE(permit.has_value());
+    {
+        auto owner = bioseq::storage::materialize_packed_region(
+            view, 0u, view.bp_size(), 4u, std::move(*permit));
+        REQUIRE(admission.reserved_bytes()
+                == reserved_before + resident.admission_bytes);
+        REQUIRE(owner.descriptor().bp_length == view.bp_size());
+        REQUIRE(owner.descriptor().leading_symbol_offset == 0u);
+        REQUIRE(state.resident_probe_count == 1u);
+    }
+    REQUIRE(admission.reserved_bytes() == reserved_before);
+}
+
+TEST_CASE("DOC0377 full packed materialization uses one optional bulk copy",
+          "[lazy-view][materialize][bulk-copy][parity][unit]") {
+    mock_lazy_state state;
+    state.ranks.resize(777u);
+    for (std::size_t index = 0u; index < state.ranks.size(); ++index) {
+        state.ranks[index] = static_cast<std::uint8_t>((index * 3u) & 3u);
+    }
+    state.bulk_copy_enabled = true;
+    const auto view = make_mock_view(state);
+    auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+
+    const std::uint64_t full_bytes =
+        bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            view.bp_size(), 8u);
+    auto full_permit = admission.try_reserve(full_bytes);
+    REQUIRE(full_permit.has_value());
+    {
+        auto owner = bioseq::storage::materialize_packed_region(
+            view, 0u, view.bp_size(), 8u, std::move(*full_permit));
+        REQUIRE(state.bulk_copy_attempt_count == 1u);
+        REQUIRE(state.bulk_copy_success_count == 1u);
+        REQUIRE(state.callback_count == 0u);
+        std::vector<std::uint8_t> observed(state.ranks.size());
+        owner.view().template to_encoded_into<false, false>(
+            observed, 0u, observed.size());
+        REQUIRE(observed == state.ranks);
+    }
+
+    const sequence_size_t partial_from = 3u;
+    const sequence_size_t partial_to = view.bp_size() - 5u;
+    const std::uint64_t partial_bytes =
+        bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            partial_to - partial_from, 8u);
+    auto partial_permit = admission.try_reserve(partial_bytes);
+    REQUIRE(partial_permit.has_value());
+    {
+        auto owner = bioseq::storage::materialize_packed_region(
+            view, partial_from, partial_to, 8u,
+            std::move(*partial_permit));
+        REQUIRE(state.bulk_copy_attempt_count == 1u);
+        REQUIRE(state.bulk_copy_success_count == 1u);
+        REQUIRE(state.callback_count > 0u);
+        std::vector<std::uint8_t> observed(
+            static_cast<std::size_t>(partial_to - partial_from));
+        owner.view().template to_encoded_into<false, false>(
+            observed, 0u, observed.size());
+        REQUIRE(std::equal(
+            observed.begin(), observed.end(),
+            state.ranks.begin() + static_cast<std::ptrdiff_t>(partial_from)));
+    }
 }

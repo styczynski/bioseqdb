@@ -13,6 +13,8 @@
 
 #include <array>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -20,6 +22,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -57,21 +60,105 @@ using minimizer_tuple_t =
 }
 
 [[nodiscard]] static bool software_vulkan_ready() {
-    auto& runtime = vk::Runtime::instance();
-    return runtime.usable() && runtime.features().software_device;
+  auto &runtime = vk::Runtime::instance();
+  return runtime.usable() && runtime.features().software_device;
 }
+
+#ifdef BIOSEQ_TEST_INDEXES
+using vulkan_lifetime_facade =
+    bioseq::storage::basic_lazy_sequence_view<seq::dna4>;
+
+struct VulkanLifetimeSourceState {
+  std::vector<std::uint8_t> ranks;
+  std::thread::id backend_thread;
+  std::atomic<std::uint64_t> *destructions = nullptr;
+  mutable std::atomic<std::uint64_t> read_calls{0u};
+  mutable std::atomic<std::uint64_t> resident_probes{0u};
+  mutable std::atomic<bool> wrong_thread{false};
+
+  ~VulkanLifetimeSourceState() {
+    if (destructions != nullptr) {
+      destructions->fetch_add(1u, std::memory_order_relaxed);
+    }
+  }
+};
+
+template <bool IsReversed, bool WriteReversed>
+[[nodiscard]] const std::uint8_t *
+vulkan_lifetime_ptr_at(const void *opaque,
+                       bioseq::storage::sequence_size_t from, std::size_t count,
+                       std::span<std::uint8_t> scratch) {
+  const auto &state = *static_cast<const VulkanLifetimeSourceState *>(opaque);
+  if (std::this_thread::get_id() != state.backend_thread) {
+    state.wrong_thread.store(true, std::memory_order_relaxed);
+  }
+  state.read_calls.fetch_add(1u, std::memory_order_relaxed);
+  const std::size_t logical_size = state.ranks.size();
+  const std::size_t forward_from =
+      IsReversed ? logical_size - (static_cast<std::size_t>(from) + count)
+                 : static_cast<std::size_t>(from);
+  constexpr bool descending_write =
+      (IsReversed && !WriteReversed) || (!IsReversed && WriteReversed);
+  for (std::size_t index = 0u; index < count; ++index) {
+    std::uint8_t rank = state.ranks[forward_from + index];
+    if constexpr (IsReversed) {
+      rank = static_cast<std::uint8_t>(3u - rank);
+    }
+    scratch[descending_write ? count - index - 1u : index] = rank;
+  }
+  return scratch.data();
+}
+
+[[nodiscard]] bioseq::storage::sequence_size_t
+vulkan_lifetime_bp_size(const void *opaque) noexcept {
+  return static_cast<const VulkanLifetimeSourceState *>(opaque)->ranks.size();
+}
+
+[[nodiscard]] vulkan_lifetime_facade::resident_probe_result
+vulkan_lifetime_resident_probe(const void *opaque,
+                               bioseq::storage::sequence_size_t,
+                               bioseq::storage::sequence_size_t,
+                               std::uint8_t) noexcept {
+  static_cast<const VulkanLifetimeSourceState *>(opaque)
+      ->resident_probes.fetch_add(1u, std::memory_order_relaxed);
+  return std::nullopt;
+}
+
+[[nodiscard]] bool vulkan_lifetime_worker_shareable(const void *) noexcept {
+  return false;
+}
+
+inline const vulkan_lifetime_facade::backend_ops vulkan_lifetime_ops{
+    .bp_size = &vulkan_lifetime_bp_size,
+    .ptr_at =
+        {
+            &vulkan_lifetime_ptr_at<false, false>,
+            &vulkan_lifetime_ptr_at<false, true>,
+            &vulkan_lifetime_ptr_at<true, false>,
+            &vulkan_lifetime_ptr_at<true, true>,
+        },
+    .try_resident_packed = &vulkan_lifetime_resident_probe,
+    .copy_full_packed = nullptr,
+    .worker_shareable = &vulkan_lifetime_worker_shareable,
+};
+
+[[nodiscard]] vulkan_lifetime_facade
+vulkan_lifetime_view(const VulkanLifetimeSourceState &state) noexcept {
+  return {std::addressof(state), std::addressof(vulkan_lifetime_ops)};
+}
+#endif
 
 /// Sorted (last_pos, kmer, strand) tuples of a minimizer vector.
 template <class MinimizerT>
 [[nodiscard]] static std::vector<minimizer_tuple_t>
-triples(const std::vector<MinimizerT>& minimizers) {
-    std::vector<minimizer_tuple_t> out;
-    out.reserve(minimizers.size());
-    for (const MinimizerT& m : minimizers) {
-        out.emplace_back(m.last_pos(), m.kmer(), m.strand());
-    }
-    std::sort(out.begin(), out.end());
-    return out;
+triples(const std::vector<MinimizerT> &minimizers) {
+  std::vector<minimizer_tuple_t> out;
+  out.reserve(minimizers.size());
+  for (const MinimizerT &m : minimizers) {
+    out.emplace_back(m.last_pos(), m.kmer(), m.strand());
+  }
+  std::sort(out.begin(), out.end());
+  return out;
 }
 
 [[nodiscard]] static std::string tuple_examples(
@@ -2078,72 +2165,223 @@ TEST_CASE("vulkan minimizer: fragmented facade admission preserves exact index w
     REQUIRE(proof.direct_tile_arena_fills == 1u);
     REQUIRE(proof.count_phase_host_transient_bytes == 0u);
     REQUIRE(proof.main_phase_host_transient_bytes == 0u);
-    REQUIRE(proof.host_transient_excluded_before_main_bytes
-            == proof.host_tile_staging_elided_bytes);
+    REQUIRE(proof.host_transient_excluded_before_main_bytes ==
+            proof.host_tile_staging_elided_bytes);
     REQUIRE(proof.arena_trimmed_before_permit_shrink == 1u);
 }
 
-TEST_CASE("vulkan minimizer: canonical u32 admission removes raw tail bytes with exact parity",
-          "[vulkan][seeding][phase-c][target-index][admission][padding][parity]") {
-    if (!vulkan_ready()) {
-        SUCCEED("no hardware Vulkan device; skipped");
-        return;
-    }
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE(
+    "DOC0377 Vulkan delayed fence retains admitted source ownership on faults",
+    "[vulkan][phase-c][admission][ownership][fault][cancellation]") {
+  if (!vulkan_ready()) {
+    SUCCEED("no hardware Vulkan device; delayed-fence fixture skipped");
+    return;
+  }
 
-    using packed8_t = sequence_custom_alphabet<seq::dna4, std::uint8_t>;
-    using packed64_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-    for (const std::size_t letter_count : std::array<std::size_t, 3>{65u, 69u, 73u}) {
-        std::vector<seq::dna4> letters(letter_count);
-        for (std::size_t index = 0u; index < letters.size(); ++index) {
-            letters[index].assign_rank(static_cast<std::uint8_t>(index & 3u));
-        }
-        compact_sequence_range<packed64_t> packed64{letters};
-        auto packed64_owner = bioseq::storage::make_lazy_in_memory(packed64);
-        const auto packed64_view =
-            bioseq::storage::as_lazy_sequence_view(packed64_owner);
-        auto baseline = vk::build_gpu_index_on_device<MinimapSketchData>(
-            packed64_view, 10u, 15u);
-        REQUIRE(baseline.has_value());
-        REQUIRE(baseline->valid);
-        const std::size_t slot_bytes =
-            static_cast<std::size_t>(baseline->occupied_slots) * 16u;
-        const std::size_t position_bytes =
-            static_cast<std::size_t>(baseline->position_count) * 8u;
-        std::vector<std::byte> expected_slots(slot_bytes);
-        std::vector<std::byte> expected_positions(position_bytes);
-        std::memcpy(expected_slots.data(), baseline->slots.mapped, slot_bytes);
-        std::memcpy(
-            expected_positions.data(), baseline->positions.mapped,
-            position_bytes);
-        const std::uint32_t expected_slot_count = baseline->occupied_slots;
-        const std::uint32_t expected_position_count = baseline->position_count;
-        baseline.reset();
+  static constexpr std::size_t source_size = 8192u;
+  static constexpr bioseq::storage::sequence_size_t selected_from = 61u;
+  static constexpr bioseq::storage::sequence_size_t selected_to = 8123u;
+  std::vector<seq::dna4> prewarm_letters(source_size);
+  for (std::size_t index = 0u; index < prewarm_letters.size(); ++index) {
+    prewarm_letters[index].assign_rank(
+        static_cast<std::uint8_t>((index * 13u + index / 17u) & 3u));
+  }
+  using prewarm_config = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+  compact_sequence_range<prewarm_config> prewarm_range{prewarm_letters};
+  auto prewarm_owner = bioseq::storage::make_lazy_in_memory(prewarm_range);
+  sketch_collector_t<MinimapSketchData> prewarm_collector;
+  vk::collect_minimizers_vulkan_segment_or_throw<MinimapSketchData>(
+      prewarm_collector, bioseq::storage::as_lazy_sequence_view(prewarm_owner),
+      selected_from, selected_to, 10u, 15u);
 
-        compact_sequence_range<packed8_t> packed8{letters};
-        const vk::SequenceUploadView upload =
-            vk::make_sequence_upload_view(packed8);
-        REQUIRE(upload.byte_size % 4u != 0u);
-        auto packed8_owner = bioseq::storage::make_lazy_in_memory(packed8);
-        const auto packed8_view =
-            bioseq::storage::as_lazy_sequence_view(packed8_owner);
-        REQUIRE_FALSE(packed8_view.try_resident_packed(
-            0u, packed8_view.bp_size(), sizeof(std::uint32_t)));
-        auto candidate = vk::build_gpu_index_on_device<MinimapSketchData>(
-            packed8_view, 10u, 15u);
-        REQUIRE(candidate.has_value());
-        REQUIRE(candidate->valid);
-        REQUIRE(candidate->ownership.sequence_padding_zeroed_bytes == 0u);
-        REQUIRE(candidate->occupied_slots == expected_slot_count);
-        REQUIRE(candidate->position_count == expected_position_count);
-        REQUIRE(std::memcmp(
-            candidate->slots.mapped,
-            expected_slots.data(),
-            expected_slots.size()) == 0);
-        REQUIRE(std::memcmp(
-            candidate->positions.mapped,
-            expected_positions.data(),
-            expected_positions.size()) == 0);
+  auto &admission = bioseq::parallelism::MemoryAdmissionController::instance();
+  const std::uint64_t baseline = admission.reserved_bytes();
+
+  const auto run_fault = [&admission,
+                          baseline](vk::VulkanSubmissionTestFault fault,
+                                    std::string_view expected_error) {
+    std::atomic<std::uint64_t> destructions{0u};
+    auto source = std::make_shared<VulkanLifetimeSourceState>();
+    source->backend_thread = std::this_thread::get_id();
+    source->destructions = std::addressof(destructions);
+    source->ranks.resize(source_size);
+    for (std::size_t index = 0u; index < source->ranks.size(); ++index) {
+      source->ranks[index] =
+          static_cast<std::uint8_t>((index * 13u + index / 17u) & 3u);
     }
+    const std::weak_ptr<VulkanLifetimeSourceState> weak_source = source;
+    const auto source_view = vulkan_lifetime_view(*source);
+
+    struct Observation {
+      bool reached_delayed_submit = false;
+      bool backing_live = false;
+      bool permit_charged = false;
+      bool one_admitted_window_live = false;
+      bool backend_materialized = false;
+      bool fence_drained = false;
+    } observed{};
+
+    vk::arm_vulkan_admitted_window_test_seam();
+    vk::arm_vulkan_submission_test_seam(fault);
+    struct ResetSeams {
+      ~ResetSeams() {
+        vk::release_vulkan_submission_test_fence();
+        vk::reset_vulkan_submission_test_seam();
+        vk::reset_vulkan_admitted_window_test_seam();
+      }
+    } reset_seams;
+
+    std::thread observer{
+        [&admission, baseline, weak_source, &destructions, &observed] {
+          const auto submit_deadline =
+              std::chrono::steady_clock::now() + std::chrono::seconds{5};
+          auto submission = vk::vulkan_submission_test_snapshot();
+          while (!submission.waiting_after_submit &&
+                 std::chrono::steady_clock::now() < submit_deadline) {
+            std::this_thread::yield();
+            submission = vk::vulkan_submission_test_snapshot();
+          }
+          observed.reached_delayed_submit =
+              submission.waiting_after_submit && submission.submissions == 1u;
+          const auto admitted = vk::vulkan_admitted_window_test_snapshot();
+          observed.backing_live =
+              !weak_source.expired() &&
+              destructions.load(std::memory_order_relaxed) == 0u;
+          observed.permit_charged = admission.reserved_bytes() > baseline;
+          observed.one_admitted_window_live =
+              admitted.admitted_materializations == 1u &&
+              admitted.live_admitted_windows == 1u;
+          observed.backend_materialized =
+              admitted.backend_thread_materializations == 1u &&
+              admitted.off_backend_materializations == 0u;
+          vk::release_vulkan_submission_test_fence();
+
+          const auto drain_deadline =
+              std::chrono::steady_clock::now() + std::chrono::seconds{5};
+          while (vk::vulkan_submission_test_snapshot().fence_drains == 0u &&
+                 std::chrono::steady_clock::now() < drain_deadline) {
+            std::this_thread::yield();
+          }
+          observed.fence_drained =
+              vk::vulkan_submission_test_snapshot().fence_drains == 1u;
+        }};
+
+    std::string failure;
+    try {
+      sketch_collector_t<MinimapSketchData> collector;
+      vk::collect_minimizers_vulkan_segment_or_throw<MinimapSketchData>(
+          collector, source_view, selected_from, selected_to, 10u, 15u);
+    } catch (const vk::VulkanRuntimeError &error) {
+      failure = error.what();
+    }
+    observer.join();
+
+    const auto submission = vk::vulkan_submission_test_snapshot();
+    const auto admitted = vk::vulkan_admitted_window_test_snapshot();
+    const std::uint64_t resident_probes =
+        source->resident_probes.load(std::memory_order_relaxed);
+    const std::uint64_t source_reads =
+        source->read_calls.load(std::memory_order_relaxed);
+    const bool wrong_thread =
+        source->wrong_thread.load(std::memory_order_relaxed);
+    source.reset();
+
+    REQUIRE(observed.reached_delayed_submit);
+    REQUIRE(observed.backing_live);
+    REQUIRE(observed.permit_charged);
+    REQUIRE(observed.one_admitted_window_live);
+    REQUIRE(observed.backend_materialized);
+    REQUIRE(observed.fence_drained);
+    REQUIRE(submission.upload_latches >= 1u);
+    REQUIRE(submission.submissions == 1u);
+    REQUIRE(submission.fence_drains == 1u);
+    REQUIRE(submission.delivered_faults == 1u);
+    REQUIRE(
+        submission.cancellation_requested ==
+        (fault == vk::VulkanSubmissionTestFault::cancellation_after_submit));
+    REQUIRE(
+        submission.upload_failure_latched ==
+        (fault == vk::VulkanSubmissionTestFault::upload_failure_after_submit));
+    REQUIRE(failure.find(expected_error) != std::string::npos);
+    REQUIRE(admitted.admitted_materializations == 1u);
+    REQUIRE(admitted.live_admitted_windows == 0u);
+    REQUIRE(admitted.backend_thread_materializations == 1u);
+    REQUIRE(admitted.off_backend_materializations == 0u);
+    REQUIRE(resident_probes == 1u);
+    REQUIRE(source_reads > 0u);
+    REQUIRE_FALSE(wrong_thread);
+    REQUIRE(weak_source.expired());
+    REQUIRE(destructions.load(std::memory_order_relaxed) == 1u);
+    REQUIRE(admission.reserved_bytes() == baseline);
+  };
+
+  run_fault(vk::VulkanSubmissionTestFault::cancellation_after_submit,
+            "cancellation after fence drain");
+  run_fault(vk::VulkanSubmissionTestFault::upload_failure_after_submit,
+            "upload failure after fence drain");
+}
+#endif
+
+TEST_CASE(
+    "vulkan minimizer: canonical u32 admission removes raw tail bytes with "
+    "exact parity",
+    "[vulkan][seeding][phase-c][target-index][admission][padding][parity]") {
+  if (!vulkan_ready()) {
+    SUCCEED("no hardware Vulkan device; skipped");
+    return;
+  }
+
+  using packed8_t = sequence_custom_alphabet<seq::dna4, std::uint8_t>;
+  using packed64_t = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+  for (const std::size_t letter_count :
+       std::array<std::size_t, 3>{65u, 69u, 73u}) {
+    std::vector<seq::dna4> letters(letter_count);
+    for (std::size_t index = 0u; index < letters.size(); ++index) {
+      letters[index].assign_rank(static_cast<std::uint8_t>(index & 3u));
+    }
+    compact_sequence_range<packed64_t> packed64{letters};
+    auto packed64_owner = bioseq::storage::make_lazy_in_memory(packed64);
+    const auto packed64_view =
+        bioseq::storage::as_lazy_sequence_view(packed64_owner);
+    auto baseline = vk::build_gpu_index_on_device<MinimapSketchData>(
+        packed64_view, 10u, 15u);
+    REQUIRE(baseline.has_value());
+    REQUIRE(baseline->valid);
+    const std::size_t slot_bytes =
+        static_cast<std::size_t>(baseline->occupied_slots) * 16u;
+    const std::size_t position_bytes =
+        static_cast<std::size_t>(baseline->position_count) * 8u;
+    std::vector<std::byte> expected_slots(slot_bytes);
+    std::vector<std::byte> expected_positions(position_bytes);
+    std::memcpy(expected_slots.data(), baseline->slots.mapped, slot_bytes);
+    std::memcpy(expected_positions.data(), baseline->positions.mapped,
+                position_bytes);
+    const std::uint32_t expected_slot_count = baseline->occupied_slots;
+    const std::uint32_t expected_position_count = baseline->position_count;
+    baseline.reset();
+
+    compact_sequence_range<packed8_t> packed8{letters};
+    const vk::SequenceUploadView upload =
+        vk::make_sequence_upload_view(packed8);
+    REQUIRE(upload.byte_size % 4u != 0u);
+    auto packed8_owner = bioseq::storage::make_lazy_in_memory(packed8);
+    const auto packed8_view =
+        bioseq::storage::as_lazy_sequence_view(packed8_owner);
+    REQUIRE_FALSE(packed8_view.try_resident_packed(0u, packed8_view.bp_size(),
+                                                   sizeof(std::uint32_t)));
+    auto candidate = vk::build_gpu_index_on_device<MinimapSketchData>(
+        packed8_view, 10u, 15u);
+    REQUIRE(candidate.has_value());
+    REQUIRE(candidate->valid);
+    REQUIRE(candidate->ownership.sequence_padding_zeroed_bytes == 0u);
+    REQUIRE(candidate->occupied_slots == expected_slot_count);
+    REQUIRE(candidate->position_count == expected_position_count);
+    REQUIRE(std::memcmp(candidate->slots.mapped, expected_slots.data(),
+                        expected_slots.size()) == 0);
+    REQUIRE(std::memcmp(candidate->positions.mapped, expected_positions.data(),
+                        expected_positions.size()) == 0);
+  }
 }
 
 TEST_CASE("vulkan minimizer: truncated query gate fails before target-index dispatch",

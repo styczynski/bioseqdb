@@ -14,6 +14,9 @@
 #include "common_tests_integration.h"
 import bioseq.integration_tests.common;
 
+#include <algorithm>
+#include <array>
+
 using namespace bioseq_int_tests;
 
 namespace {
@@ -72,6 +75,29 @@ std::optional<unsigned long long> boundary_actual_calls(
         }
     }
     return std::nullopt;
+}
+
+std::vector<std::string> planned_slice_signature(
+    std::span<const std::string> plan) {
+    std::vector<std::string> signature;
+    for (const auto& line : plan) {
+        const bool recipe_value = line.find("value_") != std::string::npos
+            && line.find(" = ") != std::string::npos;
+        const bool boundary_value = line.find("var_") != std::string::npos
+            && line.find(" = ") != std::string::npos;
+        const bool planned_property = line.find("Mechanism:") != std::string::npos
+            || line.find("Reason:") != std::string::npos
+            || line.find("Depends On:") != std::string::npos
+            || line.find("Encoding:") != std::string::npos
+            || line.find("Cache Scope:") != std::string::npos;
+        if (!recipe_value && !boundary_value && !planned_property) {
+            continue;
+        }
+        const auto first = line.find_first_not_of(" \t");
+        signature.push_back(first == std::string::npos
+            ? std::string{} : line.substr(first));
+    }
+    return signature;
 }
 
 }  // namespace
@@ -264,13 +290,13 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
     seed_small_bioseq_column(ctx, kTable);
     exec_sql(ctx,
         "CREATE TABLE test_explain_slice_dst "
-        "(seq0 bioseq.seq('dna4',32)) USING bioseq;");
+        "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;");
 
     const auto plan = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF",
         fmt::format(
             "INSERT INTO test_explain_slice_dst "
-            "SELECT seq0[0:4] FROM {};", kTable));
+            "SELECT pk, seq0[0:4] FROM {};", kTable));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(plan_contains(plan, "Mechanism: packed full"));
     REQUIRE(plan_contains(plan, "Reason: heap tuple"));
@@ -280,3 +306,261 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
         ctx, "SELECT bool_and(bioseq.len(seq0) = 4) "
              "FROM test_explain_slice_dst;") == "t");
 }
+
+TEST_CASE("DOC0377 planned slice recipe is stable between plain and ANALYZE",
+          "[explain][slice][recipe]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+    const auto sql = fmt::format(
+        "SELECT seq0[0:8], (seq0[0:8])[0:4] FROM {} WHERE pk = 1;",
+        kTable);
+
+    const auto plain = explain_with_options(
+        ctx, "VERBOSE, COSTS OFF", sql);
+    const auto analyzed = explain_with_options(
+        ctx, "ANALYZE, VERBOSE, TIMING OFF, COSTS OFF", sql);
+    REQUIRE(planned_slice_signature(plain)
+            == planned_slice_signature(analyzed));
+    REQUIRE(plan_contains(plain, "var_3 ="));
+    REQUIRE(plan_contains(plain, "Depends On: var_1"));
+    REQUIRE_FALSE(plan_contains(plain, "Actual Calls:"));
+    REQUIRE(plan_contains(analyzed, "Actual Calls:"));
+}
+
+TEST_CASE("DOC0377 LIMIT and skipped CASE arms retain zero boundary calls",
+          "[explain][slice][control-flow]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+
+    const auto limited = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE TEXT",
+        fmt::format("SELECT seq0[0:4] FROM {} LIMIT 0;", kTable));
+    REQUIRE(boundary_actual_calls(
+        limited, "text", "client output") == 0u);
+    REQUIRE(boundary_actual_calls(
+        limited, "binary", "client output") == 0u);
+
+    const auto skipped = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE TEXT",
+        fmt::format(
+            "SELECT CASE WHEN false THEN seq0[0:4] "
+            "ELSE 'ACGT'::bioseq.seq('dna4',32) END FROM {} WHERE pk = 1;",
+            kTable));
+    REQUIRE(plan_contains(skipped, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(boundary_actual_calls(
+        skipped, "text", "client output") == 0u);
+    REQUIRE(boundary_actual_calls(
+        skipped, "binary", "client output") == 0u);
+}
+
+TEST_CASE("DOC0377 lazy-only slice concat reverse has no allocation boundary",
+          "[explain][slice][lazy-only]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+
+    const auto plan = explain_with_options(
+        ctx, "ANALYZE, VERBOSE, TIMING OFF, COSTS OFF",
+        fmt::format(
+            "SELECT bioseq.len(bioseq.reverse(seq0[0:4]) || seq0[4:8]) "
+            "FROM {};",
+            kTable));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(plan, "Slice Materialization:"));
+    REQUIRE(plan_contains(plan, "none"));
+    REQUIRE_FALSE(plan_contains(plan, "Mechanism: packed full"));
+    REQUIRE_FALSE(plan_contains(plan, "Reason: executor copy"));
+}
+
+TEST_CASE("DOC0377 timing and summary options control only actual metadata",
+          "[explain][slice][timing]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+    const auto sql = fmt::format(
+        "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
+
+    const auto with_timing = explain_with_options(
+        ctx, "ANALYZE, TIMING ON, SUMMARY ON, COSTS OFF, SERIALIZE TEXT",
+        sql);
+    REQUIRE(plan_contains(with_timing, "Actual Time:"));
+    REQUIRE(plan_contains(with_timing, "Execution Time:"));
+
+    const auto without_timing = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, SUMMARY OFF, COSTS OFF, SERIALIZE TEXT",
+        sql);
+    REQUIRE_FALSE(plan_contains(without_timing, "Actual Time:"));
+    REQUIRE_FALSE(plan_contains(without_timing, "Execution Time:"));
+}
+
+TEST_CASE("DOC0377 YAML and XML preserve structured slice fields",
+          "[explain][slice][structured]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+    const auto sql = fmt::format(
+        "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
+
+    const auto yaml = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF, FORMAT YAML", sql);
+    REQUIRE(plan_contains(yaml, "BioseqSliceProject"));
+    REQUIRE(plan_contains(yaml, "Slice Materialization"));
+    REQUIRE(plan_contains(yaml, "Mechanism: text"));
+    REQUIRE(plan_contains(yaml, "Actual Calls: 0"));
+
+    const auto xml = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF, FORMAT XML", sql);
+    REQUIRE(plan_contains(xml, "BioseqSliceProject"));
+    REQUIRE(plan_contains(xml, "Slice-Materialization"));
+    REQUIRE(plan_contains(xml, "<Mechanism>text</Mechanism>"));
+    REQUIRE(plan_contains(xml, "<Actual-Calls>0</Actual-Calls>"));
+}
+
+TEST_CASE("DOC0377 transformed INNER mmsearch explains one per-row BatchJoin owner",
+          "[explain][slice][batch-join]") {
+    constexpr std::string_view target = "test_explain_slice_join_target";
+    auto ctx = fresh_context({target});
+    seed_small_bioseq_column(ctx, target);
+    exec_sql(ctx,
+        "CREATE TEMP TABLE test_explain_slice_join_query "
+        "(id int, seq bioseq.seq('dna4',32));");
+    exec_sql(ctx,
+        "INSERT INTO test_explain_slice_join_query VALUES "
+        "(1, 'ACGTACGT'::bioseq.seq('dna4',32));");
+
+    const auto plan = explain_with_options(
+        ctx, "VERBOSE, COSTS OFF",
+        fmt::format(
+            "SELECT q.id, t.pk FROM {} AS t "
+            "JOIN test_explain_slice_join_query AS q "
+            "ON mmsearch(t.seq0[0:], q.seq[0:]);",
+            target));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
+    REQUIRE(plan_contains(plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+namespace {
+
+enum class dsm_explain_format {
+    text,
+    json,
+    yaml,
+    xml,
+};
+
+void require_dsm_fixture_property(
+        std::span<const std::string> plan,
+        dsm_explain_format format,
+        std::string_view name,
+        std::string_view value) {
+    switch (format) {
+        case dsm_explain_format::text:
+        case dsm_explain_format::yaml:
+            REQUIRE(plan_contains(plan, fmt::format("{}: {}", name, value)));
+            return;
+        case dsm_explain_format::json:
+            REQUIRE(plan_contains(
+                plan, fmt::format("\"{}\": {}", name, value)));
+            return;
+        case dsm_explain_format::xml: {
+            std::string tag{name};
+            std::replace(tag.begin(), tag.end(), ' ', '-');
+            REQUIRE(plan_contains(
+                plan, fmt::format("<{}>{}</{}>", tag, value, tag)));
+            return;
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
+          "[explain][slice][dsm][malformed]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+    guc_scope fixture(ctx, "bioseq.test_slice_dsm_fixture", "malformed");
+    const auto sql = fmt::format(
+        "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
+    const std::array formats{
+        std::pair{dsm_explain_format::text,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF"}},
+        std::pair{dsm_explain_format::json,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF, FORMAT JSON"}},
+        std::pair{dsm_explain_format::yaml,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF, FORMAT YAML"}},
+        std::pair{dsm_explain_format::xml,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF, FORMAT XML"}},
+    };
+
+    for (const auto& [format, options] : formats) {
+        const auto plan = explain_with_options(ctx, options, sql);
+        require_dsm_fixture_property(
+            plan, format, "DSM Test Fixture", format == dsm_explain_format::json
+                ? "\"malformed\"" : "malformed");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Validated", "true");
+        require_dsm_fixture_property(
+            plan, format, "DSM Async Lifecycle Validated", "true");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Checks", "6");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Counter Records Read", "0");
+        require_dsm_fixture_property(
+            plan, format, "DSM Async Cleanup Callbacks", "3");
+        require_dsm_fixture_property(
+            plan, format, "Counter Overflow", "true");
+        REQUIRE_FALSE(plan_contains(plan, "Incomplete Workers"));
+        REQUIRE_FALSE(plan_contains(plan, "Incomplete-Workers"));
+    }
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
+TEST_CASE("DOC0377 incomplete DSM worker and async drain render exact evidence",
+          "[explain][slice][dsm][incomplete]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+    guc_scope fixture(ctx, "bioseq.test_slice_dsm_fixture", "incomplete");
+    const auto sql = fmt::format(
+        "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
+    const std::array formats{
+        std::pair{dsm_explain_format::text,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF"}},
+        std::pair{dsm_explain_format::json,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF, FORMAT JSON"}},
+        std::pair{dsm_explain_format::yaml,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF, FORMAT YAML"}},
+        std::pair{dsm_explain_format::xml,
+                  std::string_view{"ANALYZE, TIMING OFF, COSTS OFF, FORMAT XML"}},
+    };
+
+    for (const auto& [format, options] : formats) {
+        const auto plan = explain_with_options(ctx, options, sql);
+        require_dsm_fixture_property(
+            plan, format, "DSM Test Fixture", format == dsm_explain_format::json
+                ? "\"incomplete\"" : "incomplete");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Validated", "true");
+        require_dsm_fixture_property(
+            plan, format, "DSM Async Lifecycle Validated", "true");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Checks", "1");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Slot Headers Read", "3");
+        require_dsm_fixture_property(
+            plan, format, "DSM Fixture Counter Records Read", "4");
+        require_dsm_fixture_property(
+            plan, format, "DSM Async Cleanup Callbacks", "3");
+        require_dsm_fixture_property(
+            plan, format, "Incomplete Workers", "1");
+        require_dsm_fixture_property(
+            plan, format, "Counter Overflow", "false");
+        if (format == dsm_explain_format::text) {
+            REQUIRE(boundary_actual_calls(
+                plan, "text", "client output") == 5u);
+            REQUIRE(boundary_actual_calls(
+                plan, "binary", "client output") == 5u);
+        }
+    }
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+#endif

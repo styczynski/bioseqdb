@@ -6,6 +6,7 @@ module;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <new>
@@ -15,6 +16,7 @@ module;
 #include "headers/pg_compat.h"
 extern "C" {
 #include "storage/shmem.h"
+#include "utils/datum.h"
 #include "utils/expandeddatum.h"
 }
 
@@ -237,22 +239,9 @@ void pack_view_into(pgseq_t& destination, View view, std::uint64_t length)
         bioseq::sequences::pack_capacity_policy::fixed_span,
         sink>;
     writer_type writer{sink{units}};
-    std::array<std::uint8_t, 256> scratch{};
-    std::uint64_t position = 0u;
-    while (position < length) {
-        const std::size_t count = static_cast<std::size_t>(
-            std::min<std::uint64_t>(scratch.size(), length - position));
-        view.template to_encoded_into<false, false>(
-            std::span<std::uint8_t>{scratch.data(), count},
-            static_cast<std::size_t>(position),
-            static_cast<std::size_t>(position + count));
-        const auto status = writer.append_ranks(
-            std::span<std::uint8_t const>{scratch.data(), count});
-        if (status != bioseq::sequences::rank_pack_status::ok) {
-            rank_pack_error(status);
-        }
-        position += count;
-    }
+    bioseq::storage::stream_transformed_packed<
+        bioseq::storage::sequence_transform::identity>(
+            view, 0u, length, writer);
     const auto result = writer.finish(length, unit_count);
     if (!result) {
         rank_pack_error(result.status);
@@ -346,24 +335,30 @@ export inline void pg_sequence_flatten_into(
         .alphabet_bound = true,
         .bp_length = value.bp_length,
     };
+    std::exception_ptr callback_failure;
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
     {
         auto* local_session = begin_pg_sequence_read_session(
             CurrentMemoryContext);
         session = local_session;
-        pgseq_t::dispatch_instance(
-            value.type_params.alphabet_code,
-            value.type_params.storage_unit_byte_width,
-            [&destination, &value, local_session, header,
-             descriptor]<class Instance>() {
-                using alphabet = typename Instance::alphabet_type;
-                auto* owner = make_pg_sequence_call_owner<alphabet>(
-                    *local_session, EOHPGetRODatum(header), descriptor);
-                pack_view_into<Instance>(
-                    destination, owner->view(), value.bp_length);
-            });
-        finish_pg_sequence_read_session(local_session, true);
+        try {
+            pgseq_t::dispatch_instance(
+                value.type_params.alphabet_code,
+                value.type_params.storage_unit_byte_width,
+                [&destination, &value, local_session, header,
+                 descriptor]<class Instance>() {
+                    using alphabet = typename Instance::alphabet_type;
+                    auto* owner = make_pg_sequence_call_owner<alphabet>(
+                        *local_session, EOHPGetRODatum(header), descriptor);
+                    pack_view_into<Instance>(
+                        destination, owner->view(), value.bp_length);
+                });
+            finish_pg_sequence_read_session(local_session, true);
+        } catch (...) {
+            callback_failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local_session);
+        }
         session = nullptr;
     }
     PG_CATCH();
@@ -374,6 +369,10 @@ export inline void pg_sequence_flatten_into(
         PG_RE_THROW();
     }
     PG_END_TRY();
+    if (callback_failure != nullptr) {
+        rethrow_pg_sequence_cpp_at_c_boundary(
+            std::move(callback_failure));
+    }
     record_slice_materialization_success(
         value.trace, value.producer_value_id,
         materialization_mechanism::packed_full,
@@ -423,6 +422,13 @@ export [[nodiscard]] inline Datum pg_sequence_ro_datum(
     pg_sequence_expanded* value) noexcept
 {
     return EOHPGetRODatum(&value->hdr);
+}
+
+export [[nodiscard]] inline slice_trace_attachment*
+pg_sequence_trace_attachment_for_datum(Datum input)
+{
+    auto const* expanded = get_pg_sequence_expanded_ro(input);
+    return expanded == nullptr ? nullptr : expanded->trace;
 }
 
 export struct pending_root_cleanup {
@@ -511,9 +517,8 @@ namespace {
     const std::size_t allocation_bytes = std::max<std::size_t>(count, 1u);
     const std::uint64_t trace_started =
         begin_slice_materialization_timing(trace);
-    auto* bytes = static_cast<std::byte*>(
-        MemoryContextAllocZero(arena.payload_context,
-                               allocation_bytes));
+    auto* bytes = allocate_piece_literal_storage(
+        arena, allocation_bytes);
     if (count != 0u) {
         std::memcpy(bytes, flat.data, count);
     }
@@ -827,32 +832,254 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     return pg_sequence_ro_datum(result);
 }
 
+namespace {
+
+struct synthetic_lazy_source_state {};
+
+inline void retain_synthetic_lazy_source(void*) noexcept {}
+inline void release_synthetic_lazy_source(void*) noexcept {}
+
+[[nodiscard]] inline pg_sequence_source_identity
+synthetic_lazy_source_identity(void const* state) noexcept
+{
+    return {
+        .control_address = reinterpret_cast<std::uintptr_t>(state),
+        .generation = 1u,
+    };
+}
+
+[[nodiscard]] inline bool
+synthetic_lazy_source_worker_shareable(void const *) noexcept {
+  return true;
+}
+
+[[nodiscard]] inline pg_sequence_source_read_status
+read_synthetic_lazy_source(void const *, pg_sequence_read_session &,
+                           bioseq::storage::seq_locator const &locator,
+                           compact_sequence_stdc_type_params stored_type,
+                           bioseq::storage::sequence_transform transform,
+                           std::uint64_t from, std::span<std::uint8_t> output) {
+  constexpr std::uint8_t dna4_code =
+      pgseq_supported_alphabets::index_of<seq::dna4>();
+  if (stored_type.alphabet_code != dna4_code || from > locator.total_bp_size ||
+      output.size() > locator.total_bp_size - from) {
+    return pg_sequence_source_read_status::wrong_thread;
+  }
+  std::uint8_t rank = 0u;
+  if (bioseq::storage::has_complement(transform)) {
+    rank =
+        bioseq::storage::lazy_rank_stream_traits<seq::dna4>::letter_complement(
+            rank);
+  }
+  std::fill(output.begin(), output.end(), rank);
+  return pg_sequence_source_read_status::ok;
+}
+
+[[nodiscard]] inline pg_sequence_source_handle
+synthetic_lazy_source_handle() noexcept {
+  static synthetic_lazy_source_state state{};
+  static const pg_sequence_source_backend_ops ops{
+      .retain = &retain_synthetic_lazy_source,
+      .release = &release_synthetic_lazy_source,
+      .identity = &synthetic_lazy_source_identity,
+      .worker_shareable = &synthetic_lazy_source_worker_shareable,
+      .read_ranks = &read_synthetic_lazy_source,
+  };
+  return {
+      .state = std::addressof(state),
+      .ops = std::addressof(ops),
+  };
+}
+
+} // namespace
+
+/* Internal acceptance seam for logical-length guardrails. Its immutable
+ * process-lifetime source synthesizes DNA4 rank zero on demand, so tests can
+ * exercise bigint metadata without allocating the logical payload. */
+export inline Datum synthetic_lazy_sequence_impl(FunctionCallInfo fcinfo) {
+  const std::int64_t requested = PG_GETARG_INT64(0);
+  if (requested < 0) {
+    ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                    errmsg("synthetic bioseq length must be nonnegative")));
+  }
+  constexpr compact_sequence_stdc_type_params type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 1u,
+  };
+  const auto length = static_cast<std::uint64_t>(requested);
+  PG_RETURN_DATUM(make_source_backed_pg_sequence(
+      synthetic_lazy_source_handle(),
+      bioseq::storage::seq_locator{
+          .version = bioseq::storage::kLocatorVersion,
+          .bucket_idx = 0u,
+          ._pad_2 = 0u,
+          .shard_idx = 0u,
+          .num_fragments = length == 0u ? 0u : 1u,
+          ._pad_4 = 0u,
+          .total_bp_size = length,
+          .first_sub_row_no = 0u,
+          .source_epoch = 1u,
+      },
+      type, 0u));
+}
+
+export inline Datum sequence_piece_count_impl(FunctionCallInfo fcinfo) {
+  const auto value = acquire_sequence_for_read(PG_GETARG_DATUM(0));
+  PG_RETURN_INT64(
+      value.root() ? static_cast<std::int64_t>(value.root().node->piece_count)
+                   : 0);
+}
+
+/* Direct PostgreSQL ownership-protocol seam: RW datumTransfer reparents the
+ * EOH, while RO datumCopy produces an independent flat value.  Both must
+ * survive reset/deletion of the context that originally owned the EOH. */
+export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
+  MemoryContext saved = CurrentMemoryContext;
+  MemoryContext volatile transfer_input = nullptr;
+  MemoryContext volatile transfer_parent = nullptr;
+  MemoryContext volatile copy_input = nullptr;
+  MemoryContext volatile copy_parent = nullptr;
+  bool volatile valid = false;
+  const std::uint64_t arena_baseline = piece_tree_live_arena_count_noexcept();
+  PG_TRY();
+  {
+    transfer_input = AllocSetContextCreate(saved, "bioseq EOH transfer input",
+                                           ALLOCSET_SMALL_SIZES);
+    transfer_parent = AllocSetContextCreate(saved, "bioseq EOH transfer parent",
+                                            ALLOCSET_SMALL_SIZES);
+    copy_input = AllocSetContextCreate(saved, "bioseq EOH copy input",
+                                       ALLOCSET_SMALL_SIZES);
+    copy_parent = AllocSetContextCreate(saved, "bioseq EOH copy parent",
+                                        ALLOCSET_SMALL_SIZES);
+    constexpr compact_sequence_stdc_type_params unbound_type{
+        .alphabet_code = pgseq_unbound_alphabet_code,
+        .storage_unit_byte_width = pgseq_unbound_width_tag,
+    };
+    const auto make_probe = [unbound_type](MemoryContext input,
+                                           std::array<std::byte, 3> bytes) {
+      MemoryContext previous = MemoryContextSwitchTo(input);
+      auto *value = make_pg_sequence_expanded(unbound_type, false);
+      replace_root_error_safe(
+          *value, unbound_type, bytes.size(), false,
+          [bytes](piece_tree_arena &arena) {
+            auto *storage = allocate_piece_literal_storage(arena, bytes.size());
+            std::memcpy(storage, bytes.data(), bytes.size());
+            return make_literal_node(
+                arena,
+                literal_piece{
+                    .storage_arena = std::addressof(arena),
+                    .bytes = storage,
+                    .symbol_from = 0u,
+                    .symbol_to = bytes.size(),
+                    .stored_type_params =
+                        {
+                            .alphabet_code = pgseq_unbound_alphabet_code,
+                            .storage_unit_byte_width = pgseq_unbound_width_tag,
+                        },
+                    .encoding = literal_encoding::unbound_ascii,
+                    .validation = literal_validation::unvalidated,
+                });
+          });
+      MemoryContextSwitchTo(previous);
+      return value;
+    };
+
+    auto *transferred_value =
+        make_probe(const_cast<MemoryContext>(transfer_input),
+                   {std::byte{0x41}, std::byte{0x43}, std::byte{0x47}});
+    MemoryContextSwitchTo(const_cast<MemoryContext>(transfer_parent));
+    const Datum transferred =
+        datumTransfer(pg_sequence_rw_datum(transferred_value), false, -1);
+    MemoryContextSwitchTo(saved);
+    const bool reparented =
+        get_pg_sequence_expanded_rw(transferred) == transferred_value &&
+        MemoryContextGetParent(transferred_value->object_context) ==
+            transfer_parent;
+    MemoryContextReset(const_cast<MemoryContext>(transfer_input));
+    std::array<std::byte, 3> transferred_text{};
+    const bool transfer_survived =
+        emit_pg_unbound_ascii(transferred_value->root, 0u,
+                              transferred_text.size(), transferred_text) &&
+        transferred_text == std::array<std::byte, 3>{std::byte{0x41},
+                                                     std::byte{0x43},
+                                                     std::byte{0x47}};
+
+    auto *copied_value =
+        make_probe(const_cast<MemoryContext>(copy_input),
+                   {std::byte{0x54}, std::byte{0x47}, std::byte{0x41}});
+    const Datum read_only = MakeExpandedObjectReadOnly(
+        pg_sequence_rw_datum(copied_value), false, -1);
+    MemoryContextSwitchTo(const_cast<MemoryContext>(copy_parent));
+    const Datum copied = datumCopy(read_only, false, -1);
+    MemoryContextSwitchTo(saved);
+    MemoryContextReset(const_cast<MemoryContext>(copy_input));
+    auto const *copied_flat =
+        reinterpret_cast<pgseq_t const *>(DatumGetPointer(copied));
+    const bool copy_survived =
+        !VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(copied)) &&
+        VARSIZE(copied_flat) >=
+            pgseq_t::header_bytes() + transferred_text.size() &&
+        copied_flat->alphabet_code == pgseq_unbound_alphabet_code &&
+        copied_flat->storage_unit_byte_width == pgseq_unbound_width_tag &&
+        copied_flat->bp_size == transferred_text.size() &&
+        std::memcmp(copied_flat->data, "TGA", transferred_text.size()) == 0;
+    valid = reparented && transfer_survived && copy_survived;
+
+    MemoryContextDelete(const_cast<MemoryContext>(copy_input));
+    copy_input = nullptr;
+    MemoryContextDelete(const_cast<MemoryContext>(transfer_input));
+    transfer_input = nullptr;
+    MemoryContextDelete(const_cast<MemoryContext>(copy_parent));
+    copy_parent = nullptr;
+    MemoryContextDelete(const_cast<MemoryContext>(transfer_parent));
+    transfer_parent = nullptr;
+    valid = valid && piece_tree_live_arena_count_noexcept() == arena_baseline;
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved);
+    if (copy_input != nullptr) {
+      MemoryContextDelete(const_cast<MemoryContext>(copy_input));
+    }
+    if (transfer_input != nullptr) {
+      MemoryContextDelete(const_cast<MemoryContext>(transfer_input));
+    }
+    if (copy_parent != nullptr) {
+      MemoryContextDelete(const_cast<MemoryContext>(copy_parent));
+    }
+    if (transfer_parent != nullptr) {
+      MemoryContextDelete(const_cast<MemoryContext>(transfer_parent));
+    }
+    FlushErrorState();
+    valid = false;
+  }
+  PG_END_TRY();
+  MemoryContextSwitchTo(saved);
+  PG_RETURN_BOOL(valid);
+}
+
 /* Trace metadata is observational and may be installed on an otherwise
  * read-only EOH wrapper without changing its logical sequence value. */
-export [[nodiscard]] inline bool attach_slice_trace_provenance(
-    Datum expanded,
-    slice_trace_attachment* trace,
-    std::uint32_t producer_value_id) noexcept
-{
-    if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(expanded))
-        || (trace != nullptr
-            && (!slice_trace_attachment_live(trace)
-                || producer_value_id == 0u))) {
-        return false;
-    }
-    ExpandedObjectHeader* header = DatumGetEOHP(expanded);
-    if (header == nullptr
-        || header->eoh_methods
-            != std::addressof(pg_sequence_expanded_methods())) {
-        return false;
-    }
-    auto* value = reinterpret_cast<pg_sequence_expanded*>(header);
-    if (value->trace != trace) {
-        retain_slice_trace_attachment(trace);
-        auto* previous = value->trace;
-        value->trace = trace;
-        release_slice_trace_attachment(previous);
-    }
-    value->producer_value_id = trace == nullptr ? 0u : producer_value_id;
-    return true;
+export [[nodiscard]] inline bool
+attach_slice_trace_provenance(Datum expanded, slice_trace_attachment *trace,
+                              std::uint32_t producer_value_id) noexcept {
+  if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(expanded)) ||
+      (trace != nullptr &&
+       (!slice_trace_attachment_live(trace) || producer_value_id == 0u))) {
+    return false;
+  }
+  ExpandedObjectHeader *header = DatumGetEOHP(expanded);
+  if (header == nullptr ||
+      header->eoh_methods != std::addressof(pg_sequence_expanded_methods())) {
+    return false;
+  }
+  auto *value = reinterpret_cast<pg_sequence_expanded *>(header);
+  if (value->trace != trace) {
+    retain_slice_trace_attachment(trace);
+    auto *previous = value->trace;
+    value->trace = trace;
+    release_slice_trace_attachment(previous);
+  }
+  value->producer_value_id = trace == nullptr ? 0u : producer_value_id;
+  return true;
 }

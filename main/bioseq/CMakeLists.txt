@@ -82,6 +82,75 @@ foreach(_bioseq_pg_source IN LISTS BIOSEQ_PG_RUNTIME_GUARD_SOURCES)
       "Direct PostgreSQL Vulkan Runtime entry in ${_bioseq_pg_source}; use ensure_pg_vulkan_runtime_ready()")
   endif()
 endforeach()
+
+# DOC0377 — representation-erased sequence consumers must not reach through
+# the lazy facade into a concrete scanner/range implementation.  These files
+# are the complete implementation-owner allowlist:
+#   * lazy_compact_sequence.cppm owns the canonical facade adapters;
+#   * sequence_scanner*.cppm own scanner implementations and PG leases.
+# Any new concrete dependency outside those ownership boundaries fails CMake
+# configuration, making the allowlist a repository-enforced invariant.
+set(BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/sequence_scanner.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/sequence_scanner_pg.cppm)
+
+# Named unit fixtures may deliberately construct concrete scanners to exercise
+# the representation-erasure boundary.  Keep this list explicit: a new test is
+# not implicitly exempt merely because its filename ends in `_test.cpp`.
+set(BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/block_aligner_reference_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipeline_pipe_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/gpu_sort_oracle_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/boundary_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_hashmap_index_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/minimizer_sequence_index_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/symbol_counts_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/lazy_minimizer_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_aligner_parity_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_test.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_pipeline_parity_test.cpp)
+file(GLOB_RECURSE BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/*.hpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.hpp)
+foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
+  list(FIND BIOSEQ_LAZY_CONCRETE_BOUNDARY_ALLOWLIST
+    "${_bioseq_lazy_source}" _bioseq_lazy_allowlist_index)
+  if(NOT _bioseq_lazy_allowlist_index EQUAL -1)
+    continue()
+  endif()
+  list(FIND BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
+    "${_bioseq_lazy_source}" _bioseq_lazy_fixture_index)
+  if(NOT _bioseq_lazy_fixture_index EQUAL -1)
+    continue()
+  endif()
+  file(STRINGS "${_bioseq_lazy_source}" _bioseq_lazy_source_lines)
+  foreach(_bioseq_lazy_source_line IN LISTS _bioseq_lazy_source_lines)
+    string(REGEX REPLACE "//.*$" "" _bioseq_lazy_code_line
+      "${_bioseq_lazy_source_line}")
+    string(STRIP "${_bioseq_lazy_code_line}" _bioseq_lazy_code_line)
+    if(_bioseq_lazy_code_line STREQUAL ""
+        OR _bioseq_lazy_code_line MATCHES "^(/\\*|\\*|\\*/|\")")
+      continue()
+    endif()
+    if(_bioseq_lazy_code_line MATCHES
+        "(\\.scanner[ \t]*\\(|\\.underlying[ \t]*\\(|lazy_compact_sequence[ \t]*<|sequence_scanner_pg[ \t]*<)")
+      message(FATAL_ERROR
+        "DOC0377 concrete lazy/scanner dependency in ${_bioseq_lazy_source}; "
+        "consume basic_lazy_sequence_view or update the documented ownership boundary")
+    endif()
+  endforeach()
+endforeach()
 message("SOURCES ${SRC_FILES}")
 
 message("MODULES? ${SRC_MOD_FILES}")

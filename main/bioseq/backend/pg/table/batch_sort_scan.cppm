@@ -13,16 +13,15 @@
  *
  *   1. drains its child (e.g. the inner `BioseqScan` running the mmsearch
  *      aligner, or a plain SeqScan), buffering every output row;
- *   2. wraps each row's sequence Datum as a `lazy_compact_sequence` and gathers
- *      them into a `std::span` batch;
+ *   2. adapts each row's sequence Datum to the representation-erased lazy
+ *      sequence facade and gathers the views into a `std::span` batch;
  *   3. calls `lazy_compact_sequence_batch_processor::lazy_compact_sequence_batch_sort`
  *      to obtain an output ordering (a permutation);
  *   4. re-emits the buffered rows in that order.
  *
  * The batch processor orders with the GPU seq-sort path when Vulkan is enabled.
  * When `bioseq.aligner_vulkan_enabled` is disabled, this executor sorts the
- * buffered compact_sequence_stdc headers directly with `stdc_compare`, which is
- * the scalar comparator used by the SQL surface.
+ * same canonical facade views with the scalar logical-rank comparator.
  *
  * Layout invariant: BioseqBatchSortState keeps CustomScanState as its first
  * field (standard-layout) so PostgreSQL's CustomScanState* <-> our state*
@@ -37,33 +36,45 @@ module;
 // importing the HWY-wrapped sequence/storage BMIs (mirrors custom_scan.cppm).
 #include "common_simd.h"
 #include "common.h"
+extern "C" {
+#include "utils/expandeddatum.h"
+}
 
+#include <algorithm>
 #include <chrono>
-#include <compare>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <exception>
+#include <limits>
+#include <memory>
 #include <numeric>
 #include <span>
+#include <utility>
 #include <vector>
 
 export module bioseq.table.batch_sort_scan;
 
 import bioseq.common.mlogging;          // bioseq_log
 import bioseq.storage.batch_processor;  // lazy_compact_sequence_batch_processor, batch_sort_spec
-import bioseq.storage.lazy;             // lazy_compact_sequence, make_lazy_in_memory
-import bioseq.storage.scanner;          // sequence_scanner_none
+import bioseq.storage.lazy;             // canonical lazy sequence facade
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
-import bioseq.sequences.simd;           // active_target::stdc_compare
 import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
 import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
 import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
 import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
 import bioseq.pg_utils;                 // PostgresErrorAsCpp at the PG callback seam
+import bioseq.storage.scanner_pg;       // source-route leases + locator promotion
+import bioseq.parallelism.memory_admission; // resident admission before workers
 
 export using BioseqSliceProjectUpperPathProvider = void (*)(
     PlannerInfo*, UpperRelationKind, RelOptInfo*, RelOptInfo*, void*);
+export using BioseqBatchSortSourcePathProvider = Path* (*)(
+    Path*, Node*, bool*);
+export using BioseqBatchSortSourceRouteProvider = bool (*)(
+    PlanState*, bioseq::storage::pg_sequence_source_route_set&);
 
 namespace {
 
@@ -71,6 +82,21 @@ namespace {
  * PostgreSQL keeps sorting sequences itself (existing ORDER BY seq behavior +
  * tests are preserved); experiments SET it on. Registered in init below. */
 bool bioseq_enable_sequence_sort_scan = false;
+BioseqBatchSortSourcePathProvider BioseqBatchSortSourcePathTagger = nullptr;
+BioseqBatchSortSourceRouteProvider BatchSortSourceRouteProvider = nullptr;
+
+constexpr int kBioseqBatchSortPlanVersion = 2;
+constexpr int kBioseqBatchSortPathPrivateFields = 6;
+constexpr int kBioseqBatchSortPlanPrivateFields = 6;
+
+enum BioseqBatchSortPrivateIndex : int {
+    kBatchSortVersion = 0,
+    kBatchSortDescending = 1,
+    kBatchSortNullsFirst = 2,
+    kBatchSortSequenceResno = 3,
+    kBatchSortSourceRelationOid = 4,
+    kBatchSortSourceAttno = 5,
+};
 
 /* ------------------------------------------------------------------ */
 /* Per-execution runtime (C++-heap state behind the standard-layout    */
@@ -83,8 +109,11 @@ struct BioseqBatchSortRuntime {
     bioseq::storage::batch_sort_spec spec{};            //< ORDER BY direction + GPU enablement
 	    MemoryContext                   tuple_cxt = nullptr; //< owns the buffered MinimalTuples
 	    std::vector<MinimalTuple>       tuples;              //< all child output rows (scan order)
+	    std::vector<Datum>              retained_sequences;  //< transferred EOH sort keys, or 0
 	    std::vector<std::size_t>        order;               //< emit permutation from the processor
-	    TupleTableSlot*                 sortslot  = nullptr; //< MinimalTuple slot used for emit/deform
+	    TupleTableSlot*                 deformslot = nullptr; //< MinimalTuple slot used to deform rows
+	    TupleTableSlot*                 sortslot  = nullptr; //< virtual slot used for output
+	    TupleTableSlot*                 staging_slot = nullptr; //< virtual copy excluding retained EOH
 	    const char*                     accelerator = "not executed";
 	    std::size_t                     sorted_rows = 0;
 	    std::uint64_t                   gpu_dispatch_delta = 0;
@@ -92,6 +121,16 @@ struct BioseqBatchSortRuntime {
 	    std::uint64_t                   gpu_dense_scatter_dispatch_delta = 0;
 	    std::uint64_t                   gpu_uploaded_bytes_delta = 0;
 	    std::uint64_t                   sort_runtime_ns = 0;
+	    Oid                             source_relation_oid = InvalidOid;
+	    AttrNumber                      source_attno = InvalidAttrNumber;
+	    bioseq::storage::pg_sequence_source_route_set source_routes{};
+	    bool                            source_routes_acquired = false;
+	    std::uint64_t                   admitted_source_rows = 0;
+	    std::uint64_t                   admitted_source_bytes = 0;
+	    std::uint64_t                   admission_fallbacks = 0;
+	    bool                            runtime_callback_registered = false;
+	    bool                            route_callback_registered = false;
+	    bool                            child_initialized = false;
 	};
 
 /* State object passed across the C ABI. CustomScanState MUST be first. */
@@ -125,9 +164,26 @@ inline void release_batch_sort_scratch_as_cpp(
 void BioseqBatchSort_RuntimeCleanup(void* arg) {
     auto* state = static_cast<BioseqBatchSortState*>(arg);
     if (state->runtime != nullptr) {
-        delete static_cast<BioseqBatchSortRuntime*>(state->runtime);
+        auto* runtime = static_cast<BioseqBatchSortRuntime*>(state->runtime);
+        bioseq::storage::release_pg_sequence_source_routes_noexcept(
+            runtime->source_routes);
+        runtime->source_routes_acquired = false;
+        std::destroy_at(runtime);
         state->runtime = nullptr;
     }
+}
+
+/* Registered before ExecInitNode(child).  Child provider reset callbacks are
+ * consequently newer and run first; the upper lease is released only after
+ * every provider has closed. */
+void BioseqBatchSort_SourceRoutesCleanup(void* arg) {
+    auto* state = static_cast<BioseqBatchSortState*>(arg);
+    auto* runtime = state == nullptr
+        ? nullptr : static_cast<BioseqBatchSortRuntime*>(state->runtime);
+    if (runtime == nullptr) return;
+    bioseq::storage::release_pg_sequence_source_routes_noexcept(
+        runtime->source_routes);
+    runtime->source_routes_acquired = false;
 }
 
 /* ------------------------------------------------------------------ */
@@ -155,200 +211,443 @@ void BioseqBatchSort_RuntimeCleanup(void* arg) {
 /* Build the lazy batch from the buffered rows and run the (placeholder)*/
 /* ordering. Returns the emit permutation over rt->tuples.              */
 /* ------------------------------------------------------------------ */
-	[[nodiscard]] std::vector<std::size_t>
-	build_batch_order(CustomScanState* node, BioseqBatchSortRuntime* rt) {
-	    const std::size_t row_count = rt->tuples.size();
-	    rt->sorted_rows = row_count;
-	    if (row_count == 0) {
-	        return {};
-	    }
+	struct BatchSortDatum {
+		Datum value = 0;
+		bool is_null = true;
+	};
 
-    /* All rows in one column share an alphabet/width; dispatch once on row 0.
-     * Detoast/headers/ranges/lazies are transient — they only need to live for
-     * the synchronous sort call below, so they go in a scratch context that is
-     * dropped immediately afterwards. The returned permutation is C++-heap. */
-    MemoryContext scratch = AllocSetContextCreate(CurrentMemoryContext,
-                                                  "BioseqBatchSort scratch",
-                                                  ALLOCSET_DEFAULT_SIZES);
-    MemoryContext old_cxt = MemoryContextSwitchTo(scratch);
-
-    ExecStoreMinimalTuple(rt->tuples[0], rt->sortslot, false);
-    bool first_isnull = false;
-    Datum first_datum = slot_getattr(rt->sortslot, rt->seq_attno, &first_isnull);
-    if (first_isnull) {
-        MemoryContextSwitchTo(old_cxt);
-        MemoryContextDelete(scratch);
-        ereport(ERROR, (errmsg("BioseqBatchSortScan: NULL sequence values are not "
-                               "supported by the prototype sort node")));
-    }
-    auto* first_hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(first_datum));
-    if (bioseq::storage::is_locator_stub(first_hdr)) {
-        MemoryContextSwitchTo(old_cxt);
-        MemoryContextDelete(scratch);
-        ereport(ERROR, (errmsg("BioseqBatchSortScan: out-of-core (locator-stub) "
-                               "sequences require the fragmented scanner path, "
-                               "which is out of scope for this prototype")));
-    }
-    const std::uint8_t alphabet_code = first_hdr->alphabet_code;
-    const std::uint8_t byte_width    = first_hdr->storage_unit_byte_width;
-
-	std::vector<std::size_t> order;
-	try {
-	pgseq_t::dispatch_instance(alphabet_code, byte_width, [&]<class S>() {
-        using unit_t = typename compact_sequence_range<S>::traits::storage_unit;
-        using alphabet_t = typename compact_sequence_range<S>::traits::alphabet_type;
-        using scanner_t = bioseq::storage::sequence_scanner_none<unit_t>;
-        using lazy_t = bioseq::storage::lazy_compact_sequence<S, scanner_t>;
-        using view_t = bioseq::storage::basic_lazy_sequence_view<alphabet_t>;
-        using processor_t =
-            bioseq::storage::lazy_compact_sequence_batch_processor<alphabet_t>;
-
-        /* Detoast every row's sequence header. For inline (non-stub) values
-         * PG_DETOAST_DATUM returns a pointer into the buffered MinimalTuple,
-         * which lives in tuple_cxt and so stays valid for the whole batch. */
-        std::vector<pgseq_t*> headers;
-        headers.reserve(row_count);
-        for (std::size_t i = 0; i < row_count; ++i) {
-            ExecStoreMinimalTuple(rt->tuples[i], rt->sortslot, false);
-            bool isnull = false;
-            Datum datum = slot_getattr(rt->sortslot, rt->seq_attno, &isnull);
-            if (isnull) {
-                ereport(ERROR, (errmsg("BioseqBatchSortScan: NULL sequence values "
-                                       "are not supported by the prototype sort node")));
-            }
-            auto* hdr = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(datum));
-            if (bioseq::storage::is_locator_stub(hdr)) {
-                ereport(ERROR, (errmsg("BioseqBatchSortScan: out-of-core "
-                                       "(locator-stub) sequences are out of scope "
-                                       "for this prototype")));
-            }
-	            headers.push_back(hdr);
-	        }
-
-	        if (!rt->spec.vulkan_enabled) {
-	            std::vector<std::size_t> stdc_order(row_count);
-	            auto* order_begin = stdc_order.data();
-	            auto* order_end = order_begin + stdc_order.size();
-	            std::iota(order_begin, order_end, std::size_t{0});
-	            const bool descending = rt->spec.descending;
-	            auto less = [&headers, descending](std::size_t i, std::size_t j) {
-	                const std::strong_ordering c =
-	                    bioseq::simd::active_target::stdc_compare(*headers[i], *headers[j]);
-	                if (c != 0) return descending ? c > 0 : c < 0;
-	                return descending ? i > j : i < j;
-	            };
-	            const auto sort_start = std::chrono::steady_clock::now();
-	            bioseq::parallelism::GlobalPool::instance().parallel_sort(
-	                order_begin, order_end, less);
-	            const auto sort_end = std::chrono::steady_clock::now();
-	            rt->sort_runtime_ns = static_cast<std::uint64_t>(
-	                std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                    sort_end - sort_start).count());
-	            order = std::move(stdc_order);
-	            rt->accelerator = "stdc_compare";
-	            return;
-	        }
-
-	        /* Ranges view the headers; lazies reference the ranges (pointer-sized,
-	         * copyable for the no-fragment scanner). Both are reserved up front so
-         * neither vector reallocates and invalidates the back-references. */
-        std::vector<compact_sequence_range<S>> ranges;
-        ranges.reserve(row_count);
-        for (std::size_t i = 0; i < row_count; ++i) {
-            ranges.push_back(compact_sequence_range<S>{*headers[i]});
-        }
-        std::vector<lazy_t> lazies;
-        lazies.reserve(row_count);
-        for (std::size_t i = 0; i < row_count; ++i) {
-            lazies.push_back(bioseq::storage::make_lazy_in_memory(ranges[i]));
-	        }
-
-	        /* The canonical views borrow their concrete lazy owners. Construct
-	         * them only after the owner vector is complete, and keep both arrays
-	         * alive for the synchronous batch-processor call below. */
-	        std::vector<view_t> views;
-	        views.reserve(row_count);
-	        for (const lazy_t& lazy : lazies) {
-	            views.push_back(bioseq::storage::as_lazy_sequence_view(lazy));
-	        }
-	        const std::span<const view_t> batch(views.data(), views.size());
-	        auto& gpu_rt =
-	            bioseq::parallelism::pg::ensure_pg_vulkan_runtime_ready();
-	        const std::uint64_t dispatch_before = gpu_rt.seq_sort_dispatch_count();
-	        const std::uint64_t global_before = gpu_rt.seq_sort_global_compare_dispatch_count();
-	        const std::uint64_t dense_before = gpu_rt.seq_sort_dense_scatter_dispatch_count();
-	        const std::uint64_t uploaded_before = gpu_rt.seq_sort_uploaded_bytes_count();
-	        const auto sort_start = std::chrono::steady_clock::now();
-	        order = processor_t::lazy_compact_sequence_batch_sort(batch, rt->spec);
-	        const auto sort_end = std::chrono::steady_clock::now();
-	        const std::uint64_t dispatch_after = gpu_rt.seq_sort_dispatch_count();
-	        const std::uint64_t global_after = gpu_rt.seq_sort_global_compare_dispatch_count();
-	        const std::uint64_t dense_after = gpu_rt.seq_sort_dense_scatter_dispatch_count();
-	        const std::uint64_t uploaded_after = gpu_rt.seq_sort_uploaded_bytes_count();
-	        rt->gpu_dispatch_delta = dispatch_after - dispatch_before;
-	        rt->gpu_global_compare_dispatch_delta = global_after - global_before;
-	        rt->gpu_dense_scatter_dispatch_delta = dense_after - dense_before;
-	        rt->gpu_uploaded_bytes_delta = uploaded_after - uploaded_before;
-	        rt->sort_runtime_ns = static_cast<std::uint64_t>(
-	            std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                sort_end - sort_start).count());
-	        rt->accelerator = rt->gpu_dispatch_delta == 0 ? "compare_sequences_scalar" : "gpu";
-	    });
-	} catch (...) {
-		// Readiness errors are C++ exceptions only after their inner PG_END_TRY.
-		// Restore/delete the PG scratch context after every C++ owner in the typed
-		// dispatch has unwound, then let the callback boundary rethrow exactly.
-		release_batch_sort_scratch_as_cpp(old_cxt, scratch);
-		throw;
+	[[noreturn]] void batch_sort_raise_as_cpp(
+			int sqlstate, const char* message) {
+		bioseq::pg_utils::invoke_pg_as_cpp([sqlstate, message] {
+			ereport(ERROR,
+				(errcode(sqlstate), errmsg_internal("%s", message)));
+		});
+		pg_unreachable();
 	}
 
-	release_batch_sort_scratch_as_cpp(old_cxt, scratch);
-	return order;
-}
+	[[nodiscard]] BatchSortDatum batch_sort_sequence_datum(
+			BioseqBatchSortRuntime* runtime, std::size_t row_index) {
+		if (runtime->retained_sequences[row_index] != Datum{0}) {
+			return {runtime->retained_sequences[row_index], false};
+		}
+		return bioseq::pg_utils::invoke_pg_as_cpp(
+			[runtime, row_index] {
+				ExecStoreMinimalTuple(
+					runtime->tuples[row_index], runtime->deformslot, false);
+				bool is_null = false;
+				Datum value = slot_getattr(
+					runtime->deformslot, runtime->seq_attno, &is_null);
+				return BatchSortDatum{value, is_null};
+			});
+	}
+
+	[[nodiscard]] std::vector<std::size_t>
+	build_batch_order(CustomScanState*, BioseqBatchSortRuntime* rt) {
+		const std::size_t row_count = rt->tuples.size();
+		rt->sorted_rows = row_count;
+		if (row_count == 0) return {};
+		if (rt->retained_sequences.size() != row_count) {
+			batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED,
+				"BioseqBatchSort retained-sequence index is corrupt");
+		}
+
+		MemoryContext scratch = bioseq::pg_utils::invoke_pg_as_cpp([] {
+			return AllocSetContextCreate(CurrentMemoryContext,
+				"BioseqBatchSort scratch", ALLOCSET_DEFAULT_SIZES);
+		});
+		MemoryContext old_cxt = bioseq::pg_utils::invoke_pg_as_cpp([scratch] {
+			return MemoryContextSwitchTo(scratch);
+		});
+		pg_sequence_read_session* session = nullptr;
+		std::vector<std::size_t> order;
+		try {
+			std::vector<std::size_t> null_rows;
+			std::vector<std::size_t> value_rows;
+			std::vector<Datum> datums;
+			std::vector<pg_sequence_descriptor> descriptors;
+			null_rows.reserve(row_count);
+			value_rows.reserve(row_count);
+			datums.reserve(row_count);
+			descriptors.reserve(row_count);
+			for (std::size_t row = 0; row < row_count; ++row) {
+				const BatchSortDatum input = batch_sort_sequence_datum(rt, row);
+				if (input.is_null) {
+					null_rows.push_back(row);
+					continue;
+				}
+				Datum dispatch = input.value;
+				if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(dispatch))) {
+					dispatch = bioseq::pg_utils::invoke_pg_as_cpp([dispatch] {
+						return PointerGetDatum(PG_DETOAST_DATUM(dispatch));
+					});
+				}
+				auto descriptor = bioseq::pg_utils::invoke_pg_as_cpp([dispatch] {
+					return classify_and_describe_sequence(dispatch);
+				});
+				if (descriptor.kind == pg_sequence_datum_kind::locator) {
+					if (!OidIsValid(rt->source_relation_oid)
+						|| rt->source_attno <= 0
+						|| !rt->source_routes_acquired) {
+						batch_sort_raise_as_cpp(
+							ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+							"BioseqBatchSort locator has no exact source route");
+					}
+					dispatch = bioseq::storage::promote_pg_sequence_locator(
+						rt->source_routes, rt->source_relation_oid,
+						rt->source_attno, dispatch, scratch);
+					descriptor = bioseq::pg_utils::invoke_pg_as_cpp([dispatch] {
+						return classify_and_describe_sequence(dispatch);
+					});
+				}
+				if (!descriptor.alphabet_bound) {
+					batch_sort_raise_as_cpp(ERRCODE_DATATYPE_MISMATCH,
+						"BioseqBatchSort requires a bound sequence alphabet");
+				}
+				if (!descriptors.empty()
+					&& (descriptor.alphabet_code
+							!= descriptors.front().alphabet_code
+						|| descriptor.storage_unit_byte_width
+							!= descriptors.front().storage_unit_byte_width)) {
+					batch_sort_raise_as_cpp(ERRCODE_DATATYPE_MISMATCH,
+						"BioseqBatchSort input representation changed within one batch");
+				}
+				value_rows.push_back(row);
+				datums.push_back(dispatch);
+				descriptors.push_back(descriptor);
+			}
+
+			std::vector<std::size_t> value_order;
+			if (!datums.empty()) {
+				slice_async_owner_guard* async_owner = nullptr;
+				for (const Datum datum : datums) {
+					auto* attachment = bioseq::pg_utils::invoke_pg_as_cpp(
+						[datum] {
+							return pg_sequence_trace_attachment_for_datum(datum);
+						});
+					auto* candidate =
+						borrow_slice_async_owner_noexcept(attachment);
+					if (candidate == nullptr) continue;
+					if (async_owner != nullptr && async_owner != candidate) {
+						batch_sort_raise_as_cpp(
+							ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+							"BioseqBatchSort rows have distinct async owners");
+					}
+					async_owner = candidate;
+				}
+				const auto async_observer =
+					make_slice_async_pool_observer_noexcept(async_owner);
+				session = bioseq::pg_utils::invoke_pg_as_cpp([scratch] {
+					return begin_pg_sequence_read_session(scratch);
+				});
+				const std::uint8_t alphabet = descriptors.front().alphabet_code;
+				const std::uint8_t width =
+					descriptors.front().storage_unit_byte_width;
+				pgseq_t::dispatch_instance(
+					alphabet, width,
+					[rt, session, &datums, &descriptors,
+					 &value_order, width, async_observer]<class Instance>() {
+						using alphabet_type = typename compact_sequence_range<
+							Instance>::traits::alphabet_type;
+						using view_type = bioseq::storage::basic_lazy_sequence_view<
+							alphabet_type>;
+						using admitted_type = bioseq::storage::admitted_packed_region<
+							alphabet_type>;
+						using processor = bioseq::storage::
+							lazy_compact_sequence_batch_processor<alphabet_type>;
+						std::vector<view_type> original;
+						original.reserve(datums.size());
+						for (std::size_t index = 0; index < datums.size(); ++index) {
+							auto* owner = bioseq::pg_utils::invoke_pg_as_cpp(
+								[session, datum = datums[index],
+								 descriptor = descriptors[index]] {
+									return make_pg_sequence_call_owner<alphabet_type>(
+										*session, datum, descriptor);
+								});
+							original.push_back(owner->view());
+						}
+						std::vector<admitted_type> admitted;
+						std::vector<view_type> resident;
+						admitted.reserve(original.size());
+						resident.reserve(original.size());
+						bool admission_failed = false;
+						std::uint64_t admitted_rows = 0u;
+						std::uint64_t admitted_bytes = 0u;
+						for (view_type view : original) {
+							if (lazy_is_worker_shareable(view)) {
+								resident.push_back(view);
+								continue;
+							}
+							const auto plan = bioseq::storage::plan_sequence_access(
+								view,
+								bioseq::storage::sequence_access_requirement::
+									contiguous_resident,
+								0u, view.bp_size(), width);
+							auto permit = bioseq::parallelism::
+								MemoryAdmissionController::instance().try_reserve(
+									plan.admission_bytes);
+							if (!permit.has_value()) {
+								admission_failed = true;
+								break;
+							}
+							admitted.push_back(
+								bioseq::storage::materialize_packed_region(
+									view, 0u, view.bp_size(), width,
+									std::move(*permit)));
+							resident.push_back(admitted.back().view());
+							++admitted_rows;
+							admitted_bytes = bioseq::parallelism::saturating_add(
+								admitted_bytes, plan.admission_bytes);
+						}
+						std::span<const view_type> batch;
+						if (admission_failed) {
+							resident.clear();
+							admitted.clear();
+							++rt->admission_fallbacks;
+							batch = std::span<const view_type>{
+								original.data(), original.size()};
+						} else {
+							rt->admitted_source_rows = bioseq::parallelism::
+								saturating_add(rt->admitted_source_rows, admitted_rows);
+							rt->admitted_source_bytes = bioseq::parallelism::
+								saturating_add(rt->admitted_source_bytes, admitted_bytes);
+							batch = std::span<const view_type>{
+								resident.data(), resident.size()};
+						}
+						const auto started = std::chrono::steady_clock::now();
+						if (rt->spec.vulkan_enabled) {
+							auto& gpu = bioseq::parallelism::pg::
+								ensure_pg_vulkan_runtime_ready();
+							const std::uint64_t dispatch_before =
+								gpu.seq_sort_dispatch_count();
+							const std::uint64_t global_before =
+								gpu.seq_sort_global_compare_dispatch_count();
+							const std::uint64_t dense_before =
+								gpu.seq_sort_dense_scatter_dispatch_count();
+							const std::uint64_t uploaded_before =
+								gpu.seq_sort_uploaded_bytes_count();
+							value_order = processor::lazy_compact_sequence_batch_sort(
+								batch, rt->spec, async_observer);
+							rt->gpu_dispatch_delta =
+								gpu.seq_sort_dispatch_count() - dispatch_before;
+							rt->gpu_global_compare_dispatch_delta =
+								gpu.seq_sort_global_compare_dispatch_count()
+									- global_before;
+							rt->gpu_dense_scatter_dispatch_delta =
+								gpu.seq_sort_dense_scatter_dispatch_count()
+									- dense_before;
+							rt->gpu_uploaded_bytes_delta =
+								gpu.seq_sort_uploaded_bytes_count() - uploaded_before;
+						} else {
+							value_order = processor::lazy_compact_sequence_batch_sort(
+								batch, rt->spec, async_observer);
+						}
+						const auto finished = std::chrono::steady_clock::now();
+						rt->sort_runtime_ns = static_cast<std::uint64_t>(
+							std::chrono::duration_cast<std::chrono::nanoseconds>(
+								finished - started).count());
+						rt->accelerator = rt->gpu_dispatch_delta != 0u
+							? "vulkan"
+							: admission_failed
+								? "stdc_compare backend source"
+								: "stdc_compare";
+					});
+				bioseq::pg_utils::invoke_pg_as_cpp([session] {
+					finish_pg_sequence_read_session(session, true);
+				});
+				session = nullptr;
+			}
+
+			order.reserve(row_count);
+			if (value_order.size() != value_rows.size()) {
+				batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED,
+					"BioseqBatchSort processor returned an incomplete permutation");
+			}
+			std::vector<bool> seen_values(value_rows.size(), false);
+			if (rt->spec.nulls_first) {
+				order.insert(order.end(), null_rows.begin(), null_rows.end());
+			}
+			for (std::size_t sorted_index : value_order) {
+				if (sorted_index >= value_rows.size()
+					|| seen_values[sorted_index]) {
+					batch_sort_raise_as_cpp(ERRCODE_DATA_CORRUPTED,
+						"BioseqBatchSort processor returned an invalid permutation");
+				}
+				seen_values[sorted_index] = true;
+				order.push_back(value_rows[sorted_index]);
+			}
+			if (!rt->spec.nulls_first) {
+				order.insert(order.end(), null_rows.begin(), null_rows.end());
+			}
+		} catch (...) {
+			abort_pg_sequence_read_session_noexcept(session);
+			session = nullptr;
+			release_batch_sort_scratch_as_cpp(old_cxt, scratch);
+			throw;
+		}
+		release_batch_sort_scratch_as_cpp(old_cxt, scratch);
+		return order;
+	}
 
 /* ================================================================== */
 /* Executor callbacks                                                  */
 /* ================================================================== */
 
 void
-BioseqBatchSort_BeginCustomScan(CustomScanState* node, EState* estate, int eflags)
+BioseqBatchSort_BeginCustomScanImpl(CustomScanState* node, EState* estate, int eflags)
 {
     bioseq_log<DBG>("[bioseq] pg: BioseqBatchSort_BeginCustomScan() entered");
     auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
-
-    /* Initialise the single child plan as our outer subplan. Setting
-     * outerPlanState makes the child show up under this node in EXPLAIN and
-     * lets End/ReScan drive it generically. */
-    auto* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
-    outerPlanState(node) = ExecInitNode(child_plan, estate, eflags);
-
-    auto* rt = new BioseqBatchSortRuntime();
+    if (cscan == nullptr || cscan->scan.scanrelid != 0
+        || list_length(cscan->custom_plans) != 1
+        || list_length(cscan->custom_private)
+            != kBioseqBatchSortPlanPrivateFields
+        || node->custom_ps != NIL || IsParallelWorker()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("BioseqBatchSort executor shape is invalid or parallel")));
+    }
+    auto* rt = std::construct_at(static_cast<BioseqBatchSortRuntime*>(
+        MemoryContextAlloc(
+            estate->es_query_cxt, sizeof(BioseqBatchSortRuntime))));
     reinterpret_cast<BioseqBatchSortState*>(node)->runtime = rt;
 
-    /* DOC0346 — ORDER BY direction (planner) + GPU enablement (GUC) into the
-     * spec the batch processor consumes. custom_private = [descending, nulls_first]. */
-    if (list_length(cscan->custom_private) == 2) {
-        rt->spec.descending  = (intVal(list_nth(cscan->custom_private, 0)) != 0);
-        rt->spec.nulls_first = (intVal(list_nth(cscan->custom_private, 1)) != 0);
-    }
-    rt->spec.vulkan_enabled = bioseq_aligner_vulkan_enabled;
-
-    /* Free the C++ runtime even if the executor errors out before End. */
+    /* Register deletion first and the upper-route release second.  Child
+     * callbacks are registered by ExecInitNode afterwards, so reset order is
+     * child/provider close -> upper lease release -> C++ runtime deletion. */
     auto* cb = static_cast<MemoryContextCallback*>(
         MemoryContextAlloc(estate->es_query_cxt, sizeof(MemoryContextCallback)));
     cb->func = &BioseqBatchSort_RuntimeCleanup;
-    cb->arg  = node;   /* void*; the callback casts it back to our state */
+    cb->arg  = node;
     MemoryContextRegisterResetCallback(estate->es_query_cxt, cb);
+    rt->runtime_callback_registered = true;
+    auto* route_cb = static_cast<MemoryContextCallback*>(
+        MemoryContextAlloc(estate->es_query_cxt, sizeof(MemoryContextCallback)));
+    route_cb->func = &BioseqBatchSort_SourceRoutesCleanup;
+    route_cb->arg = node;
+    MemoryContextRegisterResetCallback(estate->es_query_cxt, route_cb);
+    rt->route_callback_registered = true;
+
+    auto private_integer = [cscan](int index) {
+        Node* encoded = reinterpret_cast<Node*>(
+            list_nth(cscan->custom_private, index));
+        if (encoded == nullptr || !IsA(encoded, Integer)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("BioseqBatchSort private plan ABI is invalid"),
+                 errdetail("field=%d", index)));
+        }
+        return intVal(encoded);
+    };
+    const int version = private_integer(kBatchSortVersion);
+    rt->spec.descending = private_integer(kBatchSortDescending) != 0;
+    rt->spec.nulls_first = private_integer(kBatchSortNullsFirst) != 0;
+    rt->seq_attno = static_cast<AttrNumber>(
+        private_integer(kBatchSortSequenceResno));
+    rt->source_relation_oid = static_cast<Oid>(
+        private_integer(kBatchSortSourceRelationOid));
+    rt->source_attno = static_cast<AttrNumber>(
+        private_integer(kBatchSortSourceAttno));
+    if (version != kBioseqBatchSortPlanVersion || rt->seq_attno <= 0
+        || (OidIsValid(rt->source_relation_oid) != (rt->source_attno > 0))) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqBatchSort private plan ABI is invalid")));
+    }
+    rt->spec.vulkan_enabled = bioseq_aligner_vulkan_enabled;
+
+    /* Initialise the single child only after the upper callbacks exist. */
+    auto* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
+    outerPlanState(node) = ExecInitNode(child_plan, estate, eflags);
+    rt->child_initialized = true;
+    node->custom_ps = list_make1(outerPlanState(node));
+    if (BatchSortSourceRouteProvider != nullptr) {
+        rt->source_routes_acquired = BatchSortSourceRouteProvider(
+            outerPlanState(node), rt->source_routes);
+    }
 
     /* Buffered rows outlive per-tuple resets, so they get their own context. */
     rt->tuple_cxt = AllocSetContextCreate(estate->es_query_cxt,
                                           "BioseqBatchSort tuples",
                                           ALLOCSET_DEFAULT_SIZES);
 
-    /* MinimalTuple slot (the scan tuple type) for buffering/emit. ss_ScanTupleSlot
-     * was built by ExecInitCustomScan from custom_scan_tlist. */
+    TupleDesc descriptor = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
+    if (descriptor == nullptr || rt->seq_attno > descriptor->natts
+        || TupleDescAttr(descriptor, rt->seq_attno - 1)->atttypid
+            != bioseq_seq_type_oid()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATATYPE_MISMATCH),
+             errmsg("BioseqBatchSort sequence output attribute is invalid")));
+    }
+    rt->deformslot = ExecInitExtraTupleSlot(
+        estate, descriptor, &TTSOpsMinimalTuple);
     rt->sortslot = ExecInitExtraTupleSlot(
-        estate, node->ss.ss_ScanTupleSlot->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+        estate, descriptor, &TTSOpsVirtual);
+    rt->staging_slot = ExecInitExtraTupleSlot(
+        estate, descriptor, &TTSOpsVirtual);
+}
+
+void
+BioseqBatchSort_BeginCustomScan(CustomScanState* node, EState* estate, int eflags)
+{
+    MemoryContext saved_context = CurrentMemoryContext;
+    ErrorData* volatile original_error = nullptr;
+    ErrorData* volatile converted_error = nullptr;
+    std::exception_ptr cpp_error;
+    PG_TRY();
+    {
+        try {
+            BioseqBatchSort_BeginCustomScanImpl(node, estate, eflags);
+        } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+            converted_error = error.release_error_data();
+        } catch (...) {
+            cpp_error = std::current_exception();
+        }
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        original_error = CopyErrorData();
+        FlushErrorState();
+    }
+    PG_END_TRY();
+    auto release_unregistered_runtime = [node]() noexcept {
+        auto* state = reinterpret_cast<BioseqBatchSortState*>(node);
+        auto* runtime = state == nullptr
+            ? nullptr : static_cast<BioseqBatchSortRuntime*>(state->runtime);
+        if (runtime != nullptr && !runtime->runtime_callback_registered) {
+            bioseq::storage::release_pg_sequence_source_routes_noexcept(
+                runtime->source_routes);
+            state->runtime = nullptr;
+            std::destroy_at(runtime);
+        }
+    };
+    if (original_error != nullptr) {
+        release_unregistered_runtime();
+        ErrorData* exact = original_error;
+        ReThrowError(exact);
+    }
+    if (converted_error != nullptr) {
+        release_unregistered_runtime();
+        ErrorData* exact = converted_error;
+        ReThrowError(exact);
+    }
+    if (cpp_error != nullptr) {
+        release_unregistered_runtime();
+        char detail[512] = "unknown C++ exception";
+        try {
+            std::rethrow_exception(cpp_error);
+        } catch (const std::exception& error) {
+            strlcpy(detail,
+                error.what() == nullptr ? "std::exception without detail"
+                    : error.what(), sizeof(detail));
+        } catch (...) {
+        }
+        cpp_error = nullptr;
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("BioseqBatchSort Begin raised a C++ exception"),
+             errdetail_internal("%s", detail)));
+    }
 }
 
 TupleTableSlot*
@@ -365,24 +664,42 @@ BioseqBatchSort_ExecCustomScanImpl(CustomScanState* node)
             if (TupIsNull(slot)) {
                 break;
             }
+            slot_getallattrs(slot);
             MemoryContext old_cxt = MemoryContextSwitchTo(rt->tuple_cxt);
-            rt->tuples.push_back(ExecCopySlotMinimalTuple(slot));
-            MemoryContextSwitchTo(old_cxt);
-        }
-
-        /* ---- locate the bioseq.seq column in the scan tuple ---- */
-        TupleDesc scan_desc = node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
-        const Oid seq_oid = bioseq_seq_type_oid();
-        rt->seq_attno = 0;
-        for (int i = 0; i < scan_desc->natts; ++i) {
-            if (TupleDescAttr(scan_desc, i)->atttypid == seq_oid) {
-                rt->seq_attno = static_cast<AttrNumber>(i + 1);
-                break;
+            const Datum sequence = slot->tts_values[rt->seq_attno - 1];
+            const bool sequence_is_null = slot->tts_isnull[rt->seq_attno - 1];
+            if (!sequence_is_null
+                && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(sequence))) {
+                Datum retained = bioseq::pg_utils::invoke_pg_as_cpp(
+                    [sequence] {
+                        /* Child slots expose read-only expanded Datums whose
+                         * object context belongs to their per-tuple lifetime.
+                         * Copy only the tiny piece-tree wrapper into our
+                         * already-selected tuple context; retained edges keep
+                         * source domains alive without flattening payloads. */
+                        const Datum read_only = MakeExpandedObjectReadOnly(
+                            sequence, false, -1);
+                        auto acquired = acquire_writable_pg_sequence(read_only);
+                        return pg_sequence_ro_datum(acquired.value);
+                    });
+                TupleTableSlot* staging = rt->staging_slot;
+                ExecClearTuple(staging);
+                const int natts = slot->tts_tupleDescriptor->natts;
+                std::memcpy(staging->tts_values, slot->tts_values,
+                    static_cast<std::size_t>(natts) * sizeof(Datum));
+                std::memcpy(staging->tts_isnull, slot->tts_isnull,
+                    static_cast<std::size_t>(natts) * sizeof(bool));
+                staging->tts_values[rt->seq_attno - 1] = Datum{0};
+                staging->tts_isnull[rt->seq_attno - 1] = true;
+                staging->tts_nvalid = natts;
+                ExecStoreVirtualTuple(staging);
+                rt->tuples.push_back(ExecCopySlotMinimalTuple(staging));
+                rt->retained_sequences.push_back(retained);
+            } else {
+                rt->tuples.push_back(ExecCopySlotMinimalTuple(slot));
+                rt->retained_sequences.push_back(Datum{0});
             }
-        }
-        if (rt->seq_attno == 0 && !rt->tuples.empty()) {
-            ereport(ERROR, (errmsg("BioseqBatchSortScan: no bioseq.seq column found "
-                                   "in the sort input tuple")));
+            MemoryContextSwitchTo(old_cxt);
         }
 
         /* ---- batch the lazy sequences and obtain the emit order ---- */
@@ -398,7 +715,48 @@ BioseqBatchSort_ExecCustomScanImpl(CustomScanState* node)
         return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
     }
     const std::size_t row_index = rt->order[rt->emit_idx++];
-    ExecStoreMinimalTuple(rt->tuples[row_index], rt->sortslot, false);
+    if (row_index >= rt->tuples.size()
+        || row_index >= rt->retained_sequences.size()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqBatchSort output permutation is corrupt")));
+    }
+    ResetExprContext(econtext);
+    ExecStoreMinimalTuple(rt->tuples[row_index], rt->deformslot, false);
+    slot_getallattrs(rt->deformslot);
+    ExecClearTuple(rt->sortslot);
+    const int natts = rt->deformslot->tts_tupleDescriptor->natts;
+    std::memcpy(rt->sortslot->tts_values, rt->deformslot->tts_values,
+        static_cast<std::size_t>(natts) * sizeof(Datum));
+    std::memcpy(rt->sortslot->tts_isnull, rt->deformslot->tts_isnull,
+        static_cast<std::size_t>(natts) * sizeof(bool));
+    if (rt->retained_sequences[row_index] != Datum{0}) {
+        rt->sortslot->tts_values[rt->seq_attno - 1] =
+            rt->retained_sequences[row_index];
+        rt->sortslot->tts_isnull[rt->seq_attno - 1] = false;
+    }
+    rt->sortslot->tts_nvalid = natts;
+    if (!rt->sortslot->tts_isnull[rt->seq_attno - 1]) {
+        Datum sequence = rt->sortslot->tts_values[rt->seq_attno - 1];
+        if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(sequence))) {
+            auto* flat = reinterpret_cast<pgseq_t*>(DatumGetPointer(sequence));
+            if (bioseq::storage::is_locator_stub(flat)) {
+                if (!OidIsValid(rt->source_relation_oid)
+                    || rt->source_attno <= 0
+                    || !rt->source_routes_acquired) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                         errmsg("BioseqBatchSort output locator has no exact source route")));
+                }
+                rt->sortslot->tts_values[rt->seq_attno - 1] =
+                    bioseq::storage::promote_pg_sequence_locator(
+                        rt->source_routes, rt->source_relation_oid,
+                        rt->source_attno, sequence,
+                        econtext->ecxt_per_tuple_memory);
+            }
+        }
+    }
+    ExecStoreVirtualTuple(rt->sortslot);
     econtext->ecxt_scantuple = rt->sortslot;
     if (node->ss.ps.ps_ProjInfo != nullptr) {
         return ExecProject(node->ss.ps.ps_ProjInfo);
@@ -409,46 +767,51 @@ BioseqBatchSort_ExecCustomScanImpl(CustomScanState* node)
 TupleTableSlot*
 BioseqBatchSort_ExecCustomScan(CustomScanState* node)
 {
-	ErrorData* exact_error = nullptr;
 	TupleTableSlot* result = nullptr;
-	bool cpp_error = false;
-	bool unknown_cpp_error = false;
-	char detail[512] = "std::exception without detail";
-	try {
-		result = BioseqBatchSort_ExecCustomScanImpl(node);
-	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
-		exact_error = error.release_error_data();
-	} catch (const std::exception& error) {
-		strlcpy(
-			detail,
-			error.what() == nullptr ? "std::exception without detail" : error.what(),
-			sizeof(detail));
-		cpp_error = true;
-	} catch (...) {
-		unknown_cpp_error = true;
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile original_error = nullptr;
+	ErrorData* volatile converted_error = nullptr;
+	std::exception_ptr cpp_error;
+	PG_TRY();
+	{
+		try {
+			result = BioseqBatchSort_ExecCustomScanImpl(node);
+		} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+			converted_error = error.release_error_data();
+		} catch (...) {
+			cpp_error = std::current_exception();
+		}
 	}
-	if (exact_error != nullptr || cpp_error || unknown_cpp_error) {
-		MemoryContext recovery_context =
-			node != nullptr && node->ss.ps.state != nullptr
-				? node->ss.ps.state->es_query_cxt
-				: TopMemoryContext;
-		MemoryContextSwitchTo(recovery_context);
-		BioseqBatchSort_RuntimeCleanup(
-			reinterpret_cast<BioseqBatchSortState*>(node));
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		original_error = CopyErrorData();
+		FlushErrorState();
 	}
-	if (exact_error != nullptr) {
-		ReThrowError(exact_error);
+	PG_END_TRY();
+	if (original_error != nullptr) {
+		ErrorData* exact = original_error;
+		ReThrowError(exact);
 	}
-	if (cpp_error) {
+	if (converted_error != nullptr) {
+		ErrorData* exact = converted_error;
+		ReThrowError(exact);
+	}
+	if (cpp_error != nullptr) {
+		char detail[512] = "unknown C++ exception";
+		try {
+			std::rethrow_exception(cpp_error);
+		} catch (const std::exception& error) {
+			strlcpy(detail,
+				error.what() == nullptr ? "std::exception without detail"
+					: error.what(), sizeof(detail));
+		} catch (...) {
+		}
+		cpp_error = nullptr;
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqBatchSort Exec raised a C++ exception"),
 			 errdetail_internal("%s", detail)));
-	}
-	if (unknown_cpp_error) {
-		ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("BioseqBatchSort Exec raised an unknown C++ exception")));
 	}
 	return result;
 }
@@ -461,11 +824,17 @@ BioseqBatchSort_EndCustomScan(CustomScanState* node)
     }
     auto* state = reinterpret_cast<BioseqBatchSortState*>(node);
     if (state->runtime != nullptr) {
-        /* tuple_cxt is a child of es_query_cxt and is freed by the executor's
-         * context teardown; we only release the C++ object here. */
-        delete static_cast<BioseqBatchSortRuntime*>(state->runtime);
+        auto* runtime = static_cast<BioseqBatchSortRuntime*>(state->runtime);
+        if (runtime->source_routes_acquired) {
+            bioseq::storage::release_pg_sequence_source_routes(
+                runtime->source_routes, true);
+            runtime->source_routes_acquired = false;
+        }
+        std::destroy_at(runtime);
         state->runtime = nullptr;
     }
+    node->custom_ps = NIL;
+    outerPlanState(node) = nullptr;
 }
 
 void
@@ -475,18 +844,35 @@ BioseqBatchSort_ReScanCustomScan(CustomScanState* node)
     rt->sorted = false;
     rt->emit_idx = 0;
     rt->tuples.clear();
+    rt->retained_sequences.clear();
     rt->order.clear();
     rt->accelerator = "not executed";
     rt->sorted_rows = 0;
     rt->gpu_dispatch_delta = 0;
     rt->gpu_global_compare_dispatch_delta = 0;
     rt->gpu_dense_scatter_dispatch_delta = 0;
+    rt->gpu_uploaded_bytes_delta = 0;
     rt->sort_runtime_ns = 0;
+    rt->admitted_source_rows = 0;
+    rt->admitted_source_bytes = 0;
+    rt->admission_fallbacks = 0;
     if (rt->tuple_cxt != nullptr) {
         MemoryContextReset(rt->tuple_cxt);
     }
     if (PlanState* child = outerPlanState(node)) {
         ExecReScan(child);
+    }
+    if (rt->source_routes.count > rt->source_routes.leases.size()) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("BioseqBatchSort source route count is corrupt")));
+    }
+    for (std::uint8_t index = 0u;
+         index < rt->source_routes.count; ++index) {
+        bioseq::storage::sweep_reclaimable_pg_sequence_source_domains(
+            rt->source_routes.leases[index],
+            bioseq::storage::pg_sequence_source_sweep_boundary::rescan,
+            true);
     }
 }
 
@@ -512,6 +898,16 @@ BioseqBatchSort_ExplainCustomScan(CustomScanState* node, List* ancestors, Explai
                            static_cast<int64>(rt->gpu_dense_scatter_dispatch_delta), es);
     ExplainPropertyInteger("Bioseq GPU Sort Uploaded Bytes", nullptr,
                            static_cast<int64>(rt->gpu_uploaded_bytes_delta), es);
+    ExplainPropertyInteger("Bioseq Source Rows Admitted", nullptr,
+                           static_cast<int64>(rt->admitted_source_rows), es);
+    ExplainPropertyInteger("Bioseq Source Bytes Admitted", "bytes",
+                           static_cast<int64>(std::min<std::uint64_t>(
+                               rt->admitted_source_bytes,
+                               static_cast<std::uint64_t>(INT64_MAX))), es);
+    ExplainPropertyInteger("Bioseq Source Admission Fallbacks", nullptr,
+                           static_cast<int64>(rt->admission_fallbacks), es);
+    ExplainPropertyBool("Bioseq Source Routes Acquired",
+                        rt->source_routes_acquired, es);
 }
 
 /* Method tables are defined AFTER their callbacks (DOC0326 — no forward
@@ -545,7 +941,57 @@ Plan*
 BioseqBatchSort_PlanCustomPath(PlannerInfo* root, RelOptInfo* rel, CustomPath* best_path,
                                List* tlist, List* clauses, List* custom_plans)
 {
+    (void)root;
+    (void)clauses;
     bioseq_log<DBG>("[bioseq] pg: BioseqBatchSort_PlanCustomPath() entered");
+    if (rel == nullptr || best_path == nullptr
+        || list_length(custom_plans) != 1
+        || list_length(best_path->custom_private)
+            != kBioseqBatchSortPathPrivateFields) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("BioseqBatchSort planner ABI is incomplete")));
+    }
+    auto path_integer = [best_path](int index) {
+        Node* encoded = reinterpret_cast<Node*>(
+            list_nth(best_path->custom_private, index));
+        if (encoded == nullptr || !IsA(encoded, Integer)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("BioseqBatchSort path integer ABI is invalid"),
+                 errdetail("field=%d", index)));
+        }
+        return intVal(encoded);
+    };
+    const int version = path_integer(kBatchSortVersion);
+    const int descending = path_integer(kBatchSortDescending);
+    const int nulls_first = path_integer(kBatchSortNullsFirst);
+    Node* sort_expression = reinterpret_cast<Node*>(
+        list_nth(best_path->custom_private, kBatchSortSequenceResno));
+    const int source_relation_oid = path_integer(kBatchSortSourceRelationOid);
+    const int source_attno = path_integer(kBatchSortSourceAttno);
+    auto* child_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
+    AttrNumber sequence_resno = InvalidAttrNumber;
+    for (TargetEntry* entry : PList<TargetEntry>(child_plan->targetlist)) {
+        if (entry != nullptr && equal(entry->expr, sort_expression)) {
+            if (sequence_resno != InvalidAttrNumber) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_AMBIGUOUS_COLUMN),
+                     errmsg("BioseqBatchSort sequence sort key is ambiguous")));
+            }
+            sequence_resno = entry->resno;
+        }
+    }
+    if (version != kBioseqBatchSortPlanVersion
+        || sort_expression == nullptr
+        || exprType(sort_expression) != bioseq_seq_type_oid()
+        || sequence_resno <= 0
+        || (OidIsValid(static_cast<Oid>(source_relation_oid))
+            != (source_attno > 0))) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("BioseqBatchSort path provenance ABI is invalid")));
+    }
     CustomScan* cscan = makeNode(CustomScan);
     cscan->methods = &BioseqBatchSortScanMethods;
     cscan->flags = best_path->flags;
@@ -554,7 +1000,12 @@ BioseqBatchSort_PlanCustomPath(PlannerInfo* root, RelOptInfo* rel, CustomPath* b
     cscan->scan.scanrelid = 0;
     cscan->scan.plan.qual = NIL;
     cscan->custom_exprs = NIL;
-    cscan->custom_private = best_path->custom_private;
+    cscan->custom_private = list_make5(
+        makeInteger(kBioseqBatchSortPlanVersion),
+        makeInteger(descending), makeInteger(nulls_first),
+        makeInteger(sequence_resno), makeInteger(source_relation_oid));
+    cscan->custom_private = lappend(
+        cscan->custom_private, makeInteger(source_attno));
     cscan->custom_plans = custom_plans;
 
     /* Passthrough output: our path's pathtarget equals the child's, so `tlist`
@@ -562,7 +1013,6 @@ BioseqBatchSort_PlanCustomPath(PlannerInfo* root, RelOptInfo* rel, CustomPath* b
      * describes the scan tuple (= child output); setrefs rewrites the output
      * targetlist into INDEX_VAR references over it. */
     cscan->scan.plan.targetlist = tlist;
-    auto* child_plan = reinterpret_cast<Plan*>(linitial(custom_plans));
     cscan->custom_scan_tlist = static_cast<List*>(copyObject(child_plan->targetlist));
     cscan->custom_relids = bms_copy(rel->relids);
 
@@ -581,8 +1031,14 @@ const CustomPathMethods BioseqBatchSortPathMethods = {
 create_upper_paths_hook_type PreviousCreateUpperPathsHook = nullptr;
 BioseqSliceProjectUpperPathProvider SliceProjectUpperPathProvider = nullptr;
 
-/* The first ORDER BY pathkey whose key is of type bioseq.seq, or nullptr. */
-[[nodiscard]] PathKey* sort_sequence_pathkey(PlannerInfo* root, Oid seq_oid)
+struct BioseqSequenceSortKey {
+    PathKey* pathkey = nullptr;
+    Node* expression = nullptr;
+};
+
+/* The first ORDER BY pathkey whose key is of type bioseq.seq. */
+[[nodiscard]] BioseqSequenceSortKey sort_sequence_pathkey(
+        PlannerInfo* root, Oid seq_oid)
 {
     ListCell* pk_cell;
     foreach(pk_cell, root->sort_pathkeys) {
@@ -595,11 +1051,11 @@ BioseqSliceProjectUpperPathProvider SliceProjectUpperPathProvider = nullptr;
                 continue;
             }
             if (exprType(reinterpret_cast<Node*>(member->em_expr)) == seq_oid) {
-                return pathkey;
+                return {pathkey, reinterpret_cast<Node*>(member->em_expr)};
             }
         }
     }
-    return nullptr;
+    return {};
 }
 
 [[nodiscard]] bool pathkey_descending(PathKey* pathkey)
@@ -625,7 +1081,8 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
 		SliceProjectUpperPathProvider(root, stage, input_rel, output_rel, extra);
 	}
 
-    if (stage != UPPERREL_ORDERED || root->sort_pathkeys == NIL) {
+    if (stage != UPPERREL_ORDERED || root->sort_pathkeys == NIL
+        || list_length(root->sort_pathkeys) != 1) {
         return;
     }
     /* Opt-in (default OFF): leave PostgreSQL's own Sort in place unless the
@@ -639,15 +1096,45 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
         return;
     }
     const Oid seq_oid = bioseq_seq_type_oid();
-    PathKey* seq_pk = OidIsValid(seq_oid) ? sort_sequence_pathkey(root, seq_oid) : nullptr;
-    if (seq_pk == nullptr) {
+    const BioseqSequenceSortKey sort_key = OidIsValid(seq_oid)
+        ? sort_sequence_pathkey(root, seq_oid) : BioseqSequenceSortKey{};
+    if (sort_key.pathkey == nullptr || sort_key.expression == nullptr) {
         return;   /* not sorting sequences — leave PostgreSQL's plan untouched */
     }
 
     /* DOC0346 — carry the sort direction to the executor. Stored as a 2-int List
      * in custom_private and read back in BeginCustomScan. */
-    const bool descending  = pathkey_descending(seq_pk);
-    const bool nulls_first = seq_pk->pk_nulls_first;
+    const bool descending  = pathkey_descending(sort_key.pathkey);
+    const bool nulls_first = sort_key.pathkey->pk_nulls_first;
+
+    Oid source_relation_oid = InvalidOid;
+    AttrNumber source_attno = InvalidAttrNumber;
+    Var* source_var = IsA(sort_key.expression, Var)
+        ? reinterpret_cast<Var*>(sort_key.expression) : nullptr;
+    if (source_var != nullptr && source_var->varno > 0
+        && source_var->varattno > 0 && source_var->varlevelsup == 0
+        && bms_is_empty(source_var->varnullingrels)
+        && root->parse != nullptr
+        && source_var->varno <= static_cast<Index>(
+            list_length(root->parse->rtable))) {
+        RangeTblEntry* rte = rt_fetch(
+            source_var->varno, root->parse->rtable);
+        if (rte != nullptr && rte->rtekind == RTE_RELATION
+            && OidIsValid(rte->relid) && rte->securityQuals == NIL) {
+            source_relation_oid = rte->relid;
+            source_attno = source_var->varattno;
+        }
+    }
+
+    Path* owned_input_path = input_path;
+    if (OidIsValid(source_relation_oid)
+        && BioseqBatchSortSourcePathTagger != nullptr) {
+        bool tagged = false;
+        Path* tagged_path = BioseqBatchSortSourcePathTagger(
+            input_path, sort_key.expression, &tagged);
+        if (tagged_path == nullptr) return;
+        if (tagged) owned_input_path = tagged_path;
+    }
 
     bioseq_log<DBG>("[bioseq] pg: BioseqBatchSort engaging for sequence ORDER BY "
                     "(descending={}, nulls_first={})", descending, nulls_first);
@@ -655,23 +1142,30 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
     CustomPath* cpath = makeNode(CustomPath);
     cpath->path.pathtype = T_CustomScan;
     cpath->path.parent = output_rel;
-    cpath->path.pathtarget = input_path->pathtarget;   /* passthrough */
+    cpath->path.pathtarget = owned_input_path->pathtarget;   /* passthrough */
     cpath->path.param_info = nullptr;
     cpath->path.parallel_aware = false;
     cpath->path.parallel_safe = false;                 /* blocking sort: serial */
     cpath->path.parallel_workers = 0;
-    cpath->path.rows = input_path->rows;
+    cpath->path.rows = owned_input_path->rows;
     /* Blocking operator: all input is consumed before the first output row, so
      * startup == input's total. total_cost is deliberately set to the input's
      * total (a "free" sort) so this path dominates and replaces any core Sort. */
-    cpath->path.startup_cost = input_path->total_cost;
-    cpath->path.total_cost = input_path->total_cost;
+    cpath->path.startup_cost = owned_input_path->total_cost;
+    cpath->path.total_cost = owned_input_path->total_cost;
     cpath->path.pathkeys = root->sort_pathkeys;         /* we satisfy the ordering */
     cpath->flags = 0;
-    cpath->custom_paths = list_make1(input_path);
-    /* [0] = descending, [1] = nulls_first (read in BeginCustomScan). */
-    cpath->custom_private = list_make2(makeInteger(descending ? 1 : 0),
-                                       makeInteger(nulls_first ? 1 : 0));
+    cpath->custom_paths = list_make1(owned_input_path);
+    /* Path ABI carries the original key identity; PlanCustomPath resolves its
+     * exact child output resno before setrefs and serializes only scalars. */
+    cpath->custom_private = list_make5(
+        makeInteger(kBioseqBatchSortPlanVersion),
+        makeInteger(descending ? 1 : 0),
+        makeInteger(nulls_first ? 1 : 0),
+        copyObject(sort_key.expression),
+        makeInteger(static_cast<int>(source_relation_oid)));
+    cpath->custom_private = lappend(cpath->custom_private,
+        makeInteger(static_cast<int>(source_attno)));
     cpath->custom_restrictinfo = NIL;
     cpath->methods = &BioseqBatchSortPathMethods;
 
@@ -705,6 +1199,28 @@ bioseq_register_slice_project_upper_path_provider(
 			 errmsg("Bioseq SliceProject upper-path provider is already registered")));
 	}
 	SliceProjectUpperPathProvider = provider;
+}
+
+export void
+bioseq_register_batch_sort_source_providers(
+        BioseqBatchSortSourcePathProvider path_provider,
+        BioseqBatchSortSourceRouteProvider route_provider)
+{
+    if (path_provider == nullptr || route_provider == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+             errmsg("Bioseq BatchSort source provider callback is NULL")));
+    }
+    if ((BioseqBatchSortSourcePathTagger != nullptr
+            && BioseqBatchSortSourcePathTagger != path_provider)
+        || (BatchSortSourceRouteProvider != nullptr
+            && BatchSortSourceRouteProvider != route_provider)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DUPLICATE_OBJECT),
+             errmsg("Bioseq BatchSort source providers are already registered")));
+    }
+    BioseqBatchSortSourcePathTagger = path_provider;
+    BatchSortSourceRouteProvider = route_provider;
 }
 
 /* ------------------------------------------------------------------ */

@@ -86,19 +86,23 @@ TEST_CASE("DOC0377 letter typmods resolve literals and validate physical alphabe
     REQUIRE(typmodless_literal.contains(
         "bioseq.letter input requires an alphabet typmod"));
 
-    // PG17 performs unknown-literal input before typmod coercion and has no
-    // base-type heap-write callback.  A parser token can therefore enter a
-    // typmodless column, but its first observable read must fail closed.
+    // PostgreSQL passes the destination typmod to a base type's three-argument
+    // input function. A typmodless heap target therefore fails before a Datum
+    // can be formed, while an explicitly bound physical letter remains valid
+    // even when stored in a typmodless column.
     exec_sql(ctx,
         "CREATE TABLE doc0377_typmodless_letter "
         " (value bioseq.letter);");
-    exec_sql(ctx,
-        "INSERT INTO doc0377_typmodless_letter VALUES ('A');");
     const auto stored_typmodless_literal = sql_error(
-        ctx, "SELECT value FROM doc0377_typmodless_letter;");
+        ctx, "INSERT INTO doc0377_typmodless_letter VALUES ('A');");
     REQUIRE(stored_typmodless_literal.sqlstate == "22023");
     REQUIRE(stored_typmodless_literal.contains(
         "bioseq.letter input requires an alphabet typmod"));
+    exec_sql(ctx,
+        "INSERT INTO doc0377_typmodless_letter VALUES "
+        " ('A'::bioseq.letter('dna4'));");
+    REQUIRE(query_scalar(
+        ctx, "SELECT value::text FROM doc0377_typmodless_letter;") == "A");
 }
 
 TEST_CASE("DOC0377 nested slice concat and transforms preserve logical value",

@@ -794,6 +794,10 @@ public:
      * the Phase B baseline `with_lazy_in_memory`.
      */
     struct ScannerPgContext {
+        /* Optional statement-root async ownership observer.  It is generic at
+         * the pipeline boundary; the PostgreSQL trace owner supplies the
+         * concrete enrollment/state-machine adapter. */
+        bioseq::parallelism::tracked_job_observer async_job_observer{};
         Oid                                              db_oid               = InvalidOid;
         Oid                                              tablespace_oid       = InvalidOid;
         Oid                                              main_relfilenode     = InvalidOid;

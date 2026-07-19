@@ -412,6 +412,7 @@ const LazyExpressionFacade::backend_ops kLazyExpressionNodeOps{
         &lazy_expression_node_ptr_at<true, true>,
     },
     .try_resident_packed = &lazy_expression_node_resident_probe,
+    .copy_full_packed = nullptr,
     .worker_shareable = &lazy_expression_node_worker_shareable,
 };
 

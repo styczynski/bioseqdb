@@ -29,11 +29,190 @@ std::atomic<std::size_t> materialization_probe_index{0u};
         std::min(index, materialization_probe_values.size() - 1u)];
 }
 
-void set_materialization_probe(
-        std::uint64_t before,
-        std::uint64_t after) noexcept {
-    materialization_probe_values = {before, after, after, after};
-    materialization_probe_index.store(0u, std::memory_order_relaxed);
+void set_materialization_probe(std::uint64_t before,
+                               std::uint64_t after) noexcept {
+  materialization_probe_values = {before, after, after, after};
+  materialization_probe_index.store(0u, std::memory_order_relaxed);
+}
+
+enum class FakeTrackedState : std::uint8_t {
+  unused = 0u,
+  enrolled,
+  scheduled,
+  finished,
+};
+
+struct FakeTrackedSlot {
+  std::uint64_t generation = 0u;
+  FakeTrackedState state = FakeTrackedState::unused;
+  bioseq::parallelism::tracked_job_resources resources{};
+  bool failed = false;
+};
+
+struct FakeTrackedOwner {
+  std::array<FakeTrackedSlot, 2> slots{};
+  std::uint32_t live = 0u;
+  std::uint32_t peak_live = 0u;
+  std::uint32_t enrollments = 0u;
+  std::uint32_t drains = 0u;
+  std::atomic<std::uint32_t> worker_entries{0u};
+  std::atomic<std::uint32_t> active_workers{0u};
+  std::atomic<std::uint32_t> peak_active_workers{0u};
+};
+
+[[nodiscard]] bool
+fake_tracked_enroll(void *argument,
+                    bioseq::parallelism::tracked_job_resources resources,
+                    bioseq::parallelism::tracked_job_handle *handle) noexcept {
+  auto *owner = static_cast<FakeTrackedOwner *>(argument);
+  if (owner == nullptr || handle == nullptr) {
+    return false;
+  }
+  for (std::size_t index = 0u; index < owner->slots.size(); ++index) {
+    auto &slot = owner->slots[index];
+    if (slot.state != FakeTrackedState::unused) {
+      continue;
+    }
+    slot.state = FakeTrackedState::enrolled;
+    slot.resources = resources;
+    slot.failed = false;
+    ++owner->live;
+    ++owner->enrollments;
+    owner->peak_live = std::max(owner->peak_live, owner->live);
+    *handle = {
+        .slot_index = static_cast<std::uint32_t>(index),
+        .generation = slot.generation,
+    };
+    return true;
+  }
+  return false;
+}
+
+[[nodiscard]] FakeTrackedSlot *
+fake_tracked_slot(FakeTrackedOwner *owner,
+                  bioseq::parallelism::tracked_job_handle handle) noexcept {
+  if (owner == nullptr || handle.slot_index >= owner->slots.size()) {
+    return nullptr;
+  }
+  auto &slot = owner->slots[handle.slot_index];
+  return slot.generation == handle.generation ? std::addressof(slot) : nullptr;
+}
+
+[[nodiscard]] bool fake_tracked_mark_scheduled(
+    void *argument, bioseq::parallelism::tracked_job_handle handle) noexcept {
+  auto *slot =
+      fake_tracked_slot(static_cast<FakeTrackedOwner *>(argument), handle);
+  if (slot == nullptr || slot->state != FakeTrackedState::enrolled) {
+    return false;
+  }
+  slot->state = FakeTrackedState::scheduled;
+  return true;
+}
+
+[[nodiscard]] bool fake_tracked_mark_finished(
+    void *argument, bioseq::parallelism::tracked_job_handle handle) noexcept {
+  auto *slot =
+      fake_tracked_slot(static_cast<FakeTrackedOwner *>(argument), handle);
+  if (slot == nullptr || slot->state != FakeTrackedState::scheduled) {
+    return false;
+  }
+  slot->state = FakeTrackedState::finished;
+  return true;
+}
+
+[[nodiscard]] bool
+fake_tracked_drain(void *argument,
+                   bioseq::parallelism::tracked_job_handle handle,
+                   bioseq::parallelism::tracked_job_outcome *outcome) noexcept {
+  auto *owner = static_cast<FakeTrackedOwner *>(argument);
+  auto *slot = fake_tracked_slot(owner, handle);
+  if (slot == nullptr || slot->state == FakeTrackedState::unused) {
+    return false;
+  }
+  if (slot->state != FakeTrackedState::finished) {
+    if (slot->resources.cancel.invoke != nullptr) {
+      slot->resources.cancel.invoke(slot->resources.cancel.argument);
+    }
+    if (outcome != nullptr) {
+      outcome->incomplete = true;
+    }
+  }
+  if (slot->resources.join.invoke != nullptr) {
+    slot->resources.join.invoke(slot->resources.join.argument);
+  }
+  if (slot->resources.backings.invoke != nullptr) {
+    slot->resources.backings.invoke(slot->resources.backings.argument);
+  }
+  if (outcome != nullptr) {
+    outcome->failed = slot->failed;
+  }
+  slot->resources = {};
+  slot->state = FakeTrackedState::unused;
+  ++slot->generation;
+  --owner->live;
+  ++owner->drains;
+  return true;
+}
+
+void fake_tracked_handoff_error(void *argument,
+                                bioseq::parallelism::tracked_job_handle handle,
+                                std::uint32_t, char const *, bool) noexcept {
+  auto *slot =
+      fake_tracked_slot(static_cast<FakeTrackedOwner *>(argument), handle);
+  if (slot != nullptr) {
+    slot->failed = true;
+  }
+}
+
+void fake_tracked_worker_enter(
+    void *argument, bioseq::parallelism::tracked_job_handle,
+    bioseq::parallelism::tracked_worker_scope_storage *) noexcept {
+  auto *owner = static_cast<FakeTrackedOwner *>(argument);
+  owner->worker_entries.fetch_add(1u, std::memory_order_relaxed);
+  const std::uint32_t active =
+      owner->active_workers.fetch_add(1u, std::memory_order_acq_rel) + 1u;
+  std::uint32_t observed =
+      owner->peak_active_workers.load(std::memory_order_relaxed);
+  while (observed < active && !owner->peak_active_workers.compare_exchange_weak(
+                                  observed, active, std::memory_order_relaxed,
+                                  std::memory_order_relaxed)) {
+  }
+}
+
+void fake_tracked_worker_leave(
+    void *argument, bioseq::parallelism::tracked_job_handle,
+    bioseq::parallelism::tracked_worker_scope_storage *) noexcept {
+  auto *owner = static_cast<FakeTrackedOwner *>(argument);
+  owner->active_workers.fetch_sub(1u, std::memory_order_acq_rel);
+}
+
+[[nodiscard]] bioseq::parallelism::tracked_job_observer
+make_fake_tracked_observer(FakeTrackedOwner *owner) noexcept {
+  return {
+      .context = owner,
+      .enroll = &fake_tracked_enroll,
+      .mark_scheduled = &fake_tracked_mark_scheduled,
+      .mark_finished = &fake_tracked_mark_finished,
+      .drain = &fake_tracked_drain,
+      .handoff_error = &fake_tracked_handoff_error,
+      .worker_enter = &fake_tracked_worker_enter,
+      .worker_leave = &fake_tracked_worker_leave,
+  };
+}
+
+struct DelayedTrackedTask {
+  std::atomic<bool> *release = nullptr;
+  std::atomic<std::uint32_t> *executions = nullptr;
+};
+
+void run_delayed_tracked_task(void *argument) {
+  auto *task = static_cast<DelayedTrackedTask *>(argument);
+  bool released = task->release->load(std::memory_order_acquire);
+  while (!released) {
+    task->release->wait(false, std::memory_order_acquire);
+    released = task->release->load(std::memory_order_acquire);
+  }
+  task->executions->fetch_add(1u, std::memory_order_relaxed);
 }
 
 } // namespace
@@ -93,40 +272,112 @@ TEST_CASE("DOC0294 pool installs worker contexts", "[parallelism][context]") {
     context::installed_context_scope install(outer_context);
     context::context* installed = context::current_or_null();
     std::atomic<bool> inherited_context = false;
-    pool.parallel_for_with_context(0, 1, 1, bioseq::parallelism::range_body{
-        [installed, &inherited_context](std::size_t, std::size_t) {
-            inherited_context.store(context::current_or_null() == installed, std::memory_order_relaxed);
-        }});
+    pool.parallel_for_with_context(
+        0, 1, 1,
+        bioseq::parallelism::range_body{
+            [installed, &inherited_context](std::size_t, std::size_t) {
+              inherited_context.store(context::current_or_null() == installed,
+                                      std::memory_order_relaxed);
+            }});
     REQUIRE(inherited_context.load(std::memory_order_relaxed));
 
     pool.shutdown();
 }
 
-TEST_CASE("DOC0294 task-parallel nested scope gates inner regions", "[parallelism][task-scope]") {
-    auto& pool = bioseq::parallelism::GlobalPool::instance();
-    pool.configure(bioseq::parallelism::PoolConfig{
-        .max_concurrency = 2,
-        .mode = bioseq::parallelism::PipelineConcurrencyMode::TASK_PARALLEL,
-    });
+TEST_CASE(
+    "tracked pool submissions are enrolled before later drain and reuse slots",
+    "[parallelism][tracked][lifecycle]") {
+  using namespace bioseq::parallelism;
+  auto &pool = GlobalPool::instance();
+  pool.restart(PoolConfig{
+      .max_concurrency = 2,
+      .mode = PipelineConcurrencyMode::TASK_PARALLEL,
+  });
 
-    std::atomic<std::uint64_t> outer_calls = 0;
-    std::atomic<std::uint64_t> inner_calls = 0;
-    bioseq::parallelism::parallel_for_pipeline(
-        0, 8, 1, 1,
-        bioseq::parallelism::TaskParallelRegion::query_batch,
-        [&outer_calls, &inner_calls](std::size_t lo, std::size_t hi) {
-            outer_calls.fetch_add(1, std::memory_order_relaxed);
-            bioseq::parallelism::parallel_for_pipeline(
-                lo, hi, 1, 1,
-                bioseq::parallelism::TaskParallelRegion::align_regions,
-                [&inner_calls](std::size_t, std::size_t) {
-                    inner_calls.fetch_add(1, std::memory_order_relaxed);
-                });
-        });
+  FakeTrackedOwner owner{};
+  const auto observer = make_fake_tracked_observer(std::addressof(owner));
+  std::atomic<bool> release{false};
+  std::atomic<std::uint32_t> executions{0u};
+  std::array<DelayedTrackedTask, 2> task_contexts{{
+      {std::addressof(release), std::addressof(executions)},
+      {std::addressof(release), std::addressof(executions)},
+  }};
+  std::array<tracked_task_submission, 2> submissions{};
 
-    REQUIRE(outer_calls.load(std::memory_order_relaxed) >= 1u);
-    REQUIRE(inner_calls.load(std::memory_order_relaxed) == outer_calls.load(std::memory_order_relaxed));
-    pool.shutdown();
+  const auto first_status = pool.submit_tracked_task_noexcept(
+      std::addressof(submissions[0]),
+      {std::addressof(task_contexts[0]), &run_delayed_tracked_task}, observer);
+  const auto second_status = pool.submit_tracked_task_noexcept(
+      std::addressof(submissions[1]),
+      {std::addressof(task_contexts[1]), &run_delayed_tracked_task}, observer);
+  REQUIRE(first_status == tracked_submit_status::submitted);
+  REQUIRE(second_status == tracked_submit_status::submitted);
+  CHECK(owner.live == 2u);
+  CHECK(owner.peak_live == 2u);
+  CHECK(owner.drains == 0u);
+
+  release.store(true, std::memory_order_release);
+  release.notify_all();
+  for (auto &submission : submissions) {
+    const auto outcome =
+        pool.join_and_drain_tracked_task_noexcept(std::addressof(submission));
+    CHECK(outcome.drained);
+    CHECK_FALSE(outcome.incomplete);
+    CHECK_FALSE(outcome.failed);
+    CHECK(submission.backing_released == 1u);
+  }
+  CHECK(executions.load(std::memory_order_relaxed) == 2u);
+  CHECK(owner.live == 0u);
+  CHECK(owner.drains == 2u);
+
+  DelayedTrackedTask reusable{std::addressof(release),
+                              std::addressof(executions)};
+  tracked_task_submission reusable_submission{};
+  for (std::uint32_t use = 0u; use < 128u; ++use) {
+    const auto status = pool.submit_tracked_task_noexcept(
+        std::addressof(reusable_submission),
+        {std::addressof(reusable), &run_delayed_tracked_task}, observer);
+    REQUIRE(status == tracked_submit_status::submitted);
+    const auto outcome = pool.join_and_drain_tracked_task_noexcept(
+        std::addressof(reusable_submission));
+    REQUIRE(outcome.drained);
+    REQUIRE_FALSE(outcome.incomplete);
+    REQUIRE_FALSE(outcome.failed);
+  }
+  CHECK(owner.live == 0u);
+  CHECK(owner.enrollments == 130u);
+  CHECK(owner.drains == 130u);
+  CHECK(executions.load(std::memory_order_relaxed) == 130u);
+  CHECK(owner.slots[0].generation + owner.slots[1].generation == 130u);
+  pool.shutdown();
+}
+
+TEST_CASE("DOC0294 task-parallel nested scope gates inner regions",
+          "[parallelism][task-scope]") {
+  auto &pool = bioseq::parallelism::GlobalPool::instance();
+  pool.configure(bioseq::parallelism::PoolConfig{
+      .max_concurrency = 2,
+      .mode = bioseq::parallelism::PipelineConcurrencyMode::TASK_PARALLEL,
+  });
+
+  std::atomic<std::uint64_t> outer_calls = 0;
+  std::atomic<std::uint64_t> inner_calls = 0;
+  bioseq::parallelism::parallel_for_pipeline(
+      0, 8, 1, 1, bioseq::parallelism::TaskParallelRegion::query_batch,
+      [&outer_calls, &inner_calls](std::size_t lo, std::size_t hi) {
+        outer_calls.fetch_add(1, std::memory_order_relaxed);
+        bioseq::parallelism::parallel_for_pipeline(
+            lo, hi, 1, 1,
+            bioseq::parallelism::TaskParallelRegion::align_regions,
+            [&inner_calls](std::size_t, std::size_t) {
+              inner_calls.fetch_add(1, std::memory_order_relaxed);
+            });
+      });
+
+  REQUIRE(outer_calls.load(std::memory_order_relaxed) >= 1u);
+  REQUIRE(inner_calls.load(std::memory_order_relaxed) ==
+          outer_calls.load(std::memory_order_relaxed));
+  pool.shutdown();
 }
 
 TEST_CASE("DOC0294 memory admission reserves and releases", "[parallelism][memory]") {

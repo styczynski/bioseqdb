@@ -27,6 +27,7 @@ import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
+import bioseq.types.pg_compact_sequence;
 
 export namespace bioseq::scheduler {
 
@@ -67,6 +68,8 @@ public:
 
     void bind_persisted_gpu_operation_evidence_sink(
         bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink);
+
+    void bind_slice_async_owner(slice_async_owner_guard* owner);
 
     void configure_mmsearch(
         AttrNumber seq_attno,

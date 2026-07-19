@@ -101,6 +101,14 @@ export struct piece_tree_arena {
     arena_dependency* arena_dependencies;
     source_dependency* source_dependencies;
     piece_tree_arena* release_next;
+    Size accounted_bytes;
+    Size node_metadata_bytes;
+    Size arena_dependency_metadata_bytes;
+    Size source_dependency_metadata_bytes;
+    Size literal_storage_bytes;
+    std::uint32_t node_count;
+    std::uint32_t arena_dependency_count;
+    std::uint32_t source_dependency_count;
     bool dependencies_released;
 };
 

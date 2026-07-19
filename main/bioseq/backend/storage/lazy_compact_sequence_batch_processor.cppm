@@ -365,7 +365,10 @@ struct lazy_compact_sequence_batch_processor {
      * equal-key runs are refined on device in the GPU runtime.
      */
     [[nodiscard]] static std::vector<std::size_t>
-    cpu_sort_sequences(const Batch& batch, const batch_sort_spec& spec) {
+    cpu_sort_sequences(
+        const Batch& batch,
+        const batch_sort_spec& spec,
+        bioseq::parallelism::tracked_job_observer observer = {}) {
         const std::size_t n = std::ranges::size(batch);
         std::vector<std::size_t> order(n);
         auto* order_begin = order.data();
@@ -383,10 +386,10 @@ struct lazy_compact_sequence_batch_processor {
         const bool worker_shareable = std::ranges::all_of(
             batch, [](seq_t view) {
                 return lazy_is_worker_shareable(view);
-            });
+        });
         if (worker_shareable) {
-            bioseq::parallelism::GlobalPool::instance().parallel_sort(
-                order_begin, order_end, less);
+            bioseq::parallelism::GlobalPool::instance().parallel_sort_tracked(
+                order_begin, order_end, less, observer);
         } else {
             std::stable_sort(order_begin, order_end, less);
         }
@@ -414,7 +417,9 @@ struct lazy_compact_sequence_batch_processor {
      */
     [[nodiscard]] static std::vector<std::size_t>
     lazy_compact_sequence_batch_sort(const Batch& batch,
-                                     const batch_sort_spec& spec = {}) {
+                                     const batch_sort_spec& spec = {},
+                                     bioseq::parallelism::tracked_job_observer
+                                         observer = {}) {
         const std::size_t n = std::ranges::size(batch);
         std::vector<std::size_t> order(n);
         std::iota(order.data(), order.data() + order.size(), std::size_t{0});
@@ -422,7 +427,7 @@ struct lazy_compact_sequence_batch_processor {
         if (auto gpu = bioseq::gpu::sort::gpu_sort_sequences(batch, spec)) {
             return std::move(*gpu);
         }
-        return cpu_sort_sequences(batch, spec);
+        return cpu_sort_sequences(batch, spec, observer);
     }
 };
 

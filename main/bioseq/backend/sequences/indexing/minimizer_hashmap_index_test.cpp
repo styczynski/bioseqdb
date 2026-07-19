@@ -1650,14 +1650,16 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
           "[indexing][minimizer-hashmap][exact-simd][bridge][contract]") {
     auto data = make_dna4(4097, 0xB81D6EULL);
     range_t range(data);
+    auto range_owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto range_view = bioseq::storage::as_lazy_sequence_view(range_owner);
     sketch_collector exact_collector;
 #if HWY_TARGET == HWY_SCALAR
     REQUIRE_THROWS_AS(
         (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
             exact_collector,
-            range,
+            range_view,
             0,
-            static_cast<std::size_t>(range.size()),
+            range_view.bp_size(),
             10,
             15,
             0,
@@ -1667,9 +1669,9 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
     const auto proof =
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             exact_collector,
-            range,
+            range_view,
             0,
-            static_cast<std::size_t>(range.size()),
+            range_view.bp_size(),
             10,
             15,
             0,
@@ -1703,14 +1705,16 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
         data[index].assign_rank(acgt_ranks[(index * 7u + index / 11u) % 4u]);
     }
     dna5_range_t no_n_range(data);
+    auto no_n_owner = bioseq::storage::make_lazy_in_memory(no_n_range);
+    const auto no_n_view = bioseq::storage::as_lazy_sequence_view(no_n_owner);
     sketch_collector no_n_exact_collector;
 #if HWY_TARGET == HWY_SCALAR
     REQUIRE_THROWS_AS(
         (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
             no_n_exact_collector,
-            no_n_range,
+            no_n_view,
             0,
-            static_cast<std::size_t>(no_n_range.size()),
+            no_n_view.bp_size(),
             w,
             k,
             0,
@@ -1720,9 +1724,9 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
     const auto no_n_proof =
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             no_n_exact_collector,
-            no_n_range,
+            no_n_view,
             0,
-            static_cast<std::size_t>(no_n_range.size()),
+            no_n_view.bp_size(),
             w,
             k,
             0,
@@ -1745,13 +1749,16 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
         data[position].assign_rank(3); // SeqAn dna5 N rank
     }
     dna5_range_t with_n_range(data);
+    auto with_n_owner = bioseq::storage::make_lazy_in_memory(with_n_range);
+    const auto with_n_view = bioseq::storage::as_lazy_sequence_view(
+        with_n_owner);
     sketch_collector with_n_collector;
     const auto with_n_proof =
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             with_n_collector,
-            with_n_range,
+            with_n_view,
             0,
-            static_cast<std::size_t>(with_n_range.size()),
+            with_n_view.bp_size(),
             w,
             k,
             0,

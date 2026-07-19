@@ -46,6 +46,7 @@ import bioseq.storage.manager;                     // seq_caches, seq_locator, i
 import bioseq.storage.bucket_math;
 import bioseq.storage.size;
 import bioseq.storage.lazy;                // make_lazy_in_memory
+import bioseq.storage.scanner;             // sequence access requirements
 import bioseq.storage.scanner_pg;          // with_lazy_postgres
 import bioseq.types.pg_compact_sequence;   // pgseq_t, dispatch_instance
 import bioseq.sequences;                   // compact_sequence_range
@@ -547,166 +548,123 @@ inline void run_pg_index_build_with_cleanup(Storage& storage, BuildFn&& build_fn
     }
 }
 
-template <class R>
+template <sequence_alphabet Alphabet>
 struct ResidentIndexBuildTarget {
-    using traits = typename compact_sequence_range<R>::traits;
-    using storage_unit = typename traits::storage_unit;
-    using resident_config = sequence_custom_alphabet<
-        typename traits::alphabet_type,
-        storage_unit,
-        traits::bits_per_char>;
-    using resident_range = compact_sequence_range<resident_config>;
-
-    bioseq::parallelism::MemoryPermit permit;
-    resident_range range;
+    bioseq::storage::admitted_packed_region<Alphabet> owner;
 };
 
-template <class R, class Scanner>
-[[nodiscard]] std::optional<ResidentIndexBuildTarget<R>>
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<ResidentIndexBuildTarget<Alphabet>>
 try_materialize_for_parallel_sequence_index_build(
-        const bioseq::storage::lazy_compact_sequence<R, Scanner>& seq,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
+        std::uint8_t requested_width,
         std::uint64_t rowno,
         std::string_view index_name) {
-    if constexpr (!Scanner::supports_fragments()) {
+    bioseq::parallelism::pg::backend_sync();
+    auto& pool = bioseq::parallelism::GlobalPool::instance();
+    if (!bioseq::parallelism::task_parallel(pool.mode())
+        || pool.max_concurrency() <= 1) {
         return std::nullopt;
-    } else {
-        bioseq::parallelism::pg::backend_sync();
-        auto& pool = bioseq::parallelism::GlobalPool::instance();
-        if (!bioseq::parallelism::task_parallel(pool.mode())
-            || pool.max_concurrency() <= 1) {
-            return std::nullopt;
-        }
-
-        using resident_t = ResidentIndexBuildTarget<R>;
-        using storage_unit = typename resident_t::storage_unit;
-        const std::uint64_t total_units64 =
-            static_cast<std::uint64_t>(seq.size());
-        if (total_units64
-            > static_cast<std::uint64_t>(
-                (std::numeric_limits<std::size_t>::max)())) {
-            bioseq_log<ERR, PG>(
-                   "bioseq.update_index: row {} index {} has too many packed "
-                   "units to materialize for parallel build",
-                   static_cast<unsigned long long>(rowno),
-                   std::string(index_name).c_str());
-        }
-        const std::size_t total_units =
-            static_cast<std::size_t>(total_units64);
-        const std::uint64_t packed_bytes =
-            bioseq::parallelism::saturating_mul(
-                total_units64,
-                static_cast<std::uint64_t>(sizeof(storage_unit)));
-        constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
-        const std::uint64_t reserve_bytes =
-            packed_bytes
-                    > (std::numeric_limits<std::uint64_t>::max)()
-                        - context_reserve_bytes
-                ? (std::numeric_limits<std::uint64_t>::max)()
-                : packed_bytes + context_reserve_bytes;
-
-        auto permit =
-            bioseq::parallelism::MemoryAdmissionController::instance()
-                .try_reserve(reserve_bytes);
-        if (!permit) {
-            bioseq_log<DBG>("[bioseq] index: row={} index={} target_bp={} packed_bytes={} "
-                    "not admitted for resident parallel build; using scanner_pg",
-                    static_cast<unsigned long long>(rowno),
-                    index_name,
-                    static_cast<unsigned long long>(seq.bp_size()),
-                    static_cast<unsigned long long>(packed_bytes));
-            return std::nullopt;
-        }
-
-        typename resident_t::resident_range::base_container packed(total_units);
-        const std::size_t fragment_units = Scanner::fragment_storage_units;
-        for (std::size_t fragment_no = 0;
-             fragment_no < seq.number_of_fragments();
-             ++fragment_no) {
-            if ((fragment_no & std::size_t{0x3ff}) == 0) {
-                CHECK_FOR_INTERRUPTS();
-            }
-            const std::span<const storage_unit> fragment =
-                seq.scanner().read_fragment(fragment_no);
-            const std::size_t dst_offset = fragment_no * fragment_units;
-            if (dst_offset >= packed.size()) {
-                seq.scanner().release_fragment(fragment_no);
-                break;
-            }
-            const std::size_t copy_units =
-                std::min(fragment.size(), packed.size() - dst_offset);
-            std::copy_n(fragment.data(), copy_units, packed.data() + dst_offset);
-            seq.scanner().release_fragment(fragment_no);
-        }
-
-        bioseq_log<DBG>("[bioseq] index: row={} index={} target_bp={} fragments={} "
-                "packed_bytes={} materialized for resident parallel build",
-                static_cast<unsigned long long>(rowno),
-                index_name,
-                static_cast<unsigned long long>(seq.bp_size()),
-                seq.number_of_fragments(),
-                static_cast<unsigned long long>(packed_bytes));
-
-        return resident_t{
-            std::move(*permit),
-            resident_t::resident_range::from_packed(
-                std::move(packed), seq.padding())};
     }
+    const auto access = bioseq::storage::plan_sequence_access(
+        seq,
+        bioseq::storage::sequence_access_requirement::contiguous_resident,
+        0u,
+        seq.bp_size(),
+        requested_width);
+    if (access.route
+        == bioseq::storage::sequence_access_route::borrow_resident) {
+        return std::nullopt;
+    }
+    constexpr std::uint64_t context_reserve_bytes = std::uint64_t{8} << 20;
+    const std::uint64_t reserve_bytes = access.admission_bytes
+            > (std::numeric_limits<std::uint64_t>::max)()
+                - context_reserve_bytes
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : access.admission_bytes + context_reserve_bytes;
+    auto permit =
+        bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+            reserve_bytes);
+    if (!permit) {
+      bioseq_log<DBG>(
+          "[bioseq] index: row={} index={} target_bp={} admitted_bytes={} "
+          "not admitted for resident parallel build; using rank stream",
+          static_cast<unsigned long long>(rowno), index_name,
+          static_cast<unsigned long long>(seq.bp_size()),
+          static_cast<unsigned long long>(access.admission_bytes));
+      return std::nullopt;
+    }
+#ifdef BIOSEQ_TEST_INDEXES
+    note_pg_sequence_facade_materialization_begin();
+#endif
+    auto owner = bioseq::storage::materialize_packed_region(
+        seq, 0u, seq.bp_size(), requested_width, std::move(*permit));
+#ifdef BIOSEQ_TEST_INDEXES
+    note_pg_sequence_facade_materialization_complete();
+#endif
+    bioseq_log<DBG>(
+        "[bioseq] index: row={} index={} target_bp={} admitted_bytes={} "
+        "materialized for resident parallel build",
+        static_cast<unsigned long long>(rowno), index_name,
+        static_cast<unsigned long long>(seq.bp_size()),
+        static_cast<unsigned long long>(access.admission_bytes));
+    return ResidentIndexBuildTarget<Alphabet>{std::move(owner)};
 }
 
 // DOC0345 Patch I — backend-aware. Whole-target resident materialization is
 // disabled under Vulkan: the goal is streaming fragmented GPU windows, not making
 // the fragmented target contiguous on the host.
-template <class SupportedIndexes, class Storage, class R, class Scanner>
+template <class SupportedIndexes, class Storage, sequence_alphabet Alphabet>
 inline void rebuild_one_fragmented_maybe_resident(
         SupportedIndexes& idx,
         std::string_view name,
         Storage& store,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& lazy,
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+        std::uint8_t requested_width,
         std::uint64_t rowno,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
     if (backend == bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar
         && name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME) {
         if (auto resident =
-                try_materialize_for_parallel_sequence_index_build(lazy, rowno, name);
+                try_materialize_for_parallel_sequence_index_build(
+                    sequence, requested_width, rowno, name);
             resident.has_value()) {
-            auto resident_lazy = bioseq::storage::make_lazy_in_memory(resident->range);
-            const auto resident_view =
-                bioseq::storage::as_lazy_sequence_view(resident_lazy);
             idx.rebuild_one_fragmented(
-                name, store, resident_view, backend);
+                name, store, resident->owner.view(), backend);
             return;
         }
     }
-    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
-    idx.rebuild_one_fragmented(name, store, lazy_view, backend);
+    idx.rebuild_one_fragmented(name, store, sequence, backend);
 }
 
 /// Opt-in locator-backed MPF/MPS Format-6 publication bridge.  The existing
 /// persistence GUC selects this production branch without introducing another
 /// feature flag; frozen Format-5 generations remain readable.
-template <class R, class Scanner>
+template <class R>
 inline void build_and_verify_minimizer_format6_generation_pg(
         Oid user_relid,
         std::int16_t column_attno,
         std::string_view index_name,
-        const seq_locator& locator,
         std::uint64_t sequence_rowno,
-        Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type> sequence,
+        bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider);
 
-template <class R, class Scanner>
+template <class R>
 inline void build_and_verify_grouped32_minimizer_generation_pg(
         Oid user_relid,
         std::int16_t column_attno,
         std::string_view index_name,
-        const seq_locator& locator,
         std::uint64_t sequence_rowno,
-        Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type> sequence,
+        bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider);
 
@@ -1236,14 +1194,19 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             if (is_locator_stub(hdr)) {
                 const seq_locator loc = decode_locator_from_stub(hdr);
                 pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
-                    constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
-                    const std::size_t pad = (loc.total_bp_size % lpu) == 0 ? 0 : (std::size_t)(lpu - loc.total_bp_size % lpu);
-                    bioseq::storage::with_lazy_postgres<S>(
+                    using SourceBinding =
+                        bioseq::storage::postgres_lazy_sequence_binding<S>;
+                    const SourceBinding source_binding{
                         rid.db_oid, rid.tablespace_oid, rid.relfilenode,
-                        seq_attno, loc, pad, rs->snapshot, caches, inner,
-                        [&](auto& lazy){
-                            const auto lazy_view =
-                                bioseq::storage::as_lazy_sequence_view(lazy);
+                        seq_attno, loc,
+                        SourceBinding::expected_last_fragment_padding(loc),
+                        rs->snapshot, caches, inner};
+                    bioseq::storage::with_lazy_postgres<S>(
+                        source_binding,
+                        [layout, rel_oid, rid, seq_attno, &name, loc, rowno,
+                         caches, work, &idx, use_grouped32_generation,
+                         source_binding, backend, requested_provider,
+                         bw](auto lazy_view){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
                                 run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view] {
@@ -1253,14 +1216,15 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                             } else if (use_grouped32_generation) {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
                                 build_and_verify_minimizer_format6_generation_pg(
-                                    rel_oid, seq_attno, name, loc, rowno,
-                                    rs->snapshot, store, lazy, backend,
+                                    rel_oid, seq_attno, name, rowno, store,
+                                    lazy_view, source_binding, backend,
                                     requested_provider);
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno, backend] {
+                                run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend] {
                                     rebuild_one_fragmented_maybe_resident(
-                                        idx, name, store, lazy, rowno, backend);
+                                        idx, name, store, lazy_view, bw,
+                                        rowno, backend);
                                 });
                             }
                         });
@@ -1285,9 +1249,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         });
                     } else {
                         auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
-                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno, backend] {
+                        run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view, bw, rowno, backend] {
                             rebuild_one_fragmented_maybe_resident(
-                                idx, name, store, lazy, rowno, backend);
+                                idx, name, store, lazy_view, bw,
+                                rowno, backend);
                         });
                     }
                 });
@@ -1774,17 +1739,18 @@ enum class ReadyMinimizerGenerationIndexKindPg : std::uint8_t {
 /// it only after this function returns a published result.
 class ReadyMinimizerGenerationPublicationPg {
 private:
-    template <class R, class Scanner>
+    template <class R>
     friend ReadyMinimizerGenerationPublicationPg
     build_and_publish_grouped32_minimizer_generation_pg(
         Oid,
         std::int16_t,
         std::string_view,
-        const seq_locator&,
         std::uint64_t,
-        Snapshot,
         IndexStorageFragmentPg&,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>&,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type>,
+        bioseq::storage::postgres_lazy_sequence_binding<R>,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend,
         IndexPayloadStorageBackend);
 
@@ -2344,28 +2310,27 @@ struct ReadyMinimizerFormat6PublicationPg {
 /// PostgreSQL-owned sorted spill runs; two bounded replays then satisfy the
 /// encoder's exact-count-before-postings contract. MPF is intentionally
 /// excluded: its physical fragment indexes must never cross this merge seam.
-template <class R, class Scanner>
+template <class R>
 [[nodiscard]] inline ReadyMinimizerFormat6PublicationPg
 build_and_publish_minimizer_format6_generation_pg(
         Oid user_relid,
         std::int16_t column_attno,
         std::string_view index_name,
-        const seq_locator& locator,
         std::uint64_t sequence_rowno,
-        Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type> sequence,
+        bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
-    static_assert(std::same_as<
-        Scanner, bioseq::storage::sequence_scanner_pg<R>>,
-        "Format-6 publisher requires the PostgreSQL scanner type");
+    using SourceBinding =
+        bioseq::storage::postgres_lazy_sequence_binding<R>;
     using Backend =
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
     using MpsIndex =
         bioseq::indexing::MinimizerSequenceMergedIndex<IndexStorageFragmentPg>;
-    using Sequence = bioseq::storage::lazy_compact_sequence<R, Scanner>;
-    using Traits = typename Sequence::traits;
+    using Traits = typename compact_sequence_range<R>::traits;
     using CanonicalSequenceConfig = sequence_custom_alphabet<
         typename Traits::alphabet_type,
         typename Traits::storage_unit>;
@@ -2373,6 +2338,9 @@ build_and_publish_minimizer_format6_generation_pg(
         == compact_sequence_range<CanonicalSequenceConfig>::traits::
             bits_per_char,
         "Format-6 publisher requires canonical PostgreSQL packing");
+    const seq_locator& locator = source_binding.locator();
+    Snapshot registered_source_snapshot =
+        source_binding.registered_snapshot();
 
     const bool is_mps =
         index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
@@ -2395,6 +2363,7 @@ build_and_publish_minimizer_format6_generation_pg(
                 && IsMVCCSnapshot(GetActiveSnapshot());
         });
     if (!OidIsValid(user_relid) || column_attno <= 0 || !is_mps
+        || source_binding.column_attno() != column_attno
         || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
         || locator.version != kLocatorVersion || locator.source_epoch == 0u
         || locator.total_bp_size == 0u || locator.num_fragments == 0u
@@ -2413,29 +2382,10 @@ build_and_publish_minimizer_format6_generation_pg(
             ERRCODE_INVALID_PARAMETER_VALUE,
             "Format-6 minimizer generation backend is invalid");
     }
-    if (sequence.scanner().is_in_memory_mode()) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "Format-6 minimizer generation requires a PostgreSQL-backed lazy sequence");
-    }
-
     constexpr std::uint16_t kWindowSize = 10u;
     constexpr std::uint16_t kKmerSize = 15u;
-    constexpr std::uint64_t letters_per_unit = Traits::letters_per_unit;
-    static_assert(letters_per_unit != 0u);
-    const std::uint64_t expected_units =
-        locator.total_bp_size / letters_per_unit
-        + (locator.total_bp_size % letters_per_unit != 0u ? 1u : 0u);
-    const std::size_t expected_padding = static_cast<std::size_t>(
-        locator.total_bp_size % letters_per_unit == 0u
-            ? 0u
-            : letters_per_unit
-                - locator.total_bp_size % letters_per_unit);
     if (static_cast<std::uint64_t>(sequence.bp_size())
-            != locator.total_bp_size
-        || static_cast<std::uint64_t>(sequence.size()) != expected_units
-        || sequence.number_of_fragments() != locator.num_fragments
-        || sequence.padding() != expected_padding) {
+            != locator.total_bp_size) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
             "Format-6 minimizer lazy sequence shape disagrees with its locator");
@@ -2456,14 +2406,11 @@ build_and_publish_minimizer_format6_generation_pg(
         || storage.bucket_idx_ != locator.bucket_idx
         || storage.shard_idx_ != locator.shard_idx
         || storage.query_key_ != sequence_rowno
-        || !sequence.scanner().matches_pg_binding(
-            relation_identity.db_oid,
-            relation_identity.tablespace_oid,
-            relation_identity.relfilenode,
-            column_attno,
-            locator,
-            expected_padding,
-            registered_source_snapshot)) {
+        || source_binding.db_oid() != relation_identity.db_oid
+        || source_binding.tablespace_oid()
+            != relation_identity.tablespace_oid
+        || source_binding.main_relfilenode()
+            != relation_identity.relfilenode) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
             "Format-6 minimizer storage identity disagrees with its source");
@@ -2514,15 +2461,13 @@ build_and_publish_minimizer_format6_generation_pg(
             ->source_content_checksum_for_diagnostics();
         if (state->source.sequence_rowno != sequence_rowno
             || !rev3_same_seq_locator(state->source.locator, locator)
-            || state->source.alphabet_code
-                != pgseq_supported_alphabets::index_of<
-                    typename Traits::alphabet_type>()
+            || state->source.alphabet_code != SourceBinding::alphabet_code()
             || state->source.storage_unit_byte_width
-                != sizeof(typename Traits::storage_unit)
-            || state->source.padding_letters != sequence.padding()
+                != SourceBinding::storage_unit_byte_width()
+            || state->source.padding_letters
+                != source_binding.last_fragment_padding()
             || state->source.locator.total_bp_size != sequence.bp_size()
-            || state->source.locator.num_fragments
-                != sequence.number_of_fragments()) {
+            || state->source.locator.num_fragments != locator.num_fragments) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
                 "Format-6 authoritative source proof disagrees with the passed lazy sequence");
@@ -2569,11 +2514,9 @@ build_and_publish_minimizer_format6_generation_pg(
         const std::uint64_t maximum_hash =
             bioseq::indexing::minimizer_format6_max_hash(compatibility);
 
-        const auto sequence_view =
-            bioseq::storage::as_lazy_sequence_view(sequence);
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             storage,
-            sequence_view,
+            sequence,
             backend,
             /*core_span_bp=*/0u,
             /*position_segment_span_bp=*/locator.total_bp_size,
@@ -2836,55 +2779,40 @@ build_and_publish_minimizer_format6_generation_pg(
 
 /// Production caller-side seal: publication must preserve the requested
 /// backend and exact source/generation identities returned by the encoder.
-template <class R, class Scanner>
+template <class R>
 inline void build_and_verify_minimizer_format6_generation_pg(
         Oid user_relid,
         std::int16_t column_attno,
         std::string_view index_name,
-        const seq_locator& locator,
         std::uint64_t sequence_rowno,
-        Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type> sequence,
+        bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
-    using Traits =
-        typename bioseq::storage::lazy_compact_sequence<R, Scanner>::traits;
+    using SourceBinding =
+        bioseq::storage::postgres_lazy_sequence_binding<R>;
+    const seq_locator& locator = source_binding.locator();
     constexpr std::uint16_t kWindowSize = 10u;
     constexpr std::uint16_t kKmerSize = 15u;
     constexpr std::uint16_t kAlphabetCode =
-        pgseq_supported_alphabets::index_of<
-            typename Traits::alphabet_type>();
+        SourceBinding::alphabet_code();
     if (index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
         // MPF owns one persisted index per physical source fragment. Never
         // route it through the target-wide Format-6 spill/merge publisher.
         build_and_verify_grouped32_minimizer_generation_pg(
-            user_relid,
-            column_attno,
-            index_name,
-            locator,
-            sequence_rowno,
-            registered_source_snapshot,
-            storage,
-            sequence,
-            backend,
-            requested_provider);
+            user_relid, column_attno, index_name, sequence_rowno, storage,
+            sequence, source_binding, backend, requested_provider);
         return;
     }
     if constexpr (kAlphabetCode != 0u) {
         // Avoid instantiating the large Format-6 publisher for alphabet
         // specializations which are statically outside its registry.
         build_and_verify_grouped32_minimizer_generation_pg(
-            user_relid,
-            column_attno,
-            index_name,
-            locator,
-            sequence_rowno,
-            registered_source_snapshot,
-            storage,
-            sequence,
-            backend,
-            requested_provider);
+            user_relid, column_attno, index_name, sequence_rowno, storage,
+            sequence, source_binding, backend, requested_provider);
         return;
     } else {
         const auto compatibility = bioseq::indexing::
@@ -2898,29 +2826,15 @@ inline void build_and_verify_minimizer_format6_generation_pg(
             // Future DNA4 parameter profiles which are not in the Format-6
             // registry continue on the frozen Format-5 route.
             build_and_verify_grouped32_minimizer_generation_pg(
-                user_relid,
-                column_attno,
-                index_name,
-                locator,
-                sequence_rowno,
-                registered_source_snapshot,
-                storage,
-                sequence,
-                backend,
+                user_relid, column_attno, index_name, sequence_rowno,
+                storage, sequence, source_binding, backend,
                 requested_provider);
             return;
         }
         const ReadyMinimizerFormat6PublicationPg publication =
             build_and_publish_minimizer_format6_generation_pg(
-                user_relid,
-                column_attno,
-                index_name,
-                locator,
-                sequence_rowno,
-                registered_source_snapshot,
-                storage,
-                sequence,
-                backend,
+                user_relid, column_attno, index_name, sequence_rowno,
+                storage, sequence, source_binding, backend,
                 requested_provider);
         if (!publication.published
             || publication.generation_id == 0u
@@ -2961,30 +2875,29 @@ inline void build_and_verify_minimizer_format6_generation_pg(
 /// sidecar or reuses an exact one; legacy/malformed same-name relations require
 /// an explicit lifecycle clear before this route. Publication remains
 /// impossible until the sink has returned its private complete-reread token.
-template <class R, class Scanner>
+template <class R>
 [[nodiscard]] inline ReadyMinimizerGenerationPublicationPg
 build_and_publish_grouped32_minimizer_generation_pg(
         Oid user_relid,
         std::int16_t column_attno,
         std::string_view index_name,
-        const seq_locator& locator,
         std::uint64_t sequence_rowno,
-        Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type> sequence,
+        bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
-    static_assert(std::same_as<
-        Scanner, bioseq::storage::sequence_scanner_pg<R>>,
-        "READY minimizer coordinator requires the PostgreSQL scanner type");
+    using SourceBinding =
+        bioseq::storage::postgres_lazy_sequence_binding<R>;
     using Backend =
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
     using MpfIndex =
         bioseq::indexing::MinimizersPerFragmentIndex<IndexStorageFragmentPg>;
     using MpsIndex =
         bioseq::indexing::MinimizerSequenceMergedIndex<IndexStorageFragmentPg>;
-    using Sequence = bioseq::storage::lazy_compact_sequence<R, Scanner>;
-    using Traits = typename Sequence::traits;
+    using Traits = typename compact_sequence_range<R>::traits;
     using CanonicalSequenceConfig = sequence_custom_alphabet<
         typename Traits::alphabet_type,
         typename Traits::storage_unit>;
@@ -2992,6 +2905,9 @@ build_and_publish_grouped32_minimizer_generation_pg(
         == compact_sequence_range<CanonicalSequenceConfig>::traits::
             bits_per_char,
         "READY minimizer coordinator requires canonical PostgreSQL packing");
+    const seq_locator& locator = source_binding.locator();
+    Snapshot registered_source_snapshot =
+        source_binding.registered_snapshot();
 
     const bool is_mpf = index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
     const bool is_mps = index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
@@ -3019,6 +2935,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         });
 
     if (!OidIsValid(user_relid) || column_attno <= 0
+        || source_binding.column_attno() != column_attno
         || (!is_mpf && !is_mps)
         || !bioseq::indexing::sql_bigint_can_represent(sequence_rowno)
         || locator.version != kLocatorVersion || locator.source_epoch == 0
@@ -3038,39 +2955,19 @@ build_and_publish_grouped32_minimizer_generation_pg(
             ERRCODE_INVALID_PARAMETER_VALUE,
             "READY minimizer generation backend is invalid");
     }
-    if (sequence.scanner().is_in_memory_mode()) {
-        ready_minimizer_error_as_cpp(
-            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
-            "READY minimizer generation requires a PostgreSQL-backed lazy sequence");
-    }
-
     constexpr std::uint16_t kWindowSize = 10u;
     constexpr std::uint16_t kKmerSize = 15u;
     constexpr std::uint64_t kMaxOccCap =
         bioseq::indexing::kMinimizerShapeV5DefaultMaxOccCap;
-    constexpr std::uint16_t kAlphabetCode =
-        pgseq_supported_alphabets::index_of<
-            typename Traits::alphabet_type>();
-    constexpr std::uint64_t letters_per_unit = Traits::letters_per_unit;
+    constexpr std::uint16_t kAlphabetCode = SourceBinding::alphabet_code();
     constexpr std::uint64_t mpf_fragment_span_bp =
-        Scanner::fragment_storage_units * letters_per_unit;
-    static_assert(letters_per_unit != 0);
+        SourceBinding::fragment_bp_capacity();
     static_assert(mpf_fragment_span_bp != 0);
     const std::uint64_t persisted_segment_span_bp = is_mpf
         ? mpf_fragment_span_bp
         : bioseq::indexing::kMinimizerPreferredSegmentSpanBp;
-    const std::uint64_t expected_units = locator.total_bp_size / letters_per_unit
-        + (locator.total_bp_size % letters_per_unit != 0 ? 1u : 0u);
-    const std::size_t expected_padding = static_cast<std::size_t>(
-        locator.total_bp_size % letters_per_unit == 0
-            ? 0u
-            : letters_per_unit
-                - locator.total_bp_size % letters_per_unit);
     if (static_cast<std::uint64_t>(sequence.bp_size())
-            != locator.total_bp_size
-        || static_cast<std::uint64_t>(sequence.size()) != expected_units
-        || sequence.number_of_fragments() != locator.num_fragments
-        || sequence.padding() != expected_padding) {
+            != locator.total_bp_size) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
             "READY minimizer lazy sequence shape disagrees with its locator");
@@ -3091,14 +2988,11 @@ build_and_publish_grouped32_minimizer_generation_pg(
         || storage.bucket_idx_ != locator.bucket_idx
         || storage.shard_idx_ != locator.shard_idx
         || storage.query_key_ != sequence_rowno
-        || !sequence.scanner().matches_pg_binding(
-            relation_identity.db_oid,
-            relation_identity.tablespace_oid,
-            relation_identity.relfilenode,
-            column_attno,
-            locator,
-            expected_padding,
-            registered_source_snapshot)) {
+        || source_binding.db_oid() != relation_identity.db_oid
+        || source_binding.tablespace_oid()
+            != relation_identity.tablespace_oid
+        || source_binding.main_relfilenode()
+            != relation_identity.relfilenode) {
         ready_minimizer_error_as_cpp(
             ERRCODE_DATA_CORRUPTED,
             "READY minimizer storage identity disagrees with its source");
@@ -3197,16 +3091,15 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 ->source_content_checksum_for_diagnostics();
             if (state->source.sequence_rowno != sequence_rowno
                 || !rev3_same_seq_locator(state->source.locator, locator)
-                || state->source.alphabet_code
-                    != pgseq_supported_alphabets::index_of<
-                        typename Traits::alphabet_type>()
+                || state->source.alphabet_code != SourceBinding::alphabet_code()
                 || state->source.storage_unit_byte_width
-                    != sizeof(typename Traits::storage_unit)
-                || state->source.padding_letters != sequence.padding()
+                    != SourceBinding::storage_unit_byte_width()
+                || state->source.padding_letters
+                    != source_binding.last_fragment_padding()
                 || state->source.locator.total_bp_size
                     != sequence.bp_size()
                 || state->source.locator.num_fragments
-                    != sequence.number_of_fragments()) {
+                    != locator.num_fragments) {
                 ready_minimizer_error_as_cpp(
                     ERRCODE_DATA_CORRUPTED,
                     "READY minimizer authoritative source proof disagrees with the passed lazy sequence");
@@ -3250,11 +3143,9 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 .minimizer_scheme_version = scheme.version,
                 .max_occ_cap = kMaxOccCap,
             };
-            const auto sequence_view =
-                bioseq::storage::as_lazy_sequence_view(sequence);
             if (is_mpf) {
                 auto encoded = MpfIndex::encode_persisted_generation(
-                    sequence_view, backend, *state->writer, options,
+                    sequence, backend, *state->writer, options,
                     bioseq::indexing::MinimizerGenerationFixedWidthLimits{},
                     &state->mpf_execution);
                 if (encoded) {
@@ -3266,7 +3157,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
             } else {
                 state->mps_spill_started = true;
                 auto spill = MpsIndex::spill_generation_replay_runs_serial(
-                    storage, sequence_view, backend,
+                    storage, sequence, backend,
                     /*core_span_bp=*/0,
                     bioseq::indexing::kMinimizerPreferredSegmentSpanBp,
                     &state->mps_execution);
@@ -3575,23 +3466,23 @@ build_and_publish_grouped32_minimizer_generation_pg(
 /// publication; this bridge additionally proves that the returned alternative,
 /// backend, and immutable publication binding still match the requested normal
 /// rebuild route. There is no scalar/Exact fallback on any selected backend.
-template <class R, class Scanner>
+template <class R>
 inline void build_and_verify_grouped32_minimizer_generation_pg(
         Oid user_relid,
         std::int16_t column_attno,
         std::string_view index_name,
-        const seq_locator& locator,
         std::uint64_t sequence_rowno,
-        Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
-        bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
+        bioseq::storage::basic_lazy_sequence_view<
+            typename bioseq::storage::postgres_lazy_sequence_binding<R>::
+                alphabet_type> sequence,
+        bioseq::storage::postgres_lazy_sequence_binding<R> source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
         IndexPayloadStorageBackend requested_provider) {
     const ReadyMinimizerGenerationPublicationPg publication =
         build_and_publish_grouped32_minimizer_generation_pg(
-            user_relid, column_attno, index_name, locator, sequence_rowno,
-            registered_source_snapshot, storage, sequence, backend,
-            requested_provider);
+            user_relid, column_attno, index_name, sequence_rowno, storage,
+            sequence, source_binding, backend, requested_provider);
     const bool evidence_kind_matches =
         index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME
             ? std::holds_alternative<
@@ -3624,27 +3515,25 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
     }
 }
 
-// Keep one explicit production scanner instantiation as a narrow compile-time
-// contract in addition to the ordinary update_index call sites.
+// Keep one explicit production facade/binding instantiation as a narrow
+// compile-time contract in addition to the ordinary update_index call sites.
 namespace ready_minimizer_generation_compile_contract_detail {
 using sequence_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
-using scanner = bioseq::storage::sequence_scanner_pg<sequence_config>;
-using lazy_sequence =
-    bioseq::storage::lazy_compact_sequence<sequence_config, scanner>;
+using source_binding =
+    bioseq::storage::postgres_lazy_sequence_binding<sequence_config>;
+using sequence_view = bioseq::storage::basic_lazy_sequence_view<seq::dna4>;
 }  // namespace ready_minimizer_generation_compile_contract_detail
 
 template ReadyMinimizerGenerationPublicationPg
 build_and_publish_grouped32_minimizer_generation_pg<
-    ready_minimizer_generation_compile_contract_detail::sequence_config,
-    ready_minimizer_generation_compile_contract_detail::scanner>(
+    ready_minimizer_generation_compile_contract_detail::sequence_config>(
         Oid,
         std::int16_t,
         std::string_view,
-        const seq_locator&,
         std::uint64_t,
-        Snapshot,
         IndexStorageFragmentPg&,
-        ready_minimizer_generation_compile_contract_detail::lazy_sequence&,
+        ready_minimizer_generation_compile_contract_detail::sequence_view,
+        ready_minimizer_generation_compile_contract_detail::source_binding,
         bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend,
         IndexPayloadStorageBackend);
 
@@ -4140,15 +4029,18 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                 [state, rel_oid, relation_identity, seq_attno, index_name,
                  sequence_rowno, backend, backend_request,
                  &result]<class SequenceConfig>() {
-                    constexpr std::size_t letters_per_unit =
-                        compact_sequence_range<SequenceConfig>::traits::
-                            letters_per_unit;
-                    const std::size_t padding = static_cast<std::size_t>(
-                        result.locator.total_bp_size % letters_per_unit == 0
-                            ? 0u
-                            : letters_per_unit
-                                - result.locator.total_bp_size
-                                    % letters_per_unit);
+                    using SourceBinding =
+                        bioseq::storage::postgres_lazy_sequence_binding<
+                            SequenceConfig>;
+                    const SourceBinding source_binding{
+                        relation_identity.db_oid,
+                        relation_identity.tablespace_oid,
+                        relation_identity.relfilenode, seq_attno,
+                        result.locator,
+                        SourceBinding::expected_last_fragment_padding(
+                            result.locator),
+                        state->source_snapshot, state->fragment_caches,
+                        state->work_context};
                     auto opened_storage =
                         bioseq::pg_utils::invoke_pg_as_cpp(
                             [state, rel_oid, relation_identity, seq_attno,
@@ -4164,22 +4056,17 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                     state->storage.emplace(std::move(opened_storage));
                     result.table_name = state->storage->this_table_name();
                     bioseq::storage::with_lazy_postgres<SequenceConfig>(
-                        relation_identity.db_oid,
-                        relation_identity.tablespace_oid,
-                        relation_identity.relfilenode, seq_attno,
-                        result.locator, padding, state->source_snapshot,
-                        state->fragment_caches, state->work_context,
+                        source_binding,
                         [state, rel_oid, seq_attno, index_name,
                          sequence_rowno, backend, backend_request,
-                         &result](auto& lazy) {
+                         &result, source_binding](auto lazy_view) {
                             arm_ready_minimizer_fixture_failures(
                                 backend_request);
                             result.publication.emplace(
                                 build_and_publish_grouped32_minimizer_generation_pg(
                                     rel_oid, seq_attno, index_name,
-                                    result.locator, sequence_rowno,
-                                    state->source_snapshot,
-                                    *state->storage, lazy, backend,
+                                    sequence_rowno, *state->storage,
+                                    lazy_view, source_binding, backend,
                                     IndexPayloadStorageBackend::
                                         postgres_relation));
                             disarm_ready_minimizer_fixture_failures();
