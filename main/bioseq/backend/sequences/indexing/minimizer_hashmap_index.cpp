@@ -9,6 +9,7 @@ module;
 #include <hwy/highway.h>
 
 #include <boost/unordered/unordered_flat_map.hpp>
+#include <boost/version.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -17,6 +18,7 @@ module;
 #include <memory>
 #include <limits>
 #include <span>
+#include <stdexcept>
 #include <utility>
 
 module bioseq.indexing.minimizer_hashmap;
@@ -31,9 +33,116 @@ import bioseq.simd.utils;
 
 namespace bioseq::indexing::detail {
 
-struct MinimizerHashmapFragmentIndexTable {
-    boost::unordered_flat_map<std::uint64_t, std::uint64_t> table;
+struct MinimizerHashmapTableAllocationState {
+    std::uint64_t live_bytes = 0u;
+    std::uint64_t peak_bytes = 0u;
 };
+
+template <class T>
+struct MinimizerHashmapTableAllocator {
+    using value_type = T;
+    using propagate_on_container_copy_assignment = std::false_type;
+    using propagate_on_container_move_assignment = std::false_type;
+    using propagate_on_container_swap = std::false_type;
+    using is_always_equal = std::false_type;
+
+    MinimizerHashmapTableAllocationState* state = nullptr;
+
+    MinimizerHashmapTableAllocator() noexcept = default;
+    explicit MinimizerHashmapTableAllocator(
+            MinimizerHashmapTableAllocationState* state_) noexcept
+        : state(state_) {}
+
+    template <class U>
+    MinimizerHashmapTableAllocator(
+            const MinimizerHashmapTableAllocator<U>& other) noexcept
+        : state(other.state) {}
+
+    [[nodiscard]] T* allocate(std::size_t count) {
+        if (state == nullptr
+            || count > (std::numeric_limits<std::uint64_t>::max)()
+                    / sizeof(T)) {
+            throw std::bad_alloc{};
+        }
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(count) * sizeof(T);
+        if (state->live_bytes
+            > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+            throw std::bad_alloc{};
+        }
+        state->live_bytes += bytes;
+        state->peak_bytes = std::max(
+            state->peak_bytes, state->live_bytes);
+        try {
+            return std::allocator<T>{}.allocate(count);
+        } catch (...) {
+            state->live_bytes -= bytes;
+            throw;
+        }
+    }
+
+    void deallocate(T* allocation, std::size_t count) noexcept {
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(count) * sizeof(T);
+        DEBUG_ASSERT(state != nullptr && state->live_bytes >= bytes);
+        std::allocator<T>{}.deallocate(allocation, count);
+        if (state != nullptr && state->live_bytes >= bytes) {
+            state->live_bytes -= bytes;
+        }
+    }
+
+    template <class U>
+    friend struct MinimizerHashmapTableAllocator;
+
+    template <class U>
+    [[nodiscard]] bool operator==(
+            const MinimizerHashmapTableAllocator<U>& other) const noexcept {
+        return state == other.state;
+    }
+};
+
+struct MinimizerHashmapFragmentIndexTable {
+    using allocator_type = MinimizerHashmapTableAllocator<
+        std::pair<const std::uint64_t, std::uint64_t>>;
+    using table_type = boost::unordered_flat_map<
+        std::uint64_t,
+        std::uint64_t,
+        boost::hash<std::uint64_t>,
+        std::equal_to<std::uint64_t>,
+        allocator_type>;
+
+    MinimizerHashmapTableAllocationState allocation;
+    table_type table;
+
+    MinimizerHashmapFragmentIndexTable()
+        : allocation{},
+          table(
+              0u,
+              boost::hash<std::uint64_t>{},
+              std::equal_to<std::uint64_t>{},
+              allocator_type{&allocation}) {}
+
+    MinimizerHashmapFragmentIndexTable(
+            const MinimizerHashmapFragmentIndexTable& other)
+        : MinimizerHashmapFragmentIndexTable() {
+        table = other.table;
+    }
+
+    MinimizerHashmapFragmentIndexTable& operator=(
+            const MinimizerHashmapFragmentIndexTable& other) {
+        if (this != &other) table = other.table;
+        return *this;
+    }
+};
+
+static_assert(BOOST_VERSION == 109000,
+    "Update minimizer_hashmap_table_allocation_plan for a new Boost FOA layout");
+static_assert(sizeof(MinimizerHashmapFragmentIndexTable::table_type::value_type)
+              == 2u * sizeof(std::uint64_t));
+using PinnedFoaGroup = boost::unordered::detail::foa::group15<
+    boost::unordered::detail::foa::plain_integral>;
+static_assert(PinnedFoaGroup::N == 15u);
+static_assert(sizeof(PinnedFoaGroup) == 16u);
 
 }  // namespace bioseq::indexing::detail
 
@@ -662,6 +771,36 @@ void MinimizerHashmapFragmentIndex::reserve_table(std::size_t bucket_count) {
     table_->table.reserve(bucket_count);
 }
 
+void MinimizerHashmapFragmentIndex::reserve_table_for_distinct_upper_bound(
+        std::size_t distinct_count) {
+    if (table_ == nullptr) {
+        table_ = std::make_unique<detail::MinimizerHashmapFragmentIndexTable>();
+    }
+    const MinimizerHashmapTableAllocationPlan plan =
+        minimizer_hashmap_table_allocation_plan(
+            static_cast<std::uint64_t>(distinct_count));
+    if (!plan.valid
+        || plan.requested_slots
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+        throw std::length_error{
+            "minimizer hashmap table allocation plan overflow"};
+    }
+    if (table_->allocation.live_bytes != 0u) {
+        throw std::runtime_error{
+            "one-shot minimizer hashmap table was not allocation-empty"};
+    }
+    table_->table.rehash(
+        static_cast<std::size_t>(plan.requested_slots));
+    if (table_->table.bucket_count() != plan.capacity
+        || table_->table.max_load() < plan.distinct_upper_bound
+        || table_->allocation.live_bytes != plan.allocation_bytes
+        || table_->allocation.peak_bytes != plan.allocation_bytes) {
+        throw std::runtime_error{
+            "minimizer hashmap table allocation exceeded planned geometry"};
+    }
+}
+
 void MinimizerHashmapFragmentIndex::emplace_table(
         std::uint64_t hash, std::uint64_t packed) {
     if (table_ == nullptr) {
@@ -676,6 +815,14 @@ std::size_t MinimizerHashmapFragmentIndex::table_size() const noexcept {
 
 bool MinimizerHashmapFragmentIndex::table_empty() const noexcept {
     return table_size() == 0u;
+}
+
+std::uint64_t MinimizerHashmapFragmentIndex::table_allocation_bytes() const noexcept {
+    return table_ == nullptr ? 0u : table_->allocation.live_bytes;
+}
+
+std::uint64_t MinimizerHashmapFragmentIndex::table_peak_allocation_bytes() const noexcept {
+    return table_ == nullptr ? 0u : table_->allocation.peak_bytes;
 }
 
 void MinimizerHashmapFragmentIndex::release_storage() noexcept {

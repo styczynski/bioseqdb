@@ -95,7 +95,9 @@ memory_admission_failure_reason_name(
 
 inline constexpr std::uint64_t kMinimizerIndexPeakBytesPerBp = 6;
 
-[[nodiscard]] inline std::uint64_t saturating_mul(std::uint64_t lhs, std::uint64_t rhs) noexcept {
+[[nodiscard]] inline constexpr std::uint64_t saturating_mul(
+        std::uint64_t lhs,
+        std::uint64_t rhs) noexcept {
     if (lhs == 0 || rhs == 0) {
         return 0;
     }
@@ -110,7 +112,9 @@ inline constexpr std::uint64_t kMinimizerIndexPeakBytesPerBp = 6;
 /// estimators (e.g. `PhaseCMemoryEstimate::total`, DOC0310 §22) never overflow
 /// into a small admitted value. The single shared definition lives here beside
 /// `saturating_mul`; do not add a local copy.
-[[nodiscard]] inline std::uint64_t saturating_add(std::uint64_t lhs, std::uint64_t rhs) noexcept {
+[[nodiscard]] inline constexpr std::uint64_t saturating_add(
+        std::uint64_t lhs,
+        std::uint64_t rhs) noexcept {
     constexpr std::uint64_t max_value = (std::numeric_limits<std::uint64_t>::max)();
     if (lhs > max_value - rhs) {
         return max_value;

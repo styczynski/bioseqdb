@@ -21,6 +21,7 @@ extern "C" {
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/indexing.h"
+#include "common/relpath.h"
 #include "commands/sequence.h"
 #include "miscadmin.h"
 #include "catalog/namespace.h"   // RelnameGetRelid
@@ -32,6 +33,7 @@ extern "C" {
 #include "catalog/pg_type_d.h"
 #include "commands/tablespace.h"
 #include "executor/instrument.h"
+#include "executor/spi.h"
 #include "executor/tuptable.h"
 #include "port/atomics.h"
 #include "storage/buffile.h"
@@ -43,12 +45,16 @@ extern "C" {
 #include "utils/lsyscache.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
+#include "utils/resowner.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
+#include "utils/xid8.h"
+#include "port.h"
 }
 
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -86,6 +92,9 @@ import bioseq.storage.size;            // sequence_size_t
 import bioseq.indexing.type;           // SequenceIndexType, index_sub_key_t, MAX_INDEX_CHUNK_SIZE_BYTES, sentinels
 import bioseq.indexing.storage;        // the concepts
 import bioseq.indexing.minimizer_hashmap;   // SerializedHeader/Bucket validation
+import bioseq.indexing.mpf5_image_v2;       // explicit fixed-endian MPF5 image ABI
+import bioseq.indexing.minimizer_direct_inverted_index;
+import bioseq.indexing.minimizer_format5_compact_h32_adapter;
 import bioseq.table.io;                // BioseqColumnBeginRead/ReadNextRow/EndRead/ReadState
 import bioseq.storage.scanner_pg;      // with_lazy_postgres, make_scanner_pg_in_memory (for_each_sequence)
 import bioseq.storage.lazy;            // lazy_compact_sequence
@@ -2875,6 +2884,110 @@ derive_rev3_catalog_source_proof_pg(
 
 class IndexStorageFragmentGenerationRowSinkPg;
 class ReadyGenerationToken;
+
+/// Exact receipt returned by the immutable MPF5 image writer.  Device/inode
+/// are transaction-local sealing evidence; the descriptor persists the
+/// provider, byte length and authenticated header checksum.
+struct Mpf5V2FileReceiptPg {
+    bioseq::indexing::Mpf5V2Provider provider =
+        bioseq::indexing::Mpf5V2Provider::postgres_relation;
+    std::uint64_t file_bytes = 0u;
+    std::uint64_t payload_crc64 = 0u;
+    std::uint64_t header_crc64 = 0u;
+    dev_t device{};
+    ino_t inode{};
+};
+
+enum class MinimizerGenerationStorageStatePg : std::int16_t {
+    live = 1,
+    retired = 2,
+};
+
+/// Production row model for
+/// bioseq_internal.minimizer_generation_storage.  Nullable relation locator
+/// attributes stay optional so provider 1 cannot acquire accidental relation
+/// authority through a default value.
+struct MinimizerGenerationStorageDescriptorPg {
+    Oid database_oid = InvalidOid;
+    Oid tablespace_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    Oid user_relid = InvalidOid;
+    std::int16_t column_attno = 0;
+    std::string index_name{};
+    std::uint64_t query_key = 0u;
+    std::uint64_t generation_id = 0u;
+    bioseq::indexing::Mpf5V2Provider provider =
+        bioseq::indexing::Mpf5V2Provider::postgres_relation;
+    std::optional<Oid> payload_relation_oid{};
+    std::optional<Oid> payload_database_oid{};
+    std::optional<Oid> payload_tablespace_oid{};
+    std::optional<Oid> payload_relfilenode{};
+    std::optional<std::string> payload_relation_name{};
+    std::uint64_t image_bytes = 0u;
+    std::uint64_t header_checksum = 0u;
+    std::optional<std::uint64_t> retire_full_xid{};
+    MinimizerGenerationStorageStatePg state =
+        MinimizerGenerationStorageStatePg::live;
+};
+
+inline constexpr AttrNumber kStorageDescriptorAttDatabaseOid = 1;
+inline constexpr AttrNumber kStorageDescriptorAttTablespaceOid = 2;
+inline constexpr AttrNumber kStorageDescriptorAttMainRelfilenode = 3;
+inline constexpr AttrNumber kStorageDescriptorAttUserRelid = 4;
+inline constexpr AttrNumber kStorageDescriptorAttColumnAttno = 5;
+inline constexpr AttrNumber kStorageDescriptorAttIndexName = 6;
+inline constexpr AttrNumber kStorageDescriptorAttQueryKey = 7;
+inline constexpr AttrNumber kStorageDescriptorAttGenerationId = 8;
+inline constexpr AttrNumber kStorageDescriptorAttProvider = 9;
+inline constexpr AttrNumber kStorageDescriptorAttPayloadRelationOid = 10;
+inline constexpr AttrNumber kStorageDescriptorAttPayloadDatabaseOid = 11;
+inline constexpr AttrNumber kStorageDescriptorAttPayloadTablespaceOid = 12;
+inline constexpr AttrNumber kStorageDescriptorAttPayloadRelfilenode = 13;
+inline constexpr AttrNumber kStorageDescriptorAttPayloadRelationName = 14;
+inline constexpr AttrNumber kStorageDescriptorAttImageBytes = 15;
+inline constexpr AttrNumber kStorageDescriptorAttHeaderChecksum = 16;
+inline constexpr AttrNumber kStorageDescriptorAttRetireFullXid = 17;
+inline constexpr AttrNumber kStorageDescriptorAttState = 18;
+inline constexpr std::size_t kStorageDescriptorAttributeCount = 18u;
+
+[[nodiscard]] inline bool exact_storage_descriptor_identity(
+        const MinimizerGenerationStorageDescriptorPg& descriptor,
+        const Rev3IndexAdministrationIdentity& identity,
+        const std::uint64_t query_key) noexcept {
+    return descriptor.database_oid == identity.database_oid
+        && descriptor.tablespace_oid == identity.tablespace_oid
+        && descriptor.main_relfilenode == identity.main_relfilenode
+        && descriptor.user_relid == identity.user_relid
+        && descriptor.column_attno == identity.column_attno
+        && descriptor.index_name == identity.index_name
+        && descriptor.query_key == query_key;
+}
+
+[[nodiscard]] inline bool exact_storage_descriptor_provider_shape(
+        const MinimizerGenerationStorageDescriptorPg& descriptor) noexcept {
+    using bioseq::indexing::Mpf5V2Provider;
+    if (descriptor.provider == Mpf5V2Provider::postgres_relation) {
+        return descriptor.payload_relation_oid
+            && OidIsValid(*descriptor.payload_relation_oid)
+            && descriptor.payload_database_oid
+            && *descriptor.payload_database_oid == descriptor.database_oid
+            && descriptor.payload_tablespace_oid
+            && OidIsValid(*descriptor.payload_tablespace_oid)
+            && descriptor.payload_relfilenode
+            && OidIsValid(*descriptor.payload_relfilenode)
+            && descriptor.payload_relation_name
+            && !descriptor.payload_relation_name->empty();
+    }
+    if (descriptor.provider == Mpf5V2Provider::mapped_file) {
+        return !descriptor.payload_relation_oid
+            && !descriptor.payload_database_oid
+            && !descriptor.payload_tablespace_oid
+            && !descriptor.payload_relfilenode
+            && !descriptor.payload_relation_name;
+    }
+    return false;
+}
+
 struct ReadyGenerationPublishedHeadReceipt {
     std::string table_name;
     std::uint64_t query_key = 0;
@@ -2915,6 +3028,7 @@ private:
     std::array<std::byte, MinimizerGenerationHead::encoded_bytes>
         head_bytes_{};
     std::uint64_t head_row_checksum_ = 0;
+    std::optional<Mpf5V2FileReceiptPg> file_receipt_{};
     bool valid_ = false;
 
     ReadyGenerationToken(
@@ -2929,7 +3043,8 @@ private:
             std::uint64_t compatibility_checksum,
             TransactionId transaction_id,
             std::span<const std::byte> head_bytes,
-            std::uint64_t head_row_checksum)
+            std::uint64_t head_row_checksum,
+            std::optional<Mpf5V2FileReceiptPg> file_receipt)
         : identity_(std::move(identity)),
           sidecar_relation_oid_(sidecar_relation_oid),
           sidecar_locator_(sidecar_locator),
@@ -2941,6 +3056,7 @@ private:
           compatibility_checksum_(compatibility_checksum),
           transaction_id_(transaction_id),
           head_row_checksum_(head_row_checksum),
+          file_receipt_(std::move(file_receipt)),
           valid_(true) {
         std::copy(head_bytes.begin(), head_bytes.end(), head_bytes_.begin());
     }
@@ -2958,6 +3074,7 @@ private:
         transaction_id_ = InvalidTransactionId;
         head_bytes_.fill(std::byte{0});
         head_row_checksum_ = 0;
+        file_receipt_.reset();
         valid_ = false;
     }
 
@@ -2983,6 +3100,7 @@ public:
           transaction_id_(other.transaction_id_),
           head_bytes_(other.head_bytes_),
           head_row_checksum_(other.head_row_checksum_),
+          file_receipt_(std::move(other.file_receipt_)),
           valid_(other.valid_) {
         other.invalidate();
     }
@@ -3001,6 +3119,7 @@ public:
             transaction_id_ = other.transaction_id_;
             head_bytes_ = other.head_bytes_;
             head_row_checksum_ = other.head_row_checksum_;
+            file_receipt_ = std::move(other.file_receipt_);
             valid_ = other.valid_;
             other.invalidate();
         }
@@ -3014,6 +3133,182 @@ static_assert(!std::is_copy_constructible_v<ReadyGenerationToken>);
 static_assert(!std::is_copy_assignable_v<ReadyGenerationToken>);
 static_assert(std::is_nothrow_move_constructible_v<ReadyGenerationToken>);
 static_assert(std::is_nothrow_move_assignable_v<ReadyGenerationToken>);
+
+/// Read the sole LIVE descriptor for one exact storage identity through the
+/// catalog's partial unique index.  The caller owns both relation locks and
+/// the registered MVCC snapshot; this helper neither substitutes SnapshotSelf
+/// nor consults the current payload-provider GUC.
+[[nodiscard]] inline MinimizerGenerationStorageDescriptorPg
+read_live_minimizer_generation_storage_descriptor_pg(
+        Relation storage_relation,
+        Relation live_index_relation,
+        Snapshot registered_snapshot,
+        const Rev3IndexAdministrationIdentity& identity,
+        const std::uint64_t query_key,
+        const std::uint64_t expected_generation_id) {
+    using namespace bioseq::indexing;
+    if (storage_relation == nullptr || live_index_relation == nullptr
+        || registered_snapshot == nullptr
+        || !IsMVCCSnapshot(registered_snapshot)
+        || registered_snapshot->regd_count == 0
+        || live_index_relation->rd_index == nullptr
+        || live_index_relation->rd_index->indrelid
+            != RelationGetRelid(storage_relation)
+        || std::string_view{RelationGetRelationName(live_index_relation)}
+            != "minimizer_generation_storage_one_live"
+        || !OidIsValid(identity.database_oid)
+        || !OidIsValid(identity.tablespace_oid)
+        || !OidIsValid(identity.main_relfilenode)
+        || !OidIsValid(identity.user_relid)
+        || identity.column_attno <= 0
+        || identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        || !sql_bigint_can_represent(query_key)
+        || expected_generation_id == 0u
+        || !sql_bigint_can_represent(expected_generation_id)) {
+        rev3_storage_error_as_cpp(
+            "LIVE generation descriptor lookup binding is invalid");
+    }
+
+    NameData index_name{};
+    bioseq::pg_utils::invoke_pg_as_cpp([&] {
+        namestrcpy(&index_name, identity.index_name.c_str());
+    });
+    ScanKeyData keys[7];
+    ScanKeyInit(&keys[0], kStorageDescriptorAttDatabaseOid,
+        BTEqualStrategyNumber, F_OIDEQ,
+        ObjectIdGetDatum(identity.database_oid));
+    ScanKeyInit(&keys[1], kStorageDescriptorAttTablespaceOid,
+        BTEqualStrategyNumber, F_OIDEQ,
+        ObjectIdGetDatum(identity.tablespace_oid));
+    ScanKeyInit(&keys[2], kStorageDescriptorAttMainRelfilenode,
+        BTEqualStrategyNumber, F_OIDEQ,
+        ObjectIdGetDatum(identity.main_relfilenode));
+    ScanKeyInit(&keys[3], kStorageDescriptorAttUserRelid,
+        BTEqualStrategyNumber, F_OIDEQ,
+        ObjectIdGetDatum(identity.user_relid));
+    ScanKeyInit(&keys[4], kStorageDescriptorAttColumnAttno,
+        BTEqualStrategyNumber, F_INT2EQ,
+        Int16GetDatum(identity.column_attno));
+    ScanKeyInit(&keys[5], kStorageDescriptorAttIndexName,
+        BTEqualStrategyNumber, F_NAMEEQ, NameGetDatum(&index_name));
+    ScanKeyInit(&keys[6], kStorageDescriptorAttQueryKey,
+        BTEqualStrategyNumber, F_INT8EQ,
+        Int64GetDatum(static_cast<std::int64_t>(query_key)));
+
+    SysScanDesc scan = nullptr;
+    try {
+        scan = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            return systable_beginscan_ordered(
+                storage_relation, live_index_relation,
+                registered_snapshot, 7, keys);
+        });
+        HeapTuple tuple = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            return systable_getnext_ordered(scan, ForwardScanDirection);
+        });
+        if (!HeapTupleIsValid(tuple)) {
+            rev3_storage_error_as_cpp(
+                "LIVE generation storage descriptor is missing");
+        }
+
+        Datum values[kStorageDescriptorAttributeCount]{};
+        bool nulls[kStorageDescriptorAttributeCount]{};
+        bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            heap_deform_tuple(
+                tuple, RelationGetDescr(storage_relation), values, nulls);
+        });
+        constexpr std::array<std::size_t, 12u> required_non_null{
+            0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 14u, 15u, 17u};
+        for (const std::size_t attribute : required_non_null) {
+            if (nulls[attribute]) {
+                rev3_storage_error_as_cpp(
+                    "LIVE generation descriptor has a NULL required attribute");
+            }
+        }
+
+        const std::int64_t query_key_sql = DatumGetInt64(values[6]);
+        const std::int64_t generation_id_sql = DatumGetInt64(values[7]);
+        const std::int16_t provider_sql = DatumGetInt16(values[8]);
+        const std::int64_t image_bytes_sql = DatumGetInt64(values[14]);
+        const std::int16_t state_sql = DatumGetInt16(values[17]);
+        if (query_key_sql < 0 || generation_id_sql <= 0
+            || image_bytes_sql
+                < static_cast<std::int64_t>(kMpf5V2HeaderBytes)
+            || !is_valid_mpf5_v2_provider(
+                static_cast<std::uint8_t>(provider_sql))) {
+            rev3_storage_error_as_cpp(
+                "LIVE generation descriptor scalar shape is invalid");
+        }
+
+        MinimizerGenerationStorageDescriptorPg descriptor{
+            .database_oid = DatumGetObjectId(values[0]),
+            .tablespace_oid = DatumGetObjectId(values[1]),
+            .main_relfilenode = DatumGetObjectId(values[2]),
+            .user_relid = DatumGetObjectId(values[3]),
+            .column_attno = DatumGetInt16(values[4]),
+            .index_name = NameStr(*DatumGetName(values[5])),
+            .query_key = static_cast<std::uint64_t>(query_key_sql),
+            .generation_id = static_cast<std::uint64_t>(generation_id_sql),
+            .provider = static_cast<Mpf5V2Provider>(provider_sql),
+            .payload_relation_oid = nulls[9]
+                ? std::nullopt
+                : std::optional<Oid>{DatumGetObjectId(values[9])},
+            .payload_database_oid = nulls[10]
+                ? std::nullopt
+                : std::optional<Oid>{DatumGetObjectId(values[10])},
+            .payload_tablespace_oid = nulls[11]
+                ? std::nullopt
+                : std::optional<Oid>{DatumGetObjectId(values[11])},
+            .payload_relfilenode = nulls[12]
+                ? std::nullopt
+                : std::optional<Oid>{DatumGetObjectId(values[12])},
+            .payload_relation_name = nulls[13]
+                ? std::nullopt
+                : std::optional<std::string>{
+                    NameStr(*DatumGetName(values[13]))},
+            .image_bytes = static_cast<std::uint64_t>(image_bytes_sql),
+            .header_checksum = checksum_from_pg_bigint(
+                DatumGetInt64(values[15])),
+            .retire_full_xid = nulls[16]
+                ? std::nullopt
+                : std::optional<std::uint64_t>{U64FromFullTransactionId(
+                    DatumGetFullTransactionId(values[16]))},
+            .state = static_cast<MinimizerGenerationStorageStatePg>(
+                state_sql),
+        };
+        if (!exact_storage_descriptor_identity(
+                descriptor, identity, query_key)
+            || descriptor.generation_id != expected_generation_id
+            || descriptor.state
+                != MinimizerGenerationStorageStatePg::live
+            || descriptor.retire_full_xid
+            || !exact_storage_descriptor_provider_shape(descriptor)) {
+            rev3_storage_error_as_cpp(
+                "LIVE generation descriptor disagrees with the active head");
+        }
+
+        HeapTuple duplicate = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            return systable_getnext_ordered(scan, ForwardScanDirection);
+        });
+        if (HeapTupleIsValid(duplicate)) {
+            rev3_storage_error_as_cpp(
+                "LIVE generation descriptor lookup returned duplicates");
+        }
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [&] { systable_endscan_ordered(scan); });
+        scan = nullptr;
+        return descriptor;
+    } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+        scan = nullptr;
+        throw;
+    } catch (...) {
+        if (scan != nullptr) {
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [&] { systable_endscan_ordered(scan); });
+            scan = nullptr;
+        }
+        throw;
+    }
+}
 
 /// Form one immutable revision-3 payload/directory/manifest tuple. The caller
 /// transfers the tuple into a TTSOpsHeapTuple slot and flushes a bounded group
@@ -3589,99 +3884,1157 @@ load_rev3_authenticated_projected_pg_row_or_error(
     return load_rev3_deformed_pg_row_or_error(deformed);
 }
 
-namespace mpf_format5_image_detail {
+// -------------------------------------------------------------------------
+// Bounded transaction-owned generation file actions.
+//
+// This remains dark until the v2 image writer and descriptor catalog publish
+// through it.  Keeping it separate prevents the v1 bridge's replace-by-rename
+// lifetime from becoming an accidental compatibility contract.
+// -------------------------------------------------------------------------
 
-inline constexpr std::uint64_t kMagic =
-    UINT64_C(0x42354d5046494d47); // "B5MPFIMG"
-inline constexpr std::uint32_t kVersion = 1u;
-inline constexpr std::uint32_t kHeaderBytes = 4096u;
+inline constexpr std::size_t kPendingFileActionCapacity = 4096u;
+inline constexpr std::size_t kFileActionDiagnosticCapacity = 256u;
+inline constexpr std::size_t kMaximumReaperFileActions = 64u;
+inline constexpr std::uint16_t kNoPairedFileAction = UINT16_MAX;
+inline constexpr std::uint8_t kMappedMpfIndexKind = 1u;
+inline constexpr std::string_view kGenerationFileDirectoryName =
+    "bioseq_mpf5";
 
-struct Header {
-    std::uint64_t magic = 0;
-    std::uint32_t version = 0;
-    std::uint32_t header_bytes = 0;
-    std::uint32_t database_oid = 0;
-    std::uint32_t tablespace_oid = 0;
-    std::uint32_t main_relfilenode = 0;
-    std::uint32_t user_relid = 0;
-    std::int32_t column_attno = 0;
-    std::uint32_t wire_format = 0;
-    std::uint64_t query_key = 0;
-    std::uint64_t generation_id = 0;
-    std::uint64_t manifest_checksum = 0;
-    std::uint64_t source_identity = 0;
-    std::uint64_t source_content_checksum = 0;
-    std::uint64_t compatibility_checksum = 0;
-    std::uint64_t target_length = 0;
-    std::uint64_t position_segment_span_bp = 0;
-    std::uint32_t position_segment_count = 0;
-    std::uint32_t reserved_zero = 0;
-    std::uint64_t directory_bytes = 0;
-    std::uint64_t directory_checksum = 0;
-    std::uint64_t payload_bytes = 0;
-    std::uint64_t payload_row_checksum = 0;
-    std::uint64_t payload_raw_checksum = 0;
-    std::uint64_t image_bytes = 0;
-    std::uint64_t header_checksum = 0;
+enum class FileAction : std::uint8_t {
+    unlink_on_abort,
+    unlink_on_commit,
 };
 
-static_assert(std::is_trivially_copyable_v<Header>);
-static_assert(std::is_standard_layout_v<Header>);
-static_assert(sizeof(Header) <= kHeaderBytes);
+/// Callback-safe file authority.  The queue stores no owning C++ object and
+/// no pointer into a PostgreSQL memory context.
+struct PendingFileAction {
+    FileAction action{};
+    SubTransactionId owner_subxid{};
+    dev_t expected_device{};
+    ino_t expected_inode{};
+    std::uint16_t paired_slot = kNoPairedFileAction;
+    bool inode_valid = false;
+    bool armed = false;
+    char path[MAXPGPATH]{};
+};
 
-[[nodiscard]] inline std::uint64_t header_checksum(
-        const Header& header) noexcept {
-    Header copy = header;
-    copy.header_checksum = 0;
-    Crc64Ecma182 crc{};
-    crc.update(std::as_bytes(std::span{&copy, std::size_t{1}}));
-    return crc.checksum();
-}
+static_assert(std::is_trivially_copyable_v<PendingFileAction>);
+static_assert(std::is_standard_layout_v<PendingFileAction>);
 
-[[nodiscard]] inline std::string directory_path() {
-    if (DataDir == nullptr || DataDir[0] == '\0') {
-        rev3_storage_error_as_cpp(
-            "MPF Format-5 image has no PostgreSQL data directory");
+enum class FileActionDiagnosticCode : std::uint8_t {
+    none,
+    already_missing,
+    unlinked,
+    missing_inode_authority,
+    stat_failed,
+    not_regular,
+    identity_mismatch,
+    link_count_mismatch,
+    paired_slot_invalid,
+    paired_identity_mismatch,
+    unlink_failed,
+    prepare_rejected,
+};
+
+struct FileActionDiagnostic {
+    std::uint64_t sequence = 0u;
+    std::uint16_t slot = kNoPairedFileAction;
+    FileActionDiagnosticCode code = FileActionDiagnosticCode::none;
+    int saved_errno = 0;
+};
+
+struct FileActionDiagnosticsSnapshot {
+    std::array<FileActionDiagnostic, kFileActionDiagnosticCapacity> entries{};
+    std::uint64_t total = 0u;
+};
+
+/// Opaque all-or-nothing reservation.  Slots are found by reservation id
+/// rather than assumed contiguous because savepoint completion can leave
+/// holes in the fixed queue.
+struct FileActionReservation {
+    std::uint32_t id = 0u;
+    std::uint16_t count = 0u;
+};
+
+struct GenerationFileIdentity {
+    Oid database_oid = InvalidOid;
+    Oid tablespace_oid = InvalidOid;
+    Oid main_relfilenode = InvalidOid;
+    Oid user_relid = InvalidOid;
+    std::int16_t column_attno = 0;
+    std::uint8_t index_kind = kMappedMpfIndexKind;
+    std::uint64_t query_key = 0u;
+    std::uint64_t generation_id = 0u;
+};
+
+/// Fixed owned buffers let callbacks consume the exact backend-resolved path
+/// without catalog access, formatting, allocation or a memory-context pointer.
+struct ResolvedGenerationFilePath {
+    std::array<char, MAXPGPATH> database_directory{};
+    std::array<char, MAXPGPATH> bioseq_directory{};
+    std::array<char, MAXPGPATH> shard_directory{};
+    std::array<char, MAXPGPATH> final_path{};
+};
+
+struct PendingGenerationFilePublication {
+    FileActionReservation reservation{};
+    std::uint16_t temporary_slot = kNoPairedFileAction;
+    std::uint16_t final_slot = kNoPairedFileAction;
+    int fd = -1;
+    dev_t expected_device{};
+    ino_t expected_inode{};
+    std::array<char, MAXPGPATH> shard_directory{};
+    std::array<char, MAXPGPATH> temporary_path{};
+    std::array<char, MAXPGPATH> final_path{};
+    bool published = false;
+
+    PendingGenerationFilePublication() = default;
+    PendingGenerationFilePublication(
+            const PendingGenerationFilePublication&) = delete;
+    PendingGenerationFilePublication& operator=(
+            const PendingGenerationFilePublication&) = delete;
+    PendingGenerationFilePublication(
+            PendingGenerationFilePublication&& other) noexcept
+        : reservation(std::exchange(
+              other.reservation, FileActionReservation{})),
+          temporary_slot(std::exchange(
+              other.temporary_slot, kNoPairedFileAction)),
+          final_slot(std::exchange(
+              other.final_slot, kNoPairedFileAction)),
+          fd(std::exchange(other.fd, -1)),
+          expected_device(other.expected_device),
+          expected_inode(other.expected_inode),
+          shard_directory(other.shard_directory),
+          temporary_path(other.temporary_path),
+          final_path(other.final_path),
+          published(std::exchange(other.published, true)) {
+        other.temporary_path.fill('\0');
+        other.final_path.fill('\0');
     }
-    return fmt::format("{}/bioseq_mpf5", DataDir);
+    PendingGenerationFilePublication& operator=(
+            PendingGenerationFilePublication&&) = delete;
+    ~PendingGenerationFilePublication();
+};
+
+namespace generation_file_action_detail {
+
+enum class SlotState : std::uint8_t {
+    free,
+    reserved,
+    armed,
+};
+
+struct QueueState {
+    std::array<PendingFileAction, kPendingFileActionCapacity> actions{};
+    std::array<SlotState, kPendingFileActionCapacity> slot_states{};
+    std::array<std::uint32_t, kPendingFileActionCapacity> reservation_ids{};
+    std::array<FileActionDiagnostic,
+        kFileActionDiagnosticCapacity> diagnostics{};
+    std::uint64_t diagnostic_total = 0u;
+    std::uint32_t next_reservation_id = 1u;
+    bool xact_callback_installed = false;
+    bool subxact_callback_installed = false;
+};
+
+// The extension image is private to one PostgreSQL backend process.
+inline QueueState g_queue_state{};
+
+static_assert(std::tuple_size_v<decltype(QueueState::actions)>
+    == kPendingFileActionCapacity);
+static_assert(std::tuple_size_v<decltype(QueueState::diagnostics)>
+    == kFileActionDiagnosticCapacity);
+
+[[nodiscard]] inline bool slot_is_occupied(
+        const std::size_t slot) noexcept {
+    return g_queue_state.slot_states[slot] != SlotState::free;
 }
 
-[[nodiscard]] inline std::string final_path(
-        const Rev3IndexAdministrationIdentity& identity,
-        std::uint64_t query_key,
-        std::uint64_t generation_id) {
-    return fmt::format(
-        "{}/{}_{}_{}_{}_{}_{}_{}.mpf5",
-        directory_path(),
-        static_cast<unsigned>(identity.database_oid),
-        static_cast<unsigned>(identity.tablespace_oid),
-        static_cast<unsigned>(identity.main_relfilenode),
-        static_cast<unsigned>(identity.user_relid),
-        static_cast<int>(identity.column_attno),
-        static_cast<unsigned long long>(query_key),
-        static_cast<unsigned long long>(generation_id));
+inline void record_diagnostic(
+        const std::uint16_t slot,
+        const FileActionDiagnosticCode code,
+        const int saved_errno = 0) noexcept {
+    const std::uint64_t sequence = g_queue_state.diagnostic_total++;
+    FileActionDiagnostic& diagnostic =
+        g_queue_state.diagnostics[
+            sequence % kFileActionDiagnosticCapacity];
+    diagnostic = FileActionDiagnostic{
+        .sequence = sequence + 1u,
+        .slot = slot,
+        .code = code,
+        .saved_errno = saved_errno,
+    };
 }
 
-inline void ensure_directory() {
-    const std::string path = directory_path();
-    if (MakePGDirectory(path.c_str()) != 0 && errno != EEXIST) {
+inline void release_slot(const std::size_t slot) noexcept {
+    g_queue_state.actions[slot] = PendingFileAction{};
+    g_queue_state.slot_states[slot] = SlotState::free;
+    g_queue_state.reservation_ids[slot] = 0u;
+}
+
+[[nodiscard]] inline bool reservation_id_is_live(
+        const std::uint32_t reservation_id) noexcept {
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (slot_is_occupied(slot)
+            && g_queue_state.reservation_ids[slot] == reservation_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[nodiscard]] inline std::uint32_t next_unused_reservation_id() {
+    for (std::uint64_t attempts = 0u;
+         attempts < static_cast<std::uint64_t>(UINT32_MAX);
+         ++attempts) {
+        std::uint32_t candidate = g_queue_state.next_reservation_id++;
+        if (candidate == 0u) {
+            candidate = g_queue_state.next_reservation_id++;
+        }
+        if (candidate != 0u && !reservation_id_is_live(candidate)) {
+            return candidate;
+        }
+    }
+    rev3_storage_error_as_cpp(
+        "generation file-action reservation id space is exhausted");
+}
+
+[[nodiscard]] inline std::optional<std::uint16_t> reservation_slot(
+        const FileActionReservation reservation,
+        const std::size_t ordinal) noexcept {
+    if (reservation.id == 0u || ordinal >= reservation.count) {
+        return std::nullopt;
+    }
+    std::size_t seen = 0u;
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (slot_is_occupied(slot)
+            && g_queue_state.reservation_ids[slot] == reservation.id) {
+            if (seen == ordinal) {
+                return static_cast<std::uint16_t>(slot);
+            }
+            ++seen;
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] inline bool same_inode(
+        const struct stat& observed,
+        const PendingFileAction& action) noexcept {
+    return action.inode_valid
+        && observed.st_dev == action.expected_device
+        && observed.st_ino == action.expected_inode;
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+enum class CallbackFailureInjection : std::uint8_t {
+    none,
+    stat_failed,
+    identity_mismatch,
+    unlink_failed,
+};
+inline CallbackFailureInjection g_callback_failure_injection =
+    CallbackFailureInjection::none;
+#endif
+
+/// The sole callback filesystem mutation.  It cannot allocate, log or raise;
+/// failures enter the fixed ring for later backend-thread reporting.
+inline void unlink_identity_bound_noexcept(
+        const std::uint16_t slot) noexcept {
+    PendingFileAction& action = g_queue_state.actions[slot];
+    if (!action.armed || !action.inode_valid || action.path[0] == '\0') {
+        record_diagnostic(
+            slot, FileActionDiagnosticCode::missing_inode_authority);
+        return;
+    }
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_callback_failure_injection
+        == CallbackFailureInjection::stat_failed) {
+        g_callback_failure_injection = CallbackFailureInjection::none;
+        record_diagnostic(
+            slot, FileActionDiagnosticCode::stat_failed, EIO);
+        return;
+    }
+#endif
+    struct stat observed{};
+    if (fstatat(
+            AT_FDCWD, action.path, &observed,
+            AT_SYMLINK_NOFOLLOW) != 0) {
+        const int saved_errno = errno;
+        record_diagnostic(
+            slot,
+            saved_errno == ENOENT
+                ? FileActionDiagnosticCode::already_missing
+                : FileActionDiagnosticCode::stat_failed,
+            saved_errno == ENOENT ? 0 : saved_errno);
+        return;
+    }
+    if (!S_ISREG(observed.st_mode)) {
+        record_diagnostic(slot, FileActionDiagnosticCode::not_regular);
+        return;
+    }
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_callback_failure_injection
+        == CallbackFailureInjection::identity_mismatch) {
+        g_callback_failure_injection = CallbackFailureInjection::none;
+        record_diagnostic(
+            slot, FileActionDiagnosticCode::identity_mismatch);
+        return;
+    }
+#endif
+    if (!same_inode(observed, action)) {
+        record_diagnostic(
+            slot, FileActionDiagnosticCode::identity_mismatch);
+        return;
+    }
+    if (observed.st_nlink == 2) {
+        if (action.paired_slot >= kPendingFileActionCapacity
+            || action.paired_slot == slot) {
+            record_diagnostic(
+                slot, FileActionDiagnosticCode::paired_slot_invalid);
+            return;
+        }
+        const PendingFileAction& paired =
+            g_queue_state.actions[action.paired_slot];
+        if (g_queue_state.slot_states[action.paired_slot]
+                != SlotState::armed
+            || !paired.armed || !paired.inode_valid
+            || paired.path[0] == '\0') {
+            record_diagnostic(
+                slot, FileActionDiagnosticCode::paired_slot_invalid);
+            return;
+        }
+        struct stat paired_observed{};
+        if (fstatat(
+                AT_FDCWD, paired.path, &paired_observed,
+                AT_SYMLINK_NOFOLLOW) != 0
+            || !S_ISREG(paired_observed.st_mode)
+            || paired_observed.st_dev != observed.st_dev
+            || paired_observed.st_ino != observed.st_ino
+            || !same_inode(paired_observed, paired)) {
+            record_diagnostic(
+                slot,
+                FileActionDiagnosticCode::paired_identity_mismatch,
+                errno);
+            return;
+        }
+    } else if (observed.st_nlink != 1) {
+        record_diagnostic(
+            slot, FileActionDiagnosticCode::link_count_mismatch);
+        return;
+    }
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_callback_failure_injection
+        == CallbackFailureInjection::unlink_failed) {
+        g_callback_failure_injection = CallbackFailureInjection::none;
+        record_diagnostic(
+            slot, FileActionDiagnosticCode::unlink_failed, EIO);
+        return;
+    }
+#endif
+    if (unlink(action.path) != 0) {
+        const int saved_errno = errno;
+        record_diagnostic(
+            slot,
+            saved_errno == ENOENT
+                ? FileActionDiagnosticCode::already_missing
+                : FileActionDiagnosticCode::unlink_failed,
+            saved_errno == ENOENT ? 0 : saved_errno);
+        return;
+    }
+    record_diagnostic(slot, FileActionDiagnosticCode::unlinked);
+}
+
+inline void finish_top_transaction(const bool committed) noexcept {
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (!slot_is_occupied(slot)) continue;
+        const PendingFileAction& action = g_queue_state.actions[slot];
+        if (g_queue_state.slot_states[slot] == SlotState::armed
+            && action.armed
+            && ((committed
+                    && action.action == FileAction::unlink_on_commit)
+                || (!committed
+                    && action.action == FileAction::unlink_on_abort))) {
+            unlink_identity_bound_noexcept(
+                static_cast<std::uint16_t>(slot));
+        }
+        release_slot(slot);
+    }
+}
+
+inline void finish_subtransaction(
+        const SubTransactionId subxid,
+        const bool committed,
+        const SubTransactionId parent_subxid) noexcept {
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (!slot_is_occupied(slot)
+            || g_queue_state.actions[slot].owner_subxid != subxid) {
+            continue;
+        }
+        PendingFileAction& action = g_queue_state.actions[slot];
+        if (committed) {
+            action.owner_subxid = parent_subxid;
+            continue;
+        }
+        if (g_queue_state.slot_states[slot] == SlotState::armed
+            && action.armed
+            && action.action == FileAction::unlink_on_abort) {
+            unlink_identity_bound_noexcept(
+                static_cast<std::uint16_t>(slot));
+        }
+        release_slot(slot);
+    }
+}
+
+[[nodiscard]] inline bool has_occupied_slot() noexcept {
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (slot_is_occupied(slot)) return true;
+    }
+    return false;
+}
+
+inline void xact_callback(const XactEvent event, void*) {
+    switch (event) {
+        case XACT_EVENT_COMMIT:
+        case XACT_EVENT_PARALLEL_COMMIT:
+            finish_top_transaction(true);
+            break;
+        case XACT_EVENT_ABORT:
+        case XACT_EVENT_PARALLEL_ABORT:
+            finish_top_transaction(false);
+            break;
+        case XACT_EVENT_PRE_PREPARE:
+            if (has_occupied_slot()) {
+                record_diagnostic(
+                    kNoPairedFileAction,
+                    FileActionDiagnosticCode::prepare_rejected);
+                ereport(ERROR,
+                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                     errmsg("bioseq generation file actions do not support prepared transactions"),
+                     errhint("commit or roll back without PREPARE TRANSACTION")));
+            }
+            break;
+        case XACT_EVENT_PREPARE:
+        case XACT_EVENT_PRE_COMMIT:
+        case XACT_EVENT_PARALLEL_PRE_COMMIT:
+            break;
+    }
+}
+
+inline void subxact_callback(
+        const SubXactEvent event,
+        const SubTransactionId subxid,
+        const SubTransactionId parent_subxid,
+        void*) noexcept {
+    switch (event) {
+        case SUBXACT_EVENT_COMMIT_SUB:
+            finish_subtransaction(subxid, true, parent_subxid);
+            break;
+        case SUBXACT_EVENT_ABORT_SUB:
+            finish_subtransaction(subxid, false, parent_subxid);
+            break;
+        case SUBXACT_EVENT_START_SUB:
+        case SUBXACT_EVENT_PRE_COMMIT_SUB:
+            break;
+    }
+}
+
+inline void install_callbacks() {
+    if (!g_queue_state.xact_callback_installed) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            RegisterXactCallback(xact_callback, nullptr);
+        });
+        g_queue_state.xact_callback_installed = true;
+    }
+    if (!g_queue_state.subxact_callback_installed) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            RegisterSubXactCallback(subxact_callback, nullptr);
+        });
+        g_queue_state.subxact_callback_installed = true;
+    }
+}
+
+template <std::size_t BufferBytes, typename... Args>
+[[nodiscard]] inline bool format_fixed(
+        std::array<char, BufferBytes>& destination,
+        fmt::format_string<Args...> format,
+        Args&&... args) {
+    static_assert(BufferBytes > 1u);
+    destination.fill('\0');
+    const auto formatted = fmt::format_to_n(
+        destination.data(), BufferBytes - 1u, format,
+        std::forward<Args>(args)...);
+    if (formatted.size >= BufferBytes) {
+        destination[0] = '\0';
+        return false;
+    }
+    destination[formatted.size] = '\0';
+    return true;
+}
+
+[[nodiscard]] inline bool path_has_only_canonical_components(
+        const std::string_view path) noexcept {
+    if (path.empty() || path.back() == '/') return false;
+    std::size_t component_begin = path.front() == '/' ? 1u : 0u;
+    if (component_begin == path.size()) return false;
+    while (component_begin < path.size()) {
+        const std::size_t separator = path.find('/', component_begin);
+        const std::size_t component_end = separator == std::string_view::npos
+            ? path.size() : separator;
+        if (component_end == component_begin) return false;
+        const std::string_view component =
+            path.substr(component_begin, component_end - component_begin);
+        if (component == "." || component == "..") return false;
+        if (separator == std::string_view::npos) break;
+        component_begin = separator + 1u;
+    }
+    return true;
+}
+
+[[nodiscard]] inline bool exact_child_path(
+        const std::string_view parent,
+        const std::string_view child) noexcept {
+    if (child.size() <= parent.size() + 1u
+        || !child.starts_with(parent)
+        || child[parent.size()] != '/') {
+        return false;
+    }
+    return child.find('/', parent.size() + 1u)
+        == std::string_view::npos;
+}
+
+[[nodiscard]] inline bool ensure_private_directory(const char* path) {
+    struct stat observed{};
+    bool created = false;
+    if (lstat(path, &observed) != 0) {
+        if (errno != ENOENT) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "generation file directory preflight failed: errno={}",
+                errno));
+        }
+        if (mkdir(path, 0700) == 0) {
+            created = true;
+        } else if (errno != EEXIST) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "generation file directory creation failed: errno={}",
+                errno));
+        }
+        if (lstat(path, &observed) != 0) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "generation file directory stat failed: errno={}",
+                errno));
+        }
+    }
+    if (!S_ISDIR(observed.st_mode)
+        || observed.st_uid != geteuid()
+        || (observed.st_mode & 07777) != 0700) {
+        rev3_storage_error_as_cpp(
+            "generation file directory is not server-owned mode-0700");
+    }
+    return created;
+}
+
+inline void arm_reserved_slot(
+        const FileActionReservation reservation,
+        const std::size_t ordinal,
+        const FileAction action,
+        const char* path,
+        const dev_t expected_device,
+        const ino_t expected_inode,
+        const std::uint16_t paired_slot) {
+    const std::optional<std::uint16_t> maybe_slot =
+        reservation_slot(reservation, ordinal);
+    if (!maybe_slot) {
+        rev3_storage_error_as_cpp(
+            "generation file-action reservation slot is missing");
+    }
+    const std::uint16_t slot = *maybe_slot;
+    if (g_queue_state.slot_states[slot] != SlotState::reserved
+        || path == nullptr) {
+        rev3_storage_error_as_cpp(
+            "generation file-action reservation cannot be armed");
+    }
+    const std::size_t path_bytes = strnlen(path, MAXPGPATH);
+    if (path_bytes == 0u || path_bytes >= MAXPGPATH) {
+        rev3_storage_error_as_cpp(
+            "generation file-action path is empty or truncated");
+    }
+    PendingFileAction& pending = g_queue_state.actions[slot];
+    pending = PendingFileAction{
+        .action = action,
+        .owner_subxid = GetCurrentSubTransactionId(),
+        .expected_device = expected_device,
+        .expected_inode = expected_inode,
+        .paired_slot = paired_slot,
+        .inode_valid = true,
+        .armed = true,
+    };
+    std::memcpy(pending.path, path, path_bytes + 1u);
+    g_queue_state.slot_states[slot] = SlotState::armed;
+}
+
+inline void fsync_directory(const char* path) {
+    const int fd = open(
+        path, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
+    if (fd < 0) {
         rev3_storage_error_as_cpp(fmt::format(
-            "MPF Format-5 image directory creation failed: errno={}",
+            "generation file directory open failed: errno={}", errno));
+    }
+    const int sync_result = pg_fsync(fd);
+    const int sync_errno = errno;
+    const int close_result = close(fd);
+    if (sync_result != 0 || close_result != 0) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "generation file directory fsync/close failed: errno={}",
+            sync_result != 0 ? sync_errno : errno));
+    }
+}
+
+} // namespace generation_file_action_detail
+
+[[nodiscard]] inline FileActionReservation reserve_file_actions(
+        const std::size_t requested_count) {
+    using namespace generation_file_action_detail;
+    if (requested_count == 0u
+        || requested_count > kPendingFileActionCapacity) {
+        rev3_storage_error_as_cpp(
+            "generation file-action reservation size is invalid");
+    }
+    install_callbacks();
+    std::size_t available = 0u;
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        available += slot_is_occupied(slot) ? 0u : 1u;
+    }
+    if (available < requested_count) {
+        rev3_storage_error_as_cpp(
+            "generation file-action queue capacity exhausted before mutation");
+    }
+
+    // After the complete preflight this pass cannot fail: it marks exactly
+    // the requested number without allocation or partial-return behavior.
+    const std::uint32_t reservation_id = next_unused_reservation_id();
+    std::size_t reserved = 0u;
+    for (std::size_t slot = 0u;
+         slot < kPendingFileActionCapacity && reserved < requested_count;
+         ++slot) {
+        if (slot_is_occupied(slot)) continue;
+        g_queue_state.actions[slot] = PendingFileAction{
+            .owner_subxid = GetCurrentSubTransactionId(),
+        };
+        g_queue_state.slot_states[slot] = SlotState::reserved;
+        g_queue_state.reservation_ids[slot] = reservation_id;
+        ++reserved;
+    }
+    return FileActionReservation{
+        .id = reservation_id,
+        .count = static_cast<std::uint16_t>(requested_count),
+    };
+}
+
+[[nodiscard]] inline FileActionReservation reserve_reaper_file_actions(
+        const std::size_t requested_count) {
+    if (requested_count == 0u
+        || requested_count > kMaximumReaperFileActions) {
+        rev3_storage_error_as_cpp(
+            "generation reaper file-action batch exceeds hard cap 64");
+    }
+    return reserve_file_actions(requested_count);
+}
+
+inline void release_unarmed_file_action_reservation(
+        const FileActionReservation reservation) noexcept {
+    using namespace generation_file_action_detail;
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (g_queue_state.slot_states[slot] == SlotState::reserved
+            && g_queue_state.reservation_ids[slot] == reservation.id) {
+            release_slot(slot);
+        }
+    }
+}
+
+inline void cancel_generation_file_publication_noexcept(
+        PendingGenerationFilePublication& publication) noexcept {
+    using namespace generation_file_action_detail;
+    if (publication.published) return;
+
+    if (publication.reservation.id == 0u) {
+        if (publication.fd >= 0) {
+            (void)CloseTransientFile(publication.fd);
+            publication.fd = -1;
+        }
+        if (publication.temporary_path[0] != '\0') {
+            (void)unlink(publication.temporary_path.data());
+        }
+        publication.published = true;
+        return;
+    }
+
+    bool has_armed_action = false;
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (g_queue_state.reservation_ids[slot]
+                == publication.reservation.id
+            && g_queue_state.slot_states[slot] == SlotState::armed) {
+            has_armed_action = true;
+            break;
+        }
+    }
+    if (publication.fd >= 0) {
+        (void)CloseTransientFile(publication.fd);
+        publication.fd = -1;
+    }
+    // Before fstat supplies inode authority the O_EXCL name is still owned by
+    // this backend inside its private 0700 shard.  Remove that exact temp
+    // directly; after arming, the queue's inode-bound path is the sole
+    // deletion authority.
+    if (!has_armed_action && publication.temporary_path[0] != '\0') {
+        (void)unlink(publication.temporary_path.data());
+    }
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (g_queue_state.reservation_ids[slot]
+            != publication.reservation.id) {
+            continue;
+        }
+        if (g_queue_state.slot_states[slot] == SlotState::armed
+            && g_queue_state.actions[slot].armed
+            && g_queue_state.actions[slot].action
+                == FileAction::unlink_on_abort) {
+            unlink_identity_bound_noexcept(
+                static_cast<std::uint16_t>(slot));
+        }
+        release_slot(slot);
+    }
+    publication.reservation = {};
+    publication.temporary_slot = kNoPairedFileAction;
+    publication.final_slot = kNoPairedFileAction;
+    publication.temporary_path.fill('\0');
+    publication.final_path.fill('\0');
+    publication.published = true;
+}
+
+inline PendingGenerationFilePublication::~PendingGenerationFilePublication() {
+    cancel_generation_file_publication_noexcept(*this);
+}
+
+[[nodiscard]] inline ResolvedGenerationFilePath
+resolve_generation_file_path(
+        const GenerationFileIdentity& identity) {
+    using namespace generation_file_action_detail;
+    if (!OidIsValid(identity.database_oid)
+        || !OidIsValid(identity.tablespace_oid)
+        || !OidIsValid(identity.main_relfilenode)
+        || !OidIsValid(identity.user_relid)
+        || identity.column_attno <= 0
+        || identity.index_kind != kMappedMpfIndexKind
+        || identity.generation_id == 0u) {
+        rev3_storage_error_as_cpp(
+            "generation file identity is invalid or is not mapped MPF");
+    }
+
+    ResolvedGenerationFilePath resolved{};
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&resolved, database_oid = identity.database_oid,
+         tablespace_oid = identity.tablespace_oid] {
+            char* const database_path =
+                GetDatabasePath(database_oid, tablespace_oid);
+            if (database_path == nullptr) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("could not resolve bioseq generation database path")));
+            }
+            const std::size_t path_bytes =
+                strnlen(database_path, MAXPGPATH);
+            if (path_bytes == 0u || path_bytes >= MAXPGPATH) {
+                pfree(database_path);
+                ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("bioseq generation database path is truncated")));
+            }
+            std::memcpy(
+                resolved.database_directory.data(),
+                database_path, path_bytes + 1u);
+            pfree(database_path);
+        });
+    const std::string_view database_directory{
+        resolved.database_directory.data()};
+    if (!path_has_only_canonical_components(database_directory)) {
+        rev3_storage_error_as_cpp(
+            "generation database path is not canonical");
+    }
+    if (!format_fixed(
+            resolved.bioseq_directory, "{}/{}",
+            database_directory, kGenerationFileDirectoryName)) {
+        rev3_storage_error_as_cpp(
+            "generation Bioseq directory path is truncated");
+    }
+    constexpr std::array<char, 16u> kLowerHex{
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    const std::uint8_t shard =
+        static_cast<std::uint8_t>(identity.generation_id & 0xffu);
+    const std::array<char, 3u> shard_name{
+        kLowerHex[shard >> 4u], kLowerHex[shard & 0x0fu], '\0'};
+    if (!format_fixed(
+            resolved.shard_directory, "{}/{}",
+            resolved.bioseq_directory.data(), shard_name.data())) {
+        rev3_storage_error_as_cpp(
+            "generation shard directory path is truncated");
+    }
+    if (!format_fixed(
+            resolved.final_path,
+            "{}/{}.{}.{}.1.{}.{}.mpf5",
+            resolved.shard_directory.data(),
+            static_cast<unsigned>(identity.main_relfilenode),
+            static_cast<unsigned>(identity.user_relid),
+            static_cast<int>(identity.column_attno),
+            static_cast<unsigned long long>(identity.query_key),
+            static_cast<unsigned long long>(identity.generation_id))) {
+        rev3_storage_error_as_cpp(
+            "generation final path is truncated");
+    }
+    if (!path_has_only_canonical_components(
+            resolved.final_path.data())
+        || !exact_child_path(
+            resolved.database_directory.data(),
+            resolved.bioseq_directory.data())
+        || !exact_child_path(
+            resolved.bioseq_directory.data(),
+            resolved.shard_directory.data())
+        || !exact_child_path(
+            resolved.shard_directory.data(),
+            resolved.final_path.data())) {
+        rev3_storage_error_as_cpp(
+            "generation file path escapes its canonical database shard");
+    }
+    return resolved;
+}
+
+/// Reserve temp/final before the first filesystem mutation and then create a
+/// cryptographically unique strict mode-0600 O_EXCL temp.
+[[nodiscard]] inline PendingGenerationFilePublication
+begin_generation_file_publication(
+        const GenerationFileIdentity& identity) {
+    using namespace generation_file_action_detail;
+    const ResolvedGenerationFilePath resolved =
+        resolve_generation_file_path(identity);
+    const FileActionReservation reservation = reserve_file_actions(2u);
+    const auto temporary_slot = reservation_slot(reservation, 0u);
+    const auto final_slot = reservation_slot(reservation, 1u);
+    if (!temporary_slot || !final_slot) {
+        rev3_storage_error_as_cpp(
+            "generation publication pair reservation is incomplete");
+    }
+
+    PendingGenerationFilePublication publication;
+    publication.reservation = reservation;
+    publication.temporary_slot = *temporary_slot;
+    publication.final_slot = *final_slot;
+    publication.shard_directory = resolved.shard_directory;
+    publication.final_path = resolved.final_path;
+
+    const bool bioseq_directory_created = ensure_private_directory(
+        resolved.bioseq_directory.data());
+    if (bioseq_directory_created) {
+        fsync_directory(resolved.database_directory.data());
+    }
+    const bool shard_directory_created = ensure_private_directory(
+        resolved.shard_directory.data());
+    if (shard_directory_created) {
+        fsync_directory(resolved.bioseq_directory.data());
+    }
+    constexpr std::size_t kNonceBytes = 16u;
+    constexpr std::size_t kMaximumCollisionRetries = 128u;
+    constexpr std::array<char, 16u> kLowerHex{
+        '0', '1', '2', '3', '4', '5', '6', '7',
+        '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    const std::uint64_t top_full_xid =
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            return U64FromFullTransactionId(
+                GetTopFullTransactionId());
+        });
+    for (std::size_t attempt = 0u;
+         attempt < kMaximumCollisionRetries; ++attempt) {
+        std::array<unsigned char, kNonceBytes> nonce{};
+        if (!pg_strong_random(nonce.data(), nonce.size())) {
+            rev3_storage_error_as_cpp(
+                "generation temp nonce source failed");
+        }
+        std::array<char, kNonceBytes * 2u + 1u> nonce_hex{};
+        for (std::size_t byte_index = 0u; byte_index < nonce.size();
+             ++byte_index) {
+            nonce_hex[byte_index * 2u] =
+                kLowerHex[nonce[byte_index] >> 4u];
+            nonce_hex[byte_index * 2u + 1u] =
+                kLowerHex[nonce[byte_index] & 0x0fu];
+        }
+        if (!format_fixed(
+                publication.temporary_path,
+                "{}.tmp.{}.{}.{}",
+                publication.final_path.data(),
+                static_cast<unsigned long long>(top_full_xid),
+                static_cast<int>(MyProcPid), nonce_hex.data())) {
+            rev3_storage_error_as_cpp(
+                "generation temporary path is truncated");
+        }
+        publication.fd = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            return OpenTransientFilePerm(
+                publication.temporary_path.data(),
+                O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW
+                    | PG_BINARY,
+                S_IRUSR | S_IWUSR);
+        });
+        if (publication.fd >= 0) break;
+        if (errno != EEXIST) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "generation O_EXCL temp creation failed: errno={}",
+                errno));
+        }
+    }
+    if (publication.fd < 0) {
+        rev3_storage_error_as_cpp(
+            "generation O_EXCL temp nonce collisions exceeded retry bound");
+    }
+    struct stat observed{};
+    if (fstat(publication.fd, &observed) != 0
+        || !S_ISREG(observed.st_mode)
+        || observed.st_uid != geteuid()
+        || (observed.st_mode & 07777) != 0600
+        || observed.st_nlink != 1) {
+        rev3_storage_error_as_cpp(
+            "generation temp inode contract is invalid");
+    }
+    publication.expected_device = observed.st_dev;
+    publication.expected_inode = observed.st_ino;
+    arm_reserved_slot(
+        reservation, 0u, FileAction::unlink_on_abort,
+        publication.temporary_path.data(), observed.st_dev,
+        observed.st_ino, publication.final_slot);
+    return publication;
+}
+
+/// Freeze, link without replacement, validate and directory-fsync a completed
+/// header-last image.  The caller finishes payload/header writes and image
+/// validation before entering this function.
+inline void publish_generation_file(
+        PendingGenerationFilePublication& publication) {
+    using namespace generation_file_action_detail;
+    if (publication.fd < 0
+        || publication.temporary_slot == kNoPairedFileAction
+        || publication.final_slot == kNoPairedFileAction) {
+        rev3_storage_error_as_cpp(
+            "generation publication is not open");
+    }
+    if (fchmod(publication.fd, S_IRUSR) != 0
+        || pg_fsync(publication.fd) != 0) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "generation image freeze/fsync failed: errno={}", errno));
+    }
+    struct stat frozen{};
+    if (fstat(publication.fd, &frozen) != 0
+        || !S_ISREG(frozen.st_mode)
+        || frozen.st_uid != geteuid()
+        || (frozen.st_mode & 07777) != 0400
+        || frozen.st_nlink != 1
+        || frozen.st_dev != publication.expected_device
+        || frozen.st_ino != publication.expected_inode) {
+        rev3_storage_error_as_cpp(
+            "generation frozen temp inode contract is invalid");
+    }
+    arm_reserved_slot(
+        publication.reservation, 1u,
+        FileAction::unlink_on_abort,
+        publication.final_path.data(),
+        publication.expected_device, publication.expected_inode,
+        publication.temporary_slot);
+    if (linkat(
+            AT_FDCWD, publication.temporary_path.data(),
+            AT_FDCWD, publication.final_path.data(), 0) != 0) {
+        // EEXIST is intentionally not special: no existing final is ever
+        // overwritten, renamed aside or pre-unlinked.
+        rev3_storage_error_as_cpp(fmt::format(
+            "generation immutable final link failed without replacement: errno={}",
             errno));
     }
+    if (unlink(publication.temporary_path.data()) != 0) {
+        // Both abort actions stay armed and paired.  Callback cleanup accepts
+        // precisely this two-link window and refuses every unrelated link.
+        rev3_storage_error_as_cpp(fmt::format(
+            "generation strict temp unlink failed: errno={}", errno));
+    }
+    release_slot(publication.temporary_slot);
+    PendingFileAction& final_action =
+        g_queue_state.actions[publication.final_slot];
+    final_action.paired_slot = kNoPairedFileAction;
+
+    struct stat published{};
+    if (fstatat(
+            AT_FDCWD, publication.final_path.data(), &published,
+            AT_SYMLINK_NOFOLLOW) != 0
+        || !S_ISREG(published.st_mode)
+        || published.st_uid != geteuid()
+        || (published.st_mode & 07777) != 0400
+        || published.st_nlink != 1
+        || published.st_dev != publication.expected_device
+        || published.st_ino != publication.expected_inode) {
+        rev3_storage_error_as_cpp(
+            "generation immutable final inode contract is invalid");
+    }
+    fsync_directory(publication.shard_directory.data());
+    if (CloseTransientFile(publication.fd) != 0) {
+        publication.fd = -1;
+        rev3_storage_error_as_cpp(fmt::format(
+            "generation immutable final close failed: errno={}", errno));
+    }
+    publication.fd = -1;
+    publication.temporary_path.fill('\0');
+    // The final abort action remains transaction-owned until commit/abort;
+    // the C++ publication guard must no longer cancel it on ordinary scope
+    // exit after the durable no-replace publication succeeds.
+    publication.published = true;
+}
+
+/// Bind one pre-reserved commit action to an existing exact final inode.  A
+/// reaper first reserves its whole <=64-file batch, then calls this only after
+/// its descriptor/head horizon checks and before descriptor deletion.
+inline void arm_generation_file_unlink_on_commit(
+        const FileActionReservation reservation,
+        const std::size_t ordinal,
+        const GenerationFileIdentity& identity) {
+    using namespace generation_file_action_detail;
+    // Never accept caller-assembled path authority.  Recompute the canonical
+    // database/shard/final path from the persisted physical identity.
+    const ResolvedGenerationFilePath resolved =
+        resolve_generation_file_path(identity);
+    if (!path_has_only_canonical_components(resolved.final_path.data())
+        || !exact_child_path(
+            resolved.database_directory.data(),
+            resolved.bioseq_directory.data())
+        || !exact_child_path(
+            resolved.bioseq_directory.data(),
+            resolved.shard_directory.data())
+        || !exact_child_path(
+            resolved.shard_directory.data(),
+            resolved.final_path.data())) {
+        rev3_storage_error_as_cpp(
+            "generation commit-unlink path is not trusted");
+    }
+    struct stat observed{};
+    if (fstatat(
+            AT_FDCWD, resolved.final_path.data(), &observed,
+            AT_SYMLINK_NOFOLLOW) != 0
+        || !S_ISREG(observed.st_mode)
+        || observed.st_uid != geteuid()
+        || (observed.st_mode & 07777) != 0400
+        || observed.st_nlink != 1) {
+        rev3_storage_error_as_cpp(
+            "generation commit-unlink inode contract is invalid");
+    }
+    arm_reserved_slot(
+        reservation, ordinal, FileAction::unlink_on_commit,
+        resolved.final_path.data(), observed.st_dev, observed.st_ino,
+        kNoPairedFileAction);
+}
+
+[[nodiscard]] inline FileActionDiagnosticsSnapshot
+generation_file_action_diagnostics() noexcept {
+    return FileActionDiagnosticsSnapshot{
+        .entries = generation_file_action_detail::g_queue_state.diagnostics,
+        .total =
+            generation_file_action_detail::g_queue_state.diagnostic_total,
+    };
+}
+
+#ifdef BIOSEQ_TEST_INDEXES
+struct FileActionQueueTestSnapshot {
+    std::size_t reserved = 0u;
+    std::size_t armed_abort = 0u;
+    std::size_t armed_commit = 0u;
+};
+
+[[nodiscard]] inline FileActionQueueTestSnapshot
+generation_file_action_queue_test_snapshot() noexcept {
+    using namespace generation_file_action_detail;
+    FileActionQueueTestSnapshot snapshot{};
+    for (std::size_t slot = 0u; slot < kPendingFileActionCapacity;
+         ++slot) {
+        if (g_queue_state.slot_states[slot] == SlotState::reserved) {
+            ++snapshot.reserved;
+        } else if (g_queue_state.slot_states[slot] == SlotState::armed) {
+            if (g_queue_state.actions[slot].action
+                == FileAction::unlink_on_abort) {
+                ++snapshot.armed_abort;
+            } else {
+                ++snapshot.armed_commit;
+            }
+        }
+    }
+    return snapshot;
+}
+
+inline void arm_generation_file_callback_failure(
+        const generation_file_action_detail::CallbackFailureInjection
+            injection) noexcept {
+    generation_file_action_detail::g_callback_failure_injection = injection;
+}
+
+inline void reset_generation_file_action_queue_for_test() noexcept {
+    using namespace generation_file_action_detail;
+    const bool xact_callback_installed =
+        g_queue_state.xact_callback_installed;
+    const bool subxact_callback_installed =
+        g_queue_state.subxact_callback_installed;
+    g_queue_state = QueueState{};
+    g_queue_state.xact_callback_installed = xact_callback_installed;
+    g_queue_state.subxact_callback_installed =
+        subxact_callback_installed;
+}
+#endif
+
+namespace mpf5_image_pg_detail {
+
+[[nodiscard]] inline GenerationFileIdentity generation_file_identity(
+        const Rev3IndexAdministrationIdentity& identity,
+        const std::uint64_t query_key,
+        const std::uint64_t generation_id) {
+    if (identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
+        || identity.database_oid != MyDatabaseId
+        || identity.column_attno <= 0) {
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 file identity is not the current MPF relation");
+    }
+    return GenerationFileIdentity{
+        .database_oid = identity.database_oid,
+        .tablespace_oid = identity.tablespace_oid,
+        .main_relfilenode = identity.main_relfilenode,
+        .user_relid = identity.user_relid,
+        .column_attno = identity.column_attno,
+        .index_kind = kMappedMpfIndexKind,
+        .query_key = query_key,
+        .generation_id = generation_id,
+    };
 }
 
 inline void pwrite_all(
-        int fd,
-        std::span<const std::byte> bytes,
-        std::uint64_t offset) {
-    std::size_t written = 0;
+        const int fd,
+        const std::span<const std::byte> bytes,
+        const std::uint64_t offset) {
+    std::size_t written = 0u;
     while (written < bytes.size()) {
+        if (written > (std::numeric_limits<std::uint64_t>::max)() - offset) {
+            rev3_storage_error_as_cpp("MPF5 v2 write offset overflows");
+        }
         const std::uint64_t current = offset + written;
         if (current > static_cast<std::uint64_t>(
                 (std::numeric_limits<off_t>::max)())) {
             rev3_storage_error_as_cpp(
-                "MPF Format-5 image offset exceeds off_t");
+                "MPF5 v2 write offset exceeds off_t");
         }
         const ssize_t result = pg_pwrite(
             fd,
@@ -3691,174 +5044,812 @@ inline void pwrite_all(
         if (result < 0 && errno == EINTR) continue;
         if (result <= 0) {
             rev3_storage_error_as_cpp(fmt::format(
-                "MPF Format-5 image write failed: errno={}", errno));
+                "MPF5 v2 write failed: errno={}", errno));
         }
         written += static_cast<std::size_t>(result);
     }
 }
 
-class Writer {
-private:
-    std::string temporary_path_;
-    std::string final_path_;
-    int fd_ = -1;
-    std::uint64_t payload_bytes_ = 0;
-    Crc64Ecma182 payload_checksum_{};
-    bool published_ = false;
-
-    void cleanup_noexcept_() noexcept {
-        if (fd_ >= 0) {
-            (void)CloseTransientFile(fd_);
-            fd_ = -1;
-        }
-        if (!published_ && !temporary_path_.empty()) {
-            (void)unlink(temporary_path_.c_str());
-        }
+inline void write_zero_padding(
+        const int fd,
+        const std::uint64_t begin,
+        const std::uint64_t end) {
+    static constexpr std::array<std::byte, 64u> zeros{};
+    if (end < begin || end - begin > zeros.size()) {
+        rev3_storage_error_as_cpp("MPF5 v2 padding geometry is invalid");
     }
+    pwrite_all(
+        fd,
+        std::span<const std::byte>{zeros}.first(
+            static_cast<std::size_t>(end - begin)),
+        begin);
+}
+
+/// Extend the private temporary inode to one checked, mmap-representable
+/// image length. No final name is visible while this operation can fail.
+inline void resize_temporary_image(
+        const int fd,
+        const std::uint64_t image_bytes) {
+    if (fd < 0
+        || image_bytes > static_cast<std::uint64_t>(
+            (std::numeric_limits<off_t>::max)())
+        || image_bytes > static_cast<std::uint64_t>(
+            (std::numeric_limits<std::size_t>::max)())) {
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 image length is not mmap/off_t representable");
+    }
+    while (::ftruncate(fd, static_cast<off_t>(image_bytes)) != 0) {
+        if (errno == EINTR) continue;
+        rev3_storage_error_as_cpp(fmt::format(
+            "MPF5 v2 image resize failed: errno={}", errno));
+    }
+}
+
+/// Scope-bound offset-zero shared mapping. Offset zero is page-aligned on
+/// every supported PostgreSQL host, while callers expose only exact sections.
+class ScopedMappedRegion {
+private:
+    void* mapping_ = MAP_FAILED;
+    std::size_t bytes_ = 0u;
 
 public:
-    Writer(
-            const Rev3IndexAdministrationIdentity& identity,
-            std::uint64_t query_key,
-            std::uint64_t generation_id)
-        : final_path_(mpf_format5_image_detail::final_path(
-              identity, query_key, generation_id)),
-          temporary_path_(fmt::format(
-              "{}.tmp.{}", final_path_, static_cast<int>(MyProcPid))) {
-        ensure_directory();
-        (void)unlink(temporary_path_.c_str());
-        fd_ = OpenTransientFilePerm(
-            temporary_path_.c_str(),
-            O_CREAT | O_EXCL | O_RDWR | PG_BINARY,
-            S_IRUSR | S_IWUSR);
-        if (fd_ < 0) {
-            rev3_storage_error_as_cpp(fmt::format(
-                "MPF Format-5 image open failed: errno={}", errno));
-        }
-    }
-
-    Writer(const Writer&) = delete;
-    Writer& operator=(const Writer&) = delete;
-    Writer(Writer&&) = delete;
-    Writer& operator=(Writer&&) = delete;
-
-    ~Writer() {
-        cleanup_noexcept_();
-    }
-
-    void append(std::span<const std::byte> bytes) {
-        if (published_ || fd_ < 0
-            || bytes.size()
-                > (std::numeric_limits<std::uint64_t>::max)()
-                    - payload_bytes_
-            || payload_bytes_
-                > (std::numeric_limits<std::uint64_t>::max)()
-                    - kHeaderBytes) {
+    ScopedMappedRegion(
+            const int fd,
+            const std::uint64_t bytes,
+            const int protection)
+        : bytes_(static_cast<std::size_t>(bytes)) {
+        if (fd < 0 || bytes == 0u
+            || bytes > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
             rev3_storage_error_as_cpp(
-                "MPF Format-5 image append state/size is invalid");
+                "MPF5 v2 mapping geometry is invalid");
         }
-        pwrite_all(fd_, bytes, kHeaderBytes + payload_bytes_);
-        payload_checksum_.update(bytes);
-        payload_bytes_ += bytes.size();
+        mapping_ = mmap(
+            nullptr, bytes_, protection, MAP_SHARED, fd, 0);
+        if (mapping_ == MAP_FAILED) {
+            rev3_storage_error_as_cpp(fmt::format(
+                "MPF5 v2 mmap failed: errno={}", errno));
+        }
     }
 
-    void publish(
-            const Rev3IndexAdministrationIdentity& identity,
-            std::uint64_t query_key,
-            const MinimizerGenerationHead& head,
-            const MinimizerGenerationManifest& manifest) {
-        if (published_ || fd_ < 0
-            || manifest.wire_format
-                != bioseq::indexing::MinimizerGenerationWireFormat::
-                    grouped_shape_soa_segment_local
-            || payload_bytes_ != manifest.payload_bytes
-            || manifest.generation_id != head.generation_id
-            || manifest.generation_id == 0u
-            || payload_bytes_
-                > (std::numeric_limits<std::uint64_t>::max)()
-                    - kHeaderBytes) {
-            rev3_storage_error_as_cpp(
-                "MPF Format-5 image publication identity/size is invalid");
+    ScopedMappedRegion(const ScopedMappedRegion&) = delete;
+    ScopedMappedRegion& operator=(const ScopedMappedRegion&) = delete;
+    ScopedMappedRegion(ScopedMappedRegion&&) = delete;
+    ScopedMappedRegion& operator=(ScopedMappedRegion&&) = delete;
+
+    ~ScopedMappedRegion() {
+        if (mapping_ != MAP_FAILED) {
+            (void)munmap(mapping_, bytes_);
         }
-        Header header{
-            .magic = kMagic,
-            .version = kVersion,
-            .header_bytes = kHeaderBytes,
-            .database_oid = identity.database_oid,
-            .tablespace_oid = identity.tablespace_oid,
-            .main_relfilenode = identity.main_relfilenode,
-            .user_relid = identity.user_relid,
-            .column_attno = identity.column_attno,
-            .wire_format = static_cast<std::uint32_t>(
-                manifest.wire_format),
-            .query_key = query_key,
-            .generation_id = manifest.generation_id,
-            .manifest_checksum = head.manifest_checksum,
-            .source_identity = head.source_identity,
-            .source_content_checksum = head.source_content_checksum,
-            .compatibility_checksum = head.compatibility_checksum,
-            .target_length = manifest.target_length,
-            .position_segment_span_bp =
-                manifest.position_segment_span_bp,
-            .position_segment_count = manifest.position_segment_count,
-            .directory_bytes = manifest.directory_bytes,
-            .directory_checksum = manifest.directory_checksum,
-            .payload_bytes = manifest.payload_bytes,
-            .payload_row_checksum = manifest.payload_checksum,
-            .payload_raw_checksum = payload_checksum_.checksum(),
-            .image_bytes = kHeaderBytes + payload_bytes_,
-        };
-        header.header_checksum =
-            mpf_format5_image_detail::header_checksum(header);
-        std::array<std::byte, kHeaderBytes> encoded_header{};
-        std::memcpy(
-            encoded_header.data(), &header, sizeof(header));
-        pwrite_all(fd_, encoded_header, 0u);
-        if (pg_fsync(fd_) != 0) {
+    }
+
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
+        return {
+            static_cast<const std::byte*>(mapping_), bytes_};
+    }
+
+    [[nodiscard]] std::span<std::byte> writable_bytes() noexcept {
+        return {static_cast<std::byte*>(mapping_), bytes_};
+    }
+
+    /// Persist every dirty page before the outer header can authorize it.
+    void sync() const {
+        while (msync(mapping_, bytes_, MS_SYNC) != 0) {
+            if (errno == EINTR) continue;
             rev3_storage_error_as_cpp(fmt::format(
-                "MPF Format-5 image fsync failed: errno={}", errno));
+                "MPF5 v2 mapped image sync failed: errno={}", errno));
         }
-        if (CloseTransientFile(fd_) != 0) {
-            fd_ = -1;
-            rev3_storage_error_as_cpp(fmt::format(
-                "MPF Format-5 image close failed: errno={}", errno));
-        }
-        fd_ = -1;
-        bioseq::pg_utils::invoke_pg_as_cpp([&] {
-            if (durable_rename(
-                    temporary_path_.c_str(),
-                    final_path_.c_str(),
-                    ERROR) != 0) {
-                ereport(ERROR,
-                    (errcode_for_file_access(),
-                     errmsg("could not publish bioseq MPF Format-5 image")));
-            }
-        });
-        published_ = true;
-        temporary_path_.clear();
     }
 };
 
-} // namespace mpf_format5_image_detail
+[[nodiscard]] inline bioseq::indexing::Mpf5V2ExpectedIdentity
+expected_identity(
+        const GenerationFileIdentity& identity,
+        const bioseq::indexing::Mpf5V2Provider provider,
+        const MinimizerGenerationHead& head,
+        const MinimizerGenerationManifest& manifest,
+        const bioseq::indexing::Mpf5V2ImageLayout& layout,
+        const std::uint64_t header_crc64) noexcept {
+    return bioseq::indexing::Mpf5V2ExpectedIdentity{
+        .database_oid = identity.database_oid,
+        .tablespace_oid = identity.tablespace_oid,
+        .main_relfilenode = identity.main_relfilenode,
+        .user_relid = identity.user_relid,
+        .column_attno = static_cast<std::uint16_t>(identity.column_attno),
+        .index_kind = bioseq::indexing::kMpf5V2IndexKind,
+        .provider = static_cast<std::uint8_t>(provider),
+        .wire_format = bioseq::indexing::kMpf5V2WireFormat,
+        .query_key = identity.query_key,
+        .generation_id = identity.generation_id,
+        .source_identity = head.source_identity,
+        .source_content_crc = head.source_content_checksum,
+        .compatibility_crc = head.compatibility_checksum,
+        .target_length = manifest.target_length,
+        .file_bytes = layout.file_bytes,
+        .position_segment_count = manifest.position_segment_count,
+        .position_segment_span_bp = manifest.position_segment_span_bp,
+        .payload = layout.payload,
+        .directory = layout.directory,
+        .manifest = layout.manifest,
+        .header_crc64 = header_crc64,
+        .feature_bitmap = layout.feature_bitmap,
+        .compact_h32_direct = layout.compact_h32_direct,
+    };
+}
+
+inline void validate_generation_metadata(
+        const GenerationFileIdentity& identity,
+        const MinimizerGenerationHead& head,
+        const MinimizerGenerationManifest& manifest,
+        const std::span<const std::byte> directory,
+        const std::span<const std::byte> encoded_manifest) {
+    if (manifest.wire_format
+            != bioseq::indexing::MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local
+        || static_cast<std::uint16_t>(manifest.wire_format)
+            != bioseq::indexing::kMpf5V2WireFormat
+        || identity.generation_id == 0u
+        || identity.generation_id != head.generation_id
+        || identity.generation_id != manifest.generation_id
+        || head.source_identity != manifest.source_identity
+        || head.source_content_checksum
+            != manifest.source_content_checksum
+        || head.compatibility_checksum
+            != bioseq::indexing::minimizer_generation_compatibility_checksum(
+                manifest)
+        || directory.size() != manifest.directory_bytes
+        || bioseq::indexing::crc64_ecma182(directory)
+            != manifest.directory_checksum
+        || encoded_manifest.size()
+            != MinimizerGenerationManifest::format5_encoded_bytes
+        || bioseq::indexing::crc64_ecma182(encoded_manifest)
+            != head.manifest_checksum) {
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 generation metadata receipt is invalid");
+    }
+}
+
+struct MappingLease {
+    ResourceOwner owner = nullptr;
+    int fd = -1;
+    void* mapping = MAP_FAILED;
+    std::size_t mapping_bytes = 0u;
+    dev_t device{};
+    ino_t inode{};
+    bool remembered = false;
+};
+
+inline void release_mapping_lease_raw(MappingLease& lease) noexcept {
+    if (lease.mapping != MAP_FAILED) {
+        (void)munmap(lease.mapping, lease.mapping_bytes);
+        lease.mapping = MAP_FAILED;
+        lease.mapping_bytes = 0u;
+    }
+    if (lease.fd >= 0) {
+        (void)::close(lease.fd);
+        lease.fd = -1;
+    }
+}
+
+inline void release_mapping_lease_resource(const Datum value) noexcept {
+    auto* const lease = reinterpret_cast<MappingLease*>(DatumGetPointer(value));
+    if (lease == nullptr) return;
+    lease->remembered = false;
+    release_mapping_lease_raw(*lease);
+}
+
+inline constexpr ResourceReleasePriority kMappingLeaseReleasePriority = 10u;
+static_assert(kMappingLeaseReleasePriority >= RELEASE_PRIO_FIRST);
+inline const ResourceOwnerDesc kMappingLeaseResourceOwnerDesc{
+    .name = "bioseq MPF5 v2 mapping lease",
+    .release_phase = RESOURCE_RELEASE_AFTER_LOCKS,
+    .release_priority = kMappingLeaseReleasePriority,
+    .ReleaseResource = release_mapping_lease_resource,
+    .DebugPrint = nullptr,
+};
+
+[[nodiscard]] inline MappingLease* allocate_mapping_lease() {
+    if (CurrentResourceOwner == nullptr || TopTransactionContext == nullptr) {
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 mapping requires a transaction ResourceOwner");
+    }
+    void* const storage = MemoryContextAlloc(
+        TopTransactionContext, sizeof(MappingLease));
+    return ::new (storage) MappingLease{
+        .owner = CurrentResourceOwner,
+    };
+}
+
+inline void destroy_mapping_lease(MappingLease*& lease) noexcept {
+    if (lease == nullptr) return;
+    if (lease->remembered) {
+        ResourceOwnerForget(
+            lease->owner, PointerGetDatum(lease),
+            &kMappingLeaseResourceOwnerDesc);
+        lease->remembered = false;
+    }
+    release_mapping_lease_raw(*lease);
+    lease->~MappingLease();
+    pfree(lease);
+    lease = nullptr;
+}
+
+/// Form the compatibility token expected by the PostgreSQL-free mapped-index
+/// readers without transferring or extending the lease lifetime.  The token
+/// deliberately has no control block: callers must retain the backend-thread
+/// lease guard which supplied it until every borrowed span has been destroyed.
+[[nodiscard]] inline std::shared_ptr<const void>
+borrow_mapping_token(MappingLease* const lease) noexcept {
+    if (lease == nullptr || lease->owner == nullptr || !lease->remembered
+        || lease->fd < 0 || lease->mapping == MAP_FAILED
+        || lease->mapping == nullptr || lease->mapping_bytes == 0u) {
+        return {};
+    }
+    std::shared_ptr<const void> no_owner;
+    return std::shared_ptr<const void>{no_owner, lease->mapping};
+}
+
+struct PageAlignedAdviceRange {
+    std::size_t begin = 0u;
+    std::size_t end = 0u;
+
+    [[nodiscard]] constexpr bool operator==(
+        const PageAlignedAdviceRange&) const noexcept = default;
+};
+
+/// Translate one byte-exact authenticated section into the page interval
+/// accepted by madvise-style APIs. The final interval never exceeds the
+/// mapping; its first/last page may also contain adjacent wire bytes because
+/// the VM can only advise complete pages.
+[[nodiscard]] constexpr std::optional<PageAlignedAdviceRange>
+page_aligned_advice_range(
+        const std::size_t mapping_bytes,
+        const std::size_t raw_begin,
+        const std::size_t raw_bytes,
+        const std::size_t page_bytes) noexcept {
+    if (mapping_bytes == 0u || raw_bytes == 0u || page_bytes == 0u
+        || raw_begin >= mapping_bytes) {
+        return std::nullopt;
+    }
+    const std::size_t available = mapping_bytes - raw_begin;
+    const std::size_t raw_end = raw_begin
+        + std::min(raw_bytes, available);
+    const std::size_t aligned_begin = raw_begin
+        - raw_begin % page_bytes;
+    std::size_t aligned_end = raw_end;
+    const std::size_t remainder = aligned_end % page_bytes;
+    if (remainder != 0u) {
+        const std::size_t growth = page_bytes - remainder;
+        aligned_end = growth > mapping_bytes - aligned_end
+            ? mapping_bytes
+            : aligned_end + growth;
+    }
+    if (aligned_end <= aligned_begin) return std::nullopt;
+    return PageAlignedAdviceRange{
+        .begin = aligned_begin,
+        .end = aligned_end,
+    };
+}
+
+static_assert(page_aligned_advice_range(
+    16'384u, 4'352u, 4'096u, 4'096u)
+    == PageAlignedAdviceRange{4'096u, 12'288u});
+static_assert(page_aligned_advice_range(
+    10'000u, 9'000u, 1'000u, 4'096u)
+    == PageAlignedAdviceRange{8'192u, 10'000u});
+static_assert(!page_aligned_advice_range(
+    10'000u, 10'000u, 1u, 4'096u));
+
+[[nodiscard]] constexpr std::size_t file_advice_chunk_bytes(
+        const std::size_t remaining) noexcept {
+    return std::min<std::size_t>(
+        remaining,
+        static_cast<std::size_t>((std::numeric_limits<int>::max)()));
+}
+
+static_assert(file_advice_chunk_bytes(17u) == 17u);
+static_assert(file_advice_chunk_bytes(
+    static_cast<std::size_t>((std::numeric_limits<int>::max)()) + 1u)
+    == static_cast<std::size_t>((std::numeric_limits<int>::max)()));
+
+/// Ask the host to begin fetching one already-validated file range without
+/// making success part of correctness. No error is logged or propagated: a
+/// filesystem/kernel which rejects the preferred async file hint receives a
+/// best-effort mapped-page hint, and rejection of that hint is also harmless.
+inline void advise_mapping_range_async_best_effort(
+        const MappingLease& lease,
+        const PageAlignedAdviceRange range) noexcept {
+    if (lease.fd < 0 || lease.mapping == MAP_FAILED
+        || lease.mapping == nullptr || range.end <= range.begin
+        || range.end > lease.mapping_bytes) {
+        return;
+    }
+
+    bool file_advice_accepted = false;
+#if defined(__APPLE__)
+    std::size_t cursor = range.begin;
+    file_advice_accepted = true;
+    while (cursor < range.end) {
+        const std::size_t remaining = range.end - cursor;
+        const int count = static_cast<int>(
+            file_advice_chunk_bytes(remaining));
+        struct radvisory advice {
+            .ra_offset = static_cast<off_t>(cursor),
+            .ra_count = count,
+        };
+        int advised = -1;
+        do {
+            advised = ::fcntl(lease.fd, F_RDADVISE, &advice);
+        } while (advised == -1 && errno == EINTR);
+        if (advised == -1) {
+            file_advice_accepted = false;
+            break;
+        }
+        cursor += static_cast<std::size_t>(count);
+    }
+#elif defined(__linux__)
+    int advised = 0;
+    do {
+        advised = ::posix_fadvise(
+            lease.fd,
+            static_cast<off_t>(range.begin),
+            static_cast<off_t>(range.end - range.begin),
+            POSIX_FADV_WILLNEED);
+    } while (advised == EINTR);
+    file_advice_accepted = advised == 0;
+#endif
+
+#if defined(MADV_WILLNEED)
+    if (!file_advice_accepted) {
+        auto* const address = static_cast<std::byte*>(lease.mapping)
+            + range.begin;
+        int advised = -1;
+        do {
+            advised = ::madvise(
+                address, range.end - range.begin, MADV_WILLNEED);
+        } while (advised == -1 && errno == EINTR);
+        (void)advised;
+    }
+#else
+    (void)file_advice_accepted;
+#endif
+}
+
+/// Borrowed callback used by the PostgreSQL-free selected-page coalescer.
+/// Advice rejection is intentionally invisible to query correctness.  The
+/// absolute interval is translated only after proving it still belongs to the
+/// stable MappingLease which supplied the callback token.
+inline void advise_borrowed_mapping_page_range(
+        void* const context,
+        const std::uintptr_t page_begin,
+        const std::uintptr_t page_end) noexcept {
+    auto* const lease = static_cast<MappingLease*>(context);
+    if (lease == nullptr || lease->owner == nullptr || !lease->remembered
+        || lease->fd < 0 || lease->mapping == MAP_FAILED
+        || lease->mapping == nullptr || lease->mapping_bytes == 0u
+        || page_begin >= page_end) {
+        return;
+    }
+    const std::uintptr_t mapping_begin =
+        reinterpret_cast<std::uintptr_t>(lease->mapping);
+    if (lease->mapping_bytes
+        > (std::numeric_limits<std::uintptr_t>::max)() - mapping_begin) {
+        return;
+    }
+    const std::uintptr_t mapping_end = mapping_begin
+        + lease->mapping_bytes;
+    if (page_begin < mapping_begin || page_begin >= mapping_end) return;
+    const std::uintptr_t clipped_end = std::min(page_end, mapping_end);
+    if (clipped_end <= page_begin) return;
+    advise_mapping_range_async_best_effort(
+        *lease,
+        PageAlignedAdviceRange{
+            .begin = static_cast<std::size_t>(page_begin - mapping_begin),
+            .end = static_cast<std::size_t>(clipped_end - mapping_begin),
+        });
+}
+
+} // namespace mpf5_image_pg_detail
+
+/// Shared header-last v2 writer.  Relation generations feed this from their
+/// authenticated heap reread; mapped generations can feed the same append API
+/// directly from the common Format-5 encoder callbacks without forming tuples.
+class Mpf5V2WriterPg {
+private:
+    GenerationFileIdentity identity_{};
+    bioseq::indexing::Mpf5V2Provider provider_{};
+    PendingGenerationFilePublication publication_{};
+    std::uint64_t payload_bytes_ = 0u;
+    Crc64Ecma182 payload_crc_{};
+    bool sealed_ = false;
+
+public:
+    Mpf5V2WriterPg(
+            const Rev3IndexAdministrationIdentity& identity,
+            const std::uint64_t query_key,
+            const std::uint64_t generation_id,
+            const bioseq::indexing::Mpf5V2Provider provider)
+        : identity_(mpf5_image_pg_detail::generation_file_identity(
+              identity, query_key, generation_id)),
+          provider_(provider),
+          publication_(begin_generation_file_publication(identity_)) {
+        if (!bioseq::indexing::is_valid_mpf5_v2_provider(
+                static_cast<std::uint8_t>(provider_))) {
+            rev3_storage_error_as_cpp("MPF5 v2 provider is invalid");
+        }
+    }
+
+    Mpf5V2WriterPg(const Mpf5V2WriterPg&) = delete;
+    Mpf5V2WriterPg& operator=(const Mpf5V2WriterPg&) = delete;
+    Mpf5V2WriterPg(Mpf5V2WriterPg&&) = delete;
+    Mpf5V2WriterPg& operator=(Mpf5V2WriterPg&&) = delete;
+
+    void append(const std::span<const std::byte> bytes) {
+        if (sealed_ || publication_.fd < 0
+            || bytes.size()
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - payload_bytes_) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 payload append state/size is invalid");
+        }
+        mpf5_image_pg_detail::pwrite_all(
+            publication_.fd, bytes,
+            bioseq::indexing::kMpf5V2HeaderBytes + payload_bytes_);
+        payload_crc_.update(bytes);
+        payload_bytes_ += bytes.size();
+    }
+
+    [[nodiscard]] Mpf5V2FileReceiptPg publish(
+            const MinimizerGenerationHead& head,
+            const MinimizerGenerationManifest& manifest,
+            const DirView& authenticated_directory,
+            const std::span<const std::byte> encoded_manifest) {
+        using namespace bioseq::indexing;
+        const std::span<const std::byte> directory =
+            authenticated_directory.encoded_bytes();
+        mpf5_image_pg_detail::validate_generation_metadata(
+            identity_, head, manifest, directory, encoded_manifest);
+        if (sealed_ || publication_.fd < 0
+            || payload_bytes_ != manifest.payload_bytes) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 publication payload receipt is invalid");
+        }
+        const std::uint64_t payload_crc64 = payload_crc_.checksum();
+        if (payload_bytes_
+                > (std::numeric_limits<std::uint64_t>::max)()
+                    - kMpf5V2HeaderBytes) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 payload mapping length overflows");
+        }
+        const std::uint64_t payload_mapping_bytes =
+            kMpf5V2HeaderBytes + payload_bytes_;
+        mpf5_image_pg_detail::resize_temporary_image(
+            publication_.fd, payload_mapping_bytes);
+        mpf5_image_pg_detail::ScopedMappedRegion payload_mapping{
+            publication_.fd, payload_mapping_bytes, PROT_READ};
+        const std::span<const std::byte> mapped_payload =
+            payload_mapping.bytes().subspan(
+                static_cast<std::size_t>(kMpf5V2HeaderBytes),
+                static_cast<std::size_t>(payload_bytes_));
+        auto opened_adapter = Format5CompactH32Adapter::open(
+            Format5CompactH32OpenedGenerationView{
+                .head = &head,
+                .manifest = &manifest,
+                .directory = &authenticated_directory,
+                .mapped_payload = mapped_payload,
+            });
+        if (!opened_adapter) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 compact-H32 source adapter rejected Format-5");
+        }
+        Format5CompactH32Adapter compact_adapter =
+            std::move(*opened_adapter);
+        const auto profile = minimizer_generation_payload_profile(manifest);
+        if (!profile || !profile->shape_v5
+            || profile->shape_v5->max_occ_cap == 0u
+            || profile->shape_v5->max_occ_cap
+                > (std::numeric_limits<std::uint32_t>::max)()) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 persisted Shape-V5 cap is invalid");
+        }
+        const std::uint32_t persisted_max_occ_cap =
+            static_cast<std::uint32_t>(
+                profile->shape_v5->max_occ_cap);
+        const auto compact_options = compact_adapter.compact_build_options(
+            persisted_max_occ_cap);
+        if (!compact_options) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 compact-H32 build options are incompatible");
+        }
+        const CompactH32SortedRunSourceRef compact_source =
+            compact_adapter.sorted_run_source();
+        const auto compact_plan = plan_compact_h32_direct_index(
+            compact_source, *compact_options);
+        if (!compact_plan) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 compact-H32 image planning failed");
+        }
+
+        const auto provisional_layout = plan_mpf5_v2_layout(
+            payload_bytes_, directory.size(), encoded_manifest.size(),
+            payload_crc64, manifest.directory_checksum,
+            head.manifest_checksum,
+            Mpf5V2CompactH32DirectSectionSpec{
+                .bytes = compact_plan->image_bytes,
+                .direct_header_crc64 = 0u,
+            });
+        if (!provisional_layout
+            || provisional_layout->feature_bitmap
+                != kMpf5V2FeatureCompactH32Direct
+            || provisional_layout->compact_h32_direct.bytes
+                != compact_plan->image_bytes) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 direct-section layout planning failed");
+        }
+        const std::uint64_t payload_end =
+            provisional_layout->payload.offset
+                + provisional_layout->payload.bytes;
+        mpf5_image_pg_detail::write_zero_padding(
+            publication_.fd, payload_end,
+            provisional_layout->directory.offset);
+        mpf5_image_pg_detail::pwrite_all(
+            publication_.fd, directory,
+            provisional_layout->directory.offset);
+        const std::uint64_t directory_end =
+            provisional_layout->directory.offset
+                + provisional_layout->directory.bytes;
+        mpf5_image_pg_detail::write_zero_padding(
+            publication_.fd, directory_end,
+            provisional_layout->manifest.offset);
+        mpf5_image_pg_detail::pwrite_all(
+            publication_.fd, encoded_manifest,
+            provisional_layout->manifest.offset);
+        const std::uint64_t manifest_end =
+            provisional_layout->manifest.offset
+                + provisional_layout->manifest.bytes;
+        mpf5_image_pg_detail::write_zero_padding(
+            publication_.fd, manifest_end,
+            provisional_layout->compact_h32_direct.offset);
+        mpf5_image_pg_detail::resize_temporary_image(
+            publication_.fd, provisional_layout->file_bytes);
+
+        std::uint64_t direct_header_crc64 = 0u;
+        {
+            mpf5_image_pg_detail::ScopedMappedRegion destination_mapping{
+                publication_.fd, provisional_layout->file_bytes,
+                PROT_READ | PROT_WRITE};
+            const auto direct_offset = static_cast<std::size_t>(
+                provisional_layout->compact_h32_direct.offset);
+            const auto direct_bytes = static_cast<std::size_t>(
+                provisional_layout->compact_h32_direct.bytes);
+            std::span<std::byte> direct_image =
+                destination_mapping.writable_bytes().subspan(
+                    direct_offset, direct_bytes);
+            if (auto built = build_compact_h32_direct_index_into(
+                    compact_source, *compact_options,
+                    *compact_plan, direct_image);
+                !built) {
+                rev3_storage_error_as_cpp(
+                    "MPF5 v2 compact-H32 image replay/build failed");
+            }
+            const auto validated_direct =
+                validate_compact_h32_direct_index(
+                    std::span<const std::byte>{direct_image},
+                    compact_options->identity,
+                    compact_options->max_occ_cap,
+                    compact_options->geometry);
+            if (!validated_direct) {
+                rev3_storage_error_as_cpp(
+                    "MPF5 v2 compact-H32 nested image validation failed");
+            }
+            const CompactH32ImagePlan& validated_direct_plan =
+                validated_direct->header;
+            if (validated_direct_plan != *compact_plan) {
+                rev3_storage_error_as_cpp(
+                    "MPF5 v2 compact-H32 validated plan receipt changed");
+            }
+            direct_header_crc64 = crc64_ecma182(
+                std::span<const std::byte>{direct_image}.first(
+                    kCompactH32DirectIndexHeaderBytes));
+            destination_mapping.sync();
+        }
+
+        const auto layout = plan_mpf5_v2_layout(
+            payload_bytes_, directory.size(), encoded_manifest.size(),
+            payload_crc64, manifest.directory_checksum,
+            head.manifest_checksum,
+            Mpf5V2CompactH32DirectSectionSpec{
+                .bytes = compact_plan->image_bytes,
+                .direct_header_crc64 = direct_header_crc64,
+            });
+        if (!layout
+            || layout->payload != provisional_layout->payload
+            || layout->directory != provisional_layout->directory
+            || layout->manifest != provisional_layout->manifest
+            || layout->feature_bitmap
+                != provisional_layout->feature_bitmap
+            || layout->compact_h32_direct.offset
+                != provisional_layout->compact_h32_direct.offset
+            || layout->compact_h32_direct.bytes
+                != provisional_layout->compact_h32_direct.bytes
+            || layout->file_bytes != provisional_layout->file_bytes) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 authenticated direct layout changed after build");
+        }
+
+        DecodedMpf5HeaderV2 header{
+            .magic = kMpf5V2Magic,
+            .version = kMpf5V2Version,
+            .header_bytes = kMpf5V2HeaderBytes,
+            .database_oid = identity_.database_oid,
+            .tablespace_oid = identity_.tablespace_oid,
+            .main_relfilenode = identity_.main_relfilenode,
+            .user_relid = identity_.user_relid,
+            .column_attno = static_cast<std::uint16_t>(
+                identity_.column_attno),
+            .index_kind = kMpf5V2IndexKind,
+            .provider = static_cast<std::uint8_t>(provider_),
+            .wire_format = kMpf5V2WireFormat,
+            .query_key = identity_.query_key,
+            .generation_id = identity_.generation_id,
+            .source_identity = head.source_identity,
+            .source_content_crc = head.source_content_checksum,
+            .compatibility_crc = head.compatibility_checksum,
+            .target_length = manifest.target_length,
+            .file_bytes = layout->file_bytes,
+            .position_segment_count = manifest.position_segment_count,
+            .position_segment_span_bp =
+                manifest.position_segment_span_bp,
+            .payload = layout->payload,
+            .directory = layout->directory,
+            .manifest = layout->manifest,
+            .feature_bitmap = layout->feature_bitmap,
+            .compact_h32_direct = layout->compact_h32_direct,
+        };
+        const auto encoded_header = encode_mpf5_v2_header(header);
+        if (!encoded_header) {
+            rev3_storage_error_as_cpp("MPF5 v2 header encoding failed");
+        }
+        const auto decoded_header = decode_mpf5_v2_header(*encoded_header);
+        if (!decoded_header) {
+            rev3_storage_error_as_cpp("MPF5 v2 header self-decode failed");
+        }
+        mpf5_image_pg_detail::pwrite_all(
+            publication_.fd, *encoded_header, 0u);
+
+        struct stat observed{};
+        if (fstat(publication_.fd, &observed) != 0
+            || observed.st_size < 0
+            || static_cast<std::uint64_t>(observed.st_size)
+                != layout->file_bytes
+            || observed.st_dev != publication_.expected_device
+            || observed.st_ino != publication_.expected_inode) {
+            rev3_storage_error_as_cpp(
+                "MPF5 v2 completed temp image size/inode is invalid");
+        }
+        const Mpf5V2ValidationOptions validation_options{
+            .expected_identity = mpf5_image_pg_detail::expected_identity(
+                identity_, provider_, head, manifest, *layout,
+                decoded_header->header_crc64),
+            .payload_crc_policy = Mpf5V2PayloadCrcPolicy::deferred,
+        };
+        {
+            mpf5_image_pg_detail::ScopedMappedRegion validation_mapping{
+                publication_.fd, layout->file_bytes, PROT_READ};
+            const auto validated = validate_mpf5_v2_image(
+                validation_mapping.bytes(), validation_options);
+            if (!validated || validated->payload_crc_bytes != 0u) {
+                rev3_storage_error_as_cpp(
+                    "MPF5 v2 bounded publication validation failed");
+            }
+        }
+
+        const Mpf5V2FileReceiptPg receipt{
+            .provider = provider_,
+            .file_bytes = layout->file_bytes,
+            .payload_crc64 = payload_crc64,
+            .header_crc64 = decoded_header->header_crc64,
+            .device = publication_.expected_device,
+            .inode = publication_.expected_inode,
+        };
+        publish_generation_file(publication_);
+        sealed_ = true;
+        return receipt;
+    }
+};
+
+enum class Mpf5V2MappedOpenValidationPg : std::uint8_t {
+    /// Timed restart path: authenticate only the fixed outer header, layout,
+    /// descriptor identity and section receipts. No section payload is read.
+    bounded_header_only = 0u,
+    /// Explicit publication/scrub compatibility path. Payload CRC remains
+    /// deferred, while directory/manifest metadata receive the legacy full
+    /// validation pass.
+    full_metadata = 1u,
+};
+
+/// Backend-thread RAII authority for one registered MPF5 mmap/fd lease.
+///
+/// Borrowed reader tokens do not own or prolong this guard.  On the normal
+/// executor path the guard must therefore be declared/stored before every
+/// reader which borrows it, so reverse destruction releases the reader first
+/// and then promptly forgets, unmaps, closes and frees the lease.  PostgreSQL's
+/// ResourceOwner registration remains armed while the guard is live and is the
+/// ERROR/longjmp fallback when ordinary C++ destruction cannot run.
+class MappedMinimizerFormat5LeaseGuardPg {
+private:
+    mpf5_image_pg_detail::MappingLease* lease_ = nullptr;
+
+    explicit MappedMinimizerFormat5LeaseGuardPg(
+            mpf5_image_pg_detail::MappingLease* lease) noexcept
+        : lease_(lease) {}
+
+    friend class MappedMinimizerFormat5ImagePg;
+
+public:
+    MappedMinimizerFormat5LeaseGuardPg() = default;
+    MappedMinimizerFormat5LeaseGuardPg(
+            const MappedMinimizerFormat5LeaseGuardPg&) = delete;
+    MappedMinimizerFormat5LeaseGuardPg& operator=(
+            const MappedMinimizerFormat5LeaseGuardPg&) = delete;
+
+    MappedMinimizerFormat5LeaseGuardPg(
+            MappedMinimizerFormat5LeaseGuardPg&& other) noexcept
+        : lease_(std::exchange(other.lease_, nullptr)) {}
+
+    MappedMinimizerFormat5LeaseGuardPg& operator=(
+            MappedMinimizerFormat5LeaseGuardPg&& other) noexcept {
+        if (this != &other) {
+            mpf5_image_pg_detail::destroy_mapping_lease(lease_);
+            lease_ = std::exchange(other.lease_, nullptr);
+        }
+        return *this;
+    }
+
+    ~MappedMinimizerFormat5LeaseGuardPg() {
+        mpf5_image_pg_detail::destroy_mapping_lease(lease_);
+    }
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return static_cast<bool>(borrow_mapping_token());
+    }
+
+    /// Non-owning compatibility token.  Every copy becomes invalid as soon as
+    /// this guard is destroyed or replaced.
+    [[nodiscard]] std::shared_ptr<const void>
+    borrow_mapping_token() const noexcept {
+        return mpf5_image_pg_detail::borrow_mapping_token(lease_);
+    }
+};
+
+static_assert(!std::is_copy_constructible_v<
+    MappedMinimizerFormat5LeaseGuardPg>);
+static_assert(!std::is_copy_assignable_v<
+    MappedMinimizerFormat5LeaseGuardPg>);
+static_assert(std::is_nothrow_move_constructible_v<
+    MappedMinimizerFormat5LeaseGuardPg>);
+static_assert(std::is_nothrow_move_assignable_v<
+    MappedMinimizerFormat5LeaseGuardPg>);
 
 class MappedMinimizerFormat5ImagePg {
 private:
-    int fd_ = -1;
-    void* mapping_ = MAP_FAILED;
-    std::size_t mapping_bytes_ = 0;
-    const mpf_format5_image_detail::Header* header_ = nullptr;
+    mpf5_image_pg_detail::MappingLease* lease_ = nullptr;
+    std::span<const std::byte> payload_{};
+    std::span<const std::byte> compact_h32_direct_{};
+    std::uint64_t payload_raw_checksum_ = 0u;
+    std::optional<std::uint64_t>
+        compact_h32_direct_header_receipt_{};
+
+    void clear_views_() noexcept {
+        payload_ = {};
+        compact_h32_direct_ = {};
+        payload_raw_checksum_ = 0u;
+        compact_h32_direct_header_receipt_.reset();
+    }
 
     void release_() noexcept {
-        header_ = nullptr;
-        if (mapping_ != MAP_FAILED) {
-            (void)munmap(mapping_, mapping_bytes_);
-            mapping_ = MAP_FAILED;
-            mapping_bytes_ = 0;
-        }
-        if (fd_ >= 0) {
-            (void)CloseTransientFile(fd_);
-            fd_ = -1;
-        }
+        clear_views_();
+        mpf5_image_pg_detail::destroy_mapping_lease(lease_);
     }
 
 public:
@@ -3869,10 +5860,14 @@ public:
             const MappedMinimizerFormat5ImagePg&) = delete;
     MappedMinimizerFormat5ImagePg(
             MappedMinimizerFormat5ImagePg&& other) noexcept
-        : fd_(std::exchange(other.fd_, -1)),
-          mapping_(std::exchange(other.mapping_, MAP_FAILED)),
-          mapping_bytes_(std::exchange(other.mapping_bytes_, 0)),
-          header_(std::exchange(other.header_, nullptr)) {}
+        : lease_(std::exchange(other.lease_, nullptr)),
+          payload_(std::exchange(other.payload_, {})),
+          compact_h32_direct_(std::exchange(
+              other.compact_h32_direct_, {})),
+          payload_raw_checksum_(std::exchange(
+              other.payload_raw_checksum_, 0u)),
+          compact_h32_direct_header_receipt_(std::exchange(
+              other.compact_h32_direct_header_receipt_, std::nullopt)) {}
     MappedMinimizerFormat5ImagePg& operator=(
             MappedMinimizerFormat5ImagePg&&) = delete;
     ~MappedMinimizerFormat5ImagePg() {
@@ -3880,49 +5875,201 @@ public:
     }
 
     [[nodiscard]] std::span<const std::byte> payload() const noexcept {
-        if (mapping_ == MAP_FAILED || header_ == nullptr
-            || mapping_bytes_ < header_->header_bytes
-            || header_->payload_bytes
-                > mapping_bytes_ - header_->header_bytes) {
-            return {};
-        }
-        return std::span<const std::byte>{
-            static_cast<const std::byte*>(mapping_)
-                + header_->header_bytes,
-            static_cast<std::size_t>(header_->payload_bytes)};
+        return payload_;
     }
 
     [[nodiscard]] std::uint64_t payload_raw_checksum() const noexcept {
-        return header_ == nullptr ? 0u : header_->payload_raw_checksum;
+        return payload_raw_checksum_;
     }
 
-    /// Transfer the mmap lifetime into a backend-independent shared owner.
-    /// The payload span obtained before this call remains valid until the last
-    /// owner is destroyed.  This lets the fragment-native seed reader probe
-    /// the immutable PostgreSQL generation directly throughout mapping
-    /// without copying any posting payload into a target-wide runtime index.
-    [[nodiscard]] std::shared_ptr<const void>
-    release_mapping_owner() && {
-        if (mapping_ == MAP_FAILED || mapping_bytes_ == 0u) {
+    /// Authenticated lazy span for the optional nested compact-H32 direct
+    /// image. The bounded outer open formed this span arithmetically without
+    /// reading any nested payload byte.
+    [[nodiscard]] std::span<const std::byte>
+    compact_h32_direct() const noexcept {
+        return compact_h32_direct_;
+    }
+
+    /// Raw CRC64/ECMA receipt over the finalized fixed 256-byte nested header,
+    /// persisted in and authenticated by the outer MPF5 header.
+    [[nodiscard]] std::optional<std::uint64_t>
+    compact_h32_direct_header_receipt() const noexcept {
+        return compact_h32_direct_header_receipt_;
+    }
+
+    /// Issue fail-open asynchronous readahead for the authenticated compact-
+    /// H32 metadata only. Selected posting pages are advised later, while the
+    /// existing descriptor layout traversal already knows their exact spans.
+    /// The unrelated outer MPF payload and unselected posting pages are never
+    /// named as byte ranges; page granularity may include adjacent bytes on a
+    /// boundary page.
+    void advise_compact_h32_direct_metadata_readahead(
+            const bioseq::indexing::CompactH32DirectIndexView&
+                authenticated_direct) const noexcept {
+        using mpf5_image_pg_detail::PageAlignedAdviceRange;
+        if (lease_ == nullptr || lease_->mapping == MAP_FAILED
+            || lease_->mapping == nullptr || lease_->mapping_bytes == 0u
+            || compact_h32_direct_.empty()
+            || authenticated_direct.image.data()
+                != compact_h32_direct_.data()
+            || authenticated_direct.image.size()
+                != compact_h32_direct_.size()) {
+            return;
+        }
+
+        const std::uintptr_t mapping_address = reinterpret_cast<std::uintptr_t>(
+            lease_->mapping);
+        const std::uintptr_t direct_address = reinterpret_cast<std::uintptr_t>(
+            compact_h32_direct_.data());
+        if (direct_address < mapping_address) return;
+        const std::uint64_t direct_file_offset =
+            static_cast<std::uint64_t>(direct_address - mapping_address);
+        if (direct_file_offset > lease_->mapping_bytes
+            || compact_h32_direct_.size()
+                > lease_->mapping_bytes
+                    - static_cast<std::size_t>(direct_file_offset)) {
+            return;
+        }
+
+        const auto& header = authenticated_direct.header;
+        if (header.image_bytes != compact_h32_direct_.size()) return;
+        const std::array<std::pair<std::uint64_t, std::uint64_t>, 3u>
+            direct_sections{
+                std::pair{header.membership_offset,
+                    header.membership_bytes},
+                std::pair{header.rank_offset, header.rank_bytes},
+                std::pair{header.descriptors_offset,
+                    header.descriptors_bytes},
+            };
+        std::array<PageAlignedAdviceRange, direct_sections.size()>
+            merged_ranges{};
+        std::size_t merged_count = 0u;
+        const long observed_page_bytes = ::sysconf(_SC_PAGESIZE);
+        if (observed_page_bytes <= 0) return;
+        const std::size_t page_bytes = static_cast<std::size_t>(
+            observed_page_bytes);
+
+        std::uint64_t previous_section_end = 0u;
+        for (const auto [section_offset, section_bytes]
+                : direct_sections) {
+            if (section_offset < previous_section_end
+                || section_offset > compact_h32_direct_.size()
+                || section_bytes
+                    > compact_h32_direct_.size()
+                        - static_cast<std::size_t>(section_offset)) {
+                return;
+            }
+            const std::uint64_t section_end = section_offset
+                + section_bytes;
+            previous_section_end = section_end;
+            if (section_bytes == 0u) continue;
+
+            if (section_offset
+                    > (std::numeric_limits<std::uint64_t>::max)()
+                        - direct_file_offset) {
+                return;
+            }
+            const std::uint64_t file_offset = direct_file_offset
+                + section_offset;
+            if (file_offset > lease_->mapping_bytes
+                || section_bytes > lease_->mapping_bytes
+                    - static_cast<std::size_t>(file_offset)) {
+                return;
+            }
+            const auto aligned = mpf5_image_pg_detail::
+                page_aligned_advice_range(
+                    lease_->mapping_bytes,
+                    static_cast<std::size_t>(file_offset),
+                    static_cast<std::size_t>(section_bytes),
+                    page_bytes);
+            if (!aligned) return;
+            if (merged_count != 0u
+                && aligned->begin <= merged_ranges[merged_count - 1u].end) {
+                merged_ranges[merged_count - 1u].end = std::max(
+                    merged_ranges[merged_count - 1u].end,
+                    aligned->end);
+            } else {
+                merged_ranges[merged_count++] = *aligned;
+            }
+        }
+        if (previous_section_end > header.postings_offset
+            || header.postings_offset > header.image_bytes
+            || header.postings_bytes
+                > header.image_bytes - header.postings_offset
+            || header.postings_offset + header.postings_bytes
+                != header.image_bytes) {
+            return;
+        }
+        for (std::size_t ordinal = 0u;
+             ordinal < merged_count; ++ordinal) {
+            mpf5_image_pg_detail::
+                advise_mapping_range_async_best_effort(
+                    *lease_, merged_ranges[ordinal]);
+        }
+    }
+
+    /// Form a non-owning adviser before this image transfers its lease into
+    /// the longer-lived guard. The context is the MappingLease allocation
+    /// itself, whose address remains stable across that transfer.
+    [[nodiscard]] bioseq::indexing::CompactDirectSelectedPageAdviser
+    borrow_compact_h32_selected_page_adviser(
+            const bioseq::indexing::CompactH32DirectIndexView&
+                authenticated_direct) const noexcept {
+        if (lease_ == nullptr || lease_->owner == nullptr
+            || !lease_->remembered || lease_->fd < 0
+            || lease_->mapping == MAP_FAILED || lease_->mapping == nullptr
+            || lease_->mapping_bytes == 0u || compact_h32_direct_.empty()
+            || authenticated_direct.image.data()
+                != compact_h32_direct_.data()
+            || authenticated_direct.image.size()
+                != compact_h32_direct_.size()
+            || authenticated_direct.header.image_bytes
+                != compact_h32_direct_.size()) {
             return {};
         }
-        void* const mapping =
-            std::exchange(mapping_, MAP_FAILED);
-        const std::size_t mapping_bytes =
-            std::exchange(mapping_bytes_, 0u);
-        const int fd = std::exchange(fd_, -1);
-        header_ = nullptr;
-        return std::shared_ptr<const void>{
-            mapping,
-            [mapping_bytes, fd](const void* address) noexcept {
-                if (address != nullptr && address != MAP_FAILED) {
-                    (void)munmap(
-                        const_cast<void*>(address), mapping_bytes);
-                }
-                if (fd >= 0) {
-                    (void)CloseTransientFile(fd);
-                }
-            }};
+        const std::uintptr_t mapping_begin =
+            reinterpret_cast<std::uintptr_t>(lease_->mapping);
+        const std::uintptr_t direct_begin = reinterpret_cast<std::uintptr_t>(
+            compact_h32_direct_.data());
+        if (lease_->mapping_bytes
+                > (std::numeric_limits<std::uintptr_t>::max)()
+                    - mapping_begin
+            || direct_begin < mapping_begin) {
+            return {};
+        }
+        const std::uintptr_t mapping_end = mapping_begin
+            + lease_->mapping_bytes;
+        if (compact_h32_direct_.size()
+                > (std::numeric_limits<std::uintptr_t>::max)()
+                    - direct_begin
+            || direct_begin + compact_h32_direct_.size() > mapping_end) {
+            return {};
+        }
+        const long observed_page_bytes = ::sysconf(_SC_PAGESIZE);
+        if (observed_page_bytes <= 0) return {};
+        return bioseq::indexing::CompactDirectSelectedPageAdviser{
+            .context = lease_,
+            .page_bytes = static_cast<std::size_t>(observed_page_bytes),
+            .advise_fn =
+                &mpf5_image_pg_detail::advise_borrowed_mapping_page_range,
+        };
+    }
+
+    /// Borrow the PG-free reader's shared_ptr-shaped compatibility token while
+    /// retaining this image as the prompt normal-path lease authority.
+    [[nodiscard]] std::shared_ptr<const void>
+    borrow_mapping_token() const noexcept {
+        return mpf5_image_pg_detail::borrow_mapping_token(lease_);
+    }
+
+    /// Transfer only the mmap/fd lifetime authority into a compact guard.  Any
+    /// spans copied before this call remain valid until the returned guard is
+    /// destroyed; this moved-from image no longer exposes mapped spans.
+    [[nodiscard]] MappedMinimizerFormat5LeaseGuardPg
+    release_mapping_lease_guard() && noexcept {
+        auto* const lease = std::exchange(lease_, nullptr);
+        clear_views_();
+        return MappedMinimizerFormat5LeaseGuardPg{lease};
     }
 
     friend MappedMinimizerFormat5ImagePg
@@ -3930,102 +6077,162 @@ public:
         const Rev3IndexAdministrationIdentity&,
         std::uint64_t,
         const MinimizerGenerationHead&,
-        const MinimizerGenerationManifest&);
+        const MinimizerGenerationManifest&,
+        const MinimizerGenerationStorageDescriptorPg&,
+        Mpf5V2MappedOpenValidationPg);
 };
 
 [[nodiscard]] inline MappedMinimizerFormat5ImagePg
 open_exact_minimizer_format5_image_pg(
         const Rev3IndexAdministrationIdentity& identity,
-        std::uint64_t query_key,
+        const std::uint64_t query_key,
         const MinimizerGenerationHead& head,
-        const MinimizerGenerationManifest& manifest) {
-    using namespace mpf_format5_image_detail;
-    if (identity.database_oid != MyDatabaseId
-        || identity.index_name != MINIMIZERS_PER_FRAGMENT_INDEX_NAME
-        || manifest.wire_format
-            != bioseq::indexing::MinimizerGenerationWireFormat::
+        const MinimizerGenerationManifest& manifest,
+        const MinimizerGenerationStorageDescriptorPg& descriptor,
+        const Mpf5V2MappedOpenValidationPg validation) {
+    using namespace bioseq::indexing;
+    const GenerationFileIdentity file_identity =
+        mpf5_image_pg_detail::generation_file_identity(
+            identity, query_key, manifest.generation_id);
+    if (manifest.wire_format
+            != MinimizerGenerationWireFormat::
                 grouped_shape_soa_segment_local
         || head.generation_id == 0u
-        || head.generation_id != manifest.generation_id) {
-        rev3_storage_error_as_cpp(
-            "MPF Format-5 mapped-image binding is invalid");
+        || head.generation_id != manifest.generation_id
+        || head.source_identity != manifest.source_identity
+        || head.source_content_checksum
+            != manifest.source_content_checksum
+        || !exact_storage_descriptor_identity(
+            descriptor, identity, query_key)
+        || descriptor.generation_id != manifest.generation_id
+        || descriptor.state != MinimizerGenerationStorageStatePg::live
+        || descriptor.retire_full_xid
+        || !exact_storage_descriptor_provider_shape(descriptor)) {
+        rev3_storage_error_as_cpp("MPF5 v2 open binding is invalid");
     }
-    const std::string path = final_path(
-        identity, query_key, manifest.generation_id);
-    const int fd = OpenTransientFile(
-        path.c_str(), O_RDONLY | PG_BINARY);
-    if (fd < 0) {
-        rev3_storage_error_as_cpp(fmt::format(
-            "MPF Format-5 mapped image is missing: errno={}", errno));
-    }
-    struct stat stat_buffer{};
-    if (fstat(fd, &stat_buffer) != 0
-        || stat_buffer.st_size
-            < static_cast<off_t>(kHeaderBytes)
-        || static_cast<std::uint64_t>(stat_buffer.st_size)
-            > (std::numeric_limits<std::size_t>::max)()) {
-        (void)CloseTransientFile(fd);
-        rev3_storage_error_as_cpp(
-            "MPF Format-5 mapped image size is invalid");
-    }
-    const std::size_t bytes =
-        static_cast<std::size_t>(stat_buffer.st_size);
-    void* mapping = mmap(
-        nullptr, bytes, PROT_READ, MAP_PRIVATE, fd, 0);
-    if (mapping == MAP_FAILED) {
+    const ResolvedGenerationFilePath resolved =
+        resolve_generation_file_path(file_identity);
+    auto* lease = mpf5_image_pg_detail::allocate_mapping_lease();
+    ResourceOwnerEnlarge(lease->owner);
+    lease->fd = ::open(
+        resolved.final_path.data(),
+        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | PG_BINARY);
+    if (lease->fd < 0) {
         const int saved_errno = errno;
-        (void)CloseTransientFile(fd);
+        mpf5_image_pg_detail::destroy_mapping_lease(lease);
         rev3_storage_error_as_cpp(fmt::format(
-            "MPF Format-5 image mmap failed: errno={}",
-            saved_errno));
+            "MPF5 v2 mapped image open failed: errno={}", saved_errno));
     }
-    const auto* header =
-        static_cast<const Header*>(mapping);
-    const bool valid =
-        header->magic == kMagic
-        && header->version == kVersion
-        && header->header_bytes == kHeaderBytes
-        && header->database_oid == identity.database_oid
-        && header->tablespace_oid == identity.tablespace_oid
-        && header->main_relfilenode == identity.main_relfilenode
-        && header->user_relid == identity.user_relid
-        && header->column_attno == identity.column_attno
-        && header->wire_format
-            == static_cast<std::uint32_t>(manifest.wire_format)
-        && header->query_key == query_key
-        && header->generation_id == manifest.generation_id
-        && header->manifest_checksum == head.manifest_checksum
-        && header->source_identity == head.source_identity
-        && header->source_content_checksum
-            == head.source_content_checksum
-        && header->compatibility_checksum
-            == head.compatibility_checksum
-        && header->target_length == manifest.target_length
-        && header->position_segment_span_bp
-            == manifest.position_segment_span_bp
-        && header->position_segment_count
-            == manifest.position_segment_count
-        && header->reserved_zero == 0u
-        && header->directory_bytes == manifest.directory_bytes
-        && header->directory_checksum == manifest.directory_checksum
-        && header->payload_bytes == manifest.payload_bytes
-        && header->payload_row_checksum == manifest.payload_checksum
-        && header->image_bytes == bytes
-        && header->image_bytes
-            == static_cast<std::uint64_t>(kHeaderBytes)
-                + manifest.payload_bytes
-        && header->header_checksum == header_checksum(*header);
-    if (!valid) {
-        (void)munmap(mapping, bytes);
-        (void)CloseTransientFile(fd);
+    struct stat observed{};
+    const bool inode_valid = fstat(lease->fd, &observed) == 0
+        && S_ISREG(observed.st_mode)
+        && observed.st_uid == geteuid()
+        && (observed.st_mode & 07777) == 0400
+        && observed.st_nlink == 1
+        && observed.st_size >= static_cast<off_t>(kMpf5V2HeaderBytes)
+        && static_cast<std::uint64_t>(observed.st_size)
+            <= (std::numeric_limits<std::size_t>::max)()
+        && static_cast<std::uint64_t>(observed.st_size)
+            == descriptor.image_bytes;
+    if (!inode_valid) {
+        mpf5_image_pg_detail::destroy_mapping_lease(lease);
         rev3_storage_error_as_cpp(
-            "MPF Format-5 mapped image identity/header is invalid");
+            "MPF5 v2 mapped image inode contract is invalid");
+    }
+    lease->device = observed.st_dev;
+    lease->inode = observed.st_ino;
+    // No PostgreSQL call is permitted between the raw fd/inode acquisition
+    // above and this pre-enlarged ResourceOwner registration.
+    ResourceOwnerRemember(
+        lease->owner, PointerGetDatum(lease),
+        &mpf5_image_pg_detail::kMappingLeaseResourceOwnerDesc);
+    lease->remembered = true;
+    lease->mapping_bytes = static_cast<std::size_t>(observed.st_size);
+    lease->mapping = mmap(
+        nullptr, lease->mapping_bytes,
+        PROT_READ, MAP_PRIVATE, lease->fd, 0);
+    if (lease->mapping == MAP_FAILED) {
+        const int saved_errno = errno;
+        mpf5_image_pg_detail::destroy_mapping_lease(lease);
+        rev3_storage_error_as_cpp(fmt::format(
+            "MPF5 v2 image mmap failed: errno={}", saved_errno));
+    }
+    const std::span<const std::byte> image{
+        static_cast<const std::byte*>(lease->mapping),
+        lease->mapping_bytes};
+    EncodedMpf5HeaderV2 encoded_header{};
+    std::memcpy(
+        encoded_header.data(), image.data(), encoded_header.size());
+    const auto decoded_header = decode_mpf5_v2_header(encoded_header);
+    if (!decoded_header
+        || decoded_header->header_crc64 != descriptor.header_checksum) {
+        mpf5_image_pg_detail::destroy_mapping_lease(lease);
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 mapped header disagrees with its LIVE descriptor");
+    }
+    std::optional<Mpf5V2CompactH32DirectSectionSpec>
+        compact_h32_direct;
+    if ((decoded_header->feature_bitmap
+            & kMpf5V2FeatureCompactH32Direct) != 0u) {
+        compact_h32_direct = Mpf5V2CompactH32DirectSectionSpec{
+            .bytes = decoded_header->compact_h32_direct.bytes,
+            .direct_header_crc64 =
+                decoded_header->compact_h32_direct.direct_header_crc64,
+        };
+    }
+    const auto layout = plan_mpf5_v2_layout(
+        manifest.payload_bytes,
+        manifest.directory_bytes,
+        MinimizerGenerationManifest::format5_encoded_bytes,
+        decoded_header->payload.crc64,
+        manifest.directory_checksum,
+        head.manifest_checksum,
+        compact_h32_direct);
+    if (!layout || descriptor.image_bytes != layout->file_bytes) {
+        mpf5_image_pg_detail::destroy_mapping_lease(lease);
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 descriptor layout is invalid");
+    }
+    const Mpf5V2ValidationOptions options{
+        .expected_identity = mpf5_image_pg_detail::expected_identity(
+            file_identity, descriptor.provider, head, manifest, *layout,
+            descriptor.header_checksum),
+        .payload_crc_policy = Mpf5V2PayloadCrcPolicy::deferred,
+    };
+    const auto validated = validation
+            == Mpf5V2MappedOpenValidationPg::bounded_header_only
+        ? open_mpf5_v2_image_bounded(image, options)
+        : validation == Mpf5V2MappedOpenValidationPg::full_metadata
+            ? validate_mpf5_v2_image(image, options)
+            : std::expected<ValidatedMpf5V2ImageView,
+                Mpf5V2WireError>{std::unexpected(
+                    Mpf5V2WireError::identity_mismatch)};
+    const bool bounded_evidence_exact = validated
+        && validated->header_crc_bytes == kMpf5V2HeaderBytes
+        && validated->payload_crc_bytes == 0u
+        && (validation
+                == Mpf5V2MappedOpenValidationPg::bounded_header_only
+            ? validated->directory_crc_bytes == 0u
+                && validated->manifest_crc_bytes == 0u
+            : validation == Mpf5V2MappedOpenValidationPg::full_metadata
+                && validated->directory_crc_bytes
+                    == manifest.directory_bytes
+                && validated->manifest_crc_bytes
+                    == MinimizerGenerationManifest::format5_encoded_bytes);
+    if (!bounded_evidence_exact) {
+        mpf5_image_pg_detail::destroy_mapping_lease(lease);
+        rev3_storage_error_as_cpp(
+            "MPF5 v2 mapped image validation/evidence failed");
     }
     MappedMinimizerFormat5ImagePg result;
-    result.fd_ = fd;
-    result.mapping_ = mapping;
-    result.mapping_bytes_ = bytes;
-    result.header_ = header;
+    result.lease_ = lease;
+    result.payload_ = validated->payload;
+    result.compact_h32_direct_ = validated->compact_h32_direct;
+    result.payload_raw_checksum_ = validated->header.payload.crc64;
+    if (!validated->compact_h32_direct.empty()) {
+        result.compact_h32_direct_header_receipt_ =
+            validated->header.compact_h32_direct.direct_header_crc64;
+    }
     return result;
 }
 
@@ -4567,6 +6774,7 @@ public:
         std::uint64_t proven_source_identity = 0;
         std::uint64_t proven_source_content_checksum = 0;
         std::uint64_t proven_compatibility_checksum = 0;
+        std::optional<Mpf5V2FileReceiptPg> proven_file_receipt{};
 
         try {
             if (stage_ != WriteStage::manifest
@@ -4589,7 +6797,7 @@ public:
 			const bool mapped_mpf_format5 = format5
 				&& identity_.index_name
 					== MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
-            std::unique_ptr<mpf_format5_image_detail::Writer>
+            std::unique_ptr<Mpf5V2WriterPg>
                 format5_image_writer;
 			/* The sidecar path/header intentionally encode the MPF source
 			 * identity, not a logical-index discriminator.  MPS Format-5 keeps
@@ -4597,8 +6805,10 @@ public:
 			 * create or overwrite this MPF-only image. */
             if (mapped_mpf_format5) {
                 format5_image_writer =
-                    std::make_unique<mpf_format5_image_detail::Writer>(
-                        identity_, query_key_, generation_id_);
+                    std::make_unique<Mpf5V2WriterPg>(
+                        identity_, query_key_, generation_id_,
+                        bioseq::indexing::Mpf5V2Provider::
+                            postgres_relation);
             }
             if ((format5 && !global_payload_order_possible_)
                 || (!format5 && !legacy_payload_order_possible_)) {
@@ -5005,9 +7215,11 @@ public:
                     "READY complete payload aggregate reread disagrees");
             }
             if (format5_image_writer) {
-                format5_image_writer->publish(
-                    identity_, query_key_, generation.head,
-                    generation.manifest);
+                proven_file_receipt = format5_image_writer->publish(
+                    generation.head,
+                    generation.manifest,
+                    generation.directory,
+                    generation.manifest_row.bytes());
             }
 
             bioseq::pg_utils::invoke_pg_as_cpp(
@@ -5045,7 +7257,8 @@ public:
             proven_compatibility_checksum,
             proven_transaction_id,
             proven_head_bytes,
-            proven_head_checksum};
+            proven_head_checksum,
+            std::move(proven_file_receipt)};
     }
 };
 
@@ -5062,6 +7275,442 @@ static_assert(std::is_nothrow_move_constructible_v<
 static_assert(!std::is_move_assignable_v<
     IndexStorageFragmentGenerationRowSinkPg>);
 
+[[nodiscard]] inline std::optional<std::array<
+    std::byte, MinimizerGenerationHead::encoded_bytes>>
+read_locked_generation_head_for_descriptor_publication_pg(
+        const std::string_view table_name,
+        const std::uint64_t query_key) {
+    std::array<std::byte, MinimizerGenerationHead::encoded_bytes> bytes{};
+    std::array<Oid, 5u> types{
+        INT8OID, INT8OID, INT8OID, INT4OID, INT4OID};
+    std::array<Datum, 5u> arguments{
+        Int64GetDatum(static_cast<std::int64_t>(query_key)),
+        Int64GetDatum(0),
+        Int64GetDatum(static_cast<std::int64_t>(GENERATION_HEAD_SUB_KEY)),
+        Int32GetDatum(-1),
+        Int32GetDatum(0),
+    };
+    const std::string owned_table_name{table_name};
+    const char* quoted_table = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+        return quote_identifier(owned_table_name.c_str());
+    });
+    const std::string sql = fmt::format(
+        "SELECT blob FROM bioseq_internal.{} "
+        "WHERE query_key=$1 AND generation_id=$2 AND sub_key=$3 "
+        "AND position_segment=$4 AND chunk_no=$5 FOR UPDATE",
+        quoted_table);
+    struct State {
+        int connect = 0;
+        int execute = 0;
+        int finish = 0;
+        std::uint64_t rows = 0u;
+        bool table = false;
+        bool is_null = true;
+        bool exact_size = false;
+    } state{};
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&state, &sql, &types, &arguments, &bytes] noexcept {
+            state.connect = SPI_connect();
+            if (state.connect != SPI_OK_CONNECT) return;
+            state.execute = SPI_execute_with_args(
+                sql.c_str(), static_cast<int>(types.size()), types.data(),
+                arguments.data(), nullptr, false, 1);
+            state.rows = SPI_processed;
+            state.table = SPI_tuptable != nullptr;
+            if (state.execute == SPI_OK_SELECT && state.rows == 1u
+                && state.table) {
+                const Datum datum = SPI_getbinval(
+                    SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
+                    1, &state.is_null);
+                if (!state.is_null) {
+                    auto* detoasted = reinterpret_cast<bytea*>(
+                        PG_DETOAST_DATUM_PACKED(datum));
+                    const std::size_t size = VARSIZE_ANY_EXHDR(detoasted);
+                    if (size == bytes.size()) {
+                        std::memcpy(
+                            bytes.data(), VARDATA_ANY(detoasted), size);
+                        state.exact_size = true;
+                    }
+                    if (static_cast<void*>(detoasted)
+                        != DatumGetPointer(datum)) {
+                        pfree(detoasted);
+                    }
+                }
+            }
+            state.finish = SPI_finish();
+        });
+    if (state.connect != SPI_OK_CONNECT
+        || state.execute != SPI_OK_SELECT || state.rows > 1u
+        || (state.rows == 1u
+            && (!state.table || state.is_null || !state.exact_size))
+        || state.finish != SPI_OK_FINISH) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "descriptor publication head lock disagrees: connect={} "
+            "execute={} rows={} table={} null={} size={} finish={}",
+            state.connect, state.execute, state.rows, state.table,
+            state.is_null, state.exact_size, state.finish));
+    }
+    if (state.rows == 0u) return std::nullopt;
+    return bytes;
+}
+
+[[nodiscard]] inline std::optional<MinimizerGenerationStorageDescriptorPg>
+read_locked_live_descriptor_for_publication_pg(
+        const Rev3IndexAdministrationIdentity& identity,
+        const std::uint64_t query_key) {
+    NameData index_name{};
+    bioseq::pg_utils::invoke_pg_as_cpp([&] {
+        namestrcpy(&index_name, identity.index_name.c_str());
+    });
+    std::array<Oid, 7u> types{
+        OIDOID, OIDOID, OIDOID, OIDOID, INT2OID, NAMEOID, INT8OID};
+    std::array<Datum, 7u> arguments{
+        ObjectIdGetDatum(identity.database_oid),
+        ObjectIdGetDatum(identity.tablespace_oid),
+        ObjectIdGetDatum(identity.main_relfilenode),
+        ObjectIdGetDatum(identity.user_relid),
+        Int16GetDatum(identity.column_attno),
+        NameGetDatum(&index_name),
+        Int64GetDatum(static_cast<std::int64_t>(query_key)),
+    };
+    static constexpr std::string_view sql{
+        "SELECT * FROM bioseq_internal.minimizer_generation_storage "
+        "WHERE database_oid=$1 AND tablespace_oid=$2 "
+        "AND main_relfilenode=$3 AND user_relid=$4 "
+        "AND column_attno=$5 AND index_name=$6 AND query_key=$7 "
+        "AND state=smallint '1' FOR UPDATE"};
+    struct RawRow {
+        Oid database_oid = InvalidOid;
+        Oid tablespace_oid = InvalidOid;
+        Oid main_relfilenode = InvalidOid;
+        Oid user_relid = InvalidOid;
+        std::int16_t column_attno = 0;
+        NameData index_name{};
+        std::int64_t query_key = -1;
+        std::int64_t generation_id = 0;
+        std::int16_t provider = -1;
+        Oid payload_relation_oid = InvalidOid;
+        Oid payload_database_oid = InvalidOid;
+        Oid payload_tablespace_oid = InvalidOid;
+        Oid payload_relfilenode = InvalidOid;
+        NameData payload_relation_name{};
+        std::int64_t image_bytes = 0;
+        std::int64_t header_checksum = 0;
+        FullTransactionId retire_full_xid = InvalidFullTransactionId;
+        std::int16_t state = 0;
+        bool payload_relation_oid_null = true;
+        bool payload_database_oid_null = true;
+        bool payload_tablespace_oid_null = true;
+        bool payload_relfilenode_null = true;
+        bool payload_relation_name_null = true;
+        bool retire_full_xid_null = true;
+        bool required_null = false;
+    } row{};
+    struct State {
+        int connect = 0;
+        int execute = 0;
+        int finish = 0;
+        std::uint64_t rows = 0u;
+        bool table = false;
+    } state{};
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&state, &row, &types, &arguments] noexcept {
+            state.connect = SPI_connect();
+            if (state.connect != SPI_OK_CONNECT) return;
+            state.execute = SPI_execute_with_args(
+                sql.data(), static_cast<int>(types.size()), types.data(),
+                arguments.data(), nullptr, false, 1);
+            state.rows = SPI_processed;
+            state.table = SPI_tuptable != nullptr;
+            if (state.execute == SPI_OK_SELECT && state.rows == 1u
+                && state.table) {
+                HeapTuple tuple = SPI_tuptable->vals[0];
+                TupleDesc descriptor = SPI_tuptable->tupdesc;
+                bool is_null = false;
+                const auto required = [&](const int attribute) {
+                    const Datum value = SPI_getbinval(
+                        tuple, descriptor, attribute, &is_null);
+                    row.required_null = row.required_null || is_null;
+                    return value;
+                };
+                row.database_oid = DatumGetObjectId(required(1));
+                row.tablespace_oid = DatumGetObjectId(required(2));
+                row.main_relfilenode = DatumGetObjectId(required(3));
+                row.user_relid = DatumGetObjectId(required(4));
+                row.column_attno = DatumGetInt16(required(5));
+                row.index_name = *DatumGetName(required(6));
+                row.query_key = DatumGetInt64(required(7));
+                row.generation_id = DatumGetInt64(required(8));
+                row.provider = DatumGetInt16(required(9));
+                Datum value = SPI_getbinval(
+                    tuple, descriptor, 10, &row.payload_relation_oid_null);
+                if (!row.payload_relation_oid_null) {
+                    row.payload_relation_oid = DatumGetObjectId(value);
+                }
+                value = SPI_getbinval(
+                    tuple, descriptor, 11, &row.payload_database_oid_null);
+                if (!row.payload_database_oid_null) {
+                    row.payload_database_oid = DatumGetObjectId(value);
+                }
+                value = SPI_getbinval(
+                    tuple, descriptor, 12, &row.payload_tablespace_oid_null);
+                if (!row.payload_tablespace_oid_null) {
+                    row.payload_tablespace_oid = DatumGetObjectId(value);
+                }
+                value = SPI_getbinval(
+                    tuple, descriptor, 13, &row.payload_relfilenode_null);
+                if (!row.payload_relfilenode_null) {
+                    row.payload_relfilenode = DatumGetObjectId(value);
+                }
+                value = SPI_getbinval(
+                    tuple, descriptor, 14, &row.payload_relation_name_null);
+                if (!row.payload_relation_name_null) {
+                    row.payload_relation_name = *DatumGetName(value);
+                }
+                row.image_bytes = DatumGetInt64(required(15));
+                row.header_checksum = DatumGetInt64(required(16));
+                value = SPI_getbinval(
+                    tuple, descriptor, 17, &row.retire_full_xid_null);
+                if (!row.retire_full_xid_null) {
+                    row.retire_full_xid = DatumGetFullTransactionId(value);
+                }
+                row.state = DatumGetInt16(required(18));
+            }
+            state.finish = SPI_finish();
+        });
+    if (state.connect != SPI_OK_CONNECT
+        || state.execute != SPI_OK_SELECT || state.rows > 1u
+        || (state.rows == 1u && (!state.table || row.required_null))
+        || state.finish != SPI_OK_FINISH) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "descriptor publication LIVE lookup disagrees: connect={} "
+            "execute={} rows={} table={} required_null={} finish={}",
+            state.connect, state.execute, state.rows, state.table,
+            row.required_null, state.finish));
+    }
+    if (state.rows == 0u) return std::nullopt;
+    if (row.query_key < 0 || row.generation_id <= 0
+        || row.image_bytes
+            < static_cast<std::int64_t>(
+                bioseq::indexing::kMpf5V2HeaderBytes)
+        || !bioseq::indexing::is_valid_mpf5_v2_provider(
+            static_cast<std::uint8_t>(row.provider))) {
+        rev3_storage_error_as_cpp(
+            "descriptor publication LIVE row scalar shape is invalid");
+    }
+    MinimizerGenerationStorageDescriptorPg result{
+        .database_oid = row.database_oid,
+        .tablespace_oid = row.tablespace_oid,
+        .main_relfilenode = row.main_relfilenode,
+        .user_relid = row.user_relid,
+        .column_attno = row.column_attno,
+        .index_name = NameStr(row.index_name),
+        .query_key = static_cast<std::uint64_t>(row.query_key),
+        .generation_id = static_cast<std::uint64_t>(row.generation_id),
+        .provider = static_cast<bioseq::indexing::Mpf5V2Provider>(
+            row.provider),
+        .payload_relation_oid = row.payload_relation_oid_null
+            ? std::nullopt
+            : std::optional<Oid>{row.payload_relation_oid},
+        .payload_database_oid = row.payload_database_oid_null
+            ? std::nullopt
+            : std::optional<Oid>{row.payload_database_oid},
+        .payload_tablespace_oid = row.payload_tablespace_oid_null
+            ? std::nullopt
+            : std::optional<Oid>{row.payload_tablespace_oid},
+        .payload_relfilenode = row.payload_relfilenode_null
+            ? std::nullopt
+            : std::optional<Oid>{row.payload_relfilenode},
+        .payload_relation_name = row.payload_relation_name_null
+            ? std::nullopt
+            : std::optional<std::string>{NameStr(
+                row.payload_relation_name)},
+        .image_bytes = static_cast<std::uint64_t>(row.image_bytes),
+        .header_checksum = checksum_from_pg_bigint(row.header_checksum),
+        .retire_full_xid = row.retire_full_xid_null
+            ? std::nullopt
+            : std::optional<std::uint64_t>{U64FromFullTransactionId(
+                row.retire_full_xid)},
+        .state = static_cast<MinimizerGenerationStorageStatePg>(row.state),
+    };
+    if (!exact_storage_descriptor_identity(result, identity, query_key)
+        || !exact_storage_descriptor_provider_shape(result)
+        || result.state != MinimizerGenerationStorageStatePg::live
+        || result.retire_full_xid) {
+        rev3_storage_error_as_cpp(
+            "descriptor publication LIVE row shape disagrees");
+    }
+    return result;
+}
+
+inline void apply_minimizer_generation_storage_transition_pg(
+        const Rev3IndexAdministrationIdentity& identity,
+        const std::uint64_t query_key,
+        const std::optional<MinimizerGenerationStorageDescriptorPg>& old_live,
+        const std::optional<MinimizerGenerationStorageDescriptorPg>& new_live) {
+    if (!old_live && !new_live) return;
+    if ((old_live && (!exact_storage_descriptor_identity(
+                *old_live, identity, query_key)
+            || old_live->state != MinimizerGenerationStorageStatePg::live
+            || old_live->retire_full_xid))
+        || (new_live && (!exact_storage_descriptor_identity(
+                *new_live, identity, query_key)
+            || new_live->state != MinimizerGenerationStorageStatePg::live
+            || new_live->retire_full_xid
+            || !exact_storage_descriptor_provider_shape(*new_live)
+            || !bioseq::indexing::sql_bigint_can_represent(
+                new_live->generation_id)
+            || !bioseq::indexing::sql_bigint_can_represent(
+                new_live->image_bytes)))) {
+        rev3_storage_error_as_cpp(
+            "generation storage transition binding is invalid");
+    }
+
+    NameData index_name{};
+    NameData payload_relation_name{};
+    bioseq::pg_utils::invoke_pg_as_cpp([&] {
+        namestrcpy(&index_name, identity.index_name.c_str());
+        if (new_live && new_live->payload_relation_name) {
+            namestrcpy(&payload_relation_name,
+                new_live->payload_relation_name->c_str());
+        }
+    });
+    std::array<Oid, 9u> update_types{
+        OIDOID, OIDOID, OIDOID, OIDOID, INT2OID, NAMEOID,
+        INT8OID, INT8OID, XID8OID};
+    std::array<Datum, 9u> update_arguments{
+        ObjectIdGetDatum(identity.database_oid),
+        ObjectIdGetDatum(identity.tablespace_oid),
+        ObjectIdGetDatum(identity.main_relfilenode),
+        ObjectIdGetDatum(identity.user_relid),
+        Int16GetDatum(identity.column_attno),
+        NameGetDatum(&index_name),
+        Int64GetDatum(static_cast<std::int64_t>(query_key)),
+        Int64GetDatum(old_live
+            ? static_cast<std::int64_t>(old_live->generation_id) : 0),
+        old_live
+            ? FullTransactionIdGetDatum(
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [] { return GetTopFullTransactionId(); }))
+            : FullTransactionIdGetDatum(InvalidFullTransactionId),
+    };
+    static constexpr std::string_view update_sql{
+        "UPDATE bioseq_internal.minimizer_generation_storage "
+        "SET retire_full_xid=$9, state=smallint '2' "
+        "WHERE database_oid=$1 AND tablespace_oid=$2 "
+        "AND main_relfilenode=$3 AND user_relid=$4 "
+        "AND column_attno=$5 AND index_name=$6 AND query_key=$7 "
+        "AND generation_id=$8 AND state=smallint '1' "
+        "AND retire_full_xid IS NULL"};
+
+    std::array<Oid, kStorageDescriptorAttributeCount> insert_types{
+        OIDOID, OIDOID, OIDOID, OIDOID, INT2OID, NAMEOID,
+        INT8OID, INT8OID, INT2OID,
+        OIDOID, OIDOID, OIDOID, OIDOID, NAMEOID,
+        INT8OID, INT8OID, XID8OID, INT2OID};
+    std::array<Datum, kStorageDescriptorAttributeCount> insert_arguments{};
+    std::array<char, kStorageDescriptorAttributeCount> insert_nulls{};
+    if (new_live) {
+        insert_arguments = {
+            ObjectIdGetDatum(new_live->database_oid),
+            ObjectIdGetDatum(new_live->tablespace_oid),
+            ObjectIdGetDatum(new_live->main_relfilenode),
+            ObjectIdGetDatum(new_live->user_relid),
+            Int16GetDatum(new_live->column_attno),
+            NameGetDatum(&index_name),
+            Int64GetDatum(static_cast<std::int64_t>(new_live->query_key)),
+            Int64GetDatum(static_cast<std::int64_t>(
+                new_live->generation_id)),
+            Int16GetDatum(static_cast<std::int16_t>(new_live->provider)),
+            new_live->payload_relation_oid
+                ? ObjectIdGetDatum(*new_live->payload_relation_oid) : 0,
+            new_live->payload_database_oid
+                ? ObjectIdGetDatum(*new_live->payload_database_oid) : 0,
+            new_live->payload_tablespace_oid
+                ? ObjectIdGetDatum(*new_live->payload_tablespace_oid) : 0,
+            new_live->payload_relfilenode
+                ? ObjectIdGetDatum(*new_live->payload_relfilenode) : 0,
+            new_live->payload_relation_name
+                ? NameGetDatum(&payload_relation_name) : 0,
+            Int64GetDatum(static_cast<std::int64_t>(new_live->image_bytes)),
+            Int64GetDatum(checksum_to_pg_bigint(
+                new_live->header_checksum)),
+            0,
+            Int16GetDatum(static_cast<std::int16_t>(
+                MinimizerGenerationStorageStatePg::live)),
+        };
+        insert_nulls.fill(' ');
+        for (const std::size_t attribute : {9u, 10u, 11u, 12u, 13u}) {
+            const bool present = attribute == 9u
+                ? new_live->payload_relation_oid.has_value()
+                : attribute == 10u
+                    ? new_live->payload_database_oid.has_value()
+                    : attribute == 11u
+                        ? new_live->payload_tablespace_oid.has_value()
+                        : attribute == 12u
+                            ? new_live->payload_relfilenode.has_value()
+                            : new_live->payload_relation_name.has_value();
+            if (!present) insert_nulls[attribute] = 'n';
+        }
+        insert_nulls[16] = 'n';
+    }
+    static constexpr std::string_view insert_sql{
+        "INSERT INTO bioseq_internal.minimizer_generation_storage "
+        "(database_oid,tablespace_oid,main_relfilenode,user_relid,"
+        "column_attno,index_name,query_key,generation_id,provider,"
+        "payload_relation_oid,payload_database_oid,payload_tablespace_oid,"
+        "payload_relfilenode,payload_relation_name,image_bytes,"
+        "header_checksum,retire_full_xid,state) VALUES "
+        "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,"
+        "$17,$18)"};
+    struct State {
+        int connect = 0;
+        int update = 0;
+        int insert = 0;
+        int finish = 0;
+        std::uint64_t updated = 0u;
+        std::uint64_t inserted = 0u;
+    } state{};
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [&state, &update_types, &update_arguments, &insert_types,
+         &insert_arguments, &insert_nulls, &old_live,
+         &new_live] noexcept {
+            state.connect = SPI_connect();
+            if (state.connect != SPI_OK_CONNECT) return;
+            if (old_live) {
+                state.update = SPI_execute_with_args(
+                    update_sql.data(), static_cast<int>(update_types.size()),
+                    update_types.data(), update_arguments.data(), nullptr,
+                    false, 0);
+                state.updated = SPI_processed;
+                if (state.update != SPI_OK_UPDATE || state.updated != 1u) {
+                    state.finish = SPI_finish();
+                    return;
+                }
+            }
+            if (new_live) {
+                state.insert = SPI_execute_with_args(
+                    insert_sql.data(), static_cast<int>(insert_types.size()),
+                    insert_types.data(), insert_arguments.data(),
+                    insert_nulls.data(), false, 0);
+                state.inserted = SPI_processed;
+            }
+            state.finish = SPI_finish();
+        });
+    if (state.connect != SPI_OK_CONNECT
+        || (old_live
+            && (state.update != SPI_OK_UPDATE || state.updated != 1u))
+        || (new_live
+            && (state.insert != SPI_OK_INSERT || state.inserted != 1u))
+        || state.finish != SPI_OK_FINISH) {
+        rev3_storage_error_as_cpp(fmt::format(
+            "generation storage transition disagrees: connect={} "
+            "update={} updated={} insert={} inserted={} finish={}",
+            state.connect, state.update, state.updated, state.insert,
+            state.inserted, state.finish));
+    }
+}
+
 /// Consume the private complete-reread proof and publish its head atomically.
 /// There is no public overload that accepts an arbitrary relation/generation.
 [[nodiscard]] inline ReadyGenerationPublishedHeadReceipt
@@ -5072,6 +7721,7 @@ publish_ready_minimizer_generation_head_pg(
     };
     struct PublicationState {
         Relation relation = nullptr;
+        Relation descriptor_relation = nullptr;
         bytea* blob = nullptr;
         std::string sql;
     };
@@ -5082,6 +7732,7 @@ publish_ready_minimizer_generation_head_pg(
         previous_head_bytes{};
     bool returned_valid = false;
     bool previous_present = false;
+    std::optional<MinimizerGenerationHead> decoded_previous_head{};
 
     try {
         if (!token.valid_
@@ -5159,6 +7810,158 @@ publish_ready_minimizer_generation_head_pg(
             rev3_storage_error("READY publication token head disagrees");
         }
 
+        const auto locked_previous_head =
+            read_locked_generation_head_for_descriptor_publication_pg(
+                token.identity_.table_name, token.query_key_);
+        previous_present = locked_previous_head.has_value();
+        if (locked_previous_head) {
+            previous_head_bytes = *locked_previous_head;
+            auto decoded_previous_head_result =
+                bioseq::indexing::decode_minimizer_generation_head(
+                    previous_head_bytes);
+            if (!decoded_previous_head_result
+                || decoded_previous_head_result->generation_id == 0u
+                || decoded_previous_head_result->generation_id
+                    == token.generation_id_) {
+                rev3_storage_error(
+                    "READY publication previous head is malformed or names the new generation");
+            }
+            decoded_previous_head = *decoded_previous_head_result;
+        }
+
+        const bool fragment_index = token.identity_.index_name
+            == MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
+        const bool new_format5 = decoded_token_head->wire_format
+            == bioseq::indexing::MinimizerGenerationWireFormat::
+                grouped_shape_soa_segment_local;
+        if (!fragment_index && token.file_receipt_) {
+            rev3_storage_error(
+                "non-MPF generation carried an MPF5 file receipt");
+        }
+        if (fragment_index) {
+            const Oid descriptor_oid =
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    return get_relname_relid(
+                        "minimizer_generation_storage",
+                        bioseq_internal_ns());
+                });
+            if (!OidIsValid(descriptor_oid)) {
+                rev3_storage_error(
+                    "generation storage descriptor catalog is missing");
+            }
+            publication->descriptor_relation =
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    return try_safe_relation_open(
+                        descriptor_oid, RowExclusiveLock);
+                });
+            if (publication->descriptor_relation == nullptr
+                || RelationGetNamespace(publication->descriptor_relation)
+                    != bioseq_internal_ns()
+                || std::string_view{RelationGetRelationName(
+                    publication->descriptor_relation)}
+                    != "minimizer_generation_storage") {
+                rev3_storage_error(
+                    "generation storage descriptor catalog identity changed");
+            }
+            bioseq::storage::
+                validate_minimizer_generation_storage_catalogs_pg();
+
+            auto old_live = read_locked_live_descriptor_for_publication_pg(
+                token.identity_, token.query_key_);
+            const bool old_format5 = decoded_previous_head
+                && decoded_previous_head->wire_format
+                    == bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local;
+            if (old_format5 != old_live.has_value()
+                || (old_live
+                    && old_live->generation_id
+                        != decoded_previous_head->generation_id)) {
+                rev3_storage_error(
+                    "active head and LIVE generation descriptor disagree");
+            }
+            if (old_live
+                && old_live->provider
+                    == bioseq::indexing::Mpf5V2Provider::postgres_relation
+                && (old_live->payload_relation_oid
+                        != std::optional<Oid>{token.sidecar_relation_oid_}
+                    || old_live->payload_database_oid
+                        != std::optional<Oid>{token.sidecar_locator_.dbOid}
+                    || old_live->payload_tablespace_oid
+                        != std::optional<Oid>{token.sidecar_locator_.spcOid}
+                    || old_live->payload_relfilenode
+                        != std::optional<Oid>{
+                            static_cast<Oid>(
+                                token.sidecar_locator_.relNumber)}
+                    || old_live->payload_relation_name
+                        != std::optional<std::string>{
+                            token.identity_.table_name})) {
+                rev3_storage_error(
+                    "old relation-provider descriptor locator changed");
+            }
+            if (new_format5 != token.file_receipt_.has_value()) {
+                rev3_storage_error(
+                    "new MPF Format-5 head and file receipt disagree");
+            }
+            std::optional<MinimizerGenerationStorageDescriptorPg> new_live;
+            if (token.file_receipt_) {
+                const Mpf5V2FileReceiptPg& file = *token.file_receipt_;
+                if (!bioseq::indexing::is_valid_mpf5_v2_provider(
+                        static_cast<std::uint8_t>(file.provider))
+                    || file.file_bytes
+                        < bioseq::indexing::kMpf5V2HeaderBytes
+                    || !bioseq::indexing::sql_bigint_can_represent(
+                        file.file_bytes)) {
+                    rev3_storage_error(
+                        "new MPF5 file receipt cannot be cataloged");
+                }
+                new_live = MinimizerGenerationStorageDescriptorPg{
+                    .database_oid = token.identity_.database_oid,
+                    .tablespace_oid = token.identity_.tablespace_oid,
+                    .main_relfilenode = token.identity_.main_relfilenode,
+                    .user_relid = token.identity_.user_relid,
+                    .column_attno = token.identity_.column_attno,
+                    .index_name = token.identity_.index_name,
+                    .query_key = token.query_key_,
+                    .generation_id = token.generation_id_,
+                    .provider = file.provider,
+                    .payload_relation_oid = file.provider
+                            == bioseq::indexing::Mpf5V2Provider::
+                                postgres_relation
+                        ? std::optional<Oid>{token.sidecar_relation_oid_}
+                        : std::nullopt,
+                    .payload_database_oid = file.provider
+                            == bioseq::indexing::Mpf5V2Provider::
+                                postgres_relation
+                        ? std::optional<Oid>{token.sidecar_locator_.dbOid}
+                        : std::nullopt,
+                    .payload_tablespace_oid = file.provider
+                            == bioseq::indexing::Mpf5V2Provider::
+                                postgres_relation
+                        ? std::optional<Oid>{token.sidecar_locator_.spcOid}
+                        : std::nullopt,
+                    .payload_relfilenode = file.provider
+                            == bioseq::indexing::Mpf5V2Provider::
+                                postgres_relation
+                        ? std::optional<Oid>{
+                            static_cast<Oid>(
+                                token.sidecar_locator_.relNumber)}
+                        : std::nullopt,
+                    .payload_relation_name = file.provider
+                            == bioseq::indexing::Mpf5V2Provider::
+                                postgres_relation
+                        ? std::optional<std::string>{
+                            token.identity_.table_name}
+                        : std::nullopt,
+                    .image_bytes = file.file_bytes,
+                    .header_checksum = file.header_crc64,
+                    .retire_full_xid = std::nullopt,
+                    .state = MinimizerGenerationStorageStatePg::live,
+                };
+            }
+            apply_minimizer_generation_storage_transition_pg(
+                token.identity_, token.query_key_, old_live, new_live);
+        }
+
         publication->blob = bioseq::pg_utils::invoke_pg_as_cpp([&] {
             return reinterpret_cast<bytea*>(
                 palloc(VARHDRSZ + token.head_bytes_.size()));
@@ -5184,11 +7987,6 @@ publish_ready_minimizer_generation_head_pg(
         return quote_identifier(token.identity_.table_name.c_str());
     });
     publication->sql = fmt::format(
-        "WITH previous AS MATERIALIZED ("
-        "SELECT blob FROM bioseq_internal.{} "
-        "WHERE generation_id=$2 AND query_key=$1 AND sub_key=$4 "
-        "AND position_segment=$3 AND chunk_no=$5 FOR UPDATE), "
-        "published AS ("
         "INSERT INTO bioseq_internal.{} "
         "(query_key,generation_id,position_segment,sub_key,chunk_no,"
         "chunk_bytes,checksum,blob) VALUES "
@@ -5197,10 +7995,8 @@ publish_ready_minimizer_generation_head_pg(
         "(generation_id,query_key,sub_key,position_segment,chunk_no) "
         "DO UPDATE SET blob=EXCLUDED.blob, "
         "chunk_bytes=EXCLUDED.chunk_bytes, checksum=EXCLUDED.checksum "
-        "RETURNING blob) "
-        "SELECT published.blob, previous.blob FROM published "
-        "LEFT JOIN previous ON true",
-        quoted_table, quoted_table);
+        "RETURNING blob",
+        quoted_table);
         struct PublishSpiState {
             int connect_status = 0;
             int execute_status = 0;
@@ -5209,13 +8005,11 @@ publish_ready_minimizer_generation_head_pg(
             bool table_present = false;
             bool returned_is_null = true;
             bool returned_size_valid = false;
-            bool previous_is_null = true;
-            bool previous_size_valid = false;
         } spi{};
         const char* publication_sql = publication->sql.c_str();
         bioseq::pg_utils::invoke_pg_as_cpp(
             [&spi, publication_sql, &argument_types, &arguments,
-             &returned_head_bytes, &previous_head_bytes] noexcept {
+             &returned_head_bytes] noexcept {
                 spi.connect_status = SPI_connect();
                 if (spi.connect_status != SPI_OK_CONNECT) return;
                 spi.execute_status = SPI_execute_with_args(
@@ -5228,7 +8022,7 @@ publish_ready_minimizer_generation_head_pg(
                     "generation_spi_publish");
                 spi.processed = SPI_processed;
                 spi.table_present = SPI_tuptable != nullptr;
-                if (spi.execute_status == SPI_OK_SELECT
+                if (spi.execute_status == SPI_OK_INSERT_RETURNING
                     && spi.processed == 1 && spi.table_present) {
                     const Datum returned_blob = SPI_getbinval(
                         SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
@@ -5249,48 +8043,32 @@ publish_ready_minimizer_generation_head_pg(
                             pfree(detoasted);
                         }
                     }
-                    const Datum previous_blob = SPI_getbinval(
-                        SPI_tuptable->vals[0], SPI_tuptable->tupdesc,
-                        2, &spi.previous_is_null);
-                    if (!spi.previous_is_null) {
-                        auto* detoasted = reinterpret_cast<bytea*>(
-                            PG_DETOAST_DATUM_PACKED(previous_blob));
-                        const std::size_t bytes =
-                            VARSIZE_ANY_EXHDR(detoasted);
-                        if (bytes == previous_head_bytes.size()) {
-                            std::memcpy(
-                                previous_head_bytes.data(),
-                                VARDATA_ANY(detoasted), bytes);
-                            spi.previous_size_valid = true;
-                        }
-                        if (static_cast<void*>(detoasted)
-                            != DatumGetPointer(previous_blob)) {
-                            pfree(detoasted);
-                        }
-                    }
                 }
                 spi.finish_status = SPI_finish();
             });
         returned_valid = spi.returned_size_valid;
-        previous_present = !spi.previous_is_null;
         if (spi.connect_status != SPI_OK_CONNECT
-            || spi.execute_status != SPI_OK_SELECT
+            || spi.execute_status != SPI_OK_INSERT_RETURNING
             || spi.processed != 1 || !spi.table_present
             || spi.returned_is_null || !spi.returned_size_valid
-            || (!spi.previous_is_null && !spi.previous_size_valid)
             || spi.finish_status != SPI_OK_FINISH) {
             rev3_storage_error(fmt::format(
                 "READY publication SPI session disagrees: connect={} "
-                "execute={} rows={} table={} null={} size={} "
-                "previous_null={} previous_size={} finish={}",
+                "execute={} rows={} table={} null={} size={} finish={}",
                 spi.connect_status, spi.execute_status, spi.processed,
                 spi.table_present, spi.returned_is_null,
-                spi.returned_size_valid, spi.previous_is_null,
-                spi.previous_size_valid, spi.finish_status));
+                spi.returned_size_valid, spi.finish_status));
         }
         bytea* finished_blob = std::exchange(publication->blob, nullptr);
         bioseq::pg_utils::invoke_pg_as_cpp(
             [&] { pfree(finished_blob); });
+        if (publication->descriptor_relation != nullptr) {
+            Relation finished_descriptor = std::exchange(
+                publication->descriptor_relation, nullptr);
+            bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                relation_close(finished_descriptor, RowExclusiveLock);
+            });
+        }
         Relation finished_relation = std::exchange(
             publication->relation, nullptr);
         bioseq::pg_utils::invoke_pg_as_cpp(
@@ -5334,6 +8112,7 @@ publish_ready_minimizer_generation_head_pg(
         // state. Do not issue PostgreSQL cleanup calls while propagating the
         // exact original error.
         publication->blob = nullptr;
+        publication->descriptor_relation = nullptr;
         publication->relation = nullptr;
         token.invalidate();
         delete publication;
@@ -5341,6 +8120,7 @@ publish_ready_minimizer_generation_head_pg(
     } catch (...) {
         std::exception_ptr failure = std::current_exception();
         publication->blob = nullptr;
+        publication->descriptor_relation = nullptr;
         publication->relation = nullptr;
         token.invalidate();
         delete publication;
@@ -5548,6 +8328,8 @@ private:
     std::string table_name_;
     Relation heap_relation_ = nullptr;
     Relation primary_index_relation_ = nullptr;
+    Relation storage_descriptor_relation_ = nullptr;
+    Relation storage_descriptor_live_index_relation_ = nullptr;
     SysScanDesc active_scan_ = nullptr;
     std::array<TupleTableSlot*, kRev3FullGenerationPinnedBatchRows>
         full_generation_batch_slots_{};
@@ -5569,6 +8351,7 @@ private:
     bioseq::parallelism::MemoryPermit control_authorization_permit_;
     std::optional<MinimizerGenerationHead> head_;
     std::optional<MinimizerGenerationReadMetadata> metadata_;
+    std::optional<MinimizerGenerationManifest> manifest_only_;
     std::vector<std::byte> directory_bytes_scratch_;
     std::vector<PlannedGroup> planned_groups_;
     std::vector<RuntimeRequest> runtime_requests_;
@@ -5578,6 +8361,18 @@ private:
     std::optional<std::uint64_t> payload_stage_begin_ns_;
     std::optional<BoundGrouped32ColdRoute> grouped32_cold_route_;
     MinimizerGenerationReadStats stats_{};
+
+    /// Return the sole authenticated manifest authority. Full metadata and
+    /// manifest-only state are mutually exclusive; observing both or neither
+    /// fails closed at every transition that consumes a manifest.
+    [[nodiscard]] const MinimizerGenerationManifest*
+    active_manifest_() const noexcept {
+        if (metadata_.has_value() == manifest_only_.has_value()) {
+            return nullptr;
+        }
+        return metadata_
+            ? &metadata_->manifest : &*manifest_only_;
+    }
 
     [[noreturn]] void fail_(std::string_view message) {
         state_ = State::failed;
@@ -5653,6 +8448,7 @@ private:
         std::vector<RuntimeRequest>{}.swap(runtime_requests_);
         std::vector<std::uint32_t>{}.swap(authorized_position_ordinals_);
         metadata_.reset();
+        manifest_only_.reset();
         head_.reset();
         grouped32_cold_route_.reset();
         runtime_permit_.release();
@@ -5762,6 +8558,36 @@ private:
                    left.delivered_bytes, right.delivered_bytes);
     }
 
+    [[nodiscard]] static constexpr bool read_stats_are_zero_(
+            const IndexChunkReadStats& stats) noexcept {
+        return read_stats_are_sum_(
+            stats, IndexChunkReadStats{}, IndexChunkReadStats{});
+    }
+
+    [[nodiscard]] static constexpr bool phase_stats_are_zero_(
+            const MinimizerGenerationPayloadPhaseReadStats& phase) noexcept {
+        return phase.plan_calls == 0u
+            && phase.planned_request_groups == 0u
+            && phase.executed_request_groups == 0u
+            && phase.range_scan_calls == 0u
+            && phase.physical_heap_rows_read == 0u
+            && phase.physical_bytes_read == 0u
+            && phase.control_authorization_checks == 0u
+            && read_stats_are_zero_(phase.read);
+    }
+
+    [[nodiscard]] static constexpr bool full_payload_stats_are_zero_(
+            const MinimizerGenerationFullPayloadReadStats& full) noexcept {
+        return full.scan_calls == 0u
+            && full.planned_extents == 0u
+            && full.completed_extents == 0u
+            && full.control_chunks == 0u
+            && full.position_chunks == 0u
+            && full.control_bytes == 0u
+            && full.position_bytes == 0u
+            && full.payload_row_checksum == 0u;
+    }
+
     [[nodiscard]] static constexpr bool phase_equations_hold_(
             const MinimizerGenerationPayloadPhaseReadStats& phase) noexcept {
         return phase.plan_calls == 1
@@ -5831,6 +8657,8 @@ private:
         full_generation_batch_slots_.fill(nullptr);
         full_generation_batch_slot_count_ = 0;
         active_scan_ = nullptr;
+        storage_descriptor_live_index_relation_ = nullptr;
+        storage_descriptor_relation_ = nullptr;
         primary_index_relation_ = nullptr;
         heap_relation_ = nullptr;
         snapshot_ = nullptr;
@@ -5847,6 +8675,23 @@ private:
                 bioseq::pg_utils::invoke_pg_as_cpp(
                     [&] { systable_endscan_ordered(active_scan_); });
                 active_scan_ = nullptr;
+            }
+            if (storage_descriptor_live_index_relation_ != nullptr) {
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    index_close(
+                        storage_descriptor_live_index_relation_,
+                        AccessShareLock);
+                });
+                storage_descriptor_live_index_relation_ = nullptr;
+                stats_.cold.add(stats_.cold.lock_releases, 1);
+            }
+            if (storage_descriptor_relation_ != nullptr) {
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    relation_close(
+                        storage_descriptor_relation_, AccessShareLock);
+                });
+                storage_descriptor_relation_ = nullptr;
+                stats_.cold.add(stats_.cold.lock_releases, 1);
             }
             if (primary_index_relation_ != nullptr) {
                 bioseq::pg_utils::invoke_pg_as_cpp(
@@ -6177,6 +9022,10 @@ public:
           heap_relation_(std::exchange(other.heap_relation_, nullptr)),
           primary_index_relation_(std::exchange(
               other.primary_index_relation_, nullptr)),
+          storage_descriptor_relation_(std::exchange(
+              other.storage_descriptor_relation_, nullptr)),
+          storage_descriptor_live_index_relation_(std::exchange(
+              other.storage_descriptor_live_index_relation_, nullptr)),
           active_scan_(std::exchange(other.active_scan_, nullptr)),
           full_generation_batch_slots_(
               other.full_generation_batch_slots_),
@@ -6198,6 +9047,7 @@ public:
               other.control_authorization_permit_)),
           head_(std::move(other.head_)),
           metadata_(std::move(other.metadata_)),
+          manifest_only_(std::move(other.manifest_only_)),
           directory_bytes_scratch_(std::move(
               other.directory_bytes_scratch_)),
           planned_groups_(std::move(other.planned_groups_)),
@@ -6382,13 +9232,181 @@ public:
         return result;
     }
 
+    /// Timed compact-direct metadata path. Read the exact manifest tuple under
+    /// the same snapshot as the head, using chunk_no=0 in the primary-index
+    /// qualification so no directory tuple can be visited. The fixed manifest
+    /// and its head checksum remain fully authenticated; only the O(directory)
+    /// materialization/CRC/DirView construction is intentionally omitted.
+    [[nodiscard]] const MinimizerGenerationManifest&
+    read_manifest_once_without_directory(
+            const MinimizerGenerationHead& expected_head) {
+        const std::uint64_t manifest_begin_ns = cold_index_now_ns();
+        const BufferUsage manifest_buffer_begin = pgBufferUsage;
+        try {
+            if (state_ != State::head_read || !head_
+                || expected_head != *head_ || metadata_ || manifest_only_
+                || expected_head.wire_format
+                    != bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local) {
+                checked_add_(stats_.metadata_repeated_reads, 1,
+                    "repeated metadata counter overflow");
+                fail_(
+                    "manifest-only read repeated, early, changed, or not Format-5");
+            }
+
+            ScanKeyData keys[5];
+            ScanKeyInit(&keys[0], kRev3IdxGenerationId,
+                BTEqualStrategyNumber, F_INT8EQ,
+                Int64GetDatum(static_cast<std::int64_t>(
+                    expected_head.generation_id)));
+            ScanKeyInit(&keys[1], kRev3IdxQueryKey,
+                BTEqualStrategyNumber, F_INT8EQ,
+                Int64GetDatum(static_cast<std::int64_t>(query_key_)));
+            ScanKeyInit(&keys[2], kRev3IdxSubKey,
+                BTEqualStrategyNumber, F_INT8EQ,
+                Int64GetDatum(static_cast<std::int64_t>(
+                    DIRECTORY_SUB_KEY)));
+            ScanKeyInit(&keys[3], kRev3IdxPositionSegment,
+                BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(-1));
+            ScanKeyInit(&keys[4], kRev3IdxChunkNo,
+                BTEqualStrategyNumber, F_INT4EQ, Int32GetDatum(0));
+            active_scan_ = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                return systable_beginscan_ordered(
+                    heap_relation_, primary_index_relation_, snapshot_, 5,
+                    keys);
+            });
+            const auto next_tuple = [this] {
+                return bioseq::pg_utils::invoke_pg_as_cpp([this] {
+                    return systable_getnext_ordered(
+                        active_scan_, ForwardScanDirection);
+                });
+            };
+            HeapTuple tuple = next_tuple();
+            if (!HeapTupleIsValid(tuple)) {
+                fail_("READY generation manifest is missing");
+            }
+            LoadedRow manifest_row =
+                load_rev3_pg_row_or_error(heap_relation_, tuple);
+            std::array<std::byte,
+                MinimizerGenerationManifest::format5_encoded_bytes>
+                manifest_bytes{};
+            constexpr std::size_t expected_manifest_bytes =
+                MinimizerGenerationManifest::format5_encoded_bytes;
+            if (manifest_row.query_key != query_key_
+                || manifest_row.address != IndexChunkAddress{
+                    .generation_id = expected_head.generation_id,
+                    .position_segment = -1,
+                    .sub_key = DIRECTORY_SUB_KEY,
+                    .chunk_no = 0,
+                }
+                || manifest_row.bytes.size() != expected_manifest_bytes) {
+                manifest_row.release();
+                fail_("READY generation manifest row shape disagrees");
+            }
+            std::copy(
+                manifest_row.bytes.begin(), manifest_row.bytes.end(),
+                manifest_bytes.begin());
+            manifest_row.release();
+            if (HeapTupleIsValid(next_tuple())) {
+                fail_("READY generation manifest scan returned duplicate rows");
+            }
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [&] { systable_endscan_ordered(active_scan_); });
+            active_scan_ = nullptr;
+
+            const std::span<const std::byte> encoded_manifest{
+                manifest_bytes};
+            auto manifest =
+                bioseq::indexing::decode_minimizer_generation_manifest(
+                    encoded_manifest);
+            if (!manifest
+                || manifest->wire_format != expected_head.wire_format
+                || manifest->generation_id != expected_head.generation_id
+                || manifest->source_identity
+                    != expected_head.source_identity
+                || manifest->source_content_checksum
+                    != expected_head.source_content_checksum
+                || manifest->directory_bytes
+                    > (std::numeric_limits<std::size_t>::max)()
+                || bioseq::indexing::crc64_ecma182(encoded_manifest)
+                    != expected_head.manifest_checksum
+                || bioseq::indexing::
+                    minimizer_generation_compatibility_checksum(*manifest)
+                    != expected_head.compatibility_checksum
+                || !bioseq::indexing::
+                    validate_minimizer_generation_compatibility(
+                        *manifest, expected_)) {
+                fail_("READY generation manifest/head binding disagrees");
+            }
+            const auto manifest_profile =
+                bioseq::indexing::minimizer_generation_payload_profile(
+                    *manifest);
+            if (!manifest_profile
+                || manifest_profile->wire_format != expected_.wire_format
+                || !manifest_profile->shape_v5) {
+                fail_(
+                    "READY generation manifest payload profile is invalid");
+            }
+            const std::uint32_t extent_payload_bytes =
+                bioseq::indexing::minimizer_extent_payload_bytes(
+                    manifest->wire_format);
+            if (extent_payload_bytes == 0u) {
+                fail_("READY manifest wire quantum is invalid");
+            }
+            const std::uint64_t expected_directory_chunks =
+                manifest->directory_bytes / extent_payload_bytes
+                + (manifest->directory_bytes % extent_payload_bytes != 0u
+                    ? 1u : 0u);
+            const std::size_t directory_entry_bytes =
+                bioseq::indexing::
+                    minimizer_directory_entry_encoded_bytes(
+                        *manifest_profile);
+            if (expected_directory_chunks
+                    != manifest->directory_chunk_count
+                || directory_entry_bytes == 0u
+                || manifest->directory_bytes % directory_entry_bytes
+                    != 0u) {
+                fail_("READY manifest fixed directory equations disagree");
+            }
+
+            expected_profile_ = *manifest_profile;
+            manifest_only_.emplace(*manifest);
+            state_ = State::metadata_unattested;
+            stats_.manifest_directory_scans = 1u;
+            stats_.cold.directory_scans = 1u;
+            stats_.manifest_rows_read = 1u;
+            stats_.manifest_bytes_read = expected_manifest_bytes;
+            stats_.directory_chunks_read = 0u;
+            stats_.directory_bytes_read = 0u;
+            stats_.metadata_heap_rows_read = 2u;
+            stats_.metadata_bytes_read =
+                MinimizerGenerationHead::encoded_bytes
+                + expected_manifest_bytes;
+            checked_add_(stats_.index_scans, 1u,
+                "metadata index scan count overflow");
+            checked_add_(stats_.explicit_copy_bytes,
+                expected_manifest_bytes,
+                "metadata copy byte count overflow");
+            add_cold_index_elapsed(
+                stats_.cold, stats_.cold.directory_ns,
+                manifest_begin_ns);
+            add_cold_index_buffer_usage(
+                stats_.cold, manifest_buffer_begin);
+        } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
+            state_ = State::failed;
+            abandon_relations_noexcept_();
+            throw;
+        }
+        return *manifest_only_;
+    }
+
     [[nodiscard]] const MinimizerGenerationReadMetadata&
     read_manifest_directory_once(const MinimizerGenerationHead& expected_head) {
         const std::uint64_t directory_begin_ns = cold_index_now_ns();
         const BufferUsage directory_buffer_begin = pgBufferUsage;
         try {
         if (state_ != State::head_read || !head_
-            || expected_head != *head_) {
+            || expected_head != *head_ || metadata_ || manifest_only_) {
             checked_add_(stats_.metadata_repeated_reads, 1,
                 "repeated metadata counter overflow");
             fail_("manifest/directory read repeated, early, or changed head identity");
@@ -6661,8 +9679,10 @@ public:
     void validate_full_source_attestation(
             Rev3AuthoritativeSourceProof&& proof) {
         try {
+            const MinimizerGenerationManifest* const manifest =
+                active_manifest_();
             if (state_ != State::metadata_unattested
-                || !head_ || !metadata_) {
+                || !head_ || manifest == nullptr) {
                 proof.invalidate_();
                 fail_("READY source proof was consumed out of order");
             }
@@ -6676,29 +9696,29 @@ public:
             }
             const std::uint64_t compatibility_checksum =
                 bioseq::indexing::minimizer_generation_compatibility_checksum(
-                    metadata_->manifest);
+                    *manifest);
             proof.source_.compatibility_checksum = compatibility_checksum;
             const std::uint64_t source_identity = rev3_source_identity(
                 proof.main_relfilenode_, proof.source_);
             const std::uint64_t source_content_checksum =
                 proof.source_content_checksum_;
             if (source_identity == 0
-                || metadata_->manifest.alphabet_code
+                || manifest->alphabet_code
                     != proof.source_.alphabet_code
-                || metadata_->manifest.storage_unit_byte_width
+                || manifest->storage_unit_byte_width
                     != proof.source_.storage_unit_byte_width
-                || metadata_->manifest.target_length
+                || manifest->target_length
                     != proof.source_.locator.total_bp_size
                 || head_->source_identity != source_identity
-                || metadata_->manifest.source_identity != source_identity
+                || manifest->source_identity != source_identity
                 || head_->source_content_checksum
                     != source_content_checksum
-                || metadata_->manifest.source_content_checksum
+                || manifest->source_content_checksum
                     != source_content_checksum
                 || head_->compatibility_checksum
                     != compatibility_checksum
                 || bioseq::indexing::minimizer_generation_compatibility_checksum(
-                    metadata_->manifest) != compatibility_checksum) {
+                    *manifest) != compatibility_checksum) {
                 proof.invalidate_();
                 fail_("READY metadata/source attestation disagrees");
             }
@@ -6717,8 +9737,10 @@ public:
     /// untimed writer/admin transition above.
     void validate_source_attestation(Rev3CatalogSourceProof&& proof) {
         try {
+            const MinimizerGenerationManifest* const manifest =
+                active_manifest_();
             if (state_ != State::metadata_unattested
-                || !head_ || !metadata_) {
+                || !head_ || manifest == nullptr) {
                 proof.invalidate_();
                 fail_("READY catalog source proof was consumed out of order");
             }
@@ -6733,24 +9755,24 @@ public:
             }
             const std::uint64_t compatibility_checksum =
                 bioseq::indexing::minimizer_generation_compatibility_checksum(
-                    metadata_->manifest);
+                    *manifest);
             proof.source_.compatibility_checksum = compatibility_checksum;
             const std::uint64_t source_identity = rev3_source_identity(
                 proof.main_relfilenode_, proof.source_);
             const std::uint64_t source_content_checksum =
                 proof.source_content_checksum_;
             if (source_identity == 0
-                || metadata_->manifest.alphabet_code
+                || manifest->alphabet_code
                     != proof.source_.alphabet_code
-                || metadata_->manifest.storage_unit_byte_width
+                || manifest->storage_unit_byte_width
                     != proof.source_.storage_unit_byte_width
-                || metadata_->manifest.target_length
+                || manifest->target_length
                     != proof.source_.locator.total_bp_size
                 || head_->source_identity != source_identity
-                || metadata_->manifest.source_identity != source_identity
+                || manifest->source_identity != source_identity
                 || head_->source_content_checksum
                     != source_content_checksum
-                || metadata_->manifest.source_content_checksum
+                || manifest->source_content_checksum
                     != source_content_checksum
                 || head_->compatibility_checksum
                     != compatibility_checksum) {
@@ -6774,6 +9796,101 @@ public:
             proof.invalidate_();
             state_ = State::failed;
             throw;
+        }
+    }
+
+    /// Bind the exact LIVE image descriptor under the same registered MVCC
+    /// snapshot that supplied the head and manifest.  Both catalog locks stay
+    /// owned by this session until the mapped image has been registered and
+    /// the selected mapped Format-5 finish transition performs the checked
+    /// close.
+    [[nodiscard]] MinimizerGenerationStorageDescriptorPg
+    read_live_storage_descriptor_once(
+            const Rev3IndexAdministrationIdentity& identity) {
+        try {
+            const MinimizerGenerationManifest* const manifest =
+                active_manifest_();
+            if (state_ != State::metadata_ready
+                || !catalog_source_attested_ || !head_
+                || manifest == nullptr
+                || manifest->wire_format
+                    != bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local
+                || storage_descriptor_relation_ != nullptr
+                || storage_descriptor_live_index_relation_ != nullptr
+                || identity.table_name != table_name_
+                || identity.database_oid != MyDatabaseId
+                || identity.tablespace_oid != expected_tablespace_oid_
+                || identity.index_name
+                    != MINIMIZERS_PER_FRAGMENT_INDEX_NAME) {
+                fail_(
+                    "LIVE generation descriptor was requested out of order");
+            }
+            const Oid descriptor_oid =
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    return get_relname_relid(
+                        "minimizer_generation_storage",
+                        bioseq_internal_ns());
+                });
+            const Oid live_index_oid =
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    return get_relname_relid(
+                        "minimizer_generation_storage_one_live",
+                        bioseq_internal_ns());
+                });
+            if (!OidIsValid(descriptor_oid) || !OidIsValid(live_index_oid)) {
+                fail_("generation storage descriptor authority is missing");
+            }
+            storage_descriptor_relation_ =
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    return try_safe_relation_open(
+                        descriptor_oid, AccessShareLock);
+                });
+            if (storage_descriptor_relation_ == nullptr) {
+                fail_("generation storage descriptor relation disappeared");
+            }
+            stats_.cold.add(stats_.cold.lock_acquires, 1);
+            storage_descriptor_live_index_relation_ =
+                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                    return index_open(live_index_oid, AccessShareLock);
+                });
+            stats_.cold.add(stats_.cold.lock_acquires, 1);
+            if (RelationGetNamespace(storage_descriptor_relation_)
+                    != bioseq_internal_ns()
+                || std::string_view{RelationGetRelationName(
+                    storage_descriptor_relation_)}
+                    != "minimizer_generation_storage"
+                || RelationGetNamespace(
+                    storage_descriptor_live_index_relation_)
+                    != bioseq_internal_ns()) {
+                fail_("generation storage descriptor identity changed");
+            }
+            bioseq::storage::
+                validate_minimizer_generation_storage_catalogs_pg();
+            auto descriptor =
+                read_live_minimizer_generation_storage_descriptor_pg(
+                    storage_descriptor_relation_,
+                    storage_descriptor_live_index_relation_, snapshot_,
+                    identity, query_key_, head_->generation_id);
+            if (descriptor.provider
+                    == bioseq::indexing::Mpf5V2Provider::postgres_relation
+                && (descriptor.payload_relation_oid
+                        != std::optional<Oid>{RelationGetRelid(heap_relation_)}
+                    || descriptor.payload_database_oid
+                        != std::optional<Oid>{heap_relation_->rd_locator.dbOid}
+                    || descriptor.payload_tablespace_oid
+                        != std::optional<Oid>{heap_relation_->rd_locator.spcOid}
+                    || descriptor.payload_relfilenode
+                        != std::optional<Oid>{
+                            static_cast<Oid>(
+                                heap_relation_->rd_locator.relNumber)}
+                    || descriptor.payload_relation_name
+                        != std::optional<std::string>{table_name_})) {
+                fail_("LIVE relation-provider descriptor locator disagrees");
+            }
+            return descriptor;
+        } catch (...) {
+            cleanup_failed_session_and_rethrow_();
         }
     }
 
@@ -8175,6 +11292,8 @@ public:
                         grouped_shape_soa_segment_local
                 || active_scan_ != nullptr || heap_relation_ == nullptr
                 || primary_index_relation_ == nullptr || snapshot_ == nullptr
+                || storage_descriptor_relation_ == nullptr
+                || storage_descriptor_live_index_relation_ == nullptr
                 || next_group_ != 0 || !planned_groups_.empty()
                 || !runtime_requests_.empty() || plan_permit_
                 || runtime_permit_ || control_authorization_permit_
@@ -8223,6 +11342,129 @@ public:
         }
     }
 
+    /// Checked success close for the timed compact-H32 mmap route. PostgreSQL
+    /// authenticates exactly one head row and one manifest row; the exact
+    /// chunk_no=0 scan qualification proves that no directory tuple was read.
+    /// Any control/payload planning or scan evidence makes this transition
+    /// invalid rather than silently falling back to the relation reader.
+    [[nodiscard]] MinimizerGenerationReadStats
+    finish_mapped_compact_direct() {
+        try {
+            const MinimizerGenerationManifest* const manifest =
+                active_manifest_();
+            const bool cold_payload_evidence_is_zero =
+                stats_.cold.payload_range_scans == 0u
+                && stats_.cold.route_empty == 0u
+                && stats_.cold.route_selective == 0u
+                && stats_.cold.route_full == 0u
+                && stats_.cold.route_candidate_rows == 0u
+                && stats_.cold.route_full_rows == 0u
+                && stats_.cold.route_candidate_bytes == 0u
+                && stats_.cold.route_full_bytes == 0u
+                && stats_.cold.route_selective_cost == 0u
+                && stats_.cold.route_full_cost == 0u
+                && stats_.cold.memory_reroutes == 0u
+                && stats_.cold.payload_bytes_requested == 0u
+                && stats_.cold.payload_bytes_delivered == 0u
+                && stats_.cold.payload_rows_requested == 0u
+                && stats_.cold.payload_rows_delivered == 0u
+                && stats_.cold.payload_rows_scanned == 0u
+                && stats_.cold.payload_bytes_scanned == 0u
+                && stats_.cold.payload_rows_skipped == 0u
+                && stats_.cold.heap_tid_adjacent == 0u
+                && stats_.cold.heap_tid_forward_gap == 0u
+                && stats_.cold.heap_tid_backward_jump == 0u
+                && stats_.cold.extent_crc_bytes == 0u
+                && stats_.cold.extent_crc_raw_bytes_hashed == 0u
+                && stats_.cold.extent_crc_combined_bytes == 0u
+                && stats_.cold.extent_crc_combine_rows == 0u
+                && stats_.cold.payload_ns == 0u
+                && stats_.cold.decode_ns == 0u
+                && stats_.cold.transfer_ns == 0u;
+            if (state_ != State::metadata_ready
+                || !catalog_source_attested_ || !head_
+                || manifest == nullptr || !manifest_only_ || metadata_
+                || manifest != &*manifest_only_
+                || manifest->wire_format
+                    != bioseq::indexing::MinimizerGenerationWireFormat::
+                        grouped_shape_soa_segment_local
+                || active_scan_ != nullptr || heap_relation_ == nullptr
+                || primary_index_relation_ == nullptr || snapshot_ == nullptr
+                || storage_descriptor_relation_ == nullptr
+                || storage_descriptor_live_index_relation_ == nullptr
+                || next_group_ != 0u || !planned_groups_.empty()
+                || !runtime_requests_.empty() || plan_permit_
+                || runtime_permit_ || control_authorization_permit_
+                || metadata_permit_
+                || !authorized_position_ordinals_.empty()
+                || !directory_bytes_scratch_.empty()
+                || previous_payload_heap_block_ || payload_stage_begin_ns_
+                || grouped32_cold_route_
+                || stats_.payload_heap_rows_read != 0u
+                || stats_.payload_bytes_read != 0u
+                || stats_.bulk_read_calls != 0u
+                || stats_.planned_request_groups != 0u
+                || stats_.executed_request_groups != 0u
+                || stats_.range_scan_calls != 0u
+                || stats_.cache_lookups != 0u
+                || stats_.cache_populations != 0u
+                || !read_stats_are_zero_(stats_.payload)
+                || !phase_stats_are_zero_(stats_.controls)
+                || !phase_stats_are_zero_(stats_.positions)
+                || !full_payload_stats_are_zero_(stats_.full_generation)
+                || !cold_payload_evidence_is_zero) {
+                fail_(
+                    "mapped compact-H32 generation read closed in an invalid state");
+            }
+
+            constexpr std::uint64_t expected_manifest_bytes =
+                MinimizerGenerationManifest::format5_encoded_bytes;
+            constexpr std::uint64_t expected_metadata_bytes =
+                MinimizerGenerationHead::encoded_bytes
+                + expected_manifest_bytes;
+            if (stats_.relation_opens != 1u
+                || stats_.head_scans != 1u
+                || stats_.cold.head_scans != 1u
+                || stats_.head_rows_read != 1u
+                || stats_.head_bytes_read
+                    != MinimizerGenerationHead::encoded_bytes
+                || stats_.manifest_directory_scans != 1u
+                || stats_.cold.directory_scans != 1u
+                || stats_.manifest_rows_read != 1u
+                || stats_.manifest_bytes_read != expected_manifest_bytes
+                || stats_.directory_chunks_read != 0u
+                || stats_.directory_bytes_read != 0u
+                || stats_.metadata_repeated_reads != 0u
+                || stats_.metadata_heap_rows_read != 2u
+                || stats_.metadata_bytes_read != expected_metadata_bytes
+                || stats_.index_scans != 2u
+                || stats_.explicit_copy_bytes != expected_metadata_bytes
+                || stats_.toast_values_read != 0u
+                || stats_.detoast_bytes != 0u
+                || stats_.total_heap_rows_read != 0u
+                || stats_.total_bytes_read != 0u
+                || stats_.source_parent_rows_read != 1u
+                || stats_.source_catalog_rows_read != 1u
+                || stats_.source_catalog_index_scans != 1u
+                || stats_.source_fragment_rows_read != 0u
+                || stats_.source_decoded_bp != 0u
+                || stats_.source_storage_incarnations_checked < 1u
+                || stats_.source_storage_incarnations_checked > 2u) {
+                fail_(
+                    "mapped compact-H32 metadata/source evidence disagrees");
+            }
+
+            stats_.total_heap_rows_read = 2u;
+            stats_.total_bytes_read = expected_metadata_bytes;
+            state_ = State::finished;
+            close_relations_checked_();
+            return stats_;
+        } catch (...) {
+            state_ = State::failed;
+            throw;
+        }
+    }
+
     /// Checked success close for callers that intentionally validate only the
     /// immutable head/manifest/directory contract and do not enter payload
     /// phases. Borrowed snapshots remain caller-owned.
@@ -8230,6 +11472,7 @@ public:
         try {
             if ((state_ != State::metadata_unattested
                     && state_ != State::metadata_ready)
+                || active_manifest_() == nullptr
                 || active_scan_ != nullptr || heap_relation_ == nullptr
                 || primary_index_relation_ == nullptr
                 || snapshot_ == nullptr) {
@@ -8858,6 +12101,28 @@ static_assert(std::same_as<
 static_assert(std::same_as<
     decltype(&inspect_ready_minimizer_generation_identity_pg), Inspector>);
 static_assert(requires(
+    MappedMinimizerFormat5ImagePg& image,
+    const MappedMinimizerFormat5LeaseGuardPg& guard,
+    const bioseq::indexing::CompactH32DirectIndexView& direct) {
+    { image.borrow_mapping_token() }
+        -> std::same_as<std::shared_ptr<const void>>;
+    { image.advise_compact_h32_direct_metadata_readahead(direct) }
+        -> std::same_as<void>;
+    { image.borrow_compact_h32_selected_page_adviser(direct) }
+        -> std::same_as<
+            bioseq::indexing::CompactDirectSelectedPageAdviser>;
+    { std::move(image).release_mapping_lease_guard() }
+        -> std::same_as<MappedMinimizerFormat5LeaseGuardPg>;
+    { guard.borrow_mapping_token() }
+        -> std::same_as<std::shared_ptr<const void>>;
+});
+static_assert(noexcept(std::declval<const MappedMinimizerFormat5ImagePg&>()
+    .advise_compact_h32_direct_metadata_readahead(
+        std::declval<const bioseq::indexing::CompactH32DirectIndexView&>())));
+static_assert(noexcept(std::declval<const MappedMinimizerFormat5ImagePg&>()
+    .borrow_compact_h32_selected_page_adviser(
+        std::declval<const bioseq::indexing::CompactH32DirectIndexView&>())));
+static_assert(requires(
     IndexStorageFragmentGenerationRowSinkPg& writer,
     const EncodedMinimizerGeneration& generation,
     const MinimizerGenerationRowView& row) {
@@ -8875,6 +12140,8 @@ static_assert(requires(
         -> std::same_as<MinimizerGenerationHead>;
     { session.read_manifest_directory_once(head) }
         -> std::same_as<const MinimizerGenerationReadMetadata&>;
+    { session.read_manifest_once_without_directory(head) }
+        -> std::same_as<const MinimizerGenerationManifest&>;
     { session.bind_grouped32_cold_route_once(route) };
     { session.plan_control_groups(groups) };
     { session.plan_position_groups(groups) };
@@ -8883,6 +12150,8 @@ static_assert(requires(
         rev3_compile_contract_detail::QualifiedReadSink{}) }
         -> std::same_as<IndexChunkReadStats>;
     { session.finish() } -> std::same_as<MinimizerGenerationReadStats>;
+    { session.finish_mapped_compact_direct() }
+        -> std::same_as<MinimizerGenerationReadStats>;
 });
 
 constexpr Rev3AuthoritativeSourceLocator kSourceIdentityGolden{

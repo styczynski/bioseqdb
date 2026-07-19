@@ -5659,12 +5659,18 @@ TEST_CASE("Shape-V5 radix pass count is exact at byte boundaries",
         return gv::runtime_shape_v5_radix_pass_count(
             0u, target_end + 1u);
     };
-    CHECK(passes(0u) == 1u);                    // 1 bit
-    CHECK(passes(0xffu) == 1u);                 // 8 bits
-    CHECK(passes(0x100u) == 2u);                // 9 bits
-    CHECK(passes(0xffffu) == 2u);               // 16 bits
-    CHECK(passes(0x10000u) == 3u);              // 17 bits
-    CHECK(passes(std::uint64_t{1} << 62u) == 8u); // 63 bits
+    CHECK(passes(0u) == 1u);                      // 1 coord + strand
+    CHECK(passes(0x7fu) == 1u);                   // 7 coord + strand
+    CHECK(passes(0x80u) == 2u);                   // 8 coord + strand
+    CHECK(passes(0xffu) == 2u);                   // 8 coord + strand
+    CHECK(passes(0x100u) == 2u);                  // 9 coord + strand
+    CHECK(passes(0x7fffu) == 2u);                 // 15 coord + strand
+    CHECK(passes(0x8000u) == 3u);                 // 16 coord + strand
+    CHECK(passes(0xffffu) == 3u);                 // 16 coord + strand
+    CHECK(passes(0x10000u) == 3u);                // 17 coord + strand
+    CHECK(passes(9'999'999u) == 4u);              // FAST_LONG: 24 + strand
+    CHECK(passes(499'999'999u) == 4u);            // XXL_HIFI: 29 + strand
+    CHECK(passes(std::uint64_t{1} << 62u) == 8u); // 63 coord + strand
     CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(0u, 0u));
     CHECK_FALSE(gv::runtime_shape_v5_radix_pass_count(
         0u, (std::uint64_t{1} << 63u) + 1u));

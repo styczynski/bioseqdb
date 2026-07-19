@@ -1354,8 +1354,30 @@ struct PhaseCSketchMemoryPlan {
     std::uint64_t target_index_bucket_peak_bytes = 0;
     std::uint64_t standalone_device_bytes = 0;
     std::uint64_t resident_output_bytes = 0;
-    std::uint64_t host_transient_bytes = 0;
+    // Host-side staging has phase-specific lifetimes.  Target-index builds
+    // borrow the caller's packed sequence directly when contiguous, write tile
+    // records directly into mapped arena storage, and destroy fragmented input
+    // scratch after the sequence copy.  The main exact-T phase therefore owns
+    // no host staging.
+    std::uint64_t host_sequence_staging_bytes = 0;
+    std::uint64_t host_tile_staging_bytes = 0;
+    std::uint64_t count_phase_host_transient_bytes = 0;
+    std::uint64_t main_phase_host_transient_bytes = 0;
+    std::uint64_t host_transient_excluded_before_main_bytes = 0;
     std::uint64_t admission_bytes = 0;
+    bool valid = false;
+};
+
+/// Exact host scratch owned by one target-index invocation.  Contiguous input
+/// is borrowed (`owned_sequence_bytes == 0`); fragmented compact sequences pass
+/// their exact backing-vector capacity so Runtime can destroy it after the
+/// arena copy and before main admission.
+struct PhaseCTargetIndexHostScratchPlan {
+    std::uint64_t owned_sequence_bytes = 0;
+    std::uint64_t elided_tile_staging_bytes = 0;
+    std::uint64_t count_phase_bytes = 0;
+    std::uint64_t main_phase_bytes = 0;
+    std::uint64_t excluded_before_main_bytes = 0;
     bool valid = false;
 };
 
@@ -1684,19 +1706,60 @@ struct PhaseCSketchMemoryPlan {
             phase_c_saturating_add(plan.pair_key_bytes, plan.pair_value_bytes));
         plan.resident_output_bytes = plan.standalone_device_bytes;
     }
-    // `tiles` and the packed sequence both exist on the host while their arena
-    // copies are live.
-    plan.host_transient_bytes = phase_c_saturating_add(
-        plan.seq_bytes, plan.tile_bytes);
+    plan.host_sequence_staging_bytes = plan.seq_bytes;
+    plan.host_tile_staging_bytes = plan.tile_bytes;
+    const std::uint64_t legacy_host_staging_bytes = phase_c_saturating_add(
+        plan.host_sequence_staging_bytes, plan.host_tile_staging_bytes);
+    if (use == PhaseCSketchUse::target_index_build) {
+        // This aggregate is the conservative full-owner count shape used by
+        // static planning.  Runtime refines it with
+        // `phase_c_target_index_host_scratch_plan`: contiguous inputs borrow
+        // the sequence (zero owned bytes), while fragmented inputs report the
+        // exact scratch-vector capacity.  Both forms destroy all owned staging
+        // before exact-main admission.
+        plan.count_phase_host_transient_bytes = legacy_host_staging_bytes;
+        plan.main_phase_host_transient_bytes = 0u;
+        plan.host_transient_excluded_before_main_bytes =
+            legacy_host_staging_bytes;
+    } else {
+        plan.count_phase_host_transient_bytes = legacy_host_staging_bytes;
+        plan.main_phase_host_transient_bytes = legacy_host_staging_bytes;
+    }
     plan.admission_bytes = phase_c_saturating_add(
         plan.arena_scaffold_bytes,
         phase_c_saturating_add(
-            plan.standalone_device_bytes, plan.host_transient_bytes));
+            plan.standalone_device_bytes,
+            std::max(plan.count_phase_host_transient_bytes,
+                     plan.main_phase_host_transient_bytes)));
 
     const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
     plan.valid = plan.arena_scaffold_bytes != limit
         && plan.standalone_device_bytes != limit
         && plan.admission_bytes != limit;
+    return plan;
+}
+
+[[nodiscard]] constexpr PhaseCTargetIndexHostScratchPlan
+phase_c_target_index_host_scratch_plan(
+    const PhaseCSketchMemoryPlan& memory_plan,
+    std::uint64_t owned_sequence_bytes) noexcept
+{
+    PhaseCTargetIndexHostScratchPlan plan{
+        .owned_sequence_bytes = owned_sequence_bytes,
+        .elided_tile_staging_bytes = memory_plan.host_tile_staging_bytes,
+    };
+    // Tile records are written directly into the mapped arena; no O(tile_count)
+    // host allocation exists.  The only count-phase host owner is an optional
+    // fragmented-sequence scratch vector whose exact capacity is supplied by
+    // the caller.
+    plan.count_phase_bytes = plan.owned_sequence_bytes;
+    plan.main_phase_bytes = 0u;
+    plan.excluded_before_main_bytes = phase_c_saturating_add(
+        plan.owned_sequence_bytes, plan.elided_tile_staging_bytes);
+    const std::uint64_t limit = (std::numeric_limits<std::uint64_t>::max)();
+    plan.valid = memory_plan.valid
+        && plan.count_phase_bytes != limit
+        && plan.excluded_before_main_bytes != limit;
     return plan;
 }
 

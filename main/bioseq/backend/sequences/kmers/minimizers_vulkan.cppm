@@ -28,6 +28,7 @@ module;
 #include <algorithm>
 #include <concepts>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -966,6 +967,17 @@ struct VulkanDeviceMinimizerSpan {
     }
 };
 
+/// Host-result ownership selected by the caller before dispatch.  The default
+/// collector-compatible route retains geometric-growth headroom because the
+/// collector wrapper duplicates records into a second vector.  The fixed
+/// zero-copy route is intentionally opt-in: its exact allocation admission is
+/// valid only when the caller adopts the returned vector allocation and drops
+/// the device result before constructing the CPU target index.
+enum class VulkanSketchHostOwnershipRoute : std::uint8_t {
+    collector_compatible = 0,
+    fixed_zero_copy_adoption = 1,
+};
+
 /// Operation-originated evidence that the collector-compatible Vulkan sketch
 /// leaf completed its runtime roundtrip. A default token is deliberately
 /// invalid, and route identity is validated before the pipeline may translate
@@ -1106,6 +1118,11 @@ struct VulkanSketchResult {
     std::shared_ptr<VulkanDeviceMinimizerStorage<MinimizerT>> device;
     std::vector<MinimizerT> host_minimizers;
     VulkanSketchDispatchToken dispatch_token{};
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible;
+    bool host_permit_released_to_process_footprint = false;
+    std::uint64_t host_footprint_reflected_delta_bytes = 0u;
+    bool arena_trimmed_before_host_materialization = false;
     bool overflow = false;
 
     [[nodiscard]] VulkanDeviceMinimizerSpan<MinimizerT> device_span() const noexcept {
@@ -1206,7 +1223,9 @@ template <class MinimizerT>
     if (!plan.valid) {
         return (std::numeric_limits<std::uint64_t>::max)();
     }
-    return sat_add(plan.arena_scaffold_bytes, plan.host_transient_bytes);
+    return sat_add(
+        plan.arena_scaffold_bytes,
+        plan.count_phase_host_transient_bytes);
 }
 
 [[nodiscard]] inline std::uint64_t vulkan_sketch_transient_reserved_bytes(
@@ -1246,6 +1265,18 @@ vulkan_exact_host_allocation_admission_bytes(
     return saturating_add(
         requested_bytes,
         kVulkanExactHostAllocationHeadroomBytes);
+}
+
+/// Exact fixed-result reservation.  An empty GPU sketch owns no host
+/// allocation, so it must not be charged allocator slop or be rejectable under
+/// pressure for a fictitious 64-KiB vector.
+[[nodiscard]] constexpr std::uint64_t
+vulkan_fixed_host_result_admission_bytes(
+        std::uint64_t exact_host_size_bytes) noexcept {
+    return exact_host_size_bytes == 0u
+        ? 0u
+        : vulkan_exact_host_allocation_admission_bytes(
+            exact_host_size_bytes);
 }
 
 [[nodiscard]] constexpr std::uint64_t
@@ -1331,7 +1362,9 @@ sketch_uploaded_window_result(
     VulkanSketchQueryGate query_gate = {},
     VulkanSketchDecline* decline_out = nullptr,
     bioseq::parallelism::MemoryPermit* borrowed_dispatch_permit = nullptr,
-    std::uint64_t borrowed_dispatch_budget = 0u)
+    std::uint64_t borrowed_dispatch_budget = 0u,
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible)
 {
     using bioseq::parallelism::MemoryAdmissionController;
     using bioseq::parallelism::saturating_mul;
@@ -1443,7 +1476,7 @@ sketch_uploaded_window_result(
         runtime.phase_c_arena_allocation_requirement(arena_request_bytes);
     const std::uint64_t host_transient_headroom_bytes =
         vulkan_exact_host_allocation_admission_bytes(
-            dispatch_plan.host_transient_bytes);
+            dispatch_plan.count_phase_host_transient_bytes);
     const std::uint64_t resident_allocation_bytes =
         allocation_requirements.pessimistic_output_allocation_bytes;
     const std::uint64_t transient_bytes = sat_add(
@@ -1570,6 +1603,10 @@ sketch_uploaded_window_result(
                 query_gate.words,
                 query_gate.mask);
         }
+        if (!raw.arena_trimmed_before_return) {
+            throw VulkanRuntimeError{
+                "Vulkan minimizer roundtrip returned before arena trim"};
+        }
         if (raw.overflow) {
             if (capacity_overflowed != nullptr) {
                 *capacity_overflowed = true;
@@ -1607,9 +1644,14 @@ sketch_uploaded_window_result(
         const std::uint64_t exact_host_size_bytes = saturating_mul(
             raw.count,
             static_cast<std::uint64_t>(sizeof(MinimizerT)));
-        const std::uint64_t exact_host_headroom_bytes = saturating_mul(
-            exact_host_size_bytes,
-            bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+        const std::uint64_t exact_host_headroom_bytes =
+            host_ownership_route
+                    == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+                ? vulkan_fixed_host_result_admission_bytes(
+                      exact_host_size_bytes)
+                : saturating_mul(
+                      exact_host_size_bytes,
+                      bioseq::parallelism::kVectorPreallocationHeadroomFactor);
         const std::uint64_t host_materialization_peak_bytes =
             vulkan_sketch_host_materialization_admission_bytes(
                 actual_device_allocation_bytes,
@@ -1665,27 +1707,112 @@ sketch_uploaded_window_result(
             return std::nullopt;
         }
 
+        if (host_ownership_route
+                == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+            && borrowed_dispatch_permit != nullptr) {
+            throw VulkanRuntimeError{
+                "Vulkan fixed zero-copy host adoption requires an owned "
+                "materialization permit"};
+        }
+
         // Reserve once, download once: the former byte-vector staging copy is
         // gone.  Permit declaration precedes vector declaration so reverse
         // destruction always frees vector capacity before returning admission.
-        std::vector<MinimizerT> host_minimizers(
-            static_cast<std::size_t>(raw.count));
-        const std::uint64_t exact_host_capacity_bytes = saturating_mul(
-            static_cast<std::uint64_t>(host_minimizers.capacity()),
-            static_cast<std::uint64_t>(sizeof(MinimizerT)));
-        if (exact_host_capacity_bytes
-                == (std::numeric_limits<std::uint64_t>::max)()
-            || exact_host_capacity_bytes > exact_host_headroom_bytes) {
-            throw VulkanRuntimeError{
-                "Vulkan decoded host minimizer capacity exceeded admission"};
-        }
-        runtime.download_slice(
-            raw.minimizer_words,
-            0u,
-            std::as_writable_bytes(std::span<MinimizerT>{
-                host_minimizers.data(), host_minimizers.size()}));
-        if (owned_host_permit) {
-            owned_host_permit->shrink_to(exact_host_capacity_bytes);
+        std::vector<MinimizerT> host_minimizers;
+        std::uint64_t exact_host_capacity_bytes = 0u;
+        bool host_permit_released_to_process_footprint = false;
+        std::uint64_t host_footprint_reflected_delta_bytes = 0u;
+        const auto allocate_and_download = [
+                &host_minimizers,
+                &exact_host_capacity_bytes,
+                &raw,
+                host_ownership_route,
+                exact_host_headroom_bytes,
+                &owned_host_permit,
+                &runtime] {
+            host_minimizers.resize(static_cast<std::size_t>(raw.count));
+            exact_host_capacity_bytes = saturating_mul(
+                static_cast<std::uint64_t>(host_minimizers.capacity()),
+                static_cast<std::uint64_t>(sizeof(MinimizerT)));
+            if ((host_ownership_route
+                        == VulkanSketchHostOwnershipRoute::
+                            fixed_zero_copy_adoption
+                    && host_minimizers.size()
+                        != host_minimizers.capacity())
+                || exact_host_capacity_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()
+                || exact_host_capacity_bytes > exact_host_headroom_bytes) {
+                throw VulkanRuntimeError{
+                    "Vulkan decoded fixed host minimizer capacity exceeded "
+                    "admission"};
+            }
+            if (owned_host_permit) {
+                owned_host_permit->shrink_to(exact_host_capacity_bytes);
+            }
+            runtime.download_slice(
+                raw.minimizer_words,
+                0u,
+                std::as_writable_bytes(std::span<MinimizerT>{
+                    host_minimizers.data(), host_minimizers.size()}));
+        };
+
+        if (host_ownership_route
+                == VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption
+            && exact_host_size_bytes != 0u) {
+            auto materialization =
+                MemoryAdmissionController::instance().materialize(
+                    *owned_host_permit,
+                    [&allocate_and_download,
+                     &exact_host_capacity_bytes]() -> bioseq::parallelism::
+                            MemoryMaterializationEvidence {
+                        allocate_and_download();
+                        return {
+                            .actual_allocation_bytes =
+                                exact_host_capacity_bytes,
+                            .fully_touched_bytes = exact_host_capacity_bytes,
+                            .host_visible = true,
+                            .host_coherent = true,
+                            .process_footprint_reflected = true,
+                        };
+                    });
+            host_permit_released_to_process_footprint =
+                materialization.permit_released;
+            host_footprint_reflected_delta_bytes =
+                materialization.reflected_delta_bytes;
+            if (!materialization.permit_released) {
+                // A large target does not imply a large emitted vector.  An
+                // ambiguity-heavy dna5 target can produce a small non-empty
+                // allocation whose allocator pages were already resident, so
+                // the serialized RSS probe may correctly decline to release
+                // the reservation.  Keep the exact, already-shrunk permit as
+                // the alternative ownership authority.  The pipeline moves it
+                // with the vector and releases it only after index construction
+                // has consumed the vector and proved capacity()==0.
+                bioseq_log<DBG>(
+                    "[vulkan sketch] fixed host footprint reconciliation "
+                    "retained exact permit: actual={} touched={} before={} "
+                    "after={} delta={} permit={}",
+                    materialization.evidence.actual_allocation_bytes,
+                    materialization.evidence.fully_touched_bytes,
+                    materialization.footprint_before_bytes,
+                    materialization.footprint_after_bytes,
+                    materialization.reflected_delta_bytes,
+                    owned_host_permit->bytes());
+            } else {
+                owned_host_permit.reset();
+            }
+        } else {
+            allocate_and_download();
+            if (host_ownership_route
+                    == VulkanSketchHostOwnershipRoute::
+                        fixed_zero_copy_adoption) {
+                // Empty vectors own no capacity and need no footprint delta.
+                if (owned_host_permit) {
+                    owned_host_permit->shrink_to(0u);
+                }
+                owned_host_permit.reset();
+                host_permit_released_to_process_footprint = true;
+            }
         }
 
         auto storage = std::make_shared<VulkanDeviceMinimizerStorage<MinimizerT>>();
@@ -1702,6 +1829,13 @@ sketch_uploaded_window_result(
             .host_minimizers = std::move(host_minimizers),
             .dispatch_token = VulkanSketchDispatchToken::
                 completed_collect_minimizers_roundtrip(),
+            .host_ownership_route = host_ownership_route,
+            .host_permit_released_to_process_footprint =
+                host_permit_released_to_process_footprint,
+            .host_footprint_reflected_delta_bytes =
+                host_footprint_reflected_delta_bytes,
+            .arena_trimmed_before_host_materialization =
+                raw.arena_trimmed_before_return,
             .overflow = false,
         };
     } catch (const VulkanRuntimeError&) {
@@ -1717,7 +1851,9 @@ build_gpu_index_from_upload_on_device(
     std::size_t window_size,
     std::size_t kmer_size,
     VulkanSketchQueryGate query_gate = {},
-    VulkanSketchDecline* decline_out = nullptr)
+    VulkanSketchDecline* decline_out = nullptr,
+    std::uint64_t owned_sequence_staging_bytes = 0u,
+    std::function<void()> release_owned_sequence_staging = {})
 {
     using bioseq::parallelism::MemoryAdmissionController;
 
@@ -1792,6 +1928,15 @@ build_gpu_index_from_upload_on_device(
         decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
         return std::nullopt;
     }
+    const PhaseCTargetIndexHostScratchPlan host_scratch_plan =
+        phase_c_target_index_host_scratch_plan(
+            memory_plan, owned_sequence_staging_bytes);
+    if (!host_scratch_plan.valid
+        || (owned_sequence_staging_bytes != 0u
+            && !release_owned_sequence_staging)) {
+        decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
+        return std::nullopt;
+    }
     const std::uint64_t query_gate_bytes =
         bioseq::parallelism::saturating_mul(
             static_cast<std::uint64_t>(query_gate.words.size()),
@@ -1805,12 +1950,40 @@ build_gpu_index_from_upload_on_device(
     const std::uint64_t count_arena_bytes =
         runtime.phase_c_arena_allocation_requirement(count_arena_request);
     const std::uint64_t admission_bytes = sat_add(
-        count_arena_bytes, memory_plan.host_transient_bytes);
+        count_arena_bytes, host_scratch_plan.count_phase_bytes);
     if (query_gate_bytes == (std::numeric_limits<std::uint64_t>::max)()
         || admission_bytes == (std::numeric_limits<std::uint64_t>::max)()) {
         decline(VulkanSketchDeclineReason::memory_plan_invalid, max_minimizers);
         return std::nullopt;
     }
+
+    const auto query_gate_identity = query_gate.canonical_identity();
+    const VulkanSketchParams sketch_params{
+        .bp_size = static_cast<std::uint32_t>(upload.bp_size),
+        .window_size = static_cast<std::uint32_t>(window_size),
+        .kmer_size = static_cast<std::uint32_t>(kmer_size),
+        .hash_bits = minimizer_wire_traits<MinimizerT>::hash_bits,
+        .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
+        .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
+        .minimizer_word_kind = static_cast<std::uint32_t>(
+            minimizer_wire_traits<MinimizerT>::word_kind),
+        .minimizer_words32 =
+            minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
+        .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
+        .unit_bits = upload.unit_bits,
+        .bits_per_char = upload.bits_per_char,
+        .letters_per_unit = upload.letters_per_unit,
+        .alphabet_size = upload.alphabet_size,
+        .seq_word_offset = 0u,
+        .char_mask = upload.char_mask,
+        .padding_letters = upload.padding_letters,
+    };
+    // Pipeline-cache metadata is process-lived authority. Resolve the exact
+    // target-index key set before reserving the transient count/main peak so a
+    // cold pipeline cannot nest a metadata admission after large mapped Vulkan
+    // allocations have become visible in the process footprint.
+    runtime.prepare_phase_c_target_index_pipelines(sketch_params);
+
     auto& admission = MemoryAdmissionController::instance();
     bioseq::parallelism::MemoryAdmissionFailure admission_failure{};
     auto permit = admission.try_reserve(admission_bytes, &admission_failure);
@@ -1844,51 +2017,24 @@ build_gpu_index_from_upload_on_device(
     }
 
     try {
-        const auto query_gate_identity = query_gate.canonical_identity();
-        const VulkanSketchParams sketch_params{
-            .bp_size = static_cast<std::uint32_t>(upload.bp_size),
-            .window_size = static_cast<std::uint32_t>(window_size),
-            .kmer_size = static_cast<std::uint32_t>(kmer_size),
-            .hash_bits = minimizer_wire_traits<MinimizerT>::hash_bits,
-            .hash_shift = minimizer_wire_traits<MinimizerT>::hash_shift,
-            .pos_bits = minimizer_wire_traits<MinimizerT>::pos_bits,
-            .minimizer_word_kind = static_cast<std::uint32_t>(
-                minimizer_wire_traits<MinimizerT>::word_kind),
-            .minimizer_words32 =
-                minimizer_wire_traits<MinimizerT>::words32_per_minimizer,
-            .alphabet_kind = static_cast<std::uint32_t>(upload.alphabet_kind),
-            .unit_bits = upload.unit_bits,
-            .bits_per_char = upload.bits_per_char,
-            .letters_per_unit = upload.letters_per_unit,
-            .alphabet_size = upload.alphabet_size,
-            .seq_word_offset = 0u,
-            .char_mask = upload.char_mask,
-            .padding_letters = upload.padding_letters,
-        };
         GpuBuiltIndex built{};
         const auto materialization = admission.materialize(
             *permit,
             [&]() -> bioseq::parallelism::MemoryMaterializationEvidence {
-                {
-                    std::vector<std::byte> padded_sequence(
-                        static_cast<std::size_t>(upload.padded_byte_size));
-                    if (upload.byte_size != 0u && upload.bytes != nullptr) {
-                        std::memcpy(
-                            padded_sequence.data(),
-                            upload.bytes,
-                            static_cast<std::size_t>(upload.byte_size));
-                    }
-                    built = runtime.run_phase_c_build_target_index(
-                        std::span<const std::byte>{
-                            padded_sequence.data(), padded_sequence.size()},
-                        rank_lut,
-                        sketch_params,
-                        max_minimizers,
-                        query_gate.words,
-                        query_gate.mask,
-                        query_gate_identity,
-                        &*permit);
-                } // host sequence dies before the post-materialization probe.
+                built = runtime.run_phase_c_build_target_index(
+                    std::span<const std::byte>{
+                        static_cast<const std::byte*>(upload.bytes),
+                        static_cast<std::size_t>(upload.byte_size)},
+                    upload.padded_byte_size,
+                    owned_sequence_staging_bytes,
+                    std::move(release_owned_sequence_staging),
+                    rank_lut,
+                    sketch_params,
+                    max_minimizers,
+                    query_gate.words,
+                    query_gate.mask,
+                    query_gate_identity,
+                    &*permit);
 
                 if (!built.valid) {
                     return {};
@@ -1905,10 +2051,7 @@ build_gpu_index_from_upload_on_device(
                     built.slots.reset();
                     return {};
                 }
-                const std::uint64_t observed_total = sat_add(
-                    built.observed_device_peak_bytes,
-                    memory_plan.host_transient_bytes);
-                if (observed_total > permit->bytes()) {
+                if (built.ownership.peak_observed_bytes > permit->bytes()) {
                     built.valid = false;
                     built.failure_reason = GpuBuiltIndexFailureReason::
                         peak_allocation_exceeds_admission;
@@ -1989,7 +2132,9 @@ collect_minimizers_vulkan_result(
     const Seq& seq,
     std::size_t window_size,
     std::size_t kmer_size,
-    VulkanSketchDecline* decline_out = nullptr)
+    VulkanSketchDecline* decline_out = nullptr,
+    VulkanSketchHostOwnershipRoute host_ownership_route =
+        VulkanSketchHostOwnershipRoute::collector_compatible)
 {
     using bare = std::remove_cvref_t<Seq>;
     if (decline_out != nullptr) {
@@ -2048,7 +2193,10 @@ collect_minimizers_vulkan_result(
                     0u,
                     nullptr,
                     {},
-                    decline_out);
+                    decline_out,
+                    nullptr,
+                    0u,
+                    host_ownership_route);
             }
         }
     } else if constexpr (!vulkan_sketchable_sequence<bare>) {
@@ -2083,7 +2231,10 @@ collect_minimizers_vulkan_result(
                 0u,
                 nullptr,
                 {},
-                decline_out);
+                decline_out,
+                nullptr,
+                0u,
+                host_ownership_route);
         }
     }
 }
@@ -2692,13 +2843,23 @@ template <class MinimizerT, class Seq>
                 const SequenceUploadView upload =
                     make_upload_view_from_window<bare>(seq, base, descriptor);
                 const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
+                const std::uint64_t scratch_capacity_bytes =
+                    bioseq::parallelism::saturating_mul(
+                        static_cast<std::uint64_t>(scratch.capacity()),
+                        sizeof(storage_unit));
+                auto release_scratch =
+                    [scratch = std::move(scratch)]() mutable noexcept {
+                        std::vector<storage_unit>{}.swap(scratch);
+                    };
                 return build_gpu_index_from_upload_on_device<MinimizerT>(
                     upload,
                     rank_lut,
                     window_size,
                     kmer_size,
                     query_gate,
-                    decline_out);
+                    decline_out,
+                    scratch_capacity_bytes,
+                    std::move(release_scratch));
             }
         }
     } else if constexpr (!vulkan_sketchable_sequence<bare>) {
@@ -2826,13 +2987,26 @@ template <class MinimizerT, class Seq>
             const SequenceUploadView upload =
                 make_upload_view_from_window<bare>(seq, base, descriptor);
             const VulkanRankLut rank_lut = make_vulkan_rank_lut<bare>();
+            const std::uint64_t scratch_capacity_bytes =
+                bioseq::parallelism::saturating_mul(
+                    static_cast<std::uint64_t>(scratch.capacity()),
+                    sizeof(storage_unit));
+            std::function<void()> release_scratch;
+            if (!scratch.empty()) {
+                release_scratch =
+                    [scratch = std::move(scratch)]() mutable noexcept {
+                        std::vector<storage_unit>{}.swap(scratch);
+                    };
+            }
             return build_gpu_index_from_upload_on_device<MinimizerT>(
                 upload,
                 rank_lut,
                 window_size,
                 kmer_size,
                 query_gate,
-                decline_out);
+                decline_out,
+                scratch_capacity_bytes,
+                std::move(release_scratch));
         }
     }
 }
@@ -3080,7 +3254,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
                     maximum_dispatch_plan.arena_scaffold_bytes);
             const std::uint64_t maximum_host_transient_headroom_bytes =
                 vulkan_exact_host_allocation_admission_bytes(
-                    maximum_dispatch_plan.host_transient_bytes);
+                    maximum_dispatch_plan.count_phase_host_transient_bytes);
             const std::uint64_t maximum_dispatch_phase_bytes =
                 vulkan_sketch_dispatch_admission_bytes(
                     maximum_physical_arena_bytes,

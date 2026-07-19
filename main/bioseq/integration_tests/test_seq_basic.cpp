@@ -19,6 +19,7 @@
 // heap table to keep the assertions tight on the type itself.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
@@ -133,7 +134,11 @@ TEMPLATE_TEST_CASE_SIG(
     ((int Width), Width),
     8, 16, 32, 64) {
     auto ctx = fresh_context();
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    for (const auto alphabet : {std::string_view("dna4")}) {
+#else
     for (const auto alphabet : {std::string_view("dna4"), std::string_view("dna5")}) {
+#endif
         const seq_typmod typmod{.alphabet = alphabet, .width = Width};
         const auto text = query_scalar(
             ctx, fmt::format("SELECT {}::text;", format_literal("", typmod)));
@@ -145,6 +150,15 @@ TEMPLATE_TEST_CASE_SIG(
                     ctx, fmt::format("SELECT bioseq.unit_len({});",
                                      format_literal("", typmod))) == 0);
     }
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    const auto unsupported_alphabet = sql_error(
+        ctx,
+        fmt::format("SELECT ''::bioseq.seq('dna5', {})::text;", Width));
+    REQUIRE(unsupported_alphabet.sqlstate == "22023");
+    REQUIRE(unsupported_alphabet.contains(
+        "bioseq.seq alphabet \"dna5\" is not supported"));
+    REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
+#endif
 }
 
 // Empty + non-empty literals stored side-by-side on a heap table. The recv
@@ -274,15 +288,24 @@ TEST_CASE("bioseq.seq supports equality and range filters on heap tables",
     }
 }
 
-TEST_CASE("dna4 typmod cast loses non-canonical letters; dna5 preserves N",
+TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
           "[seq][basic][cast]") {
     auto ctx = fresh_context();
-    const auto row = query_one(
+    REQUIRE(query_scalar(
         ctx,
-        "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text, "
-        "       'ACGTN'::bioseq.seq('dna5', 16)::text;");
-    REQUIRE(row[0].value() == "ACGTA");
-    REQUIRE(row[1].value() == "ACGTN");
+        "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text;") == "ACGTA");
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    const auto unsupported_alphabet = sql_error(
+        ctx, "SELECT 'ACGTN'::bioseq.seq('dna5', 16)::text;");
+    REQUIRE(unsupported_alphabet.sqlstate == "22023");
+    REQUIRE(unsupported_alphabet.contains(
+        "bioseq.seq alphabet \"dna5\" is not supported"));
+    REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
+#else
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT 'ACGTN'::bioseq.seq('dna5', 16)::text;") == "ACGTN");
+#endif
 }
 
 // Negative typmod matrix: every entry must raise a SQL error. Adding a new

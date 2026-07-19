@@ -122,6 +122,7 @@ struct PgPersistQueueSlot {
     std::uint64_t payload_bytes;
     dsm_handle dsm;
     std::uint32_t payload_kind;
+    std::int32_t requested_provider;
 };
 
 enum class RuntimeInitState : std::uint32_t {
@@ -184,9 +185,12 @@ struct IndexBuildMpsDsmHeader {
     std::int32_t max_concurrency;
     std::int32_t index_memory_cap_mb;
     std::int32_t index_sketch_backend;  // DOC0345 Patch K — repurposed from `reserved` (keeps 72-byte size)
+    std::int32_t requested_provider;
     bioseq::storage::seq_locator locator;
 };
 static_assert(sizeof(IndexBuildMpsDsmHeader) == 80);
+static_assert(offsetof(IndexBuildMpsDsmHeader, requested_provider) == 36);
+static_assert(offsetof(IndexBuildMpsDsmHeader, locator) == 40);
 static_assert(std::is_trivially_copyable_v<IndexBuildMpsDsmHeader>);
 
 struct PersistFileChunkHeader {
@@ -201,7 +205,7 @@ inline constexpr std::uint32_t kIndexPersistDsmVersion = 1;
 inline constexpr std::uint32_t kIndexPersistFileDsmMagic = 0xB1051D59u;
 inline constexpr std::uint32_t kIndexPersistFileDsmVersion = 1;
 inline constexpr std::uint32_t kIndexBuildMpsDsmMagic = 0xB1051D5Au;
-inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 3;
+inline constexpr std::uint32_t kIndexBuildMpsDsmVersion = 4;
 
 struct PgMpsBuildStats {
     pg_atomic_uint64 generation;
@@ -394,6 +398,9 @@ void scheduler_shmem_startup() {
             slot.dsm = DSM_HANDLE_INVALID;
             slot.payload_kind = static_cast<std::uint32_t>(
                 PersistPayloadKind::none);
+            slot.requested_provider =
+                index_payload_storage_backend_wire_value(
+                    IndexPayloadStorageBackend::postgres_relation);
         }
         pg_atomic_init_u32(
             &g_shared->runtime_init_state,
@@ -626,6 +633,8 @@ struct PendingPersistJob {
     bool published = false;
     bool file_backed = false;
     PersistPayloadKind payload_kind = PersistPayloadKind::none;
+    IndexPayloadStorageBackend requested_provider =
+        IndexPayloadStorageBackend::postgres_relation;
     bioseq::parallelism::MemoryPermit permit{};
 };
 
@@ -770,6 +779,8 @@ struct MpsBuildMetadata {
     std::int32_t max_concurrency = 0;
     std::int32_t index_memory_cap_mb = 0;
     std::int32_t index_sketch_backend = 0;  // DOC0345 Patch K
+    IndexPayloadStorageBackend requested_provider =
+        IndexPayloadStorageBackend::postgres_relation;
 };
 
 [[nodiscard]] std::optional<PersistFileMetadata>
@@ -811,6 +822,8 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     if (header.magic != kIndexBuildMpsDsmMagic
         || header.version != kIndexBuildMpsDsmVersion
         || header.index_name_len == 0
+        || !is_valid_index_payload_storage_backend_wire_value(
+            header.requested_provider)
         || header.locator.version != bioseq::storage::kLocatorVersion
         || header.locator.source_epoch == 0) {
         return std::nullopt;
@@ -831,6 +844,8 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     meta.max_concurrency = header.max_concurrency;
     meta.index_memory_cap_mb = header.index_memory_cap_mb;
     meta.index_sketch_backend = header.index_sketch_backend;  // DOC0345 Patch K
+    meta.requested_provider =
+        *decode_index_payload_storage_backend(header.requested_provider);
     return meta;
 }
 
@@ -840,6 +855,15 @@ parse_mps_build_metadata(const char* base, Size mapped) {
     }
     if (job.payload_kind != PersistPayloadKind::mps_build_identity) {
         record_prohibited_legacy_persist_rejection("queue_publish");
+        return false;
+    }
+    if (!is_valid_index_payload_storage_backend_wire_value(
+            index_payload_storage_backend_wire_value(
+                job.requested_provider))
+        || job.requested_provider
+            != IndexPayloadStorageBackend::postgres_relation) {
+        record_prohibited_legacy_persist_rejection(
+            "queue_publish_provider");
         return false;
     }
     for (PgPersistQueueSlot& slot : g_shared->persist_queue) {
@@ -858,6 +882,9 @@ parse_mps_build_metadata(const char* base, Size mapped) {
         slot.payload_bytes = job.payload_bytes;
         slot.dsm = job.dsm;
         slot.payload_kind = static_cast<std::uint32_t>(job.payload_kind);
+        slot.requested_provider =
+            index_payload_storage_backend_wire_value(
+                job.requested_provider);
         pg_atomic_fetch_add_u32(&slot.generation, 1);
         pg_atomic_write_u32(&slot.state, 1);
         bioseq_log<DBG>("[bioseq] index: published async persist job row={} index={} bytes={}",
@@ -1140,7 +1167,35 @@ void ensure_persist_xact_callback_registered() {
         std::int32_t pipeline_mode,
         std::int32_t max_concurrency,
         std::int32_t index_memory_cap_mb,
-        std::int32_t index_sketch_backend) {  // DOC0345 Patch K
+        std::int32_t index_sketch_backend,
+        int requested_provider_wire_value) {  // DOC0345 Patch K / DOC0383 P5
+    const auto requested_provider =
+        decode_index_payload_storage_backend(
+            requested_provider_wire_value);
+    if (!requested_provider.has_value()) {
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [requested_provider_wire_value] {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("invalid asynchronous index payload provider"),
+                     errdetail("provider=%d",
+                        requested_provider_wire_value)));
+            });
+        pg_unreachable();
+    }
+    // The only asynchronous producer currently constructs MPS.  Preserve the
+    // caller's snapshotted provider identity, but reject mapped_file before
+    // callback registration, DSM creation, catalog access, or file activity.
+    if (*requested_provider
+            == IndexPayloadStorageBackend::mapped_file) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("mapped_file payload storage does not support asynchronous MPS persistence"),
+                 errdetail("mapped_file is restricted to Format-5 minimizers_per_fragment generations")));
+        });
+        pg_unreachable();
+    }
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
     if (!bioseq_index_async_persist
@@ -1243,6 +1298,9 @@ void ensure_persist_xact_callback_registered() {
             .max_concurrency = max_concurrency,
             .index_memory_cap_mb = index_memory_cap_mb,
             .index_sketch_backend = index_sketch_backend,
+            .requested_provider =
+                index_payload_storage_backend_wire_value(
+                    *requested_provider),
             .locator = locator,
         };
         std::memcpy(base, &header, sizeof(header));
@@ -1273,6 +1331,7 @@ void ensure_persist_xact_callback_registered() {
         job.dsm = dsm.handle;
         job.payload_bytes = bytes_total;
         job.payload_kind = PersistPayloadKind::mps_build_identity;
+        job.requested_provider = *requested_provider;
         pending_persist_jobs().push_back(std::move(job));
         // The pending transaction list now owns the pin. Disarm cleanup only
         // after vector insertion (and every possible allocation) succeeded.
@@ -2761,6 +2820,8 @@ struct PersistClaim {
     dsm_handle dsm = DSM_HANDLE_INVALID;
     std::uint64_t payload_bytes = 0;
     PersistPayloadKind payload_kind = PersistPayloadKind::none;
+    IndexPayloadStorageBackend requested_provider =
+        IndexPayloadStorageBackend::postgres_relation;
 };
 
 [[nodiscard]] std::optional<PersistClaim> claim_persist_job() noexcept {
@@ -2771,10 +2832,16 @@ struct PersistClaim {
          slot_index < BioseqSchedulerShared::kPersistQueueSize;
          ++slot_index) {
         PgPersistQueueSlot& slot = g_shared->persist_queue[slot_index];
+        if (pg_atomic_read_u32(&slot.state) != 1) {
+            continue;
+        }
         const auto payload_kind = static_cast<PersistPayloadKind>(
             slot.payload_kind);
-        if (pg_atomic_read_u32(&slot.state) == 1
-            && payload_kind != PersistPayloadKind::mps_build_identity) {
+        const auto requested_provider =
+            decode_index_payload_storage_backend(
+                slot.requested_provider);
+        if (payload_kind != PersistPayloadKind::mps_build_identity
+            || !requested_provider.has_value()) {
             static std::array<std::uint32_t,
                 BioseqSchedulerShared::kPersistQueueSize>
                 rejected_generations{};
@@ -2783,7 +2850,8 @@ struct PersistClaim {
             if (rejected_generations[slot_index] != generation) {
                 rejected_generations[slot_index] = generation;
                 record_prohibited_legacy_persist_rejection(
-                    "queue_claim");
+                    requested_provider.has_value()
+                        ? "queue_claim" : "queue_provider_decode");
             }
             // Fail closed: do not claim and therefore never acknowledge a
             // legacy DSM/file payload. Identity-queue replacement will
@@ -2808,6 +2876,7 @@ struct PersistClaim {
         claim.dsm = slot.dsm;
         claim.payload_bytes = slot.payload_bytes;
         claim.payload_kind = payload_kind;
+        claim.requested_provider = *requested_provider;
         return claim;
     }
     return std::nullopt;
@@ -2828,6 +2897,9 @@ void finish_persist_claim(const PersistClaim& claim) noexcept {
     slot.payload_bytes = 0;
     slot.payload_kind = static_cast<std::uint32_t>(
         PersistPayloadKind::none);
+    slot.requested_provider =
+        index_payload_storage_backend_wire_value(
+            IndexPayloadStorageBackend::postgres_relation);
     slot.sequence_rowno = 0;
     pg_atomic_fetch_add_u32(&slot.generation, 1);
     pg_atomic_write_u32(&slot.state, 0);
@@ -3176,6 +3248,22 @@ void process_mps_build_claim_cpp(
         bioseq_log<DBG>("[bioseq] index: discarded invalid async mps build metadata row={}",
                 static_cast<unsigned long long>(claim.target.sequence_rowno));
         return;
+    }
+    if (meta->requested_provider != claim.requested_provider) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("asynchronous MPS provider identity disagrees across queue and DSM")));
+        });
+    }
+    if (meta->requested_provider
+            != IndexPayloadStorageBackend::postgres_relation) {
+        bioseq::pg_utils::invoke_pg_as_cpp([] {
+            ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("mapped_file payload storage does not support MPS persistence"),
+                 errdetail("the queued job is rejected without provider fallback")));
+        });
     }
 
     PersistTarget target = claim.target;
@@ -3695,7 +3783,14 @@ void process_mps_identity_claim(const PersistClaim& claim) {
         ereport(ERROR,
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
              errmsg("legacy asynchronous persistence payload is prohibited"),
-             errdetail("only the temporary MPS identity build payload is accepted until the PostgreSQL identity queue replacement lands")));
+                errdetail("only the temporary MPS identity build payload is accepted until the PostgreSQL identity queue replacement lands")));
+    }
+    if (claim.requested_provider
+            != IndexPayloadStorageBackend::postgres_relation) {
+        ereport(ERROR,
+            (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+             errmsg("mapped_file payload storage does not support MPS persistence"),
+             errdetail("the requested provider was captured by the foreground job and is rejected before worker catalog access")));
     }
     StartTransactionCommand();
     Snapshot registered_snapshot =

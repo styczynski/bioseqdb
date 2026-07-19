@@ -21,6 +21,7 @@
 //     placeholder Const and the executor crashed.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 
 #include <set>
 
@@ -524,12 +525,21 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
 		"EXECUTE p_join_test("
 		"'ACGTACGTACGTACGTACGTACGTACGTACGT'"
 		"::bioseq.seq('dna5', 32));");
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+	REQUIRE(bad_typmod.sqlstate == "22023");
+	REQUIRE(bad_typmod.contains(
+		"bioseq.seq alphabet \"dna5\" is not supported"));
+	REQUIRE(bad_typmod.contains("Valid alphabets: 'dna4'"));
+#else
 	REQUIRE(bad_typmod.sqlstate == "42804");
 	REQUIRE(bad_typmod.contains(
 		"bioseq mmsearch Param payload typmod is incompatible"));
+#endif
 	/* A generic PREPARE Param loses its declared typmod in the plan, so the
-	 * pgseq payload is checked at runtime. Rejection happens before a new
-	 * alignment root can replace the last completed snapshot. */
+	 * pgseq payload is checked at runtime when dna5 is enabled. The level-0
+	 * profile rejects dna5 while parsing the EXECUTE argument instead. Both
+	 * rejections happen before a new alignment root can replace the last
+	 * completed snapshot. */
 	REQUIRE(query_scalar_int(
 		ctx,
 		"SELECT execution_id FROM "

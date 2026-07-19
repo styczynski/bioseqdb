@@ -205,6 +205,29 @@ namespace hn = hwy::HWY_NAMESPACE;
 
 namespace {
 
+/// Arms before fragment-anchor preparation and completes the scratch wave only
+/// after the synchronous prepare/consumer scope has unwound. The scratch API is
+/// idempotent/noexcept, so preparation and alignment failures both leave the
+/// reusable planner clean.
+class FragmentAnchorWaveCompletion final {
+private:
+    bioseq::indexing::QueryWaveScratch* scratch_ = nullptr;
+
+public:
+    explicit FragmentAnchorWaveCompletion(
+            bioseq::indexing::QueryWaveScratch& scratch) noexcept
+        : scratch_(&scratch) {}
+
+    ~FragmentAnchorWaveCompletion() noexcept {
+        scratch_->complete_wave_after_join();
+    }
+
+    FragmentAnchorWaveCompletion(
+        const FragmentAnchorWaveCompletion&) = delete;
+    FragmentAnchorWaveCompletion& operator=(
+        const FragmentAnchorWaveCompletion&) = delete;
+};
+
 constexpr std::string_view kMinimizersPerFragmentIndex =
     bioseq::indexing::MinimizerHashmapFragmentIndex::index_name;
 constexpr std::string_view kMinimizersPerSequenceIndex =
@@ -731,6 +754,13 @@ inline void record_unattested_job(
         stats.operational.stats_saturated =
             stats.operational.stats_saturated
             || execution_proof->host_stage_timing_saturated;
+        if (execution_proof->fragment_native_query_evidence_present) {
+            stats.operational.fragment_native_query_evidence.merge(
+                execution_proof->fragment_native_query_evidence);
+            stats.operational.stats_saturated =
+                stats.operational.stats_saturated
+                || stats.operational.fragment_native_query_evidence.saturated;
+        }
     }
     ::bioseq::pipeline_stats::PipelineJobExecutionStats job{};
     job.requested_backend = backend_from_selected_params(params);
@@ -2894,6 +2924,11 @@ template <class LazyQuery, class Target>
     const auto persist_target =
         make_fragment_index_persist_target(
             ctx, loc, sequence_rowno, choice->index_name);
+    // Snapshot provider selection exactly once at job creation.  The staging
+    // boundary validates this raw stable-ABI value and carries it through the
+    // queue and metadata-only DSM; the background worker never rereads a GUC.
+    const int requested_provider_wire_value =
+        bioseq_index_payload_storage_backend;
     const bool staged = bioseq::parallelism::pg::stage_async_mps_build(
         persist_target,
         loc,
@@ -2906,7 +2941,8 @@ template <class LazyQuery, class Target>
         bioseq_scheduler_max_concurrency,
         bioseq_index_memory_cap_mb,
         static_cast<std::int32_t>(  // DOC0345 Patch K — thread backend into the async worker
-            target_backend_from_params_for_recompute(params)));
+            target_backend_from_params_for_recompute(params)),
+        requested_provider_wire_value);
     bioseq_log<DBG>("[bioseq] index: recompute async-mps-build row={} index={} target_bp={} reason={} async_staged={}",
             static_cast<unsigned long long>(sequence_rowno),
             choice->index_name,
@@ -3152,6 +3188,7 @@ try_materialize_target_for_segment_workers(
         const std::uint64_t target_bp_size) noexcept {
     if (!group.persisted_format6_reader.has_value()
         || group.persisted_grouped32_reader.has_value()
+		|| group.persisted_shape_v5_mapping_guard.has_value()
         || group.persisted_shape_v5_reader.has_value()
 		|| group.persisted_mps_shape_v5_reader.has_value()
         || group.target_index
@@ -3219,6 +3256,8 @@ try_materialize_target_for_segment_workers(
         const BatchProcessor::CpuPreparedIndexGroup& group,
         const std::uint64_t target_bp_size) noexcept {
     if (!group.persisted_shape_v5_reader.has_value()
+		|| !group.persisted_shape_v5_mapping_guard.has_value()
+		|| !*group.persisted_shape_v5_mapping_guard
         || group.persisted_grouped32_reader.has_value()
 		|| group.persisted_mps_shape_v5_reader.has_value()
         || group.persisted_format6_reader.has_value()
@@ -3237,9 +3276,49 @@ try_materialize_target_for_segment_workers(
         return false;
     }
     const auto& read = group.persisted_read_stats;
+    const auto& reader = *group.persisted_shape_v5_reader;
     const auto memory =
-        group.persisted_shape_v5_reader->memory_evidence();
-    return group.persisted_shape_v5_reader->ready()
+        reader.memory_evidence();
+    const bool exact_lookup_backing_identity = [&]() noexcept {
+        switch (group.persisted_shape_v5_lookup_route) {
+        case bioseq::indexing::FragmentAnchorLookupRoute::
+                compact_h32_direct:
+            return reader.compact_direct_ready()
+                && reader.compact_direct_only()
+                && reader.mapped_format5_payload_bytes() == 0u
+                && reader.format5_directory_entry_count() == 0u
+                && memory.directory_capacity_bytes == 0u
+                && memory.ordinal_route_capacity_bytes == 0u
+                && read.directory_chunks_read == 0u
+                && read.directory_bytes_read == 0u;
+        case bioseq::indexing::FragmentAnchorLookupRoute::
+                format5_control_scans:
+            return !reader.compact_direct_ready()
+                && !reader.compact_direct_only()
+                && reader.mapped_format5_payload_bytes() > 0u
+                && reader.format5_directory_entry_count() > 0u
+                && memory.directory_capacity_bytes > 0u
+                && memory.ordinal_route_capacity_bytes > 0u
+                && read.directory_chunks_read > 0u
+                && read.directory_bytes_read > 0u;
+        }
+		return false;
+	}();
+	const bool deferred_query_set_identity =
+		group.compact_direct_query_set_proof_pending
+		? group.persisted_shape_v5_lookup_route
+				== bioseq::indexing::FragmentAnchorLookupRoute::
+					compact_h32_direct
+			&& group.canonical_query_hash_union_u32.empty()
+			&& group.canonical_query_hash_union_u32.capacity() == 0u
+			&& group.key_set_checksum == 0u
+			&& !group.build_set_checksum_present
+			&& group.build_set_checksum == 0u
+		: group.build_set_checksum_present
+			&& group.build_set_checksum == group.key_set_checksum;
+	return reader.ready()
+		&& exact_lookup_backing_identity
+		&& deferred_query_set_identity
         && memory.query_record_count == 0u
         && memory.query_record_capacity_bytes == 0u
         && memory.query_hash_capacity_bytes == 0u
@@ -3255,11 +3334,9 @@ try_materialize_target_for_segment_workers(
         && memory.current_selected_control_capacity_bytes == 0u
         && memory.selected_extent_capacity_bytes == 0u
         && memory.control_payload_capacity_bytes == 0u
-        && memory.directory_capacity_bytes > 0u
-        && memory.ordinal_route_capacity_bytes > 0u
         && memory.retained_layout_equation_holds()
         && memory.owned_capacity_bytes
-            == group.persisted_shape_v5_reader->admitted_bytes()
+            == reader.admitted_bytes()
         && read.relation_opens == 1u
         && read.head_scans == 1u
         && read.manifest_directory_scans == 1u
@@ -3504,6 +3581,14 @@ template <class S>
                  &row_consumed_persisted_query_sketch,
                  &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
+                    if (!minimizer_query_length_is_representable<
+                            MinimapSketchData>(
+                                static_cast<sequence_size_t>(
+                                    query_seq.bp_size()))) {
+                        raise_typed_dispatch_pg_error_as_cpp(
+                            ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+                            "query exceeds the 28-bit minimizer position domain");
+                    }
                     const std::uint64_t query_sketch_started_ns =
                         dispatch_host_now_ns();
                     if (selected_vulkan_execution(idx_params)) {
@@ -3564,6 +3649,11 @@ template <class S>
 					&& prepared_group->persisted_grouped32_reader.has_value();
 				const bool has_shape_v5_reader = prepared_group != nullptr
 					&& prepared_group->persisted_shape_v5_reader.has_value();
+				const bool has_shape_v5_mapping_guard =
+					prepared_group != nullptr
+					&& prepared_group->persisted_shape_v5_mapping_guard.has_value()
+					&& static_cast<bool>(
+						*prepared_group->persisted_shape_v5_mapping_guard);
 				const bool has_mps_shape_v5_reader = prepared_group != nullptr
 					&& prepared_group->
 						persisted_mps_shape_v5_reader.has_value();
@@ -3649,6 +3739,7 @@ template <class S>
 							has_shape_v5_reader,
 							has_mps_shape_v5_reader,
 							has_format6_reader)
+					|| has_shape_v5_reader != has_shape_v5_mapping_guard
 					|| (has_grouped32_reader
 						&& !prepared_group->persisted_grouped32_reader->ready())
 					|| (has_shape_v5_reader
@@ -3714,14 +3805,63 @@ template <class S>
 								/*gpu_index_cache=*/nullptr,
 								bioseq::indexing::GpuIndexCacheIdentity{});
 							} else if (has_shape_v5_reader) {
-							collection = minimap2_port_with_index_pg_checked(
-								fq_pg,
-								ft_pg,
-								alignment_query_minimizers,
-								*prepared_group->persisted_shape_v5_reader,
-								idx_params,
-								/*gpu_index_cache=*/nullptr,
-								bioseq::indexing::GpuIndexCacheIdentity{});
+							collection = run_aligner_pg_checked(
+								"fragment-native single-query anchor preparation",
+									[&alignment_query_minimizers, &query_seq,
+									 &idx_params, prepared_group, &fq_pg,
+									 &ft_pg]() -> MatchResultCollection {
+									const std::uint64_t prepare_started_ns =
+										dispatch_host_now_ns();
+									auto& admission = bioseq::parallelism::
+										MemoryAdmissionController::instance();
+									auto scratch_result = bioseq::indexing::
+										QueryWaveScratch::create(admission);
+									if (!scratch_result) {
+										throw bioseq::indexing::
+											PersistedMinimizerLookupError(
+												"fragment-native query scratch was not "
+												"admitted; wire_error="
+												+ std::to_string(static_cast<unsigned>(
+													scratch_result.error())));
+									}
+									auto scratch = std::move(*scratch_result);
+									const bioseq::indexing::FragmentSeedQuery request{
+										.minimizers = alignment_query_minimizers,
+										.query_length = static_cast<sequence_size_t>(
+											query_seq.bp_size()),
+										.kmer_size = idx_params.kmer_size,
+									};
+									FragmentAnchorWaveCompletion wave_completion{
+										scratch};
+									auto prepared = prepared_group->
+										persisted_shape_v5_reader->
+										prepare_fragment_anchor_batch(
+											admission,
+											std::span<const bioseq::indexing::
+												FragmentSeedQuery>{&request, 1u},
+											idx_params.max_occ,
+											scratch,
+											/*baseline_query_plan_matcher_for_testing=*/false,
+											/*verify_compositional_order_for_testing=*/false,
+											prepared_group->
+												persisted_shape_v5_lookup_route);
+									const auto query_index = prepared.query_view(0u);
+									const std::uint64_t prepare_host_wall_ns =
+										elapsed_dispatch_host_ns(prepare_started_ns);
+									MatchResultCollection out = minimap2_port_with_index(
+										fq_pg,
+										ft_pg,
+										alignment_query_minimizers,
+										query_index,
+										idx_params,
+										/*gpu_index_cache=*/nullptr,
+										bioseq::indexing::GpuIndexCacheIdentity{});
+										out.record_seed_lookup_host_time(
+											prepare_host_wall_ns);
+										out.record_fragment_native_query_evidence(
+											prepared.evidence());
+										return out;
+								});
 							} else {
 							collection = minimap2_port_with_index_pg_checked(
 								fq_pg,
@@ -6656,8 +6796,11 @@ template <class S>
                 bool batch_identity_valid =
                     prepared_target->unions_ready
                     && prepared_target->target_rowno >= 0
-                    && prepared_target->query_count
-                        >= static_cast<std::uint64_t>(batch_size)
+					&& prepared_target->query_count
+						>= static_cast<std::uint64_t>(batch_size)
+					&& (prepared_target->query_set_proof_ready()
+						|| prepared_target->query_count
+							== static_cast<std::uint64_t>(batch_size))
                     && prepared_target->target_bp_size
                         > static_cast<std::uint64_t>(
                             kPgSegmentationThresholdBp);
@@ -6801,18 +6944,27 @@ template <class S>
                             native_group->persisted_shape_v5_reader
                             ? &*native_group->persisted_shape_v5_reader
                             : nullptr;
-                        // MPF fragments remain independent and are probed in
-                        // parallel. Bound the transient query wave to the
-                        // effective worker count: a 16-query wave retained too
-                        // many occurrence plans/candidates at once on the
-                        // 16-GiB benchmark host and increased swap-backed wall
-                        // time despite one fewer control traversal.
-                        const std::size_t shape_v5_wave_size = std::max(
-                            std::size_t{1u},
-                            std::min(
-                                batch_size,
-                                static_cast<std::size_t>(
-                                    pool.max_concurrency())));
+						const auto shape_v5_lookup_route =
+							native_group->persisted_shape_v5_lookup_route;
+						// Compact-direct preparation is itself the exact memory
+						// authority. Attempt the complete canonical batch once,
+						// without a duplicate occurrence-estimation pass. A typed
+						// preparation-time admission failure may retry from wave 0
+						// at the historical worker bound below.
+						const std::size_t worker_bounded_shape_v5_wave_size =
+							std::max(
+								std::size_t{1u},
+								std::min(
+									batch_size,
+									static_cast<std::size_t>(
+										pool.max_concurrency())));
+						const std::size_t shape_v5_wave_size =
+							shape_v5_reader != nullptr
+								&& shape_v5_lookup_route
+									== bioseq::indexing::FragmentAnchorLookupRoute::
+										compact_h32_direct
+							? batch_size
+							: worker_bounded_shape_v5_wave_size;
                         std::vector<MatchResultCollection>
                             native_collections(batch_size);
                         (void)run_aligner_pg_checked(
@@ -6822,10 +6974,14 @@ template <class S>
                              &resident_target,
                              &retained_query_sketches,
                              per_row_query_hdrs,
-                             format6_reader,
-                             shape_v5_reader,
-                             batch_size,
-                             shape_v5_wave_size]()
+							 format6_reader,
+							 shape_v5_reader,
+							 shape_v5_lookup_route,
+							 prepared_target,
+							 native_group,
+							 batch_size,
+							 worker_bounded_shape_v5_wave_size,
+							 shape_v5_wave_size]()
                                     -> MatchResultCollection {
                                 const auto align_query =
                                     [&native_collections,
@@ -6886,75 +7042,244 @@ template <class S>
                                         "fragment-native Format-5 reader disappeared");
                                 }
 
+                                auto& memory_admission = bioseq::parallelism::
+                                    MemoryAdmissionController::instance();
+                                const std::uint64_t first_wave_prepare_started_ns =
+                                    dispatch_host_now_ns();
+                                auto scratch_result = bioseq::indexing::
+                                    QueryWaveScratch::create(memory_admission);
+                                if (!scratch_result) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query scratch was "
+                                            "not admitted; wire_error="
+                                            + std::to_string(
+                                                static_cast<unsigned>(
+                                                    scratch_result.error())));
+                                }
+                                // Reuse one admitted scratch owner across the
+                                // serial waves. Each prepared batch owns its
+                                // final anchors independently and is destroyed
+                                // after its synchronous query wave completes.
+                                auto query_wave_scratch =
+                                    std::move(*scratch_result);
+
+                                const std::uint64_t descriptor_bytes =
+                                    bioseq::parallelism::saturating_mul(
+                                        shape_v5_wave_size,
+                                        sizeof(bioseq::indexing::
+                                            FragmentSeedQuery));
+                                const std::uint64_t descriptor_headroom =
+                                    bioseq::parallelism::saturating_mul(
+                                        descriptor_bytes,
+                                        bioseq::parallelism::
+                                            kVectorPreallocationHeadroomFactor);
+                                if (descriptor_bytes
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                    || descriptor_headroom
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptor "
+                                            "capacity overflow");
+                                }
+                                auto descriptor_permit_result =
+                                    memory_admission.try_reserve(
+                                        descriptor_headroom);
+                                if (!descriptor_permit_result) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptors "
+                                            "were not admitted");
+                                }
+                                // Declared before the vector so reverse
+                                // destruction releases storage before permit.
+                                auto descriptor_permit =
+                                    std::move(*descriptor_permit_result);
+                                std::vector<bioseq::indexing::FragmentSeedQuery>
+                                    wave_queries;
+                                try {
+                                    wave_queries.reserve(shape_v5_wave_size);
+                                } catch (const std::bad_alloc&) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptor "
+                                            "allocation failed");
+                                }
+                                const std::uint64_t actual_descriptor_bytes =
+                                    bioseq::parallelism::saturating_mul(
+                                        wave_queries.capacity(),
+                                        sizeof(bioseq::indexing::
+                                            FragmentSeedQuery));
+                                if (actual_descriptor_bytes
+                                        == (std::numeric_limits<
+                                            std::uint64_t>::max)()
+                                    || (actual_descriptor_bytes
+                                            > descriptor_permit.bytes()
+                                        && !descriptor_permit.grow_to(
+                                            actual_descriptor_bytes))) {
+                                    throw bioseq::indexing::
+                                        PersistedMinimizerLookupError(
+                                            "fragment-native query descriptor "
+                                            "reconciliation failed");
+                                }
+                                descriptor_permit.shrink_to(
+                                    actual_descriptor_bytes);
+
+								std::size_t active_shape_v5_wave_size =
+									shape_v5_wave_size;
+								bool full_wave_admission_retry_available =
+									shape_v5_lookup_route
+										== bioseq::indexing::
+											FragmentAnchorLookupRoute::
+												compact_h32_direct
+									&& shape_v5_wave_size == batch_size
+									&& worker_bounded_shape_v5_wave_size
+										< batch_size;
                                 for (std::size_t wave_begin = 0u;
-                                     wave_begin < batch_size;
-                                     wave_begin += shape_v5_wave_size) {
+									 wave_begin < batch_size;) {
+                                    const std::uint64_t
+                                        seed_wave_prepare_started_ns =
+                                            wave_begin == 0u
+                                            ? first_wave_prepare_started_ns
+                                            : dispatch_host_now_ns();
                                     const std::size_t wave_end = std::min(
                                         batch_size,
-                                        wave_begin + shape_v5_wave_size);
-                                    std::vector<std::span<
-                                        const MinimapSketchData>>
-                                            wave_queries;
-                                    wave_queries.reserve(
-                                        wave_end - wave_begin);
+										wave_begin
+											+ active_shape_v5_wave_size);
+                                    wave_queries.clear();
                                     for (std::size_t row = wave_begin;
                                          row < wave_end;
                                          ++row) {
-                                        wave_queries.emplace_back(
-                                            retained_query_sketches[row]
-                                                ->minimizers);
-                                    }
-                                    const std::uint64_t
-                                        seed_wave_prepare_started_ns =
-                                            dispatch_host_now_ns();
-                                    const auto prepared_seed_batch =
-                                        shape_v5_reader->
-                                            prepare_fragment_seed_batch(
-                                                std::span<const std::span<
-                                                    const MinimapSketchData>>{
-                                                        wave_queries},
-                                                native_query_params[
-                                                    wave_begin].max_occ);
-                                    const std::uint64_t
-                                        seed_wave_prepare_host_wall_ns =
-                                            elapsed_dispatch_host_ns(
-                                                seed_wave_prepare_started_ns);
-                                    bioseq::parallelism::
-                                        parallel_for_pipeline(
-                                            wave_begin,
-                                            wave_end,
-                                            1,
-                                            bioseq::parallelism::
-                                                TaskParallelMinTriggers::
-                                                    MIN_QUERY_COUNT,
-                                            bioseq::parallelism::
-                                                TaskParallelRegion::
-                                                    query_batch,
-                                            [&align_query,
-                                             &prepared_seed_batch,
-                                             &retained_query_sketches,
-                                             wave_begin](
-                                                    const std::size_t lo,
-                                                    const std::size_t hi) {
-                                                for (std::size_t row = lo;
-                                                     row < hi;
-                                                     ++row) {
-                                                    const auto query_index =
-                                                        prepared_seed_batch.
-                                                            query_view(
-                                                                row
-                                                                    - wave_begin,
-                                                                retained_query_sketches[
-                                                                    row]->
-                                                                    minimizers);
-                                                    align_query(
-                                                        row,
-                                                        query_index);
-                                                }
+                                        wave_queries.push_back(
+                                            bioseq::indexing::FragmentSeedQuery{
+                                                .minimizers =
+                                                    retained_query_sketches[row]
+                                                        ->minimizers,
+                                                .query_length =
+                                                    static_cast<sequence_size_t>(
+                                                        (*per_row_query_hdrs)[row]
+                                                            ->bp_size),
+                                                .kmer_size =
+                                                    native_query_params[row]
+                                                        .kmer_size,
                                             });
-                                    native_collections[wave_begin].
-                                        record_seed_lookup_host_time(
-                                            seed_wave_prepare_host_wall_ns);
+                                    }
+									bool retry_at_worker_bound = false;
+									{
+										FragmentAnchorWaveCompletion
+											wave_completion{query_wave_scratch};
+										std::optional<bioseq::indexing::
+											PreparedFragmentAnchorBatch>
+												prepared_seed_batch;
+										try {
+											prepared_seed_batch.emplace(
+												shape_v5_reader->
+													prepare_fragment_anchor_batch(
+														memory_admission,
+														std::span<const bioseq::indexing::
+															FragmentSeedQuery>{
+																wave_queries},
+														native_query_params[
+															wave_begin].max_occ,
+														query_wave_scratch,
+														/*baseline_query_plan_matcher_for_testing=*/false,
+														/*verify_compositional_order_for_testing=*/false,
+														shape_v5_lookup_route));
+										} catch (const bioseq::indexing::
+												PersistedMinimizerLookupError& error) {
+											retry_at_worker_bound =
+												wave_begin == 0u
+												&& full_wave_admission_retry_available
+												&& error.reason()
+													== bioseq::indexing::
+														PersistedMinimizerLookupError::
+															Reason::
+																admission_or_allocation;
+										if (!retry_at_worker_bound) throw;
+									}
+
+									if (!retry_at_worker_bound) {
+										if (native_group->
+												compact_direct_query_set_proof_pending) {
+											const bool complete_query_set =
+												wave_begin == 0u
+												&& wave_end == batch_size
+												&& wave_queries.size() == batch_size;
+											if (!complete_query_set
+												|| !BatchProcessor::
+													publish_compact_direct_query_set_proof(
+														*prepared_target,
+														*native_group,
+														prepared_seed_batch->
+															compact_direct_query_set_proof())) {
+												throw bioseq::indexing::
+													PersistedMinimizerLookupError(
+														"compact-direct full-batch query-set proof was rejected");
+											}
+										}
+										const std::uint64_t
+												seed_wave_prepare_host_wall_ns =
+													elapsed_dispatch_host_ns(
+														seed_wave_prepare_started_ns);
+											bioseq::parallelism::
+												parallel_for_pipeline(
+													wave_begin,
+													wave_end,
+													1,
+													bioseq::parallelism::
+														TaskParallelMinTriggers::
+															MIN_QUERY_COUNT,
+													bioseq::parallelism::
+														TaskParallelRegion::
+															query_batch,
+													[&align_query,
+													 &prepared_seed_batch,
+													 wave_begin](
+															const std::size_t lo,
+															const std::size_t hi) {
+														for (std::size_t row = lo;
+															 row < hi;
+															 ++row) {
+															const auto query_index =
+																prepared_seed_batch->
+																	query_view(
+																		row
+																			- wave_begin);
+															align_query(
+																row,
+																query_index);
+														}
+													});
+											native_collections[wave_begin].
+												record_fragment_native_query_evidence(
+													prepared_seed_batch->evidence());
+											native_collections[wave_begin].
+												record_seed_lookup_host_time(
+													seed_wave_prepare_host_wall_ns);
+										}
+									}
+									if (retry_at_worker_bound) {
+										full_wave_admission_retry_available = false;
+										if (query_wave_scratch.wave_outstanding()) {
+											throw bioseq::indexing::
+												PersistedMinimizerLookupError(
+													"fragment-native failed wave retained "
+													"active scratch state");
+										}
+										query_wave_scratch.
+											release_retained_capacity();
+										BatchProcessor::
+											finalize_pending_compact_direct_query_set_proof_fallback(
+												*prepared_target);
+										active_shape_v5_wave_size =
+											worker_bounded_shape_v5_wave_size;
+										wave_queries.clear();
+										continue;
+									}
+									wave_begin = wave_end;
                                 }
                                 return {};
                             });
@@ -7034,9 +7359,23 @@ template <class S>
                         return results;
                     }
                 }
-            }
+			}
+			if (scanner_pg_ctx != nullptr
+				&& scanner_pg_ctx->cpu_prepared_target != nullptr
+				&& !scanner_pg_ctx->cpu_prepared_target->
+					query_set_proof_ready()) {
+				(void)run_aligner_pg_checked(
+					"compact-direct query-set slow fallback",
+					[prepared_target = scanner_pg_ctx->cpu_prepared_target]()
+							-> MatchResultCollection {
+						BatchProcessor::
+							finalize_pending_compact_direct_query_set_proof_fallback(
+								*prepared_target);
+						return {};
+					});
+			}
 
-            std::vector<std::uint8_t> parallel_done;
+			std::vector<std::uint8_t> parallel_done;
             std::vector<MatchResultCollection> parallel_collections;
             std::vector<Minimap2Params> parallel_params;
 

@@ -3394,6 +3394,37 @@ inline constexpr bool exact_compiled_target_is_scalar = true;
 inline constexpr bool exact_compiled_target_is_scalar = false;
 #endif
 
+/**
+ * The packed K15/W10/B8 kernel stores candidate hashes in u32 lanes and raw
+ * minimizers in u64 lanes.  Both persisted-index representations used by the
+ * production pipeline satisfy that contract:
+ *
+ *  * `MinimizerRepr<33, 15>` for target postings (30 hash bits); and
+ *  * `MinimapSketchData == MinimizerRepr<28, 15>` for query sketches
+ *    (35 hash bits, of which minimap-int uses the low 30).
+ *
+ * The original gate admitted only the target layout even though every raw
+ * construction below is already parameterized by `hash_shift`,
+ * `pos_field_mask`, and `pos_shift`.  Keep the admission deliberately narrow
+ * to these two persisted-compatible layouts rather than silently widening the
+ * kernel to arbitrary `MinimizerT` encodings.
+ */
+template<class MinimizerT>
+inline constexpr bool exact_k15_w10_b8_representation_v =
+    exact_simd_minimizer_representation<MinimizerT>
+    && std::same_as<typename MinimizerT::storage_t, std::uint64_t>
+    && MinimizerT::pos_shift == 1u
+    && ((static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
+                == 0x3fffffffull
+            && static_cast<std::uint64_t>(MinimizerT::pos_field_mask)
+                == 0x1ffffffffull
+            && MinimizerT::hash_shift == 34u)
+        || (static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
+                == 0x7ffffffffull
+            && static_cast<std::uint64_t>(MinimizerT::pos_field_mask)
+                == 0x0fffffffull
+            && MinimizerT::hash_shift == 29u));
+
 template<class MinimizerT, class AlphabetTraits>
 [[nodiscard]] inline ExactSimdKernelKind select_exact_simd_kernel_kind(
     std::size_t consumed_bp) noexcept
@@ -3401,13 +3432,7 @@ template<class MinimizerT, class AlphabetTraits>
     if constexpr (
         std::same_as<typename AlphabetTraits::alphabet_type, seq::dna4>
         && std::same_as<typename AlphabetTraits::storage_unit, std::uint32_t>
-        && std::same_as<typename MinimizerT::storage_t, std::uint64_t>
-        && static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
-            == 0x3fffffffull
-        && static_cast<std::uint64_t>(MinimizerT::pos_field_mask)
-            == 0x1ffffffffull
-        && MinimizerT::hash_shift == 34u
-        && MinimizerT::pos_shift == 1u) {
+        && exact_k15_w10_b8_representation_v<MinimizerT>) {
         const hn::ScalableTag<std::uint32_t> d32;
         const hn::ScalableTag<std::uint64_t> d64;
         if (!exact_compiled_target_is_scalar
@@ -3664,11 +3689,23 @@ decode_packed_dna4_rank_vector(
 
     std::uint64_t packed_low = 0;
     std::uint64_t packed_high = 0;
+    // `bit_casted_view` may expose native u64 storage as logical u32 words.
+    // Load through the character alias and memcpy into the declared storage
+    // type so the zero-copy downcast does not depend on type-based aliasing.
+    // Constant-size memcpy lowers to the same unaligned scalar load here.
+    const auto* packed_bytes = reinterpret_cast<const unsigned char*>(
+        packed.data());
     for (std::size_t unit_offset = 0;
          unit_offset < required_units;
          ++unit_offset) {
+        unsigned_storage storage_value = 0;
+        std::memcpy(
+            &storage_value,
+            packed_bytes
+                + (first_unit + unit_offset) * sizeof(storage_unit),
+            sizeof(storage_unit));
         const std::uint64_t value = static_cast<std::uint64_t>(
-            static_cast<unsigned_storage>(packed[first_unit + unit_offset]));
+            storage_value);
         const std::size_t destination_bit = unit_offset * unit_bits;
         if (destination_bit < 64) {
             packed_low |= value << destination_bit;
@@ -3954,12 +3991,7 @@ process_exact_k15_w10_u32_group(
     const std::uint64_t* HWY_RESTRICT candidate_ordinal,
     std::size_t active_lanes)
 {
-    static_assert(std::is_same_v<typename MinimizerT::storage_t,
-        std::uint64_t>);
-    static_assert(MinimizerT::hash_field_mask == 0x3fffffffu);
-    static_assert(MinimizerT::pos_field_mask == 0x1ffffffffULL);
-    static_assert(MinimizerT::hash_shift == 34u);
-    static_assert(MinimizerT::pos_shift == 1u);
+    static_assert(exact_k15_w10_b8_representation_v<MinimizerT>);
 
     using d32_t = hn::ScalableTag<std::uint32_t>;
     using d64_t = hn::ScalableTag<std::uint64_t>;
@@ -4457,6 +4489,7 @@ process_exact_k15_w10_b8_candidate_block(
 {
     static_assert(std::is_same_v<typename ContinuationState::alphabet_type,
         seq::dna4>);
+    static_assert(exact_k15_w10_b8_representation_v<MinimizerT>);
     using d32_t = hn::ScalableTag<std::uint32_t>;
     using d64_t = hn::ScalableTag<std::uint64_t>;
     const d32_t d32;
@@ -5508,13 +5541,8 @@ consume_two_stack_nthash_packed_fragment(
         && std::same_as<
             typename AlphabetTraits::alphabet_type, seq::dna4>
         && std::same_as<storage_unit, std::uint32_t>
-        && std::same_as<typename MinimizerT::storage_t, std::uint64_t>
-        && static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
-            == 0x3fffffffull
-        && static_cast<std::uint64_t>(MinimizerT::pos_field_mask)
-            == 0x1ffffffffull
-        && MinimizerT::hash_shift == 34u
-        && MinimizerT::pos_shift == 1u;
+        && two_stack_internal::
+            exact_k15_w10_b8_representation_v<MinimizerT>;
     const std::size_t pending_limit =
         fast_type_eligible
             && state.kernel_kind
@@ -5817,13 +5845,8 @@ template<std::size_t W, std::size_t K, class AlphabetTraits, class Collector>
         && std::same_as<typename AlphabetTraits::alphabet_type, seq::dna4>
         && std::same_as<
             typename AlphabetTraits::storage_unit, std::uint32_t>
-        && std::same_as<typename MinimizerT::storage_t, std::uint64_t>
-        && static_cast<std::uint64_t>(MinimizerT::hash_field_mask)
-            == 0x3fffffffull
-        && static_cast<std::uint64_t>(MinimizerT::pos_field_mask)
-            == 0x1ffffffffull
-        && MinimizerT::hash_shift == 34u
-        && MinimizerT::pos_shift == 1u;
+        && two_stack_internal::
+            exact_k15_w10_b8_representation_v<MinimizerT>;
     const std::size_t pending_limit =
         fast_type_eligible
             && state.kernel_kind

@@ -124,6 +124,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -1067,6 +1068,15 @@ void append_cpu_prepared_query_sketch(
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
+	if (!minimizer_query_length_is_representable<MinimapSketchData>(
+			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
+		bioseq::pg_utils::invoke_pg_as_cpp([] {
+			ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+		});
+		pg_unreachable();
+	}
 	const auto fail = [](const char* message) -> void {
 		bioseq::pg_utils::invoke_pg_as_cpp([message] {
 			ereport(ERROR,
@@ -1087,15 +1097,13 @@ void append_cpu_prepared_query_sketch(
 				: nullptr,
 			retained_query_permit,
 			retained_query_bytes};
-		auto proof = pipe::minimizer_dispatch_range<MinimapSketchData>(
+		auto proof = pipe::minimizer_dispatch_indexed_query_whole<
+			MinimapSketchData>(
 			collector,
 			query,
-			0,
-			static_cast<bioseq::storage::sequence_size_t>(query.size()),
 			static_cast<std::size_t>(window_size),
 			static_cast<std::size_t>(kmer_size),
-			sketch_backend,
-			pipe::ExactSimdRangeRoute::require_continuation);
+			sketch_backend);
 		if (!collector.hash_width_valid()) {
 			bioseq::pg_utils::invoke_pg_as_cpp([] {
 				ereport(ERROR,
@@ -1142,15 +1150,13 @@ void append_cpu_prepared_query_sketch(
 		bioseq::parallelism::MemoryPermit> collector{
 			std::move(*collector_permit),
 			bioseq::parallelism::kVectorPreallocationHeadroomFactor};
-	const auto proof = pipe::minimizer_dispatch_range<MinimapSketchData>(
+	const auto proof = pipe::minimizer_dispatch_indexed_query_whole<
+		MinimapSketchData>(
 		collector,
 		query,
-		0,
-		static_cast<bioseq::storage::sequence_size_t>(query.size()),
 		static_cast<std::size_t>(window_size),
 		static_cast<std::size_t>(kmer_size),
-		sketch_backend,
-		pipe::ExactSimdRangeRoute::require_continuation);
+		sketch_backend);
 	if (!collector.ok()) {
 		fail("BioseqBatchJoin query sketch collector growth cannot be admitted");
 	}
@@ -1293,6 +1299,7 @@ void dispatch_append_cpu_prepared_query_sketch(
 enum class ParallelPreparedQuerySketchStatus : std::uint8_t {
 	pending,
 	ready,
+	query_length_unsupported,
 	admission_unavailable,
 	collector_growth_failed,
 	capacity_mismatch,
@@ -1312,6 +1319,10 @@ prepare_independently_admitted_query_sketch(
 	using sequence_t = compact_sequence_stdc_instance<
 		pgseq_t, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
+	if (!minimizer_query_length_is_representable<MinimapSketchData>(
+			static_cast<bioseq::storage::sequence_size_t>(query.bp_size()))) {
+		return ParallelPreparedQuerySketchStatus::query_length_unsupported;
+	}
 	auto permit =
 		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
 			0u);
@@ -1323,15 +1334,13 @@ prepare_independently_admitted_query_sketch(
 		bioseq::parallelism::MemoryPermit> collector{
 			std::move(*permit),
 			bioseq::parallelism::kVectorPreallocationHeadroomFactor};
-	auto proof = pipe::minimizer_dispatch_range<MinimapSketchData>(
+	auto proof = pipe::minimizer_dispatch_indexed_query_whole<
+		MinimapSketchData>(
 		collector,
 		query,
-		0,
-		static_cast<bioseq::storage::sequence_size_t>(query.size()),
 		static_cast<std::size_t>(window_size),
 		static_cast<std::size_t>(kmer_size),
-		sketch_backend,
-		pipe::ExactSimdRangeRoute::require_continuation);
+		sketch_backend);
 	if (!collector.ok()) {
 		return ParallelPreparedQuerySketchStatus::collector_growth_failed;
 	}
@@ -1624,6 +1633,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	prepared_target.query_union_prepare_host_wall_ns = 0;
 	prepared_target.unions_ready = false;
 	prepared_target.query_union_prepare_host_wall_published = false;
+	CpuQueryUnionStorage effective_union_storage = union_storage;
 	if (pipe::vulkan_components_requested(base_params)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -1642,6 +1652,13 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("BioseqBatchJoin query typmod changed during CPU preparation")));
+		}
+		if (!minimizer_query_length_is_representable<MinimapSketchData>(
+				static_cast<bioseq::storage::sequence_size_t>(
+					query_header->bp_size))) {
+			ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
 		}
 	}
 	if (query_ordinals.size() != query_headers.size()) {
@@ -1665,7 +1682,9 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			 errmsg("BioseqBatchJoin query-hash union admission owner is unavailable")));
 	}
 	prepared_target.query_union_permit.emplace(std::move(*union_permit));
-	if (union_storage == CpuQueryUnionStorage::canonical_u32) {
+	if (effective_union_storage == CpuQueryUnionStorage::canonical_u32
+		|| effective_union_storage
+			== CpuQueryUnionStorage::retained_sketch_only) {
 		auto retained_query_permit =
 			bioseq::parallelism::MemoryAdmissionController::instance().
 				try_reserve(0u);
@@ -1757,7 +1776,9 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	};
 	bool used_parallel_canonical_preparation = false;
 	bool parallel_group_is_uniform =
-		union_storage == CpuQueryUnionStorage::canonical_u32
+		(effective_union_storage == CpuQueryUnionStorage::canonical_u32
+			|| effective_union_storage
+				== CpuQueryUnionStorage::retained_sketch_only)
 		&& include_persisted_parameter_group
 		&& query_headers.size() >= 2u
 		&& prepared_target.query_sketch_cache_permit.has_value();
@@ -1786,6 +1807,13 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		parallel_group_is_uniform
 		&& bioseq::parallelism::dispatch_parallel(pool.mode())
 		&& pool.max_concurrency() > 1u;
+	if (effective_union_storage == CpuQueryUnionStorage::retained_sketch_only
+		&& !parallel_group_is_uniform) {
+		/* Retention is an optimization, not a correctness prerequisite.  If
+		 * full-batch retention cannot be proven before sketching starts, retain
+		 * the historical admitted canonical owner and publish synchronously. */
+		effective_union_storage = CpuQueryUnionStorage::canonical_u32;
+	}
 	if (parallel_group_is_uniform) {
 		CpuPreparedIndexGroup& group = ensure_group(
 			15, 10, parallel_max_occ, parallel_sketch_backend);
@@ -1842,6 +1870,14 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 				case ParallelPreparedQuerySketchStatus::ready:
 					break;
 				case ParallelPreparedQuerySketchStatus::
+						query_length_unsupported:
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						ereport(ERROR,
+							(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+							 errmsg("BioseqBatchJoin query exceeds the 28-bit minimizer position domain")));
+					});
+					pg_unreachable();
+				case ParallelPreparedQuerySketchStatus::
 						admission_unavailable:
 				case ParallelPreparedQuerySketchStatus::
 						collector_growth_failed:
@@ -1877,6 +1913,8 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 					pg_unreachable();
 			}
 		}
+		const bool materialize_canonical =
+			effective_union_storage == CpuQueryUnionStorage::canonical_u32;
 		std::size_t canonical_size = 0u;
 		for (CpuPreparedQuerySketch& retained
 			 : group.retained_query_sketches) {
@@ -1897,9 +1935,10 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 					== (std::numeric_limits<std::uint64_t>::max)()
 				|| !prepared_target.query_sketch_cache_permit->absorb(
 					std::move(*retained.parallel_preparation_permit))
-				|| retained.minimizers.size()
-					> group.canonical_query_hash_union_u32.max_size()
-						- canonical_size) {
+				|| (materialize_canonical
+					&& retained.minimizers.size()
+						> group.canonical_query_hash_union_u32.max_size()
+							- canonical_size)) {
 				bioseq::pg_utils::invoke_pg_as_cpp([] {
 					ereport(ERROR,
 						(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -1910,42 +1949,46 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			retained.parallel_preparation_permit.reset();
 			prepared_target.query_sketch_cache_admission_bytes =
 				reconciled_cache_bytes;
-			canonical_size += retained.minimizers.size();
-		}
-		AdmittedCanonicalU32QueryCollector canonical_collector{
-			group.canonical_query_hash_union_u32,
-			*prepared_target.query_union_permit,
-			prepared_target.query_union_admission_bytes};
-		if (!canonical_collector.reserve(canonical_size)) {
-			bioseq::pg_utils::invoke_pg_as_cpp([] {
-				ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("BioseqBatchJoin parallel canonical query union cannot be admitted")));
-			});
-			pg_unreachable();
-		}
-		for (const CpuPreparedQuerySketch& retained
-			 : group.retained_query_sketches) {
-			for (const MinimapSketchData& minimizer
-				 : retained.minimizers) {
-				canonical_collector.collect(minimizer);
+			if (materialize_canonical) {
+				canonical_size += retained.minimizers.size();
 			}
 		}
-		if (!canonical_collector.hash_width_valid()) {
-			bioseq::pg_utils::invoke_pg_as_cpp([] {
-				ereport(ERROR,
-					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("Format-6 canonical query hash exceeds its authenticated u32 profile")));
-			});
-			pg_unreachable();
-		}
-		if (!canonical_collector.ok()) {
-			bioseq::pg_utils::invoke_pg_as_cpp([] {
-				ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("BioseqBatchJoin parallel canonical query union growth cannot be admitted")));
-			});
-			pg_unreachable();
+		if (materialize_canonical) {
+			AdmittedCanonicalU32QueryCollector canonical_collector{
+				group.canonical_query_hash_union_u32,
+				*prepared_target.query_union_permit,
+				prepared_target.query_union_admission_bytes};
+			if (!canonical_collector.reserve(canonical_size)) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_OUT_OF_MEMORY),
+						 errmsg("BioseqBatchJoin parallel canonical query union cannot be admitted")));
+				});
+				pg_unreachable();
+			}
+			for (const CpuPreparedQuerySketch& retained
+					 : group.retained_query_sketches) {
+				for (const MinimapSketchData& minimizer
+						 : retained.minimizers) {
+					canonical_collector.collect(minimizer);
+				}
+			}
+			if (!canonical_collector.hash_width_valid()) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Format-6 canonical query hash exceeds its authenticated u32 profile")));
+				});
+				pg_unreachable();
+			}
+			if (!canonical_collector.ok()) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_OUT_OF_MEMORY),
+						 errmsg("BioseqBatchJoin parallel canonical query union growth cannot be admitted")));
+				});
+				pg_unreachable();
+			}
 		}
 		used_parallel_canonical_preparation = true;
 	}
@@ -1962,8 +2005,11 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 			const MinimizerSketchBackend sketch_backend =
 				pipe::target_index_sketch_backend_from_params(effective);
 			auto append_to = [&](CpuPreparedIndexGroup& group) {
-				if (union_storage
-						== CpuQueryUnionStorage::canonical_u32) {
+				if (effective_union_storage
+						== CpuQueryUnionStorage::canonical_u32
+					|| effective_union_storage
+						== CpuQueryUnionStorage::
+							canonical_u32_sequential_fallback) {
 					dispatch_append_cpu_prepared_query_sketch(
 						alphabet_code,
 						storage_unit_byte_width,
@@ -2013,7 +2059,45 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		}
 	}
 	for (CpuPreparedIndexGroup& group : prepared_target.groups) {
-		if (union_storage == CpuQueryUnionStorage::canonical_u32) {
+		if (effective_union_storage
+				== CpuQueryUnionStorage::retained_sketch_only) {
+			bool retained_proofs_match =
+				group.retained_query_sketches.size() == query_headers.size()
+				&& group.query_hash_union.empty()
+				&& group.query_hash_union.capacity() == 0u
+				&& group.canonical_query_hash_union_u32.empty()
+				&& group.canonical_query_hash_union_u32.capacity() == 0u;
+			for (std::size_t query_index = 0u;
+				 retained_proofs_match
+					&& query_index < group.retained_query_sketches.size();
+				 ++query_index) {
+				const CpuPreparedQuerySketch& retained =
+					group.retained_query_sketches[query_index];
+				retained_proofs_match =
+					retained.query_ordinal == query_ordinals[query_index]
+					&& retained.query_bp_size
+						== static_cast<std::uint64_t>(
+							query_headers[query_index]->bp_size)
+					&& pipe::minimizer_range_proof_matches_backend(
+						group.sketch_backend,
+						retained.proof,
+						/*require_nonempty_vector_work=*/false,
+						pipe::ExactSimdRangeRoute::require_continuation);
+			}
+			if (!retained_proofs_match) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("compact-direct retained-only query cache/proof is incomplete")));
+				});
+				pg_unreachable();
+			}
+			group.compact_direct_query_set_proof_pending = true;
+			continue;
+		}
+		if (effective_union_storage == CpuQueryUnionStorage::canonical_u32
+			|| effective_union_storage
+				== CpuQueryUnionStorage::canonical_u32_sequential_fallback) {
 			if (!group.query_hash_union.empty()
 				|| group.query_hash_union.capacity() != 0u) {
 				bioseq::pg_utils::invoke_pg_as_cpp([] {
@@ -2266,6 +2350,191 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	prepared_target.unions_ready = true;
 }
 
+bool BatchProcessor::publish_compact_direct_query_set_proof(
+		CpuPreparedTarget& prepared_target,
+		CpuPreparedIndexGroup& group,
+		const bioseq::indexing::CompactDirectQuerySetProof& proof) noexcept {
+	if (!prepared_target.unions_ready
+		|| prepared_target.groups.size() != 1u
+		|| &prepared_target.groups.front() != &group
+		|| !group.compact_direct_query_set_proof_pending
+		|| group.max_occ <= 0
+		|| !proof.present
+		|| proof.query_count != prepared_target.query_count
+		|| proof.query_count != group.retained_query_sketches.size()
+		|| proof.unique_hash_count > proof.query_occurrence_count
+		|| !group.query_hash_union.empty()
+		|| group.query_hash_union.capacity() != 0u
+		|| !group.canonical_query_hash_union_u32.empty()
+		|| group.canonical_query_hash_union_u32.capacity() != 0u
+		|| prepared_target.total_unique_keys != 0u
+		|| prepared_target.key_set_checksum
+			!= bioseq::indexing::kCompactDirectQuerySetFnvOffset
+		|| group.key_set_checksum != 0u
+		|| group.build_set_checksum_present
+		|| group.build_set_checksum != 0u) {
+		return false;
+	}
+
+	std::uint64_t retained_occurrence_count = 0u;
+	for (const CpuPreparedQuerySketch& retained
+			: group.retained_query_sketches) {
+		retained_occurrence_count = bioseq::parallelism::saturating_add(
+			retained_occurrence_count,
+			static_cast<std::uint64_t>(retained.minimizers.size()));
+	}
+	if (retained_occurrence_count
+			== (std::numeric_limits<std::uint64_t>::max)()
+		|| retained_occurrence_count != proof.query_occurrence_count) {
+		return false;
+	}
+
+	group.key_set_checksum = proof.group_key_set_checksum;
+	group.build_set_checksum = proof.group_key_set_checksum;
+	group.build_set_checksum_present = true;
+	prepared_target.total_unique_keys = proof.unique_hash_count;
+	auto mix = [&prepared_target](const std::uint64_t value) noexcept {
+		prepared_target.key_set_checksum ^= value;
+		prepared_target.key_set_checksum *=
+			bioseq::indexing::kCompactDirectQuerySetFnvPrime;
+	};
+	mix(static_cast<std::uint64_t>(group.kmer_size));
+	mix(static_cast<std::uint64_t>(group.window_size));
+	mix(static_cast<std::uint64_t>(group.max_occ));
+	mix(static_cast<std::uint64_t>(group.sketch_backend));
+	mix(proof.unique_hash_count);
+	mix(proof.group_key_set_checksum);
+	group.compact_direct_query_set_proof_pending = false;
+	return true;
+}
+
+void BatchProcessor::finalize_pending_compact_direct_query_set_proof_fallback(
+		CpuPreparedTarget& prepared_target) {
+	if (prepared_target.query_set_proof_ready()) return;
+	if (!prepared_target.unions_ready
+		|| prepared_target.groups.size() != 1u) {
+		throw bioseq::indexing::PersistedMinimizerLookupError(
+			"compact-direct query-set fallback has no exclusive prepared group");
+	}
+	CpuPreparedIndexGroup& group = prepared_target.groups.front();
+	if (!group.compact_direct_query_set_proof_pending
+		|| group.max_occ <= 0
+		|| group.retained_query_sketches.size()
+			!= prepared_target.query_count
+		|| !group.query_hash_union.empty()
+		|| group.query_hash_union.capacity() != 0u
+		|| !group.canonical_query_hash_union_u32.empty()
+		|| group.canonical_query_hash_union_u32.capacity() != 0u) {
+		throw bioseq::indexing::PersistedMinimizerLookupError(
+			"compact-direct query-set fallback retained state is incomplete");
+	}
+
+	std::uint64_t occurrence_count = 0u;
+	std::optional<std::uint64_t> previous_query_ordinal;
+	for (const CpuPreparedQuerySketch& retained
+			: group.retained_query_sketches) {
+		if ((previous_query_ordinal
+				&& *previous_query_ordinal >= retained.query_ordinal)
+			|| !pipe::minimizer_range_proof_matches_backend(
+				group.sketch_backend,
+				retained.proof,
+				/*require_nonempty_vector_work=*/false,
+				pipe::ExactSimdRangeRoute::require_continuation)) {
+			throw bioseq::indexing::PersistedMinimizerLookupError(
+				"compact-direct query-set fallback retained proof is invalid");
+		}
+		previous_query_ordinal = retained.query_ordinal;
+		occurrence_count = bioseq::parallelism::saturating_add(
+			occurrence_count,
+			static_cast<std::uint64_t>(retained.minimizers.size()));
+	}
+	const std::uint64_t requested_bytes =
+		bioseq::parallelism::saturating_mul(
+			occurrence_count, sizeof(std::uint32_t));
+	const std::uint64_t allocation_headroom =
+		bioseq::parallelism::saturating_mul(
+			requested_bytes,
+			bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+	if (occurrence_count
+			== (std::numeric_limits<std::uint64_t>::max)()
+		|| occurrence_count
+			> (std::numeric_limits<std::size_t>::max)()
+		|| requested_bytes
+			== (std::numeric_limits<std::uint64_t>::max)()
+		|| allocation_headroom
+			== (std::numeric_limits<std::uint64_t>::max)()) {
+		throw bioseq::indexing::PersistedMinimizerLookupError(
+			"compact-direct query-set fallback size overflow");
+	}
+	auto fallback_permit =
+		bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
+			allocation_headroom);
+	if (!fallback_permit) {
+		throw bioseq::indexing::PersistedMinimizerLookupError(
+			bioseq::indexing::PersistedMinimizerLookupError::Reason::
+				admission_or_allocation,
+			"compact-direct query-set fallback cannot be admitted");
+	}
+	std::vector<std::uint32_t> canonical;
+	try {
+		canonical.reserve(static_cast<std::size_t>(occurrence_count));
+		const std::uint64_t measured_bytes =
+			bioseq::parallelism::saturating_mul(
+				canonical.capacity(), sizeof(std::uint32_t));
+		if (measured_bytes
+				== (std::numeric_limits<std::uint64_t>::max)()
+			|| measured_bytes > fallback_permit->bytes()) {
+			throw bioseq::indexing::PersistedMinimizerLookupError(
+				bioseq::indexing::PersistedMinimizerLookupError::Reason::
+					admission_or_allocation,
+				"compact-direct query-set fallback exceeded admission");
+		}
+		fallback_permit->shrink_to(measured_bytes);
+		for (const CpuPreparedQuerySketch& retained
+				: group.retained_query_sketches) {
+			for (const MinimapSketchData& minimizer : retained.minimizers) {
+				if (minimizer.kmer()
+						> (std::numeric_limits<std::uint32_t>::max)()) {
+					throw bioseq::indexing::PersistedMinimizerLookupError(
+						"compact-direct query-set fallback hash exceeds u32");
+				}
+				canonical.push_back(
+					static_cast<std::uint32_t>(minimizer.kmer()));
+			}
+		}
+		if (canonical.size() > 1u) {
+			bioseq::sorting::radix_sort(
+				canonical.data(), canonical.data() + canonical.size(),
+				[](const std::uint32_t hash) noexcept { return hash; });
+		}
+		canonical.erase(
+			std::unique(canonical.begin(), canonical.end()),
+			canonical.end());
+		const bioseq::indexing::CompactDirectQuerySetProof proof{
+			.query_count = prepared_target.query_count,
+			.query_occurrence_count = occurrence_count,
+			.unique_hash_count = canonical.size(),
+			.group_key_set_checksum =
+				bioseq::indexing::compact_direct_query_set_checksum(
+					canonical,
+					static_cast<std::uint32_t>(group.kmer_size),
+					static_cast<std::uint32_t>(group.window_size),
+					static_cast<std::uint32_t>(group.max_occ)),
+			.present = true,
+		};
+		if (!publish_compact_direct_query_set_proof(
+				prepared_target, group, proof)) {
+			throw bioseq::indexing::PersistedMinimizerLookupError(
+				"compact-direct query-set fallback publication was rejected");
+		}
+	} catch (const std::bad_alloc&) {
+		throw bioseq::indexing::PersistedMinimizerLookupError(
+			bioseq::indexing::PersistedMinimizerLookupError::Reason::
+				admission_or_allocation,
+			"compact-direct query-set fallback allocation failed");
+	}
+}
+
 void BatchProcessor::prepare_cpu_persisted_native_target(
 		const Oid database_oid,
 		const Oid tablespace_oid,
@@ -2466,6 +2735,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 				|| !format6_group.query_hash_union.empty()
 				|| format6_group.query_hash_union.capacity() != 0u
 				|| format6_group.persisted_grouped32_reader
+				|| format6_group.persisted_shape_v5_mapping_guard
 				|| format6_group.persisted_shape_v5_reader
 				|| format6_group.persisted_mps_shape_v5_reader
 				|| format6_group.persisted_format6_reader
@@ -2680,7 +2950,6 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		return;
 	}
 	opened_format6.session.reset();
-
 	const auto expected =
 		bioseq::indexing::expected_minimizer_compatibility_for_backend(
 			MinimizerGenerationWireFormat::
@@ -2710,6 +2979,20 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			static_cast<unsigned>(format4_expected.error())));
 		return;
 	}
+	const auto configured_mpf_format5_lookup_route =
+		decode_mpf_format5_lookup_route(
+			bioseq_aligner_mpf_format5_lookup_route);
+	if (!configured_mpf_format5_lookup_route) {
+		fail("MPF Format-5 lookup-route GUC has an invalid wire value");
+		return;
+	}
+	const bool compact_h32_direct_configured =
+		*configured_mpf_format5_lookup_route
+		== MpfFormat5LookupRoute::compact_h32_direct;
+	const bool compact_h32_direct_requested =
+		compact_h32_direct_configured
+		&& index_name
+			== bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
 	auto opened = open_exact_minimizer_generation_read_session_pg(
 		identity.table_name, index_name, sequence_rowno, executor_read,
 		*expected);
@@ -2743,8 +3026,18 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	const auto head =
 		session.read_active_head_allowing_format4_compatibility_once(
 			*format4_expected);
-	const auto& metadata = session.read_manifest_directory_once(head);
-	const auto manifest = metadata.manifest;
+	std::optional<std::span<const std::byte>>
+		authenticated_format5_directory{};
+	const MinimizerGenerationReadMetadata* metadata = nullptr;
+	MinimizerGenerationManifest manifest{};
+	if (compact_h32_direct_requested) {
+		manifest = session.read_manifest_once_without_directory(head);
+	} else {
+		metadata = &session.read_manifest_directory_once(head);
+		manifest = metadata->manifest;
+		authenticated_format5_directory =
+			metadata->directory.encoded_bytes();
+	}
 	const bool format5 = manifest.wire_format
 		== MinimizerGenerationWireFormat::grouped_shape_soa_segment_local;
 	const bool mapped_mpf_format5 = format5
@@ -2757,11 +3050,28 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		fail("Format-5 READY generation is bound to an unsupported logical index");
 		return;
 	}
+	if (compact_h32_direct_requested && !mapped_mpf_format5) {
+		fail("compact-H32 direct lookup requires an MPF Format-5 READY generation");
+		return;
+	}
 	const auto& selected_expected = manifest.wire_format
 			== MinimizerGenerationWireFormat::
 				grouped_shape_soa_segment_local
 		? *expected : *format4_expected;
 	session.validate_source_attestation(std::move(source_proof));
+	auto& query_prep_pool = bioseq::parallelism::GlobalPool::instance();
+	/* This is the exact eligibility boundary of the typed full-batch native
+	 * route.  Outside it, preserve the synchronous canonical-u32 proof because
+	 * no later complete QueryHashPlan stream is guaranteed to exist. */
+	const bool defer_compact_direct_query_set_proof =
+		compact_h32_direct_requested
+		&& base_params.max_occ > 0
+		&& !base_params.enable_profiling
+		&& target_bp_size > UINT64_C(256000000)
+		&& query_headers.size()
+			>= bioseq::parallelism::TaskParallelMinTriggers::MIN_QUERY_COUNT
+		&& bioseq::parallelism::task_parallel(query_prep_pool.mode())
+		&& query_prep_pool.max_concurrency() > 1u;
 	prepare_cpu_shared_query_unions(
 		alphabet_code,
 		storage_unit_byte_width,
@@ -2771,7 +3081,9 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		base_params,
 		/*include_persisted_parameter_group=*/true,
 		mapped_mpf_format5
-			? CpuQueryUnionStorage::canonical_u32
+			? (defer_compact_direct_query_set_proof
+				? CpuQueryUnionStorage::retained_sketch_only
+				: CpuQueryUnionStorage::canonical_u32)
 			: CpuQueryUnionStorage::minimizer_sketch,
 		prepared_target);
 	if (!prepared_target.unions_ready
@@ -2783,12 +3095,18 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	if (group.kmer_size != 15 || group.window_size != 10
 		|| group.max_occ < 0
 		|| group.sketch_backend != sketch_backend
+		|| (group.compact_direct_query_set_proof_pending
+			&& (!defer_compact_direct_query_set_proof
+				|| group.max_occ <= 0
+				|| !group.canonical_query_hash_union_u32.empty()
+				|| group.canonical_query_hash_union_u32.capacity() != 0u))
 		|| (mapped_mpf_format5
 			? (!group.query_hash_union.empty()
 				|| group.query_hash_union.capacity() != 0u)
 			: (!group.canonical_query_hash_union_u32.empty()
 				|| group.canonical_query_hash_union_u32.capacity() != 0u))
 		|| group.persisted_grouped32_reader
+		|| group.persisted_shape_v5_mapping_guard
 		|| group.persisted_shape_v5_reader
 		|| group.persisted_mps_shape_v5_reader
 		|| group.persisted_format6_reader
@@ -2808,29 +3126,145 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		const std::uint64_t shape_v5_load_started_ns =
 			static_cast<std::uint64_t>(
 				bioseq::instr::clock::now_ns());
+		const auto storage_descriptor =
+			session.read_live_storage_descriptor_once(identity);
 		auto mapped_image = open_exact_minimizer_format5_image_pg(
-			identity, sequence_rowno, head, manifest);
-		const std::span<const std::byte> mapped_payload =
-			mapped_image.payload();
-		auto mapped_payload_owner =
-			std::move(mapped_image).release_mapping_owner();
-		auto made = ShapeReader::open(
-			bioseq::parallelism::MemoryAdmissionController::instance(),
-			head, manifest, selected_expected,
-			metadata.directory.encoded_bytes(),
-			static_cast<std::uint64_t>(group.max_occ),
-			std::move(mapped_payload_owner),
-			mapped_payload);
-		if (!made) {
-			fail(fmt::format(
-				"fragment-native Format-5 reader rejected wire_error={}",
-				static_cast<unsigned>(made.error())));
-			return;
+			identity, sequence_rowno, head, manifest,
+			storage_descriptor,
+			compact_h32_direct_requested
+				? Mpf5V2MappedOpenValidationPg::bounded_header_only
+				: Mpf5V2MappedOpenValidationPg::full_metadata);
+		std::optional<ShapeReader> shape_reader{};
+		MinimizerGenerationReadStats read_stats{};
+		if (compact_h32_direct_requested) {
+			const auto direct_profile =
+				bioseq::indexing::minimizer_generation_payload_profile(
+					manifest);
+			if (!direct_profile || !direct_profile->shape_v5
+				|| direct_profile->max_hash == 0u
+				|| direct_profile->max_hash
+					> (std::numeric_limits<std::uint32_t>::max)()
+				|| direct_profile->shape_v5->max_occ_cap == 0u
+				|| direct_profile->shape_v5->max_occ_cap
+					> (std::numeric_limits<std::uint32_t>::max)()) {
+				fail("compact-H32 direct profile geometry is invalid");
+				return;
+			}
+			const std::uint32_t profile_max_hash =
+				static_cast<std::uint32_t>(direct_profile->max_hash);
+			const std::uint32_t profile_hash_bits =
+				std::bit_width(profile_max_hash);
+			const std::uint64_t exact_profile_max_hash =
+				(std::uint64_t{1u} << profile_hash_bits) - 1u;
+			const std::span<const std::byte> direct_section =
+				mapped_image.compact_h32_direct();
+			const auto direct_header_receipt =
+				mapped_image.compact_h32_direct_header_receipt();
+			if (profile_hash_bits == 0u
+				|| profile_hash_bits
+					> (std::numeric_limits<std::uint8_t>::max)()
+				|| exact_profile_max_hash != direct_profile->max_hash
+				|| direct_section.empty()
+				|| !direct_header_receipt) {
+				fail("compact-H32 direct mapped section is absent or incompatible");
+				return;
+			}
+			auto mapped_owner = mapped_image.borrow_mapping_token();
+			const bioseq::indexing::CompactH32BoundedOpenOptions
+				direct_open_options{
+					.expected_identity = bioseq::indexing::DirectIndexIdentity{
+						.generation_id = head.generation_id,
+						.source_identity = head.source_identity,
+						.compatibility_checksum =
+							head.compatibility_checksum,
+						.target_length = manifest.target_length,
+					},
+					.expected_max_occ_cap = static_cast<std::uint32_t>(
+						direct_profile->shape_v5->max_occ_cap),
+					.expected_geometry =
+						bioseq::indexing::CompactH32Geometry{
+							.hash_domain_bits = static_cast<std::uint8_t>(
+								profile_hash_bits),
+							.max_hash = profile_max_hash,
+						},
+					.expected_direct_header_crc64 = direct_header_receipt,
+				};
+			auto bounded_direct = bioseq::indexing::
+				open_compact_h32_direct_index_bounded(
+					std::move(mapped_owner), direct_section,
+					direct_open_options);
+			if (!bounded_direct
+				|| bounded_direct->evidence().direct_section_bytes
+					!= direct_section.size()
+				|| bounded_direct->evidence().header_bytes_examined
+					!= bioseq::indexing::
+						kCompactH32DirectIndexHeaderBytes
+				|| bounded_direct->evidence().payload_bytes_examined != 0u
+				|| !bounded_direct->evidence().
+					expected_direct_header_crc64_checked) {
+				fail(fmt::format(
+					"compact-H32 bounded open rejected direct_error={}",
+					bounded_direct
+						? 0u
+						: static_cast<unsigned>(bounded_direct.error())));
+				return;
+			}
+			// The nested fixed header and its outer CRC receipt are now
+			// authenticated. Start fail-open metadata readahead now; selected
+			// posting pages are advised by the existing descriptor-layout pass.
+			// The unrelated outer MPF payload remains demand-paged.
+			mapped_image.advise_compact_h32_direct_metadata_readahead(
+				bounded_direct->view());
+			const auto selected_page_adviser =
+				mapped_image.borrow_compact_h32_selected_page_adviser(
+					bounded_direct->view());
+			auto owned_direct = bioseq::indexing::
+				OwnedCompactH32DirectIndexView::bind(
+					bounded_direct->image_owner(), bounded_direct->view());
+			if (!owned_direct) {
+				fail(fmt::format(
+					"compact-H32 owner binding rejected wire_error={}",
+					static_cast<unsigned>(owned_direct.error())));
+				return;
+			}
+			auto made = ShapeReader::open_compact_direct(
+				bioseq::parallelism::MemoryAdmissionController::instance(),
+				head, manifest, selected_expected,
+				static_cast<std::uint64_t>(group.max_occ),
+				std::move(*owned_direct), selected_page_adviser);
+			if (!made) {
+				fail(fmt::format(
+					"compact-H32 fragment reader rejected wire_error={}",
+					static_cast<unsigned>(made.error())));
+				return;
+			}
+			shape_reader.emplace(std::move(*made));
+			read_stats = session.finish_mapped_compact_direct();
+		} else {
+			if (!authenticated_format5_directory) {
+				fail("Format-5 control-scan route has no authenticated directory");
+				return;
+			}
+			const std::span<const std::byte> mapped_payload =
+				mapped_image.payload();
+			auto mapped_payload_owner =
+				mapped_image.borrow_mapping_token();
+			auto made = ShapeReader::open(
+				bioseq::parallelism::MemoryAdmissionController::instance(),
+				head, manifest, selected_expected,
+				*authenticated_format5_directory,
+				static_cast<std::uint64_t>(group.max_occ),
+				std::move(mapped_payload_owner),
+				mapped_payload);
+			if (!made) {
+				fail(fmt::format(
+					"fragment-native Format-5 reader rejected wire_error={}",
+					static_cast<unsigned>(made.error())));
+				return;
+			}
+			shape_reader.emplace(std::move(*made));
+			read_stats = session.finish_mapped_format5_payload();
 		}
-		std::optional<ShapeReader> shape_reader{
-			std::in_place, std::move(*made)};
-		const MinimizerGenerationReadStats read_stats =
-			session.finish_mapped_format5_payload();
 		const std::uint64_t shape_v5_load_finished_ns =
 			static_cast<std::uint64_t>(
 				bioseq::instr::clock::now_ns());
@@ -2847,8 +3281,31 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		const auto producer_backend =
 			bioseq::indexing::minimizer_producer_backend_identity_for_backend(
 				group.sketch_backend);
+		const std::uint64_t expected_metadata_rows =
+			2u + read_stats.directory_chunks_read;
+		const std::uint64_t expected_metadata_bytes =
+			MinimizerGenerationHead::encoded_bytes
+			+ bioseq::indexing::minimizer_manifest_encoded_bytes(
+				manifest.wire_format)
+			+ read_stats.directory_bytes_read;
+		const bool route_read_proof_matches =
+			compact_h32_direct_requested
+			? shape_reader->compact_direct_ready()
+				&& shape_reader->compact_direct_only()
+				&& shape_reader->mapped_format5_payload_bytes() == 0u
+				&& shape_reader->format5_directory_entry_count() == 0u
+				&& read_stats.directory_chunks_read == 0u
+				&& read_stats.directory_bytes_read == 0u
+			: !shape_reader->compact_direct_only()
+				&& shape_reader->mapped_format5_payload_bytes()
+					== manifest.payload_bytes
+				&& read_stats.directory_chunks_read
+					== manifest.directory_chunk_count
+				&& read_stats.directory_bytes_read
+					== manifest.directory_bytes;
 		const bool read_proof_matches =
 			shape_reader->ready()
+			&& route_read_proof_matches
 			&& shape_reader->target_length()
 				== prepared_target.target_bp_size
 			&& manifest.kmer_size == group.kmer_size
@@ -2865,7 +3322,16 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			&& head.source_identity != 0
 			&& read_stats.relation_opens == 1
 			&& read_stats.head_scans == 1
+			&& read_stats.head_rows_read == 1
 			&& read_stats.manifest_directory_scans == 1
+			&& read_stats.manifest_rows_read == 1
+			&& read_stats.metadata_heap_rows_read == expected_metadata_rows
+			&& read_stats.metadata_bytes_read == expected_metadata_bytes
+			&& read_stats.total_heap_rows_read == expected_metadata_rows
+			&& read_stats.total_bytes_read == expected_metadata_bytes
+			&& read_stats.explicit_copy_bytes == expected_metadata_bytes
+			&& read_stats.toast_values_read == 0
+			&& read_stats.detoast_bytes == 0
 			&& read_stats.metadata_repeated_reads == 0
 			&& read_stats.full_generation.scan_calls == 0
 			&& read_stats.bulk_read_calls == 0
@@ -2878,6 +3344,8 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			&& read_stats.cold.route_empty == 0
 			&& read_stats.cold.route_selective == 0
 			&& read_stats.cold.route_full == 0
+			&& read_stats.cold.head_scans == 1
+			&& read_stats.cold.directory_scans == 1
 			&& read_stats.source_parent_rows_read == 1
 			&& read_stats.source_catalog_rows_read == 1
 			&& read_stats.source_catalog_index_scans == 1
@@ -2889,16 +3357,36 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 			return;
 		}
 
+		auto mapping_guard =
+			std::move(mapped_image).release_mapping_lease_guard();
+		if (!mapping_guard) {
+			fail("Format-5 mapped reader lost its mmap/fd lifetime authority");
+			return;
+		}
+		group.persisted_shape_v5_mapping_guard.emplace(
+			std::move(mapping_guard));
 		group.persisted_shape_v5_reader.emplace(
 			std::move(*shape_reader));
+		group.persisted_shape_v5_lookup_route =
+			compact_h32_direct_requested
+			? bioseq::indexing::FragmentAnchorLookupRoute::compact_h32_direct
+			: bioseq::indexing::FragmentAnchorLookupRoute::format5_control_scans;
 		group.target_index_source =
 			::bioseq::pipeline_stats::TargetIndexSource::persisted;
 		group.persisted_generation_id = head.generation_id;
 		group.persisted_source_identity = head.source_identity;
 		group.persisted_read_stats = read_stats;
 		group.persisted_reader_loads = 1;
-		group.build_set_checksum_present = true;
-		group.build_set_checksum = group.key_set_checksum;
+		if (!group.compact_direct_query_set_proof_pending) {
+			group.build_set_checksum_present = true;
+			group.build_set_checksum = group.key_set_checksum;
+		} else if (!compact_h32_direct_requested
+			|| group.key_set_checksum != 0u
+			|| group.build_set_checksum_present
+			|| group.build_set_checksum != 0u) {
+			fail("compact-H32 deferred query-set proof crossed reader publication");
+			return;
+		}
 		++prepared_target.physical_target_index_reads;
 		return;
 	}
@@ -2909,12 +3397,16 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	 * query-selected Shape-v5 reader. */
 	if (full_mps_format5) {
 		using ShapeReader = bioseq::indexing::PreparedShapeV5QueryReader;
+		if (!authenticated_format5_directory) {
+			fail("MPS Format-5 route has no authenticated directory");
+			return;
+		}
 		const std::uint64_t shape_v5_load_started_ns =
 			static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
 		auto made = ShapeReader::begin(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected,
-			metadata.directory.encoded_bytes(), group.query_hash_union,
+			*authenticated_format5_directory, group.query_hash_union,
 			static_cast<std::uint64_t>(group.max_occ));
 		if (!made) {
 			fail(fmt::format(
@@ -3036,6 +3528,10 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	// Format 4 still consumes the legacy u64 span. Keep its conversion out of
 	// the Format-5 hot path: the latter now copies once directly from the
 	// already sorted/unique MinimapSketchData union into its canonical owner.
+	if (metadata == nullptr) {
+		fail("grouped32 route has no authenticated directory metadata");
+		return;
+	}
 	const std::uint64_t query_hash_bytes =
 		bioseq::parallelism::saturating_mul(
 			group.query_hash_union.size(), sizeof(std::uint64_t));
@@ -3076,7 +3572,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	}
 
 	auto planned = bioseq::indexing::plan_minimizer_grouped32_cold_route(
-		head, manifest, metadata.directory, query_hashes);
+		head, manifest, metadata->directory, query_hashes);
 	if (!planned) {
 		fail(fmt::format("grouped32 cold route rejected wire_error={}",
 			static_cast<unsigned>(planned.error())));
@@ -3121,7 +3617,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		auto made = Grouped32Reader::begin_full_generation_stream(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected, group.sketch_backend,
-			metadata.directory.encoded_bytes(), query_hashes,
+			metadata->directory.encoded_bytes(), query_hashes,
 			static_cast<std::uint64_t>(group.max_occ));
 		if (!made) {
 			fail(fmt::format("grouped32 full reader begin rejected wire_error={}",
@@ -3162,7 +3658,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		auto made = Grouped32Reader::begin(
 			bioseq::parallelism::MemoryAdmissionController::instance(),
 			head, manifest, selected_expected, group.sketch_backend,
-			metadata.directory.encoded_bytes(), query_hashes,
+			metadata->directory.encoded_bytes(), query_hashes,
 			static_cast<std::uint64_t>(group.max_occ));
 		if (!made) {
 			fail(fmt::format("grouped32 selective reader begin rejected wire_error={}",

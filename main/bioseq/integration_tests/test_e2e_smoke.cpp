@@ -11,6 +11,7 @@
  */
 #include "common_simd.h"
 #include "common_tests.h"
+#include "headers/pg_build_config.h"
 #include "common.h"
 
 #include <array>
@@ -168,9 +169,11 @@ TEST_CASE("E2E smoke: dna4 load + index + mmsearch == minimap2", "[e2e-smoke][do
     run_smoke<seq::dna4>("dna4", "bioseq.seq('dna4', 64)", "e2e_smoke_dna4");
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 TEST_CASE("E2E smoke: dna5 (with N) load + index + mmsearch == minimap2", "[e2e-smoke][doc0286]") {
     run_smoke<seq::dna5>("dna5", "bioseq.seq('dna5', 64)", "e2e_smoke_dna5");
 }
+#endif
 
 TEST_CASE(
         "E2E just_index MPS Format-6 READY proof uses the loaded table-AM row identity",

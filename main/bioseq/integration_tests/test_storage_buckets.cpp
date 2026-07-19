@@ -11,6 +11,7 @@
 //   * UNLOGGED parents inherit UNLOGGED sub-tables.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
@@ -184,16 +185,23 @@ TEST_CASE("DOC0260 — DROP TABLE cascades to every sub-table",
 TEST_CASE("DOC0260 — multi-SEQ-column parents route by column_attno",
           "[integration][storage-buckets][multi-column]") {
     auto ctx = fresh_context({kTable});
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+    constexpr std::string_view second_alphabet = "dna5";
+    constexpr std::string_view second_sequence = "NACGT";
+#else
+    constexpr std::string_view second_alphabet = "dna4";
+    constexpr std::string_view second_sequence = "AACGT";
+#endif
     exec_sqlf(ctx,
               "CREATE TABLE {} (id INT PRIMARY KEY, "
               "seq_a bioseq.seq('dna4', 32), "
-              "seq_b bioseq.seq('dna5', 64)) USING bioseq;",
-              kTable);
+              "seq_b bioseq.seq('{}', 64)) USING bioseq;",
+              kTable, second_alphabet);
     exec_sqlf(ctx,
               "INSERT INTO {} VALUES (1, "
               "'ACGT'::bioseq.seq('dna4', 32), "
-              "'NACGT'::bioseq.seq('dna5', 64));",
-              kTable);
+              "'{}'::bioseq.seq('{}', 64));",
+              kTable, second_sequence, second_alphabet);
     const auto column_attnos = query_rows(
         ctx,
         fmt::format(

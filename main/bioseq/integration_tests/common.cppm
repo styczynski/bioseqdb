@@ -585,6 +585,7 @@ export inline void reset_extension(const connection_test_context& ctx,
         "bioseq.update_index_on_insert",
         "bioseq.read_sequence_index",         // DOC0279 §13 — assemble-vs-recompute routing
         "bioseq.index_run_buffer_bytes",      // DOC0279 §13 — test-only spill run buffer
+        "bioseq.index_payload_storage_backend", // DOC0383 P5 — provider captured per job
     });
     for (const auto guc : kGucsToReset) {
         // Best-effort: GUCs not yet set by anyone are silently fine.

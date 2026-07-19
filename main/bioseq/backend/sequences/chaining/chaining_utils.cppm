@@ -34,6 +34,7 @@ export module bioseq.sequences.chaining.utils;
 
 import bioseq.common.mlogging;
 import bioseq.common.context;
+import bioseq.common.radix_sort;
 
 export {
 namespace bioseq::chaining {
@@ -111,6 +112,212 @@ struct Anchor {
         return static_cast<std::uint64_t>(is_reverse) << 31;
     }
 };
+
+/// Canonical total ordering shared by ordinary CPU seed collection and the
+/// fragment-native prepared-anchor reader.  `query_bits()` intentionally
+/// carries only the low 32 position bits for mm128 compatibility, so the full
+/// query position is the final tie-breaker.  Keeping this definition beside
+/// `Anchor` prevents persisted and recomputed routes from quietly choosing
+/// different equal-reference ordering rules.
+struct CanonicalAnchorLess {
+    [[nodiscard, gnu::always_inline]] inline bool operator()(
+            const Anchor& left, const Anchor& right) const noexcept {
+        const std::uint64_t left_ref = left.ref_bits();
+        const std::uint64_t right_ref = right.ref_bits();
+        if (left_ref != right_ref) return left_ref < right_ref;
+
+        const std::uint64_t left_query = left.query_bits();
+        const std::uint64_t right_query = right.query_bits();
+        if (left_query != right_query) return left_query < right_query;
+
+        return left.query_position < right.query_position;
+    }
+};
+
+/// Exact payload presented to the in-place canonical sort stages.  The byte
+/// counters describe algorithmic work, not allocator traffic: the primary
+/// field counts each non-trivial span once, while tie bytes count every
+/// equal-reference and equal-query-key subspan presented to its radix pass.
+struct CanonicalAnchorSortEvidence {
+    std::uint64_t primary_bytes = 0u;
+    std::uint64_t tie_bytes = 0u;
+    bool saturated = false;
+    bool bounded_u32_primary_key = false;
+};
+
+namespace canonical_anchor_sort_detail {
+
+template <class Key>
+[[nodiscard]] inline CanonicalAnchorSortEvidence sort_primary(
+        std::span<Anchor> anchors,
+        Key key,
+        bool bounded_u32_primary_key) noexcept {
+    CanonicalAnchorSortEvidence evidence{};
+    evidence.bounded_u32_primary_key = bounded_u32_primary_key;
+    if (anchors.size() < 2u) return evidence;
+
+    const auto add_payload_bytes = [&evidence](
+            std::uint64_t& destination,
+            std::size_t count) noexcept {
+        constexpr std::uint64_t element_bytes = sizeof(Anchor);
+        if (count > (std::numeric_limits<std::uint64_t>::max)()
+                        / element_bytes) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            evidence.saturated = true;
+            return;
+        }
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(count) * element_bytes;
+        if (destination
+                > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+            destination = (std::numeric_limits<std::uint64_t>::max)();
+            evidence.saturated = true;
+            return;
+        }
+        destination += bytes;
+    };
+
+    add_payload_bytes(evidence.primary_bytes, anchors.size());
+    bioseq::sorting::radix_sort(
+        anchors.data(), anchors.data() + anchors.size(), key);
+    return evidence;
+}
+
+} // namespace canonical_anchor_sort_detail
+
+[[nodiscard]] inline CanonicalAnchorSortEvidence sort_canonical_anchor_primary(
+        std::span<Anchor> anchors) noexcept {
+    struct AnchorRefBitsKey {
+        [[nodiscard, gnu::always_inline]] std::uint64_t operator()(
+                const Anchor& anchor) const noexcept {
+            return anchor.ref_bits();
+        }
+    };
+    return canonical_anchor_sort_detail::sort_primary(
+        anchors, AnchorRefBitsKey{}, false);
+}
+
+/// Fragment-native callers present one orientation-homogeneous slice at a
+/// time and have already authenticated every reference position against the
+/// target length.  For targets whose exclusive length fits in u32, the
+/// orientation bit is constant and `ref_position` is therefore the exact
+/// canonical primary key.  Selecting a u32 key prevents the in-place MSD
+/// radix from scanning four constant high bytes.  Larger targets retain the
+/// full `ref_bits()` authority without first scanning the anchor payload for
+/// a narrower maximum.
+[[nodiscard]] inline CanonicalAnchorSortEvidence
+sort_canonical_anchor_primary_bounded(
+        std::span<Anchor> orientation_homogeneous_anchors,
+        std::uint64_t authenticated_target_length) noexcept {
+    if (authenticated_target_length
+            <= (std::numeric_limits<std::uint32_t>::max)()) {
+        struct AnchorRefPositionU32Key {
+            [[nodiscard, gnu::always_inline]] std::uint32_t operator()(
+                    const Anchor& anchor) const noexcept {
+                return static_cast<std::uint32_t>(anchor.ref_position);
+            }
+        };
+        return canonical_anchor_sort_detail::sort_primary(
+            orientation_homogeneous_anchors,
+            AnchorRefPositionU32Key{},
+            true);
+    }
+    return sort_canonical_anchor_primary(orientation_homogeneous_anchors);
+}
+
+[[nodiscard]] inline CanonicalAnchorSortEvidence
+normalize_canonical_anchor_ties(std::span<Anchor> anchors) noexcept {
+    CanonicalAnchorSortEvidence evidence{};
+    if (anchors.size() < 2u) return evidence;
+
+    const auto add_payload_bytes = [&evidence](
+            std::size_t count) noexcept {
+        constexpr std::uint64_t element_bytes = sizeof(Anchor);
+        if (count > (std::numeric_limits<std::uint64_t>::max)()
+                        / element_bytes) {
+            evidence.tie_bytes =
+                (std::numeric_limits<std::uint64_t>::max)();
+            evidence.saturated = true;
+            return;
+        }
+        const std::uint64_t bytes =
+            static_cast<std::uint64_t>(count) * element_bytes;
+        if (evidence.tie_bytes
+                > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
+            evidence.tie_bytes =
+                (std::numeric_limits<std::uint64_t>::max)();
+            evidence.saturated = true;
+            return;
+        }
+        evidence.tie_bytes += bytes;
+    };
+
+    struct AnchorQueryBitsKey {
+        [[nodiscard, gnu::always_inline]] std::uint64_t operator()(
+                const Anchor& anchor) const noexcept {
+            return anchor.query_bits();
+        }
+    };
+    struct AnchorFullQueryPositionKey {
+        [[nodiscard, gnu::always_inline]] std::uint64_t operator()(
+                const Anchor& anchor) const noexcept {
+            return anchor.query_position;
+        }
+    };
+
+    // The project radix sorter is intentionally unstable.  Establish each
+    // subsequent key only inside the already-equal primary group: first
+    // query_bits, then the full query position where mm128's low-32-bit query
+    // word still ties.  This is linear for duplicate-heavy runs and produces
+    // exactly CanonicalAnchorLess order without a comparison-sort cliff.
+    for (std::size_t ref_begin = 0u; ref_begin < anchors.size();) {
+        std::size_t ref_end = ref_begin + 1u;
+        const std::uint64_t ref_bits = anchors[ref_begin].ref_bits();
+        while (ref_end < anchors.size()
+               && anchors[ref_end].ref_bits() == ref_bits) {
+            ++ref_end;
+        }
+        if (ref_end - ref_begin > 1u) {
+            add_payload_bytes(ref_end - ref_begin);
+            bioseq::sorting::radix_sort(
+                anchors.data() + ref_begin,
+                anchors.data() + ref_end,
+                AnchorQueryBitsKey{});
+
+            for (std::size_t query_begin = ref_begin;
+                 query_begin < ref_end;) {
+                std::size_t query_end = query_begin + 1u;
+                const std::uint64_t query_bits =
+                    anchors[query_begin].query_bits();
+                while (query_end < ref_end
+                       && anchors[query_end].query_bits() == query_bits) {
+                    ++query_end;
+                }
+                if (query_end - query_begin > 1u) {
+                    add_payload_bytes(query_end - query_begin);
+                    bioseq::sorting::radix_sort(
+                        anchors.data() + query_begin,
+                        anchors.data() + query_end,
+                        AnchorFullQueryPositionKey{});
+                }
+                query_begin = query_end;
+            }
+        }
+        ref_begin = ref_end;
+    }
+    return evidence;
+}
+
+[[nodiscard]] inline CanonicalAnchorSortEvidence sort_canonical_anchors(
+        std::span<Anchor> anchors) noexcept {
+    CanonicalAnchorSortEvidence evidence =
+        sort_canonical_anchor_primary(anchors);
+    const CanonicalAnchorSortEvidence ties =
+        normalize_canonical_anchor_ties(anchors);
+    evidence.tie_bytes = ties.tie_bytes;
+    evidence.saturated = evidence.saturated || ties.saturated;
+    return evidence;
+}
 
 // Pin the packing. DOC0263 §2 accepted "anchor memory doubles" (16 → ≤32 B); the
 // flat layout + reference_id removal lands at 24 B, 1.5× — the tightest the

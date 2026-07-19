@@ -6,10 +6,9 @@ set_target_properties(bioseq_pg_support PROPERTIES
   CXX_MODULE_STD ON
   POSITION_INDEPENDENT_CODE ON
   INTERPROCEDURAL_OPTIMIZATION FALSE)
-# This library is embedded in backend modules.  Export server include paths,
-# but never propagate the libpq client/static frontend support libraries into
-# those modules.
-target_link_libraries(bioseq_pg_support PUBLIC PostgreSQL::ServerHeaders)
+# This library is consumed by PostgreSQL server extensions.  It needs server
+# headers, but must not propagate the libpq client archive into those modules;
+# backend symbols are resolved by the postmaster at module load time.
 target_include_directories(bioseq_pg_support PUBLIC ${PostgreSQL_INCLUDE_DIRS})
 target_sources(bioseq_pg_support
   PUBLIC FILE_SET CXX_MODULES

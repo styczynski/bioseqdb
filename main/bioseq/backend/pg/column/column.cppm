@@ -439,6 +439,37 @@ bioseq_guc_init()
 		NULL,
 		NULL);
 
+	// DOC0383 P5 — one high-level, user-selected persistence provider.  The
+	// stable numeric values are carried through synchronous/async job receipts;
+	// the GUC spelling is only the configuration surface at job creation.
+	static const struct config_enum_entry
+	index_payload_storage_backend_options[] = {
+		{ "postgres_relation",
+		  index_payload_storage_backend_wire_value(
+			  IndexPayloadStorageBackend::postgres_relation),
+		  false },
+		{ "mapped_file",
+		  index_payload_storage_backend_wire_value(
+			  IndexPayloadStorageBackend::mapped_file),
+		  false },
+		{ NULL, 0, false }
+	};
+
+	DefineCustomEnumVariable(
+		"bioseq.index_payload_storage_backend",
+		"Payload backend captured when publishing a persisted minimizer generation.",
+		"postgres_relation preserves the current tuple-backed provider; "
+		"mapped_file streams a complete immutable generation without payload tuples.",
+		&bioseq_index_payload_storage_backend,
+		index_payload_storage_backend_wire_value(
+			IndexPayloadStorageBackend::postgres_relation),
+		index_payload_storage_backend_options,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
 	static const struct config_enum_entry mps_pair_sort_impl_options[] = {
 		{ "std_sort", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::std_sort), false },
 		{ "simd_u128_vqsort", static_cast<int>(bioseq::indexing::detail::PairRunSortImpl::simd_u128_vqsort), false },
@@ -641,6 +672,35 @@ bioseq_guc_init()
 							 NULL, &bioseq_aligner_minimizer_algorithm, 0,
 							 minimizer_algorithm_options,
 							 PGC_USERSET, 0, NULL, NULL, NULL);
+
+	static const struct config_enum_entry mpf_format5_lookup_route_options[] = {
+		{ "format5_control_scans",
+		  mpf_format5_lookup_route_wire_value(
+			  MpfFormat5LookupRoute::format5_control_scans),
+		  false },
+		{ "compact_h32_direct",
+		  mpf_format5_lookup_route_wire_value(
+			  MpfFormat5LookupRoute::compact_h32_direct),
+		  false },
+		{ NULL, 0, false }
+	};
+
+	DefineCustomEnumVariable(
+		"bioseq.aligner.mpf_format5_lookup_route",
+		"Select the persisted MPF Format-5 minimizer lookup topology.",
+		"This MPF-only setting does not alter MPS. For active MPF, "
+		"compact_h32_direct fails closed when the authenticated nested image "
+		"is absent or invalid and never falls back to control scans.",
+		&bioseq_aligner_mpf_format5_lookup_route,
+		mpf_format5_lookup_route_wire_value(
+			MpfFormat5LookupRoute::format5_control_scans),
+		mpf_format5_lookup_route_options,
+		PGC_USERSET,
+		0,
+		NULL,
+		NULL,
+		NULL);
+
 	DefineCustomBoolVariable(
 		"bioseq.aligner.grouped32_persisted_generation_enabled",
 		"Opt into locator-backed native READY minimizer publication (selective Format 6 for registered profiles, authenticated Format 5 otherwise); requires asynchronous persistence and INSERT-time minimizer maintenance to be disabled.",

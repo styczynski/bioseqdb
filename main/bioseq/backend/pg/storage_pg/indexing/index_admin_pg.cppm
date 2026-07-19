@@ -436,15 +436,19 @@ inline auto build_letter_rank_table() {
     std::array<std::array<std::int8_t, kCharDomain>, kNumAlphabets> table{};
     for (auto& row : table) row.fill((std::int8_t)-1);
     for (std::uint8_t ac = 0; ac < kNumAlphabets; ++ac) {
-        pgseq_t::dispatch_instance(ac, 1, [&]<class S>() {
-            using alphabet_t = typename S::alphabet_type;
-            for (int c = 0; c < (int)kCharDomain; ++c) {
-                const char letter = (char)c;
-                if (!seqan3::char_is_valid_for<alphabet_t>(letter)) continue;
-                alphabet_t sym{}; sym.assign_char(letter);
-                table[ac][(std::uint8_t)c] = (std::int8_t)sym.to_rank();
-            }
-        });
+        // Rank conversion depends only on the alphabet.  Dispatching a
+        // fabricated storage width here violates pgseq_t's active width
+        // policy in optimized PostgreSQL builds (which intentionally enable
+        // only 8-byte storage units).
+        pgseq_supported_alphabets::dispatch_alphabet_by_code(
+            ac, [&table, ac]<class alphabet_t>() {
+                for (int c = 0; c < (int)kCharDomain; ++c) {
+                    const char letter = (char)c;
+                    if (!seqan3::char_is_valid_for<alphabet_t>(letter)) continue;
+                    alphabet_t sym{}; sym.assign_char(letter);
+                    table[ac][(std::uint8_t)c] = (std::int8_t)sym.to_rank();
+                }
+            });
     }
     return table;
 }
@@ -684,7 +688,8 @@ inline void build_and_verify_minimizer_format6_generation_pg(
         Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend);
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        IndexPayloadStorageBackend requested_provider);
 
 template <class R, class Scanner>
 inline void build_and_verify_grouped32_minimizer_generation_pg(
@@ -696,7 +701,8 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
         Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend);
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        IndexPayloadStorageBackend requested_provider);
 
 [[noreturn]] inline void reject_grouped32_nonlocator_source_as_cpp(
         std::string_view index_name) {
@@ -892,15 +898,56 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         });
         pg_unreachable();
     }
+    // Snapshot the provider once at synchronous job creation.  Every later
+    // coordinator boundary receives this value explicitly and never rereads
+    // session configuration.
+    const int requested_provider_wire_value =
+        bioseq_index_payload_storage_backend;
+    const auto decoded_requested_provider =
+        decode_index_payload_storage_backend(
+            requested_provider_wire_value);
+    if (!decoded_requested_provider.has_value()) {
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [requested_provider_wire_value] {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                     errmsg("bioseq.update_index received an invalid payload provider"),
+                     errdetail("provider=%d",
+                        requested_provider_wire_value)));
+            });
+        pg_unreachable();
+    }
+    const IndexPayloadStorageBackend requested_provider =
+        *decoded_requested_provider;
     const RelationIdentity rid = index_relation_identity(rel_oid);
     const SequenceIndexType layout = layout_of_name(name);
-    reset_last_mps_build_stats();
     const auto backend = resolve_index_sketch_backend_from_gucs();  // DOC0345 Patch I
     const bool is_minimizer_index =
         name == bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME
         || name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
     const bool use_grouped32_generation = is_minimizer_index
         && bioseq_aligner_grouped32_persisted_generation_enabled;
+    if (is_minimizer_index
+        && requested_provider == IndexPayloadStorageBackend::mapped_file) {
+        const bool is_mps = name
+            == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+        bioseq::pg_utils::invoke_pg_as_cpp([is_mps] {
+            ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("mapped_file payload storage is unavailable for this minimizer rebuild"),
+                 errdetail("%s",
+                    is_mps
+                        ? "MPS/Format-6 is not supported by mapped_file"
+                        : "the mapped_file MPF lifecycle is not installed; no relation-provider fallback is permitted")));
+        });
+        pg_unreachable();
+    }
+    if (is_minimizer_index) {
+        // Cold fail-closed gate before generation-id allocation, relation/file
+        // creation, payload writes, or descriptor/head publication.
+        bioseq::storage::validate_minimizer_generation_storage_catalogs_pg();
+    }
+    reset_last_mps_build_stats();
     if (use_grouped32_generation
         && (bioseq_index_async_persist
             || bioseq_recompute_async_persist)) {
@@ -1198,7 +1245,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
                                 build_and_verify_minimizer_format6_generation_pg(
                                     rel_oid, seq_attno, name, loc, rowno,
-                                    rs->snapshot, store, lazy, backend);
+                                    rs->snapshot, store, lazy, backend,
+                                    requested_provider);
                             } else {
                                 auto store = open_fragment_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
                                 run_pg_index_build_with_cleanup(store, [&idx, &name, &store, &lazy, rowno, backend] {
@@ -1725,7 +1773,8 @@ private:
         Snapshot,
         IndexStorageFragmentPg&,
         bioseq::storage::lazy_compact_sequence<R, Scanner>&,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend);
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend,
+        IndexPayloadStorageBackend);
 
     ReadyMinimizerGenerationIndexKindPg index_kind_ =
         ReadyMinimizerGenerationIndexKindPg::mpf;
@@ -2294,7 +2343,8 @@ build_and_publish_minimizer_format6_generation_pg(
         Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        IndexPayloadStorageBackend requested_provider) {
     static_assert(std::same_as<
         Scanner, bioseq::storage::sequence_scanner_pg<R>>,
         "Format-6 publisher requires the PostgreSQL scanner type");
@@ -2314,6 +2364,19 @@ build_and_publish_minimizer_format6_generation_pg(
 
     const bool is_mps =
         index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+    if (!is_valid_index_payload_storage_backend_wire_value(
+            index_payload_storage_backend_wire_value(
+                requested_provider))) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "Format-6 minimizer generation provider is invalid");
+    }
+    if (requested_provider == IndexPayloadStorageBackend::mapped_file) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            "mapped_file payload storage does not support Format-6 generations",
+            "the requested provider is rejected before generation allocation or storage mutation");
+    }
     const bool active_snapshot_ready =
         bioseq::pg_utils::invoke_pg_as_cpp([] {
             return ActiveSnapshotSet()
@@ -2398,6 +2461,8 @@ build_and_publish_minimizer_format6_generation_pg(
         bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
 
     struct BuildState {
+        IndexPayloadStorageBackend requested_provider =
+            IndexPayloadStorageBackend::postgres_relation;
         Rev3IndexAdministrationIdentity identity{};
         std::optional<Rev3AuthoritativeSourceProof> source_proof;
         Rev3AuthoritativeSourceLocator source{};
@@ -2409,6 +2474,7 @@ build_and_publish_minimizer_format6_generation_pg(
         bioseq::indexing::MpsGenerationExecutionEvidence execution{};
     };
     auto* state = new BuildState{
+        .requested_provider = requested_provider,
         .identity = Rev3IndexAdministrationIdentity{
             .database_oid = relation_identity.db_oid,
             .tablespace_oid = relation_identity.tablespace_oid,
@@ -2766,7 +2832,8 @@ inline void build_and_verify_minimizer_format6_generation_pg(
         Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        IndexPayloadStorageBackend requested_provider) {
     using Traits =
         typename bioseq::storage::lazy_compact_sequence<R, Scanner>::traits;
     constexpr std::uint16_t kWindowSize = 10u;
@@ -2786,7 +2853,8 @@ inline void build_and_verify_minimizer_format6_generation_pg(
             registered_source_snapshot,
             storage,
             sequence,
-            backend);
+            backend,
+            requested_provider);
         return;
     }
     if constexpr (kAlphabetCode != 0u) {
@@ -2801,7 +2869,8 @@ inline void build_and_verify_minimizer_format6_generation_pg(
             registered_source_snapshot,
             storage,
             sequence,
-            backend);
+            backend,
+            requested_provider);
         return;
     } else {
         const auto compatibility = bioseq::indexing::
@@ -2823,7 +2892,8 @@ inline void build_and_verify_minimizer_format6_generation_pg(
                 registered_source_snapshot,
                 storage,
                 sequence,
-                backend);
+                backend,
+                requested_provider);
             return;
         }
         const ReadyMinimizerFormat6PublicationPg publication =
@@ -2836,7 +2906,8 @@ inline void build_and_verify_minimizer_format6_generation_pg(
                 registered_source_snapshot,
                 storage,
                 sequence,
-                backend);
+                backend,
+                requested_provider);
         if (!publication.published
             || publication.generation_id == 0u
             || publication.query_key != sequence_rowno
@@ -2887,7 +2958,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
         Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        IndexPayloadStorageBackend requested_provider) {
     static_assert(std::same_as<
         Scanner, bioseq::storage::sequence_scanner_pg<R>>,
         "READY minimizer coordinator requires the PostgreSQL scanner type");
@@ -2909,6 +2981,23 @@ build_and_publish_grouped32_minimizer_generation_pg(
 
     const bool is_mpf = index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
     const bool is_mps = index_name == MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+    if (!is_valid_index_payload_storage_backend_wire_value(
+            index_payload_storage_backend_wire_value(
+                requested_provider))) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_INVALID_PARAMETER_VALUE,
+            "READY minimizer generation provider is invalid");
+    }
+    if (requested_provider == IndexPayloadStorageBackend::mapped_file) {
+        ready_minimizer_error_as_cpp(
+            ERRCODE_FEATURE_NOT_SUPPORTED,
+            is_mps
+                ? "mapped_file payload storage does not support MPS generations"
+                : "mapped_file payload storage is not available until its complete lifecycle is installed",
+            is_mps
+                ? "mapped_file is restricted to Format-5 minimizers_per_fragment generations"
+                : "the provider remains dark and no relation-provider fallback is permitted");
+    }
     const bool active_snapshot_ready =
         bioseq::pg_utils::invoke_pg_as_cpp([] {
             return ActiveSnapshotSet()
@@ -3028,6 +3117,8 @@ build_and_publish_grouped32_minimizer_generation_pg(
     }
 
     struct BuildState {
+        IndexPayloadStorageBackend requested_provider =
+            IndexPayloadStorageBackend::postgres_relation;
         Rev3IndexAdministrationIdentity identity{};
         std::optional<Rev3AuthoritativeSourceProof> source_proof;
         Rev3AuthoritativeSourceLocator source{};
@@ -3044,6 +3135,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         bool mps_spill_started = false;
     };
     auto* state = new BuildState{
+        .requested_provider = requested_provider,
         .identity = Rev3IndexAdministrationIdentity{
             .database_oid = relation_identity.db_oid,
             .tablespace_oid = relation_identity.tablespace_oid,
@@ -3477,11 +3569,13 @@ inline void build_and_verify_grouped32_minimizer_generation_pg(
         Snapshot registered_source_snapshot,
         IndexStorageFragmentPg& storage,
         bioseq::storage::lazy_compact_sequence<R, Scanner>& sequence,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend) {
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend,
+        IndexPayloadStorageBackend requested_provider) {
     const ReadyMinimizerGenerationPublicationPg publication =
         build_and_publish_grouped32_minimizer_generation_pg(
             user_relid, column_attno, index_name, locator, sequence_rowno,
-            registered_source_snapshot, storage, sequence, backend);
+            registered_source_snapshot, storage, sequence, backend,
+            requested_provider);
     const bool evidence_kind_matches =
         index_name == MINIMIZERS_PER_FRAGMENT_INDEX_NAME
             ? std::holds_alternative<
@@ -3535,7 +3629,8 @@ build_and_publish_grouped32_minimizer_generation_pg<
         Snapshot,
         IndexStorageFragmentPg&,
         ready_minimizer_generation_compile_contract_detail::lazy_sequence&,
-        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend);
+        bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend,
+        IndexPayloadStorageBackend);
 
 /// Result of the test seam that instantiates the production coordinator
 /// against a real PostgreSQL-backed lazy sequence. The head and manifest are
@@ -4068,7 +4163,9 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                                     rel_oid, seq_attno, index_name,
                                     result.locator, sequence_rowno,
                                     state->source_snapshot,
-                                    *state->storage, lazy, backend));
+                                    *state->storage, lazy, backend,
+                                    IndexPayloadStorageBackend::
+                                        postgres_relation));
                             disarm_ready_minimizer_fixture_failures();
                         });
                 });

@@ -1080,8 +1080,9 @@ static_assert(std::is_nothrow_move_constructible_v<
 inline constexpr std::size_t k_runtime_pipeline_kind_slots = 64u;
 inline constexpr std::size_t k_runtime_pipeline_prepared_slots = 11u;
 
-/// Exact 8-bit radix pass count for the persisted Shape-V5 target coordinate
-/// domain.  Kept public and allocation-free so portable contract tests can pin
+/// Exact 8-bit radix pass count for the persisted Shape-V5 Anchor ref_bits
+/// domain: every target-coordinate bit plus the one canonical reverse-strand
+/// bit. Kept public and allocation-free so portable contract tests can pin
 /// every byte-width boundary used by causal dispatch validation.
 [[nodiscard]] inline std::optional<std::uint32_t>
 runtime_shape_v5_radix_pass_count(
@@ -1102,7 +1103,7 @@ runtime_shape_v5_radix_pass_count(
         ? 1u
         : 64u - static_cast<std::uint32_t>(
             std::countl_zero(target_end));
-    return std::clamp<std::uint32_t>((bits + 7u) / 8u, 1u, 8u);
+    return std::clamp<std::uint32_t>((bits + 8u) / 8u, 1u, 8u);
 }
 
 enum class RuntimePipelineOperationKind : std::uint8_t {
@@ -2378,6 +2379,8 @@ self_test_causal_collector_contract(
         collector->begin(command(13u));
         for (std::size_t slot = 8u; slot < 11u; ++slot) {
             collector->use(command(13u), 1u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 1u, keys[slot], &receipts[slot], 1u);
+            collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
             collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
             collector->use(command(13u), 2u, keys[slot], &receipts[slot], 1u);
         }
@@ -2573,6 +2576,11 @@ static_assert(std::is_standard_layout_v<GenerateUnitsPush>);
 struct RuntimeSketchResult {
     Buffer minimizer_words;
     std::uint64_t count = 0;
+    // Operation-originated lifetime receipt.  A successful roundtrip may hand
+    // its standalone output buffer to the caller only after every shared-arena
+    // backing buffer has been destroyed.  The caller consumes this receipt
+    // before shrinking dispatch admission or reserving exact host storage.
+    bool arena_trimmed_before_return = false;
     bool overflow = false;
 };
 
@@ -3178,6 +3186,24 @@ struct GpuBuiltIndexOwnershipProof {
     // Exact count T may exceed it and then drives checked allocation/admission.
     std::uint64_t target_minimizer_capacity_estimate = 0;
     std::uint64_t capacity_estimate_underestimated = 0;
+    // Deterministic host-scratch lifetime evidence for target-index builds.
+    // A prior idle arena high-water is destroyed before count admission; the
+    // packed sequence is copied directly from the borrowed input and only its
+    // device padding is zeroed; tile records are filled directly in mapped
+    // arena storage, so exact-main grow_to sees no host tile owner.
+    std::uint64_t idle_arena_trim_attempts_before_count = 0;
+    std::uint64_t idle_arena_trim_successes_before_count = 0;
+    std::uint64_t idle_arena_released_bytes_before_count = 0;
+    std::uint64_t pretrim_peak_observed_bytes = 0;
+    std::uint64_t direct_sequence_arena_copies = 0;
+    std::uint64_t sequence_padding_zeroed_bytes = 0;
+    std::uint64_t host_sequence_capacity_releases_before_main = 0;
+    std::uint64_t host_sequence_capacity_released_bytes = 0;
+    std::uint64_t direct_tile_arena_fills = 0;
+    std::uint64_t host_tile_staging_elided_bytes = 0;
+    std::uint64_t count_phase_host_transient_bytes = 0;
+    std::uint64_t main_phase_host_transient_bytes = 0;
+    std::uint64_t host_transient_excluded_before_main_bytes = 0;
     // Set inside Runtime under its mutex only after the runtime scope has
     // rewound and destroyed every arena backing buffer, before the façade can
     // shrink the peak permit to resident R.
@@ -4828,7 +4854,8 @@ public:
         std::uint64_t query_len,
         std::uint32_t kmer_size,
         std::uint64_t exact_anchor_count,
-        const SeedAnchorSortPlan& sort_plan);
+        const SeedAnchorSortPlan& sort_plan,
+        std::uint64_t expected_vulkan_allocation_bytes);
 
     // DOC0310 Phase C — accessor for the per-runtime reusable arena (§7).
     [[nodiscard]] GpuArena& phase_c_arena();
@@ -4852,12 +4879,22 @@ public:
         std::uint64_t max_minimizers,
         VulkanSketchHostMaterialization materialization);
 
+    // Resolve the complete, finite target-index pipeline set before the caller
+    // acquires the large count/main allocation permit. A cold cache miss must
+    // never grow process-lifetime metadata while that transient peak is both
+    // reserved and reflected in the process footprint.
+    void prepare_phase_c_target_index_pipelines(
+        const VulkanSketchParams& params);
+
     // DOC0310 Phase C — build the target minimizer index entirely on device
     // (§12): exact tile count/scan → deterministic emit → device radix sort →
     // dense sorted buckets. `max_target_minimizers` is only the caller's
     // planning estimate; exact T drives checked allocation and admission.
     GpuBuiltIndex run_phase_c_build_target_index(
         std::span<const std::byte> packed_sequence,
+        std::uint64_t padded_sequence_bytes,
+        std::uint64_t owned_sequence_staging_bytes,
+        std::function<void()> release_owned_sequence_staging,
         const VulkanRankLut& rank_lut,
         const VulkanSketchParams& params,
         std::uint64_t max_target_minimizers,
@@ -5211,6 +5248,8 @@ private:
     // cache and transfer Vulkan handles exactly once across reallocation.
     PhaseBPipeline get_phase_b_pipeline_locked(
         ShaderKind kind, std::uint32_t local_size, std::uint32_t max_span);
+    void prepare_phase_c_target_index_pipelines_locked(
+        const VulkanSketchParams& params);
     void bind_phase_b_descriptors_locked(
         const PhaseBPipeline& entry,
         std::span<const VkBuffer> buffers);
@@ -11100,14 +11139,21 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
     std::uint64_t query_len,
     std::uint32_t kmer_size,
     std::uint64_t exact_anchor_count,
-    const SeedAnchorSortPlan& sort_plan)
+    const SeedAnchorSortPlan& sort_plan,
+    std::uint64_t expected_vulkan_allocation_bytes)
 {
     std::lock_guard<std::mutex> guard(mu_);
     if (!features_.available) {
         throw VulkanRuntimeError("run_seed_lookup_roundtrip on unavailable device");
     }
     if (prefix_counts.size() < 2 || exact_anchor_count == 0) {
-        return SeedLookupResult{};
+        if (expected_vulkan_allocation_bytes != 0u) {
+            throw VulkanRuntimeError(
+                "zero-anchor seed lookup carried a Vulkan allocation plan");
+        }
+        SeedLookupResult empty_result{};
+        empty_result.anchor_proof = make_seed_anchor_canonical_proof({}, 0u);
+        return empty_result;
     }
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw VulkanRuntimeError("seed lookup missing resident index buffers");
@@ -11217,6 +11263,31 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
             sort_plan.histogram_bytes, kPhaseBBufferUsage);
     }
 
+    std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    const auto add_allocation = [&actual_vulkan_allocation_bytes](
+            const Buffer& buffer) noexcept {
+        actual_vulkan_allocation_bytes = sat_add(
+            actual_vulkan_allocation_bytes,
+            buffer.allocation_bytes);
+    };
+    add_allocation(scratch);
+    add_allocation(uploaded_min_words);
+    add_allocation(prefix_buf);
+    add_allocation(anchors_buf);
+    add_allocation(anchor_keys_buf);
+    add_allocation(ranges_buf);
+    add_allocation(anchors_scratch_buf);
+    add_allocation(anchor_keys_scratch_buf);
+    add_allocation(histogram_buf);
+    if (actual_vulkan_allocation_bytes
+        != expected_vulkan_allocation_bytes) {
+        throw VulkanRuntimeError(fmt::format(
+            "seed lookup Vulkan allocation requirement mismatch "
+            "(planned={} actual={})",
+            expected_vulkan_allocation_bytes,
+            actual_vulkan_allocation_bytes));
+    }
+
     {
         const std::array<VkBuffer, 6> seed_bufs{
             min_words->buffer, inputs.slots->buffer, inputs.positions->buffer,
@@ -11320,6 +11391,8 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
 
     SeedLookupResult result;
     result.count = exact_anchor_count;
+    result.actual_vulkan_allocation_bytes =
+        actual_vulkan_allocation_bytes;
     result.seed_lookup_dispatches = 1u;
     result.open_addressed_lookup_dispatches =
         inputs.bucket_count == 0u ? 1u : 0u;
@@ -11330,6 +11403,29 @@ SeedLookupResult Runtime::run_seed_lookup_roundtrip(
         ? anchors_scratch_buf : anchors_buf;
     download_locked(scratch, sorted_anchors, std::span<std::byte>{
         result.host_bytes.data(), result.host_bytes.size()});
+    const auto tie_normalization = normalize_seed_anchor_equal_ref_ties(
+        std::span<std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!tie_normalization.gpu_ref_order_checked
+        || !tie_normalization.gpu_ref_order_accepted) {
+        throw VulkanRuntimeError(
+            "seed lookup GPU result is not ordered by Anchor ref_bits");
+    }
+    result.canonical_tie_normalization_runs =
+        tie_normalization.canonical_tie_run_count;
+    result.canonical_tie_normalization_anchors =
+        tie_normalization.canonical_tie_anchor_count;
+    result.anchor_proof = make_seed_anchor_canonical_proof(
+        std::span<const std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!result.anchor_proof.canonical_order_checked
+        || !result.anchor_proof.canonical_order_accepted
+        || result.anchor_proof.anchor_count != result.count) {
+        throw VulkanRuntimeError(
+            "seed lookup result is not in canonical Anchor order");
+    }
 
     if (sort_plan.backend == SeedAnchorSortBackend::bitonic) {
         result.sort_proof.bitonic_sort_dispatches = 1u;
@@ -12028,10 +12124,28 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     if (!features_.available) {
         throw VulkanRuntimeError("run_phase_c_sketch_roundtrip on unavailable device");
     }
+    GpuArena& arena = phase_c_arena();
+    // A completed minimizer roundtrip returns only a standalone output buffer;
+    // no result aliases the shared arena.  Drop any idle high-water inherited
+    // from an earlier request, then cover every exit/exception path in this
+    // request with the same physical-trim invariant.
+    if (!arena.release_idle_capacity()) {
+        throw VulkanRuntimeError(
+            "phase_c sketch entered with live arena slices");
+    }
+    GpuArenaTrimGuard arena_trim{arena};
     const std::uint32_t bp = params.bp_size;
     const std::uint32_t w = params.window_size;
     const std::uint32_t k = params.kmer_size;
-    if (bp == 0u || w == 0u || k == 0u || bp < k) { result.count = 0; return result; }
+    if (bp == 0u || w == 0u || k == 0u || bp < k) {
+        result.count = 0;
+        if (!arena_trim.release_now()) {
+            throw VulkanRuntimeError(
+                "phase_c sketch empty roundtrip left live arena slices");
+        }
+        result.arena_trimmed_before_return = true;
+        return result;
+    }
     if (query_gate_words.size()
         > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c sketch query gate exceeds uint32 word count");
@@ -12093,7 +12207,6 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
     Buffer out_words = create_device_buffer(out_bytes, kPhaseBBufferUsage);
     if (out_words.mapped == nullptr) throw VulkanRuntimeError("phase_c sketch non-unified memory");
 
-    GpuArena& arena = phase_c_arena();
     const std::uint64_t arena_bytes = sat_add(
         memory_plan.arena_scaffold_bytes,
         query_gate_bytes == 0u
@@ -12223,6 +12336,12 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
         result.minimizer_words = std::move(out_words);
     }
     arena.rewind(mark);
+    if (!arena_trim.release_now()) {
+        result.minimizer_words.reset();
+        throw VulkanRuntimeError(
+            "phase_c sketch completed with live arena slices");
+    }
+    result.arena_trimmed_before_return = true;
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "vkResetCommandBuffer(pc_sketch-post)");
     chaining_dispatch_count_.fetch_add(1, std::memory_order_relaxed);
     return result;
@@ -12774,8 +12893,53 @@ void submit_and_wait(
 
 }  // namespace
 
+void Runtime::prepare_phase_c_target_index_pipelines_locked(
+    const VulkanSketchParams& params)
+{
+    // Keep this list identical to the complete target-index route. Pipeline
+    // owners and their exact metadata permits remain process-lived in Runtime;
+    // later getters in count, radix, mark, and bucket phases are cache hits
+    // under the operation's transient allocation permit.
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sketch_tile,
+        kPhaseCSketchLocal,
+        std::max<std::uint32_t>(params.window_size, 1u));
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_block, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_prefix_scan_add, 128u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sort_radix_histogram, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sort_radix_scan, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_sort_radix_scatter, 1u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_index_mark_runs, 128u, 1u);
+    (void)get_phase_b_pipeline_locked(
+        ShaderKind::phase_c_index_emit_buckets, 128u, 1u);
+}
+
+void Runtime::prepare_phase_c_target_index_pipelines(
+    const VulkanSketchParams& params)
+{
+    std::lock_guard<std::mutex> guard(mu_);
+    if (!features_.available) {
+        throw VulkanRuntimeError(
+            "prepare_phase_c_target_index_pipelines on unavailable device");
+    }
+    if (params.window_size == 0u) {
+        throw VulkanRuntimeError(
+            "prepare_phase_c_target_index_pipelines with zero window");
+    }
+    prepare_phase_c_target_index_pipelines_locked(params);
+}
+
 GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     std::span<const std::byte> packed_sequence,
+    std::uint64_t padded_sequence_bytes,
+    std::uint64_t owned_sequence_staging_bytes,
+    std::function<void()> release_owned_sequence_staging,
     const VulkanRankLut& rank_lut,
     const VulkanSketchParams& params,
     std::uint64_t max_target_minimizers,
@@ -12805,6 +12969,13 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
             GpuBuiltIndexFailureReason::minimizer_capacity_exceeds_u32;
         return out;
     }
+    if (packed_sequence.size() > padded_sequence_bytes
+        || padded_sequence_bytes
+            > static_cast<std::uint64_t>(
+                (std::numeric_limits<std::size_t>::max)())) {
+        out.failure_reason = GpuBuiltIndexFailureReason::memory_plan_invalid;
+        return out;
+    }
     if (query_gate_words.size()
         > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
         throw VulkanRuntimeError("phase_c index query gate exceeds uint32 word count");
@@ -12830,6 +13001,11 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         throw VulkanRuntimeError(
             "phase_c index query gate lacks matching immutable identity");
     }
+    // Fail-safe for direct Runtime callers. The production wrapper prepares
+    // this same set before reserving target-index memory, so these are normally
+    // cache hits. Keeping the invariant here prevents a future caller from
+    // reintroducing a cold miss under the much larger exact-main peak below.
+    prepare_phase_c_target_index_pipelines_locked(params);
     out.gate_identity = std::move(query_gate_identity);
     out.ownership.query_gate_enabled = query_gate_word_count != 0u ? 1u : 0u;
     out.ownership.query_gate_word_count = query_gate_word_count;
@@ -12847,7 +13023,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
 
     const PhaseCSketchMemoryPlan memory_plan = phase_c_sketch_memory_plan(
         bp,
-        packed_sequence.size(),
+        padded_sequence_bytes,
         sizeof(VulkanRankLut),
         max_target_minimizers,
         0u,
@@ -12860,6 +13036,19 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         out.failure_reason = GpuBuiltIndexFailureReason::memory_plan_invalid;
         return out;
     }
+    const PhaseCTargetIndexHostScratchPlan host_scratch_plan =
+        phase_c_target_index_host_scratch_plan(
+            memory_plan, owned_sequence_staging_bytes);
+    if (!host_scratch_plan.valid
+        || (owned_sequence_staging_bytes != 0u
+            && !release_owned_sequence_staging)) {
+        out.failure_reason = GpuBuiltIndexFailureReason::memory_plan_invalid;
+        return out;
+    }
+    out.ownership.count_phase_host_transient_bytes =
+        host_scratch_plan.count_phase_bytes;
+    out.ownership.main_phase_host_transient_bytes =
+        host_scratch_plan.main_phase_bytes;
     const std::uint32_t tile_bp = memory_plan.tiles.tile_bp;
     const std::uint32_t num_tiles = memory_plan.tiles.tile_count;
     // DOC0353: grid-strided sketch — clamp the dispatch to the device limit.
@@ -12867,18 +13056,26 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         ceil_div_u32(num_tiles, kPhaseCSketchLocal),
         features_.max_workgroup_count_x);
     const std::uint32_t overlap = phase_c_replay_overlap_bp(k, w);
-    std::vector<TileC> tiles(num_tiles);
-    for (std::uint32_t t = 0; t < num_tiles; ++t) {
-        const std::uint32_t lo = t * tile_bp;
-        const std::uint32_t hi = std::min(bp, (t + 1u) * tile_bp);
-        tiles[t] = TileC{params.seq_word_offset, bp, lo > overlap ? lo - overlap : 0u, lo, hi, 0u};
-    }
     // Small per-call scaffolding lives in the shared arena (seq + lut + tiles +
     // tile counts/offsets). The large minimizer/sort/index arrays are sized from
     // the EXACT minimizer count (downloaded after the count pass) as standalone
     // device buffers — never a single 14 GB arena buffer that Metal cannot
     // allocate for the XXL_HIFI 500 Mbp target.
     GpuArena& arena = phase_c_arena();
+    out.ownership.idle_arena_trim_attempts_before_count = 1u;
+    const std::uint64_t idle_arena_bytes = sat_add(
+        arena.device_buffer().allocation_bytes,
+        sat_add(arena.upload_buffer().allocation_bytes,
+                arena.download_buffer().allocation_bytes));
+    const std::uint64_t pretrim_observed_peak = sat_add(
+        idle_arena_bytes, host_scratch_plan.count_phase_bytes);
+    out.ownership.pretrim_peak_observed_bytes = pretrim_observed_peak;
+    if (!arena.release_idle_capacity()) {
+        out.failure_reason = GpuBuiltIndexFailureReason::index_invariant_failed;
+        return out;
+    }
+    out.ownership.idle_arena_trim_successes_before_count = 1u;
+    out.ownership.idle_arena_released_bytes_before_count = idle_arena_bytes;
     GpuArenaTrimGuard arena_trim{arena};
     const std::uint64_t arena_bytes = sat_add(
         memory_plan.arena_scaffold_bytes,
@@ -12889,7 +13086,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         arena.device_buffer().allocation_bytes,
         buffer_memory_requirement_locked(arena_bytes, kPhaseCArenaUsage));
     const std::uint64_t count_required_peak = sat_add(
-        count_arena_requirement, memory_plan.host_transient_bytes);
+        count_arena_requirement,
+        host_scratch_plan.count_phase_bytes);
     if (peak_permit == nullptr) {
         out.failure_reason =
             GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
@@ -12937,9 +13135,11 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         return out;
     }
 
-    const std::uint64_t count_observed_peak = sat_add(
-        arena.device_buffer().allocation_bytes,
-        memory_plan.host_transient_bytes);
+    const std::uint64_t count_observed_peak = std::max(
+        pretrim_observed_peak,
+        sat_add(
+            arena.device_buffer().allocation_bytes,
+            host_scratch_plan.count_phase_bytes));
     if (count_observed_peak > peak_permit->bytes()) {
         out.failure_reason =
             GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
@@ -12950,9 +13150,53 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     }
 
     auto* base = static_cast<std::byte*>(arena.device_buffer().mapped);
-    if (!packed_sequence.empty()) std::memcpy(base + seq_s.offset, packed_sequence.data(), packed_sequence.size());
+    if (!packed_sequence.empty()) {
+        std::memcpy(
+            base + seq_s.offset,
+            packed_sequence.data(),
+            packed_sequence.size());
+    }
+    const std::uint64_t sequence_padding_bytes =
+        seq_s.size - static_cast<std::uint64_t>(packed_sequence.size());
+    if (sequence_padding_bytes != 0u) {
+        std::memset(
+            base + seq_s.offset + packed_sequence.size(),
+            0,
+            static_cast<std::size_t>(sequence_padding_bytes));
+    }
+    out.ownership.direct_sequence_arena_copies = 1u;
+    out.ownership.sequence_padding_zeroed_bytes = sequence_padding_bytes;
+    if (release_owned_sequence_staging) {
+        release_owned_sequence_staging();
+        release_owned_sequence_staging = {};
+        out.ownership.host_sequence_capacity_releases_before_main = 1u;
+        out.ownership.host_sequence_capacity_released_bytes =
+            owned_sequence_staging_bytes;
+    }
     std::memcpy(base + lut_s.offset, &rank_lut, sizeof(rank_lut));
-    std::memcpy(base + tiles_s.offset, tiles.data(), tiles.size() * sizeof(TileC));
+    for (std::uint32_t tile_index = 0u;
+         tile_index < num_tiles;
+         ++tile_index) {
+        const std::uint32_t lo = tile_index * tile_bp;
+        const std::uint32_t hi = std::min(bp, (tile_index + 1u) * tile_bp);
+        const TileC tile{
+            params.seq_word_offset,
+            bp,
+            lo > overlap ? lo - overlap : 0u,
+            lo,
+            hi,
+            0u};
+        std::memcpy(
+            base + tiles_s.offset
+                + static_cast<std::uint64_t>(tile_index) * sizeof(TileC),
+            &tile,
+            sizeof(tile));
+    }
+    out.ownership.direct_tile_arena_fills = 1u;
+    out.ownership.host_tile_staging_elided_bytes =
+        host_scratch_plan.elided_tile_staging_bytes;
+    out.ownership.host_transient_excluded_before_main_bytes =
+        host_scratch_plan.excluded_before_main_bytes;
     std::memset(base + tcounts_s.offset, 0, static_cast<std::size_t>(tcounts_s.size));
     if (query_gate_bytes != 0u) {
         std::memcpy(base + query_gate_s.offset, query_gate_words.data(),
@@ -13090,7 +13334,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
             const std::uint64_t empty_position_requirement =
                 buffer_memory_requirement_locked(8u, kPhaseBBufferUsage);
             const std::uint64_t empty_peak = sat_add(
-                memory_plan.host_transient_bytes,
+                memory_plan.main_phase_host_transient_bytes,
                 sat_add(arena.device_buffer().allocation_bytes,
                     sat_add(empty_slot_requirement,
                             empty_position_requirement)));
@@ -13102,8 +13346,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
                 return out;
             }
             out.ownership.main_peak_admissions = 1u;
-            out.peak_admission_bytes = empty_peak;
-            out.ownership.peak_admitted_bytes = empty_peak;
+            out.peak_admission_bytes = peak_permit->bytes();
+            out.ownership.peak_admitted_bytes = peak_permit->bytes();
             out.slots = create_device_buffer(16u, kPhaseBBufferUsage);
             out.positions = create_device_buffer(8u, kPhaseBBufferUsage);
             if (out.slots.mapped == nullptr || out.positions.mapped == nullptr
@@ -13122,9 +13366,11 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
                 arena.device_buffer().allocation_bytes,
                 sat_add(out.slots.allocation_bytes,
                         out.positions.allocation_bytes));
-            out.ownership.peak_observed_bytes = sat_add(
-                out.observed_device_peak_bytes,
-                memory_plan.host_transient_bytes);
+            out.ownership.peak_observed_bytes = std::max(
+                count_observed_peak,
+                sat_add(
+                    out.observed_device_peak_bytes,
+                    memory_plan.main_phase_host_transient_bytes));
             out.occupied_slots = 0u;
             out.position_count = 0u;
             out.slot_mask = 0u;
@@ -13157,7 +13403,7 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         emit_flag_bytes);
     const PhaseCSketchMemoryPlan exact_main_plan = phase_c_sketch_memory_plan(
         bp,
-        packed_sequence.size(),
+        padded_sequence_bytes,
         sizeof(VulkanRankLut),
         emit_capacity,
         0u,
@@ -13220,7 +13466,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     const std::uint64_t exact_device_peak = std::max(
         sort_device_peak, std::max(mark_device_peak, bucket_device_peak));
     const std::uint64_t exact_main_admission = sat_add(
-        exact_device_peak, exact_main_plan.host_transient_bytes);
+        exact_device_peak,
+        exact_main_plan.main_phase_host_transient_bytes);
     if (peak_permit == nullptr || !exact_main_plan.valid
         || exact_main_admission == (std::numeric_limits<std::uint64_t>::max)()) {
         out.failure_reason =
@@ -13236,8 +13483,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
         return out;
     }
     out.ownership.main_peak_admissions = 1u;
-    out.peak_admission_bytes = exact_main_admission;
-    out.ownership.peak_admitted_bytes = exact_main_admission;
+    out.peak_admission_bytes = peak_permit->bytes();
+    out.ownership.peak_admitted_bytes = peak_permit->bytes();
 
     Buffer keys = create_device_buffer(
         std::max<std::uint64_t>(emit_capacity * 8u, emit_flag_scan_bytes),
@@ -13259,7 +13506,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     out.observed_device_peak_bytes = std::max(
         out.observed_device_peak_bytes, emit_observed_device);
     if (sat_add(emit_observed_device,
-                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+                exact_main_plan.main_phase_host_transient_bytes)
+            > peak_permit->bytes()) {
         out.failure_reason =
             GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
         arena.rewind(mark);
@@ -13416,7 +13664,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
                     sat_add(vals_scr.allocation_bytes,
                             hist.allocation_bytes)))));
     if (sat_add(out.observed_device_peak_bytes,
-                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+                exact_main_plan.main_phase_host_transient_bytes)
+            > peak_permit->bytes()) {
         out.failure_reason =
             GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
         arena.rewind(mark);
@@ -13528,7 +13777,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
                     sat_add(flag_scan.allocation_bytes,
                             iblocks.allocation_bytes)))));
     if (sat_add(out.observed_device_peak_bytes,
-                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+                exact_main_plan.main_phase_host_transient_bytes)
+            > peak_permit->bytes()) {
         out.failure_reason =
             GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
         arena.rewind(mark);
@@ -13656,7 +13906,8 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
                     sat_add(flag_scan.allocation_bytes,
                             buckets.allocation_bytes)))));
     if (sat_add(out.observed_device_peak_bytes,
-                exact_main_plan.host_transient_bytes) > peak_permit->bytes()) {
+                exact_main_plan.main_phase_host_transient_bytes)
+            > peak_permit->bytes()) {
         out.failure_reason =
             GpuBuiltIndexFailureReason::peak_allocation_exceeds_admission;
         arena.rewind(mark);
@@ -13699,9 +13950,11 @@ GpuBuiltIndex Runtime::run_phase_c_build_target_index(
     out.slot_mask = 0u;               // 0 ⇒ seed binary-searches `occupied_slots` buckets
     out.occupied_slots = num_buckets;
     out.position_count = static_cast<std::uint32_t>(tm);
-    out.ownership.peak_observed_bytes = sat_add(
-        out.observed_device_peak_bytes,
-        exact_main_plan.host_transient_bytes);
+    out.ownership.peak_observed_bytes = std::max(
+        count_observed_peak,
+        sat_add(
+            out.observed_device_peak_bytes,
+            exact_main_plan.main_phase_host_transient_bytes));
     check_vk(vkResetCommandBuffer(command_buffer_, 0), "reset(pc_idx-post)");
     arena.rewind(mark);
     const bool arena_released = arena_trim.release_now();
@@ -17078,6 +17331,8 @@ bool Runtime::self_test_persisted_shape_v5_finalizer_preclaim_contract(
         for (std::size_t slot = 8u; slot < 11u; ++slot) {
             shape_collector->use(
                 command(13u), 0u, keys[slot], &receipts[slot], 1u);
+            shape_collector->use(
+                command(13u), 0u, keys[slot], &receipts[slot], 1u);
         }
         shape_collector->use(
             command(13u), 0u, keys[5], &receipts[5], 1u);
@@ -18767,6 +19022,7 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
 {
     std::lock_guard<std::mutex> guard(mu_);
     SeedLookupResult result;
+    result.anchor_proof = make_seed_anchor_canonical_proof({}, 0u);
     if (!features_.available) throw VulkanRuntimeError("run_phase_c_seed_roundtrip on unavailable device");
     if (inputs.slots == nullptr || inputs.positions == nullptr) {
         throw VulkanRuntimeError("phase_c seed missing resident index buffers");
@@ -19004,6 +19260,31 @@ SeedLookupResult Runtime::run_phase_c_seed_roundtrip(
     std::memcpy(result.host_bytes.data(),
                 static_cast<const std::byte*>(sorted_anchors.buffer->mapped) + sorted_anchors.offset,
                 static_cast<std::size_t>(total * 24u));
+    const auto tie_normalization = normalize_seed_anchor_equal_ref_ties(
+        std::span<std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!tie_normalization.gpu_ref_order_checked
+        || !tie_normalization.gpu_ref_order_accepted) {
+        seed_arena_lifetime.release_or_throw();
+        throw VulkanRuntimeError(
+            "phase_c seed GPU result is not ordered by Anchor ref_bits");
+    }
+    result.canonical_tie_normalization_runs =
+        tie_normalization.canonical_tie_run_count;
+    result.canonical_tie_normalization_anchors =
+        tie_normalization.canonical_tie_anchor_count;
+    result.anchor_proof = make_seed_anchor_canonical_proof(
+        std::span<const std::byte>{
+            result.host_bytes.data(), result.host_bytes.size()},
+        result.count);
+    if (!result.anchor_proof.canonical_order_checked
+        || !result.anchor_proof.canonical_order_accepted
+        || result.anchor_proof.anchor_count != result.count) {
+        seed_arena_lifetime.release_or_throw();
+        throw VulkanRuntimeError(
+            "phase_c seed result is not in canonical Anchor order");
+    }
     result.sort_proof.radix_sort_operations = 1u;
     result.sort_proof.radix_anchor_count = total;
     result.sort_proof.radix_passes = anchor_sort_plan.pass_count;

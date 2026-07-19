@@ -74,12 +74,15 @@ namespace idx_ns = bioseq::indexing;
 }
 
 [[nodiscard]] static std::vector<std::tuple<std::uint64_t, std::uint64_t,
-                                            std::uint32_t, std::uint8_t>>
+                                            std::uint32_t, std::uint8_t,
+                                            std::uint8_t, std::uint16_t>>
 anchor_tuples(const ch::ArenaSlab<Anchor>& slab) {
-    std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint32_t, std::uint8_t>> out;
+    std::vector<std::tuple<std::uint64_t, std::uint64_t, std::uint32_t,
+                           std::uint8_t, std::uint8_t, std::uint16_t>> out;
     for (std::size_t i = 0; i < slab.size(); ++i) {
         const Anchor& a = slab.data()[i];
-        out.emplace_back(a.ref_position, a.query_position, a.is_reverse, a.query_span);
+        out.emplace_back(a.ref_position, a.query_position, a.is_reverse,
+                         a.query_span, a.flags, a.segment_id);
     }
     return out;
 }
@@ -146,15 +149,277 @@ TEST_CASE("vulkan seeding: scalable sort plan boundary and XXL arithmetic",
     REQUIRE(report87.host_result_bytes == 36'502'656u);
     REQUIRE(report87.transient_bytes == 136'885'376u);
 
-    std::uint64_t slab_growth = 0u;
-    REQUIRE(vk::vulkan_seed_reserved_bytes<MinimapSketchData>(
-        100u, report87, /*has_device_minimizers=*/true,
-        report87.anchor_count, &slab_growth) == 136'886'188u);
-    REQUIRE(slab_growth == 0u);
-    REQUIRE(vk::vulkan_seed_reserved_bytes<MinimapSketchData>(
-        100u, report87, /*has_device_minimizers=*/true,
-        0u, &slab_growth) == 173'388'844u);
-    REQUIRE(slab_growth == 36'502'656u);
+    const vk::VulkanSeedBufferAllocationRequirements requirements{
+        .scratch_bytes = 4u,
+        .prefix_bytes = 404u,
+        .anchors_bytes = report87.anchor_bytes,
+        .anchor_keys_bytes = report87.key_bytes,
+        .anchors_scratch_bytes = report87.anchor_bytes,
+        .anchor_keys_scratch_bytes = report87.key_bytes,
+        .histogram_bytes = report87.histogram_bytes,
+    };
+    const auto no_slab_growth = vk::make_vulkan_seed_reservation_plan(
+        requirements, 404u, report87.host_result_bytes, 0u);
+    REQUIRE(no_slab_growth.arithmetic_valid);
+    REQUIRE(no_slab_growth.vulkan_allocation_requirement_bytes
+            == 100'383'128u);
+    REQUIRE(no_slab_growth.total_bytes == 136'886'188u);
+    REQUIRE(vk::vulkan_seed_reservation_fits(
+        no_slab_growth, no_slab_growth.total_bytes));
+    REQUIRE_FALSE(vk::vulkan_seed_reservation_fits(
+        no_slab_growth, no_slab_growth.total_bytes - 1u));
+
+    const auto with_slab_growth = vk::make_vulkan_seed_reservation_plan(
+        requirements,
+        404u,
+        report87.host_result_bytes,
+        report87.anchor_bytes);
+    REQUIRE(with_slab_growth.arithmetic_valid);
+    REQUIRE(with_slab_growth.total_bytes == 173'388'844u);
+    REQUIRE(with_slab_growth.anchors_out_growth_bytes == 36'502'656u);
+}
+
+TEST_CASE("vulkan seeding: canonical anchor proof normalizes ref ties and digests explicit fields",
+          "[vulkan][seeding][anchor-proof]") {
+    std::vector<vk::SeedAnchorWire> anchors{
+        {.ref_position = 7u, .query_position = 30u, .is_reverse = 0u,
+         .query_span = 15u, .flags = 0u, .segment_id = 0u},
+        {.ref_position = 7u, .query_position = 10u, .is_reverse = 0u,
+         .query_span = 15u, .flags = 0u, .segment_id = 0u},
+        {.ref_position = 9u, .query_position = 20u, .is_reverse = 0u,
+         .query_span = 15u, .flags = 0u, .segment_id = 0u},
+    };
+    const auto normalized = vk::normalize_seed_anchor_equal_ref_ties(
+        std::as_writable_bytes(std::span{anchors}), anchors.size());
+    REQUIRE(normalized.gpu_ref_order_checked);
+    REQUIRE(normalized.gpu_ref_order_accepted);
+    REQUIRE(normalized.canonical_tie_run_count == 1u);
+    REQUIRE(normalized.canonical_tie_anchor_count == 2u);
+    REQUIRE(anchors[0].query_position == 10u);
+    REQUIRE(anchors[1].query_position == 30u);
+
+    const auto proof = vk::make_seed_anchor_canonical_proof(
+        std::as_bytes(std::span{anchors}), anchors.size());
+    REQUIRE(proof.anchor_count == anchors.size());
+    REQUIRE(proof.canonical_order_checked);
+    REQUIRE(proof.canonical_order_accepted);
+
+    auto mutated = anchors;
+    mutated[1].flags = 1u;
+    const auto mutated_proof = vk::make_seed_anchor_canonical_proof(
+        std::as_bytes(std::span{mutated}), mutated.size());
+    REQUIRE(mutated_proof.canonical_order_accepted);
+    REQUIRE((mutated_proof.digest_lo != proof.digest_lo
+             || mutated_proof.digest_hi != proof.digest_hi));
+
+    auto ref_disordered = anchors;
+    std::swap(ref_disordered.front(), ref_disordered.back());
+    const auto rejected = vk::normalize_seed_anchor_equal_ref_ties(
+        std::as_writable_bytes(std::span{ref_disordered}),
+        ref_disordered.size());
+    REQUIRE(rejected.gpu_ref_order_checked);
+    REQUIRE_FALSE(rejected.gpu_ref_order_accepted);
+
+    const auto empty = vk::make_seed_anchor_canonical_proof({}, 0u);
+    REQUIRE(empty.anchor_count == 0u);
+    REQUIRE(empty.digest_lo == vk::kSeedAnchorDigestSeedLo);
+    REQUIRE(empty.digest_hi == vk::kSeedAnchorDigestSeedHi);
+    REQUIRE(empty.canonical_order_checked);
+    REQUIRE(empty.canonical_order_accepted);
+}
+
+TEST_CASE("vulkan seeding: mapped sorted-dense two-pass prefix is exact and immutable",
+          "[vulkan][seeding][mapped-prefix][authority]"
+          "[vulkan][seeding][phase-b][mapped-prefix-authority]") {
+    std::vector<idx_ns::GpuMinimizerSlot> controls{
+        {.hash = 0x10u, .pos_offset = 0u, .pos_count = 2u},
+        {.hash = 0x20u, .pos_offset = 2u, .pos_count = 1u},
+    };
+    std::vector<std::uint64_t> positions{
+        enc(3u, 0u), enc(5u, 1u), enc(8u, 0u)};
+    std::uint64_t checksum = idx_ns::kGpuSourceDirectChecksumSeed;
+    for (const auto& control : controls) {
+        checksum = idx_ns::gpu_source_direct_checksum_word(
+            checksum, control.hash);
+        checksum = idx_ns::gpu_source_direct_checksum_word(
+            checksum, control.pos_offset);
+        for (std::uint64_t i = control.pos_offset;
+             i < control.pos_offset + control.pos_count; ++i) {
+            checksum = idx_ns::gpu_source_direct_checksum_word(
+                checksum, positions[static_cast<std::size_t>(i)]);
+        }
+        checksum = idx_ns::gpu_source_direct_checksum_word(
+            checksum, control.pos_count);
+    }
+    const auto accepted = vk::validate_mapped_sorted_dense_payload(
+        controls, positions, 100u, checksum);
+    REQUIRE(accepted.canonical_order_checked);
+    REQUIRE(accepted.accepted);
+    REQUIRE(accepted.covered_position_count == positions.size());
+
+    // Both present hashes share their low four bits. The mapped route must use
+    // sorted-dense binary search, handle a normal miss, and count duplicate
+    // query hashes exactly.
+    const std::vector<MinimapSketchData> query{
+        MinimapSketchData{0x10u, 1u, 0u},
+        MinimapSketchData{0x20u, 2u, 0u},
+        MinimapSketchData{0x30u, 3u, 0u},
+        MinimapSketchData{0x10u, 4u, 1u},
+    };
+    const auto query_span = std::span<const MinimapSketchData>{query};
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> oracle_pairs{
+        {0x10u, positions[0]},
+        {0x10u, positions[1]},
+        {0x20u, positions[2]},
+    };
+    MinimizerHashmapFragmentIndex oracle;
+    oracle.build_from_pairs(oracle_pairs, 100u);
+
+    const auto mapped_plan = vk::count_seed_prefix_plan(
+        query_span,
+        vk::validated_mapped_sorted_dense_prefix_view(
+            controls, positions, 100u, checksum),
+        /*max_occ=*/500);
+    const auto oracle_plan = vk::count_seed_prefix_plan(
+        query_span, oracle, /*max_occ=*/500);
+    REQUIRE(mapped_plan.prefix_len == query.size() + 1u);
+    REQUIRE(mapped_plan.exact_anchor_count == 5u);
+    REQUIRE(mapped_plan.exact_anchor_count
+            == oracle_plan.exact_anchor_count);
+    REQUIRE(mapped_plan.mapped_lookup_count == query.size());
+    REQUIRE(mapped_plan.mapped_comparison_count >= query.size());
+
+    const auto mapped_prefix =
+        vk::build_seed_prefix_counts_after_admission(
+            query_span,
+            vk::validated_mapped_sorted_dense_prefix_view(
+                controls, positions, 100u, checksum),
+            /*max_occ=*/500,
+            mapped_plan);
+    const auto oracle_prefix =
+        vk::build_seed_prefix_counts_after_admission(
+            query_span, oracle, /*max_occ=*/500, oracle_plan);
+    REQUIRE((mapped_prefix.prefix
+             == std::vector<std::uint32_t>{0u, 2u, 3u, 3u, 5u}));
+    REQUIRE(mapped_prefix.prefix == oracle_prefix);
+    REQUIRE(mapped_prefix.mapped_lookup_count == query.size());
+    REQUIRE(mapped_prefix.mapped_comparison_count >= query.size());
+
+    // A nonempty resident paired with an empty minimizer span is still a
+    // source-direct operation, not the generic empty-query shortcut.  Both
+    // calls reconstruct and validate the complete mapped payload; the absence
+    // of query hashes legitimately produces zero binary-search activity.
+    const std::span<const MinimapSketchData> empty_query{};
+    const auto empty_mapped_plan = vk::count_seed_prefix_plan(
+        empty_query,
+        vk::validated_mapped_sorted_dense_prefix_view(
+            controls, positions, 100u, checksum),
+        /*max_occ=*/500);
+    const auto empty_mapped_prefix =
+        vk::build_seed_prefix_counts_after_admission(
+            empty_query,
+            vk::validated_mapped_sorted_dense_prefix_view(
+                controls, positions, 100u, checksum),
+            /*max_occ=*/500,
+            empty_mapped_plan);
+    REQUIRE(empty_mapped_plan.prefix_len == 1u);
+    REQUIRE(empty_mapped_plan.exact_anchor_count == 0u);
+    REQUIRE(empty_mapped_plan.mapped_lookup_count == 0u);
+    REQUIRE(empty_mapped_plan.mapped_comparison_count == 0u);
+    REQUIRE(empty_mapped_prefix.prefix
+            == std::vector<std::uint32_t>{0u});
+    REQUIRE(empty_mapped_prefix.mapped_lookup_count == 0u);
+    REQUIRE(empty_mapped_prefix.mapped_comparison_count == 0u);
+
+    const auto limited_plan = vk::count_seed_prefix_plan(
+        query_span,
+        vk::validated_mapped_sorted_dense_prefix_view(
+            controls, positions, 100u, checksum),
+        /*max_occ=*/1);
+    const auto limited_prefix =
+        vk::build_seed_prefix_counts_after_admission(
+            query_span,
+            vk::validated_mapped_sorted_dense_prefix_view(
+                controls, positions, 100u, checksum),
+            /*max_occ=*/1,
+            limited_plan);
+    REQUIRE(limited_plan.exact_anchor_count == 1u);
+    REQUIRE((limited_prefix.prefix
+             == std::vector<std::uint32_t>{0u, 0u, 1u, 1u, 1u}));
+
+    const auto disabled_plan = vk::count_seed_prefix_plan(
+        query_span,
+        vk::validated_mapped_sorted_dense_prefix_view(
+            controls, positions, 100u, checksum),
+        /*max_occ=*/-1);
+    const auto disabled_prefix =
+        vk::build_seed_prefix_counts_after_admission(
+            query_span,
+            vk::validated_mapped_sorted_dense_prefix_view(
+                controls, positions, 100u, checksum),
+            /*max_occ=*/-1,
+            disabled_plan);
+    REQUIRE(disabled_plan.exact_anchor_count == 0u);
+    REQUIRE(disabled_plan.mapped_lookup_count == 0u);
+    REQUIRE(disabled_prefix.prefix
+            == std::vector<std::uint32_t>(query.size() + 1u, 0u));
+
+    auto divergent_plan = mapped_plan;
+    ++divergent_plan.exact_anchor_count;
+    REQUIRE_THROWS_AS(
+        vk::build_seed_prefix_counts_after_admission(
+            query_span,
+            vk::validated_mapped_sorted_dense_prefix_view(
+                controls, positions, 100u, checksum),
+            /*max_occ=*/500,
+            divergent_plan),
+        vk::MappedPrefixAuthorityInvalid);
+
+    auto mutated_positions = positions;
+    mutated_positions[1] ^= 2u;
+    REQUIRE_FALSE(vk::validate_mapped_sorted_dense_payload(
+        controls, mutated_positions, 100u, checksum).accepted);
+
+    auto mutated_controls = controls;
+    mutated_controls[1].pos_offset = 1u;
+    REQUIRE_FALSE(vk::validate_mapped_sorted_dense_payload(
+        mutated_controls, positions, 100u, checksum).accepted);
+
+    // The second pass revalidates the whole mapped payload, so mutation after
+    // the count receipt fails before any prefix can be published.
+    const auto mutated_second_pass = [
+        &controls,
+        &mutated_positions,
+        checksum,
+        query_span,
+        mapped_plan] {
+        auto second_view = vk::validated_mapped_sorted_dense_prefix_view(
+            controls, mutated_positions, 100u, checksum);
+        static_cast<void>(vk::build_seed_prefix_counts_after_admission(
+            query_span, std::move(second_view), /*max_occ=*/500,
+            mapped_plan));
+    };
+    REQUIRE_THROWS_AS(mutated_second_pass(),
+                      vk::MappedPrefixAuthorityInvalid);
+
+    constexpr std::uint64_t u32_max =
+        (std::numeric_limits<std::uint32_t>::max)();
+    REQUIRE(vk::checked_seed_prefix_length(u32_max - 1u) == u32_max);
+    REQUIRE(vk::checked_seed_anchor_total(u32_max - 1u, 1u) == u32_max);
+    try {
+        static_cast<void>(vk::checked_seed_prefix_length(u32_max));
+        FAIL("u32+1 prefix length was accepted");
+    } catch (const vk::SeedLookupTooLarge& error) {
+        REQUIRE(error.kind == vk::SeedLookupOverflowKind::query_prefix_length);
+        REQUIRE(error.observed == u32_max + 1u);
+    }
+    try {
+        static_cast<void>(vk::checked_seed_anchor_total(u32_max, 1u));
+        FAIL("u32+1 exact anchor total was accepted");
+    } catch (const vk::SeedLookupTooLarge& error) {
+        REQUIRE(error.kind == vk::SeedLookupOverflowKind::exact_anchor_count);
+        REQUIRE(error.observed == u32_max + 1u);
+    }
 }
 
 TEST_CASE("vulkan seeding: sort plan proves local-key offset order and typed failures",
@@ -264,11 +529,30 @@ TEST_CASE("vulkan seeding: anchors match CPU collect_seed_hits (fwd/rev, >2^32)"
     REQUIRE(decline.sort_proof.bitonic_sort_dispatches == 1u);
     REQUIRE(decline.sort_proof.radix_sort_operations == 0u);
     REQUIRE(decline.sort_proof.host_sort_fallbacks == 0u);
+    REQUIRE(decline.planned_vulkan_allocation_bytes != 0u);
+    REQUIRE(decline.actual_vulkan_allocation_bytes
+            == decline.planned_vulkan_allocation_bytes);
+    REQUIRE(decline.canonical_anchor_count == gpu_slab.size());
+    REQUIRE(decline.canonical_anchor_order_checked);
+    REQUIRE(decline.canonical_anchor_order_accepted);
 
     const auto cpu_t = anchor_tuples(cpu_slab);
     const auto gpu_t = anchor_tuples(gpu_slab);
     ASSERT(cpu_t == gpu_t,
-           "GPU anchors differ from CPU (ref/query/strand/span)", cpu_t.size());
+           "GPU anchors differ from CPU in at least one explicit Anchor field",
+           cpu_t.size());
+
+    auto fused_slab = ch::make_arena_slab<Anchor>();
+    vk::VulkanSeedLookupDecline fused_decline{};
+    REQUIRE(vk::collect_seed_hits_vulkan<MinimapSketchData>(
+        std::span<const MinimapSketchData>{query.data(), query.size()},
+        std::nullopt, idx, resident, /*vulkan_enabled=*/true,
+        query_len, max_occ, kmer_size, fused_slab,
+        /*fused_frontend=*/true, &fused_decline));
+    REQUIRE(anchor_tuples(fused_slab) == cpu_t);
+    REQUIRE(fused_decline.canonical_anchor_count == fused_slab.size());
+    REQUIRE(fused_decline.canonical_anchor_order_checked);
+    REQUIRE(fused_decline.canonical_anchor_order_accepted);
 
     cache.clear();
 }
@@ -404,6 +688,11 @@ TEST_CASE("vulkan seeding: capacity+1 radix is stable on real GPU for odd/even p
         REQUIRE(decline.sort_proof.radix_scatter_dispatches
                 == expected_passes);
         REQUIRE(decline.sort_proof.host_sort_fallbacks == 0u);
+        REQUIRE(decline.canonical_anchor_count == anchor_count);
+        REQUIRE(decline.canonical_anchor_order_checked);
+        REQUIRE(decline.canonical_anchor_order_accepted);
+        REQUIRE(decline.canonical_tie_normalization_runs == 1u);
+        REQUIRE(decline.canonical_tie_normalization_anchors == anchor_count);
 
         const std::uint64_t equal_key = slab.data()[0].ref_bits();
         for (std::uint32_t ordinal = 0; ordinal < anchor_count; ++ordinal) {
@@ -455,6 +744,11 @@ TEST_CASE("vulkan seeding: empty result when no query minimizer hits the target"
     ASSERT(gpu_slab.size() == 0, "no-hit query produced anchors", gpu_slab.size());
     REQUIRE(decline.seed_lookup_dispatches == 0u);
     REQUIRE(decline.sort_proof == vk::SeedLookupSortExecutionProof{});
+    REQUIRE(decline.canonical_anchor_count == 0u);
+    REQUIRE(decline.canonical_anchor_digest_lo == vk::kSeedAnchorDigestSeedLo);
+    REQUIRE(decline.canonical_anchor_digest_hi == vk::kSeedAnchorDigestSeedHi);
+    REQUIRE(decline.canonical_anchor_order_checked);
+    REQUIRE(decline.canonical_anchor_order_accepted);
     cache.clear();
 }
 
@@ -475,6 +769,11 @@ TEST_CASE("vulkan seeding: empty query succeeds without fabricated dispatch proo
     REQUIRE(slab.size() == 0u);
     REQUIRE(decline.seed_lookup_dispatches == 0u);
     REQUIRE(decline.sort_proof == vk::SeedLookupSortExecutionProof{});
+    REQUIRE(decline.canonical_anchor_count == 0u);
+    REQUIRE(decline.canonical_anchor_digest_lo == vk::kSeedAnchorDigestSeedLo);
+    REQUIRE(decline.canonical_anchor_digest_hi == vk::kSeedAnchorDigestSeedHi);
+    REQUIRE(decline.canonical_anchor_order_checked);
+    REQUIRE(decline.canonical_anchor_order_accepted);
 }
 
 TEST_CASE("vulkan seeding: typed decline maps pre-dispatch shape predicates",

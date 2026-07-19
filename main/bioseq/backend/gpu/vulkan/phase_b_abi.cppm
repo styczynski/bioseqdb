@@ -16,9 +16,12 @@ module;
 
 #include <cstddef>
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+#include <span>
 #include <vector>
 
 export module bioseq.gpu.vulkan.phase_b_abi;
@@ -305,12 +308,294 @@ struct SeedLookupSortExecutionProof {
         const SeedLookupSortExecutionProof&) const noexcept = default;
 };
 
+/// Host mirror of the explicit 24-byte Anchor payload emitted by the seed
+/// shader.  This deliberately names every field instead of hashing raw object
+/// bytes, so padding can never become part of the biological-result proof.
+struct SeedAnchorWire {
+    std::uint64_t ref_position = 0u;
+    std::uint64_t query_position = 0u;
+    std::uint32_t is_reverse = 0u;
+    std::uint8_t query_span = 0u;
+    std::uint8_t flags = 0u;
+    std::uint16_t segment_id = 0u;
+};
+static_assert(sizeof(SeedAnchorWire) == 24u);
+static_assert(offsetof(SeedAnchorWire, ref_position) == 0u);
+static_assert(offsetof(SeedAnchorWire, query_position) == 8u);
+static_assert(offsetof(SeedAnchorWire, is_reverse) == 16u);
+static_assert(offsetof(SeedAnchorWire, query_span) == 20u);
+static_assert(offsetof(SeedAnchorWire, flags) == 21u);
+static_assert(offsetof(SeedAnchorWire, segment_id) == 22u);
+
+inline constexpr std::uint64_t kSeedAnchorDigestSeedLo =
+    0x243f6a8885a308d3ULL;
+inline constexpr std::uint64_t kSeedAnchorDigestSeedHi =
+    0x13198a2e03707344ULL;
+
+struct SeedAnchorCanonicalProof {
+    std::uint64_t anchor_count = 0u;
+    std::uint64_t digest_lo = kSeedAnchorDigestSeedLo;
+    std::uint64_t digest_hi = kSeedAnchorDigestSeedHi;
+    bool canonical_order_checked = false;
+    bool canonical_order_accepted = false;
+};
+
+struct SeedAnchorTieNormalizationProof {
+    std::uint64_t canonical_tie_run_count = 0u;
+    std::uint64_t canonical_tie_anchor_count = 0u;
+    bool gpu_ref_order_checked = false;
+    bool gpu_ref_order_accepted = false;
+};
+
+[[nodiscard]] inline constexpr std::uint64_t
+seed_anchor_digest_mix(std::uint64_t value) noexcept {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30u)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27u)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31u);
+}
+
+[[nodiscard]] inline constexpr bool seed_anchor_wire_less(
+    const SeedAnchorWire& left,
+    const SeedAnchorWire& right) noexcept
+{
+    constexpr std::uint64_t position_mask =
+        (std::uint64_t{1} << 63u) - 1u;
+    const std::uint64_t left_ref =
+        (static_cast<std::uint64_t>(left.is_reverse) << 63u)
+        | (left.ref_position & position_mask);
+    const std::uint64_t right_ref =
+        (static_cast<std::uint64_t>(right.is_reverse) << 63u)
+        | (right.ref_position & position_mask);
+    if (left_ref != right_ref) return left_ref < right_ref;
+
+    const std::uint64_t left_query =
+        (static_cast<std::uint64_t>(left.segment_id) << 48u)
+        | (static_cast<std::uint64_t>(left.flags) << 40u)
+        | (static_cast<std::uint64_t>(left.query_span) << 32u)
+        | static_cast<std::uint32_t>(left.query_position);
+    const std::uint64_t right_query =
+        (static_cast<std::uint64_t>(right.segment_id) << 48u)
+        | (static_cast<std::uint64_t>(right.flags) << 40u)
+        | (static_cast<std::uint64_t>(right.query_span) << 32u)
+        | static_cast<std::uint32_t>(right.query_position);
+    if (left_query != right_query) return left_query < right_query;
+    return left.query_position < right.query_position;
+}
+
+[[nodiscard]] inline SeedAnchorWire seed_anchor_wire_at(
+    std::span<const std::byte> payload,
+    std::uint64_t index) noexcept
+{
+    SeedAnchorWire anchor{};
+    std::memcpy(
+        &anchor,
+        payload.data() + index * sizeof(SeedAnchorWire),
+        sizeof(anchor));
+    return anchor;
+}
+
+inline void seed_anchor_wire_store(
+    std::span<std::byte> payload,
+    std::uint64_t index,
+    const SeedAnchorWire& anchor) noexcept
+{
+    std::memcpy(
+        payload.data() + index * sizeof(SeedAnchorWire),
+        &anchor,
+        sizeof(anchor));
+}
+
+[[nodiscard]] inline constexpr std::uint64_t seed_anchor_ref_bits(
+    const SeedAnchorWire& anchor) noexcept
+{
+    constexpr std::uint64_t position_mask =
+        (std::uint64_t{1} << 63u) - 1u;
+    return (static_cast<std::uint64_t>(anchor.is_reverse) << 63u)
+        | (anchor.ref_position & position_mask);
+}
+
+inline void seed_anchor_wire_swap(
+    std::span<std::byte> payload,
+    std::uint64_t left,
+    std::uint64_t right) noexcept
+{
+    if (left == right) return;
+    const SeedAnchorWire left_anchor = seed_anchor_wire_at(payload, left);
+    const SeedAnchorWire right_anchor = seed_anchor_wire_at(payload, right);
+    seed_anchor_wire_store(payload, left, right_anchor);
+    seed_anchor_wire_store(payload, right, left_anchor);
+}
+
+/// Sort one equal-ref run by the remaining CanonicalAnchorLess fields.  This
+/// allocation-free heap sort is part of the required common-order
+/// normalization after the GPU's ref_bits-only sort; it is not a biological
+/// CPU fallback.
+inline void normalize_seed_anchor_tie_run(
+    std::span<std::byte> payload,
+    std::uint64_t begin,
+    std::uint64_t count) noexcept
+{
+    const auto sift_down = [payload, begin](
+            std::uint64_t heap_count,
+            std::uint64_t first_root) noexcept {
+        std::uint64_t root = first_root;
+        while (root < heap_count / 2u) {
+            std::uint64_t child = root * 2u + 1u;
+            if (child + 1u < heap_count
+                && seed_anchor_wire_less(
+                    seed_anchor_wire_at(payload, begin + child),
+                    seed_anchor_wire_at(payload, begin + child + 1u))) {
+                ++child;
+            }
+            if (!seed_anchor_wire_less(
+                    seed_anchor_wire_at(payload, begin + root),
+                    seed_anchor_wire_at(payload, begin + child))) {
+                return;
+            }
+            seed_anchor_wire_swap(payload, begin + root, begin + child);
+            root = child;
+        }
+    };
+    for (std::uint64_t root = count / 2u; root != 0u; --root) {
+        sift_down(count, root - 1u);
+    }
+    for (std::uint64_t end = count; end > 1u; --end) {
+        seed_anchor_wire_swap(payload, begin, begin + end - 1u);
+        sift_down(end - 1u, 0u);
+    }
+}
+
+[[nodiscard]] inline SeedAnchorTieNormalizationProof
+normalize_seed_anchor_equal_ref_ties(
+    std::span<std::byte> payload,
+    std::uint64_t anchor_count) noexcept
+{
+    SeedAnchorTieNormalizationProof proof{
+        .gpu_ref_order_checked = true,
+        .gpu_ref_order_accepted = true,
+    };
+    constexpr std::uint64_t max =
+        (std::numeric_limits<std::uint64_t>::max)();
+    if (anchor_count > max / sizeof(SeedAnchorWire)
+        || payload.size() != anchor_count * sizeof(SeedAnchorWire)) {
+        proof.gpu_ref_order_accepted = false;
+        return proof;
+    }
+    std::uint64_t run_begin = 0u;
+    while (run_begin < anchor_count) {
+        const SeedAnchorWire first = seed_anchor_wire_at(payload, run_begin);
+        if (first.is_reverse > 1u) {
+            proof.gpu_ref_order_accepted = false;
+            return proof;
+        }
+        const std::uint64_t run_ref = seed_anchor_ref_bits(first);
+        if (run_begin != 0u) {
+            const SeedAnchorWire previous =
+                seed_anchor_wire_at(payload, run_begin - 1u);
+            if (seed_anchor_ref_bits(previous) > run_ref) {
+                proof.gpu_ref_order_accepted = false;
+                return proof;
+            }
+        }
+        std::uint64_t run_end = run_begin + 1u;
+        while (run_end < anchor_count) {
+            const SeedAnchorWire next = seed_anchor_wire_at(payload, run_end);
+            if (next.is_reverse > 1u) {
+                proof.gpu_ref_order_accepted = false;
+                return proof;
+            }
+            const std::uint64_t next_ref = seed_anchor_ref_bits(next);
+            if (next_ref < run_ref) {
+                proof.gpu_ref_order_accepted = false;
+                return proof;
+            }
+            if (next_ref != run_ref) break;
+            ++run_end;
+        }
+        const std::uint64_t run_count = run_end - run_begin;
+        if (run_count > 1u) {
+            ++proof.canonical_tie_run_count;
+            proof.canonical_tie_anchor_count += run_count;
+            normalize_seed_anchor_tie_run(payload, run_begin, run_count);
+        }
+        run_begin = run_end;
+    }
+    return proof;
+}
+
+/// Validate CanonicalAnchorLess-equivalent order and digest every explicit
+/// Anchor field in order.  The two lanes have independent seeds, salts, and
+/// recurrence, and the empty payload therefore has deterministic nonzero
+/// digest seeds while still carrying checked/accepted evidence.
+[[nodiscard]] inline SeedAnchorCanonicalProof make_seed_anchor_canonical_proof(
+    std::span<const std::byte> payload,
+    std::uint64_t anchor_count) noexcept
+{
+    SeedAnchorCanonicalProof proof{
+        .anchor_count = anchor_count,
+        .canonical_order_checked = true,
+        .canonical_order_accepted = true,
+    };
+    constexpr std::uint64_t max =
+        (std::numeric_limits<std::uint64_t>::max)();
+    if (anchor_count > max / sizeof(SeedAnchorWire)
+        || payload.size() != anchor_count * sizeof(SeedAnchorWire)) {
+        proof.canonical_order_accepted = false;
+        return proof;
+    }
+
+    SeedAnchorWire previous{};
+    bool have_previous = false;
+    for (std::uint64_t index = 0u; index < anchor_count; ++index) {
+        SeedAnchorWire anchor{};
+        std::memcpy(
+            &anchor,
+            payload.data() + index * sizeof(SeedAnchorWire),
+            sizeof(SeedAnchorWire));
+        if (anchor.is_reverse > 1u
+            || (have_previous && seed_anchor_wire_less(anchor, previous))) {
+            proof.canonical_order_accepted = false;
+        }
+
+        const std::array<std::uint64_t, 6u> fields{
+            anchor.ref_position,
+            anchor.query_position,
+            anchor.is_reverse,
+            anchor.query_span,
+            anchor.flags,
+            anchor.segment_id,
+        };
+        for (std::size_t field_index = 0u;
+             field_index < fields.size(); ++field_index) {
+            const std::uint64_t tagged = seed_anchor_digest_mix(
+                fields[field_index]
+                ^ seed_anchor_digest_mix(
+                    (index << 3u) | field_index));
+            proof.digest_lo = seed_anchor_digest_mix(
+                proof.digest_lo ^ tagged ^ 0xa4093822299f31d0ULL);
+            proof.digest_hi = std::rotl(
+                proof.digest_hi + tagged + 0x082efa98ec4e6c89ULL,
+                23);
+            proof.digest_hi ^= seed_anchor_digest_mix(
+                tagged ^ 0x452821e638d01377ULL);
+        }
+        previous = anchor;
+        have_previous = true;
+    }
+    return proof;
+}
+
 /// Result of a seed-lookup roundtrip: the downloaded `Anchor` bytes plus the
 /// real anchor count. The caller memcpys `count * sizeof(Anchor)` into the
 /// pipeline `ArenaSlab<Anchor>`.
 struct SeedLookupResult {
     std::vector<std::byte> host_bytes;
     std::uint64_t count = 0;
+    std::uint64_t actual_vulkan_allocation_bytes = 0u;
+    SeedAnchorCanonicalProof anchor_proof{};
+    std::uint64_t canonical_tie_normalization_runs = 0u;
+    std::uint64_t canonical_tie_normalization_anchors = 0u;
     std::uint64_t seed_lookup_dispatches = 0;
     std::uint64_t open_addressed_lookup_dispatches = 0;
     std::uint64_t sorted_dense_lookup_dispatches = 0;

@@ -1,6 +1,7 @@
 module;
 #include "common.h"
 
+#include <optional>
 #include <string_view>
 
 export module bioseq.config;
@@ -247,6 +248,52 @@ export bool bioseq_recompute_async_persist = false;
 export int  bioseq_index_memory_cap_mb = 0;
 
 /*
+ * DOC0383 P5 — persisted generation payload-provider identity. These values
+ * are a stable cross-backend/DSM ABI. The backing value and user-set GUC both
+ * default to the relation provider. Callers snapshot it once per job; provider
+ * admission still fails closed when a requested format is unsupported.
+ */
+export enum class IndexPayloadStorageBackend : int {
+	postgres_relation = 0,
+	mapped_file = 1,
+};
+
+export constexpr int index_payload_storage_backend_wire_value(
+		IndexPayloadStorageBackend backend) noexcept {
+	return static_cast<int>(backend);
+}
+
+export constexpr bool is_valid_index_payload_storage_backend_wire_value(
+		int value) noexcept {
+	return value == index_payload_storage_backend_wire_value(
+			IndexPayloadStorageBackend::postgres_relation)
+		|| value == index_payload_storage_backend_wire_value(
+			IndexPayloadStorageBackend::mapped_file);
+}
+
+export constexpr std::optional<IndexPayloadStorageBackend>
+decode_index_payload_storage_backend(int value) noexcept {
+	return is_valid_index_payload_storage_backend_wire_value(value)
+		? std::optional{static_cast<IndexPayloadStorageBackend>(value)}
+		: std::nullopt;
+}
+
+export int bioseq_index_payload_storage_backend =
+	index_payload_storage_backend_wire_value(
+		IndexPayloadStorageBackend::postgres_relation);
+
+static_assert(index_payload_storage_backend_wire_value(
+	IndexPayloadStorageBackend::postgres_relation) == 0);
+static_assert(index_payload_storage_backend_wire_value(
+	IndexPayloadStorageBackend::mapped_file) == 1);
+static_assert(decode_index_payload_storage_backend(0)
+	== IndexPayloadStorageBackend::postgres_relation);
+static_assert(decode_index_payload_storage_backend(1)
+	== IndexPayloadStorageBackend::mapped_file);
+static_assert(!decode_index_payload_storage_backend(-1).has_value());
+static_assert(!decode_index_payload_storage_backend(2).has_value());
+
+/*
  * DOC0263 §11.3.2 / DOC0264 — test-only knob. When on, the dispatch buffer
  * wraps row sequences in a synthetic chunked scanner (parity tests). Default
  * off; PGC_SUSET. The synthetic scanner has NO Postgres backing — the
@@ -323,6 +370,45 @@ export int  bioseq_aligner_block_max_size  = 256;
 export int  bioseq_aligner_chaining_algorithm  = 0;  /* matches ChainingAlgorithmType::SCALAR_MM2 */
 export int  bioseq_aligner_base_alignment_algorithm = 1;  /* matches BaseAlignmentAlgorithmType::BLOCK_ALIGNER */
 export int  bioseq_aligner_minimizer_algorithm = 0;  /* DOC0286: matches MinimizerAlgorithmType::SCALAR */
+
+/*
+ * DOC0383/DOC0384 — explicit MPF Format-5 lookup topology.  The direct route
+ * is deliberately opt-in until its restart-persistent performance gate is
+ * accepted.  The GUC applies only while MPF is the active index; MPS keeps its
+ * independent lookup topology.  An active MPF compact_h32_direct request is
+ * fail-closed and never permits a control-scan fallback when the nested image
+ * is absent or invalid.
+ */
+export enum class MpfFormat5LookupRoute : int {
+	format5_control_scans = 0,
+	compact_h32_direct = 1,
+};
+
+export constexpr int mpf_format5_lookup_route_wire_value(
+		MpfFormat5LookupRoute route) noexcept {
+	return static_cast<int>(route);
+}
+
+export constexpr std::optional<MpfFormat5LookupRoute>
+decode_mpf_format5_lookup_route(int value) noexcept {
+	return value == mpf_format5_lookup_route_wire_value(
+			MpfFormat5LookupRoute::format5_control_scans)
+		|| value == mpf_format5_lookup_route_wire_value(
+			MpfFormat5LookupRoute::compact_h32_direct)
+		? std::optional{static_cast<MpfFormat5LookupRoute>(value)}
+		: std::nullopt;
+}
+
+export int bioseq_aligner_mpf_format5_lookup_route =
+	mpf_format5_lookup_route_wire_value(
+		MpfFormat5LookupRoute::format5_control_scans);
+
+static_assert(decode_mpf_format5_lookup_route(0)
+	== MpfFormat5LookupRoute::format5_control_scans);
+static_assert(decode_mpf_format5_lookup_route(1)
+	== MpfFormat5LookupRoute::compact_h32_direct);
+static_assert(!decode_mpf_format5_lookup_route(-1).has_value());
+static_assert(!decode_mpf_format5_lookup_route(2).has_value());
 /*
  * Runtime profiling toggle. When true, BatchProcessor::process_sequences
  * picks the profiling pipeline (context_args_profiling_full); when false,

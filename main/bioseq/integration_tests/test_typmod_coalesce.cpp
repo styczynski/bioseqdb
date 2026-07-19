@@ -23,6 +23,7 @@
 // user-visible signal but the row set is the load-bearing part.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
 
 #include <set>
 #include <string>
@@ -85,13 +86,14 @@ TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
     REQUIRE(rows_match == rows_coalesce);
 }
 
-TEST_CASE("EXPLAIN surfaces \"coalesce to seq('dna4', 32)\" when the "
-          "literal width differs from the column width",
+TEST_CASE("EXPLAIN typmod-coalesce metadata follows the active storage-width "
+          "profile",
           "[mmsearch][typmod_coalesce][explain]") {
-    // The user explicitly asked for the EXPLAIN line so they can
-    // see the coalesce decision in the plan. We only check for
-    // the substring; the exact wording is in customscan's
-    // ExplainCustomScan.
+    // Optimisation levels 0 and 1 deliberately normalise every accepted
+    // SQL width to uint64_t.  Under those profiles the nominal dna4/32
+    // column and dna4/64 literal have the same packed typmod, so there is
+    // no coalesce decision to surface.  Level 2 retains the requested
+    // widths and must expose the user-visible coalesce hint.
     auto ctx = fresh_context({kCoalesceTable});
     seed_hoe_fixture(ctx, kCoalesceTable);
 
@@ -103,12 +105,15 @@ TEST_CASE("EXPLAIN surfaces \"coalesce to seq('dna4', 32)\" when the "
             "                'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('dna4', 64));",
             kCoalesceTable));
     REQUIRE_FALSE(plan.empty());
-    // The EXPLAIN line should include both the index-fetch
-    // reference and the coalesce hint. We check for "coalesce" so
-    // the test isn't brittle against rewording.
+#if BIOSEQ_OPTTIMIZATION_LEVEL <= 1
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "coalesce to seq"));
+#else
     REQUIRE(plan_contains(plan, "coalesce to seq('dna4', 32)"));
+#endif
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 TEST_CASE("Cross-alphabet recompute: dna5 query against dna4 column "
           "still returns matches",
           "[mmsearch][cross_alphabet][typmod_coalesce][regression]") {
@@ -178,6 +183,7 @@ TEST_CASE("Cross-alphabet recompute: dna5 query against dna4 column "
         REQUIRE(dna5_pks.count(key) > 0);
     }
 }
+#endif
 
 // Parameterised matrix: column at dna4/32 vs literal at every
 // supported (alphabet, width) typmod. The contract:
@@ -212,6 +218,22 @@ TEMPLATE_TEST_CASE_SIG(
     (Dna5Entry, 32),
     (Dna5Entry, 64)) {
     auto ctx = fresh_context({kCoalesceTable});
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    if constexpr (std::is_same_v<typename Entry::alphabet_type,
+                                 seq_entry_tag::dna5>) {
+        const auto unsupported_alphabet = sql_error(
+            ctx,
+            fmt::format(
+                "SELECT "
+                "'CTAGTCACTGTAGCCTGATCGTAGCTAGT'::bioseq.seq('{}', {});",
+                Entry::alphabet_name_sv, Width));
+        REQUIRE(unsupported_alphabet.sqlstate == "22023");
+        REQUIRE(unsupported_alphabet.contains(
+            "bioseq.seq alphabet \"dna5\" is not supported"));
+        REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
+    } else
+#endif
+    {
     seed_hoe_fixture(ctx, kCoalesceTable);
 
     // Baseline at the column's exact typmod.
@@ -267,8 +289,10 @@ TEMPLATE_TEST_CASE_SIG(
             REQUIRE(param_pks.count(key) > 0);
         }
     }
+    }
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 TEST_CASE("EXPLAIN surfaces \"Bioseq Recomputed: minimizers 100%\" with "
           "\"Performance reduced\" hint when alphabets differ",
           "[mmsearch][cross_alphabet][typmod_coalesce][explain]") {
@@ -295,3 +319,4 @@ TEST_CASE("EXPLAIN surfaces \"Bioseq Recomputed: minimizers 100%\" with "
     REQUIRE(plan_contains(plan, "Bioseq Recomputed"));
     REQUIRE(plan_contains(plan, "Performance reduced"));
 }
+#endif

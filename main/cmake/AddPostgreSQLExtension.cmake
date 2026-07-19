@@ -126,13 +126,13 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       # Add extension as a dynamically linked library
       add_library(${LIBRARY_NAME} MODULE ${EXTENSION_SOURCES})
 
-      # Backend modules resolve PostgreSQL server APIs from the hosting
-      # `postgres` executable.  Do not static-link the libpq client target on
-      # Unix: its frontend pgcommon/pgport dependencies can interpose
-      # same-named backend APIs.  Windows still requires the postgres import
-      # library selected by FindPostgreSQL.cmake.
-      target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::ServerHeaders)
-      if(WIN32)
+      # A PostgreSQL server extension on ELF platforms must not link libpq.
+      # Its backend API symbols are resolved by the postmaster when the module
+      # is loaded.  Linking a static client library here can pull frontend
+      # pgcommon objects into the DSO and leave symbols such as
+      # pg_log_generic unresolved at server startup.  Apple/Windows retain the
+      # platform-specific import-library behavior below.
+      if(APPLE OR WIN32)
         target_link_libraries(${LIBRARY_NAME} PRIVATE PostgreSQL::PostgreSQL)
       endif()
 

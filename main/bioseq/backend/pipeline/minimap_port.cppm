@@ -69,7 +69,6 @@ import bioseq.sequences.chaining.utils;
 import bioseq.sequences.chaining.scalar;
 import bioseq.sequences.chaining.simd;
 import bioseq.sequences.chaining.rmq;
-import bioseq.common.radix_sort;
 import bioseq.common.context;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
@@ -110,7 +109,6 @@ using bioseq::chaining::backtrack_chains;
 // DOC0279 §9 / §7.1 — the relocated minimizer index + its concept. Highway-
 // namespace consumers reference them cross-namespace (POD value type + concept).
 using bioseq::indexing::MinimizerHashmapFragmentIndex;
-using bioseq::indexing::FragmentNativeMinimizerSeedIndex;
 using bioseq::indexing::MinimizerLookupIndex;
 using bioseq::indexing::MinimizerSeedIndex;
 using bioseq::indexing::MinimizerLookupSpans;
@@ -791,6 +789,181 @@ struct MatchResult {
     sequence_size_t edit_distance  = 0;    ///< exact unit-cost edits in the reported alignment
 };
 
+/// Exact, truncation-resistant fingerprint of one complete MatchResult stream.
+/// Storage/index checksums deliberately do not feed this value: this is
+/// biological-result evidence and is comparable across independently executed
+/// pipeline routes.  The two lanes use independent byte-mixing recurrences and
+/// every field is encoded explicitly, so struct padding and host endianness are
+/// never part of the proof.
+struct MatchResultBiologicalFingerprint {
+    std::uint64_t collection_count = 0u;
+    std::uint64_t match_result_count = 0u;
+    std::uint64_t cigar_result_count = 0u;
+    std::uint64_t cigar_operation_count = 0u;
+    std::uint64_t match_digest_lane0 = 0u;
+    std::uint64_t match_digest_lane1 = 0u;
+    std::uint64_t cigar_digest_lane0 = 0u;
+    std::uint64_t cigar_digest_lane1 = 0u;
+    bool computed = false;
+    bool saturated = false;
+
+    void combine(const MatchResultBiologicalFingerprint& other) noexcept {
+        if (!other.computed) {
+            // A missing collection proof is a permanent aggregate failure.
+            // `computed == false && saturated == false` is reserved for the
+            // pristine accumulator so a later valid collection cannot erase
+            // evidence that an earlier collection was unproved.
+            computed = false;
+            saturated = true;
+            return;
+        }
+        if (!computed) {
+            if (saturated) return;
+            *this = other;
+            return;
+        }
+        const auto add = [this](
+                std::uint64_t& destination,
+                std::uint64_t increment) noexcept {
+            if (increment > (std::numeric_limits<std::uint64_t>::max)()
+                                - destination) {
+                destination = (std::numeric_limits<std::uint64_t>::max)();
+                saturated = true;
+            } else {
+                destination += increment;
+            }
+        };
+        const std::uint64_t other_match_count = other.match_result_count;
+        match_digest_lane0 = std::rotl(match_digest_lane0, 19)
+            ^ other.match_digest_lane0
+            ^ (other_match_count * 0x9e3779b97f4a7c15ull);
+        match_digest_lane1 = std::rotl(match_digest_lane1, 37)
+            ^ other.match_digest_lane1
+            ^ (other_match_count * 0xbf58476d1ce4e5b9ull);
+        cigar_digest_lane0 = std::rotl(cigar_digest_lane0, 23)
+            ^ other.cigar_digest_lane0
+            ^ (other.cigar_operation_count * 0x94d049bb133111ebull);
+        cigar_digest_lane1 = std::rotl(cigar_digest_lane1, 41)
+            ^ other.cigar_digest_lane1
+            ^ (other.cigar_operation_count * 0xd6e8feb86659fd93ull);
+        add(collection_count, other.collection_count);
+        add(match_result_count, other.match_result_count);
+        add(cigar_result_count, other.cigar_result_count);
+        add(cigar_operation_count, other.cigar_operation_count);
+        saturated = saturated || other.saturated;
+    }
+
+    [[nodiscard]] constexpr bool operator==(
+        const MatchResultBiologicalFingerprint&) const noexcept = default;
+};
+
+namespace biological_fingerprint_detail {
+
+struct Digest128 {
+    std::uint64_t lane0 = 0xcbf29ce484222325ull;
+    std::uint64_t lane1 = 0x6a09e667f3bcc909ull;
+
+    constexpr void add_byte(std::uint8_t byte) noexcept {
+        lane0 ^= byte;
+        lane0 *= 0x100000001b3ull;
+
+        lane1 ^= static_cast<std::uint64_t>(byte)
+            + 0x9e3779b97f4a7c15ull + (lane1 << 6u) + (lane1 >> 2u);
+        lane1 = std::rotl(lane1, 17) * 0xbf58476d1ce4e5b9ull;
+    }
+
+    constexpr void add_u64(std::uint64_t value) noexcept {
+        for (std::uint32_t shift = 0u; shift != 64u; shift += 8u) {
+            add_byte(static_cast<std::uint8_t>(value >> shift));
+        }
+    }
+
+    constexpr void add_u32(std::uint32_t value) noexcept {
+        add_u64(value);
+    }
+
+    constexpr void add_i32(std::int32_t value) noexcept {
+        add_u32(std::bit_cast<std::uint32_t>(value));
+    }
+
+    constexpr void add_bool(bool value) noexcept {
+        add_byte(value ? std::uint8_t{1u} : std::uint8_t{0u});
+    }
+
+    constexpr void add_float(float value) noexcept {
+        add_u32(std::bit_cast<std::uint32_t>(value));
+    }
+};
+
+} // namespace biological_fingerprint_detail
+
+[[nodiscard]] inline MatchResultBiologicalFingerprint
+fingerprint_match_results(std::span<const MatchResult> results) noexcept {
+    biological_fingerprint_detail::Digest128 match_digest{};
+    biological_fingerprint_detail::Digest128 cigar_digest{};
+    MatchResultBiologicalFingerprint proof{
+        .collection_count = 1u,
+        .match_result_count = static_cast<std::uint64_t>(results.size()),
+        .computed = true,
+    };
+
+    match_digest.add_u64(proof.match_result_count);
+    cigar_digest.add_u64(proof.match_result_count);
+    for (const MatchResult& result : results) {
+        match_digest.add_byte(0xa5u);
+        match_digest.add_u64(result.query_len);
+        match_digest.add_u64(result.query_start);
+        match_digest.add_u64(result.query_end);
+        match_digest.add_bool(result.is_reverse);
+        match_digest.add_u64(result.target_len);
+        match_digest.add_u64(result.target_start);
+        match_digest.add_u64(result.target_end);
+        match_digest.add_u64(result.num_matches);
+        match_digest.add_u64(result.block_length);
+        match_digest.add_i32(result.mapq);
+        match_digest.add_i32(result.chain_score);
+        match_digest.add_i32(result.dp_score);
+        match_digest.add_i32(result.dp_max_score);
+        match_digest.add_i32(result.seed_count);
+        match_digest.add_i32(result.secondary_chain_score);
+        match_digest.add_float(result.divergence);
+        match_digest.add_bool(result.is_primary);
+        match_digest.add_bool(result.has_cigar);
+        match_digest.add_u64(result.edit_distance);
+        match_digest.add_u64(
+            static_cast<std::uint64_t>(result.cigar.size()));
+
+        cigar_digest.add_byte(0x5au);
+        cigar_digest.add_bool(result.has_cigar);
+        cigar_digest.add_u64(
+            static_cast<std::uint64_t>(result.cigar.size()));
+        if (result.has_cigar) ++proof.cigar_result_count;
+        const std::uint64_t cigar_size =
+            static_cast<std::uint64_t>(result.cigar.size());
+        if (cigar_size > (std::numeric_limits<std::uint64_t>::max)()
+                             - proof.cigar_operation_count) {
+            proof.cigar_operation_count =
+                (std::numeric_limits<std::uint64_t>::max)();
+            proof.saturated = true;
+        } else {
+            proof.cigar_operation_count += cigar_size;
+        }
+        for (const CigarOp& operation : result.cigar) {
+            match_digest.add_u32(operation.length);
+            match_digest.add_u32(operation.opcode);
+            cigar_digest.add_u32(operation.length);
+            cigar_digest.add_u32(operation.opcode);
+        }
+    }
+    cigar_digest.add_u64(proof.cigar_result_count);
+    cigar_digest.add_u64(proof.cigar_operation_count);
+    proof.match_digest_lane0 = match_digest.lane0;
+    proof.match_digest_lane1 = match_digest.lane1;
+    proof.cigar_digest_lane0 = cigar_digest.lane0;
+    proof.cigar_digest_lane1 = cigar_digest.lane1;
+    return proof;
+}
+
 // ============================================================================
 // Internal data structures
 // ============================================================================
@@ -900,16 +1073,9 @@ inline void sort_seed_hits(
     static const auto* _sort_desc =
         bioseq::instr::register_region_static("collect_seed_hits_sort");
     auto _sort_scope = bioseq::instr::region(_sort_desc);
-    struct AnchorRefBitsKey {
-        [[nodiscard, gnu::always_inline]]
-        inline std::uint64_t operator()(const Anchor& anchor) const noexcept {
-            return anchor.ref_bits();
-        }
-    };
-    bioseq::sorting::radix_sort(
-        anchors_out.data(),
-        anchors_out.data() + anchors_out.size(),
-        AnchorRefBitsKey{});
+    if (anchors_out.size() < 2u) return;
+    (void)::bioseq::chaining::sort_canonical_anchors(
+        std::span<Anchor>{anchors_out.data(), anchors_out.size()});
 }
 
 /**
@@ -1053,8 +1219,10 @@ void collect_seed_hits(
     }
     }  // end target_index_lookup scope
 
-    // Sort by reference position (ref_bits field), exact port of
-    // minimap2's `radix_sort_128x(a, a + n_a)` from misc.c. The
+    // Establish the canonical `(ref_bits, query_bits, full query_position)`
+    // order. The primary reference-key pass remains the exact port of
+    // minimap2's `radix_sort_128x(a, a + n_a)` from misc.c; equal-reference
+    // runs are then comparison-sorted by `sort_seed_hits`. The
     // 8-bit-per-pass MSD radix sort is faster than libc++ pdqsort by
     // ~3-5x at the anchor populations we see (50 k - 1 M+ at LONG/XL/XXL)
     // because it bypasses the comparison-based branch-predictor
@@ -1080,87 +1248,6 @@ void collect_seed_hits(
                 anchors_out.size(), query_minimizers.size(),
                 bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
                 bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
-    });
-}
-
-/// MPF-native seed collection.  Unlike the ordinary per-hash lookup shape,
-/// this asks each persisted fragment index to stream its own matching packed
-/// positions directly into the query's anchor slab.  The only sort is the
-/// normal post-seed anchor ordering required by chaining; postings themselves
-/// are never concatenated, merged, or sorted across fragments.
-template <class MinimizerT, FragmentNativeMinimizerSeedIndex IndexT>
-requires std::same_as<
-    std::remove_cv_t<MinimizerT>,
-    MinimapSketchData>
-void collect_seed_hits(
-    std::span<const MinimizerT> query_minimizers,
-    const IndexT& target_index,
-    sequence_size_t query_len,
-    int32_t max_occ,
-    int32_t kmer_size,
-    ::bioseq::chaining::ArenaSlab<Anchor>& anchors_out)
-{
-    static const auto* _seed_hits_desc =
-        bioseq::instr::register_region_static("collect_seed_hits");
-    auto _seed_hits_scope = bioseq::instr::region(_seed_hits_desc);
-    anchors_out.reserve(query_minimizers.size() * 2);
-    if (max_occ < 0) [[unlikely]] {
-        throw std::invalid_argument(
-            "collect_seed_hits requires a nonnegative max_occ");
-    }
-
-    static const auto* _idx_lookup_desc =
-        bioseq::instr::register_region_static("target_index_lookup");
-    {
-        auto _idx_lookup_scope = bioseq::instr::region(_idx_lookup_desc);
-        const std::uint32_t query_span_value =
-            static_cast<std::uint32_t>(kmer_size);
-        const sequence_size_t reverse_pos_base =
-            query_len - 2 + query_span_value;
-        target_index.for_each_fragment_seed_hit(
-            std::span<const MinimapSketchData>{
-                query_minimizers.data(), query_minimizers.size()},
-            max_occ,
-            [&](const std::uint64_t target_hit,
-                const MinimapSketchData& query_minimizer) {
-                const sequence_size_t ref_position =
-                    static_cast<sequence_size_t>(target_hit >> 1u);
-                const std::uint32_t target_strand_bit =
-                    static_cast<std::uint32_t>(target_hit & 1u);
-                const std::uint64_t query_pos_encoded =
-                    query_minimizer.pos_strand_encoded();
-                const std::uint32_t query_strand_bit =
-                    static_cast<std::uint32_t>(
-                        query_pos_encoded & 1u);
-                const sequence_size_t forward_query_pos =
-                    static_cast<sequence_size_t>(
-                        query_pos_encoded >> 1u);
-                const std::uint32_t is_reverse_bit =
-                    target_strand_bit ^ query_strand_bit;
-                const sequence_size_t reverse_query_pos =
-                    reverse_pos_base - forward_query_pos;
-
-                Anchor anchor;
-                anchor.ref_position = ref_position;
-                anchor.is_reverse = is_reverse_bit;
-                anchor.query_position = is_reverse_bit
-                    ? reverse_query_pos : forward_query_pos;
-                anchor.query_span =
-                    static_cast<std::uint8_t>(query_span_value);
-                anchor.flags = 0;
-                anchor.segment_id = 0;
-                anchors_out.push_back(anchor);
-            });
-    }
-
-    sort_seed_hits(anchors_out);
-    bioseq_log_lazy<DBG>([&] {
-        bioseq_log_progress<DBG>(
-            "[minimap_port] Collected {} fragment-native seed anchors from {} "
-            "query minimizers | footprint={}MB avail={}MB",
-            anchors_out.size(), query_minimizers.size(),
-            bioseq::instr::detail::sysinfo::process_footprint_bytes() >> 20,
-            bioseq::instr::detail::sysinfo::system_available_bytes() >> 20);
     });
 }
 
@@ -3526,6 +3613,18 @@ struct PartialVulkanExecutionProof {
     std::uint64_t seed_radix_scan_dispatches = 0;
     std::uint64_t seed_radix_scatter_dispatches = 0;
     std::uint64_t seed_host_sort_fallbacks = 0;
+    // Biological evidence emitted by completed GPU seed roundtrips.  The
+    // count/order/digest stream is independent from resident storage
+    // integrity checks and therefore remains comparable between distinct
+    // resident/index construction routes.
+    std::uint64_t seed_anchor_proof_operations = 0;
+    std::uint64_t seed_canonical_anchor_count = 0;
+    std::uint64_t seed_canonical_anchor_order_checks = 0;
+    std::uint64_t seed_canonical_anchor_order_accepts = 0;
+    std::uint64_t seed_canonical_tie_normalization_runs = 0;
+    std::uint64_t seed_canonical_tie_normalization_anchors = 0;
+    std::uint64_t seed_anchor_digest_lane0 = 0;
+    std::uint64_t seed_anchor_digest_lane1 = 0;
     // Operation-originated legacy Phase-B index materialization evidence.
     // Additive fields describe actual upload operations, never cache hits;
     // max fields preserve the worst collision/load observation across them.
@@ -3575,6 +3674,58 @@ struct PartialVulkanExecutionProof {
     std::uint64_t gpu_index_arena_trimmed_before_permit_shrink = 0;
     std::uint64_t gpu_index_retained_minimizer_count = 0;
     std::uint64_t gpu_index_distinct_minimizer_count = 0;
+    // DOC0384 §34.17 query-independent source-direct sorted-dense route.
+    // These fields are copied from the operation ledger only after its
+    // terminal predicate accepts.  They therefore describe completed work,
+    // including the canonical-empty bypass which intentionally has no GPU
+    // dispatch and cannot be represented by the legacy dispatch counters.
+    std::uint64_t gpu_index_source_direct_operations = 0;
+    std::uint64_t gpu_index_source_direct_terminal_successes = 0;
+    std::uint64_t gpu_index_source_direct_empty_bypasses = 0;
+    std::uint64_t gpu_index_source_direct_zero_query_bypasses = 0;
+    std::uint64_t gpu_index_source_direct_planning_receipts = 0;
+    std::uint64_t gpu_index_source_direct_terminal_receipts = 0;
+    std::uint64_t gpu_index_source_direct_materializations = 0;
+    std::uint64_t gpu_index_source_direct_resident_publications = 0;
+    std::uint64_t gpu_index_source_direct_logical_control_bytes = 0;
+    std::uint64_t gpu_index_source_direct_logical_position_bytes = 0;
+    std::uint64_t gpu_index_source_direct_control_requirement_bytes = 0;
+    std::uint64_t gpu_index_source_direct_position_requirement_bytes = 0;
+    std::uint64_t gpu_index_source_direct_allocation_request_bytes = 0;
+    std::uint64_t gpu_index_source_direct_actual_control_bytes = 0;
+    std::uint64_t gpu_index_source_direct_actual_position_bytes = 0;
+    std::uint64_t gpu_index_source_direct_source_releases = 0;
+    std::uint64_t gpu_index_source_direct_source_released_bytes = 0;
+    std::uint64_t gpu_index_source_direct_checksum_matches = 0;
+    std::uint64_t gpu_index_source_direct_source_traversals = 0;
+    std::uint64_t gpu_index_source_direct_mapped_traversals = 0;
+    std::uint64_t gpu_index_source_direct_reflected_authorities = 0;
+    std::uint64_t gpu_index_source_direct_retained_authorities = 0;
+    std::uint64_t gpu_index_source_direct_retained_resident_permit_bytes = 0;
+    std::uint64_t gpu_index_source_direct_cache_preinsertions = 0;
+    std::uint64_t gpu_index_source_direct_expected_seed_consumers = 0;
+    std::uint64_t gpu_index_source_direct_completed_seed_consumers = 0;
+    std::uint64_t gpu_index_source_direct_required_lookups = 0;
+    std::uint64_t gpu_index_source_direct_required_hits = 0;
+    std::uint64_t gpu_index_source_direct_required_misses = 0;
+    std::uint64_t gpu_index_source_direct_fallback_attempts = 0;
+    std::uint64_t gpu_index_source_direct_mapped_prefix_passes = 0;
+    std::uint64_t gpu_index_source_direct_mapped_prefix_lookups = 0;
+    std::uint64_t gpu_index_source_direct_mapped_prefix_comparisons = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_requested_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_initial_capacity = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_actual_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_retained_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_slab_permit_releases = 0;
+    std::uint64_t gpu_index_source_direct_seed_reserved_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_planned_vulkan_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_actual_vulkan_bytes = 0;
+    std::uint64_t gpu_index_source_direct_seed_roundtrips = 0;
+    std::uint64_t gpu_index_source_direct_zero_anchor_bypasses = 0;
+    std::uint64_t gpu_index_source_direct_seed_fence_completions = 0;
+    std::uint64_t gpu_index_source_direct_cache_cleanup_releases = 0;
+    std::uint64_t gpu_index_source_direct_resident_cleanup_bytes = 0;
+    std::uint64_t gpu_index_source_direct_pipeline_completions = 0;
     // Owned-only last-seed retirement evidence. These counters are populated
     // only after the completed seed operation has dropped its local resident
     // handle and the operation-owned lifetime coordinator has actually
@@ -3600,6 +3751,8 @@ struct PartialVulkanExecutionProof {
     constexpr void combine(
         const PartialVulkanExecutionProof& other) noexcept {
         bool overflow = saturated || other.saturated;
+        const std::uint64_t anchor_operations_before =
+            seed_anchor_proof_operations;
         add(sketch_dispatches, other.sketch_dispatches, overflow);
         add(query_sketch_dispatches, other.query_sketch_dispatches, overflow);
         add(target_sketch_dispatches, other.target_sketch_dispatches, overflow);
@@ -3626,6 +3779,35 @@ struct PartialVulkanExecutionProof {
             other.seed_radix_scatter_dispatches, overflow);
         add(seed_host_sort_fallbacks,
             other.seed_host_sort_fallbacks, overflow);
+        add(seed_anchor_proof_operations,
+            other.seed_anchor_proof_operations, overflow);
+        add(seed_canonical_anchor_count,
+            other.seed_canonical_anchor_count, overflow);
+        add(seed_canonical_anchor_order_checks,
+            other.seed_canonical_anchor_order_checks, overflow);
+        add(seed_canonical_anchor_order_accepts,
+            other.seed_canonical_anchor_order_accepts, overflow);
+        add(seed_canonical_tie_normalization_runs,
+            other.seed_canonical_tie_normalization_runs, overflow);
+        add(seed_canonical_tie_normalization_anchors,
+            other.seed_canonical_tie_normalization_anchors, overflow);
+        if (other.seed_anchor_proof_operations != 0u) {
+            if (anchor_operations_before == 0u) {
+                seed_anchor_digest_lane0 = other.seed_anchor_digest_lane0;
+                seed_anchor_digest_lane1 = other.seed_anchor_digest_lane1;
+            } else {
+                seed_anchor_digest_lane0 = std::rotl(
+                    seed_anchor_digest_lane0, 19)
+                    ^ other.seed_anchor_digest_lane0
+                    ^ (other.seed_canonical_anchor_count
+                       * 0x9e3779b97f4a7c15ull);
+                seed_anchor_digest_lane1 = std::rotl(
+                    seed_anchor_digest_lane1, 37)
+                    ^ other.seed_anchor_digest_lane1
+                    ^ (other.seed_canonical_anchor_count
+                       * 0xbf58476d1ce4e5b9ull);
+            }
+        }
         add(gpu_index_materializations,
             other.gpu_index_materializations, overflow);
         add(gpu_index_open_addressed_materializations,
@@ -3704,6 +3886,101 @@ struct PartialVulkanExecutionProof {
             other.gpu_index_retained_minimizer_count, overflow);
         add(gpu_index_distinct_minimizer_count,
             other.gpu_index_distinct_minimizer_count, overflow);
+        add(gpu_index_source_direct_operations,
+            other.gpu_index_source_direct_operations, overflow);
+        add(gpu_index_source_direct_terminal_successes,
+            other.gpu_index_source_direct_terminal_successes, overflow);
+        add(gpu_index_source_direct_empty_bypasses,
+            other.gpu_index_source_direct_empty_bypasses, overflow);
+        add(gpu_index_source_direct_zero_query_bypasses,
+            other.gpu_index_source_direct_zero_query_bypasses, overflow);
+        add(gpu_index_source_direct_planning_receipts,
+            other.gpu_index_source_direct_planning_receipts, overflow);
+        add(gpu_index_source_direct_terminal_receipts,
+            other.gpu_index_source_direct_terminal_receipts, overflow);
+        add(gpu_index_source_direct_materializations,
+            other.gpu_index_source_direct_materializations, overflow);
+        add(gpu_index_source_direct_resident_publications,
+            other.gpu_index_source_direct_resident_publications, overflow);
+        add(gpu_index_source_direct_logical_control_bytes,
+            other.gpu_index_source_direct_logical_control_bytes, overflow);
+        add(gpu_index_source_direct_logical_position_bytes,
+            other.gpu_index_source_direct_logical_position_bytes, overflow);
+        add(gpu_index_source_direct_control_requirement_bytes,
+            other.gpu_index_source_direct_control_requirement_bytes, overflow);
+        add(gpu_index_source_direct_position_requirement_bytes,
+            other.gpu_index_source_direct_position_requirement_bytes, overflow);
+        add(gpu_index_source_direct_allocation_request_bytes,
+            other.gpu_index_source_direct_allocation_request_bytes, overflow);
+        add(gpu_index_source_direct_actual_control_bytes,
+            other.gpu_index_source_direct_actual_control_bytes, overflow);
+        add(gpu_index_source_direct_actual_position_bytes,
+            other.gpu_index_source_direct_actual_position_bytes, overflow);
+        add(gpu_index_source_direct_source_releases,
+            other.gpu_index_source_direct_source_releases, overflow);
+        add(gpu_index_source_direct_source_released_bytes,
+            other.gpu_index_source_direct_source_released_bytes, overflow);
+        add(gpu_index_source_direct_checksum_matches,
+            other.gpu_index_source_direct_checksum_matches, overflow);
+        add(gpu_index_source_direct_source_traversals,
+            other.gpu_index_source_direct_source_traversals, overflow);
+        add(gpu_index_source_direct_mapped_traversals,
+            other.gpu_index_source_direct_mapped_traversals, overflow);
+        add(gpu_index_source_direct_reflected_authorities,
+            other.gpu_index_source_direct_reflected_authorities, overflow);
+        add(gpu_index_source_direct_retained_authorities,
+            other.gpu_index_source_direct_retained_authorities, overflow);
+        add(gpu_index_source_direct_retained_resident_permit_bytes,
+            other.gpu_index_source_direct_retained_resident_permit_bytes,
+            overflow);
+        add(gpu_index_source_direct_cache_preinsertions,
+            other.gpu_index_source_direct_cache_preinsertions, overflow);
+        add(gpu_index_source_direct_expected_seed_consumers,
+            other.gpu_index_source_direct_expected_seed_consumers, overflow);
+        add(gpu_index_source_direct_completed_seed_consumers,
+            other.gpu_index_source_direct_completed_seed_consumers, overflow);
+        add(gpu_index_source_direct_required_lookups,
+            other.gpu_index_source_direct_required_lookups, overflow);
+        add(gpu_index_source_direct_required_hits,
+            other.gpu_index_source_direct_required_hits, overflow);
+        add(gpu_index_source_direct_required_misses,
+            other.gpu_index_source_direct_required_misses, overflow);
+        add(gpu_index_source_direct_fallback_attempts,
+            other.gpu_index_source_direct_fallback_attempts, overflow);
+        add(gpu_index_source_direct_mapped_prefix_passes,
+            other.gpu_index_source_direct_mapped_prefix_passes, overflow);
+        add(gpu_index_source_direct_mapped_prefix_lookups,
+            other.gpu_index_source_direct_mapped_prefix_lookups, overflow);
+        add(gpu_index_source_direct_mapped_prefix_comparisons,
+            other.gpu_index_source_direct_mapped_prefix_comparisons, overflow);
+        add(gpu_index_source_direct_seed_slab_requested_bytes,
+            other.gpu_index_source_direct_seed_slab_requested_bytes, overflow);
+        add(gpu_index_source_direct_seed_slab_initial_capacity,
+            other.gpu_index_source_direct_seed_slab_initial_capacity, overflow);
+        add(gpu_index_source_direct_seed_slab_actual_bytes,
+            other.gpu_index_source_direct_seed_slab_actual_bytes, overflow);
+        add(gpu_index_source_direct_seed_slab_retained_bytes,
+            other.gpu_index_source_direct_seed_slab_retained_bytes, overflow);
+        add(gpu_index_source_direct_seed_slab_permit_releases,
+            other.gpu_index_source_direct_seed_slab_permit_releases, overflow);
+        add(gpu_index_source_direct_seed_reserved_bytes,
+            other.gpu_index_source_direct_seed_reserved_bytes, overflow);
+        add(gpu_index_source_direct_seed_planned_vulkan_bytes,
+            other.gpu_index_source_direct_seed_planned_vulkan_bytes, overflow);
+        add(gpu_index_source_direct_seed_actual_vulkan_bytes,
+            other.gpu_index_source_direct_seed_actual_vulkan_bytes, overflow);
+        add(gpu_index_source_direct_seed_roundtrips,
+            other.gpu_index_source_direct_seed_roundtrips, overflow);
+        add(gpu_index_source_direct_zero_anchor_bypasses,
+            other.gpu_index_source_direct_zero_anchor_bypasses, overflow);
+        add(gpu_index_source_direct_seed_fence_completions,
+            other.gpu_index_source_direct_seed_fence_completions, overflow);
+        add(gpu_index_source_direct_cache_cleanup_releases,
+            other.gpu_index_source_direct_cache_cleanup_releases, overflow);
+        add(gpu_index_source_direct_resident_cleanup_bytes,
+            other.gpu_index_source_direct_resident_cleanup_bytes, overflow);
+        add(gpu_index_source_direct_pipeline_completions,
+            other.gpu_index_source_direct_pipeline_completions, overflow);
         add(post_seed_owned_gpu_cache_evictions,
             other.post_seed_owned_gpu_cache_evictions, overflow);
         add(post_seed_owned_gpu_resident_bytes_released,
@@ -3737,6 +4014,14 @@ struct PartialVulkanExecutionProof {
             || seed_radix_scan_dispatches != 0
             || seed_radix_scatter_dispatches != 0
             || seed_host_sort_fallbacks != 0
+            || seed_anchor_proof_operations != 0
+            || seed_canonical_anchor_count != 0
+            || seed_canonical_anchor_order_checks != 0
+            || seed_canonical_anchor_order_accepts != 0
+            || seed_canonical_tie_normalization_runs != 0
+            || seed_canonical_tie_normalization_anchors != 0
+            || seed_anchor_digest_lane0 != 0
+            || seed_anchor_digest_lane1 != 0
             || gpu_index_gate_count_dispatches != 0
             || gpu_index_gated_emit_dispatches != 0
             || gpu_index_ungated_emit_dispatches != 0
@@ -3751,7 +4036,11 @@ struct PartialVulkanExecutionProof {
             || gpu_index_count_emit_parity_verified != 0
             || gpu_index_target_minimizer_capacity_estimate != 0
             || gpu_index_capacity_estimate_underestimated != 0
-            || gpu_index_arena_trimmed_before_permit_shrink != 0;
+            || gpu_index_arena_trimmed_before_permit_shrink != 0
+            || gpu_index_source_direct_operations != 0
+            || gpu_index_source_direct_empty_bypasses != 0
+            || gpu_index_source_direct_planning_receipts != 0
+            || gpu_index_source_direct_terminal_receipts != 0;
     }
 
     [[nodiscard]] constexpr bool exact_target_index_route_accepted()
@@ -3816,6 +4105,47 @@ struct PartialVulkanExecutionProof {
                         == gpu_index_deterministic_tile_emit_dispatches);
     }
 
+    /// A source-direct sorted-dense operation owns a resident target index but
+    /// deliberately emits no Phase-C target-build dispatch. Its N/D fields are
+    /// therefore positive evidence, not contradictory no-build residue. Keep
+    /// the Phase-C ownership/gate/build surface fail-closed while allowing the
+    /// direct operation's full helper to validate its resident shape.
+    [[nodiscard]] constexpr bool
+    exact_source_direct_target_index_route_accepted() const noexcept {
+        return target_index_build_dispatches == 0u
+            && gpu_index_source_direct_operations == 1u
+            && gpu_index_source_direct_planning_receipts == 1u
+            && gpu_index_source_direct_terminal_receipts == 1u
+            && gpu_index_source_direct_terminal_successes == 1u
+            && gpu_index_count_phase_admissions == 0u
+            && gpu_index_main_peak_admissions == 0u
+            && gpu_index_resident_transfers == 0u
+            && gpu_index_adoption_rereserve_attempts == 0u
+            && gpu_index_adoption_successes == 0u
+            && gpu_index_owned_resident_bytes == 0u
+            && gpu_index_gate_enabled == 0u
+            && gpu_index_gate_word_count == 0u
+            && gpu_index_gate_mask == 0u
+            && gpu_index_gate_set_bits == 0u
+            && gpu_index_gate_digest_lo == 0u
+            && gpu_index_gate_digest_hi == 0u
+            && gpu_index_gate_count_dispatches == 0u
+            && gpu_index_gated_emit_dispatches == 0u
+            && gpu_index_ungated_emit_dispatches == 0u
+            && gpu_index_exact_count_dispatches == 0u
+            && gpu_index_exact_count_prefix_scan_dispatches == 0u
+            && gpu_index_exact_count_control_readbacks == 0u
+            && gpu_index_deterministic_tile_emit_dispatches == 0u
+            && gpu_index_atomic_append_dispatches == 0u
+            && gpu_index_emit_validation_control_readbacks == 0u
+            && gpu_index_counted_minimizer_count == 0u
+            && gpu_index_verified_emit_count == 0u
+            && gpu_index_count_emit_parity_verified == 0u
+            && gpu_index_target_minimizer_capacity_estimate == 0u
+            && gpu_index_capacity_estimate_underestimated == 0u
+            && gpu_index_arena_trimmed_before_permit_shrink == 0u;
+    }
+
     [[nodiscard]] constexpr bool exact_stage_mask_accepted(
         bool expect_query_sketch,
         bool expect_target_sketch,
@@ -3832,6 +4162,23 @@ struct PartialVulkanExecutionProof {
             && matches(target_sketch_dispatches, expect_target_sketch)
             && matches(target_index_build_dispatches,
                        expect_target_index_build)
+            && matches(seed_lookup_dispatches, expect_seed_lookup)
+            && matches(chain_score_dispatches, expect_chain_score);
+    }
+
+    [[nodiscard]] constexpr bool exact_source_direct_stage_mask_accepted(
+        bool expect_query_sketch,
+        bool expect_target_sketch,
+        bool expect_seed_lookup,
+        bool expect_chain_score) const noexcept {
+        const auto matches = [](std::uint64_t count, bool expected) noexcept {
+            return expected ? count > 0 : count == 0;
+        };
+        return !saturated
+            && sketch_dispatches == 0u
+            && exact_source_direct_target_index_route_accepted()
+            && matches(query_sketch_dispatches, expect_query_sketch)
+            && matches(target_sketch_dispatches, expect_target_sketch)
             && matches(seed_lookup_dispatches, expect_seed_lookup)
             && matches(chain_score_dispatches, expect_chain_score);
     }
@@ -3887,6 +4234,31 @@ static_assert([] {
         && !proof.exact_stage_mask_accepted(true, true, false, true, true);
 }());
 static_assert([] {
+    PartialVulkanExecutionProof proof{};
+    proof.query_sketch_dispatches = 1u;
+    proof.target_sketch_dispatches = 1u;
+    proof.seed_lookup_dispatches = 1u;
+    proof.chain_score_dispatches = 1u;
+    proof.gpu_index_materializations = 1u;
+    proof.gpu_index_sorted_dense_materializations = 1u;
+    proof.gpu_index_retained_minimizer_count = 53u;
+    proof.gpu_index_distinct_minimizer_count = 17u;
+    proof.gpu_index_source_direct_operations = 1u;
+    proof.gpu_index_source_direct_planning_receipts = 1u;
+    proof.gpu_index_source_direct_terminal_receipts = 1u;
+    proof.gpu_index_source_direct_terminal_successes = 1u;
+    if (!proof.exact_source_direct_stage_mask_accepted(
+            true, true, true, true)) {
+        return false;
+    }
+    if (proof.exact_stage_mask_accepted(true, true, false, true, true)) {
+        return false;
+    }
+    proof.gpu_index_gate_enabled = 1u;
+    return !proof.exact_source_direct_stage_mask_accepted(
+        true, true, true, true);
+}());
+static_assert([] {
     PartialVulkanExecutionProof lhs{};
     lhs.gpu_index_materializations = 1;
     lhs.gpu_index_open_addressed_materializations = 1;
@@ -3924,6 +4296,8 @@ struct MatchResultCollection {
     ::bioseq::prefilter_stats::PrefilterExecutionProof
         prefilter_execution_proof{};
     PartialVulkanExecutionProof partial_vulkan_execution_proof{};
+    bioseq::indexing::PreparedFragmentAnchorBatchEvidence
+        fragment_native_query_evidence{};
     bool exact_simd_query_execution_proof_present = false;
     bool exact_simd_target_execution_proof_present = false;
     bool paper_nthash_query_execution_proof_present = false;
@@ -3933,6 +4307,7 @@ struct MatchResultCollection {
     bool scalar_pipeline_execution_proof_present = false;
     bool ksw2_batched_execution_proof_present = false;
     bool prefilter_execution_proof_present = false;
+    bool fragment_native_query_evidence_present = false;
     // Operation-local CPU/SIMD wall clocks. These travel with the result so
     // parallel rows never update shared statement statistics. The PostgreSQL
     // dispatch boundary consumes them exactly once into the existing stable
@@ -4028,6 +4403,13 @@ struct MatchResultCollection {
     void record_partial_vulkan_execution_proof(
             const PartialVulkanExecutionProof& proof) noexcept {
         partial_vulkan_execution_proof.combine(proof);
+    }
+
+    void record_fragment_native_query_evidence(
+            const bioseq::indexing::PreparedFragmentAnchorBatchEvidence&
+                evidence) noexcept {
+        fragment_native_query_evidence.merge(evidence);
+        fragment_native_query_evidence_present = true;
     }
 
     void record_host_stage_time(
@@ -4160,6 +4542,10 @@ struct MatchResultCollection {
         }
         partial_vulkan_execution_proof.combine(
             other.partial_vulkan_execution_proof);
+        if (other.fragment_native_query_evidence_present) {
+            record_fragment_native_query_evidence(
+                other.fragment_native_query_evidence);
+        }
         record_query_sketch_host_time(other.query_sketch_host_wall_ns);
         record_persisted_index_decode_host_time(
             other.persisted_index_decode_host_wall_ns);
@@ -4420,6 +4806,14 @@ struct MatchResultCollection {
 
     [[nodiscard]] std::span<const MatchResult> view() const {
         return std::span<const MatchResult>(results);
+    }
+
+    /// Compute the complete biological result proof while the owning result
+    /// vector and all CIGAR payloads are still live.
+    [[nodiscard]] MatchResultBiologicalFingerprint biological_fingerprint()
+        const noexcept
+    {
+        return fingerprint_match_results(view());
     }
 
     /**

@@ -10,6 +10,7 @@
  * as the regression guard; and the column-rule / malformed-file error paths.
  */
 #include "common_tests.h"
+#include "headers/pg_build_config.h"
 #include "common.h"
 
 #include <algorithm>
@@ -220,24 +221,32 @@ TEST_CASE("bioseq.load: width-agnostic equivalence (dna4/32 == dna4/64)",
     REQUIRE(pos32 == pos64);   // identical target_start across storage widths
 }
 
-TEST_CASE("bioseq.load: dna5 (A/C/G/T/N) + dna4 round-trip + non-empty literal mmsearch across widths 8/16/32/64",
+TEST_CASE("bioseq.load: active-profile alphabets round-trip and mmsearch across widths 8/16/32/64",
           "[load][integration]") {
     // §13.3 — the storage-unit-parametric streaming reader must be width-correct.
     // Each width gets its OWN connection so the DROP/CREATE EXTENSION reset is
     // isolated per typmod. Decoding is checked with a plain projection; mmsearch
     // is proved separately with an explicit literal query, matching the SQL E2E
     // benchmark path.
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
     const std::string body5 = gen_bases(3000, 99, /*with_n=*/true);   // dna5 + sparse N
     const std::string path5 = "/tmp/bioseq_test_load_dna5.fasta";
     write_fasta(path5, {{"r5", body5}});
+#endif
     const std::string body4 = gen_bases(3000, 100, /*with_n=*/false); // dna4
     const std::string path4 = "/tmp/bioseq_test_load_dna4w.fasta";
     write_fasta(path4, {{"r4", body4}});
 
     struct Case { const char* alpha; const std::string& body; const std::string& path; };
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
     const Case dna5{"dna5", body5, path5};
+#endif
     const Case dna4{"dna4", body4, path4};
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
     for (const Case* c : {&dna5, &dna4}) {
+#else
+    for (const Case* c : {&dna4}) {
+#endif
         for (const char* width : {"8", "16", "32", "64"}) {
             it::connection_test_context ctx;                 // fresh backend per width
             it::reset_extension(ctx, { std::string_view{"load_w"} });

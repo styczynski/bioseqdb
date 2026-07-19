@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -32,6 +33,7 @@ import bioseq.common.context;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
+import bioseq.sequences.kmers.hashers.minimap_int;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.pipe;
@@ -60,6 +62,26 @@ struct RawSketchAppendFixture {
 static_assert(std::is_trivially_copyable_v<RawSketchAppendFixture>);
 static_assert(sizeof(RawSketchAppendFixture)
               == sizeof(RawSketchAppendFixture::storage_t));
+
+struct alignas(8) SourceDirectMinimizerFixture {
+    struct layout_t {
+        static constexpr std::uint32_t pos_bits = 33u;
+        static constexpr std::uint32_t hash_bits = 30u;
+    };
+    std::uint64_t value = 0u;
+};
+static_assert(sizeof(SourceDirectMinimizerFixture) == 8u);
+static_assert(alignof(SourceDirectMinimizerFixture) == 8u);
+
+struct alignas(8) IncompatibleSourceDirectMinimizerFixture {
+    struct layout_t {
+        static constexpr std::uint32_t pos_bits = 32u;
+        static constexpr std::uint32_t hash_bits = 31u;
+    };
+    std::uint64_t value = 0u;
+};
+static_assert(sizeof(IncompatibleSourceDirectMinimizerFixture) == 8u);
+static_assert(alignof(IncompatibleSourceDirectMinimizerFixture) == 8u);
 
 struct BudgetedSketchLifetimeProbe {
     using storage_t = std::uint64_t;
@@ -156,6 +178,715 @@ TEST_CASE("BudgetedSketchVector transfers and destroys host capacity before admi
     }
     REQUIRE(explicit_observed);
     REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("fixed Vulkan target sketch adopts host allocation and releases device before index",
+          "[pipeline][vulkan][sketch][zero-copy][lifetime]"
+          "[pipeline][vulkan][zero-copy]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+
+    Source source;
+    source.host_minimizers = {
+        Sketch{/*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u},
+        Sketch{/*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u},
+    };
+    const Sketch* const original_data = source.host_minimizers.data();
+    const std::size_t original_capacity =
+        source.host_minimizers.capacity();
+    auto device = std::make_shared<Device>();
+    std::weak_ptr<Device> device_lifetime = device;
+    source.device = std::move(device);
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes =
+        original_capacity * sizeof(Sketch);
+    source.arena_trimmed_before_host_materialization = true;
+
+    using Owner = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        FixedVulkanTargetHostOwner<Sketch>;
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<Owner>);
+    STATIC_REQUIRE_FALSE(std::is_move_assignable_v<Owner>);
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    const auto& receipt = adopted.adoption;
+
+    REQUIRE(receipt.zero_copy_adoption_accepted());
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(receipt.host_permit_released_to_process_footprint);
+    REQUIRE(receipt.retained_host_permit_bytes == 0u);
+    REQUIRE(receipt.device_owner_present_before_adoption);
+    REQUIRE(receipt.device_owner_unique_before_adoption);
+    REQUIRE(receipt.source_data == original_data);
+    REQUIRE(receipt.adopted_data == original_data);
+    REQUIRE(receipt.adopted_capacity == original_capacity);
+    REQUIRE(adopted.minimizers.data() == original_data);
+    REQUIRE(adopted.minimizers.capacity() == original_capacity);
+    REQUIRE(adopted.minimizers.size() == 2u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(source.host_minimizers.capacity() == 0u);
+    REQUIRE(source.device == nullptr);
+    REQUIRE(device_lifetime.expired());
+    REQUIRE_FALSE(source.host_permit.has_value());
+}
+
+TEST_CASE("fixed Vulkan host ownership is target-only and starts at 256 Mi bp",
+          "[pipeline][vulkan][sketch][zero-copy][route-selection]") {
+    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using pipe_entry_detail::
+        fixed_vulkan_target_host_adoption_route_selected;
+    constexpr std::uint64_t minimum = pipe_entry_detail::
+        kVulkanFixedHostAdoptionTargetMinimumBp;
+    // Route selection is intentionally independent of emitted-vector size.
+    // An ambiguity-heavy dna5 target can be >=256 MiB yet emit only this
+    // representative small nonzero payload, which must retain its exact permit
+    // if RSS reconciliation is inconclusive.
+    constexpr std::uint64_t sparse_dna5_emitted_bytes =
+        2u * sizeof(MinimapSketchData);
+    Minimap2Params params{};
+    params.vulkan_enabled = true;
+    params.vulkan_seed_hits_enabled = true;
+    params.vulkan_fused_frontend_enabled = false;
+    params.vulkan_gpu_index_build_enabled = false;
+    params.minimizer_algorithm =
+        MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+
+    STATIC_REQUIRE(minimum == (std::uint64_t{256} << 20u));
+    STATIC_REQUIRE(sparse_dna5_emitted_bytes < (std::uint64_t{64} << 10u));
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(
+        /*phase_c_gpu_index=*/false,
+        params,
+        /*alphabet_size=*/4u,
+        minimum - 1u));
+    REQUIRE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(
+        /*phase_c_gpu_index=*/false,
+        params,
+        /*alphabet_size=*/4u,
+        minimum));
+    REQUIRE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(
+        /*phase_c_gpu_index=*/false,
+        params,
+        /*alphabet_size=*/5u,
+        minimum));
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(
+        /*phase_c_gpu_index=*/true,
+        params,
+        /*alphabet_size=*/4u,
+        minimum));
+
+    params.vulkan_enabled = false;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(
+        /*phase_c_gpu_index=*/false,
+        params,
+        /*alphabet_size=*/4u,
+        minimum));
+    params.vulkan_enabled = true;
+
+    params.vulkan_seed_hits_enabled = false;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.vulkan_seed_hits_enabled = true;
+
+    params.vulkan_fused_frontend_enabled = true;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.vulkan_fused_frontend_enabled = false;
+
+    params.vulkan_gpu_index_build_enabled = true;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.vulkan_gpu_index_build_enabled = false;
+
+    params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.minimizer_algorithm =
+        MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+
+    params.kmer_size = 7;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.kmer_size = 27;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.kmer_size = 15;
+
+    params.window_size = 9;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.window_size = 11;
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 4u, minimum));
+    params.window_size = 10;
+
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        SourceDirectMinimizerFixture>(false, params, 20u, minimum));
+    REQUIRE_FALSE(fixed_vulkan_target_host_adoption_route_selected<
+        IncompatibleSourceDirectMinimizerFixture>(
+            false, params, 4u, minimum));
+}
+
+TEST_CASE("empty fixed Vulkan target result adopts zero bytes and releases device",
+          "[pipeline][vulkan][sketch][zero-copy][lifetime][empty]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+
+    Source source;
+    auto device = std::make_shared<Device>();
+    std::weak_ptr<Device> device_lifetime = device;
+    source.device = std::move(device);
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    const auto& receipt = adopted.adoption;
+
+    REQUIRE(receipt.zero_copy_adoption_accepted());
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(receipt.adopted_size == 0u);
+    REQUIRE(receipt.adopted_capacity == 0u);
+    REQUIRE(receipt.host_capacity_bytes == 0u);
+    REQUIRE(receipt.source_capacity_after_adoption == 0u);
+    REQUIRE(adopted.minimizers.empty());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(source.device == nullptr);
+    REQUIRE(device_lifetime.expired());
+}
+
+TEST_CASE("empty fixed Vulkan target index handoff admits and retains zero bytes",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][empty]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    Source source;
+    source.device = std::make_shared<Device>();
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.arena_trimmed_before_host_materialization = true;
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+
+    REQUIRE(admitted.accepted());
+    REQUIRE(receipt.admitted_position_headroom_bytes == 0u);
+    REQUIRE(receipt.admitted_table_headroom_bytes == 0u);
+    REQUIRE(receipt.admitted_build_bytes == 0u);
+    REQUIRE(receipt.retained_position_bytes == 0u);
+    REQUIRE(receipt.retained_table_bytes == 0u);
+    REQUIRE(receipt.retained_index_bytes == 0u);
+    REQUIRE(receipt.retained_index_permit_bytes == 0u);
+    REQUIRE(receipt.transferred_position_footprint_bytes == 0u);
+    REQUIRE_FALSE(
+        receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.every_retained_position_initialized);
+    REQUIRE(receipt.source_capacity_released);
+    REQUIRE(receipt.source_host_permit_cleared_after_consumption);
+    REQUIRE(receipt.source_adoption_cleared_after_consumption);
+    REQUIRE_FALSE(receipt.source_host_permit_retained_during_build);
+    REQUIRE(admitted.index_permit.has_value());
+    REQUIRE(admitted.index_permit->bytes() == 0u);
+    REQUIRE(admitted.index.positions.capacity() == 0u);
+    REQUIRE(admitted.index.table_allocation_bytes() == 0u);
+    REQUIRE(admission.reserved_bytes() == baseline);
+
+    admitted.release_storage_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("dense fixed Vulkan handoff transfers exact footprint authority to positions",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][replacement-authority]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+    using Authority = ::bioseq::simd::HWY_NAMESPACE::pipe::
+        TransientTargetIndexReleaseAuthority;
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{64} << 20u)));
+
+    Source source;
+    source.host_minimizers.reserve(2u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u);
+    REQUIRE(source.host_minimizers.size()
+            == source.host_minimizers.capacity());
+    const std::uint64_t source_host_bytes =
+        source.host_minimizers.capacity() * sizeof(Sketch);
+    source.device = std::make_shared<Device>();
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes = source_host_bytes;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    REQUIRE(adopted.ownership_authority_accepted());
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+
+    REQUIRE(admitted.accepted());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE(adopted.adoption.adopted_size == 0u);
+    REQUIRE(adopted.adoption.host_capacity_bytes == 0u);
+    REQUIRE_FALSE(
+        adopted.adoption.host_permit_released_to_process_footprint);
+    REQUIRE(receipt.source_host_capacity_bytes_before_build
+            == source_host_bytes);
+    REQUIRE(receipt.source_footprint_reflected_bytes_before_build
+            >= source_host_bytes);
+    REQUIRE(receipt.source_minimizer_count_before_build == 2u);
+    REQUIRE(receipt.retained_position_count == 2u);
+    REQUIRE(receipt.retained_position_initialized_bytes
+            == receipt.retained_position_bytes);
+    REQUIRE(admitted.index.positions.size()
+            == admitted.index.positions.capacity());
+    REQUIRE(receipt.every_retained_position_initialized);
+    REQUIRE(receipt.source_capacity_released);
+    REQUIRE(receipt.source_adoption_cleared_after_consumption);
+    REQUIRE_FALSE(receipt.source_host_permit_retained_during_build);
+    REQUIRE(receipt.source_host_permit_bytes_before_build == 0u);
+    REQUIRE(receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.transferred_position_footprint_bytes
+            == receipt.retained_position_bytes);
+    REQUIRE(receipt.transferred_position_footprint_bytes
+            == source_host_bytes);
+    REQUIRE(receipt.retained_index_permit_bytes
+            == receipt.retained_table_bytes);
+    REQUIRE(receipt.retained_index_bytes
+            == receipt.retained_index_permit_bytes
+                + receipt.transferred_position_footprint_bytes);
+    REQUIRE(admitted.index_permit->bytes()
+            == receipt.retained_index_permit_bytes);
+    REQUIRE(admission.reserved_bytes()
+            == baseline + receipt.retained_index_permit_bytes);
+    REQUIRE(admitted.index.lookup(7u).size() == 1u);
+    REQUIRE(admitted.index.lookup(9u).size() == 1u);
+
+    Authority authority{
+        .index = &admitted.index,
+        .permit = &*admitted.index_permit,
+        .expected_permit_bytes = receipt.retained_index_permit_bytes,
+        .require_exact_permit_bytes = true,
+    };
+    REQUIRE(authority.accepted());
+    Authority mismatched_authority = authority;
+    ++mismatched_authority.expected_permit_bytes;
+    REQUIRE_FALSE(mismatched_authority.accepted());
+    ::bioseq::simd::HWY_NAMESPACE::pipe::PostSeedOwnedLifetime lifetime{
+        /*seed_users=*/1u,
+        /*owned_gpu_cache=*/nullptr,
+        authority};
+    const auto release = lifetime.complete_seed_user();
+    REQUIRE(release.cpu_index_releases == 1u);
+    REQUIRE(release.cpu_index_permit_releases == 1u);
+    REQUIRE(release.cpu_index_permit_bytes_released
+            == receipt.retained_index_permit_bytes);
+    REQUIRE(release.cpu_index_storage_released_before_permit);
+    REQUIRE(admitted.index.table_empty());
+    REQUIRE(admitted.index.positions.capacity() == 0u);
+    REQUIRE_FALSE(static_cast<bool>(*admitted.index_permit));
+    REQUIRE(admitted.index_permit->bytes() == 0u);
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("fixed Vulkan footprint mismatch keeps full index permit",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][replacement-authority][mismatch]") {
+    using WideSketch =
+        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<40u, 15u>;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<WideSketch>;
+    using Device =
+        bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<WideSketch>;
+    STATIC_REQUIRE(sizeof(WideSketch) == 2u * sizeof(std::uint64_t));
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{64} << 20u)));
+
+    Source source;
+    source.host_minimizers.reserve(2u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u);
+    REQUIRE(source.host_minimizers.size()
+            == source.host_minimizers.capacity());
+    const std::uint64_t source_host_bytes =
+        source.host_minimizers.capacity() * sizeof(WideSketch);
+    source.device = std::make_shared<Device>();
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes = source_host_bytes;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+
+    REQUIRE(admitted.accepted());
+    REQUIRE(receipt.source_host_capacity_bytes_before_build
+            == source_host_bytes);
+    REQUIRE(receipt.retained_position_bytes
+            == 2u * sizeof(std::uint64_t));
+    REQUIRE(receipt.retained_position_initialized_bytes
+            == receipt.retained_position_bytes);
+    REQUIRE(admitted.index.positions.size()
+            == admitted.index.positions.capacity());
+    REQUIRE(receipt.source_host_capacity_bytes_before_build
+            != receipt.retained_position_bytes);
+    REQUIRE_FALSE(
+        receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.transferred_position_footprint_bytes == 0u);
+    REQUIRE(receipt.retained_index_permit_bytes
+            == receipt.retained_index_bytes);
+    REQUIRE(admitted.index_permit->bytes()
+            == receipt.retained_index_bytes);
+    REQUIRE(admission.reserved_bytes()
+            == baseline + receipt.retained_index_bytes);
+
+    admitted.release_storage_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("small nonzero fixed Vulkan host permit survives adoption through index consumption",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][retained-permit]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+    using IndexOwner = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        VulkanAdmittedTargetIndex;
+    STATIC_REQUIRE(std::is_nothrow_move_constructible_v<IndexOwner>);
+    STATIC_REQUIRE_FALSE(std::is_move_assignable_v<IndexOwner>);
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{64} << 20u)));
+
+    constexpr std::size_t minimizer_count = 2u;
+    const std::uint64_t planned_host_bytes =
+        minimizer_count * sizeof(Sketch);
+    auto host_permit = admission.try_reserve(planned_host_bytes);
+    REQUIRE(host_permit.has_value());
+    Source source;
+    source.host_permit.emplace(std::move(*host_permit));
+    source.host_minimizers.reserve(minimizer_count);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 9u, /*pos*/ 13u, /*strand*/ 1u);
+    const std::uint64_t exact_host_bytes =
+        source.host_minimizers.capacity() * sizeof(Sketch);
+    REQUIRE(exact_host_bytes <= planned_host_bytes);
+    source.host_permit->shrink_to(exact_host_bytes);
+    const Sketch* const original_data = source.host_minimizers.data();
+    source.device = std::make_shared<Device>();
+    std::weak_ptr<Device> device_lifetime = source.device;
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = false;
+    source.host_footprint_reflected_delta_bytes = 0u;
+    source.arena_trimmed_before_host_materialization = true;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(source));
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(adopted.minimizers.data() == original_data);
+    REQUIRE(adopted.host_permit.has_value());
+    REQUIRE(adopted.host_permit->bytes() == exact_host_bytes);
+    REQUIRE(adopted.adoption.retained_host_permit_bytes == exact_host_bytes);
+    REQUIRE_FALSE(
+        adopted.adoption.host_permit_released_to_process_footprint);
+    REQUIRE(device_lifetime.expired());
+    REQUIRE(admission.reserved_bytes() == baseline + exact_host_bytes);
+
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), /*target_len=*/1'000u);
+    const auto& receipt = admitted.receipt;
+    REQUIRE(admitted.accepted());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(adopted.adoption.adopted_size == 0u);
+    REQUIRE(adopted.adoption.host_capacity_bytes == 0u);
+    REQUIRE_FALSE(
+        adopted.adoption.host_permit_released_to_process_footprint);
+    REQUIRE(receipt.source_host_permit_retained_during_build);
+    REQUIRE(receipt.source_host_permit_bytes_before_build
+            == exact_host_bytes);
+    REQUIRE(receipt.reserved_bytes_before_index_admission
+            == baseline + exact_host_bytes);
+    REQUIRE(receipt.reserved_bytes_after_index_admission
+            == baseline + exact_host_bytes + receipt.admitted_build_bytes);
+    REQUIRE(receipt.source_capacity_released);
+    REQUIRE(receipt.source_host_permit_cleared_after_consumption);
+    REQUIRE(receipt.source_adoption_cleared_after_consumption);
+    REQUIRE_FALSE(
+        receipt.source_footprint_authority_transferred_to_positions);
+    REQUIRE(receipt.transferred_position_footprint_bytes == 0u);
+    REQUIRE(receipt.retained_index_permit_bytes
+            == receipt.retained_index_bytes);
+    REQUIRE(admission.reserved_bytes()
+            == baseline + receipt.retained_index_bytes);
+    REQUIRE(admitted.index.lookup(7u).size() == 1u);
+    REQUIRE(admitted.index.lookup(9u).size() == 1u);
+
+    admitted.release_storage_before_permit();
+    REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE("fixed Vulkan adoption rejects an aliased device owner",
+          "[pipeline][vulkan][sketch][zero-copy][lifetime][alias]") {
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using Source = bioseq::gpu::vulkan::VulkanSketchResult<Sketch>;
+    using Device = bioseq::gpu::vulkan::VulkanDeviceMinimizerStorage<Sketch>;
+
+    Source source;
+    source.host_minimizers.emplace_back(
+        /*kmer*/ 7u, /*pos*/ 11u, /*strand*/ 0u);
+    source.device = std::make_shared<Device>();
+    const auto device_alias = source.device;
+    source.dispatch_token = bioseq::gpu::vulkan::VulkanSketchDispatchToken::
+        completed_collect_minimizers_roundtrip();
+    source.host_ownership_route = bioseq::gpu::vulkan::
+        VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption;
+    source.host_permit_released_to_process_footprint = true;
+    source.host_footprint_reflected_delta_bytes = sizeof(Sketch);
+    source.arena_trimmed_before_host_materialization = true;
+
+    REQUIRE_THROWS_AS(
+        ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+            adopt_fixed_vulkan_sketch_host_result(std::move(source)),
+        bioseq::gpu::vulkan::VulkanRuntimeError);
+    REQUIRE(device_alias != nullptr);
+}
+
+TEST_CASE("real sparse dna5 Vulkan target adopts either exact authority and builds admitted index",
+          "[pipeline][vulkan][sketch][zero-copy][memory-admission][hardware][dna5]") {
+    namespace vk = bioseq::gpu::vulkan;
+    auto& runtime = vk::Runtime::instance();
+    if (!vk::hardware_device_available(runtime)) {
+        SUCCEED("hardware Vulkan unavailable; real fixed-route handoff skipped");
+        return;
+    }
+
+    using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
+    using PackedSequence =
+        sequence_custom_alphabet<seq::dna5, std::uint64_t>;
+    constexpr std::size_t letter_count = 1'000'000u;
+    constexpr std::size_t window_size = 10u;
+    constexpr std::size_t kmer_size = 15u;
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    const std::uint64_t pipeline_cache_metadata_baseline =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{512} << 20u)));
+
+    seq::dna5 ambiguous{};
+    ambiguous.assign_char('N');
+    std::vector<seq::dna5> letters(letter_count, ambiguous);
+    std::vector<bool> ambiguous_positions(letter_count, true);
+    constexpr std::size_t island_size = 128u;
+    constexpr std::size_t island_stride = 100'000u;
+    std::uint64_t lcg = 0x243f6a8885a308d3ULL;
+    for (std::size_t island_start = 4'096u;
+         island_start + island_size <= letter_count;
+         island_start += island_stride) {
+        for (std::size_t offset = 0u; offset < island_size; ++offset) {
+            lcg = lcg * 6364136223846793005ULL
+                + 1442695040888963407ULL;
+            seq::dna5 value{};
+            constexpr std::array<char, 4> canonical{'A', 'C', 'G', 'T'};
+            value.assign_char(canonical[(lcg >> 33u) & 3u]);
+            letters[island_start + offset] = value;
+            ambiguous_positions[island_start + offset] = false;
+        }
+    }
+    auto sequence = compact_sequence_range<PackedSequence>(letters);
+
+    auto result = vk::collect_minimizers_vulkan_result<Sketch>(
+        sequence,
+        window_size,
+        kmer_size,
+        nullptr,
+        vk::VulkanSketchHostOwnershipRoute::fixed_zero_copy_adoption);
+    REQUIRE(result.has_value());
+    REQUIRE(result->dispatch_token.accepted());
+    REQUIRE(result->host_ownership_route
+            == vk::VulkanSketchHostOwnershipRoute::
+                fixed_zero_copy_adoption);
+    REQUIRE(result->arena_trimmed_before_host_materialization);
+    REQUIRE_FALSE(result->host_minimizers.empty());
+    REQUIRE(result->host_minimizers.size() < 10'000u);
+    const std::uint64_t host_capacity_bytes =
+        result->host_minimizers.capacity() * sizeof(Sketch);
+    const bool footprint_authority =
+        result->host_permit_released_to_process_footprint
+        && !result->host_permit.has_value()
+        && result->host_footprint_reflected_delta_bytes
+            >= host_capacity_bytes;
+    const bool retained_permit_authority =
+        !result->host_permit_released_to_process_footprint
+        && result->host_permit.has_value()
+        && result->host_permit->bytes() == host_capacity_bytes;
+    REQUIRE(footprint_authority != retained_permit_authority);
+    for (const Sketch& minimizer : result->host_minimizers) {
+        const std::size_t last_position =
+            static_cast<std::size_t>(minimizer.last_pos());
+        REQUIRE(last_position + 1u >= kmer_size);
+        const std::size_t first_position =
+            last_position + 1u - kmer_size;
+        REQUIRE(last_position < ambiguous_positions.size());
+        for (std::size_t position = first_position;
+             position <= last_position;
+             ++position) {
+            REQUIRE_FALSE(ambiguous_positions[position]);
+        }
+    }
+    const Sketch* const original_data = result->host_minimizers.data();
+    std::weak_ptr<vk::VulkanDeviceMinimizerStorage<Sketch>> device_lifetime =
+        result->device;
+
+    auto adopted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        adopt_fixed_vulkan_sketch_host_result(std::move(*result));
+    REQUIRE(adopted.adoption.zero_copy_adoption_accepted());
+    REQUIRE(adopted.ownership_authority_accepted());
+    REQUIRE(adopted.minimizers.data() == original_data);
+    REQUIRE(device_lifetime.expired());
+    // Moving an optional leaves its source engagement unspecified.  If the
+    // retained-permit case leaves an engaged source, its MemoryPermit must be
+    // moved-from and therefore own neither a controller nor any bytes.
+    if (result->host_permit.has_value()) {
+        REQUIRE_FALSE(static_cast<bool>(*result->host_permit));
+        REQUIRE(result->host_permit->bytes() == 0u);
+    }
+    REQUIRE(result->host_minimizers.capacity() == 0u);
+
+    auto admitted = ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+        admit_and_build_fixed_vulkan_target_index(
+            std::move(adopted), letter_count);
+    const auto& handoff = admitted.receipt;
+    REQUIRE(admitted.accepted());
+    REQUIRE(adopted.minimizers.capacity() == 0u);
+    REQUIRE_FALSE(adopted.host_permit.has_value());
+    REQUIRE(admitted.index_permit.has_value());
+    REQUIRE(admitted.index_permit->bytes()
+            == handoff.retained_index_permit_bytes);
+    REQUIRE(handoff.retained_position_bytes
+            == admitted.index.positions.capacity() * sizeof(std::uint64_t));
+    REQUIRE(handoff.retained_table_bytes
+            == admitted.index.table_allocation_bytes());
+    REQUIRE(admitted.index.table_peak_allocation_bytes()
+            <= handoff.admitted_table_headroom_bytes);
+    REQUIRE(handoff.retained_index_bytes
+            == handoff.retained_index_permit_bytes
+                + handoff.transferred_position_footprint_bytes);
+    if (footprint_authority) {
+        REQUIRE(handoff.source_footprint_authority_transferred_to_positions);
+        REQUIRE(handoff.transferred_position_footprint_bytes
+                == handoff.retained_position_bytes);
+    } else {
+        REQUIRE_FALSE(
+            handoff.source_footprint_authority_transferred_to_positions);
+        REQUIRE(handoff.transferred_position_footprint_bytes == 0u);
+    }
+
+    admitted.release_storage_before_permit();
+    // This first real sketch may compile and retain Vulkan pipelines.  Their
+    // process-lifetime metadata has its own explicit MemoryPermit and is not
+    // part of the adopted host vector or admitted index.  Prove that the only
+    // reservation surviving this transaction is precisely that cache growth;
+    // an unreturned host/device/index permit would make the equality fail.
+    const std::uint64_t pipeline_cache_metadata_after =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    REQUIRE(pipeline_cache_metadata_after
+            >= pipeline_cache_metadata_baseline);
+    REQUIRE(admission.reserved_bytes()
+            == bioseq::parallelism::saturating_add(
+                baseline,
+                pipeline_cache_metadata_after
+                    - pipeline_cache_metadata_baseline));
 }
 
 TEST_CASE("raw sketch batches grow geometrically and nested query scopes release only their tail",
@@ -2344,6 +3075,202 @@ TEST_CASE("cold-index operational telemetry merges and saturates through one aut
         &PipelineOperationalStats::format5_reader_control_payload_capacity_bytes);
 }
 
+TEST_CASE("DOC0383 fragment-native query evidence preserves additive and peak merge semantics",
+          "[pipe][pipeline-stats][fragment-native][evidence][merge][saturation]") {
+    using bioseq::indexing::PreparedFragmentAnchorBatchEvidence;
+    using bioseq::pipeline_stats::PipelineOperationalStats;
+
+    PreparedFragmentAnchorBatchEvidence first{};
+    first.waves = 1u;
+    first.queries = 3u;
+    first.query_occurrences = 7u;
+    first.unique_query_plans = 3u;
+    first.packed_occurrence_waves = 1u;
+    first.wide_occurrence_waves = 0u;
+    first.occurrence_fill_ns = 11u;
+    first.control_count_bytes = 101u;
+    first.pass2_position_bytes = 40u;
+    first.pass3_position_bytes = 40u;
+    first.anchors_constructed = 12u;
+    first.exact_final_bytes = 288u;
+    first.peak_exact_final_bytes = 288u;
+    first.global_sort_calls_skipped = 3u;
+    first.peak_occurrence_capacity_bytes = 96u;
+    first.peak_block_layout_capacity_bytes = 144u;
+    first.occurrence_allocations = 1u;
+
+    PreparedFragmentAnchorBatchEvidence second{};
+    second.waves = 2u;
+    second.queries = 5u;
+    second.query_occurrences = 11u;
+    second.unique_query_plans = 4u;
+    second.packed_occurrence_waves = 1u;
+    second.wide_occurrence_waves = 1u;
+    second.occurrence_fill_ns = 17u;
+    second.control_count_bytes = 203u;
+    second.pass2_position_bytes = 72u;
+    second.pass3_position_bytes = 72u;
+    second.anchors_constructed = 21u;
+    second.exact_final_bytes = 504u;
+    second.peak_exact_final_bytes = 360u;
+    second.global_sort_calls_skipped = 5u;
+    second.peak_occurrence_capacity_bytes = 80u;
+    second.peak_block_layout_capacity_bytes = 192u;
+    second.occurrence_allocations = 0u;
+
+    first.merge(second);
+    REQUIRE(first.waves == 3u);
+    REQUIRE(first.queries == 8u);
+    REQUIRE(first.query_occurrences == 18u);
+    REQUIRE(first.unique_query_plans == 7u);
+    REQUIRE(first.query_occurrences >= first.unique_query_plans);
+    REQUIRE(first.packed_occurrence_waves == 2u);
+    REQUIRE(first.wide_occurrence_waves == 1u);
+    REQUIRE(first.packed_occurrence_waves + first.wide_occurrence_waves
+        == first.waves);
+    REQUIRE(first.occurrence_fill_ns == 28u);
+    REQUIRE(first.control_count_bytes == 304u);
+    REQUIRE(first.pass2_position_bytes == 112u);
+    REQUIRE(first.pass2_position_bytes == first.pass3_position_bytes);
+    REQUIRE(first.anchors_constructed == 33u);
+    REQUIRE(first.exact_final_bytes == 792u);
+    REQUIRE(first.peak_exact_final_bytes == 360u);
+    REQUIRE(first.global_sort_calls_invoked == 0u);
+    REQUIRE(first.global_sort_calls_skipped == 8u);
+    REQUIRE(first.peak_occurrence_capacity_bytes == 96u);
+    REQUIRE(first.peak_block_layout_capacity_bytes == 192u);
+    REQUIRE(first.occurrence_allocations == 1u);
+    REQUIRE(first.forbidden_buffers_are_zero());
+    REQUIRE_FALSE(first.saturated);
+
+    PipelineOperationalStats aggregate{};
+    PipelineOperationalStats delta{};
+    delta.fragment_native_query_evidence = first;
+    aggregate.merge(delta);
+    REQUIRE(aggregate.fragment_native_query_evidence == first);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats overflow{};
+    overflow.fragment_native_query_evidence.waves =
+        (std::numeric_limits<std::uint64_t>::max)();
+    overflow.fragment_native_query_evidence.query_occurrences =
+        (std::numeric_limits<std::uint64_t>::max)();
+    aggregate.merge(overflow);
+    REQUIRE(aggregate.fragment_native_query_evidence.waves
+        == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(aggregate.fragment_native_query_evidence.query_occurrences
+        == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(aggregate.fragment_native_query_evidence.saturated);
+    REQUIRE(aggregate.stats_saturated);
+}
+
+TEST_CASE("DOC0383 Format-5 provider evidence preserves stable codes and checked counters",
+          "[pipeline][operational-stats][format5][provider-evidence]"
+          "[doc0383][p5][schema-v4]") {
+    using namespace bioseq::pipeline_stats;
+
+    PipelineOperationalStats first{};
+    auto& first_evidence = first.format5_provider_evidence;
+    first_evidence.record_provider_configured(1u);
+    first_evidence.record_provider_captured(1u);
+    first_evidence.record_provider_persisted(1u);
+    first_evidence.record_provider_opened(1u);
+    first_evidence.record_mapped_sink_preallocation_result(
+        Format5EvidenceOperationResult::succeeded);
+    first_evidence.record_lazy_state_layout(
+        Format5LazyStateLayout::compact_aligned_planes);
+    first_evidence.record_madvise(
+        Format5MappingAdvice::random,
+        Format5EvidenceOperationResult::succeeded);
+    first_evidence.record_counter(first_evidence.provider_head_scans, 1u);
+    first_evidence.record_counter(first_evidence.provider_head_rows, 1u);
+    first_evidence.record_counter(first_evidence.mapped_sink_calls, 1u);
+    first_evidence.record_counter(first_evidence.mapped_sink_bytes, 100u);
+    first_evidence.record_counter(first_evidence.mapping_bytes, 400u);
+    first_evidence.record_file_action_high_water(2u);
+    REQUIRE(first_evidence.provider_identity_complete_and_consistent());
+
+    PipelineOperationalStats second{};
+    auto& second_evidence = second.format5_provider_evidence;
+    second_evidence.record_provider_configured(1u);
+    second_evidence.record_provider_captured(1u);
+    second_evidence.record_provider_persisted(1u);
+    second_evidence.record_provider_opened(1u);
+    second_evidence.record_mapped_sink_preallocation_result(
+        Format5EvidenceOperationResult::succeeded);
+    second_evidence.record_lazy_state_layout(
+        Format5LazyStateLayout::compact_aligned_planes);
+    second_evidence.record_madvise(
+        Format5MappingAdvice::random,
+        Format5EvidenceOperationResult::succeeded);
+    second_evidence.record_counter(second_evidence.provider_head_scans, 1u);
+    second_evidence.record_counter(second_evidence.provider_head_rows, 1u);
+    second_evidence.record_counter(second_evidence.mapped_sink_calls, 1u);
+    second_evidence.record_counter(second_evidence.mapped_sink_bytes, 200u);
+    second_evidence.record_counter(second_evidence.mapping_bytes, 800u);
+    second_evidence.record_file_action_high_water(3u);
+
+    PipelineOperationalStats aggregate{};
+    aggregate.merge(first);
+    aggregate.merge(second);
+    const auto& evidence = aggregate.format5_provider_evidence;
+    REQUIRE(evidence.provider_identity_complete_and_consistent());
+    REQUIRE(evidence.provider_configured == 1u);
+    REQUIRE(evidence.provider_captured == 1u);
+    REQUIRE(evidence.provider_persisted == 1u);
+    REQUIRE(evidence.provider_opened == 1u);
+    REQUIRE(evidence.provider_head_scans == 2u);
+    REQUIRE(evidence.provider_head_rows == 2u);
+    REQUIRE(evidence.mapped_sink_calls == 2u);
+    REQUIRE(evidence.mapped_sink_bytes == 300u);
+    REQUIRE(evidence.mapping_bytes == 1'200u);
+    REQUIRE(evidence.file_action_high_water == 3u);
+    REQUIRE(evidence.mapped_sink_preallocation_result
+        == static_cast<std::uint64_t>(
+            Format5EvidenceOperationResult::succeeded));
+    REQUIRE(evidence.lazy_state_layout
+        == static_cast<std::uint64_t>(
+            Format5LazyStateLayout::compact_aligned_planes));
+    REQUIRE(evidence.madvise_choice
+        == static_cast<std::uint64_t>(Format5MappingAdvice::random));
+    REQUIRE(evidence.madvise_result
+        == static_cast<std::uint64_t>(
+            Format5EvidenceOperationResult::succeeded));
+    REQUIRE_FALSE(evidence.stable_value_conflict);
+    REQUIRE_FALSE(evidence.saturated);
+    REQUIRE_FALSE(aggregate.operational_identity_conflict);
+    REQUIRE_FALSE(aggregate.format5_reader_memory_evidence_saturated);
+    REQUIRE_FALSE(aggregate.stats_saturated);
+
+    PipelineOperationalStats conflicting{};
+    conflicting.format5_provider_evidence.record_provider_opened(0u);
+    aggregate.merge(conflicting);
+    REQUIRE(aggregate.operational_identity_conflict);
+    REQUIRE(aggregate.format5_provider_evidence.stable_value_conflict);
+    REQUIRE_FALSE(
+        aggregate.format5_provider_evidence.provider_identity_complete_and_consistent());
+
+    PipelineOperationalStats exact_limit{};
+    exact_limit.format5_provider_evidence.record_counter(
+        exact_limit.format5_provider_evidence.mapping_bytes,
+        sql_bigint_value_max);
+    PipelineOperationalStats saturated_aggregate{};
+    saturated_aggregate.merge(exact_limit);
+    REQUIRE(saturated_aggregate.format5_provider_evidence.mapping_bytes
+        == sql_bigint_value_max);
+    REQUIRE_FALSE(saturated_aggregate.stats_saturated);
+
+    PipelineOperationalStats plus_one{};
+    plus_one.format5_provider_evidence.record_counter(
+        plus_one.format5_provider_evidence.mapping_bytes, 1u);
+    saturated_aggregate.merge(plus_one);
+    REQUIRE(saturated_aggregate.format5_provider_evidence.mapping_bytes
+        == sql_bigint_value_max);
+    REQUIRE(saturated_aggregate.format5_provider_evidence.saturated);
+    REQUIRE(saturated_aggregate.format5_reader_memory_evidence_saturated);
+    REQUIRE(saturated_aggregate.stats_saturated);
+}
+
 TEST_CASE("Format-6 reader receipts preserve max peaks and report-once owners",
           "[pipe][pipeline-stats][format6][identity][saturation]") {
     using namespace bioseq::pipeline_stats;
@@ -3357,6 +4284,27 @@ TEST_CASE("partial Vulkan proof requires the exact positive stage mask",
     REQUIRE_FALSE(tampered_frontend.exact_stage_mask_accepted(
         true, true, true, true, true));
 
+    PartialVulkanExecutionProof source_direct{};
+    source_direct.query_sketch_dispatches = 1u;
+    source_direct.target_sketch_dispatches = 1u;
+    source_direct.seed_lookup_dispatches = 1u;
+    source_direct.chain_score_dispatches = 1u;
+    source_direct.gpu_index_materializations = 1u;
+    source_direct.gpu_index_sorted_dense_materializations = 1u;
+    source_direct.gpu_index_retained_minimizer_count = 53u;
+    source_direct.gpu_index_distinct_minimizer_count = 17u;
+    source_direct.gpu_index_source_direct_operations = 1u;
+    source_direct.gpu_index_source_direct_planning_receipts = 1u;
+    source_direct.gpu_index_source_direct_terminal_receipts = 1u;
+    source_direct.gpu_index_source_direct_terminal_successes = 1u;
+    REQUIRE(source_direct.exact_source_direct_stage_mask_accepted(
+        true, true, true, true));
+    REQUIRE_FALSE(source_direct.exact_stage_mask_accepted(
+        true, true, false, true, true));
+    source_direct.gpu_index_gate_enabled = 1u;
+    REQUIRE_FALSE(source_direct.exact_source_direct_stage_mask_accepted(
+        true, true, true, true));
+
     MatchResultCollection combined;
     combined.combine_execution_proof(tiled_chain);
     REQUIRE(combined.has_any_algorithm_execution_proof());
@@ -4293,13 +5241,13 @@ TEST_CASE("DOC0256 — dispatch_chain rejects rvalue args at compile time",
 }
 
 // ============================================================================
-// DOC0307 §13 (tests 11/13) — VULKAN_MINIMAP_INT end-to-end pipe parity.
+// DOC0307 §13 / DOC0384 — VULKAN_MINIMAP_INT end-to-end biological parity.
 // ============================================================================
 //
 // The full Vulkan front-end (GPU minimizers + GPU seed-hit lookup) must produce
-// the same primary match coordinates as the scalar CPU path. When a Vulkan
-// algorithm is selected, disabling Vulkan is an error; fallback selection must
-// happen before entering the pipe.
+// the same complete ordered MatchResult/CIGAR stream as the CPU path. When a
+// Vulkan algorithm is selected, disabling Vulkan is an error; fallback
+// selection must happen before entering the pipe.
 namespace doc0307_e2e {
 
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
@@ -4328,17 +5276,48 @@ using range_t  = compact_sequence_range<dna4_u64>;
     return ::bioseq::simd::HWY_NAMESPACE::minimap_port(lazy_q, lazy_t, params);
 }
 
-/// Coordinate-only canonicalisation (test 11 compares match coordinates; CIGAR
-/// / mapq tie-breaks are allowed to differ when equal-ref_bits anchors reorder).
-[[nodiscard]] std::vector<std::string> coords(const MatchResultCollection& c) {
-    std::vector<std::string> out;
-    for (const auto& m : c.results) {
-        out.push_back(fmt::format("qs={} qe={} rev={} ts={} te={}",
-                                  m.query_start, m.query_end, m.is_reverse,
-                                  m.target_start, m.target_end));
+[[nodiscard]] bool exact_biological_results_equal(
+    const MatchResultCollection& left,
+    const MatchResultCollection& right) noexcept
+{
+    if (left.results.size() != right.results.size()) return false;
+    for (std::size_t index = 0u; index < left.results.size(); ++index) {
+        const MatchResult& lhs = left.results[index];
+        const MatchResult& rhs = right.results[index];
+        if (lhs.query_len != rhs.query_len
+            || lhs.query_start != rhs.query_start
+            || lhs.query_end != rhs.query_end
+            || lhs.is_reverse != rhs.is_reverse
+            || lhs.target_len != rhs.target_len
+            || lhs.target_start != rhs.target_start
+            || lhs.target_end != rhs.target_end
+            || lhs.num_matches != rhs.num_matches
+            || lhs.block_length != rhs.block_length
+            || lhs.mapq != rhs.mapq
+            || lhs.chain_score != rhs.chain_score
+            || lhs.dp_score != rhs.dp_score
+            || lhs.dp_max_score != rhs.dp_max_score
+            || lhs.seed_count != rhs.seed_count
+            || lhs.secondary_chain_score != rhs.secondary_chain_score
+            || std::bit_cast<std::uint32_t>(lhs.divergence)
+                != std::bit_cast<std::uint32_t>(rhs.divergence)
+            || lhs.is_primary != rhs.is_primary
+            || lhs.has_cigar != rhs.has_cigar
+            || lhs.edit_distance != rhs.edit_distance
+            || lhs.cigar.size() != rhs.cigar.size()) {
+            return false;
+        }
+        for (std::size_t cigar_index = 0u;
+             cigar_index < lhs.cigar.size(); ++cigar_index) {
+            if (lhs.cigar[cigar_index].length
+                    != rhs.cigar[cigar_index].length
+                || lhs.cigar[cigar_index].opcode
+                    != rhs.cigar[cigar_index].opcode) {
+                return false;
+            }
+        }
     }
-    std::sort(out.begin(), out.end());
-    return out;
+    return true;
 }
 
 }  // namespace doc0307_e2e
@@ -4744,6 +5723,75 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
     REQUIRE((subrange_proof.exact_simd.generic_u64_kernel_calls > 0u
         || subrange_proof.exact_simd
             .k15_w10_b8_u32_hash_kernel_calls > 0u));
+}
+
+TEST_CASE("Indexed dna4 u64 queries use zero-copy u32 B8 continuation with scalar-identical records",
+          "[pipe][exact-simd][indexed-query][u64-u32][b8][parity][proof]") {
+    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using query_sequence = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using query_range = compact_sequence_range<query_sequence>;
+    using b8_sequence = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+    using b8_range = compact_sequence_range<b8_sequence>;
+
+    if (two_stack_internal::select_exact_simd_kernel_kind<
+            MinimapSketchData, b8_range::traits>(4'123u)
+        != ExactSimdKernelKind::k15_w10_b8_u32_hash) {
+        return;
+    }
+
+    Minimap2Params params;
+    params.minimizer_algorithm = MinimizerAlgorithmType::TWO_STACK_NTHASH;
+
+    const auto assert_case = [&params](std::vector<seq::dna4> data,
+                                      std::string_view fixture) {
+        CAPTURE(fixture, data.size());
+        query_range resident(data);
+        auto lazy_query = bioseq::storage::make_lazy_in_memory(resident);
+        auto fast = sketch_query_for_index_selection<MinimapSketchData>(
+            lazy_query, params, 10u, 15u);
+
+        sketch_collector_t<MinimapSketchData> scalar_collector;
+        collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(
+            scalar_collector,
+            resident,
+            resident.begin(),
+            resident.end(),
+            10u,
+            15u);
+        const auto scalar =
+            std::move(scalar_collector).extract_sketches_data();
+
+        REQUIRE(fast.exact_simd_execution_proof_present);
+        const TwoStackExecutionProof& proof =
+            fast.exact_simd_execution_proof;
+        REQUIRE(proof.accepted(/*require_nonempty_vector_work=*/true));
+        REQUIRE(proof.bp_consumed == data.size());
+        REQUIRE(proof.resident_vector_stream_kernel_calls == 0u);
+        REQUIRE(proof.resident_vector_stream_single_calls == 0u);
+        REQUIRE(proof.resident_vector_stream_dual_calls == 0u);
+        REQUIRE(proof.generic_u64_kernel_calls == 0u);
+        REQUIRE(proof.k15_w10_b8_u32_hash_kernel_calls == 1u);
+        REQUIRE(proof.k15_w10_b8_u32_hash_candidate_blocks > 0u);
+        REQUIRE(proof.k15_w10_b8_u32_hash_lane_visits > 0u);
+        REQUIRE(proof.k15_w10_b8_packed22_groups > 0u);
+        REQUIRE(proof.k15_w10_b8_packed22_lane_visits > 0u);
+        REQUIRE(fast.minimizers.size() == scalar.size());
+        for (std::size_t i = 0; i < scalar.size(); ++i) {
+            CAPTURE(i);
+            REQUIRE(fast.minimizers[i].raw_value()
+                == scalar[i].raw_value());
+        }
+    };
+
+    assert_case(
+        doc0307_e2e::make_dna4(4'123u, 0xB8D0A57u),
+        "non-periodic tail");
+    std::vector<seq::dna4> repeated(4'123u);
+    seq::dna4 adenine;
+    adenine.assign_rank(
+        static_cast<decltype(adenine.to_rank())>(0u));
+    std::fill(repeated.begin(), repeated.end(), adenine);
+    assert_case(std::move(repeated), "equal-hash tie windows");
 }
 
 TEST_CASE("KSW2 batched pipeline returns operation-originated nonempty proof",
@@ -5386,8 +6434,8 @@ TEST_CASE("persisted Shape-V5 GPU preparation admits zero-based supported alphab
     REQUIRE_FALSE(admitted(dna4_code, 1u));
 }
 
-TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
-          "[vulkan][phase-b][pipe]") {
+TEST_CASE("DOC0384 — bounded Vulkan pipe matches complete CPU biological results",
+          "[vulkan][phase-b][pipe][pipeline][biological-parity]") {
     using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
     using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using ::bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
@@ -5487,7 +6535,9 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT pipe matches CPU coordinates",
                     /*chain_score=*/true));
     REQUIRE(gpu_res.block_aligner_execution_accepted(
         /*require_nonempty_simd_work=*/true));
-    REQUIRE(doc0307_e2e::coords(cpu_res) == doc0307_e2e::coords(gpu_res));
+    REQUIRE(doc0307_e2e::exact_biological_results_equal(cpu_res, gpu_res));
+    REQUIRE(cpu_res.biological_fingerprint()
+            == gpu_res.biological_fingerprint());
 }
 
 TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
@@ -5509,6 +6559,514 @@ TEST_CASE("DOC0307 — VULKAN_MINIMAP_INT with vulkan_enabled=false fails",
         bioseq::gpu::vulkan::VulkanRuntimeError);
 }
 
+namespace doc0384_direct_test {
+
+using Ledger = ::bioseq::simd::HWY_NAMESPACE::pipe::
+    DirectResidentOperationLedger;
+using SourceAuthority = ::bioseq::simd::HWY_NAMESPACE::pipe::
+    SourceDirectHostAuthority;
+using ResidentAuthority = bioseq::indexing::
+    GpuResidentAccountingAuthority;
+
+[[nodiscard]] Ledger full_resident_ledger(ResidentAuthority authority) {
+    Ledger ledger{};
+    ledger.operation_identity = 17u;
+    ledger.minimizer_count = 53u;
+    ledger.distinct_count = 17u;
+    ledger.logical_control_bytes = 272u;
+    ledger.logical_position_bytes = 424u;
+    ledger.logical_resident_bytes = 696u;
+    ledger.control_requirement_bytes = 1'024u;
+    ledger.position_requirement_bytes = 3'072u;
+    ledger.control_allowance_bytes = 1'024u;
+    ledger.position_allowance_bytes = 3'072u;
+    ledger.conservative_allowance_bytes = 4'096u;
+    ledger.conservative_request_bytes = 4'096u;
+    ledger.source_capacity_bytes = 512u;
+    ledger.source_releases = 1u;
+    ledger.source_released_bytes = 512u;
+    ledger.cache_preinsertions = 1u;
+    ledger.cache_required_lookups = 1u;
+    ledger.cache_required_hits = 1u;
+    ledger.mapped_prefix_passes = 2u;
+    ledger.mapped_prefix_lookups = 20u;
+    ledger.mapped_prefix_comparisons = 80u;
+    ledger.expected_seed_consumers = 1u;
+    ledger.completed_seed_consumers = 1u;
+    ledger.slab_requested_bytes = 1'024u;
+    ledger.slab_actual_bytes = 1'024u;
+    ledger.slab_retained_permit_bytes = 1'024u;
+    ledger.slab_permit_releases = 1u;
+    ledger.seed_reserved_bytes = 4'096u;
+    ledger.seed_planned_vulkan_bytes = 2'048u;
+    ledger.seed_actual_vulkan_bytes = 2'048u;
+    ledger.seed_roundtrips = 1u;
+    ledger.seed_dispatches = 1u;
+    ledger.seed_fence_completions = 1u;
+    ledger.cache_cleanup_releases = 1u;
+    ledger.resident_cleanup_bytes = 4'096u;
+    ledger.materialization = {
+        .logical_slot_bytes = 272u,
+        .logical_position_bytes = 424u,
+        .logical_resident_bytes = 696u,
+        .control_allocation_requirement_bytes = 1'024u,
+        .position_allocation_requirement_bytes = 3'072u,
+        .control_allocation_allowance_bytes = 1'024u,
+        .position_allocation_allowance_bytes = 3'072u,
+        .conservative_allowance_bytes = 4'096u,
+        .conservative_request_bytes = 4'096u,
+        .actual_slot_allocation_bytes = 1'024u,
+        .actual_position_allocation_bytes = 3'072u,
+        .actual_allocation_bytes = 4'096u,
+        .source_checksum = 0x1234u,
+        .mapped_checksum = 0x1234u,
+        .fully_touched_bytes = 4'096u,
+        .reflected_footprint_bytes =
+            authority == ResidentAuthority::reflected_process_footprint
+                ? 4'096u : 0u,
+        .retained_permit_bytes =
+            authority == ResidentAuthority::retained_exact_permit
+                ? 4'096u : 0u,
+        .permit_reconciliations = 1u,
+        .complete_source_traversals = 1u,
+        .complete_mapped_traversals = 1u,
+        .authority = authority,
+    };
+    ledger.source_authority =
+        authority == ResidentAuthority::reflected_process_footprint
+            ? SourceAuthority::reflected_process_footprint
+            : SourceAuthority::retained_exact_permit;
+    ledger.phase_c_checked = true;
+    ledger.phase_c_compatible = true;
+    ledger.source_authority_checked = true;
+    ledger.source_authority_accepted = true;
+    ledger.runtime_checked = true;
+    ledger.runtime_available = true;
+    ledger.hardware_checked = true;
+    ledger.hardware_available = true;
+    ledger.sorted_shape_checked = true;
+    ledger.sorted_shape_accepted = true;
+    ledger.identity_checked = true;
+    ledger.identity_accepted = true;
+    ledger.u32_shape_checked = true;
+    ledger.u32_shape_accepted = true;
+    ledger.storage_ranges_checked = true;
+    ledger.control_range_accepted = true;
+    ledger.position_range_accepted = true;
+    ledger.mapping_plan_checked = true;
+    ledger.mapping_plan_accepted = true;
+    ledger.admission_snapshot_taken = true;
+    ledger.planning_accepted = true;
+    ledger.route_committed = true;
+    ledger.materialization_started = true;
+    ledger.materialization_completed = true;
+    ledger.resident_published = true;
+    ledger.source_release_completed = true;
+    ledger.source_released_after_publication = true;
+    ledger.cache_lookup_started = true;
+    ledger.mapped_prefix_started = true;
+    ledger.slab_admission_started = true;
+    ledger.seed_dispatch_started = true;
+    ledger.pipeline_started = true;
+    ledger.pipeline_completed = true;
+    ledger.log_planning("proceed", "focused_test_fixture");
+    return ledger;
+}
+
+[[nodiscard]] Ledger canonical_empty_ledger() {
+    Ledger ledger{};
+    ledger.operation_identity = 18u;
+    ledger.source_authority = SourceAuthority::canonical_empty;
+    ledger.phase_c_checked = true;
+    ledger.phase_c_compatible = true;
+    ledger.source_authority_checked = true;
+    ledger.source_authority_accepted = true;
+    ledger.runtime_checked = true;
+    ledger.runtime_available = true;
+    ledger.hardware_checked = true;
+    ledger.hardware_available = true;
+    ledger.sorted_shape_checked = true;
+    ledger.sorted_shape_accepted = true;
+    ledger.identity_checked = true;
+    ledger.identity_accepted = true;
+    ledger.u32_shape_checked = true;
+    ledger.u32_shape_accepted = true;
+    ledger.storage_ranges_checked = true;
+    ledger.control_range_accepted = true;
+    ledger.position_range_accepted = true;
+    ledger.mapping_plan_checked = true;
+    ledger.mapping_plan_accepted = true;
+    ledger.admission_snapshot_taken = true;
+    ledger.canonical_empty = true;
+    ledger.planning_accepted = true;
+    ledger.route_committed = true;
+    ledger.source_release_completed = true;
+    ledger.empty_bypass = true;
+    ledger.log_planning("proceed", "focused_empty_fixture");
+    return ledger;
+}
+
+}  // namespace doc0384_direct_test
+
+TEST_CASE("DOC0384 source-direct operation ledger emits an exact two-receipt transaction",
+          "[pipeline][vulkan][prepared-full-resident]"
+          "[pipeline][vulkan][receipt][fail-closed]") {
+    using doc0384_direct_test::Ledger;
+    using doc0384_direct_test::ResidentAuthority;
+
+    SECTION("reflected authority") {
+        auto ledger = doc0384_direct_test::full_resident_ledger(
+            ResidentAuthority::reflected_process_footprint);
+        REQUIRE(ledger.route_name() == "full_sorted_dense_direct_mapped");
+        REQUIRE(ledger.planning_receipts == 1u);
+        REQUIRE(ledger.terminal_success_invariants());
+        ledger.log_terminal("success", "focused_success");
+        REQUIRE(ledger.terminal_receipts == 1u);
+        REQUIRE(ledger.terminal_success);
+        ledger.log_terminal("failure", "must_not_duplicate");
+        REQUIRE(ledger.terminal_receipts == 1u);
+        REQUIRE(ledger.terminal_success);
+    }
+
+    SECTION("retained exact permit authority") {
+        auto ledger = doc0384_direct_test::full_resident_ledger(
+            ResidentAuthority::retained_exact_permit);
+        REQUIRE(ledger.terminal_success_invariants());
+    }
+
+    SECTION("zero anchors still complete two mapped-prefix passes") {
+        auto ledger = doc0384_direct_test::full_resident_ledger(
+            ResidentAuthority::retained_exact_permit);
+        ledger.slab_requested_bytes = 0u;
+        ledger.slab_actual_bytes = 0u;
+        ledger.slab_retained_permit_bytes = 0u;
+        ledger.slab_permit_releases = 0u;
+        ledger.seed_reserved_bytes = 0u;
+        ledger.seed_planned_vulkan_bytes = 0u;
+        ledger.seed_actual_vulkan_bytes = 0u;
+        ledger.zero_anchor_bypasses = 1u;
+        ledger.seed_dispatches = 0u;
+        ledger.seed_fence_completions = 0u;
+        REQUIRE(ledger.mapped_prefix_passes == 2u);
+        REQUIRE(ledger.terminal_success_invariants());
+        --ledger.mapped_prefix_passes;
+        REQUIRE_FALSE(ledger.terminal_success_invariants());
+    }
+
+    SECTION("zero query is an explicit post-publication pipeline bypass") {
+        auto ledger = doc0384_direct_test::full_resident_ledger(
+            ResidentAuthority::reflected_process_footprint);
+        ledger.expected_seed_consumers = 0u;
+        ledger.completed_seed_consumers = 0u;
+        ledger.cache_required_lookups = 0u;
+        ledger.cache_required_hits = 0u;
+        ledger.mapped_prefix_passes = 0u;
+        ledger.mapped_prefix_lookups = 0u;
+        ledger.mapped_prefix_comparisons = 0u;
+        ledger.slab_requested_bytes = 0u;
+        ledger.slab_actual_bytes = 0u;
+        ledger.slab_retained_permit_bytes = 0u;
+        ledger.slab_permit_releases = 0u;
+        ledger.seed_reserved_bytes = 0u;
+        ledger.seed_planned_vulkan_bytes = 0u;
+        ledger.seed_actual_vulkan_bytes = 0u;
+        ledger.seed_roundtrips = 0u;
+        ledger.seed_dispatches = 0u;
+        ledger.seed_fence_completions = 0u;
+        ledger.zero_query_bypasses = 1u;
+        ledger.cache_lookup_started = false;
+        ledger.mapped_prefix_started = false;
+        ledger.slab_admission_started = false;
+        ledger.seed_dispatch_started = false;
+        ledger.pipeline_started = false;
+        ledger.pipeline_completed = false;
+        REQUIRE(ledger.terminal_success_invariants());
+    }
+
+    SECTION("canonical empty publishes neither resident nor fake cleanup") {
+        auto ledger = doc0384_direct_test::canonical_empty_ledger();
+        REQUIRE(ledger.route_name() == "empty_no_resident_zero_anchor");
+        REQUIRE(ledger.terminal_success_invariants());
+        ledger.resident_published = true;
+        REQUIRE_FALSE(ledger.terminal_success_invariants());
+    }
+
+    SECTION("failure and not-reached unwind remain exactly two receipts") {
+        auto invalid = doc0384_direct_test::full_resident_ledger(
+            ResidentAuthority::reflected_process_footprint);
+        --invalid.materialization.fully_touched_bytes;
+        REQUIRE_FALSE(invalid.terminal_success_invariants());
+        invalid.log_terminal("success", "injected_touch_failure");
+        REQUIRE(invalid.terminal_receipts == 1u);
+        REQUIRE_FALSE(invalid.terminal_success);
+
+        Ledger not_reached{};
+        not_reached.operation_identity = 19u;
+        {
+            ::bioseq::simd::HWY_NAMESPACE::pipe::
+                DirectResidentReceiptGuard guard{&not_reached};
+        }
+        REQUIRE(not_reached.planning_receipts == 1u);
+        REQUIRE(not_reached.terminal_receipts == 1u);
+        REQUIRE_FALSE(not_reached.terminal_success);
+    }
+}
+
+TEST_CASE("DOC0384 bounded real-GPU prepared resident matches independent Phase C",
+          "[pipeline][vulkan][prepared-full-resident]"
+          "[pipeline][vulkan][zero-copy][hardware][biological-parity]") {
+    namespace vk = bioseq::gpu::vulkan;
+    using ::bioseq::simd::HWY_NAMESPACE::BaseAlignmentAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::MatchResultCollection;
+    using ::bioseq::simd::HWY_NAMESPACE::Minimap2Params;
+    using ::bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
+    using DirectMinimizer =
+        ::bioseq::simd::HWY_NAMESPACE::MinimizerRepr<33u, 15u>;
+
+    auto& runtime = vk::Runtime::instance();
+    if (!vk::hardware_device_available(runtime)) {
+        SUCCEED("hardware Vulkan unavailable; prepared-resident parity skipped");
+        return;
+    }
+
+    auto& admission =
+        bioseq::parallelism::MemoryAdmissionController::instance();
+    const std::uint64_t previous_cap = admission.index_memory_cap_bytes();
+    const std::uint64_t baseline = admission.reserved_bytes();
+    const std::uint64_t pipeline_cache_metadata_baseline =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    struct RestoreCap {
+        bioseq::parallelism::MemoryAdmissionController& controller;
+        std::uint64_t cap = 0u;
+        ~RestoreCap() { controller.set_index_memory_cap_bytes(cap); }
+    } restore{admission, previous_cap};
+    admission.set_index_memory_cap_bytes(std::max<std::uint64_t>(
+        previous_cap,
+        bioseq::parallelism::saturating_add(
+            baseline, std::uint64_t{512} << 20u)));
+
+    MatchResultCollection direct_results;
+    MatchResultCollection phase_c_results;
+    MatchResultCollection empty_minimizer_results;
+    {
+        auto target_letters =
+            doc0307_e2e::make_dna4(20'000u, 0x0384c0ffeeULL);
+        std::vector<seq::dna4> query_letters(
+            target_letters.begin() + 5'000,
+            target_letters.begin() + 6'500);
+        doc0307_e2e::range_t query_range(query_letters);
+        doc0307_e2e::range_t target_range(target_letters);
+
+        auto target_sketch =
+            vk::collect_minimizers_vulkan_result<DirectMinimizer>(
+                target_range,
+                /*window_size=*/10u,
+                /*kmer_size=*/15u,
+                nullptr,
+                vk::VulkanSketchHostOwnershipRoute::
+                    fixed_zero_copy_adoption);
+        REQUIRE(target_sketch.has_value());
+        REQUIRE(target_sketch->dispatch_token.accepted());
+        REQUIRE_FALSE(target_sketch->host_minimizers.empty());
+        auto target_owner =
+            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+                adopt_fixed_vulkan_sketch_host_result(
+                    std::move(*target_sketch));
+        REQUIRE(target_owner.ownership_authority_accepted());
+
+        auto query_sketch =
+            vk::collect_minimizers_vulkan_result<DirectMinimizer>(
+                query_range,
+                /*window_size=*/10u,
+                /*kmer_size=*/15u);
+        REQUIRE(query_sketch.has_value());
+        REQUIRE(query_sketch->dispatch_token.accepted());
+        REQUIRE_FALSE(query_sketch->host_minimizers.empty());
+
+        Minimap2Params direct_params{};
+        direct_params.chaining_algorithm =
+            ChainingAlgorithmType::VULKAN_TILED_DP;
+        direct_params.base_alignment_algorithm =
+            BaseAlignmentAlgorithmType::BLOCK_ALIGNER;
+        direct_params.minimizer_algorithm =
+            MinimizerAlgorithmType::VULKAN_MINIMAP_INT;
+        direct_params.vulkan_enabled = true;
+        direct_params.vulkan_seed_hits_enabled = true;
+        direct_params.vulkan_index_cache_enabled = true;
+        direct_params.vulkan_fused_frontend_enabled = false;
+        direct_params.vulkan_gpu_index_build_enabled = false;
+        direct_params.vulkan_extend_enabled = false;
+        direct_params.do_cigar = true;
+
+        auto direct_lazy_query =
+            bioseq::storage::make_lazy_in_memory(query_range);
+        auto direct_lazy_target =
+            bioseq::storage::make_lazy_in_memory(target_range);
+        direct_results =
+            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+                minimap2_port_with_fixed_vulkan_target_handoff(
+                    direct_lazy_query,
+                    direct_lazy_target,
+                    query_sketch->host_minimizers,
+                    std::move(target_owner),
+                    direct_params);
+        query_sketch.reset();
+        target_sketch.reset();
+
+        Minimap2Params phase_c_params = direct_params;
+        phase_c_params.vulkan_fused_frontend_enabled = true;
+        phase_c_params.vulkan_gpu_index_build_enabled = true;
+        auto phase_c_lazy_query =
+            bioseq::storage::make_lazy_in_memory(query_range);
+        auto phase_c_lazy_target =
+            bioseq::storage::make_lazy_in_memory(target_range);
+        phase_c_results =
+            ::bioseq::simd::HWY_NAMESPACE::minimap_port(
+                phase_c_lazy_query,
+                phase_c_lazy_target,
+                phase_c_params);
+
+        // A nonempty query shorter than k has no minimizers, but the already
+        // materialized source-direct resident still owns the two required
+        // mapped-payload authority passes. Rebuild the small bounded resident
+        // and exercise the production wrapper so the generic early-empty seed
+        // shortcut cannot regress over this case.
+        std::vector<seq::dna4> short_query_letters(
+            target_letters.begin(), target_letters.begin() + 8);
+        doc0307_e2e::range_t short_query_range(short_query_letters);
+        auto empty_query_sketch =
+            vk::collect_minimizers_vulkan_result<DirectMinimizer>(
+                short_query_range,
+                /*window_size=*/10u,
+                /*kmer_size=*/15u);
+        REQUIRE(empty_query_sketch.has_value());
+        REQUIRE(empty_query_sketch->dispatch_token.accepted());
+        REQUIRE(empty_query_sketch->host_minimizers.empty());
+        auto second_target_sketch =
+            vk::collect_minimizers_vulkan_result<DirectMinimizer>(
+                target_range,
+                /*window_size=*/10u,
+                /*kmer_size=*/15u,
+                nullptr,
+                vk::VulkanSketchHostOwnershipRoute::
+                    fixed_zero_copy_adoption);
+        REQUIRE(second_target_sketch.has_value());
+        REQUIRE(second_target_sketch->dispatch_token.accepted());
+        auto second_target_owner =
+            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+                adopt_fixed_vulkan_sketch_host_result(
+                    std::move(*second_target_sketch));
+        auto empty_lazy_query =
+            bioseq::storage::make_lazy_in_memory(short_query_range);
+        auto empty_lazy_target =
+            bioseq::storage::make_lazy_in_memory(target_range);
+        empty_minimizer_results =
+            ::bioseq::simd::HWY_NAMESPACE::pipe_entry_detail::
+                minimap2_port_with_fixed_vulkan_target_handoff(
+                    empty_lazy_query,
+                    empty_lazy_target,
+                    empty_query_sketch->host_minimizers,
+                    std::move(second_target_owner),
+                    direct_params);
+    }
+
+    REQUIRE_FALSE(direct_results.results.empty());
+    REQUIRE_FALSE(phase_c_results.results.empty());
+    const auto& direct = direct_results.partial_vulkan_execution_proof;
+    const auto& phase_c = phase_c_results.partial_vulkan_execution_proof;
+    REQUIRE_FALSE(direct.saturated);
+    REQUIRE(direct.gpu_index_source_direct_operations == 1u);
+    REQUIRE(direct.gpu_index_source_direct_terminal_successes == 1u);
+    REQUIRE(direct.gpu_index_source_direct_planning_receipts == 1u);
+    REQUIRE(direct.gpu_index_source_direct_terminal_receipts == 1u);
+    REQUIRE(direct.gpu_index_source_direct_materializations == 1u);
+    REQUIRE(direct.gpu_index_source_direct_resident_publications == 1u);
+    REQUIRE(direct.gpu_index_source_direct_source_releases == 1u);
+    REQUIRE(direct.gpu_index_source_direct_checksum_matches == 1u);
+    REQUIRE(direct.gpu_index_source_direct_source_traversals == 1u);
+    REQUIRE(direct.gpu_index_source_direct_mapped_traversals == 1u);
+    REQUIRE(direct.gpu_index_source_direct_cache_preinsertions == 1u);
+    REQUIRE(direct.gpu_index_source_direct_required_misses == 0u);
+    REQUIRE(direct.gpu_index_source_direct_fallback_attempts == 0u);
+    REQUIRE(direct.gpu_index_source_direct_expected_seed_consumers > 0u);
+    REQUIRE(direct.gpu_index_source_direct_completed_seed_consumers
+            == direct.gpu_index_source_direct_expected_seed_consumers);
+    REQUIRE(direct.gpu_index_source_direct_required_lookups
+            == direct.gpu_index_source_direct_completed_seed_consumers);
+    REQUIRE(direct.gpu_index_source_direct_required_hits
+            == direct.gpu_index_source_direct_required_lookups);
+    REQUIRE(direct.gpu_index_source_direct_mapped_prefix_passes
+            == 2u * direct.gpu_index_source_direct_required_lookups);
+    REQUIRE(direct.gpu_index_source_direct_seed_slab_initial_capacity == 0u);
+    REQUIRE(direct.gpu_index_source_direct_seed_planned_vulkan_bytes
+            == direct.gpu_index_source_direct_seed_actual_vulkan_bytes);
+    REQUIRE(direct.gpu_index_source_direct_seed_roundtrips
+            == direct.gpu_index_source_direct_required_lookups);
+    REQUIRE(direct.gpu_index_source_direct_seed_fence_completions
+            == direct.gpu_index_source_direct_seed_roundtrips);
+    REQUIRE(direct.gpu_index_source_direct_cache_cleanup_releases == 1u);
+    REQUIRE(direct.gpu_index_source_direct_resident_cleanup_bytes
+            == direct.gpu_index_actual_allocation_bytes);
+    REQUIRE(direct.gpu_index_source_direct_pipeline_completions == 1u);
+    REQUIRE(direct.gpu_index_fully_touched_bytes
+            == direct.gpu_index_actual_allocation_bytes);
+    REQUIRE(direct.target_index_build_dispatches == 0u);
+    REQUIRE(direct.seed_host_sort_fallbacks == 0u);
+    REQUIRE(direct.post_seed_owned_cpu_index_releases == 0u);
+    REQUIRE(direct.post_seed_owned_cpu_position_bytes_released == 0u);
+
+    REQUIRE(direct.seed_anchor_proof_operations
+            == direct.gpu_index_source_direct_seed_roundtrips);
+    REQUIRE(direct.seed_canonical_anchor_order_checks
+            == direct.seed_anchor_proof_operations);
+    REQUIRE(direct.seed_canonical_anchor_order_accepts
+            == direct.seed_canonical_anchor_order_checks);
+    REQUIRE(direct.seed_canonical_anchor_count
+            == phase_c.seed_canonical_anchor_count);
+    REQUIRE(direct.seed_anchor_digest_lane0
+            == phase_c.seed_anchor_digest_lane0);
+    REQUIRE(direct.seed_anchor_digest_lane1
+            == phase_c.seed_anchor_digest_lane1);
+    REQUIRE(doc0307_e2e::exact_biological_results_equal(
+        direct_results, phase_c_results));
+    REQUIRE(direct_results.biological_fingerprint()
+            == phase_c_results.biological_fingerprint());
+
+    REQUIRE(empty_minimizer_results.results.empty());
+    const auto& empty_minimizer =
+        empty_minimizer_results.partial_vulkan_execution_proof;
+    REQUIRE(empty_minimizer.gpu_index_source_direct_operations == 1u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_terminal_successes == 1u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_required_lookups == 1u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_required_hits == 1u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_mapped_prefix_passes == 2u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_mapped_prefix_lookups == 0u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_mapped_prefix_comparisons
+            == 0u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_seed_roundtrips == 1u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_zero_anchor_bypasses == 1u);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_seed_fence_completions == 0u);
+    REQUIRE(empty_minimizer.seed_lookup_dispatches == 0u);
+    REQUIRE(empty_minimizer.seed_anchor_proof_operations == 1u);
+    REQUIRE(empty_minimizer.seed_canonical_anchor_count == 0u);
+    REQUIRE(empty_minimizer.seed_anchor_digest_lane0
+            == vk::kSeedAnchorDigestSeedLo);
+    REQUIRE(empty_minimizer.seed_anchor_digest_lane1
+            == vk::kSeedAnchorDigestSeedHi);
+    REQUIRE(empty_minimizer.gpu_index_source_direct_pipeline_completions == 1u);
+
+    const std::uint64_t pipeline_cache_metadata_after =
+        runtime.pipeline_cache_metadata_reserved_bytes();
+    REQUIRE(pipeline_cache_metadata_after
+            >= pipeline_cache_metadata_baseline);
+    REQUIRE(admission.reserved_bytes()
+            == bioseq::parallelism::saturating_add(
+                baseline,
+                pipeline_cache_metadata_after
+                    - pipeline_cache_metadata_baseline));
+}
+
 TEST_CASE("post-seed owned lifetime releases only after the final seed user",
           "[pipeline][seed][lifetime]") {
     using Sketch = ::bioseq::simd::HWY_NAMESPACE::MinimapSketchData;
@@ -5526,7 +7084,8 @@ TEST_CASE("post-seed owned lifetime releases only after the final seed user",
     PostSeedOwnedLifetime lifetime{
         /*seed_users=*/2u,
         /*owned_gpu_cache=*/nullptr,
-        /*owned_cpu_index=*/&index};
+        TransientTargetIndexReleaseAuthority{
+            .index = &index}};
     const auto first = lifetime.complete_seed_user();
     REQUIRE(first.cpu_index_releases == 0u);
     REQUIRE_FALSE(index.table_empty());
@@ -5757,6 +7316,226 @@ TEST_CASE("Vulkan chaining shape preflight exactly matches in-place range compac
     REQUIRE(compacted.data()[0].ref_position == anchors.front().ref_position);
     REQUIRE(compacted.data()[compacted.size() - 1u].ref_position
             == anchors.back().ref_position);
+}
+
+TEST_CASE("MatchResult biological fingerprints cover every result and CIGAR field",
+          "[pipeline][biological-proof][fingerprint]") {
+    MatchResult result{
+        .query_len = 101u,
+        .query_start = 3u,
+        .query_end = 97u,
+        .is_reverse = true,
+        .target_len = 1001u,
+        .target_start = 23u,
+        .target_end = 117u,
+        .num_matches = 90u,
+        .block_length = 94u,
+        .mapq = 42,
+        .chain_score = 99,
+        .dp_score = 88,
+        .dp_max_score = 91,
+        .seed_count = 7,
+        .secondary_chain_score = 11,
+        .divergence = 0.125f,
+        .is_primary = true,
+        .has_cigar = true,
+        .cigar = {
+            CigarOp{.length = 10u, .opcode = CIGAR_MATCH},
+            CigarOp{.length = 2u, .opcode = CIGAR_INS},
+            CigarOp{.length = 82u, .opcode = CIGAR_MATCH},
+        },
+        .edit_distance = 2u,
+    };
+    MatchResultCollection lhs{std::vector<MatchResult>{result}};
+    MatchResultCollection rhs{std::vector<MatchResult>{result}};
+
+    const auto expected = lhs.biological_fingerprint();
+    REQUIRE(expected.computed);
+    REQUIRE_FALSE(expected.saturated);
+    REQUIRE(expected.collection_count == 1u);
+    REQUIRE(expected.match_result_count == 1u);
+    REQUIRE(expected.cigar_result_count == 1u);
+    REQUIRE(expected.cigar_operation_count == 3u);
+    REQUIRE(expected == rhs.biological_fingerprint());
+
+    enum class ResultField : std::uint8_t {
+        query_len,
+        query_start,
+        query_end,
+        is_reverse,
+        target_len,
+        target_start,
+        target_end,
+        num_matches,
+        block_length,
+        mapq,
+        chain_score,
+        dp_score,
+        dp_max_score,
+        seed_count,
+        secondary_chain_score,
+        divergence,
+        is_primary,
+        has_cigar,
+        edit_distance,
+    };
+    struct ResultFieldMutation {
+        ResultField field;
+        const char* name;
+        bool affects_cigar_digest;
+    };
+    constexpr std::array<ResultFieldMutation, 19u> result_mutations{{
+        {ResultField::query_len, "query_len", false},
+        {ResultField::query_start, "query_start", false},
+        {ResultField::query_end, "query_end", false},
+        {ResultField::is_reverse, "is_reverse", false},
+        {ResultField::target_len, "target_len", false},
+        {ResultField::target_start, "target_start", false},
+        {ResultField::target_end, "target_end", false},
+        {ResultField::num_matches, "num_matches", false},
+        {ResultField::block_length, "block_length", false},
+        {ResultField::mapq, "mapq", false},
+        {ResultField::chain_score, "chain_score", false},
+        {ResultField::dp_score, "dp_score", false},
+        {ResultField::dp_max_score, "dp_max_score", false},
+        {ResultField::seed_count, "seed_count", false},
+        {ResultField::secondary_chain_score,
+         "secondary_chain_score", false},
+        {ResultField::divergence, "divergence", false},
+        {ResultField::is_primary, "is_primary", false},
+        {ResultField::has_cigar, "has_cigar", true},
+        {ResultField::edit_distance, "edit_distance", false},
+    }};
+    for (const auto& mutation : result_mutations) {
+        auto mutated = result;
+        switch (mutation.field) {
+            case ResultField::query_len: ++mutated.query_len; break;
+            case ResultField::query_start: ++mutated.query_start; break;
+            case ResultField::query_end: ++mutated.query_end; break;
+            case ResultField::is_reverse:
+                mutated.is_reverse = !mutated.is_reverse;
+                break;
+            case ResultField::target_len: ++mutated.target_len; break;
+            case ResultField::target_start: ++mutated.target_start; break;
+            case ResultField::target_end: ++mutated.target_end; break;
+            case ResultField::num_matches: ++mutated.num_matches; break;
+            case ResultField::block_length: ++mutated.block_length; break;
+            case ResultField::mapq: ++mutated.mapq; break;
+            case ResultField::chain_score: ++mutated.chain_score; break;
+            case ResultField::dp_score: ++mutated.dp_score; break;
+            case ResultField::dp_max_score: ++mutated.dp_max_score; break;
+            case ResultField::seed_count: ++mutated.seed_count; break;
+            case ResultField::secondary_chain_score:
+                ++mutated.secondary_chain_score;
+                break;
+            case ResultField::divergence:
+                mutated.divergence = 0.25f;
+                break;
+            case ResultField::is_primary:
+                mutated.is_primary = !mutated.is_primary;
+                break;
+            case ResultField::has_cigar:
+                mutated.has_cigar = !mutated.has_cigar;
+                break;
+            case ResultField::edit_distance:
+                ++mutated.edit_distance;
+                break;
+        }
+        INFO("mutated MatchResult field: " << mutation.name);
+        rhs.results = {std::move(mutated)};
+        const auto fingerprint = rhs.biological_fingerprint();
+        REQUIRE(fingerprint.match_digest_lane0
+                != expected.match_digest_lane0);
+        REQUIRE(fingerprint.match_digest_lane1
+                != expected.match_digest_lane1);
+        if (mutation.affects_cigar_digest) {
+            REQUIRE(fingerprint.cigar_digest_lane0
+                    != expected.cigar_digest_lane0);
+            REQUIRE(fingerprint.cigar_digest_lane1
+                    != expected.cigar_digest_lane1);
+        } else {
+            REQUIRE(fingerprint.cigar_digest_lane0
+                    == expected.cigar_digest_lane0);
+            REQUIRE(fingerprint.cigar_digest_lane1
+                    == expected.cigar_digest_lane1);
+        }
+    }
+
+    enum class CigarField : std::uint8_t { length, opcode, vector_shape };
+    struct CigarFieldMutation {
+        CigarField field;
+        const char* name;
+    };
+    constexpr std::array<CigarFieldMutation, 3u> cigar_mutations{{
+        {CigarField::length, "cigar.length"},
+        {CigarField::opcode, "cigar.opcode"},
+        {CigarField::vector_shape, "cigar vector shape"},
+    }};
+    for (const auto& mutation : cigar_mutations) {
+        auto mutated = result;
+        switch (mutation.field) {
+            case CigarField::length:
+                ++mutated.cigar[1].length;
+                break;
+            case CigarField::opcode:
+                mutated.cigar[1].opcode = CIGAR_DEL;
+                break;
+            case CigarField::vector_shape:
+                mutated.cigar.push_back(
+                    CigarOp{.length = 1u, .opcode = CIGAR_DEL});
+                break;
+        }
+        INFO("mutated CIGAR field: " << mutation.name);
+        rhs.results = {std::move(mutated)};
+        const auto fingerprint = rhs.biological_fingerprint();
+        REQUIRE(fingerprint.match_digest_lane0
+                != expected.match_digest_lane0);
+        REQUIRE(fingerprint.match_digest_lane1
+                != expected.match_digest_lane1);
+        REQUIRE(fingerprint.cigar_digest_lane0
+                != expected.cigar_digest_lane0);
+        REQUIRE(fingerprint.cigar_digest_lane1
+                != expected.cigar_digest_lane1);
+    }
+
+    MatchResultCollection empty_a;
+    MatchResultCollection empty_b;
+    const auto empty_fingerprint = empty_a.biological_fingerprint();
+    REQUIRE(empty_fingerprint.computed);
+    REQUIRE_FALSE(empty_fingerprint.saturated);
+    REQUIRE(empty_fingerprint.collection_count == 1u);
+    REQUIRE(empty_fingerprint.match_result_count == 0u);
+    REQUIRE(empty_fingerprint.cigar_result_count == 0u);
+    REQUIRE(empty_fingerprint.cigar_operation_count == 0u);
+    REQUIRE(empty_fingerprint == empty_b.biological_fingerprint());
+
+    auto second = result;
+    ++second.query_start;
+    ++second.cigar.front().length;
+    MatchResultCollection ordered{
+        std::vector<MatchResult>{result, second}};
+    MatchResultCollection reversed{
+        std::vector<MatchResult>{second, result}};
+    const auto ordered_fingerprint = ordered.biological_fingerprint();
+    const auto reversed_fingerprint = reversed.biological_fingerprint();
+    REQUIRE(ordered_fingerprint.match_digest_lane0
+            != reversed_fingerprint.match_digest_lane0);
+    REQUIRE(ordered_fingerprint.match_digest_lane1
+            != reversed_fingerprint.match_digest_lane1);
+    REQUIRE(ordered_fingerprint.cigar_digest_lane0
+            != reversed_fingerprint.cigar_digest_lane0);
+    REQUIRE(ordered_fingerprint.cigar_digest_lane1
+            != reversed_fingerprint.cigar_digest_lane1);
+
+    MatchResultBiologicalFingerprint aggregate{};
+    aggregate.combine(expected);
+    REQUIRE(aggregate == expected);
+    aggregate.combine(MatchResultBiologicalFingerprint{});
+    REQUIRE_FALSE(aggregate.computed);
+    REQUIRE(aggregate.saturated);
+    aggregate.combine(expected);
+    REQUIRE_FALSE(aggregate.computed);
+    REQUIRE(aggregate.saturated);
 }
 
 }  // namespace bioseq::simd::HWY_NAMESPACE::pipe
