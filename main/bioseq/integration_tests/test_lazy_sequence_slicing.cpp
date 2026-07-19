@@ -41,13 +41,72 @@ TEST_CASE("DOC0377 Python coordinates and letter access are exact",
     REQUIRE(unbound.sqlstate == "42804");
 }
 
+TEST_CASE("DOC0377 letter typmods resolve literals and validate physical alphabets",
+          "[seq][letter][typmod][array]") {
+    auto ctx = fresh_context({"doc0377_typmodless_letter"});
+
+    REQUIRE(query_scalar(
+        ctx, "SELECT ('A'::bioseq.letter('dna4'))::text;") == "A");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT ((ARRAY['A'::bioseq.letter('dna4'), "
+        "               'C'::bioseq.letter('dna4')])[2])::text;") == "C");
+
+    // Element expressions lose their declared typmod, but the two physical
+    // bytes remain authoritative and must stay usable without relabeling.
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT (('AC'::bioseq.seq('dna4',32))[1])::text;") == "C");
+
+    const auto mismatched_typmod = sql_error(
+        ctx,
+        "SELECT (('A'::bioseq.letter('dna4'))"
+        "        ::bioseq.letter('dna5'))::text;");
+    REQUIRE(mismatched_typmod.sqlstate == "42804");
+    REQUIRE(mismatched_typmod.contains(
+        "cannot relabel bioseq.letter to a different alphabet"));
+
+    const auto typmodless_literal = sql_error(
+        ctx, "SELECT 'A'::bioseq.letter;");
+    REQUIRE(typmodless_literal.sqlstate == "22023");
+    REQUIRE(typmodless_literal.contains(
+        "bioseq.letter input requires an alphabet typmod"));
+
+    // PG17 performs unknown-literal input before typmod coercion and has no
+    // base-type heap-write callback.  A parser token can therefore enter a
+    // typmodless column, but its first observable read must fail closed.
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_typmodless_letter "
+        " (value bioseq.letter);");
+    exec_sql(ctx,
+        "INSERT INTO doc0377_typmodless_letter VALUES ('A');");
+    const auto stored_typmodless_literal = sql_error(
+        ctx, "SELECT value FROM doc0377_typmodless_letter;");
+    REQUIRE(stored_typmodless_literal.sqlstate == "22023");
+    REQUIRE(stored_typmodless_literal.contains(
+        "bioseq.letter input requires an alphabet typmod"));
+}
+
 TEST_CASE("DOC0377 nested slice concat and transforms preserve logical value",
           "[seq][slice][concat][reverse]") {
     auto ctx = fresh_context();
+    exec_sql(ctx, "SET search_path TO pg_catalog, public;");
+    const auto unqualified_concat = sql_error(
+        ctx,
+        "SELECT ('AC'::bioseq.seq('dna4',32)) "
+        "       || ('GT'::bioseq.seq('dna4',32));");
+    REQUIRE(unqualified_concat.sqlstate == "42883");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT (('AC'::bioseq.seq('dna4',32)) "
+        "        OPERATOR(bioseq.||) "
+        "        ('GT'::bioseq.seq('dna4',32)))::text;") == "ACGT");
+
     REQUIRE(query_scalar(
         ctx,
         "SELECT (((('ACGTACGTACGT'::bioseq.seq('dna4',32))[:10])[5:] "
-        "       || ('TTTTCCCCAAAA'::bioseq.seq('dna4',32))[5:10])"
+        "       OPERATOR(bioseq.||) "
+        "       ('TTTTCCCCAAAA'::bioseq.seq('dna4',32))[5:10])"
         "       [1:-1])::text;") == "GTACCCCA");
     REQUIRE(query_scalar(
         ctx,
@@ -63,7 +122,8 @@ TEST_CASE("DOC0377 nested slice concat and transforms preserve logical value",
         "WITH a AS MATERIALIZED ("
         "  SELECT 'ACGTACGT'::bioseq.seq('dna4',32) AS s), "
         "b AS MATERIALIZED ("
-        "  SELECT s[1:7] || bioseq.reverse(s[0:2]) AS s FROM a) "
+        "  SELECT s[1:7] OPERATOR(bioseq.||) "
+        "         bioseq.reverse(s[0:2]) AS s FROM a) "
         "SELECT (SELECT s::text FROM b) || (SELECT s::text FROM b);")
         == "CGTACGCACGTACGCA");
 }
@@ -74,12 +134,14 @@ TEST_CASE("DOC0377 explicit text and array bridges validate and round-trip",
     REQUIRE(query_scalar(
         ctx,
         "SELECT (('AC'::bioseq.seq('dna4',32)) "
-        " || ARRAY['G','TAC']::text[])::text;") == "ACGTAC");
+        " OPERATOR(bioseq.||) ARRAY['G','TAC']::text[])::text;")
+        == "ACGTAC");
     REQUIRE(query_scalar(
         ctx,
         "SELECT (ARRAY['A'::bioseq.letter('dna4'),"
         "              'C'::bioseq.letter('dna4')] "
-        " || 'GT'::bioseq.seq('dna4',32))::text;") == "ACGT");
+        " OPERATOR(bioseq.||) "
+        " 'GT'::bioseq.seq('dna4',32))::text;") == "ACGT");
     REQUIRE(query_scalar(
         ctx,
         "SELECT array_to_string(bioseq.to_array("
@@ -96,7 +158,7 @@ TEST_CASE("DOC0377 explicit text and array bridges validate and round-trip",
     const auto null_element = sql_error(
         ctx,
         "SELECT ('A'::bioseq.seq('dna4',32)) "
-        " || ARRAY['C'::text,NULL::text];");
+        " OPERATOR(bioseq.||) ARRAY['C'::text,NULL::text];");
     REQUIRE(null_element.sqlstate == "22004");
 }
 
@@ -114,7 +176,7 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
     exec_sql(ctx,
         "INSERT INTO doc0377_slice_dst "
-        "SELECT id, s[500000:500064] || s[-64:] "
+        "SELECT id, s[500000:500064] OPERATOR(bioseq.||) s[-64:] "
         "FROM doc0377_slice_src;");
     REQUIRE(query_scalar_int(
         ctx, "SELECT bioseq.len(s) FROM doc0377_slice_dst;") == 128);

@@ -2005,8 +2005,8 @@ TEST_CASE("vulkan minimizer: exact target count may exceed planning estimate",
     REQUIRE((*adopted)->ownership.capacity_estimate_underestimated == 1u);
 }
 
-TEST_CASE("vulkan minimizer: fragmented target scratch dies before main and preserves exact index",
-          "[vulkan][seeding][phase-c][target-index][host-scratch][fragmented][ownership]") {
+TEST_CASE("vulkan minimizer: fragmented facade admission preserves exact index without scanner scratch",
+          "[vulkan][seeding][phase-c][target-index][admission][fragmented][ownership]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
         return;
@@ -2070,24 +2070,21 @@ TEST_CASE("vulkan minimizer: fragmented target scratch dies before main and pres
         expected_positions.size()) == 0);
 
     const auto& proof = fragmented_built->ownership;
-    const std::uint64_t expected_sequence_scratch_bytes =
-        static_cast<std::uint64_t>(fragmented.size()) * sizeof(storage_unit);
+    REQUIRE_FALSE(fragmented_view.try_resident_packed(
+        0u, fragmented_view.bp_size(), sizeof(std::uint32_t)));
     REQUIRE(proof.direct_sequence_arena_copies == 1u);
-    REQUIRE(proof.host_sequence_capacity_releases_before_main == 1u);
-    REQUIRE(proof.host_sequence_capacity_released_bytes
-            == expected_sequence_scratch_bytes);
+    REQUIRE(proof.host_sequence_capacity_releases_before_main == 0u);
+    REQUIRE(proof.host_sequence_capacity_released_bytes == 0u);
     REQUIRE(proof.direct_tile_arena_fills == 1u);
-    REQUIRE(proof.count_phase_host_transient_bytes
-            == expected_sequence_scratch_bytes);
+    REQUIRE(proof.count_phase_host_transient_bytes == 0u);
     REQUIRE(proof.main_phase_host_transient_bytes == 0u);
     REQUIRE(proof.host_transient_excluded_before_main_bytes
-            == expected_sequence_scratch_bytes
-                + proof.host_tile_staging_elided_bytes);
+            == proof.host_tile_staging_elided_bytes);
     REQUIRE(proof.arena_trimmed_before_permit_shrink == 1u);
 }
 
-TEST_CASE("vulkan minimizer: direct target copy zeroes one through three tail bytes with exact parity",
-          "[vulkan][seeding][phase-c][target-index][host-scratch][padding][parity]") {
+TEST_CASE("vulkan minimizer: canonical u32 admission removes raw tail bytes with exact parity",
+          "[vulkan][seeding][phase-c][target-index][admission][padding][parity]") {
     if (!vulkan_ready()) {
         SUCCEED("no hardware Vulkan device; skipped");
         return;
@@ -2126,17 +2123,16 @@ TEST_CASE("vulkan minimizer: direct target copy zeroes one through three tail by
         const vk::SequenceUploadView upload =
             vk::make_sequence_upload_view(packed8);
         REQUIRE(upload.byte_size % 4u != 0u);
-        const std::uint64_t expected_padding =
-            4u - upload.byte_size % 4u;
         auto packed8_owner = bioseq::storage::make_lazy_in_memory(packed8);
         const auto packed8_view =
             bioseq::storage::as_lazy_sequence_view(packed8_owner);
+        REQUIRE_FALSE(packed8_view.try_resident_packed(
+            0u, packed8_view.bp_size(), sizeof(std::uint32_t)));
         auto candidate = vk::build_gpu_index_on_device<MinimapSketchData>(
             packed8_view, 10u, 15u);
         REQUIRE(candidate.has_value());
         REQUIRE(candidate->valid);
-        REQUIRE(candidate->ownership.sequence_padding_zeroed_bytes
-                == expected_padding);
+        REQUIRE(candidate->ownership.sequence_padding_zeroed_bytes == 0u);
         REQUIRE(candidate->occupied_slots == expected_slot_count);
         REQUIRE(candidate->position_count == expected_position_count);
         REQUIRE(std::memcmp(
