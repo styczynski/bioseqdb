@@ -90,6 +90,7 @@ CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
 CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_unit_len);
 CXX_PG_FUNCTION_INFO_V1(seq_hash);
 CXX_PG_FUNCTION_INFO_V1(seq_hash_extended);
+CXX_PG_FUNCTION_INFO_V1(slice_trace_self_test);
 
 CXX_PG_FUNCTION_INFO_V1(letter_typmod_in);
 CXX_PG_FUNCTION_INFO_V1(letter_typmod_out);

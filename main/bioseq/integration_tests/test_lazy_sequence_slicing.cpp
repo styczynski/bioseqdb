@@ -1,9 +1,23 @@
 // DOC0377: SQL-level slicing/letter/algebra/bridge and durable-boundary tests.
 
 #include "common_tests_integration.h"
+#include "headers/pg_build_config.h"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
+
+TEST_CASE("DOC0377 trace ABI counters scopes refs and reusable slots are exact",
+          "[seq][slice][trace][unit]") {
+    auto ctx = fresh_context();
+    REQUIRE(query_scalar(
+        ctx, "SELECT bioseq_internal.slice_trace_self_test();") == "t");
+}
 
 TEST_CASE("DOC0377 Python coordinates and letter access are exact",
           "[seq][slice][letter]") {
@@ -128,6 +142,52 @@ TEST_CASE("DOC0377 nested slice concat and transforms preserve logical value",
         == "CGTACGCACGTACGCA");
 }
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+TEST_CASE("DOC0377 concat mismatch diagnostics name both alphabets",
+          "[seq][concat][diagnostic]") {
+    auto ctx = fresh_context();
+    const auto mismatch = sql_error(
+        ctx,
+        "SELECT 'AC'::bioseq.seq('dna4',64) "
+        "       OPERATOR(bioseq.||) "
+        "       'GT'::bioseq.seq('dna5',64);");
+    REQUIRE(mismatch.sqlstate == "42804");
+    REQUIRE(mismatch.contains("dna4"));
+    REQUIRE(mismatch.contains("dna5"));
+}
+#endif
+
+TEST_CASE("DOC0377 TOAST metadata casts and element access are bounded",
+          "[seq][slice][toast][cast][letter]") {
+    auto ctx = fresh_context({"doc0377_toast_seq"});
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_toast_seq ("
+        " id int, s bioseq.seq('dna4',64));"
+        "ALTER TABLE doc0377_toast_seq ALTER COLUMN s SET STORAGE EXTERNAL;"
+        "INSERT INTO doc0377_toast_seq VALUES "
+        " (1, repeat('ACGT',300000)::bioseq.seq('dna4',64));");
+
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT reltoastrelid <> 0 "
+        "       AND pg_total_relation_size(reltoastrelid) > 8192 "
+        "FROM pg_catalog.pg_class "
+        "WHERE oid='doc0377_toast_seq'::regclass;") == "t");
+    const auto row = query_one(
+        ctx,
+        "SELECT bioseq.len(s), s[1199999]::text, "
+        "       bioseq.len(bioseq.seq_cast("
+        "           s, (SELECT atttypmod FROM pg_catalog.pg_attribute "
+        "               WHERE attrelid='doc0377_toast_seq'::regclass "
+        "                 AND attname='s'), false)), "
+        "       bioseq.len(bioseq.seq_cast(s, -1, false)) "
+        "FROM doc0377_toast_seq;");
+    REQUIRE(row[0] == "1200000");
+    REQUIRE(row[1] == "T");
+    REQUIRE(row[2] == "1200000");
+    REQUIRE(row[3] == "1200000");
+}
+
 TEST_CASE("DOC0377 explicit text and array bridges validate and round-trip",
           "[seq][concat][array]") {
     auto ctx = fresh_context();
@@ -184,16 +244,132 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
         ctx,
         "SELECT s::text = repeat('ACGT',32) "
         "FROM doc0377_slice_dst;") == "t");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT bioseq.seq_send(s[0:64]) = "
+        "       bioseq.seq_send(repeat('ACGT',16)::"
+        "                          bioseq.seq('dna4',32)) "
+        "FROM doc0377_slice_dst;") == "t");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT array_to_string(bioseq.to_array(s[0:8]),'') "
+        "FROM doc0377_slice_dst;") == "ACGTACGT");
+    constexpr auto literal_left_sql =
+        "SELECT octet_length(bioseq.to_text("
+        " text 'TG' OPERATOR(bioseq.||) s[0:4])) "
+        "FROM doc0377_slice_dst;";
+    constexpr auto array_left_sql =
+        "SELECT octet_length(bioseq.to_text("
+        " ARRAY['T','G']::text[] OPERATOR(bioseq.||) s[0:4])) "
+        "FROM doc0377_slice_dst;";
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT (text 'TG' OPERATOR(bioseq.||) s[0:4])::text "
+        "FROM doc0377_slice_dst;") == "TGACGT");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT (ARRAY['T','G']::text[] "
+        "        OPERATOR(bioseq.||) s[0:4])::text "
+        "FROM doc0377_slice_dst;") == "TGACGT");
+    REQUIRE(query_scalar_int(ctx, literal_left_sql) == 6);
+    REQUIRE(query_scalar_int(ctx, array_left_sql) == 6);
+    const std::array<const char*, 2> provenance_sql{
+        literal_left_sql, array_left_sql};
+    for (const char* sql : provenance_sql) {
+        const auto provenance_plan = explain_text(ctx, sql);
+        REQUIRE(plan_contains(provenance_plan, "Mechanism: text"));
+        REQUIRE(plan_contains(provenance_plan, "Reason: SQL conversion"));
+        REQUIRE(find_explain_property(
+            provenance_plan, "Actual Calls") == "1");
+    }
 
     const auto plan = explain_text(
         ctx,
         "SELECT s[500000:500064] FROM doc0377_slice_src;");
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
-    REQUIRE(plan_contains(plan, "Projection Mode: source-backed lazy"));
-    REQUIRE(plan_contains(plan, "Normalized Interval: [500000, 500064)"));
+    REQUIRE(plan_contains(plan, "Slice Materialization:"));
+    REQUIRE(plan_contains(plan, "s[500000:500064]"));
+    REQUIRE(plan_contains(plan, "Mechanism: text"));
+    REQUIRE(plan_contains(plan, "Reason: client output"));
     REQUIRE(plan_contains(plan, "Planned Materialized Symbols"));
     REQUIRE(plan_contains(plan, "Planned Materialized Bytes"));
-    REQUIRE(plan_contains(plan, "Actual Rows Published: 1"));
+    REQUIRE(plan_contains(plan, "Actual Calls"));
+}
+
+TEST_CASE("DOC0377 long source slice is faster than whole-sequence materialization",
+          "[seq][slice][storage][performance]") {
+    auto ctx = fresh_context({"doc0377_slice_perf"});
+    exec_sql(ctx,
+        "SET jit = off; "
+        "SET bioseq.enable_column_cache = off; "
+        "SET bioseq.enable_vectorization = off;");
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_slice_perf "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+    exec_sql(ctx,
+        "INSERT INTO doc0377_slice_perf VALUES "
+        " (1, repeat('ACGT',2097152)::bioseq.seq('dna4',32));");
+
+    constexpr auto slice_sql =
+        "SELECT octet_length(bioseq.to_text(s[4194304:4194368])) "
+        "FROM doc0377_slice_perf;";
+    constexpr auto whole_sql =
+        "SELECT octet_length(bioseq.to_text(s)) "
+        "FROM doc0377_slice_perf;";
+    REQUIRE(query_scalar_int(ctx, slice_sql) == 64);
+    REQUIRE(query_scalar_int(ctx, whole_sql) == 8388608);
+
+    const auto timed_ns = [&ctx](const char* sql, std::int64_t expected) {
+        const auto started = std::chrono::steady_clock::now();
+        const auto value = query_scalar_int(ctx, sql);
+        const auto stopped = std::chrono::steady_clock::now();
+        REQUIRE(value == expected);
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            stopped - started).count();
+    };
+
+    std::array<std::int64_t, 7> slice_ns{};
+    std::array<std::int64_t, 7> whole_ns{};
+    for (std::size_t round = 0; round < slice_ns.size(); ++round) {
+        if ((round & 1u) == 0u) {
+            whole_ns[round] = timed_ns(whole_sql, 8388608);
+            slice_ns[round] = timed_ns(slice_sql, 64);
+        } else {
+            slice_ns[round] = timed_ns(slice_sql, 64);
+            whole_ns[round] = timed_ns(whole_sql, 8388608);
+        }
+    }
+    std::sort(slice_ns.begin(), slice_ns.end());
+    std::sort(whole_ns.begin(), whole_ns.end());
+    const auto slice_median_ns = slice_ns[slice_ns.size() / 2u];
+    const auto whole_median_ns = whole_ns[whole_ns.size() / 2u];
+    INFO("slice median ns=" << slice_median_ns
+         << ", whole median ns=" << whole_median_ns);
+    REQUIRE(slice_median_ns > 0);
+    REQUIRE(whole_median_ns > 0);
+    REQUIRE(slice_median_ns <= whole_median_ns / 2);
+
+    const auto trace_plan = explain_text(ctx, slice_sql);
+    REQUIRE(plan_contains(trace_plan, "Slice Materialization:"));
+    REQUIRE(plan_contains(trace_plan, "Mechanism: text"));
+    REQUIRE(plan_contains(trace_plan, "Reason: SQL conversion"));
+    REQUIRE(find_explain_property(trace_plan, "Actual Calls") == "1");
+    const auto traced_input = find_explain_property(
+        trace_plan, "Actual Input Symbols");
+    const auto traced_output = find_explain_property(
+        trace_plan, "Actual Output Symbols");
+    const auto traced_bytes = find_explain_property(
+        trace_plan, "Actual Bytes");
+    REQUIRE(traced_input.has_value());
+    REQUIRE(traced_output.has_value());
+    REQUIRE(traced_bytes.has_value());
+    REQUIRE(std::stoull(*traced_input) <= 64u);
+    REQUIRE(std::stoull(*traced_output) <= 64u);
+    REQUIRE(std::stoull(traced_bytes->substr(
+        0, traced_bytes->find(' '))) <= 128u);
+    REQUIRE_FALSE(plan_contains(trace_plan, "Mechanism: packed full"));
+    REQUIRE_FALSE(plan_contains(
+        trace_plan, "Actual Input Symbols: 8388608"));
 }
 
 TEST_CASE("DOC0377 SliceProject selection is exact and fail-closed",

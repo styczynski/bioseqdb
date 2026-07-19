@@ -22,6 +22,7 @@ extern "C" {
 export module bioseq.types.pg_compact_sequence:array_string;
 
 import :flat_abi;
+import :trace;
 import :tree_types;
 import :view_session;
 import :packed_output;
@@ -358,10 +359,8 @@ export inline Datum seq_cardinality_impl(FunctionCallInfo fcinfo)
 
 export inline Datum seq_to_text_impl(FunctionCallInfo fcinfo)
 {
-    char* ascii = DatumGetCString(seq_out_impl(fcinfo));
-    text* result = cstring_to_text(ascii);
-    pfree(ascii);
-    PG_RETURN_TEXT_P(result);
+    PG_RETURN_TEXT_P(materialize_pg_sequence_text(
+        fcinfo, materialization_reason::sql_conversion));
 }
 
 export inline Datum seq_to_varchar_impl(FunctionCallInfo fcinfo)
@@ -371,7 +370,15 @@ export inline Datum seq_to_varchar_impl(FunctionCallInfo fcinfo)
 
 export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
 {
-    const auto descriptor = inspect_sequence(PG_GETARG_DATUM(0));
+    const Datum input = PG_GETARG_DATUM(0);
+    auto const* expanded = VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))
+        ? get_pg_sequence_expanded_ro(input) : nullptr;
+    auto* trace = expanded == nullptr ? nullptr : expanded->trace;
+    const std::uint32_t producer_value_id = expanded == nullptr
+        ? 0u : expanded->producer_value_id;
+    const std::uint64_t trace_started =
+        begin_slice_materialization_timing(trace);
+    const auto descriptor = inspect_sequence(input);
     if (!descriptor.alphabet_bound) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
@@ -380,7 +387,14 @@ export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
     }
     const Oid letter_oid = bioseq_letter_oid();
     if (descriptor.bp_length == 0u) {
-        PG_RETURN_ARRAYTYPE_P(construct_empty_array(letter_oid));
+        ArrayType* result = construct_empty_array(letter_oid);
+        record_slice_materialization_success(
+            trace, producer_value_id,
+            materialization_mechanism::letter_array,
+            materialization_reason::sql_conversion,
+            0u, 0u, static_cast<std::uint64_t>(VARSIZE(result)), false,
+            static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
+        PG_RETURN_ARRAYTYPE_P(result);
     }
     if (descriptor.bp_length > static_cast<std::uint64_t>(INT_MAX)
         || descriptor.bp_length
@@ -390,8 +404,9 @@ export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
                  errmsg("bioseq sequence is too long to materialize as letter[]")));
     }
     const int count = static_cast<int>(descriptor.bp_length);
-    auto* values = static_cast<Datum*>(palloc(
-        checked_mul_size(sizeof(Datum), static_cast<Size>(count))));
+    const Size values_bytes = checked_mul_size(
+        sizeof(Datum), static_cast<Size>(count));
+    auto* values = static_cast<Datum*>(palloc(values_bytes));
     const std::uint8_t alphabet = descriptor.alphabet_code;
     with_pg_sequence_view<std::monostate>(
         fcinfo, 0,
@@ -423,7 +438,17 @@ export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
         });
     ArrayType* result = construct_array(
         values, count, letter_oid, 2, true, 's');
+    const std::uint64_t peak_retained_bytes =
+        static_cast<std::uint64_t>(values_bytes)
+        + static_cast<std::uint64_t>(VARSIZE(result));
     pfree(values);
+    record_slice_materialization_success(
+        trace, producer_value_id,
+        materialization_mechanism::letter_array,
+        materialization_reason::sql_conversion,
+        descriptor.bp_length, descriptor.bp_length,
+        static_cast<std::uint64_t>(VARSIZE(result)), false,
+        peak_retained_bytes, trace_started);
     PG_RETURN_ARRAYTYPE_P(result);
 }
 

@@ -41,6 +41,29 @@ constexpr std::string_view kCoalesceTable = "coalesce_test";
 
 }  // namespace
 
+TEST_CASE("Typmod coalesce keeps equality and hash support representation-independent",
+          "[seq][typmod_coalesce][hash][regression]") {
+    auto ctx = fresh_context();
+    const auto row = query_one(
+        ctx,
+        "WITH v AS (SELECT "
+        " 'ACGTACGT'::bioseq.seq('dna4',8) AS narrow,"
+        " 'ACGTACGT'::bioseq.seq('dna4',64) AS wide) "
+        "SELECT bioseq.seq_eq(narrow,wide),"
+        "       bioseq.seq_hash(narrow)=bioseq.seq_hash(wide),"
+        "       bioseq.seq_hash_extended(narrow,0)="
+        "         bioseq.seq_hash_extended(wide,0),"
+        "       (bioseq.seq_hash(narrow)::bigint & 4294967295)="
+        "         ((bioseq.seq_hash_extended(narrow,0) # "
+        "           (bioseq.seq_hash_extended(narrow,0) >> 32)) "
+        "          & 4294967295) "
+        "FROM v;");
+    REQUIRE(row[0] == "t");
+    REQUIRE(row[1] == "t");
+    REQUIRE(row[2] == "t");
+    REQUIRE(row[3] == "t");
+}
+
 TEST_CASE("Typmod coalesce: same alphabet, wider query than column "
           "yields the same rows as a width-matched query",
           "[mmsearch][typmod_coalesce][regression]") {

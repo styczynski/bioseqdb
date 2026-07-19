@@ -22,6 +22,7 @@ export module bioseq.types.pg_compact_sequence:packed_output;
 
 import :flat_abi;
 import :source_abi;
+import :trace;
 import :tree_types;
 import :tree_ops;
 import :view_session;
@@ -302,6 +303,8 @@ export inline void pg_sequence_flatten_into(
     Size allocated_size)
 {
     auto& value = *reinterpret_cast<pg_sequence_expanded*>(header);
+    const std::uint64_t trace_started =
+        begin_slice_materialization_timing(value.trace);
     const Size expected = expanded_flat_size(value);
     if (allocated_size != expected) {
         ereport(ERROR,
@@ -326,6 +329,13 @@ export inline void pg_sequence_flatten_into(
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("unbound bioseq tree cannot be flattened")));
         }
+        record_slice_materialization_success(
+            value.trace, value.producer_value_id,
+            materialization_mechanism::packed_full,
+            materialization_reason::executor_copy,
+            value.bp_length, value.bp_length,
+            static_cast<std::uint64_t>(allocated_size), false,
+            static_cast<std::uint64_t>(allocated_size), trace_started);
         return;
     }
 
@@ -364,6 +374,13 @@ export inline void pg_sequence_flatten_into(
         PG_RE_THROW();
     }
     PG_END_TRY();
+    record_slice_materialization_success(
+        value.trace, value.producer_value_id,
+        materialization_mechanism::packed_full,
+        materialization_reason::executor_copy,
+        value.bp_length, value.bp_length,
+        static_cast<std::uint64_t>(allocated_size), false,
+        static_cast<std::uint64_t>(allocated_size), trace_started);
 }
 
 export [[nodiscard]] inline ExpandedObjectMethods const&
@@ -483,18 +500,30 @@ namespace {
 [[nodiscard]] inline literal_piece copy_flat_literal(
     piece_tree_arena& arena,
     pgseq_t const& flat,
-    pg_sequence_descriptor descriptor)
+    pg_sequence_descriptor descriptor,
+    slice_trace_attachment* trace,
+    std::uint32_t producer_value_id)
 {
     const bool unbound = !descriptor.alphabet_bound;
     const std::size_t count = unbound
         ? static_cast<std::size_t>(descriptor.bp_length)
         : static_cast<std::size_t>(VARSIZE(&flat)) - pgseq_t::header_bytes();
+    const std::size_t allocation_bytes = std::max<std::size_t>(count, 1u);
+    const std::uint64_t trace_started =
+        begin_slice_materialization_timing(trace);
     auto* bytes = static_cast<std::byte*>(
         MemoryContextAllocZero(arena.payload_context,
-                               std::max<std::size_t>(count, 1u)));
+                               allocation_bytes));
     if (count != 0u) {
         std::memcpy(bytes, flat.data, count);
     }
+    record_slice_materialization_success(
+        trace, producer_value_id,
+        materialization_mechanism::backing_copy,
+        materialization_reason::executor_copy,
+        descriptor.bp_length, descriptor.bp_length,
+        static_cast<std::uint64_t>(allocation_bytes), false,
+        static_cast<std::uint64_t>(allocation_bytes), trace_started);
     return {
         .storage_arena = std::addressof(arena),
         .bytes = bytes,
@@ -515,13 +544,59 @@ namespace {
     };
 }
 
+inline void reconcile_concat_trace_provenance_noexcept(
+    pg_sequence_expanded& result,
+    pg_sequence_expanded const& right) noexcept
+{
+    const bool left_live = slice_trace_attachment_live(result.trace)
+        && result.producer_value_id != 0u;
+    const bool right_live = slice_trace_attachment_live(right.trace)
+        && right.producer_value_id != 0u;
+
+    slice_trace_attachment* selected_trace = nullptr;
+    std::uint32_t selected_producer = 0u;
+    if (left_live && !right_live) {
+        selected_trace = result.trace;
+        selected_producer = result.producer_value_id;
+    } else if (!left_live && right_live) {
+        selected_trace = right.trace;
+        selected_producer = right.producer_value_id;
+    } else if (left_live && right_live
+               && result.trace == right.trace
+               && result.producer_value_id == right.producer_value_id) {
+        selected_trace = result.trace;
+        selected_producer = result.producer_value_id;
+    }
+    /* Two different live producer identities cannot be attributed to one
+     * result without its planned result id.  Clear the observation metadata;
+     * BioseqSliceProject installs the exact result provenance after evaluation. */
+    if (result.trace != selected_trace) {
+        retain_slice_trace_attachment(selected_trace);
+        auto* previous = result.trace;
+        result.trace = selected_trace;
+        release_slice_trace_attachment(previous);
+    }
+    result.producer_value_id = selected_producer;
+}
+
 } // namespace
 
 export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
     Datum input,
-    slice_trace_attachment const* trace = nullptr)
+    slice_trace_attachment const* trace = nullptr,
+    std::uint32_t producer_value_id = 0u)
 {
     if (auto* rw = get_pg_sequence_expanded_rw(input); rw != nullptr) {
+        if (trace != nullptr && rw->trace != trace) {
+            auto* replacement = const_cast<slice_trace_attachment*>(trace);
+            retain_slice_trace_attachment(replacement);
+            auto* previous = rw->trace;
+            rw->trace = replacement;
+            release_slice_trace_attachment(previous);
+        }
+        if (producer_value_id != 0u) {
+            rw->producer_value_id = producer_value_id;
+        }
         return {rw, true};
     }
     if (auto const* ro = get_pg_sequence_expanded_ro(input); ro != nullptr) {
@@ -529,7 +604,8 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
             ro->type_params, ro->alphabet_bound);
         copy->bp_length = ro->bp_length;
         copy->root = retain_edge(ro->root);
-        copy->producer_value_id = ro->producer_value_id;
+        copy->producer_value_id = producer_value_id != 0u
+            ? producer_value_id : ro->producer_value_id;
         copy->trace = const_cast<slice_trace_attachment*>(
             trace != nullptr ? trace : ro->trace);
         retain_slice_trace_attachment(copy->trace);
@@ -553,12 +629,15 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
           };
     auto* result = make_pg_sequence_expanded(type, descriptor.alphabet_bound);
     result->trace = const_cast<slice_trace_attachment*>(trace);
+    result->producer_value_id = producer_value_id;
     retain_slice_trace_attachment(result->trace);
     replace_root_error_safe(
         *result, type, descriptor.bp_length, descriptor.alphabet_bound,
-        [flat, descriptor](piece_tree_arena& arena) {
+        [flat, descriptor, result](piece_tree_arena& arena) {
             return make_literal_node(
-                arena, copy_flat_literal(arena, *flat, descriptor));
+                arena, copy_flat_literal(
+                    arena, *flat, descriptor,
+                    result->trace, result->producer_value_id));
         });
     if (reinterpret_cast<Pointer>(flat) != DatumGetPointer(input)) {
         pfree(flat);
@@ -568,7 +647,8 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
 
 export [[nodiscard]] inline pg_sequence_read_handle acquire_sequence_for_read(
     Datum input,
-    slice_trace_attachment const* trace = nullptr)
+    slice_trace_attachment const* trace = nullptr,
+    std::uint32_t producer_value_id = 0u)
 {
     if (auto const* expanded = get_pg_sequence_expanded_ro(input);
         expanded != nullptr) {
@@ -580,7 +660,8 @@ export [[nodiscard]] inline pg_sequence_read_handle acquire_sequence_for_read(
             .alphabet_bound = expanded->alphabet_bound,
         };
     }
-    acquired_sequence adopted = acquire_writable_pg_sequence(input, trace);
+    acquired_sequence adopted = acquire_writable_pg_sequence(
+        input, trace, producer_value_id);
     return {
         .backing = adopted.value,
         .root_value = adopted.value->root,
@@ -610,9 +691,19 @@ resolve_concat_type(
     if (left->alphabet_bound && right.alphabet_bound) {
         if (left->type_params.alphabet_code
             != right.type_params.alphabet_code) {
+            const auto left_name =
+                pgseq_supported_alphabets::name_of_alphabet_code(
+                    left->type_params.alphabet_code);
+            const auto right_name =
+                pgseq_supported_alphabets::name_of_alphabet_code(
+                    right.type_params.alphabet_code);
             ereport(ERROR,
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
-                     errmsg("cannot concatenate bioseq values with different alphabets")));
+                     errmsg("cannot concatenate bioseq alphabets %.*s and %.*s",
+                            static_cast<int>(left_name.size()),
+                            left_name.data(),
+                            static_cast<int>(right_name.size()),
+                            right_name.data())));
         }
         return left->type_params;
     }
@@ -649,6 +740,8 @@ export [[nodiscard]] inline Datum concat_pg_sequences(
                 : retain_edge(right.root());
             return join_edges(arena, bound_left, bound_right);
         });
+    reconcile_concat_trace_provenance_noexcept(
+        *left.value, *right.backing);
     return pg_sequence_rw_datum(left.value);
 }
 
@@ -703,7 +796,8 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     bioseq::storage::seq_locator locator,
     compact_sequence_stdc_type_params stored_type,
     std::uint16_t last_padding_letters,
-    slice_trace_attachment* trace = nullptr)
+    slice_trace_attachment* trace = nullptr,
+    std::uint32_t producer_value_id = 0u)
 {
     if (!pg_sequence_source_handle_valid(source)
         || locator.total_bp_size > static_cast<std::uint64_t>(INT64_MAX)) {
@@ -713,6 +807,7 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     }
     auto* result = make_pg_sequence_expanded(stored_type, true);
     result->trace = trace;
+    result->producer_value_id = producer_value_id;
     retain_slice_trace_attachment(trace);
     replace_root_error_safe(
         *result, stored_type, locator.total_bp_size, true,
@@ -730,4 +825,34 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
                 });
         });
     return pg_sequence_ro_datum(result);
+}
+
+/* Trace metadata is observational and may be installed on an otherwise
+ * read-only EOH wrapper without changing its logical sequence value. */
+export [[nodiscard]] inline bool attach_slice_trace_provenance(
+    Datum expanded,
+    slice_trace_attachment* trace,
+    std::uint32_t producer_value_id) noexcept
+{
+    if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(expanded))
+        || (trace != nullptr
+            && (!slice_trace_attachment_live(trace)
+                || producer_value_id == 0u))) {
+        return false;
+    }
+    ExpandedObjectHeader* header = DatumGetEOHP(expanded);
+    if (header == nullptr
+        || header->eoh_methods
+            != std::addressof(pg_sequence_expanded_methods())) {
+        return false;
+    }
+    auto* value = reinterpret_cast<pg_sequence_expanded*>(header);
+    if (value->trace != trace) {
+        retain_slice_trace_attachment(trace);
+        auto* previous = value->trace;
+        value->trace = trace;
+        release_slice_trace_attachment(previous);
+    }
+    value->producer_value_id = trace == nullptr ? 0u : producer_value_id;
+    return true;
 }

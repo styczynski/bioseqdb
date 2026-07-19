@@ -1,6 +1,8 @@
 /* Text/binary/typmod I/O and the exhaustive seq self-cast matrix. */
 module;
 
+#include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -25,11 +27,13 @@ extern "C" {
 export module bioseq.types.pg_compact_sequence:io;
 
 import :flat_abi;
+import :trace;
 import :tree_types;
 import :tree_ops;
 import :view_session;
 import :packed_output;
 import bioseq.common.mlogging;
+import bioseq.sequences.rank_pack;
 import bioseq.sequences.simd;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy;
@@ -78,7 +82,8 @@ namespace {
 [[nodiscard]] inline pgseq_t* allocate_unbound_ascii(
     char const* input,
     std::size_t length,
-    bool require_already_canonical)
+    bool require_already_canonical,
+    int invalid_sqlstate = ERRCODE_INVALID_TEXT_REPRESENTATION)
 {
     if (length > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
         ereport(ERROR,
@@ -117,7 +122,7 @@ namespace {
                 && static_cast<unsigned char>(canonical.value) != raw)) {
             pfree(result);
             ereport(ERROR,
-                    (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+                    (errcode(invalid_sqlstate),
                      errmsg("invalid symbol at byte %zu in unbound bioseq.seq",
                             index),
                      errdetail("byte value=%u", static_cast<unsigned>(raw))));
@@ -224,6 +229,103 @@ namespace {
                 (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
                  errmsg("invalid bioseq wire storage width %u", width)));
     };
+
+struct sequence_trace_provenance {
+    slice_trace_attachment* attachment;
+    std::uint32_t producer_value_id;
+};
+
+[[nodiscard]] inline sequence_trace_provenance trace_provenance_for(
+    Datum input)
+{
+    if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
+        return {};
+    }
+    auto const* expanded = get_pg_sequence_expanded_ro(input);
+    return {
+        .attachment = expanded->trace,
+        .producer_value_id = expanded->producer_value_id,
+    };
+}
+
+template<class Unit>
+struct pg_wire_rank_unit_sink {
+    using storage_unit = Unit;
+    static constexpr auto capacity_policy =
+        bioseq::sequences::pack_capacity_policy::fixed_span;
+
+    StringInfoData* buffer;
+    std::uint64_t maximum_units;
+    std::uint64_t written{};
+
+    [[nodiscard]] bool try_write(Unit value)
+    {
+        if (written >= maximum_units) {
+            return false;
+        }
+        pg_send_byte_writer.template operator()<Unit>(
+            *buffer, static_cast<std::uint64_t>(value),
+            static_cast<std::uint8_t>(sizeof(Unit)));
+        ++written;
+        return true;
+    }
+
+    [[nodiscard]] std::size_t written_units() const noexcept
+    {
+        return static_cast<std::size_t>(written);
+    }
+};
+
+[[noreturn]] inline void wire_rank_pack_error(
+    bioseq::sequences::rank_pack_status status)
+{
+    ereport(ERROR,
+            (errcode(status
+                == bioseq::sequences::rank_pack_status::capacity_overflow
+                    ? ERRCODE_PROGRAM_LIMIT_EXCEEDED
+                    : ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq wire rank packing failed (status=%u)",
+                    static_cast<unsigned>(status))));
+    __builtin_unreachable();
+}
+
+template<class Instance, class View>
+void stream_view_to_wire(
+    View view,
+    StringInfoData& buffer,
+    std::uint64_t length,
+    std::uint64_t expected_units)
+{
+    using traits = typename compact_sequence_range<Instance>::traits;
+    using unit = typename traits::storage_unit;
+    using sink = pg_wire_rank_unit_sink<unit>;
+    using writer_type = bioseq::sequences::checked_rank_pack_sink<
+        Instance,
+        bioseq::sequences::invalid_rank_policy::reject,
+        bioseq::sequences::pack_capacity_policy::fixed_span,
+        sink>;
+    writer_type writer{sink{&buffer, expected_units}};
+    std::array<std::uint8_t, 256> scratch{};
+    std::uint64_t position = 0u;
+    while (position < length) {
+        const std::size_t count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(scratch.size(), length - position));
+        view.template to_encoded_into<false, false>(
+            std::span<std::uint8_t>{scratch.data(), count},
+            static_cast<std::size_t>(position),
+            static_cast<std::size_t>(position + count));
+        const auto status = writer.append_ranks(
+            std::span<std::uint8_t const>{scratch.data(), count});
+        if (status != bioseq::sequences::rank_pack_status::ok) {
+            wire_rank_pack_error(status);
+        }
+        position += count;
+    }
+    const auto result = writer.finish(length, expected_units);
+    if (!result) {
+        wire_rank_pack_error(result.status);
+    }
+}
 
 template<class Alphabet>
 void view_to_ascii(
@@ -348,38 +450,15 @@ export inline Datum seq_in_impl(FunctionCallInfo fcinfo)
         PG_RETURN_POINTER(allocate_unbound_ascii(input, length, false));
     }
     const auto target = decode_seq_typmod_checked(typmod);
-    if (length > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
-        ereport(ERROR,
-                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                 errmsg("bioseq.seq input length %zu exceeds uint32", length)));
-    }
-    pgseq_t::dispatch_instance(
-        target.alphabet_code, target.storage_unit_byte_width,
-        [length]<class Instance>() {
-            (void) bound_flat_size<Instance>(length);
-        });
-    pgseq_t* result = nullptr;
-    pgseq_supported_alphabets::dispatch_alphabet_by_code(
-        target.alphabet_code,
-        [&result, target, length, input]<class Alphabet>() {
-            result = ::bioseq::simd::active_target::
-                stdc_convert_from_cstr<pgseq_t, Alphabet>(
-                    target.storage_unit_byte_width,
-                    static_cast<pgseq_t::bp_size_t>(length),
-                    input,
-                    pg_alloc);
-        });
-    if (result == nullptr) {
-        ereport(ERROR,
-                (errcode(ERRCODE_OUT_OF_MEMORY),
-                 errmsg("out of memory in bioseq.seq input")));
-    }
-    PG_RETURN_POINTER(result);
+    PG_RETURN_POINTER(pack_ascii_for_target(input, length, target));
 }
 
 export inline Datum seq_out_impl(FunctionCallInfo fcinfo)
 {
     Datum input = PG_GETARG_DATUM(0);
+    const auto provenance = trace_provenance_for(input);
+    const std::uint64_t trace_started =
+        begin_slice_materialization_timing(provenance.attachment);
     Datum dispatch = input;
     pgseq_t* flat_copy = nullptr;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
@@ -420,23 +499,29 @@ export inline Datum seq_out_impl(FunctionCallInfo fcinfo)
     if (flat_copy != nullptr) {
         PG_FREE_IF_COPY(flat_copy, 0);
     }
+    record_slice_materialization_success(
+        provenance.attachment, provenance.producer_value_id,
+        materialization_mechanism::text,
+        materialization_reason::client_output,
+        descriptor.bp_length, descriptor.bp_length,
+        descriptor.bp_length + 1u, false,
+        descriptor.bp_length + 1u, trace_started);
     PG_RETURN_CSTRING(output);
 }
 
-export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
+export [[nodiscard]] inline text* materialize_pg_sequence_text(
+    FunctionCallInfo fcinfo,
+    materialization_reason reason)
 {
     Datum input = PG_GETARG_DATUM(0);
-    const int32_t target_typmod = PG_GETARG_INT32(1);
-    if (target_typmod < 0) {
-        PG_RETURN_DATUM(input);
-    }
-    const auto target = decode_seq_typmod_checked(target_typmod);
-
+    const auto provenance = trace_provenance_for(input);
+    const std::uint64_t trace_started =
+        begin_slice_materialization_timing(provenance.attachment);
     Datum dispatch = input;
-    pgseq_t* flat = nullptr;
+    pgseq_t* flat_copy = nullptr;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
-        dispatch = PointerGetDatum(flat);
+        flat_copy = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+        dispatch = PointerGetDatum(flat_copy);
     }
     const auto descriptor = classify_and_describe_sequence(dispatch);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
@@ -444,20 +529,73 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
+    const Size total = checked_add_size(
+        VARHDRSZ, checked_size_cast(descriptor.bp_length));
+    auto* result = static_cast<text*>(palloc(total));
+    SET_VARSIZE(result, total);
+    auto* output = VARDATA(result);
+    if (!descriptor.alphabet_bound) {
+        if (flat_copy != nullptr) {
+            std::memcpy(output, flat_copy->data,
+                        static_cast<std::size_t>(descriptor.bp_length));
+        } else if (!emit_pg_unbound_ascii(
+                       get_pg_sequence_expanded_ro(input)->root,
+                       0u, descriptor.bp_length,
+                       std::span<std::byte>{
+                           reinterpret_cast<std::byte*>(output),
+                           static_cast<std::size_t>(descriptor.bp_length)})) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("invalid unbound bioseq piece tree")));
+        }
+    } else {
+        with_pg_sequence_view<std::monostate>(
+            fcinfo, 0,
+            [output](auto view) {
+                view_to_ascii(view, output);
+                return std::monostate{};
+            });
+    }
+    if (flat_copy != nullptr) {
+        PG_FREE_IF_COPY(flat_copy, 0);
+    }
+    record_slice_materialization_success(
+        provenance.attachment, provenance.producer_value_id,
+        materialization_mechanism::text, reason,
+        descriptor.bp_length, descriptor.bp_length,
+        static_cast<std::uint64_t>(total), false,
+        static_cast<std::uint64_t>(total), trace_started);
+    return result;
+}
+
+export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
+{
+    Datum input = PG_GETARG_DATUM(0);
+    const int32_t target_typmod = PG_GETARG_INT32(1);
+    const auto descriptor = classify_and_describe_sequence_header(input);
+    if (descriptor.kind == pg_sequence_datum_kind::locator) {
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cannot resolve a bioseq locator outside its owning table scan")));
+    }
+    if (target_typmod < 0) {
+        PG_RETURN_DATUM(input);
+    }
+    const auto target = decode_seq_typmod_checked(target_typmod);
+    if (descriptor.alphabet_bound
+        && descriptor.alphabet_code != target.alphabet_code) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("cannot cast bound bioseq.seq across alphabets")));
+    }
+    if (descriptor.alphabet_bound
+        && descriptor.storage_unit_byte_width
+            == target.storage_unit_byte_width) {
+        PG_RETURN_DATUM(input);
+    }
 
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
         auto acquired = acquire_writable_pg_sequence(input);
-        if (acquired.value->alphabet_bound
-            && acquired.value->type_params.alphabet_code
-                != target.alphabet_code) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_DATATYPE_MISMATCH),
-                     errmsg("cannot cast bound bioseq.seq across alphabets")));
-        }
-        if (acquired.value->alphabet_bound
-            && acquired.value->type_params == target) {
-            PG_RETURN_DATUM(pg_sequence_rw_datum(acquired.value));
-        }
         replace_root_error_safe(
             *acquired.value, target, acquired.value->bp_length, true,
             [&acquired, target](piece_tree_arena& arena) {
@@ -468,20 +606,15 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
         PG_RETURN_DATUM(pg_sequence_rw_datum(acquired.value));
     }
 
+    auto* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+    (void) classify_and_describe_sequence(PointerGetDatum(flat));
+
     if (!descriptor.alphabet_bound) {
         pgseq_t* result = pack_ascii_for_target(
             reinterpret_cast<char const*>(flat->data),
             static_cast<std::size_t>(flat->bp_size), target);
         PG_FREE_IF_COPY(flat, 0);
         PG_RETURN_POINTER(result);
-    }
-    if (descriptor.alphabet_code != target.alphabet_code) {
-        ereport(ERROR,
-                (errcode(ERRCODE_DATATYPE_MISMATCH),
-                 errmsg("cannot cast bound bioseq.seq across alphabets")));
-    }
-    if (flat->get_type_params() == target) {
-        PG_RETURN_POINTER(flat);
     }
     pgseq_t* result = ::bioseq::simd::active_target::
         stdc_recode_to_type_params(*flat, target, pg_alloc);
@@ -496,9 +629,109 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
 
 export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
 {
+    const Datum input = PG_GETARG_DATUM(0);
+    const auto provenance = trace_provenance_for(input);
+    const std::uint64_t trace_started =
+        begin_slice_materialization_timing(provenance.attachment);
+    if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
+        const auto descriptor = classify_and_describe_sequence(input);
+        if (descriptor.kind == pg_sequence_datum_kind::locator) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("cannot send an unresolved bioseq locator")));
+        }
+        if (descriptor.bp_length
+            > (std::numeric_limits<std::uint32_t>::max)()) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("bioseq sequence is too long for binary output")));
+        }
+        StringInfoData buffer;
+        pq_begintypsend(&buffer);
+        if (!descriptor.alphabet_bound) {
+            pq_sendint8(&buffer, pgseq_unbound_alphabet_code);
+            pq_sendint8(&buffer, 1u);
+            pq_sendint8(&buffer, pgseq_unbound_width_tag);
+            pq_sendint32(
+                &buffer, static_cast<std::uint32_t>(descriptor.bp_length));
+            std::array<std::byte, 256> scratch{};
+            std::uint64_t position = 0u;
+            auto const* expanded = get_pg_sequence_expanded_ro(input);
+            while (position < descriptor.bp_length) {
+                const std::size_t count = static_cast<std::size_t>(
+                    std::min<std::uint64_t>(
+                        scratch.size(), descriptor.bp_length - position));
+                if (!emit_pg_unbound_ascii(
+                        expanded->root, position, position + count,
+                        std::span<std::byte>{scratch.data(), count})) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("invalid unbound bioseq piece tree")));
+                }
+                pq_sendbytes(
+                    &buffer, reinterpret_cast<char const*>(scratch.data()),
+                    static_cast<int>(count));
+                position += count;
+            }
+        } else {
+            const std::uint8_t width = descriptor.storage_unit_byte_width;
+            const std::uint8_t width_code = width == 1u ? 0u
+                : width == 2u ? 1u : width == 4u ? 2u : 3u;
+            std::uint64_t unit_count = 0u;
+            std::uint16_t padding = 0u;
+            pgseq_t::dispatch_instance(
+                descriptor.alphabet_code, width,
+                [descriptor, &unit_count, &padding]<class Instance>() {
+                    using traits =
+                        typename compact_sequence_range<Instance>::traits;
+                    unit_count = checked_ceil_div(
+                        descriptor.bp_length, traits::letters_per_unit);
+                    padding = unit_count == 0u ? 0u
+                        : static_cast<std::uint16_t>(
+                            unit_count * traits::letters_per_unit
+                            - descriptor.bp_length);
+                });
+            if (unit_count
+                > (std::numeric_limits<std::uint32_t>::max)()) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                         errmsg("bioseq wire unit count exceeds uint32")));
+            }
+            pq_sendint8(&buffer, descriptor.alphabet_code);
+            pq_sendint8(&buffer, width_code);
+            pq_sendint16(&buffer, padding);
+            pq_sendint32(
+                &buffer, static_cast<std::uint32_t>(descriptor.bp_length));
+            pq_sendint32(&buffer, static_cast<std::uint32_t>(unit_count));
+            with_pg_sequence_view<std::monostate>(
+                fcinfo, 0,
+                [&buffer, descriptor, unit_count](auto view) {
+                    pgseq_t::dispatch_instance(
+                        descriptor.alphabet_code,
+                        descriptor.storage_unit_byte_width,
+                        [&view, &buffer, descriptor,
+                         unit_count]<class Instance>() {
+                            stream_view_to_wire<Instance>(
+                                view, buffer, descriptor.bp_length,
+                                unit_count);
+                        });
+                    return std::monostate{};
+                });
+        }
+        bytea* result = pq_endtypsend(&buffer);
+        record_slice_materialization_success(
+            provenance.attachment, provenance.producer_value_id,
+            materialization_mechanism::binary,
+            materialization_reason::client_output,
+            descriptor.bp_length, descriptor.bp_length,
+            static_cast<std::uint64_t>(VARSIZE(result)), false,
+            static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
+        PG_RETURN_BYTEA_P(result);
+    }
+
     bool must_free = false;
     pgseq_t* value = flatten_sequence_datum(
-        PG_GETARG_DATUM(0), must_free);
+        input, must_free);
     const auto descriptor = classify_and_describe_sequence(
         PointerGetDatum(value));
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
@@ -529,7 +762,15 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
     if (must_free) {
         pfree(value);
     }
-    PG_RETURN_BYTEA_P(pq_endtypsend(&buffer));
+    bytea* result = pq_endtypsend(&buffer);
+    record_slice_materialization_success(
+        provenance.attachment, provenance.producer_value_id,
+        materialization_mechanism::binary,
+        materialization_reason::client_output,
+        descriptor.bp_length, descriptor.bp_length,
+        static_cast<std::uint64_t>(VARSIZE(result)), false,
+        static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
+    PG_RETURN_BYTEA_P(result);
 }
 
 export inline Datum seq_recv_impl(FunctionCallInfo fcinfo)
@@ -550,7 +791,8 @@ export inline Datum seq_recv_impl(FunctionCallInfo fcinfo)
         }
         const char* ascii = pq_getmsgbytes(buffer, static_cast<int>(length));
         pgseq_t* unbound = allocate_unbound_ascii(
-            ascii, length, /* already canonical */ true);
+            ascii, length, /* already canonical */ true,
+            ERRCODE_INVALID_BINARY_REPRESENTATION);
         pq_getmsgend(buffer);
         if (typmod < 0) {
             PG_RETURN_POINTER(unbound);
@@ -635,35 +877,20 @@ export inline Datum seq_recv_impl(FunctionCallInfo fcinfo)
 
 export inline Datum seq_len_impl(FunctionCallInfo fcinfo)
 {
-    Datum input = PG_GETARG_DATUM(0);
-    Datum dispatch = input;
-    pgseq_t* flat = nullptr;
-    if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
-        dispatch = PointerGetDatum(flat);
-    }
-    const auto descriptor = classify_and_describe_sequence(dispatch);
+    const auto descriptor = classify_and_describe_sequence_header(
+        PG_GETARG_DATUM(0));
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
-    }
-    if (flat != nullptr) {
-        PG_FREE_IF_COPY(flat, 0);
     }
     PG_RETURN_INT64(static_cast<int64_t>(descriptor.bp_length));
 }
 
 export inline Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
 {
-    Datum input = PG_GETARG_DATUM(0);
-    Datum dispatch = input;
-    pgseq_t* flat = nullptr;
-    if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
-        dispatch = PointerGetDatum(flat);
-    }
-    const auto descriptor = classify_and_describe_sequence(dispatch);
+    const auto descriptor = classify_and_describe_sequence_header(
+        PG_GETARG_DATUM(0));
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -679,9 +906,6 @@ export inline Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
                 units = checked_ceil_div(
                     descriptor.bp_length, traits::letters_per_unit);
             });
-    }
-    if (flat != nullptr) {
-        PG_FREE_IF_COPY(flat, 0);
     }
     PG_RETURN_INT64(static_cast<int64_t>(units));
 }

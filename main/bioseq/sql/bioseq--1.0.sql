@@ -1799,6 +1799,11 @@ CREATE FUNCTION bioseq.seq_hash_extended(bioseq.seq, bigint)
     RETURNS bigint AS 'MODULE_PATHNAME', 'seq_hash_extended'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
+CREATE FUNCTION bioseq_internal.slice_trace_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'slice_trace_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.slice_trace_self_test() FROM PUBLIC;
+
 CREATE OPERATOR CLASS bioseq.seq_hash_ops
     DEFAULT FOR TYPE bioseq.seq USING hash AS
     OPERATOR 1 bioseq.=,

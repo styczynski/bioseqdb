@@ -25,7 +25,10 @@
     "naive_ofstream_fastq":          {"_": {"type": "integer", "default": 0}},
 
     "bioseq_dumb_header_fasta":             {"_": {"type": "integer", "default": 0}},
-    "bioseq_identifier_parse_uniprot_fasta":{"_": {"type": "integer", "default": 0}}
+    "bioseq_identifier_parse_uniprot_fasta":{"_": {"type": "integer", "default": 0}},
+
+    "bioseq_lazy_expr_eager_each_step": {"_": {"type": "integer", "default": 0}},
+    "bioseq_lazy_expr_deferred":        {"_": {"type": "integer", "default": 0}}
   },
 
   "test_cases": {
@@ -43,7 +46,9 @@
     "FASTQ_REAL_HUMAN_FASTQ_6GB": { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq" }, "description": "Real-data FASTQ: ~6 GiB. Reader-only: it is a dna5 corpus (contains N) and the bench's dna4 reader silently drops N's, so byte-faithful roundtrip is not achievable through the dna4 alphabet. Throughput numbers from the reader path are still meaningful." },
     "FASTQ_REAL_HUMAN_FASTQ_GZ":  { "data": { "format": "fastq", "kind": "real", "real_data_path": "1000_genomes_human_SRR062634_sample_1_dna5.fastq.gz", "compressed": true }, "description": "Real-data FASTQ.gz: ~1.96 GiB compressed. Reader-only — see FASTQ_REAL_HUMAN_FASTQ_6GB note." },
 
-    "FASTA_IDENTIFIER_UNIPROT_SHORT": { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200, "seed": 101, "header_shape": "uniprot_metadata" }, "description": "~9 MiB FASTA of ~200 bp records with UniProt-like metadata headers" }
+    "FASTA_IDENTIFIER_UNIPROT_SHORT": { "data": { "format": "fasta", "kind": "synthetic", "record_count": 40000, "mean_record_length_bp": 200, "seed": 101, "header_shape": "uniprot_metadata" }, "description": "~9 MiB FASTA of ~200 bp records with UniProt-like metadata headers" },
+
+    "LAZY_SEQUENCE_EXPRESSION_8M": { "concurrency": 1, "data": { "kind": "lazy_sequence_expression", "bp_size": 8388608, "seed": 377 }, "description": "8 Mi-bp deterministic DNA4 nested slice/concat expression" }
   },
 
   "bench_io_identifier_parser": {
@@ -83,6 +88,167 @@
         "header_bytes": { "type": "evaluation" },
         "parsed_field_count": { "type": "evaluation" },
         "parsed_field_bytes": { "type": "evaluation" }
+      }
+    }
+  },
+
+  "bench_io_lazy_sequence_expression": {
+    "tags": ["io", "lazy-sequence", "materialization"],
+    "description": "Single DOC0377 case comparing eager materialize-each-step with one deferred canonical-facade nested slice/concat expression.",
+    "fast": true,
+    "concurrency": { "bench_lock": true, "concurrency": false },
+    "iteration_order": { "mode": "interleaved_seeded", "seed": 377018 },
+    "matrix": {
+      "for": { "LAZY_SEQUENCE_EXPRESSION_8M": 12 },
+      "over": {
+        "bioseq_lazy_expr_eager_each_step": {},
+        "bioseq_lazy_expr_deferred": {}
+      },
+      "by_regions": false,
+      "metrics": {
+        "wall_clock_ns": {
+          "rules": [
+            [ "lazy_expression_p50_at_least_15pct_faster",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 25, "tolerance%": 10,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 1 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "output_bp": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_output_bp_matches_samplewise",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+                "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "logical_hash_hi32": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_hash_hi_matches_samplewise",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+                "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "logical_hash_lo32": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_hash_lo_matches_samplewise",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+                "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "payload_materializations": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_payload_materializations_drop_75pct",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 75, "tolerance%": 0,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 0 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "intermediate_payload_materializations": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_has_zero_intermediate_payloads",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 99, "tolerance%": 0,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 0 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "boundary_materializations": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_boundary_count_matches_samplewise",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+                "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "payload_bytes_materialized": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_payload_bytes_drop_70pct",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 70, "tolerance%": 0,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 0 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "peak_live_payload_bytes": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_peak_payload_bytes_drop_70pct",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 70, "tolerance%": 0,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 0 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "admitted_bytes_total": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_admitted_bytes_drop_70pct",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 70, "tolerance%": 0,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 0 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "peak_live_admitted_bytes": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_peak_admitted_bytes_drop_70pct",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "<", "threshold%": 70, "tolerance%": 0,
+                "aggregate": "p50", "pairing": "by_iteration_ratio",
+                "paired_baseline": 1.0, "blocking": true,
+                "warmup_repetitions": 0 },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "correctness_contract_ok": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_correctness_contract_matches_samplewise",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+                "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        },
+        "allocation_contract_ok": {
+          "type": "evaluation",
+          "rules": [
+            [ "lazy_expression_allocation_contract_matches_samplewise",
+              { "key": "bioseq_lazy_expr_deferred" },
+              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+                "aggregate": "min", "pairing": "by_iteration_exact" },
+              { "key": "bioseq_lazy_expr_eager_each_step" } ]
+          ]
+        }
       }
     }
   },

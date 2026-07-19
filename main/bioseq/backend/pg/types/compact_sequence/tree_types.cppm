@@ -14,37 +14,10 @@ export module bioseq.types.pg_compact_sequence:tree_types;
 
 import :flat_abi;
 import :source_abi;
+import :trace;
 import bioseq.storage.bucket_math;
 import bioseq.storage.coordinates;
 import bioseq.storage.size;
-
-export struct slice_materialization_runtime;
-
-export struct slice_trace_attachment {
-    std::uint32_t refcount;
-    std::uint64_t generation;
-    slice_materialization_runtime* runtime;
-    bool valid;
-};
-
-export inline void retain_slice_trace_attachment(
-    slice_trace_attachment* attachment) noexcept
-{
-    if (attachment != nullptr && attachment->refcount != UINT32_MAX) {
-        ++attachment->refcount;
-    }
-}
-
-export inline void release_slice_trace_attachment(
-    slice_trace_attachment* attachment) noexcept
-{
-    if (attachment == nullptr || attachment->refcount == 0) {
-        return;
-    }
-    if (--attachment->refcount == 0) {
-        pfree(attachment);
-    }
-}
 
 export struct piece_tree_arena;
 export struct piece_node;

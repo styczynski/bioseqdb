@@ -28,22 +28,12 @@ import bioseq.storage.coordinates;
 
 export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
 {
-    Datum dispatch = input;
-    pgseq_t* flat = nullptr;
-    if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
-        dispatch = PointerGetDatum(flat);
-    }
-    const auto descriptor = classify_and_describe_sequence(dispatch);
+    const auto descriptor = classify_and_describe_sequence_header(input);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan"),
                  errdetail("relation, column, snapshot, and cache ownership are unavailable")));
-    }
-    if (flat != nullptr
-        && reinterpret_cast<Pointer>(flat) != DatumGetPointer(input)) {
-        pfree(flat);
     }
     return descriptor.bp_length;
 }

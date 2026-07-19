@@ -2857,13 +2857,34 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		Datum indexValues[INDEX_MAX_KEYS];
 		bool indexNulls[INDEX_MAX_KEYS];
-		FormIndexDatum(indexInfo, slot, estate, indexValues, indexNulls);
 
 		Relation bioseqColumnRelation = scan->rs_rd;
 		IndexUniqueCheck indexUniqueCheck =
 			indexInfo->ii_Unique ? UNIQUE_CHECK_YES : UNIQUE_CHECK_NO;
-		index_insert_compat(indexRelation, indexValues, indexNulls, bioseqColumnItemPointer,
-							bioseqColumnRelation, indexUniqueCheck, false, indexInfo);
+		const auto previous_scope = exchange_slice_materialization_scope({
+			.attachment = nullptr,
+			.boundary_id = 0u,
+			.producer_value_id = 0u,
+			.mechanism = materialization_mechanism::packed_full,
+			.reason = materialization_reason::index_tuple,
+			.local_sink = nullptr,
+		});
+		PG_TRY();
+		{
+			FormIndexDatum(
+				indexInfo, slot, estate, indexValues, indexNulls);
+			index_insert_compat(
+				indexRelation, indexValues, indexNulls,
+				bioseqColumnItemPointer, bioseqColumnRelation,
+				indexUniqueCheck, false, indexInfo);
+			restore_slice_materialization_scope(previous_scope);
+		}
+		PG_CATCH();
+		{
+			restore_slice_materialization_scope(previous_scope);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		validateIndexState->tups_inserted += 1;
 	}

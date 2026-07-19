@@ -1846,7 +1846,8 @@ void close_pg_sequence_source_provider(
     AttrNumber column_attno,
     Datum locator_datum,
     MemoryContext result_context,
-    slice_trace_attachment* trace = nullptr);
+    slice_trace_attachment* trace = nullptr,
+    std::uint32_t producer_value_id = 0u);
 
 // DOC0286 §4.3 — public alias for the per-fragment storage-unit count
 // (detail::kFragmentStorageUnits below aliases this so the two never drift).
@@ -4923,7 +4924,8 @@ Datum promote_pg_sequence_locator(
         AttrNumber column_attno,
         Datum locator_datum,
         MemoryContext result_context,
-        slice_trace_attachment* trace) {
+        slice_trace_attachment* trace,
+        std::uint32_t producer_value_id) {
     using namespace pg_sequence_source_detail;
     if (provider == nullptr || !provider->open
         || !provider->backend_thread.is_current()
@@ -4959,11 +4961,12 @@ Datum promote_pg_sequence_locator(
     };
     return bioseq::pg_utils::invoke_pg_as_cpp([
             result_context, handle, locator, stored_type,
-            last_padding_letters, trace] {
+            last_padding_letters, trace, producer_value_id] {
         const MemoryContext saved_context = CurrentMemoryContext;
         MemoryContextSwitchTo(result_context);
         Datum result = make_source_backed_pg_sequence(
-            handle, locator, stored_type, last_padding_letters, trace);
+            handle, locator, stored_type, last_padding_letters,
+            trace, producer_value_id);
         MemoryContextSwitchTo(saved_context);
         return result;
     });

@@ -47,7 +47,7 @@ import bioseq.sequences;                             // sequence_custom_alphabet
 import bioseq.sequences.kmers;                       // collect_minimizers_view, sketch_collector, MinimapSketchData, MinimizerSketchBackend
 import bioseq.sequences.kmers.vulkan;                // DOC0345 Patch F — collect_sorted_minimizer_pairs_vulkan_segment_or_throw
 import bioseq.sequences.kmers.hashers.minimap_int;   // minimap_int_hasher
-import bioseq.storage.lazy;                          // lazy_compact_sequence, make_lazy_in_memory
+import bioseq.storage.lazy;                          // canonical basic_lazy_sequence_view
 import bioseq.storage.size;                          // sequence_size_t
 import bioseq.sequences.chaining.utils;              // Anchor, CanonicalAnchorLess
 import bioseq.common.radix_sort;                  // bioseq::sorting::radix_sort
@@ -69,7 +69,6 @@ using bioseq::simd::HWY_NAMESPACE::collect_minimizers_view;
 using bioseq::simd::HWY_NAMESPACE::sketch_collector;
 using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;   // DOC0345 Patch F
 using bioseq::storage::sequence_size_t;
-using bioseq::storage::lazy_compact_sequence;
 
 // Non-Highway ABI between indexing interfaces and the existing hashmap
 // implementation unit. No indexing module imports two_stacks: the .cpp owns
@@ -637,108 +636,6 @@ rejected_packed_paper_nthash_index_result(
 [[nodiscard]] PackedPaperNthashIndexBridgeResult
 collect_packed_paper_nthash_index_erased(
     const PackedPaperNthashIndexBridgeRequest& request);
-
-/// Materialize exactly one bounded haloed window from a lazy packed sequence
-/// and execute the checked packed-Paper bridge over that resident window.  MPF
-/// and MPS persistence share this adapter so neither route can grow a second
-/// implementation or silently substitute a scalar collector.
-template <class R, class Scanner>
-[[nodiscard]] PackedPaperNthashIndexBridgeResult
-collect_bounded_packed_paper_nthash_index_lazy(
-        lazy_compact_sequence<R, Scanner>& sequence,
-        std::uint64_t lo_unit,
-        std::uint64_t hi_unit,
-        std::uint64_t local_bp_size,
-        std::uint16_t window_size,
-        std::uint16_t kmer_size,
-        sketch_collector& collector,
-        std::uint64_t* materialized_window_bp_out = nullptr) {
-    using traits = typename lazy_compact_sequence<R, Scanner>::traits;
-    using storage_unit = typename traits::storage_unit;
-    constexpr std::uint64_t lpu = traits::letters_per_unit;
-    if (materialized_window_bp_out != nullptr) {
-        *materialized_window_bp_out = 0;
-    }
-    if constexpr (!std::same_as<typename traits::alphabet_type, seq::dna4>) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_alphabet);
-    } else if constexpr (!std::same_as<storage_unit, std::uint32_t>
-        && !std::same_as<storage_unit, std::uint64_t>) {
-        return rejected_packed_paper_nthash_index_result(
-            PackedPaperNthashIndexStatus::unsupported_storage);
-    } else {
-        if (lpu == 0 || lo_unit > hi_unit
-            || hi_unit > static_cast<std::uint64_t>(sequence.size())) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::invalid_range);
-        }
-        if (local_bp_size == 0
-            || local_bp_size - 1u
-                > static_cast<std::uint64_t>(
-                    MinimapSketchData::pos_field_mask)) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::unsupported_representation);
-        }
-        const std::uint64_t materialized_units_u64 = hi_unit - lo_unit;
-        if (materialized_units_u64
-                > static_cast<std::uint64_t>(
-                    (std::numeric_limits<std::size_t>::max)())
-            || materialized_units_u64
-                > (std::numeric_limits<std::uint64_t>::max)() / lpu) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::input_too_large);
-        }
-        const std::uint64_t materialized_capacity_bp =
-            materialized_units_u64 * lpu;
-        if (materialized_capacity_bp < local_bp_size
-            || local_bp_size
-                > static_cast<std::uint64_t>(
-                    (std::numeric_limits<std::size_t>::max)())
-            || materialized_capacity_bp - local_bp_size
-                > static_cast<std::uint64_t>(
-                    (std::numeric_limits<std::size_t>::max)())) {
-            return rejected_packed_paper_nthash_index_result(
-                PackedPaperNthashIndexStatus::invalid_range);
-        }
-
-        const std::size_t materialized_units =
-            static_cast<std::size_t>(materialized_units_u64);
-        using packed_config = sequence_custom_alphabet<seq::dna4, storage_unit>;
-        using packed_range = compact_sequence_range<packed_config>;
-        typename packed_range::base_container packed(materialized_units);
-        auto begin = sequence.cbegin();
-        begin += static_cast<sequence_size_t>(lo_unit);
-        const storage_unit* source = sequence.read_cptr(
-            begin,
-            std::span<storage_unit>{packed},
-            materialized_units);
-        if (materialized_units != 0 && source != packed.data()) {
-            std::memcpy(
-                packed.data(),
-                source,
-                materialized_units * sizeof(storage_unit));
-        }
-        const std::size_t padding = static_cast<std::size_t>(
-            materialized_capacity_bp - local_bp_size);
-        packed_range resident = packed_range::from_packed(
-            std::move(packed), padding);
-        if (materialized_window_bp_out != nullptr) {
-            *materialized_window_bp_out = local_bp_size;
-        }
-        return collect_packed_paper_nthash_index_erased(
-            PackedPaperNthashIndexBridgeRequest{
-                .sequence_context = &resident,
-                .collector_context = &collector,
-                .alphabet = PackedPaperNthashIndexAlphabet::dna4,
-                .storage_unit_bytes = sizeof(storage_unit),
-                .letters_per_unit = lpu,
-                .storage_units = materialized_units,
-                .local_bp_size = static_cast<std::size_t>(local_bp_size),
-                .window_size = window_size,
-                .kmer_size = kmer_size,
-            });
-    }
-}
 
 // Revision-3 persisted minimizer codecs stay in this wire owner. Their shared
 // CRC implementation is imported from the lower chunk-storage module so row,

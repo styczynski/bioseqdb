@@ -8,6 +8,7 @@ module;
 
 export module bioseq.types.pg_compact_sequence:sql_entrypoints;
 
+import :trace;
 import :io;
 import :content;
 import :letter;
@@ -39,6 +40,7 @@ BIOSEQ_SEQ_FORWARD(pg_compact_sequence_len, seq_len_impl)
 BIOSEQ_SEQ_FORWARD(pg_compact_sequence_unit_len, seq_unit_len_impl)
 BIOSEQ_SEQ_FORWARD(seq_hash, seq_hash_impl)
 BIOSEQ_SEQ_FORWARD(seq_hash_extended, seq_hash_extended_impl)
+BIOSEQ_SEQ_FORWARD(slice_trace_self_test, slice_trace_self_test_impl)
 
 BIOSEQ_SEQ_FORWARD(letter_typmod_in, letter_typmod_in_impl)
 BIOSEQ_SEQ_FORWARD(letter_typmod_out, letter_typmod_out_impl)

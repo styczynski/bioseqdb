@@ -257,18 +257,22 @@ export inline Datum letter_recv_impl(FunctionCallInfo fcinfo)
     const auto alphabet = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
     const auto rank = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
     pq_getmsgend(buffer);
-    if (alphabet == unresolved_letter_alphabet_code) {
-        ereport(ERROR,
-                (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
-                 errmsg("unresolved bioseq.letter input is not a wire value")));
-    }
-    const Datum result = make_letter_datum(alphabet, rank);
-    (void) validate_letter_datum(result);
     if (version != 1u) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
                  errmsg("unsupported bioseq.letter wire version %u",
                         static_cast<unsigned>(version))));
+    }
+    char symbol = '\0';
+    if (alphabet == unresolved_letter_alphabet_code
+        || !is_supported_alphabet_code(alphabet)
+        || !pgseq_symbol_for_rank(alphabet, rank, symbol)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+                 errmsg("invalid physical bioseq.letter wire value"),
+                 errdetail("alphabet code=%u, rank=%u",
+                           static_cast<unsigned>(alphabet),
+                           static_cast<unsigned>(rank))));
     }
     if (typmod >= 0
         && decode_letter_typmod_checked(typmod) != alphabet) {
@@ -276,6 +280,7 @@ export inline Datum letter_recv_impl(FunctionCallInfo fcinfo)
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                  errmsg("bioseq.letter wire alphabet does not match destination typmod")));
     }
+    const Datum result = make_letter_datum(alphabet, rank);
     PG_RETURN_DATUM(result);
 }
 

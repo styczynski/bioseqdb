@@ -34,9 +34,28 @@ BioseqColumnSlotCopyHeapTuple(TupleTableSlot *slot)
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnSlotCopyHeapTuple() entered");
 	Assert(!TTS_EMPTY(slot));
 
-	HeapTuple tuple = heap_form_tuple(slot->tts_tupleDescriptor,
-									  slot->tts_values,
-									  slot->tts_isnull);
+	HeapTuple volatile tuple = nullptr;
+	const auto previous_scope = exchange_slice_materialization_scope({
+		.attachment = nullptr,
+		.boundary_id = 0u,
+		.producer_value_id = 0u,
+		.mechanism = materialization_mechanism::packed_full,
+		.reason = materialization_reason::heap_tuple,
+		.local_sink = nullptr,
+	});
+	PG_TRY();
+	{
+		tuple = heap_form_tuple(slot->tts_tupleDescriptor,
+								slot->tts_values,
+								slot->tts_isnull);
+		restore_slice_materialization_scope(previous_scope);
+	}
+	PG_CATCH();
+	{
+		restore_slice_materialization_scope(previous_scope);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	/* slot->tts_tid is filled in bioseq_getnextslot */
 	tuple->t_self = slot->tts_tid;

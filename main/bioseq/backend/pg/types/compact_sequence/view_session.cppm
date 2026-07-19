@@ -8,6 +8,7 @@ module;
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <new>
 #include <optional>
 #include <ranges>
@@ -218,6 +219,129 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
             invalid_flat_sequence("unknown alphabet/width state tag");
     }
     __builtin_unreachable();
+}
+
+/* Metadata-only inspection for length, identical self-casts, and locating one
+ * packed unit.  TOAST fetches only the fixed payload header; it never reads a
+ * whole sequence merely to learn its logical shape. */
+export [[nodiscard]] inline pg_sequence_descriptor
+classify_and_describe_sequence_header(Datum input)
+{
+    if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
+        return classify_and_describe_sequence(input);
+    }
+    const Size raw_size = toast_raw_datum_size(input);
+    if (raw_size < pgseq_t::header_bytes()) {
+        invalid_flat_sequence("value is shorter than the pgseq header");
+    }
+    auto* original = reinterpret_cast<pgseq_t*>(DatumGetPointer(input));
+    pgseq_t* header = original;
+    bool free_header = false;
+    if (!VARATT_IS_4B_U(DatumGetPointer(input))) {
+        header = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM_SLICE(
+            input, 0,
+            static_cast<int32>(pgseq_t::header_bytes() - VARHDRSZ)));
+        free_header = true;
+    }
+
+    pg_sequence_descriptor descriptor{};
+    const auto kind = classify_pg_sequence_flat(header);
+    switch (kind) {
+        case pg_sequence_flat_kind::bound: {
+            bool metadata_ok = false;
+            pgseq_t::dispatch_instance(
+                static_cast<std::uint8_t>(header->alphabet_code),
+                static_cast<std::uint8_t>(header->storage_unit_byte_width),
+                [header, raw_size, &metadata_ok]<class Instance>() {
+                    using traits =
+                        typename compact_sequence_range<Instance>::traits;
+                    const std::uint64_t units = header->bp_size == 0u ? 0u
+                        : (static_cast<std::uint64_t>(header->bp_size)
+                           + traits::letters_per_unit - 1u)
+                            / traits::letters_per_unit;
+                    const std::uint64_t padding = units == 0u ? 0u
+                        : units * traits::letters_per_unit - header->bp_size;
+                    const std::uint64_t payload = units
+                        * sizeof(typename traits::storage_unit);
+                    const std::uint64_t expected = pgseq_t::header_bytes()
+                        + round_up_to_uint64(
+                            static_cast<std::size_t>(payload));
+                    metadata_ok = padding == header->padding_letters
+                        && expected == raw_size;
+                });
+            if (!metadata_ok) {
+                if (free_header) {
+                    pfree(header);
+                }
+                invalid_flat_sequence(
+                    "bound header, padding, or payload size mismatch");
+            }
+            descriptor = {
+                .kind = pg_sequence_datum_kind::flat_bound,
+                .alphabet_code = static_cast<std::uint8_t>(
+                    header->alphabet_code),
+                .storage_unit_byte_width = static_cast<std::uint8_t>(
+                    header->storage_unit_byte_width),
+                .alphabet_bound = true,
+                .bp_length = header->bp_size,
+            };
+            break;
+        }
+        case pg_sequence_flat_kind::unbound: {
+            const std::uint64_t expected = pgseq_t::header_bytes()
+                + round_up_to_uint64(
+                    static_cast<std::size_t>(header->bp_size));
+            if (header->padding_letters != 0u || expected != raw_size) {
+                if (free_header) {
+                    pfree(header);
+                }
+                invalid_flat_sequence("unbound header or payload size mismatch");
+            }
+            descriptor = {
+                .kind = pg_sequence_datum_kind::flat_unbound,
+                .alphabet_code = pgseq_unbound_alphabet_code,
+                .storage_unit_byte_width = pgseq_unbound_width_tag,
+                .alphabet_bound = false,
+                .bp_length = header->bp_size,
+            };
+            break;
+        }
+        case pg_sequence_flat_kind::locator: {
+            const std::uint8_t physical_width =
+                static_cast<std::uint8_t>(
+                    header->storage_unit_byte_width)
+                & pgseq_physical_width_mask;
+            if (raw_size != pgseq_t::header_bytes()
+                    + sizeof(bioseq::storage::seq_locator)
+                || !is_supported_alphabet_code(
+                    static_cast<std::uint8_t>(header->alphabet_code))
+                || !pgseq_supported_storage_unit_byte_widths::
+                    contains_runtime(physical_width)) {
+                if (free_header) {
+                    pfree(header);
+                }
+                invalid_flat_sequence("invalid locator header framing");
+            }
+            descriptor = {
+                .kind = pg_sequence_datum_kind::locator,
+                .alphabet_code = static_cast<std::uint8_t>(
+                    header->alphabet_code),
+                .storage_unit_byte_width = physical_width,
+                .alphabet_bound = true,
+                .bp_length = header->bp_size,
+            };
+            break;
+        }
+        case pg_sequence_flat_kind::invalid:
+            if (free_header) {
+                pfree(header);
+            }
+            invalid_flat_sequence("unknown alphabet/width state tag");
+    }
+    if (free_header) {
+        pfree(header);
+    }
+    return descriptor;
 }
 
 namespace {
@@ -730,12 +854,84 @@ export struct pg_sequence_rank_value {
 export [[nodiscard]] inline pg_sequence_rank_value
 read_pg_sequence_rank_at(Datum input, std::uint64_t index)
 {
-    Datum dispatch = input;
-    pgseq_t* flat_copy = nullptr;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat_copy = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
-        dispatch = PointerGetDatum(flat_copy);
+        const auto descriptor = classify_and_describe_sequence_header(input);
+        if (descriptor.kind == pg_sequence_datum_kind::locator) {
+            unresolved_locator_error();
+        }
+        if (index >= descriptor.bp_length) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
+                     errmsg("bioseq element index is outside its logical sequence")));
+        }
+        if (!descriptor.alphabet_bound) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("cannot extract bioseq.letter from an unbound sequence"),
+                     errhint("cast the sequence as bioseq.seq('alphabet', width) first")));
+        }
+        pg_sequence_rank_value result{
+            .alphabet_code = descriptor.alphabet_code,
+            .rank = 0u,
+        };
+        pgseq_t::dispatch_instance(
+            descriptor.alphabet_code,
+            descriptor.storage_unit_byte_width,
+            [input, index, &result]<class Instance>() {
+                using traits =
+                    typename compact_sequence_range<Instance>::traits;
+                using unit = typename traits::storage_unit;
+                const std::uint64_t unit_index =
+                    index / traits::letters_per_unit;
+                const std::size_t shift = static_cast<std::size_t>(
+                    index % traits::letters_per_unit)
+                    * traits::bits_per_char;
+                unit packed{};
+                if (VARATT_IS_4B_U(DatumGetPointer(input))) {
+                    auto const* flat = reinterpret_cast<pgseq_t const*>(
+                        DatumGetPointer(input));
+                    std::memcpy(
+                        std::addressof(packed),
+                        flat->data + unit_index * sizeof(unit),
+                        sizeof(unit));
+                } else {
+                    const std::uint64_t slice_offset =
+                        pgseq_t::header_bytes() - VARHDRSZ
+                        + unit_index * sizeof(unit);
+                    if (slice_offset
+                        > static_cast<std::uint64_t>(INT32_MAX)) {
+                        ereport(ERROR,
+                                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                                 errmsg("bioseq element TOAST offset exceeds int32")));
+                    }
+                    auto* slice = PG_DETOAST_DATUM_SLICE(
+                        input, static_cast<int32>(slice_offset),
+                        static_cast<int32>(sizeof(unit)));
+                    if (VARSIZE_ANY_EXHDR(slice) != sizeof(unit)) {
+                        pfree(slice);
+                        ereport(ERROR,
+                                (errcode(ERRCODE_DATA_CORRUPTED),
+                                 errmsg("truncated packed bioseq element unit")));
+                    }
+                    std::memcpy(
+                        std::addressof(packed), VARDATA_ANY(slice),
+                        sizeof(unit));
+                    pfree(slice);
+                }
+                result.rank = static_cast<std::uint8_t>(
+                    (packed >> shift) & traits::char_mask);
+            });
+        char symbol = '\0';
+        if (!pgseq_symbol_for_rank(
+                result.alphabet_code, result.rank, symbol)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq source emitted an invalid alphabet rank")));
+        }
+        return result;
     }
+
+    Datum dispatch = input;
     const auto descriptor = classify_and_describe_sequence(dispatch);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         unresolved_locator_error();
@@ -788,10 +984,6 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
         PG_RE_THROW();
     }
     PG_END_TRY();
-    if (flat_copy != nullptr
-        && reinterpret_cast<Pointer>(flat_copy) != DatumGetPointer(input)) {
-        pfree(flat_copy);
-    }
     char symbol = '\0';
     if (!pgseq_symbol_for_rank(result.alphabet_code, result.rank, symbol)) {
         ereport(ERROR,

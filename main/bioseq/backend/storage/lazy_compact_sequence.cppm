@@ -1797,9 +1797,9 @@ inline void with_lazy_fragmented(ScannerFactory&& scanner_fn, Fn&& fn) {
 /// slot for the §5 plain-forward zero-copy fast path, otherwise the caller's
 /// `dst`. When it is a slot we copy into `dst` so the aligner's padded/
 /// contiguous layout is preserved. `eit` is a named local so its slot ring
-/// outlives the copy. One overload set is shared by every aligner module (both
-/// `bioseq_alignment_hwy.block_aligner` and `bioseq_alignment_hwy.ksw2`
-/// import this).
+/// outlives the copy. One canonical facade helper is shared by every aligner
+/// module (both `bioseq_alignment_hwy.block_aligner` and
+/// `bioseq_alignment_hwy.ksw2` import this).
 template <bool is_reversed, bool write_reversed = false,
           sequence_alphabet Alphabet>
 [[gnu::always_inline]] inline void encode_region_via_ptr_at(
@@ -1818,39 +1818,6 @@ template <bool is_reversed, bool write_reversed = false,
         static_cast<sequence_size_t>(bp_from), len, dst);
     if (p != dst.data()) {
         std::memcpy(dst.data(), p, len * sizeof(std::uint8_t));
-    }
-}
-
-/// Concrete-owner compatibility overload. Keep the resident no-fragment
-/// direct encoder fast path; fragmented owners retain their named slot cursor.
-template <bool is_reversed, bool write_reversed = false,
-          class R, class Scanner>
-[[gnu::always_inline]] inline void encode_region_via_ptr_at(
-    const lazy_compact_sequence<R, Scanner>& seq,
-    std::span<std::uint8_t> dst,
-    std::size_t bp_from, std::size_t bp_to)
-{
-    if constexpr (!Scanner::supports_fragments()) {
-        // No-fragment (production) fast path: the no-fragment specialisation's
-        // `encoded_iter::ptr_at` is itself just a thin wrapper around the
-        // underlying `compact_sequence_range::to_encoded_into(...)` — there is
-        // no slot ring and no `std::vector` to elide. Calling the forwarder
-        // directly removes the gratuitous encoded_iter / ptr_at / memcpy-check
-        // indirection that LTO+inlining can't always collapse across module
-        // boundaries, restoring pre-Phase-B-round-2 block_aligner hot-loop
-        // throughput. §1.1#7 (no std::vector on the encoded path) and §9.1/§9.2
-        // (the slot-ring exists and is exercised) are both met on the FRAGMENTED
-        // side — which is where the requirement bites — by the else branch.
-        seq.template to_encoded_into<is_reversed, write_reversed>(dst, bp_from, bp_to);
-    } else {
-        // Fragmented path — through the encoded_iterator slot ring (§7).
-        if (bp_from >= bp_to) return;
-        const std::size_t len = bp_to - bp_from;
-        auto eit = seq.template encoded_iter<is_reversed, write_reversed, std::uint8_t, 2>();
-        const std::uint8_t* p = eit.ptr_at(static_cast<sequence_size_t>(bp_from), len, dst);
-        if (p != dst.data()) {
-            std::memcpy(dst.data(), p, len * sizeof(std::uint8_t));
-        }
     }
 }
 
