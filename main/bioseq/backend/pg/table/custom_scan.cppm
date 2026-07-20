@@ -4332,6 +4332,10 @@ static void slice_project_attach_sources_from_plan_state(
 			BioseqScanRuntime& child_runtime = bioseq_runtime(bioseq_state);
 			if (!child_runtime.lazy_source_projection) return;
 			++tagged_sources;
+			/* The upper set retains child lifetimes only.  Locator stubs are
+			 * promoted inside each BioseqScan through that leaf's exact provider
+			 * before its tuple reaches this projection, so self-join aliases never
+			 * require an ambiguous physical-relation lookup here. */
 			if (child_runtime.lazy_source_provider == nullptr
 				|| !bioseq::storage::add_pg_sequence_source_route(
 					state->runtime.source_routes,

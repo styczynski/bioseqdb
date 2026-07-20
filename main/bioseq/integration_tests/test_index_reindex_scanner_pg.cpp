@@ -98,8 +98,19 @@ TEST_CASE("DOC0377 expression index CREATE REINDEX and VACUUM FULL hydrate locat
         "(bioseq.reverse(s[4:36]) OPERATOR(bioseq.||) s[16380:16412]) "
         "OPERATOR(bioseq.=) "
         "repeat('A',64)::bioseq.seq('dna4',32) ORDER BY id";
-    exec_sql(ctx, "SET enable_seqscan=off;");
+    // The ordinary BioseqScan is a CustomPath, so PostgreSQL's
+    // enable_seqscan penalty does not disable it.  Turn that alternative off
+    // while proving that the expression index itself is usable.
+    exec_sql(ctx,
+        "SET bioseq.enable_custom_scan=off;"
+        "SET enable_seqscan=off;");
     const auto initial_plan = explain_text<false>(ctx, indexed_query);
+    std::string initial_plan_text;
+    for (const auto& line : initial_plan) {
+        initial_plan_text += line;
+        initial_plan_text += '\n';
+    }
+    INFO(initial_plan_text);
     REQUIRE(plan_contains(initial_plan, std::string(index)));
     auto ids = query_int_column(ctx, indexed_query);
     REQUIRE(ids.size() == 1u);

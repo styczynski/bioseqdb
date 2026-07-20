@@ -5520,6 +5520,25 @@ PGDLLEXPORT Datum bioseq_internal_sequence_source_fault_contract_probe(
 		&bioseq_internal_sequence_source_fault_contract_probe_impl, fcinfo);
 }
 
+static Datum bioseq_internal_sequence_source_route_alias_probe_impl(
+		FunctionCallInfo) {
+#ifdef BIOSEQ_TEST_INDEXES
+	PG_RETURN_BOOL(bioseq::storage::pg_sequence_source_route_alias_probe());
+#else
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("bioseq sequence source-domain diagnostics require a test build")));
+	PG_RETURN_BOOL(false);
+#endif
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_route_alias_probe);
+PGDLLEXPORT Datum bioseq_internal_sequence_source_route_alias_probe(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_sequence_source_route_alias_probe_impl, fcinfo);
+}
+
 static Datum bioseq_internal_sequence_source_pre_prepare_probe_impl(
 		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES

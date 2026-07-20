@@ -1504,7 +1504,13 @@ struct pg_sequence_source_provider {
     bool open = false;
 };
 
-/** Fixed two-provider routing used by binary/join upper wrappers. */
+/** Fixed two-registry routing used by binary/join upper wrappers.
+ *
+ * A PostgreSQL self join has two scan bindings even when both bindings name
+ * the same physical relation.  Each scan owns an independent registry and
+ * snapshot lifetime, so relation_oids is provenance rather than a unique
+ * route key.  The provider generation in each lease is the exact route key.
+ */
 struct pg_sequence_source_route_set {
     std::array<Oid, 2u> relation_oids{InvalidOid, InvalidOid};
     std::array<pg_sequence_source_registry_lease, 2u> leases{};
@@ -3365,13 +3371,6 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
         if (routes.leases[index].registry == parent.registry) {
             return true;
         }
-        if (routes.relation_oids[index] == relation_oid) {
-            ereport(ERROR,
-                (errcode(ERRCODE_AMBIGUOUS_ALIAS),
-                 errmsg("bioseq source route has two bindings for one relation"),
-                 errdetail("relation %u maps to distinct source registries",
-                           relation_oid)));
-        }
     }
     if (routes.count >= routes.leases.size()) {
         ereport(ERROR,
@@ -3420,27 +3419,9 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
                 already_present = true;
                 break;
             }
-            if (destination.relation_oids[destination_index]
-                == source.relation_oids[source_index]) {
-                ereport(ERROR,
-                    (errcode(ERRCODE_AMBIGUOUS_ALIAS),
-                     errmsg("bioseq source route has two bindings for one relation"),
-                     errdetail("relation %u maps to distinct source registries",
-                               source.relation_oids[source_index])));
-            }
         }
         if (!already_present) {
             for (std::uint8_t prior = 0u; prior < source_index; ++prior) {
-                if (source.relation_oids[prior]
-                        == source.relation_oids[source_index]
-                    && source.leases[prior].registry
-                        != source_lease.registry) {
-                    ereport(ERROR,
-                        (errcode(ERRCODE_AMBIGUOUS_ALIAS),
-                         errmsg("bioseq source route has two bindings for one relation"),
-                         errdetail("relation %u maps to distinct source registries",
-                                   source.relation_oids[source_index])));
-                }
                 if (source.leases[prior].registry
                     == source_lease.registry) {
                     already_present = true;
@@ -3471,18 +3452,57 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
 [[nodiscard]] inline const pg_sequence_source_registry_lease*
 find_pg_sequence_source_route(
         const pg_sequence_source_route_set& routes,
-        Oid relation_oid) noexcept {
-    if (routes.count > routes.leases.size()) {
+        Oid relation_oid,
+        std::uint64_t provider_generation) noexcept {
+    if (routes.count > routes.leases.size()
+        || !OidIsValid(relation_oid) || provider_generation == 0u) {
         return nullptr;
     }
+    const pg_sequence_source_registry_lease* match = nullptr;
     for (std::uint8_t index = 0u; index < routes.count; ++index) {
-        if (routes.relation_oids[index] == relation_oid
-            && sequence_source_detail::registry_lease_is_live(
-                routes.leases[index])) {
-            return &routes.leases[index];
+        const auto& lease = routes.leases[index];
+        if (!sequence_source_detail::registry_lease_is_live(lease)
+            || routes.relation_oids[index] != lease.registry->user_relid) {
+            return nullptr;
         }
+        if (routes.relation_oids[index] != relation_oid
+            || lease.provider_generation != provider_generation) {
+            continue;
+        }
+        if (match != nullptr && match->registry != lease.registry) {
+            return nullptr;
+        }
+        match = &lease;
     }
-    return nullptr;
+    return match;
+}
+
+/** Relation-only lookup is retained for proven single-source upper nodes.
+ * It deliberately fails closed when self-join aliases contribute multiple
+ * live registries for the same physical relation. */
+[[nodiscard]] inline const pg_sequence_source_registry_lease*
+find_pg_sequence_source_route(
+        const pg_sequence_source_route_set& routes,
+        Oid relation_oid) noexcept {
+    if (routes.count > routes.leases.size() || !OidIsValid(relation_oid)) {
+        return nullptr;
+    }
+    const pg_sequence_source_registry_lease* match = nullptr;
+    for (std::uint8_t index = 0u; index < routes.count; ++index) {
+        const auto& lease = routes.leases[index];
+        if (!sequence_source_detail::registry_lease_is_live(lease)
+            || routes.relation_oids[index] != lease.registry->user_relid) {
+            return nullptr;
+        }
+        if (routes.relation_oids[index] != relation_oid) {
+            continue;
+        }
+        if (match != nullptr && match->registry != lease.registry) {
+            return nullptr;
+        }
+        match = &lease;
+    }
+    return match;
 }
 
 inline void release_pg_sequence_source_routes(
@@ -3644,6 +3664,35 @@ inline void release_pg_sequence_source_routes_noexcept(
 [[nodiscard]] inline Datum promote_pg_sequence_locator(
         const pg_sequence_source_route_set& routes,
         Oid relation_oid,
+        std::uint64_t provider_generation,
+        AttrNumber column_attno,
+        Datum locator_datum,
+        MemoryContext result_context,
+        slice_trace_attachment* trace = nullptr,
+        std::uint32_t producer_value_id = 0u) {
+    return bioseq::pg_utils::invoke_pg_as_cpp(
+        [&routes, relation_oid, provider_generation, column_attno,
+         locator_datum, result_context, trace, producer_value_id] {
+            const auto* lease = find_pg_sequence_source_route(
+                routes, relation_oid, provider_generation);
+            if (lease == nullptr) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("bioseq locator has no exact source-provider route"),
+                     errdetail("relation %u and provider generation %llu do not identify one live registry",
+                               relation_oid,
+                               static_cast<unsigned long long>(
+                                   provider_generation))));
+            }
+            return promote_pg_sequence_locator(
+                *lease, column_attno, locator_datum, result_context,
+                trace, producer_value_id);
+        });
+}
+
+[[nodiscard]] inline Datum promote_pg_sequence_locator(
+        const pg_sequence_source_route_set& routes,
+        Oid relation_oid,
         AttrNumber column_attno,
         Datum locator_datum,
         MemoryContext result_context,
@@ -3657,7 +3706,9 @@ inline void release_pg_sequence_source_routes_noexcept(
             if (lease == nullptr) {
                 ereport(ERROR,
                     (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                     errmsg("bioseq locator has no matching source-provider route")));
+                     errmsg("bioseq locator has no unique source-provider route"),
+                     errdetail("relation %u has no live route or is represented by multiple scan bindings",
+                               relation_oid)));
             }
             return promote_pg_sequence_locator(
                 *lease, column_attno, locator_datum, result_context,
@@ -3721,6 +3772,49 @@ inline void release_pg_sequence_source_routes_noexcept(
     return domain.refcount_fault
         && domain.lifecycle == sequence_source_detail::domain_lifecycle::faulted
         && lease_rejected && registry.lease_fault && !lease.owned;
+}
+
+/** Prove that self-join aliases retain independent exact routes while the
+ * legacy relation-only seam refuses to guess between them. */
+[[nodiscard]] inline bool pg_sequence_source_route_alias_probe() noexcept {
+    constexpr Oid relation_oid = static_cast<Oid>(1u);
+    pg_sequence_source_registry first{};
+    first.backend_thread = pg_sequence_backend_thread_token::capture();
+    first.user_relid = relation_oid;
+    first.generation = 41u;
+    first.active_leases = 1u;
+    first.accepting_lookups = true;
+    pg_sequence_source_registry second{};
+    second.backend_thread = pg_sequence_backend_thread_token::capture();
+    second.user_relid = relation_oid;
+    second.generation = 42u;
+    second.active_leases = 1u;
+    second.accepting_lookups = true;
+
+    pg_sequence_source_route_set routes{};
+    routes.relation_oids[0] = relation_oid;
+    routes.relation_oids[1] = relation_oid;
+    routes.leases[0] = pg_sequence_source_registry_lease{
+        .registry = &first,
+        .provider_generation = first.generation,
+        .owned = true,
+    };
+    routes.leases[1] = pg_sequence_source_registry_lease{
+        .registry = &second,
+        .provider_generation = second.generation,
+        .owned = true,
+    };
+    routes.count = 2u;
+
+    return find_pg_sequence_source_route(routes, relation_oid) == nullptr
+        && find_pg_sequence_source_route(
+               routes, relation_oid, first.generation)
+            == &routes.leases[0]
+        && find_pg_sequence_source_route(
+               routes, relation_oid, second.generation)
+            == &routes.leases[1]
+        && find_pg_sequence_source_route(
+               routes, relation_oid, 43u) == nullptr;
 }
 
 /** Install one inert-but-live token and drive the real PRE_PREPARE switch. */

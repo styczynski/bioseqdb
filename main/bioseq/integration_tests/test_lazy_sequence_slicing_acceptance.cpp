@@ -1360,6 +1360,13 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
     REQUIRE(plan_contains(
         explain_text<false>(ctx, hash_join_query), "Hash Join"));
 
+    /* The two aliases below scan one physical relation through independent
+     * providers.  The probe also attests that relation-only lookup rejects
+     * this ambiguity while each provider generation remains exact. */
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT bioseq_internal.sequence_source_route_alias_probe();")
+        == "t");
     const auto layouts = query_one(
         ctx,
         "SELECT bioseq.seq_eq(a.value,"

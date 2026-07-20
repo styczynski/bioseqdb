@@ -1885,6 +1885,13 @@ CREATE FUNCTION bioseq_internal.sequence_source_fault_contract_probe()
 REVOKE ALL ON FUNCTION
     bioseq_internal.sequence_source_fault_contract_probe() FROM PUBLIC;
 
+CREATE FUNCTION bioseq_internal.sequence_source_route_alias_probe()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_route_alias_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_route_alias_probe() FROM PUBLIC;
+
 CREATE FUNCTION bioseq_internal.sequence_source_pre_prepare_probe()
     RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_pre_prepare_probe'
