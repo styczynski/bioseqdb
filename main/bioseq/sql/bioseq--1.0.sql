@@ -1804,6 +1804,18 @@ CREATE FUNCTION bioseq_internal.slice_trace_self_test()
     LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
 REVOKE ALL ON FUNCTION bioseq_internal.slice_trace_self_test() FROM PUBLIC;
 
+CREATE FUNCTION bioseq_internal.slice_payload_allocation_probe(integer)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'slice_payload_allocation_probe'
+    LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.slice_payload_allocation_probe(integer) FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.slice_trace_worker_failure_probe(integer)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'slice_trace_worker_failure_probe'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.slice_trace_worker_failure_probe(integer) FROM PUBLIC;
+
 CREATE FUNCTION bioseq_internal.synthetic_lazy_sequence(bigint)
     RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'synthetic_lazy_sequence'
     LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;

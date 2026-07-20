@@ -151,6 +151,8 @@ TEST_CASE("DOC0377 expression index CREATE REINDEX and VACUUM FULL hydrate locat
         " 'user_relid',v.user_relid,'state',v.state,"
         " 'main_relfilenode',v.main_relfilenode,"
         " 'current_relfilenode',c.relfilenode,"
+        " 'total_bp_size',v.total_bp_size,"
+        " 'storage_unit_byte_width',v.storage_unit_byte_width,"
         " 'num_fragments',v.num_fragments) ORDER BY v.source_epoch)::text,"
         " '[]') FROM bioseq_internal.sequence_source_version v "
         "LEFT JOIN pg_class c ON c.oid=v.user_relid "
@@ -160,8 +162,12 @@ TEST_CASE("DOC0377 expression index CREATE REINDEX and VACUUM FULL hydrate locat
         "JOIN pg_class c ON c.oid=v.user_relid "
         "WHERE v.user_relid='doc0377_expr_rewrite'::regclass "
         "AND v.state=1 AND v.main_relfilenode=c.relfilenode "
-        // dna4/32 stores 32 letters per unit: ceil(40000/(1024*32)) = 2.
-        "AND v.num_fragments=2;") == 2);
+        "AND v.total_bp_size=40000 "
+        // DNA4 packs four letters per byte. Each fragment contains 1024
+        // storage units, whose persisted width varies by optimization profile.
+        "AND v.num_fragments=(v.total_bp_size + "
+        " (4096::bigint * v.storage_unit_byte_width) - 1) / "
+        " (4096::bigint * v.storage_unit_byte_width);") == 2);
 
     // The direct helper pins zero/aligned/overflow and exact MaxAlloc edges
     // in the same storage/index boundary suite.

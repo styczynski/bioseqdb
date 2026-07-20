@@ -1076,7 +1076,13 @@ TEST_CASE("DOC0377 generic and custom plans retain transformed ownership",
             const auto null_param = query_rows(
                 ctx, fmt::format("EXECUTE {}(NULL);", statement));
             REQUIRE(first.size() == 1u);
-            REQUIRE(restored == first);
+            REQUIRE((first.front() == row_t{
+                std::optional<std::string>{"1"},
+                std::optional<std::string>{"1"}}));
+            REQUIRE(restored.size() == 1u);
+            REQUIRE((restored.front() == row_t{
+                std::optional<std::string>{"1"},
+                std::optional<std::string>{"3"}}));
             REQUIRE(repeated == first);
             REQUIRE(null_query.empty());
             REQUIRE(null_param.empty());

@@ -435,6 +435,11 @@ export inline void pg_sequence_flatten_into(
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("unbound bioseq tree cannot be flattened")));
         }
+#ifdef BIOSEQ_TEST_INDEXES
+        note_slice_payload_allocation_test_event_noexcept(
+            materialization_mechanism::packed_full,
+            materialization_reason::executor_copy);
+#endif
         const auto observer = make_slice_payload_allocation_observer_noexcept(
             value.trace, value.producer_value_id,
             materialization_mechanism::packed_full,
@@ -515,6 +520,11 @@ export inline void pg_sequence_flatten_into(
                          ? "unknown non-standard C++ exception"
                          : callback_detail)));
     }
+#ifdef BIOSEQ_TEST_INDEXES
+    note_slice_payload_allocation_test_event_noexcept(
+        materialization_mechanism::packed_full,
+        materialization_reason::executor_copy);
+#endif
     const auto observer = make_slice_payload_allocation_observer_noexcept(
         value.trace, value.producer_value_id,
         materialization_mechanism::packed_full,
@@ -665,6 +675,11 @@ namespace {
     if (count != 0u) {
         std::memcpy(bytes, flat.data, count);
     }
+#ifdef BIOSEQ_TEST_INDEXES
+    note_slice_payload_allocation_test_event_noexcept(
+        materialization_mechanism::backing_copy,
+        materialization_reason::executor_copy);
+#endif
     const auto observer = make_slice_payload_allocation_observer_noexcept(
         trace, producer_value_id,
         materialization_mechanism::backing_copy,

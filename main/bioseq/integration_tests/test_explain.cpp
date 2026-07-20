@@ -12,6 +12,7 @@
 //     plan tree references "BioseqScan" as the custom plan provider.
 
 #include "common_tests_integration.h"
+#include <libpq-fe.h>
 import bioseq.integration_tests.common;
 
 #include <algorithm>
@@ -171,6 +172,141 @@ std::vector<materialization_signature> materialization_signatures(
     if (!current.variable.empty()) {
         result.push_back(std::move(current));
     }
+    return result;
+}
+
+[[nodiscard]] std::string plan_document(
+    std::span<const std::string> plan) {
+    std::string document;
+    for (const auto& row : plan) {
+        document += row;
+        document.push_back('\n');
+    }
+    return document;
+}
+
+[[nodiscard]] std::size_t count_occurrences(
+    std::string_view text, std::string_view needle) {
+    if (needle.empty()) {
+        return 0u;
+    }
+    std::size_t count = 0u;
+    for (std::size_t position = 0u;
+         (position = text.find(needle, position)) != std::string_view::npos;
+         position += needle.size()) {
+        ++count;
+    }
+    return count;
+}
+
+[[nodiscard]] std::optional<std::string_view> json_array_member(
+    std::string_view document, std::string_view key) {
+    const auto key_position = document.find(
+        fmt::format("\"{}\"", key));
+    if (key_position == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto colon = document.find(':', key_position + key.size() + 2u);
+    const auto open = colon == std::string_view::npos
+        ? std::string_view::npos : document.find('[', colon + 1u);
+    if (open == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t depth = 0u;
+    bool in_string = false;
+    bool escaped = false;
+    for (std::size_t position = open; position < document.size(); ++position) {
+        const char value = document[position];
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (value == '\\') {
+                escaped = true;
+            } else if (value == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (value == '"') {
+            in_string = true;
+        } else if (value == '[') {
+            ++depth;
+        } else if (value == ']') {
+            if (depth == 0u) {
+                return std::nullopt;
+            }
+            --depth;
+            if (depth == 0u) {
+                return document.substr(open, position - open + 1u);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::string_view> yaml_property_block(
+    std::string_view document, std::string_view key) {
+    const auto key_position = document.find(key);
+    if (key_position == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto line_start_marker = document.rfind('\n', key_position);
+    const auto line_start = line_start_marker == std::string_view::npos
+        ? 0u : line_start_marker + 1u;
+    const auto header_end = document.find('\n', key_position);
+    if (header_end == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::size_t base_indent = 0u;
+    while (line_start + base_indent < header_end
+           && (document[line_start + base_indent] == ' '
+               || document[line_start + base_indent] == '\t')) {
+        ++base_indent;
+    }
+    const std::size_t block_start = header_end + 1u;
+    std::size_t block_end = document.size();
+    for (std::size_t cursor = block_start; cursor < document.size();) {
+        const auto newline = document.find('\n', cursor);
+        const auto line_end = newline == std::string_view::npos
+            ? document.size() : newline;
+        std::size_t indent = 0u;
+        while (cursor + indent < line_end
+               && (document[cursor + indent] == ' '
+                   || document[cursor + indent] == '\t')) {
+            ++indent;
+        }
+        if (cursor + indent < line_end && indent <= base_indent) {
+            block_end = cursor;
+            break;
+        }
+        if (newline == std::string_view::npos) {
+            break;
+        }
+        cursor = newline + 1u;
+    }
+    return document.substr(block_start, block_end - block_start);
+}
+
+[[nodiscard]] std::optional<std::string_view> xml_element_block(
+    std::string_view document, std::string_view element) {
+    const auto open_text = fmt::format("<{}>", element);
+    const auto close_text = fmt::format("</{}>", element);
+    const auto open = document.find(open_text);
+    const auto close = open == std::string_view::npos
+        ? std::string_view::npos : document.find(close_text, open);
+    if (open == std::string_view::npos || close == std::string_view::npos) {
+        return std::nullopt;
+    }
+    return document.substr(
+        open, close - open + close_text.size());
+}
+
+[[nodiscard]] std::string sql_quoted_literal(
+    PGconn* connection, std::string_view value) {
+    char* escaped = PQescapeLiteral(connection, value.data(), value.size());
+    REQUIRE(escaped != nullptr);
+    std::string result{escaped};
+    PQfreemem(escaped);
     return result;
 }
 
@@ -384,6 +520,57 @@ TEST_CASE("DOC0377 structured EXPLAIN preserves numeric counter fields",
     REQUIRE(json.find("\"Depends On\": []") != std::string::npos);
     REQUIRE(json.find("\"Counter Overflow\": false")
             != std::string::npos);
+
+    const auto materializations = json_array_member(
+        json, "Slice Materialization");
+    REQUIRE(materializations.has_value());
+    REQUIRE(count_occurrences(*materializations, "\"Variable\"") == 2u);
+    constexpr std::array unique_properties{
+        std::string_view{"\"Mechanism\""},
+        std::string_view{"\"Reason\""},
+        std::string_view{"\"Depends On\""},
+        std::string_view{"\"Encoding\""},
+        std::string_view{"\"Cache Scope\""},
+        std::string_view{"\"Actual Calls\""},
+        std::string_view{"\"Actual Bytes\""},
+        std::string_view{"\"Counter Overflow\""},
+    };
+    for (const auto property : unique_properties) {
+        CAPTURE(property);
+        REQUIRE(count_occurrences(*materializations, property) == 2u);
+    }
+    REQUIRE(materializations->find("var_1 =") == std::string_view::npos);
+
+    const auto parsed = query_one(ctx, fmt::format(
+        "WITH document AS (SELECT {}::jsonb AS value), "
+        "materializations AS ("
+        " SELECT value->0->'Plan'->'Slice Materialization' AS value "
+        " FROM document"
+        ") SELECT jsonb_typeof(value), "
+        "         jsonb_array_length(value)::text, "
+        "         (SELECT bool_and(jsonb_typeof(entry)='object') "
+        "          FROM jsonb_array_elements(value) AS item(entry))::text, "
+        "         (SELECT bool_and(entry ?& ARRAY["
+        "             'Variable','Expression','Mechanism','Reason',"
+        "             'Depends On','Encoding','Cache Scope',"
+        "             'Actual Calls','Actual Bytes','Counter Overflow']) "
+        "          FROM jsonb_array_elements(value) AS item(entry))::text, "
+        "         (SELECT bool_and(jsonb_typeof(entry->'Depends On')='array') "
+        "          FROM jsonb_array_elements(value) AS item(entry))::text, "
+        "         (SELECT bool_and("
+        "             jsonb_typeof(entry->'Actual Calls')='number' AND "
+        "             jsonb_typeof(entry->'Actual Bytes')='number' AND "
+        "             jsonb_typeof(entry->'Counter Overflow')='boolean') "
+        "          FROM jsonb_array_elements(value) AS item(entry))::text "
+        "FROM materializations;",
+        sql_quoted_literal(ctx.raw(), json)));
+    REQUIRE(parsed.size() == 6u);
+    REQUIRE(parsed[0].value_or("") == "array");
+    REQUIRE(parsed[1].value_or("") == "2");
+    REQUIRE(parsed[2].value_or("") == "true");
+    REQUIRE(parsed[3].value_or("") == "true");
+    REQUIRE(parsed[4].value_or("") == "true");
+    REQUIRE(parsed[5].value_or("") == "true");
 }
 
 TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
@@ -410,6 +597,10 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
     REQUIRE(query_scalar_int(
         ctx, "SELECT count(*) FROM test_explain_flat_dst;") == 3);
 
+#ifdef BIOSEQ_TEST_INDEXES
+    exec_sql(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(0);");
+#endif
     const auto plan = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF",
         fmt::format(
@@ -418,6 +609,12 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(plan_contains(plan, "Mechanism: packed full"));
     REQUIRE(plan_contains(plan, "Reason: heap tuple"));
+    REQUIRE(boundary_actual_calls(
+        plan, "packed full", "heap tuple") == 3u);
+#ifdef BIOSEQ_TEST_INDEXES
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(1);") == 3);
+#endif
     REQUIRE(query_scalar_int(
         ctx, "SELECT count(*) FROM test_explain_slice_dst;") == 3);
     REQUIRE(query_scalar(
@@ -510,6 +707,32 @@ TEST_CASE("DOC0377 lazy-only slice concat reverse has no allocation boundary",
     REQUIRE_FALSE(plan_contains(plan, "Reason: executor copy"));
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 SliceProject shallow publication allocates no payload",
+          "[explain][slice][materialization][accounting]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+    const auto expression = fmt::format(
+        "bioseq.reverse(seq0[0:4]) OPERATOR(bioseq.||) seq0[4:8]");
+    const auto plan = explain_with_options(
+        ctx, "VERBOSE, COSTS OFF",
+        fmt::format("SELECT bioseq.len({}) FROM {};", expression, kTable));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+
+    exec_sql(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(0);");
+    REQUIRE(query_scalar(ctx, fmt::format(
+        "SELECT bool_and(bioseq.len({}) = 8) FROM {};",
+        expression, kTable)) == "t");
+    const auto counters = query_one(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(1), "
+        "       bioseq_internal.slice_payload_allocation_probe(2);");
+    REQUIRE(counters.size() == 2u);
+    REQUIRE(counters[0].value_or("") == "0");
+    REQUIRE(counters[1].value_or("") == "0");
+}
+#endif
+
 TEST_CASE("DOC0377 timing and summary options control only actual metadata",
           "[explain][slice][timing]") {
     auto ctx = fresh_context({kTable});
@@ -543,6 +766,27 @@ TEST_CASE("DOC0377 YAML and XML preserve structured slice fields",
     REQUIRE(plan_contains(yaml, "Slice Materialization"));
     REQUIRE(plan_contains(yaml, "Mechanism: text"));
     REQUIRE(plan_contains(yaml, "Actual Calls: 0"));
+    const auto yaml_document = plan_document(yaml);
+    const auto yaml_materializations = yaml_property_block(
+        yaml_document, "Slice Materialization");
+    REQUIRE(yaml_materializations.has_value());
+    REQUIRE(count_occurrences(*yaml_materializations, "- Variable:") == 2u);
+    constexpr std::array yaml_unique_properties{
+        std::string_view{"Mechanism:"},
+        std::string_view{"Reason:"},
+        std::string_view{"Depends On:"},
+        std::string_view{"Encoding:"},
+        std::string_view{"Cache Scope:"},
+        std::string_view{"Actual Calls:"},
+        std::string_view{"Actual Bytes:"},
+        std::string_view{"Counter Overflow:"},
+    };
+    for (const auto property : yaml_unique_properties) {
+        CAPTURE(property);
+        REQUIRE(count_occurrences(*yaml_materializations, property) == 2u);
+    }
+    REQUIRE(yaml_materializations->find("var_1 =")
+            == std::string_view::npos);
 
     const auto xml = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF, FORMAT XML", sql);
@@ -550,6 +794,39 @@ TEST_CASE("DOC0377 YAML and XML preserve structured slice fields",
     REQUIRE(plan_contains(xml, "Slice-Materialization"));
     REQUIRE(plan_contains(xml, "<Mechanism>text</Mechanism>"));
     REQUIRE(plan_contains(xml, "<Actual-Calls>0</Actual-Calls>"));
+    const auto xml_document = plan_document(xml);
+    const auto xml_materializations = xml_element_block(
+        xml_document, "Slice-Materialization");
+    REQUIRE(xml_materializations.has_value());
+    REQUIRE(count_occurrences(
+        *xml_materializations, "<Materialization>") == 2u);
+    constexpr std::array xml_unique_properties{
+        std::string_view{"<Variable>"},
+        std::string_view{"<Mechanism>"},
+        std::string_view{"<Reason>"},
+        std::string_view{"<Depends-On"},
+        std::string_view{"<Encoding>"},
+        std::string_view{"<Cache-Scope>"},
+        std::string_view{"<Actual-Calls>"},
+        std::string_view{"<Actual-Bytes>"},
+        std::string_view{"<Counter-Overflow>"},
+    };
+    for (const auto property : xml_unique_properties) {
+        CAPTURE(property);
+        REQUIRE(count_occurrences(*xml_materializations, property) == 2u);
+    }
+    REQUIRE(xml_materializations->find("var_1 =")
+            == std::string_view::npos);
+    const auto parsed_xml = query_one(ctx, fmt::format(
+        "SELECT xml_is_well_formed_document({}::text), "
+        "       cardinality(xpath("
+        "         '//*[local-name()=\"Slice-Materialization\"]"
+        "/*[local-name()=\"Materialization\"]', {}::xml))::text;",
+        sql_quoted_literal(ctx.raw(), xml_document),
+        sql_quoted_literal(ctx.raw(), xml_document)));
+    REQUIRE(parsed_xml.size() == 2u);
+    REQUIRE(parsed_xml[0].value_or("") == "t");
+    REQUIRE(parsed_xml[1].value_or("") == "2");
 }
 
 TEST_CASE("DOC0377 transformed INNER mmsearch explains one per-row BatchJoin owner",

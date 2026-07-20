@@ -3709,7 +3709,9 @@ TEST_CASE("DOC0377 outer-join match quals fail closed",
         "LEFT", "RIGHT", "FULL"};
     for (const auto join_type : join_types) {
         const std::string sql = fmt::format(
-            "SELECT count(*) FROM {} AS t {} JOIN "
+            /* Consume both sides so outer-join removal cannot legally erase
+             * the ineligible match qual before the fail-closed SQL stub. */
+            "SELECT t.pk, q.id FROM {} AS t {} JOIN "
             "doc0377_outer_match_queries AS q "
             "ON t.pk=q.id AND mmsearch(t.seq0[0:], q.seq[0:]);",
             kHoe, join_type);

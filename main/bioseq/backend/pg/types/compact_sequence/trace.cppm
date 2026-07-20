@@ -40,6 +40,42 @@ export enum class materialization_reason : std::uint8_t {
     client_output,
 };
 
+#ifdef BIOSEQ_TEST_INDEXES
+/* Independent allocator-side evidence for §17.5.  These counters are not
+ * plan instrumentation: allocation sites increment them only after a payload
+ * allocation succeeds, so a lazy SliceProject query can prove that its
+ * shallow read-only slot publication never reached either flat-payload
+ * allocation path.  Backend-local storage is intentional; the SQL probe is
+ * used only around one query on one integration-test connection. */
+struct slice_payload_allocation_test_counters {
+    std::uint64_t packed_full{};
+    std::uint64_t executor_copy{};
+};
+
+[[nodiscard]] slice_payload_allocation_test_counters&
+slice_payload_allocation_test_storage_noexcept() noexcept
+{
+    static thread_local slice_payload_allocation_test_counters counters{};
+    return counters;
+}
+
+export [[gnu::noinline]] void note_slice_payload_allocation_test_event_noexcept(
+    materialization_mechanism mechanism,
+    materialization_reason reason) noexcept
+{
+    constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    auto& counters = slice_payload_allocation_test_storage_noexcept();
+    if (mechanism == materialization_mechanism::packed_full
+        && counters.packed_full != maximum) {
+        ++counters.packed_full;
+    }
+    if (reason == materialization_reason::executor_copy
+        && counters.executor_copy != maximum) {
+        ++counters.executor_copy;
+    }
+}
+#endif
+
 export struct slice_dsm_counter {
     std::uint64_t calls;
     std::uint64_t input_symbols;
@@ -1812,10 +1848,79 @@ export inline Datum slice_trace_self_test_impl(FunctionCallInfo) {
   PG_RETURN_BOOL(slice_trace_self_test_noexcept());
 }
 
+export inline Datum slice_payload_allocation_probe_impl(
+    FunctionCallInfo fcinfo) {
+#ifdef BIOSEQ_TEST_INDEXES
+  const int32 action = PG_GETARG_INT32(0);
+  auto& counters = slice_payload_allocation_test_storage_noexcept();
+  switch (action) {
+    case 0:
+      counters = {};
+      PG_RETURN_INT64(0);
+    case 1:
+      PG_RETURN_INT64(static_cast<int64>(std::min(
+          counters.packed_full,
+          static_cast<std::uint64_t>(
+              (std::numeric_limits<int64>::max)()))));
+    case 2:
+      PG_RETURN_INT64(static_cast<int64>(std::min(
+          counters.executor_copy,
+          static_cast<std::uint64_t>(
+              (std::numeric_limits<int64>::max)()))));
+    default:
+      ereport(ERROR,
+              (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+               errmsg("invalid slice payload-allocation probe action"),
+               errdetail("expected 0 (reset), 1 (packed full), or 2 "
+                         "(executor copy); received %d", action)));
+  }
+#else
+  ereport(ERROR,
+          (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+           errmsg("slice payload-allocation probe is unavailable"),
+           errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
+#endif
+  PG_RETURN_NULL();
+}
+
+export inline Datum slice_trace_worker_failure_probe_impl(
+    FunctionCallInfo fcinfo) {
+#ifdef BIOSEQ_TEST_INDEXES
+  (void)PG_GETARG_INT32(0);
+  if (IsParallelWorker()) {
+    ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("injected DOC0377 SliceProject parallel worker failure"),
+             errdetail("the original worker ERROR must survive DSM cleanup")));
+  }
+  PG_RETURN_BOOL(true);
+#else
+  ereport(ERROR,
+          (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+           errmsg("SliceProject worker failure probe is unavailable"),
+           errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
+#endif
+  PG_RETURN_NULL();
+}
+
 extern "C" {
 CXX_PG_FUNCTION_INFO_V1(slice_trace_self_test);
 PGDLLEXPORT Datum slice_trace_self_test(PG_FUNCTION_ARGS)
 {
     return bioseq_invoke_pg_sequence_fmgr_boundary(&slice_trace_self_test_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(slice_payload_allocation_probe);
+PGDLLEXPORT Datum slice_payload_allocation_probe(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(
+        &slice_payload_allocation_probe_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(slice_trace_worker_failure_probe);
+PGDLLEXPORT Datum slice_trace_worker_failure_probe(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(
+        &slice_trace_worker_failure_probe_impl, fcinfo);
 }
 } // extern "C"

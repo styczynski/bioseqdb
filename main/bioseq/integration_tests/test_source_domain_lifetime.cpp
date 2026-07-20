@@ -585,6 +585,9 @@ TEST_CASE("DOC0377 nested BatchJoin SliceProject shares and releases source rout
         "SET bioseq.index_async_persist=off;"
         "SET bioseq.recompute_async_persist=off;"
         "SET bioseq.enable_vectorization=off;"
+        "SET bioseq.aligner.minimizer_algorithm='scalar';"
+        "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm='ksw2';"
         "SET bioseq.aligner.vulkan_enabled=off;"
         "CREATE TABLE doc0377_source_batch_target "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
@@ -767,6 +770,70 @@ TEST_CASE("DOC0377 materialized spill aggregate COPY generated and parallel rout
         REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
         require_source_resources_balanced(ctx);
     }
+}
+
+TEST_CASE("DOC0377 parallel worker ERROR preserves DSM cleanup and original error",
+          "[seq][slice][source-domain][parallel][dsm][error]") {
+    constexpr std::string_view source = "doc0377_slice_worker_error";
+    auto ctx = fresh_context({source});
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_slice_worker_error "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO doc0377_slice_worker_error "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1,256) AS g;");
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT current_setting('max_parallel_workers')::int;") > 0);
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=2;"
+        "SET min_parallel_table_scan_size=0;"
+        "SET parallel_setup_cost=0;"
+        "SET parallel_tuple_cost=0;"
+        "SET parallel_leader_participation=off;"
+        "DO $$ BEGIN "
+        " IF EXISTS (SELECT 1 FROM pg_settings "
+        "            WHERE name='debug_parallel_query') THEN "
+        "   PERFORM set_config('debug_parallel_query','on',false);"
+        " ELSIF EXISTS (SELECT 1 FROM pg_settings "
+        "               WHERE name='force_parallel_mode') THEN "
+        "   PERFORM set_config('force_parallel_mode','on',false);"
+        " END IF; END $$;");
+
+    constexpr auto error_sql =
+        "SELECT bioseq.to_text(s[0:64]) "
+        "FROM doc0377_slice_worker_error "
+        "WHERE bioseq_internal.slice_trace_worker_failure_probe(id);";
+    const auto planned = explain_text<false>(ctx, error_sql);
+    REQUIRE(plan_contains(planned, "Gather"));
+    REQUIRE(plan_contains(
+        planned, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(
+        planned, "slice_trace_worker_failure_probe"));
+
+    reset_source_counters(ctx);
+    const auto injected = sql_error(ctx, error_sql);
+    REQUIRE(injected.sqlstate == "XX000");
+    REQUIRE(injected.contains(
+        "injected DOC0377 SliceProject parallel worker failure"));
+    require_source_resources_balanced(ctx);
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    /* A fresh forced-parallel cycle must attach, publish and detach cleanly
+     * after the failed cycle.  With leader participation disabled, all 256
+     * successful conversion deltas must arrive through worker DSM slots. */
+    reset_source_counters(ctx);
+    const auto recovered = explain_text<true>(ctx,
+        "SELECT bioseq.to_text(s[0:64]) "
+        "FROM doc0377_slice_worker_error;");
+    REQUIRE(plan_contains(recovered, "Gather"));
+    REQUIRE(plan_contains(
+        recovered, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(source_boundary_actual_calls(
+        recovered, "text", "SQL conversion") == 256u);
+    REQUIRE_FALSE(plan_contains(recovered, "Incomplete Workers"));
+    REQUIRE_FALSE(plan_contains(recovered, "Counter Overflow: true"));
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
 }
 
 TEST_CASE("DOC0377 production source routes never invoke PostgreSQL off backend",
