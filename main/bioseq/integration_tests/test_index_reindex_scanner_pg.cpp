@@ -51,3 +51,100 @@ TEST_CASE("DOC0279 update_index reindexes stub-backed rows via scanner_pg (query
     const auto recomputed = mmsearch_set(ctx, "doc0279_rx");
     REQUIRE(assembled == recomputed);
 }
+
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 expression index CREATE REINDEX and VACUUM FULL hydrate locator sources",
+          "[indexing][expression][slice][source-backed][rewrite][doc0377]") {
+    constexpr std::string_view table = "doc0377_expr_rewrite";
+    constexpr std::string_view index = "doc0377_expr_rewrite_slice_idx";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off;"
+        "CREATE TABLE doc0377_expr_rewrite ("
+        " id int PRIMARY KEY, s bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO doc0377_expr_rewrite VALUES "
+        " (1,repeat('A',40000)::bioseq.seq('dna4',32)),"
+        " (2,repeat('C',40000)::bioseq.seq('dna4',32));");
+
+    // A duplicate-key ERROR occurs inside the TableAM's index tuple callback.
+    // The next trace self-test requires default ambient TLS, proving the
+    // index_tuple classification scope was restored by the PG_CATCH path.
+    const auto duplicate = sql_error(ctx,
+        "CREATE UNIQUE INDEX doc0377_expr_rewrite_failed_idx "
+        "ON doc0377_expr_rewrite ((s[0:0]));");
+    REQUIRE(duplicate.sqlstate == "23505");
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq_internal.slice_trace_self_test();") == "t");
+
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_sequence_source_counters();");
+    exec_sql(ctx,
+        "CREATE INDEX doc0377_expr_rewrite_slice_idx "
+        "ON doc0377_expr_rewrite "
+        "((bioseq.reverse(s[4:36]) OPERATOR(bioseq.||) "
+        "s[16380:16412]));");
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq_internal.sequence_source_counters()"
+        "->>'standalone_providers_created')::bigint;") == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq_internal.sequence_source_counters()"
+        "->>'domains_created')::bigint;") == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq_internal.sequence_source_counters()"
+        "->>'domains_reused')::bigint;") >= 1);
+
+    const std::string indexed_query =
+        "SELECT id FROM doc0377_expr_rewrite WHERE "
+        "(bioseq.reverse(s[4:36]) OPERATOR(bioseq.||) s[16380:16412]) "
+        "OPERATOR(bioseq.=) "
+        "repeat('A',64)::bioseq.seq('dna4',32) ORDER BY id";
+    exec_sql(ctx, "SET enable_seqscan=off;");
+    const auto initial_plan = explain_text<false>(ctx, indexed_query);
+    REQUIRE(plan_contains(initial_plan, std::string(index)));
+    auto ids = query_int_column(ctx, indexed_query);
+    REQUIRE(ids.size() == 1u);
+    REQUIRE(ids.front() == 1);
+
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_sequence_source_counters();");
+    exec_sql(ctx, "REINDEX INDEX doc0377_expr_rewrite_slice_idx;");
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT (bioseq_internal.sequence_source_counters()"
+        "->>'standalone_providers_created')::bigint;") == 1);
+    ids = query_int_column(ctx, indexed_query);
+    REQUIRE(ids.size() == 1u);
+    REQUIRE(ids.front() == 1);
+
+    // DOC0377 requires safe VACUUM/table-rewrite interaction, not indexed
+    // CLUSTER support. Keep the access method's existing rejection explicit
+    // and prove the backend remains usable before exercising the shared
+    // relation_copy_for_cluster callback through VACUUM FULL.
+    const auto cluster_error = sql_error(ctx,
+        "CLUSTER doc0377_expr_rewrite USING "
+        "doc0377_expr_rewrite_pkey;");
+    REQUIRE(cluster_error.sqlstate == "0A000");
+    REQUIRE(cluster_error.contains(
+        "clustering columnar tables using indexes is not supported"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    exec_sql(ctx, "VACUUM FULL doc0377_expr_rewrite;");
+    ids = query_int_column(ctx, indexed_query);
+    REQUIRE(ids.size() == 1u);
+    REQUIRE(ids.front() == 1);
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq.to_text(s[16380:16412]) "
+        "FROM doc0377_expr_rewrite WHERE id=1;")
+        == std::string(32u, 'A'));
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) FROM bioseq_internal.sequence_source_version v "
+        "JOIN pg_class c ON c.oid=v.user_relid "
+        "WHERE v.user_relid='doc0377_expr_rewrite'::regclass "
+        "AND v.state=1 AND v.main_relfilenode=c.relfilenode "
+        "AND v.num_fragments=3;") == 2);
+
+    // The direct helper pins zero/aligned/overflow and exact MaxAlloc edges
+    // in the same storage/index boundary suite.
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq_internal.materialization_size_self_test();") == "t");
+}
+#endif

@@ -1887,13 +1887,29 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   }
   PG_END_TRY();
 
-  PG_RETURN_BOOL(saturation_caught && budget_caught && generation_caught &&
-                 factory_failure_matrix && tree_length_guardrail_matrix &&
-                 arena_alignment_guardrail_matrix &&
-                 corrupt_tree_length_guardrail_matrix &&
-                 million_piece_balanced &&
-                 deep_release_iterative &&
-                 live_piece_tree_arenas == arena_baseline);
+  const bool all_checks_passed =
+      saturation_caught && budget_caught && generation_caught &&
+      factory_failure_matrix && tree_length_guardrail_matrix &&
+      arena_alignment_guardrail_matrix &&
+      corrupt_tree_length_guardrail_matrix &&
+      million_piece_balanced && deep_release_iterative &&
+      live_piece_tree_arenas == arena_baseline;
+  if (!all_checks_passed) {
+    ereport(WARNING,
+            (errmsg_internal(
+                "bioseq piece-tree self-test flags: saturation=%d budget=%d generation=%d factory=%d length=%d alignment=%d corrupt=%d million=%d deep=%d arena_balance=%d",
+                saturation_caught ? 1 : 0,
+                budget_caught ? 1 : 0,
+                generation_caught ? 1 : 0,
+                factory_failure_matrix ? 1 : 0,
+                tree_length_guardrail_matrix ? 1 : 0,
+                arena_alignment_guardrail_matrix ? 1 : 0,
+                corrupt_tree_length_guardrail_matrix ? 1 : 0,
+                million_piece_balanced ? 1 : 0,
+                deep_release_iterative ? 1 : 0,
+                live_piece_tree_arenas == arena_baseline ? 1 : 0)));
+  }
+  PG_RETURN_BOOL(all_checks_passed);
 }
 
 extern "C" {

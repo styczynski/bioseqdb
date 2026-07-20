@@ -66,6 +66,28 @@ export [[nodiscard]] inline Size checked_add_size(Size left, Size right)
     return add_size(left, right);
 }
 
+/* PostgreSQL's palloc accepts Size, but rejects requests above MaxAllocSize
+ * with an internal allocation error.  Every concrete sequence conversion
+ * must turn that condition into the public PROGRAM_LIMIT_EXCEEDED contract
+ * before it asks a varlena, StringInfo, array, or flat pgseq allocator to
+ * grow.  Comparing the uint64 payload before narrowing also covers size_t /
+ * Size overflow on narrower PostgreSQL builds. */
+export [[nodiscard]] inline Size checked_materialization_allocation_size(
+    std::uint64_t payload_bytes,
+    Size overhead_bytes,
+    char const* target)
+{
+    if (overhead_bytes > MaxAllocSize
+        || payload_bytes > static_cast<std::uint64_t>(
+            MaxAllocSize - overhead_bytes)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq %s materialization exceeds MaxAllocSize",
+                        target)));
+    }
+    return overhead_bytes + static_cast<Size>(payload_bytes);
+}
+
 export [[nodiscard]] inline Size checked_round_up_to_uint64(Size value)
 {
     constexpr Size alignment = sizeof(std::uint64_t);
@@ -77,7 +99,7 @@ export [[nodiscard]] inline Size checked_round_up_to_uint64(Size value)
     return round_up_to_uint64(value);
 }
 
-template<class Instance>
+export template<class Instance>
 [[nodiscard]] inline Size bound_flat_size(std::uint64_t bp_length)
 {
     using range = compact_sequence_range<Instance>;
@@ -96,17 +118,112 @@ template<class Instance>
     }
     const Size payload = checked_mul_size(
         checked_size_cast(units), sizeof(typename traits::storage_unit));
-    const Size total = checked_add_size(
-        pgseq_t::header_bytes(), checked_round_up_to_uint64(payload));
-    if (total > MaxAllocSize) {
-        ereport(ERROR,
-                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                 errmsg("flattened bioseq value exceeds MaxAllocSize")));
-    }
+    const Size total = checked_materialization_allocation_size(
+        checked_round_up_to_uint64(payload), pgseq_t::header_bytes(),
+        "flat sequence");
     return total;
 }
 
 namespace {
+
+enum class materialization_size_probe : std::uint8_t {
+  round_overflow,
+  multiply_overflow,
+  addition_overflow,
+  maxalloc_payload_overflow,
+  maxalloc_header_terminator_overflow,
+  bound_flat_bp_overflow,
+};
+
+[[nodiscard]] bool materialization_size_probe_raises_program_limit(
+    materialization_size_probe probe) {
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    switch (probe) {
+      case materialization_size_probe::round_overflow:
+        (void)checked_round_up_to_uint64(
+            (std::numeric_limits<Size>::max)()
+            - (sizeof(std::uint64_t) - 2u));
+        break;
+      case materialization_size_probe::multiply_overflow:
+        (void)checked_mul_size((std::numeric_limits<Size>::max)(), 2u);
+        break;
+      case materialization_size_probe::addition_overflow:
+        (void)checked_add_size((std::numeric_limits<Size>::max)(), 1u);
+        break;
+      case materialization_size_probe::maxalloc_payload_overflow:
+        (void)checked_materialization_allocation_size(
+            static_cast<std::uint64_t>(MaxAllocSize) + 1u, 0u,
+            "self-test payload");
+        break;
+      case materialization_size_probe::maxalloc_header_terminator_overflow:
+        (void)checked_materialization_allocation_size(
+            static_cast<std::uint64_t>(MaxAllocSize) - VARHDRSZ,
+            static_cast<Size>(VARHDRSZ + 1u), "self-test framed output");
+        break;
+      case materialization_size_probe::bound_flat_bp_overflow:
+        pgseq_t::dispatch_instance(
+            pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
+            []<class Instance>() {
+              (void)bound_flat_size<Instance>(
+                  static_cast<std::uint64_t>(UINT32_MAX) + 1u);
+            });
+        break;
+    }
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    ErrorData* error = CopyErrorData();
+    matched = error != nullptr
+        && error->sqlerrcode == ERRCODE_PROGRAM_LIMIT_EXCEEDED;
+    FlushErrorState();
+    if (error != nullptr) {
+      FreeErrorData(error);
+    }
+  }
+  PG_END_TRY();
+  return matched;
+}
+
+[[nodiscard]] bool run_materialization_size_guardrail_matrix() {
+  Size zero_flat_size = 0u;
+  pgseq_t::dispatch_instance(
+      pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
+      [&zero_flat_size]<class Instance>() {
+        zero_flat_size = bound_flat_size<Instance>(0u);
+      });
+  const Size framed_overhead = static_cast<Size>(VARHDRSZ + 1u);
+  return checked_size_cast(0u) == 0u
+      && checked_mul_size(0u, (std::numeric_limits<Size>::max)()) == 0u
+      && checked_add_size(0u, 0u) == 0u
+      && checked_round_up_to_uint64(0u) == 0u
+      && checked_round_up_to_uint64(sizeof(std::uint64_t))
+          == sizeof(std::uint64_t)
+      && checked_round_up_to_uint64(1u) == sizeof(std::uint64_t)
+      && checked_materialization_allocation_size(
+             static_cast<std::uint64_t>(MaxAllocSize), 0u,
+             "self-test exact MaxAlloc") == MaxAllocSize
+      && checked_materialization_allocation_size(
+             static_cast<std::uint64_t>(MaxAllocSize) - framed_overhead,
+             framed_overhead, "self-test exact framed MaxAlloc")
+          == MaxAllocSize
+      && zero_flat_size >= pgseq_t::header_bytes()
+      && materialization_size_probe_raises_program_limit(
+          materialization_size_probe::round_overflow)
+      && materialization_size_probe_raises_program_limit(
+          materialization_size_probe::multiply_overflow)
+      && materialization_size_probe_raises_program_limit(
+          materialization_size_probe::addition_overflow)
+      && materialization_size_probe_raises_program_limit(
+          materialization_size_probe::maxalloc_payload_overflow)
+      && materialization_size_probe_raises_program_limit(
+          materialization_size_probe::maxalloc_header_terminator_overflow)
+      && materialization_size_probe_raises_program_limit(
+          materialization_size_probe::bound_flat_bp_overflow);
+}
 
 [[nodiscard]] inline Size expanded_flat_size(pg_sequence_expanded const& value)
 {
@@ -117,14 +234,9 @@ namespace {
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("unbound bioseq sequence is too long to flatten")));
         }
-        const Size total = checked_add_size(
-            pgseq_t::header_bytes(),
-            checked_round_up_to_uint64(checked_size_cast(value.bp_length)));
-        if (total > MaxAllocSize) {
-            ereport(ERROR,
-                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                     errmsg("flattened unbound bioseq value exceeds MaxAllocSize")));
-        }
+        const Size total = checked_materialization_allocation_size(
+            checked_round_up_to_uint64(checked_size_cast(value.bp_length)),
+            pgseq_t::header_bytes(), "flat unbound sequence");
         return total;
     }
     Size size = 0u;
@@ -143,8 +255,13 @@ namespace {
     std::uint64_t to,
     std::span<std::byte> output)
 {
-    if (!edge || from > to || to > edge.node->bp_length
-        || output.size() != to - from
+    if (from > to || output.size() != to - from) {
+        return false;
+    }
+    if (!edge) {
+        return from == 0 && to == 0 && output.empty();
+    }
+    if (to > edge.node->bp_length
         || bioseq::storage::has_complement(edge.transform)) {
         return false;
     }
@@ -1003,7 +1120,7 @@ export inline Datum synthetic_lazy_sequence_impl(FunctionCallInfo fcinfo) {
   }
   constexpr compact_sequence_stdc_type_params type{
       .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
-      .storage_unit_byte_width = 1u,
+      .storage_unit_byte_width = 8u,
   };
   const auto length = static_cast<std::uint64_t>(requested);
   PG_RETURN_DATUM(make_source_backed_pg_sequence(
@@ -1020,6 +1137,10 @@ export inline Datum synthetic_lazy_sequence_impl(FunctionCallInfo fcinfo) {
           .source_epoch = 1u,
       },
       type, 0u));
+}
+
+export inline Datum materialization_size_self_test_impl(FunctionCallInfo) {
+  PG_RETURN_BOOL(run_materialization_size_guardrail_matrix());
 }
 
 export inline Datum sequence_piece_count_impl(FunctionCallInfo fcinfo) {
@@ -1197,6 +1318,12 @@ CXX_PG_FUNCTION_INFO_V1(sequence_piece_count);
 PGDLLEXPORT Datum sequence_piece_count(PG_FUNCTION_ARGS)
 {
     return bioseq_invoke_pg_sequence_fmgr_boundary(&sequence_piece_count_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(materialization_size_self_test);
+PGDLLEXPORT Datum materialization_size_self_test(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&materialization_size_self_test_impl, fcinfo);
 }
 
 CXX_PG_FUNCTION_INFO_V1(expanded_ownership_self_test);

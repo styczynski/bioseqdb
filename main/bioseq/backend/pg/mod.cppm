@@ -2556,6 +2556,7 @@ _PG_init()
 	bioseq_log<DBG, PG>("[bioseq] pg: _PG_init() entered");
 	install_alignment_execution_hooks();
 	bioseq_init();
+	install_letter_literal_validation_hook();
 }
 
 /*

@@ -55,9 +55,68 @@ TEST_CASE("DOC0377 Python coordinates and letter access are exact",
     REQUIRE(unbound.sqlstate == "42804");
 }
 
+TEST_CASE("DOC0377 letter validation hook chains and walks nested queries",
+          "[seq][letter][hook][typmod]") {
+    auto ctx = fresh_context({"doc0377_letter_hook_ctas"});
+    exec_sql(ctx, "SET statement_timeout='2s';");
+
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT current_setting('shared_preload_libraries') LIKE "
+        "       '%auth_permission_dialog%' "
+        "   AND current_setting('shared_preload_libraries') LIKE '%bioseq%';")
+        == "t");
+
+    const auto simple_before = query_scalar_int(
+        ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    const auto simple_after = query_scalar_int(
+        ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
+    // The second diagnostic query contributes one call itself.  The other
+    // delta entry is the probe SELECT, proving bioseq is reached exactly once
+    // through the installed preload-hook chain rather than skipped or
+    // recursively re-entered.  This remains exact whichever preload hook was
+    // installed last and therefore owns the outermost callback.
+    REQUIRE(simple_after - simple_before == 2);
+
+    const auto nested_before = query_scalar_int(
+        ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
+    REQUIRE(query_scalar_int(
+        ctx,
+        "WITH first_level(n) AS (SELECT 1), "
+        "second_level(n) AS (SELECT n + 1 FROM first_level) "
+        "SELECT n FROM second_level;") == 2);
+    const auto nested_after = query_scalar_int(
+        ctx, "SELECT bioseq_internal.letter_hook_chain_calls();");
+    REQUIRE(nested_after - nested_before == 2);
+
+    for (const char* utility_sql : {
+             "EXPLAIN SELECT 'A'::bioseq.letter;",
+             "PREPARE doc0377_letter_hook_prepare AS "
+             "SELECT 'A'::bioseq.letter;",
+             "CREATE TABLE public.doc0377_letter_hook_ctas AS "
+             "SELECT 'A'::bioseq.letter AS value;",
+         }) {
+        CAPTURE(utility_sql);
+        const auto error = sql_error(ctx, utility_sql);
+        REQUIRE(error.sqlstate == "22023");
+        REQUIRE(error.contains(
+            "bioseq.letter input requires an alphabet typmod"));
+    }
+    exec_sql(ctx, "BEGIN;");
+    const auto cursor_error = sql_error(
+        ctx,
+        "DECLARE doc0377_letter_hook_cursor CURSOR FOR "
+        "SELECT 'A'::bioseq.letter;");
+    REQUIRE(cursor_error.sqlstate == "22023");
+    exec_sql(ctx, "ROLLBACK;");
+    exec_sql(ctx, "RESET statement_timeout;");
+}
+
 TEST_CASE("DOC0377 letter typmods resolve literals and validate physical alphabets",
           "[seq][letter][typmod][array]") {
-    auto ctx = fresh_context({"doc0377_typmodless_letter"});
+    auto ctx = fresh_context({"doc0377_typmodless_letter",
+                              "doc0377_typed_letter"});
 
     REQUIRE(query_scalar(
         ctx, "SELECT ('A'::bioseq.letter('dna4'))::text;") == "A");
@@ -72,6 +131,7 @@ TEST_CASE("DOC0377 letter typmods resolve literals and validate physical alphabe
         ctx,
         "SELECT (('AC'::bioseq.seq('dna4',32))[1])::text;") == "C");
 
+#if BIOSEQ_OPTTIMIZATION_LEVEL > 0
     const auto mismatched_typmod = sql_error(
         ctx,
         "SELECT (('A'::bioseq.letter('dna4'))"
@@ -79,17 +139,33 @@ TEST_CASE("DOC0377 letter typmods resolve literals and validate physical alphabe
     REQUIRE(mismatched_typmod.sqlstate == "42804");
     REQUIRE(mismatched_typmod.contains(
         "cannot relabel bioseq.letter to a different alphabet"));
+#else
+    // DOC0377 section 17.2 requires the dna4/dna5 matrix.  The repository's
+    // mandated opt0 iteration build intentionally registers only dna4, so it
+    // must report that exact configuration boundary rather than silently skip
+    // the query.  The cross-alphabet 42804 branch remains a required opt>0
+    // acceptance run before final handoff.
+    const auto unavailable_dna5 = sql_error(
+        ctx, "SELECT 'A'::bioseq.letter('dna5');");
+    REQUIRE(unavailable_dna5.sqlstate == "22023");
+    REQUIRE(unavailable_dna5.contains("is not supported"));
+#endif
 
     const auto typmodless_literal = sql_error(
         ctx, "SELECT 'A'::bioseq.letter;");
     REQUIRE(typmodless_literal.sqlstate == "22023");
     REQUIRE(typmodless_literal.contains(
         "bioseq.letter input requires an alphabet typmod"));
+    const auto typmodless_values = sql_error(
+        ctx, "VALUES ('A'::bioseq.letter);");
+    REQUIRE(typmodless_values.sqlstate == "22023");
+    REQUIRE(typmodless_values.contains(
+        "bioseq.letter input requires an alphabet typmod"));
 
-    // PostgreSQL passes the destination typmod to a base type's three-argument
-    // input function. A typmodless heap target therefore fails before a Datum
-    // can be formed, while an explicitly bound physical letter remains valid
-    // even when stored in a typmodless column.
+    // Unknown literals enter the base input function before PostgreSQL applies
+    // the same-type typmod cast.  The analyzed-tree guard consumes that token
+    // only under a positive typmod cast and rejects it before a typmodless heap
+    // target can persist it.  An already-bound physical letter remains valid.
     exec_sql(ctx,
         "CREATE TABLE doc0377_typmodless_letter "
         " (value bioseq.letter);");
@@ -103,6 +179,13 @@ TEST_CASE("DOC0377 letter typmods resolve literals and validate physical alphabe
         " ('A'::bioseq.letter('dna4'));");
     REQUIRE(query_scalar(
         ctx, "SELECT value::text FROM doc0377_typmodless_letter;") == "A");
+
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_typed_letter "
+        " (value bioseq.letter('dna4')); "
+        "INSERT INTO doc0377_typed_letter VALUES ('C');");
+    REQUIRE(query_scalar(
+        ctx, "SELECT value::text FROM doc0377_typed_letter;") == "C");
 }
 
 TEST_CASE("DOC0377 nested slice concat and transforms preserve logical value",

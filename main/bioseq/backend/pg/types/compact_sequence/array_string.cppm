@@ -495,16 +495,18 @@ export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
             static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
         PG_RETURN_ARRAYTYPE_P(result);
     }
-    if (descriptor.bp_length > static_cast<std::uint64_t>(INT_MAX)
-        || descriptor.bp_length
-            > static_cast<std::uint64_t>(MaxAllocSize / sizeof(Datum))) {
+    if (descriptor.bp_length > static_cast<std::uint64_t>(INT_MAX)) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to materialize as letter[]")));
     }
     const int count = static_cast<int>(descriptor.bp_length);
-    const Size values_bytes = checked_mul_size(
-        sizeof(Datum), static_cast<Size>(count));
+    const Size values_bytes = checked_materialization_allocation_size(
+        descriptor.bp_length * sizeof(Datum), 0u,
+        "letter array workspace");
+    (void) checked_materialization_allocation_size(
+        descriptor.bp_length * sizeof(pg_letter),
+        ARR_OVERHEAD_NONULLS(1), "letter array");
     auto* values = static_cast<Datum*>(palloc(values_bytes));
     const std::uint8_t alphabet = descriptor.alphabet_code;
     with_pg_sequence_view<std::monostate>(

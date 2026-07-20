@@ -991,6 +991,7 @@ struct compact_sequence_range_base {
         static constexpr IteratorMode iterator_mode = p_iterator_mode;
 
         size_t _bit_no;
+        base_iterator_t _end{};
         typename traits::storage_unit _current_unit;
 
     public:
@@ -1003,9 +1004,10 @@ struct compact_sequence_range_base {
 
         explicit bp_scalar_iter(
             base_iterator_t it,
+            base_iterator_t end,
             const size_t bit_no,
             typename traits::storage_unit current_unit
-        ) : super_t(it), _bit_no(bit_no), _current_unit(current_unit) {}
+        ) : super_t(it), _bit_no(bit_no), _end(end), _current_unit(current_unit) {}
 
         constexpr size_t bit_no() const {
             return _bit_no;
@@ -1054,7 +1056,9 @@ struct compact_sequence_range_base {
             } else if (_bit_no == traits::letters_per_unit - 1) {
                 // Need to increment
                 ++this->base_reference();
-                _current_unit = *this->base();
+                if (this->base() != _end) {
+                    _current_unit = *this->base();
+                }
                 _bit_no = 0;
             } else {
                 ++_bit_no;
@@ -1096,12 +1100,20 @@ struct compact_sequence_range_base {
     template<IteratorMode M, typename I>
     requires (is_valid_derived_iter<I>::value == true)
     constexpr inline bp_scalar_iter<I, M> iter(const I& it) const {
-        if constexpr (traits::letters_per_unit == 1) {
-            return bp_scalar_iter<I, M>(it, 0, *it);
-        } else if (super()->end() == it && super()->begin() != it && super()->padding() != 0) {
-            return bp_scalar_iter<I, M>(it-1, traits::letters_per_unit - super()->padding(), 0);
+        if (super()->end() == it) {
+            if constexpr (traits::letters_per_unit != 1) {
+                if (super()->begin() != it && super()->padding() != 0) {
+                    return bp_scalar_iter<I, M>(
+                        it - 1,
+                        super()->end(),
+                        traits::letters_per_unit - super()->padding(),
+                        typename traits::storage_unit{});
+                }
+            }
+            return bp_scalar_iter<I, M>(
+                it, super()->end(), 0, typename traits::storage_unit{});
         }
-        return bp_scalar_iter<I, M>(it, 0, *it);
+        return bp_scalar_iter<I, M>(it, super()->end(), 0, *it);
     };
 
     // template<IteratorMode M, typename I>

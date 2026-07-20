@@ -1599,7 +1599,7 @@ CREATE OR REPLACE FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
 
 CREATE CAST (bioseq.seq AS bioseq.seq)
     WITH FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
-    AS IMPLICIT;
+    AS ASSIGNMENT;
 
 -- 4. Comparison functions + operators.
 CREATE OR REPLACE FUNCTION bioseq.seq_cmp(bioseq.seq, bioseq.seq)
@@ -1816,6 +1816,12 @@ CREATE FUNCTION bioseq_internal.sequence_piece_count(bioseq.seq)
 REVOKE ALL ON FUNCTION bioseq_internal.sequence_piece_count(bioseq.seq)
     FROM PUBLIC;
 
+CREATE FUNCTION bioseq_internal.materialization_size_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'materialization_size_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.materialization_size_self_test()
+    FROM PUBLIC;
+
 CREATE FUNCTION bioseq_internal.piece_tree_self_test()
     RETURNS boolean AS 'MODULE_PATHNAME', 'piece_tree_self_test'
     LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
@@ -1831,6 +1837,11 @@ CREATE FUNCTION bioseq_internal.letter_wire_self_test()
     RETURNS boolean AS 'MODULE_PATHNAME', 'letter_wire_self_test'
     LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
 REVOKE ALL ON FUNCTION bioseq_internal.letter_wire_self_test() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.letter_hook_chain_calls()
+    RETURNS bigint AS 'MODULE_PATHNAME', 'letter_hook_chain_calls'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.letter_hook_chain_calls() FROM PUBLIC;
 
 CREATE FUNCTION bioseq_internal.arm_sequence_source_failure(text)
     RETURNS void

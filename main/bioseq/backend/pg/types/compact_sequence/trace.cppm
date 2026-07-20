@@ -351,9 +351,6 @@ export struct slice_materialization_scope {
 
 namespace {
 
-inline thread_local slice_materialization_scope active_slice_scope{};
-inline thread_local std::byte slice_async_owner_thread_identity{};
-
 [[nodiscard]] inline slice_materialization_boundary const *
 find_boundary_by_id(slice_materialization_runtime const &runtime,
                     std::uint32_t boundary_id) noexcept {
@@ -414,28 +411,49 @@ find_unique_boundary_by_classification(
 
 } // namespace
 
+/* Keep trace TLS behind module-owned, out-of-line accessors.  Anonymous-
+ * namespace inline TLS variables are replicated in every importer that
+ * instantiates these exported inline helpers, which disconnects a scope set
+ * in one TU from an observation in another and makes address identity
+ * importer-local. */
+export [[nodiscard, gnu::noinline]] slice_materialization_scope&
+current_slice_materialization_scope_storage_noexcept() noexcept {
+  static thread_local slice_materialization_scope scope{};
+  return scope;
+}
+
+/* The token is shared by all calls on one thread while remaining distinct on
+ * a worker thread, preserving the off-backend tripwire. */
+export [[nodiscard, gnu::noinline]] void const*
+current_slice_async_owner_thread_identity_noexcept() noexcept {
+  static thread_local std::byte token{};
+  return std::addressof(token);
+}
+
 export [[nodiscard]] inline slice_materialization_scope
 get_current_slice_materialization_scope() noexcept {
-  return active_slice_scope;
+  return current_slice_materialization_scope_storage_noexcept();
 }
 
 export [[nodiscard]] inline slice_materialization_scope
 exchange_slice_materialization_scope(
     slice_materialization_scope next) noexcept {
-  const auto previous = active_slice_scope;
-  active_slice_scope = next;
+  auto& active = current_slice_materialization_scope_storage_noexcept();
+  const auto previous = active;
+  active = next;
   return previous;
 }
 
 export inline void restore_slice_materialization_scope(
     slice_materialization_scope previous) noexcept {
-  active_slice_scope = previous;
+  current_slice_materialization_scope_storage_noexcept() = previous;
 }
 
 export [[nodiscard]] inline std::uint64_t begin_slice_materialization_timing(
     slice_trace_attachment const *attachment) noexcept {
   if (attachment == nullptr) {
-    attachment = active_slice_scope.attachment;
+    attachment =
+        current_slice_materialization_scope_storage_noexcept().attachment;
   }
   return slice_trace_attachment_live(attachment) &&
                  attachment->runtime->collection_enabled &&
@@ -451,7 +469,7 @@ export [[nodiscard]] inline std::uint64_t begin_slice_materialization_timing(
     std::uint64_t output_symbols, std::uint64_t bytes, bool reused,
     std::uint64_t peak_retained_bytes,
     std::uint64_t started_at_ns = 0u) noexcept {
-  auto const scope = active_slice_scope;
+  auto const scope = current_slice_materialization_scope_storage_noexcept();
   if (attachment == nullptr) {
     attachment = scope.attachment;
   }
@@ -968,7 +986,7 @@ borrow_slice_async_owner_noexcept(
       owner->generation != attachment->async_owner_generation ||
       owner->attachment != attachment ||
       owner->owner_thread_identity !=
-          std::addressof(slice_async_owner_thread_identity) ||
+          current_slice_async_owner_thread_identity_noexcept() ||
       owner->phase != slice_async_owner_phase::accepting) {
     return nullptr;
   }
@@ -1228,7 +1246,7 @@ make_slice_async_pool_observer_noexcept(
     slice_async_owner_guard *owner) noexcept {
   if (owner == nullptr || owner->phase != slice_async_owner_phase::accepting ||
       owner->owner_thread_identity !=
-          std::addressof(slice_async_owner_thread_identity) ||
+          current_slice_async_owner_thread_identity_noexcept() ||
       owner->job_capacity == 0u) {
     return {};
   }
@@ -1321,7 +1339,7 @@ export [[nodiscard]] inline bool initialize_slice_async_owner_noexcept(
   guard->job_capacity = job_capacity;
   guard->generation = next_slice_async_owner_generation++;
   guard->owner_thread_identity =
-      std::addressof(slice_async_owner_thread_identity);
+      current_slice_async_owner_thread_identity_noexcept();
   guard->phase = slice_async_owner_phase::accepting;
   attachment->async_owner = guard;
   attachment->async_owner_generation = guard->generation;
@@ -1405,6 +1423,13 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
 
   slice_counter_sink local_sink{std::addressof(cumulative), 1u};
   const auto original_scope = get_current_slice_materialization_scope();
+  valid = valid && original_scope.attachment == nullptr
+      && original_scope.boundary_id == 0u
+      && original_scope.producer_value_id == 0u
+      && original_scope.mechanism
+          == materialization_mechanism::backing_copy
+      && original_scope.reason == materialization_reason::executor_copy
+      && original_scope.local_sink == nullptr;
   const slice_materialization_scope outer{
       .attachment = std::addressof(attachment),
       .boundary_id = 1u,
@@ -1519,6 +1544,40 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
             consumer_counters[index].calls == 1u &&
             consumer_counters[index].bytes == initial_bytes[index];
   }
+
+  /* Table-AM index build/validation cannot attach a plan-owned boundary, so
+   * it installs the classification-only scope used by FormIndexDatum and the
+   * index callback.  Prove the generic EOH packed-full observer is redirected
+   * from executor_copy to the unique index_tuple consumer and that restoration
+   * leaves the caller's ambient scope byte-exact. */
+  constexpr std::size_t index_consumer = 1u;
+  const auto index_calls_before = consumer_counters[index_consumer].calls;
+  const auto index_bytes_before = consumer_counters[index_consumer].bytes;
+  const slice_materialization_scope index_tuple_scope{
+      .attachment = nullptr,
+      .boundary_id = 0u,
+      .producer_value_id = 0u,
+      .mechanism = materialization_mechanism::packed_full,
+      .reason = materialization_reason::index_tuple,
+      .local_sink = nullptr,
+  };
+  const auto saved_index_scope =
+      exchange_slice_materialization_scope(index_tuple_scope);
+  const auto index_observer = make_slice_payload_allocation_observer_noexcept(
+      std::addressof(consumer_attachment), shared_producer_value_id,
+      materialization_mechanism::packed_full,
+      materialization_reason::executor_copy);
+  const bool index_observed =
+      bioseq::storage::observe_sequence_payload_allocation_noexcept(
+          std::addressof(index_observer),
+          bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
+          64u, 64u, 64u, 64u);
+  restore_slice_materialization_scope(saved_index_scope);
+  valid = valid && index_observed
+      && consumer_counters[index_consumer].calls == index_calls_before + 1u
+      && consumer_counters[index_consumer].bytes == index_bytes_before + 64u
+      && scope_equal(
+          get_current_slice_materialization_scope(), original_scope);
 
   const auto exercise_abandoned_admission =
       [&](std::size_t index) noexcept {

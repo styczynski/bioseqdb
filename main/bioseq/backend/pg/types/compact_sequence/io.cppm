@@ -501,8 +501,9 @@ export inline Datum seq_out_impl(FunctionCallInfo fcinfo)
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
-    auto* output = static_cast<char*>(
-        palloc(checked_add_size(checked_size_cast(descriptor.bp_length), 1u)));
+    const Size output_size = checked_materialization_allocation_size(
+        descriptor.bp_length, 1u, "text output");
+    auto* output = static_cast<char*>(palloc(output_size));
     if (!descriptor.alphabet_bound) {
         if (flat_copy != nullptr) {
             std::memcpy(output, flat_copy->data,
@@ -559,8 +560,8 @@ export [[nodiscard]] inline text* materialize_pg_sequence_text(
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
-    const Size total = checked_add_size(
-        VARHDRSZ, checked_size_cast(descriptor.bp_length));
+    const Size total = checked_materialization_allocation_size(
+        descriptor.bp_length, VARHDRSZ, "text output");
     auto* result = static_cast<text*>(palloc(total));
     SET_VARSIZE(result, total);
     auto* output = VARDATA(result);
@@ -666,6 +667,39 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("bioseq sequence is too long for binary output")));
         }
+        std::uint64_t unit_count = 0u;
+        std::uint16_t padding = 0u;
+        if (descriptor.alphabet_bound) {
+            pgseq_t::dispatch_instance(
+                descriptor.alphabet_code,
+                descriptor.storage_unit_byte_width,
+                [descriptor, &unit_count, &padding]<class Instance>() {
+                    using traits =
+                        typename compact_sequence_range<Instance>::traits;
+                    unit_count = checked_ceil_div(
+                        descriptor.bp_length, traits::letters_per_unit);
+                    padding = unit_count == 0u ? 0u
+                        : static_cast<std::uint16_t>(
+                            unit_count * traits::letters_per_unit
+                            - descriptor.bp_length);
+                });
+            if (unit_count
+                > (std::numeric_limits<std::uint32_t>::max)()) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                         errmsg("bioseq wire unit count exceeds uint32")));
+            }
+        }
+        const std::uint64_t payload_bytes = descriptor.alphabet_bound
+            ? unit_count * descriptor.storage_unit_byte_width
+            : descriptor.bp_length;
+        /* pq_begintypsend includes the bytea varlena header.  The remaining
+         * framing is 7 bytes for unbound values and 12 for bound values;
+         * StringInfo additionally maintains one trailing NUL byte. */
+        const Size wire_overhead = static_cast<Size>(
+            VARHDRSZ + (descriptor.alphabet_bound ? 12u : 7u) + 1u);
+        (void) checked_materialization_allocation_size(
+            payload_bytes, wire_overhead, "binary output");
         StringInfoData buffer;
         pq_begintypsend(&buffer);
         if (!descriptor.alphabet_bound) {
@@ -697,26 +731,6 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
             const std::uint8_t width = descriptor.storage_unit_byte_width;
             const std::uint8_t width_code = width == 1u ? 0u
                 : width == 2u ? 1u : width == 4u ? 2u : 3u;
-            std::uint64_t unit_count = 0u;
-            std::uint16_t padding = 0u;
-            pgseq_t::dispatch_instance(
-                descriptor.alphabet_code, width,
-                [descriptor, &unit_count, &padding]<class Instance>() {
-                    using traits =
-                        typename compact_sequence_range<Instance>::traits;
-                    unit_count = checked_ceil_div(
-                        descriptor.bp_length, traits::letters_per_unit);
-                    padding = unit_count == 0u ? 0u
-                        : static_cast<std::uint16_t>(
-                            unit_count * traits::letters_per_unit
-                            - descriptor.bp_length);
-                });
-            if (unit_count
-                > (std::numeric_limits<std::uint32_t>::max)()) {
-                ereport(ERROR,
-                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-                         errmsg("bioseq wire unit count exceeds uint32")));
-            }
             pq_sendint8(&buffer, descriptor.alphabet_code);
             pq_sendint8(&buffer, width_code);
             pq_sendint16(&buffer, padding);
@@ -759,6 +773,14 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot send an unresolved bioseq locator")));
     }
+    const std::uint64_t payload_bytes = descriptor.alphabet_bound
+        ? static_cast<std::uint64_t>(value->unit_count())
+            * value->storage_unit_byte_width
+        : value->bp_size;
+    const Size wire_overhead = static_cast<Size>(
+        VARHDRSZ + (descriptor.alphabet_bound ? 12u : 7u) + 1u);
+    (void) checked_materialization_allocation_size(
+        payload_bytes, wire_overhead, "binary output");
     StringInfoData buffer;
     pq_begintypsend(&buffer);
     if (!descriptor.alphabet_bound) {

@@ -128,6 +128,136 @@ static_assert((static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::ma
     return locator;
 }
 
+// A locator may come from a raw on-disk stub, so every consumer that intends
+// to rebuild one contiguous pgseq_t must validate the complete narrowing and
+// row-range contract before opening a shard or doing allocation arithmetic.
+// Keep the classification PostgreSQL-free so the exact corrupt boundaries are
+// exhaustively testable without manufacturing unsafe varlena values.
+enum class flat_locator_validation_error : std::uint8_t {
+    none = 0u,
+    invalid_wire_metadata,
+    logical_length_exceeds_bigint,
+    logical_length_exceeds_flat_field,
+    shard_exceeds_catalog_domain,
+    first_row_exceeds_catalog_domain,
+    fragment_geometry_inconsistent,
+    fragment_row_range_exceeds_catalog_domain,
+};
+
+[[nodiscard]] constexpr flat_locator_validation_error
+validate_flat_locator_geometry(seq_locator const& locator) noexcept
+{
+    constexpr auto bigint_max =
+        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
+    if (locator.version != kLocatorVersion
+        || locator._pad_2 != 0u
+        || locator._pad_4 != 0u
+        || locator.source_epoch == 0u
+        || locator.source_epoch > bigint_max) {
+        return flat_locator_validation_error::invalid_wire_metadata;
+    }
+    if (locator.total_bp_size > bigint_max) {
+        return flat_locator_validation_error::logical_length_exceeds_bigint;
+    }
+    if (locator.total_bp_size
+        > static_cast<std::uint64_t>(
+            (std::numeric_limits<std::uint32_t>::max)())) {
+        return flat_locator_validation_error::logical_length_exceeds_flat_field;
+    }
+    if (locator.shard_idx
+        > static_cast<std::uint32_t>(
+            (std::numeric_limits<std::int32_t>::max)())) {
+        return flat_locator_validation_error::shard_exceeds_catalog_domain;
+    }
+    if (locator.first_sub_row_no > bigint_max) {
+        return flat_locator_validation_error::first_row_exceeds_catalog_domain;
+    }
+    if ((locator.num_fragments == 0u) != (locator.total_bp_size == 0u)
+        || (locator.num_fragments == 0u
+            && locator.first_sub_row_no != 0u)) {
+        return flat_locator_validation_error::fragment_geometry_inconsistent;
+    }
+    if (locator.num_fragments > 0u
+        && locator.first_sub_row_no
+            > bigint_max
+                - static_cast<std::uint64_t>(locator.num_fragments - 1u)) {
+        return flat_locator_validation_error::
+            fragment_row_range_exceeds_catalog_domain;
+    }
+    return flat_locator_validation_error::none;
+}
+
+[[nodiscard]] constexpr std::uint64_t
+expected_flat_locator_fragment_count(
+    std::uint64_t total_bp_size,
+    std::uint64_t letters_per_unit,
+    std::uint64_t fragment_storage_units) noexcept
+{
+    if (total_bp_size == 0u) {
+        return 0u;
+    }
+    if (letters_per_unit == 0u || fragment_storage_units == 0u) {
+        return (std::numeric_limits<std::uint64_t>::max)();
+    }
+    const std::uint64_t total_units =
+        total_bp_size / letters_per_unit
+        + (total_bp_size % letters_per_unit != 0u ? 1u : 0u);
+    return total_units / fragment_storage_units
+        + (total_units % fragment_storage_units != 0u ? 1u : 0u);
+}
+
+enum class fragment_frame_validation_error : std::uint8_t {
+    none = 0u,
+    shorter_than_header,
+    size_mismatch,
+};
+
+[[nodiscard]] constexpr fragment_frame_validation_error
+validate_fragment_frame_size(
+    std::uint64_t actual_bytes,
+    std::uint64_t header_bytes,
+    std::uint64_t expected_bytes) noexcept
+{
+    if (actual_bytes < header_bytes) {
+        return fragment_frame_validation_error::shorter_than_header;
+    }
+    if (actual_bytes != expected_bytes) {
+        return fragment_frame_validation_error::size_mismatch;
+    }
+    return fragment_frame_validation_error::none;
+}
+
+enum class fragment_metadata_validation_error : std::uint8_t {
+    none = 0u,
+    type_mismatch,
+    logical_length_mismatch,
+    padding_mismatch,
+};
+
+[[nodiscard]] constexpr fragment_metadata_validation_error
+validate_fragment_metadata(
+    std::uint8_t actual_alphabet,
+    std::uint8_t actual_width,
+    std::uint64_t actual_bp_size,
+    std::uint64_t actual_padding,
+    std::uint8_t expected_alphabet,
+    std::uint8_t expected_width,
+    std::uint64_t expected_bp_size,
+    std::uint64_t expected_padding) noexcept
+{
+    if (actual_alphabet != expected_alphabet
+        || actual_width != expected_width) {
+        return fragment_metadata_validation_error::type_mismatch;
+    }
+    if (actual_bp_size != expected_bp_size) {
+        return fragment_metadata_validation_error::logical_length_mismatch;
+    }
+    if (actual_padding != expected_padding) {
+        return fragment_metadata_validation_error::padding_mismatch;
+    }
+    return fragment_metadata_validation_error::none;
+}
+
 // ---------------------------------------------------------------------------
 // §4 — bucket cut-points. One bucket for L in [0, min_bits], one bucket each
 // for L in {min_bits+1 .. max_bits-1}, one bucket for L in [max_bits,

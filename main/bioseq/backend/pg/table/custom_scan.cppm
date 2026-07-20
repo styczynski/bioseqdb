@@ -345,9 +345,9 @@ constexpr int kBioseqBatchJoinPrivateFields = 17;
  * child is a reconstructed core INNER join with the exact mmsearch
  * RestrictInfo removed, wrapped in BioseqSliceProject to compute the two
  * per-row operand Datums. */
-constexpr int kBioseqPerRowJoinPlanVersion = 1;
+constexpr int kBioseqPerRowJoinPlanVersion = 2;
 constexpr int kBioseqPerRowJoinPathPrivateFields = 13;
-constexpr int kBioseqPerRowJoinPrivateFields = 14;
+constexpr int kBioseqPerRowJoinPrivateFields = 16;
 
 enum BioseqPerRowJoinPrivateIndex : int {
 	kPerRowVersion = 0,
@@ -358,12 +358,14 @@ enum BioseqPerRowJoinPrivateIndex : int {
 	kPerRowChildColumnCount = 5,
 	kPerRowAlphabetCode = 6,
 	kPerRowStorageUnitByteWidth = 7,
-	kPerRowPlaceholderSites = 8,
-	kPerRowMmsearchExpr = 9,
-	kPerRowIndexReadRequirement = 10,
-	kPerRowHonestStartupCost = 11,
-	kPerRowHonestTotalCost = 12,
-	kPerRowIncumbentCostFloor = 13,
+	kPerRowTargetTypmodErasedProof = 8,
+	kPerRowQueryTypmodErasedProof = 9,
+	kPerRowPlaceholderSites = 10,
+	kPerRowMmsearchExpr = 11,
+	kPerRowIndexReadRequirement = 12,
+	kPerRowHonestStartupCost = 13,
+	kPerRowHonestTotalCost = 14,
+	kPerRowIncumbentCostFloor = 15,
 };
 
 enum BioseqBatchJoinPrivateIndex : int {
@@ -2673,18 +2675,25 @@ struct SliceProjectIrBuilder {
 				!= dependencies.end()) return;
 		dependencies.push_back(dependency);
 	};
-	if (IsA(expression, SubscriptingRef)) {
+	/* Opaque source expressions are PostgreSQL-evaluated leaves in this
+	 * descriptive graph.  Only recognized lazy operations expose producer
+	 * dependencies; otherwise a sequence-returning FuncExpr would be encoded
+	 * as source_expr while still carrying children, contradicting the codec. */
+	if (operation.has_value() && IsA(expression, SubscriptingRef)) {
 		auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
 		add_dependency(reinterpret_cast<Node*>(subscript->refexpr), false);
-	} else if (FuncExpr* function = pg_node_try_as<FuncExpr>(expression)) {
-		const bool all_arguments_are_values = operation.has_value()
-			&& (*operation == SliceProjectOpcode::concat
-				|| *operation == SliceProjectOpcode::bridge);
-		for (Node* argument : PList<Node>(function->args)) {
-			if (exprType(argument) == builder.oids->bioseq_seq_type_oid
-				|| slice_project_node_opcode(argument, *builder.oids).has_value()
-				|| all_arguments_are_values) {
-				add_dependency(argument, all_arguments_are_values);
+	} else if (operation.has_value()) {
+		if (FuncExpr* function = pg_node_try_as<FuncExpr>(expression)) {
+			const bool all_arguments_are_values = *operation
+				== SliceProjectOpcode::concat
+				|| *operation == SliceProjectOpcode::bridge;
+			for (Node* argument : PList<Node>(function->args)) {
+				if (exprType(argument) == builder.oids->bioseq_seq_type_oid
+					|| slice_project_node_opcode(
+						argument, *builder.oids).has_value()
+					|| all_arguments_are_values) {
+					add_dependency(argument, all_arguments_are_values);
+				}
 			}
 		}
 	}
@@ -5354,6 +5363,132 @@ bioseq_slice_project_exec_methods() noexcept {
 	return custom->methods == &bioseq_slice_project_path_methods();
 }
 
+/* Planner Path nodes are deliberately marked `no_copy_equal` by PostgreSQL.
+ * `copyObject(path)` therefore reaches copyObjectImpl's "unrecognized node
+ * type" branch for every Path-family tag.  Clone exactly the mutable path
+ * spine that slice_project_tag_owned_path_tree() descends, while sharing
+ * immutable leaf paths and expression metadata.  This keeps Path traversal
+ * structural and reserves PostgreSQL expression walkers/copying for actual
+ * Expr/List nodes. */
+[[nodiscard]] static Path* slice_project_clone_mutable_path_spine(Path* path);
+
+[[nodiscard]] static List* slice_project_clone_path_list(List* paths) {
+	List* clones = NIL;
+	for (Path* child : PList<Path>(paths)) {
+		clones = lappend(
+			clones, slice_project_clone_mutable_path_spine(child));
+	}
+	return clones;
+}
+
+[[nodiscard]] static Path* slice_project_clone_mutable_path_spine(Path* path) {
+	if (path == nullptr) return nullptr;
+	if (IsA(path, NestPath)) {
+		auto* clone = makeNode(NestPath);
+		*clone = *reinterpret_cast<NestPath*>(path);
+		clone->jpath.outerjoinpath = slice_project_clone_mutable_path_spine(
+			clone->jpath.outerjoinpath);
+		clone->jpath.innerjoinpath = slice_project_clone_mutable_path_spine(
+			clone->jpath.innerjoinpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, MergePath)) {
+		auto* clone = makeNode(MergePath);
+		*clone = *reinterpret_cast<MergePath*>(path);
+		clone->jpath.outerjoinpath = slice_project_clone_mutable_path_spine(
+			clone->jpath.outerjoinpath);
+		clone->jpath.innerjoinpath = slice_project_clone_mutable_path_spine(
+			clone->jpath.innerjoinpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, HashPath)) {
+		auto* clone = makeNode(HashPath);
+		*clone = *reinterpret_cast<HashPath*>(path);
+		clone->jpath.outerjoinpath = slice_project_clone_mutable_path_spine(
+			clone->jpath.outerjoinpath);
+		clone->jpath.innerjoinpath = slice_project_clone_mutable_path_spine(
+			clone->jpath.innerjoinpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, CustomPath)) {
+		auto* clone = makeNode(CustomPath);
+		*clone = *reinterpret_cast<CustomPath*>(path);
+		clone->custom_paths = slice_project_clone_path_list(clone->custom_paths);
+		clone->custom_restrictinfo = list_copy(clone->custom_restrictinfo);
+		clone->custom_private = list_copy(clone->custom_private);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, ProjectionPath)) {
+		auto* clone = makeNode(ProjectionPath);
+		*clone = *reinterpret_cast<ProjectionPath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, ProjectSetPath)) {
+		auto* clone = makeNode(ProjectSetPath);
+		*clone = *reinterpret_cast<ProjectSetPath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, IncrementalSortPath)) {
+		auto* clone = makeNode(IncrementalSortPath);
+		*clone = *reinterpret_cast<IncrementalSortPath*>(path);
+		clone->spath.subpath = slice_project_clone_mutable_path_spine(
+			clone->spath.subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, SortPath)) {
+		auto* clone = makeNode(SortPath);
+		*clone = *reinterpret_cast<SortPath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, MaterialPath)) {
+		auto* clone = makeNode(MaterialPath);
+		*clone = *reinterpret_cast<MaterialPath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, MemoizePath)) {
+		auto* clone = makeNode(MemoizePath);
+		*clone = *reinterpret_cast<MemoizePath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, UniquePath)) {
+		auto* clone = makeNode(UniquePath);
+		*clone = *reinterpret_cast<UniquePath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, GatherPath)) {
+		auto* clone = makeNode(GatherPath);
+		*clone = *reinterpret_cast<GatherPath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, GatherMergePath)) {
+		auto* clone = makeNode(GatherMergePath);
+		*clone = *reinterpret_cast<GatherMergePath*>(path);
+		clone->subpath = slice_project_clone_mutable_path_spine(clone->subpath);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, AppendPath)) {
+		auto* clone = makeNode(AppendPath);
+		*clone = *reinterpret_cast<AppendPath*>(path);
+		clone->subpaths = slice_project_clone_path_list(clone->subpaths);
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, MergeAppendPath)) {
+		auto* clone = makeNode(MergeAppendPath);
+		*clone = *reinterpret_cast<MergeAppendPath*>(path);
+		clone->subpaths = slice_project_clone_path_list(clone->subpaths);
+		return reinterpret_cast<Path*>(clone);
+	}
+	/* The tagger never mutates an unrecognised leaf/container. */
+	return path;
+}
+
 [[nodiscard]] static Path* slice_project_tag_source_child(
 		Path* path, PathTarget* target,
 		SliceProjectIrBuilder const& builder) {
@@ -5552,7 +5687,7 @@ bioseq_slice_project_exec_methods() noexcept {
 	 * truthfully means source ownership without boundary attribution. */
 	builder.source_bindings.emplace_back(
 		reinterpret_cast<Node*>(copyObject(sort_expression)), 0u);
-	Path* private_path = reinterpret_cast<Path*>(copyObject(path));
+	Path* private_path = slice_project_clone_mutable_path_spine(path);
 	bool tagged = false;
 	private_path = slice_project_tag_owned_path_tree(
 		private_path, builder, tagged);
@@ -5856,7 +5991,7 @@ static void BioseqSliceProject_CreateUpperPaths(
 		 * below them before installing hidden leaf outputs through core's
 		 * projection constructor.  The final target remains wrapper-only. */
 		bool tagged_source = false;
-		Path* private_child = reinterpret_cast<Path*>(copyObject(child));
+		Path* private_child = slice_project_clone_mutable_path_spine(child);
 		private_child = slice_project_tag_owned_path_tree(
 			private_child, builder, tagged_source);
 		if (!tagged_source) return;
@@ -6196,6 +6331,105 @@ struct batch_join_target_projection_visitor {
 			decoded.storage_unit_byte_width);
 	return alphabet_supported && width_supported
 		&& decoded.encode() == typmod;
+}
+
+struct PerRowSequenceTypmodProof {
+	int32 typmod = -1;
+	bool descriptor_erased = false;
+};
+
+[[nodiscard]] static bool per_row_function_signature_is_exact(
+		FuncExpr* function) {
+	if (function == nullptr || function->funcretset
+		|| OidIsValid(function->funcvariadic)) return false;
+	Oid* catalog_argument_types = nullptr;
+	int catalog_argument_count = 0;
+	const Oid catalog_result_type = get_func_signature(
+		function->funcid, &catalog_argument_types, &catalog_argument_count);
+	if (catalog_result_type != function->funcresulttype
+		|| catalog_argument_count != list_length(function->args)) return false;
+	int argument_index = 0;
+	for (Node* argument : PList<Node>(function->args)) {
+		if (argument == nullptr
+			|| exprType(argument)
+				!= catalog_argument_types[argument_index++]) return false;
+	}
+	return true;
+}
+
+/* PostgreSQL does not propagate typmods through ordinary FuncExpr results,
+ * even when the exact catalog function is sequence-type preserving.  Admit an
+ * erased descriptor only after recursively proving one identical concrete
+ * typmod at every sequence-valued leaf.  Non-sequence literal/array operands
+ * are neutral only for the exact registered concat overloads. */
+[[nodiscard]] static std::optional<PerRowSequenceTypmodProof>
+per_row_sequence_typmod_proof(
+		Node* expression, BioseqStubOids const& oids) {
+	check_stack_depth();
+	if (expression == nullptr
+		|| exprType(expression) != oids.bioseq_seq_type_oid) {
+		return std::nullopt;
+	}
+	const int32 descriptor_typmod = exprTypmod(expression);
+	auto finish = [descriptor_typmod](const int32 proven_typmod)
+			-> std::optional<PerRowSequenceTypmodProof> {
+		if (!batch_join_typmod_is_supported(proven_typmod)
+			|| (descriptor_typmod != -1
+				&& descriptor_typmod != proven_typmod)) {
+			return std::nullopt;
+		}
+		return PerRowSequenceTypmodProof{
+			.typmod = proven_typmod,
+			.descriptor_erased = descriptor_typmod == -1};
+	};
+	if (IsA(expression, RelabelType)) {
+		auto* relabel = reinterpret_cast<RelabelType*>(expression);
+		if (relabel->resulttype != oids.bioseq_seq_type_oid
+			|| relabel->arg == nullptr) return std::nullopt;
+		auto child = per_row_sequence_typmod_proof(
+			reinterpret_cast<Node*>(relabel->arg), oids);
+		return child.has_value() ? finish(child->typmod) : std::nullopt;
+	}
+	const auto operation = slice_project_node_opcode(expression, oids);
+	if (!operation.has_value()) {
+		return batch_join_typmod_is_supported(descriptor_typmod)
+			? finish(descriptor_typmod) : std::nullopt;
+	}
+	if (*operation == SliceProjectOpcode::slice) {
+		auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
+		if (subscript->refcontainertype != oids.bioseq_seq_type_oid
+			|| subscript->refrestype != oids.bioseq_seq_type_oid
+			|| subscript->reflowerindexpr == NIL
+			|| subscript->refexpr == nullptr) return std::nullopt;
+		auto source = per_row_sequence_typmod_proof(
+			reinterpret_cast<Node*>(subscript->refexpr), oids);
+		return source.has_value() ? finish(source->typmod) : std::nullopt;
+	}
+	FuncExpr* function = pg_node_try_as<FuncExpr>(expression);
+	if (function == nullptr
+		|| function->funcresulttype != oids.bioseq_seq_type_oid
+		|| !per_row_function_signature_is_exact(function)) {
+		return std::nullopt;
+	}
+	if (*operation == SliceProjectOpcode::reverse
+		|| *operation == SliceProjectOpcode::reverse_complement) {
+		if (list_length(function->args) != 1) return std::nullopt;
+		auto source = per_row_sequence_typmod_proof(
+			reinterpret_cast<Node*>(linitial(function->args)), oids);
+		return source.has_value() ? finish(source->typmod) : std::nullopt;
+	}
+	if (*operation != SliceProjectOpcode::concat) return std::nullopt;
+	std::optional<int32> common_typmod;
+	for (Node* argument : PList<Node>(function->args)) {
+		if (exprType(argument) != oids.bioseq_seq_type_oid) continue;
+		auto child = per_row_sequence_typmod_proof(argument, oids);
+		if (!child.has_value()
+			|| (common_typmod.has_value()
+				&& *common_typmod != child->typmod)) return std::nullopt;
+		common_typmod = child->typmod;
+	}
+	return common_typmod.has_value()
+		? finish(*common_typmod) : std::nullopt;
 }
 
 /* Reject a Gather hidden below the common unary planner wrappers.  Looking
@@ -6900,13 +7134,12 @@ struct per_row_operand_source_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
 			PerRowOperandSourceProof& proof) const {
-		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
-			if (placeholder->phlevelsup != 0
-				|| !bms_is_empty(placeholder->phnullingrels)) {
-				proof.invalid = true;
-				return pg_walk_step::stop;
-			}
-			return pg_walk_step::descend;
+		if (node.try_as<PlaceHolderVar>() != nullptr) {
+			/* Moving an operand PHV to the post-join recipe can change its
+			 * evaluation/nulling frontier.  No sequence helper requires that
+			 * representation, so decline instead of approximating semantics. */
+			proof.invalid = true;
+			return pg_walk_step::stop;
 		}
 		Var* var = node.try_as<Var>();
 		if (var == nullptr) return pg_walk_step::descend;
@@ -6932,6 +7165,52 @@ struct per_row_operand_source_visitor {
 		return pg_walk_step::skip_subtree;
 	}
 };
+
+struct PerRowOutputSemanticProof {
+	Index target_relid = 0;
+	bool invalid = false;
+};
+
+struct per_row_output_semantic_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			PerRowOutputSemanticProof& proof) const noexcept {
+		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+			/* The exact helper PHV is deliberately evaluated by the BatchJoin
+			 * owner after MatchResult production.  Every generic PHV retains a
+			 * planner-selected frontier which this transformation cannot move. */
+			if (!batch_join_is_exact_helper_phv(
+					placeholder, proof.target_relid)) proof.invalid = true;
+			return proof.invalid
+				? pg_walk_step::stop : pg_walk_step::skip_subtree;
+		}
+		if (Var* var = node.try_as<Var>()) {
+			if (var->varno == 0 || var->varattno <= 0
+				|| var->varlevelsup != 0
+				|| !bms_is_empty(var->varnullingrels)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::skip_subtree;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+[[nodiscard]] static bool per_row_output_semantics_are_supported(
+		PathTarget* target, const Index target_relid) {
+	if (target == nullptr || target_relid == 0) return false;
+	/* Volatile final-output expressions stay in the owner PathTarget and are
+	 * evaluated once by core ProjectionInfo for each emitted match.  This proof
+	 * governs only nodes that would otherwise lose a planner frontier. */
+	PerRowOutputSemanticProof proof{target_relid, false};
+	per_row_output_semantic_visitor visitor;
+	for (Node* expression : PList<Node>(target->exprs)) {
+		pg_walk_expression_including_root(expression, proof, visitor);
+		if (proof.invalid) return false;
+	}
+	return true;
+}
 
 [[nodiscard]] static bool per_row_collect_operand_sources(
 		Node* expression, RelOptInfo* joinrel,
@@ -7200,11 +7479,66 @@ static void per_row_audit_mmsearch_plan(
 	}
 }
 
+[[nodiscard]] static Path* per_row_unparameterized_path_without_owned_qual(
+		RelOptInfo* rel, RestrictInfo* owned) noexcept {
+	if (rel == nullptr || owned == nullptr
+		|| !bms_is_empty(rel->lateral_relids)) return nullptr;
+	Path* best = nullptr;
+	for (Path* candidate : PList<Path>(rel->pathlist)) {
+		if (candidate == nullptr || candidate->parent != rel
+			|| candidate->param_info != nullptr
+			|| !bms_is_empty(PATH_REQ_OUTER(candidate))
+			|| batch_join_path_contains_parallel_execution(candidate)
+			|| per_row_descendant_owns_restriction(candidate, owned)
+			|| !std::isfinite(candidate->total_cost)
+			|| candidate->total_cost < 0) continue;
+		if (best == nullptr || candidate->total_cost < best->total_cost) {
+			best = candidate;
+		}
+	}
+	return best;
+}
+
+/* A reconstructed join may expose raw sequence Vars that its incumbent child
+ * PathTargets did not need after core pushed the original join predicate.
+ * Add only positive, level-zero raw Vars owned by this child's relids.  The
+ * projection is a new Path node; shared child paths and PHV/whole-row
+ * semantics are never mutated or synthesized. */
+[[nodiscard]] static Path* per_row_project_required_child_vars(
+		PlannerInfo* root, Path* child, List* required_vars) {
+	if (root == nullptr || child == nullptr || child->parent == nullptr
+		|| child->pathtarget == nullptr || required_vars == nullptr) {
+		return nullptr;
+	}
+	PathTarget* projected = copy_pathtarget(child->pathtarget);
+	bool added = false;
+	for (Node* expression : PList<Node>(required_vars)) {
+		Var* var = pg_node_try_as<Var>(expression);
+		if (var == nullptr || var->varno == 0 || var->varattno <= 0
+			|| var->varlevelsup != 0
+			|| !bms_is_empty(var->varnullingrels)) return nullptr;
+		if (!bms_is_member(
+				static_cast<int>(var->varno), child->parent->relids)) continue;
+		if (!path_target_contains_expression(
+				projected, reinterpret_cast<Expr*>(var))) {
+			add_column_to_pathtarget(
+				projected, reinterpret_cast<Expr*>(copyObject(var)), 0);
+			added = true;
+		}
+	}
+	if (!added) return child;
+	set_pathtarget_cost_width(root, projected);
+	return reinterpret_cast<Path*>(create_projection_path(
+		root, child->parent, child, projected));
+}
+
 [[nodiscard]] static Path* per_row_reconstruct_inner_join_path(
 		PlannerInfo* root, RelOptInfo* joinrel, Path* incumbent,
-		RestrictInfo* owned, JoinPathExtraData const& original_extra) {
+		RestrictInfo* owned, JoinPathExtraData const& original_extra,
+		PathTarget* required_target, List* required_vars) {
 	if (root == nullptr || joinrel == nullptr || incumbent == nullptr
-		|| owned == nullptr) return nullptr;
+		|| owned == nullptr || required_target == nullptr
+		|| required_vars == nullptr) return nullptr;
 	JoinPath* join = nullptr;
 	if (IsA(incumbent, NestPath)) {
 		join = &reinterpret_cast<NestPath*>(incumbent)->jpath;
@@ -7218,39 +7552,74 @@ static void per_row_audit_mmsearch_plan(
 	if (join->jointype != JOIN_INNER
 		|| !list_member_ptr(join->joinrestrictinfo, owned)
 		|| join->outerjoinpath == nullptr || join->innerjoinpath == nullptr
-		|| per_row_descendant_owns_restriction(join->outerjoinpath, owned)
-		|| per_row_descendant_owns_restriction(join->innerjoinpath, owned)
 		|| batch_join_path_contains_parallel_execution(incumbent)) {
 		return nullptr;
 	}
+	Path* outer_path = join->outerjoinpath;
+	Path* inner_path = join->innerjoinpath;
+	const bool outer_owns = per_row_descendant_owns_restriction(
+		outer_path, owned);
+	const bool inner_owns = per_row_descendant_owns_restriction(
+		inner_path, owned);
+	if (outer_owns || inner_owns) {
+		/* Only a nested loop can push the exact join RestrictInfo into a
+		 * parameterized child.  Rebuild that side from a truly unparameterized
+		 * legal path; merge/hash descendants retaining it are contradictory. */
+		if (!IsA(incumbent, NestPath)) return nullptr;
+		if (outer_owns) outer_path =
+			per_row_unparameterized_path_without_owned_qual(
+				join->outerjoinpath->parent, owned);
+		if (inner_owns) inner_path =
+			per_row_unparameterized_path_without_owned_qual(
+				join->innerjoinpath->parent, owned);
+		if (outer_path == nullptr || inner_path == nullptr) return nullptr;
+		if (outer_owns && !pathkeys_contained_in(
+				join->path.pathkeys, outer_path->pathkeys)) return nullptr;
+	}
+	outer_path = per_row_project_required_child_vars(
+		root, outer_path, required_vars);
+	inner_path = per_row_project_required_child_vars(
+		root, inner_path, required_vars);
+	if (outer_path == nullptr || inner_path == nullptr
+		|| per_row_descendant_owns_restriction(outer_path, owned)
+		|| per_row_descendant_owns_restriction(inner_path, owned)) return nullptr;
 	List* filtered_restrictions = per_row_without_restriction(
 		join->joinrestrictinfo, owned);
 	JoinPathExtraData filtered_extra = original_extra;
+	filtered_extra.inner_unique = join->inner_unique;
 	filtered_extra.restrictlist = per_row_without_restriction(
 		original_extra.restrictlist, owned);
 	filtered_extra.mergeclause_list = per_row_without_restriction(
 		original_extra.mergeclause_list, owned);
-	Relids required_outer = PATH_REQ_OUTER(&join->path);
 	JoinCostWorkspace workspace{};
 	if (IsA(incumbent, NestPath)) {
+		Relids required_outer = calc_nestloop_required_outer(
+			outer_path->parent->relids, PATH_REQ_OUTER(outer_path),
+			inner_path->parent->relids, PATH_REQ_OUTER(inner_path));
+		if (!bms_equal(required_outer, PATH_REQ_OUTER(&join->path))) {
+			return nullptr;
+		}
 		initial_cost_nestloop(root, &workspace, JOIN_INNER,
-			join->outerjoinpath, join->innerjoinpath, &filtered_extra);
+			outer_path, inner_path, &filtered_extra);
 		return reinterpret_cast<Path*>(create_nestloop_path(
 			root, joinrel, JOIN_INNER, &workspace, &filtered_extra,
-			join->outerjoinpath, join->innerjoinpath,
+			outer_path, inner_path,
 			filtered_restrictions, join->path.pathkeys, required_outer));
 	}
+	Relids required_outer = calc_non_nestloop_required_outer(
+		outer_path, inner_path);
+	if (!bms_equal(required_outer, PATH_REQ_OUTER(&join->path))) return nullptr;
 	if (IsA(incumbent, MergePath)) {
 		auto* merge = reinterpret_cast<MergePath*>(incumbent);
 		List* mergeclauses = per_row_without_restriction(
 			merge->path_mergeclauses, owned);
 		if (mergeclauses == NIL) return nullptr;
 		initial_cost_mergejoin(root, &workspace, JOIN_INNER,
-			mergeclauses, join->outerjoinpath, join->innerjoinpath,
+			mergeclauses, outer_path, inner_path,
 			merge->outersortkeys, merge->innersortkeys, &filtered_extra);
 		return reinterpret_cast<Path*>(create_mergejoin_path(
 			root, joinrel, JOIN_INNER, &workspace, &filtered_extra,
-			join->outerjoinpath, join->innerjoinpath,
+			outer_path, inner_path,
 			filtered_restrictions, join->path.pathkeys, required_outer,
 			mergeclauses, merge->outersortkeys, merge->innersortkeys));
 	}
@@ -7258,13 +7627,13 @@ static void per_row_audit_mmsearch_plan(
 	List* hashclauses = per_row_without_restriction(
 		hash->path_hashclauses, owned);
 	if (hashclauses == NIL) return nullptr;
-	const bool parallel_hash = join->innerjoinpath->parallel_aware;
+	const bool parallel_hash = inner_path->parallel_aware;
 	initial_cost_hashjoin(root, &workspace, JOIN_INNER,
-		hashclauses, join->outerjoinpath, join->innerjoinpath,
+		hashclauses, outer_path, inner_path,
 		&filtered_extra, parallel_hash);
 	return reinterpret_cast<Path*>(create_hashjoin_path(
 		root, joinrel, JOIN_INNER, &workspace, &filtered_extra,
-		join->outerjoinpath, join->innerjoinpath, parallel_hash,
+		outer_path, inner_path, parallel_hash,
 		filtered_restrictions, required_outer, hashclauses));
 }
 
@@ -7285,10 +7654,15 @@ static void per_row_audit_mmsearch_plan(
 	const bool transformed_query =
 		bioseq_expr_uses_lazy_sequence_projection(query_expression);
 	if (!transformed_target && !transformed_query) return false;
+	const auto target_typmod_proof = per_row_sequence_typmod_proof(
+		target_expression, oids);
+	const auto query_typmod_proof = per_row_sequence_typmod_proof(
+		query_expression, oids);
 	if (exprType(target_expression) != oids.bioseq_seq_type_oid
 		|| exprType(query_expression) != oids.bioseq_seq_type_oid
-		|| !batch_join_typmod_is_supported(exprTypmod(target_expression))
-		|| exprTypmod(target_expression) != exprTypmod(query_expression)
+		|| !target_typmod_proof.has_value()
+		|| !query_typmod_proof.has_value()
+		|| target_typmod_proof->typmod != query_typmod_proof->typmod
 		|| exprCollation(target_expression) != exprCollation(query_expression)
 		|| requirement
 			== bioseq::indexing::IndexReadRequirement::require_compatible_persisted) {
@@ -7315,6 +7689,8 @@ static void per_row_audit_mmsearch_plan(
 		}
 	}
 	if (target_source == nullptr || target_rte == nullptr) return false;
+	if (!per_row_output_semantics_are_supported(
+			joinrel->reltarget, target_source->varno)) return false;
 	for (Var* source : PList<Var>(query_sources.sequence_vars)) {
 		if (source->varno > static_cast<Index>(
 				list_length(root->parse->rtable))) return false;
@@ -7335,6 +7711,14 @@ static void per_row_audit_mmsearch_plan(
 		pull_var_clause(target_expression, pull_flags));
 	required_vars = list_concat(required_vars,
 		pull_var_clause(query_expression, pull_flags));
+	for (Node* required : PList<Node>(required_vars)) {
+		Var* var = pg_node_try_as<Var>(required);
+		if (var == nullptr || var->varno == 0 || var->varattno <= 0
+			|| var->varlevelsup != 0
+			|| !bms_is_empty(var->varnullingrels)
+			|| !bms_is_member(
+				static_cast<int>(var->varno), joinrel->relids)) return false;
+	}
 	add_new_columns_to_pathtarget(required_target, required_vars);
 	set_pathtarget_cost_width(root, required_target);
 
@@ -7384,7 +7768,8 @@ static void per_row_audit_mmsearch_plan(
 	}
 	for (Path* incumbent : PList<Path>(incumbent_paths)) {
 		Path* reconstructed = per_row_reconstruct_inner_join_path(
-			root, joinrel, incumbent, restriction, *extra);
+			root, joinrel, incumbent, restriction, *extra,
+			required_target, required_vars);
 		if (reconstructed == nullptr) continue;
 		/* Re-run the exact pointer audit on the finished reconstructed path,
 		 * before copyObject can turn a leaked RestrictInfo into a merely-equal
@@ -7395,7 +7780,7 @@ static void per_row_audit_mmsearch_plan(
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("BioseqPerRowMmsearch reconstructed path retained its owned RestrictInfo")));
 		}
-		Path* private_join = reinterpret_cast<Path*>(copyObject(reconstructed));
+		Path* private_join = slice_project_clone_mutable_path_spine(reconstructed);
 		private_join->pathtarget = copy_pathtarget(required_target);
 		bool tagged_source = false;
 		private_join = slice_project_tag_owned_path_tree(
@@ -7470,7 +7855,7 @@ static void per_row_audit_mmsearch_plan(
 		owner->custom_paths = list_make1(recipe_path);
 		owner->custom_restrictinfo = list_make1(restriction);
 		const auto typmod = compact_sequence_stdc_type_params::decode(
-			exprTypmod(target_expression));
+			target_typmod_proof->typmod);
 		owner->custom_private = list_make5(
 			makeInteger(kBioseqPerRowJoinPlanVersion),
 			makeInteger(static_cast<int>(target_rte->relid)),
@@ -7781,8 +8166,8 @@ BioseqBatchJoinSetJoinPathlistHook(
 	}
 	locator_path->custom_private = static_cast<List*>(
 		copyObject(target_path->custom_private));
-	locator_path->custom_paths = static_cast<List*>(
-		copyObject(target_path->custom_paths));
+	locator_path->custom_paths = slice_project_clone_path_list(
+		target_path->custom_paths);
 	locator_path->custom_restrictinfo = NIL;
 	if (!path_target_contains_expression(
 			locator_path->path.pathtarget,
@@ -10410,14 +10795,26 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		reinterpret_cast<Node*>(list_nth(best_path->custom_private, 12)),
 		"incumbent_cost_floor");
 	const BioseqStubOids& oids = get_cached_stub_oids();
+	const auto target_typmod_proof = per_row_sequence_typmod_proof(
+		target_expression, oids);
+	const auto query_typmod_proof = per_row_sequence_typmod_proof(
+		query_expression, oids);
+	const int32 expected_typmod = compact_sequence_stdc_type_params{
+		static_cast<std::uint8_t>(alphabet_code),
+		static_cast<std::uint8_t>(storage_unit_byte_width)}.encode();
 	if (version != kBioseqPerRowJoinPlanVersion
 		|| !OidIsValid(target_relation_oid) || target_varno == 0
 		|| target_storage_attno <= 0 || target_expression == nullptr
 		|| query_expression == nullptr || mmsearch == nullptr
 		|| !is_mmsearch_funcid(mmsearch->funcid, oids)
+		|| count_mmsearch_occurrences(
+			reinterpret_cast<Node*>(mmsearch), oids) != 1u
 		|| exprType(target_expression) != oids.bioseq_seq_type_oid
 		|| exprType(query_expression) != oids.bioseq_seq_type_oid
-		|| exprTypmod(target_expression) != exprTypmod(query_expression)
+		|| !target_typmod_proof.has_value()
+		|| !query_typmod_proof.has_value()
+		|| target_typmod_proof->typmod != expected_typmod
+		|| query_typmod_proof->typmod != expected_typmod
 		|| alphabet_code < 0 || alphabet_code > UINT8_MAX
 		|| (storage_unit_byte_width != 1 && storage_unit_byte_width != 2
 			&& storage_unit_byte_width != 4
@@ -10491,19 +10888,12 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		output_tlist = lappend(output_tlist, copied);
 	}
 	validate_batch_join_setrefs_coverage(output_tlist, combined_tlist);
-	std::size_t owned_restrictions = 0u;
-	for (RestrictInfo* candidate : PList<RestrictInfo>(clauses)) {
-		if (candidate != nullptr && count_mmsearch_occurrences(
-				reinterpret_cast<Node*>(candidate->clause), oids) != 0u) {
-			++owned_restrictions;
-		}
-	}
-	if (owned_restrictions != 1u) {
-		ereport(ERROR,
-			(errcode(ERRCODE_DATA_CORRUPTED),
-			 errmsg("BioseqPerRowMmsearch owned restriction is invalid"),
-			 errdetail("owned_restrictions=%zu", owned_restrictions)));
-	}
+	/* custom_restrictinfo is planner-lifetime join metadata, primarily used by
+	 * core for pseudoconstant gating; PostgreSQL may legitimately pass NIL in
+	 * `clauses` here.  Executable ownership is instead proved by the validated
+	 * versioned mmsearch recipe above plus the recursive child-plan audit, which
+	 * rejects every surviving duplicate below this sole owner. */
+	(void)clauses;
 	auto* cscan = makeNode(CustomScan);
 	/* Post-join-recipe mode is a versioned BioseqBatchJoin shape.  Reuse the
 	 * registered scan/executor method set so copied, cached, and deserialized
@@ -10529,6 +10919,10 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		makeInteger(alphabet_code));
 	cscan->custom_private = lappend(cscan->custom_private,
 		makeInteger(storage_unit_byte_width));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(target_typmod_proof->descriptor_erased ? 1 : 0));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(query_typmod_proof->descriptor_erased ? 1 : 0));
 	cscan->custom_private = lappend(cscan->custom_private, placeholder_sites);
 	cscan->custom_private = lappend(
 		cscan->custom_private, copyObject(mmsearch));
@@ -13913,6 +14307,10 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	runtime->child_column_count = private_integer(kPerRowChildColumnCount);
 	const int raw_alphabet = private_integer(kPerRowAlphabetCode);
 	const int raw_width = private_integer(kPerRowStorageUnitByteWidth);
+	const int target_typmod_erased = private_integer(
+		kPerRowTargetTypmodErasedProof);
+	const int query_typmod_erased = private_integer(
+		kPerRowQueryTypmodErasedProof);
 	const int raw_requirement = private_integer(kPerRowIndexReadRequirement);
 	runtime->honest_startup_cost = batch_join_cost_from_node(
 		reinterpret_cast<Node*>(list_nth(cscan->custom_private,
@@ -13937,6 +14335,8 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		|| raw_alphabet < 0 || raw_alphabet > UINT8_MAX
 		|| (raw_width != 1 && raw_width != 2
 			&& raw_width != 4 && raw_width != 8)
+		|| (target_typmod_erased != 0 && target_typmod_erased != 1)
+		|| (query_typmod_erased != 0 && query_typmod_erased != 1)
 		|| raw_requirement != static_cast<int>(
 			bioseq::indexing::IndexReadRequirement::require_absent)
 		|| !sites_shape_valid || mmsearch == nullptr) {
@@ -13960,12 +14360,17 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	}
 	const int32 expected_typmod = compact_sequence_stdc_type_params{
 		runtime->alphabet_code, runtime->storage_unit_byte_width}.encode();
-	for (AttrNumber resno : {runtime->target_slot_resno,
-			runtime->query_slot_resno}) {
+	const std::array<AttrNumber, 2> operand_resnos{
+		runtime->target_slot_resno, runtime->query_slot_resno};
+	const std::array<int, 2> erased_proofs{
+		target_typmod_erased, query_typmod_erased};
+	for (std::size_t index = 0u; index < operand_resnos.size(); ++index) {
+		const AttrNumber resno = operand_resnos[index];
 		Form_pg_attribute attribute = TupleDescAttr(scan_desc, resno - 1);
 		if (attribute->atttypid
 				!= get_cached_stub_oids().bioseq_seq_type_oid
-			|| attribute->atttypmod != expected_typmod) {
+			|| attribute->atttypmod
+				!= (erased_proofs[index] != 0 ? -1 : expected_typmod)) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("BioseqPerRowMmsearch operand type is invalid")));

@@ -1827,6 +1827,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				DatumGetPointer(values[idx]));
 			if (!bioseq::storage::is_locator_stub(hdr)) continue;
 			const auto loc = bioseq::storage::decode_locator_from_stub(hdr);
+			bioseq::storage::validate_locator_flat_materialization_length(loc);
 			pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
 				OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
 				OldHeap->rd_locator.relNumber, attno, loc,
@@ -2839,14 +2840,33 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		Datum indexValues[INDEX_MAX_KEYS];
 		bool indexNulls[INDEX_MAX_KEYS];
-		FormIndexDatum(indexInfo, slot, estate, indexValues, indexNulls);
-
 		ItemPointerData itemPointerData = slot->tts_tid;
 
 		/* currently, columnar tables can't have dead tuples */
 		bool tupleIsAlive = true;
-		indexCallback(indexRelation, &itemPointerData, indexValues, indexNulls,
-					  tupleIsAlive, indexCallbackState);
+		const auto previous_scope = exchange_slice_materialization_scope({
+			.attachment = nullptr,
+			.boundary_id = 0u,
+			.producer_value_id = 0u,
+			.mechanism = materialization_mechanism::packed_full,
+			.reason = materialization_reason::index_tuple,
+			.local_sink = nullptr,
+		});
+		PG_TRY();
+		{
+			FormIndexDatum(
+				indexInfo, slot, estate, indexValues, indexNulls);
+			indexCallback(
+				indexRelation, &itemPointerData, indexValues, indexNulls,
+				tupleIsAlive, indexCallbackState);
+			restore_slice_materialization_scope(previous_scope);
+		}
+		PG_CATCH();
+		{
+			restore_slice_materialization_scope(previous_scope);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		reltuples++;
 	}

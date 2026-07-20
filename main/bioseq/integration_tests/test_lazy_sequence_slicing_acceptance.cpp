@@ -11,7 +11,9 @@
 #include <fstream>
 #include <iterator>
 #include <libpq-fe.h>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 import bioseq.integration_tests.common;
@@ -44,6 +46,50 @@ private:
     const char* drop_sql_ = nullptr;
     bool active_ = true;
 };
+
+struct prepared_letter_result {
+    ExecStatusType status = PGRES_FATAL_ERROR;
+    std::string sqlstate;
+    std::optional<std::string> value;
+};
+
+[[nodiscard]] prepared_letter_result execute_prepared_letter_parameter(
+    PGconn* connection,
+    const char* name,
+    const char* sql,
+    Oid letter_oid,
+    const char* value,
+    int length,
+    int format)
+{
+    PGresult* prepared = PQprepare(
+        connection, name, sql, 1, &letter_oid);
+    REQUIRE(prepared != nullptr);
+    REQUIRE(PQresultStatus(prepared) == PGRES_COMMAND_OK);
+    PQclear(prepared);
+
+    const char* values[]{value};
+    const int lengths[]{length};
+    const int formats[]{format};
+    PGresult* executed = PQexecPrepared(
+        connection, name, 1, values, lengths, formats,
+        /* text results = */ 0);
+    REQUIRE(executed != nullptr);
+    prepared_letter_result result{
+        .status = PQresultStatus(executed),
+    };
+    if (const char* state = PQresultErrorField(
+            executed, PG_DIAG_SQLSTATE)) {
+        result.sqlstate = state;
+    }
+    if (result.status == PGRES_TUPLES_OK
+        && PQntuples(executed) == 1 && PQnfields(executed) >= 1
+        && !PQgetisnull(executed, 0, 0)) {
+        result.value = std::string(PQgetvalue(executed, 0, 0));
+    }
+    PQclear(executed);
+    return result;
+}
 
 void write_letter_binary_copy_variant(
     const std::string& source_path,
@@ -1224,7 +1270,7 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
     });
     exec_sql(ctx,
         "SET search_path TO pg_catalog, bioseq, public; "
-        "CREATE TABLE doc0377_total_key "
+        "CREATE TABLE public.doc0377_total_key "
         " (label text, value bioseq.seq); "
         "INSERT INTO doc0377_total_key VALUES "
         " ('ua','A'::bioseq.seq); "
@@ -1244,13 +1290,13 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
     exec_sql(ctx,
         "CREATE INDEX doc0377_total_key_btree_idx "
         " ON doc0377_total_key USING btree(value bioseq.seq_ops); "
-        "CREATE TABLE doc0377_total_key_hash AS "
+        "CREATE TABLE public.doc0377_total_key_hash AS "
         " TABLE doc0377_total_key; "
         "CREATE INDEX doc0377_total_key_hash_idx "
         " ON doc0377_total_key_hash USING hash(value bioseq.seq_hash_ops); "
-        "CREATE TABLE doc0377_total_key_join AS "
+        "CREATE TABLE public.doc0377_total_key_join AS "
         " TABLE doc0377_total_key; "
-        "CREATE TABLE doc0377_total_key_source "
+        "CREATE TABLE public.doc0377_total_key_source "
         " (id int, value bioseq.seq('dna4',8)) USING bioseq; "
         "INSERT INTO doc0377_total_key_source VALUES "
         " (1,'A'::bioseq.seq('dna4',8)), "
@@ -1336,6 +1382,157 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
     }
 }
 
+TEST_CASE("DOC0377 typmodless letter persistence validates runtime Params",
+          "[letter][typmod][param][copy][acceptance]") {
+    auto ctx = fresh_context({
+        "doc0377_letter_param_target",
+        "doc0377_letter_param_typed",
+        "doc0377_letter_param_ctas_text",
+        "doc0377_letter_param_ctas_binary",
+    });
+    exec_sql(ctx,
+        "CREATE TABLE public.doc0377_letter_param_target "
+        " (id int PRIMARY KEY, value bioseq.letter); "
+        "CREATE TABLE public.doc0377_letter_param_typed "
+        " (id int PRIMARY KEY, value bioseq.letter('dna4'));");
+
+    const Oid letter_oid = static_cast<Oid>(query_scalar_int(
+        ctx, "SELECT 'bioseq.letter'::regtype::oid;"));
+    constexpr std::array<char, 3> physical_a{char{1}, char{0}, char{0}};
+    constexpr std::array<char, 3> physical_c{char{1}, char{0}, char{1}};
+    constexpr char text_a[] = "A";
+
+    const auto ordinary_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_ordinary_text", "SELECT $1::text;",
+        letter_oid, text_a, 1, /* text = */ 0);
+    REQUIRE(ordinary_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(ordinary_text.sqlstate == "22023");
+
+    const auto ordinary_binary = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_ordinary_binary", "SELECT $1::text;",
+        letter_oid, physical_a.data(), physical_a.size(), /* binary = */ 1);
+    REQUIRE(ordinary_binary.status == PGRES_TUPLES_OK);
+    REQUIRE(ordinary_binary.value == "A");
+
+    const auto typmodless_text_insert = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_typmodless_insert",
+        "INSERT INTO public.doc0377_letter_param_target VALUES (1,$1) "
+        "RETURNING value::text;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(typmodless_text_insert.status == PGRES_FATAL_ERROR);
+    REQUIRE(typmodless_text_insert.sqlstate == "22023");
+    REQUIRE(query_scalar_int(
+        ctx, "SELECT count(*) FROM public.doc0377_letter_param_target;") == 0);
+
+    const auto typmodless_binary_insert = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_binary_insert",
+        "INSERT INTO public.doc0377_letter_param_target VALUES (1,$1) "
+        "RETURNING value::text;",
+        letter_oid, physical_a.data(), physical_a.size(), 1);
+    REQUIRE(typmodless_binary_insert.status == PGRES_TUPLES_OK);
+    REQUIRE(typmodless_binary_insert.value == "A");
+
+    const auto typed_text_insert = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_typed_insert",
+        "INSERT INTO public.doc0377_letter_param_typed VALUES (1,$1) "
+        "RETURNING value::text;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(typed_text_insert.status == PGRES_TUPLES_OK);
+    REQUIRE(typed_text_insert.value == "A");
+
+    const auto update_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_update_text",
+        "UPDATE public.doc0377_letter_param_target SET value=$1 "
+        "WHERE id=1 RETURNING value::text;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(update_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(update_text.sqlstate == "22023");
+
+    const auto update_binary = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_update_binary",
+        "UPDATE public.doc0377_letter_param_target SET value=$1 "
+        "WHERE id=1 RETURNING value::text;",
+        letter_oid, physical_c.data(), physical_c.size(), 1);
+    REQUIRE(update_binary.status == PGRES_TUPLES_OK);
+    REQUIRE(update_binary.value == "C");
+
+    const auto conflict_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_conflict_text",
+        "INSERT INTO public.doc0377_letter_param_target "
+        "VALUES (1,'A'::bioseq.letter('dna4')) "
+        "ON CONFLICT (id) DO UPDATE SET value=$1 "
+        "RETURNING value::text;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(conflict_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(conflict_text.sqlstate == "22023");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT value::text FROM public.doc0377_letter_param_target "
+        "WHERE id=1;") == "C");
+
+    const auto insert_select_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_insert_select_text",
+        "INSERT INTO public.doc0377_letter_param_target "
+        "SELECT 5,$1 RETURNING value::text;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(insert_select_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(insert_select_text.sqlstate == "22023");
+
+    const auto merge_update_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_merge_update_text",
+        "MERGE INTO public.doc0377_letter_param_target AS target "
+        "USING (VALUES (1)) AS source(id) ON target.id=source.id "
+        "WHEN MATCHED THEN UPDATE SET value=$1;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(merge_update_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(merge_update_text.sqlstate == "22023");
+
+    const auto merge_insert_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_merge_insert_text",
+        "MERGE INTO public.doc0377_letter_param_target AS target "
+        "USING (VALUES (6)) AS source(id) ON target.id=source.id "
+        "WHEN NOT MATCHED THEN INSERT (id,value) VALUES (source.id,$1);",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(merge_insert_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(merge_insert_text.sqlstate == "22023");
+
+    const auto ctas_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_ctas_text",
+        "CREATE TABLE public.doc0377_letter_param_ctas_text AS "
+        "SELECT $1 AS value;",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(ctas_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(ctas_text.sqlstate == "22023");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT to_regclass('public.doc0377_letter_param_ctas_text') "
+        "IS NULL;") == "t");
+
+    const auto ctas_binary = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_ctas_binary",
+        "CREATE TABLE public.doc0377_letter_param_ctas_binary AS "
+        "SELECT $1 AS value;",
+        letter_oid, physical_a.data(), physical_a.size(), 1);
+    REQUIRE(ctas_binary.status == PGRES_COMMAND_OK);
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT value::text FROM "
+        "public.doc0377_letter_param_ctas_binary;") == "A");
+    REQUIRE(query_scalar_int(
+        ctx,
+        "SELECT atttypmod FROM pg_catalog.pg_attribute "
+        "WHERE attrelid='public.doc0377_letter_param_ctas_binary'::regclass "
+        "AND attname='value';") == -1);
+
+    const auto explain_insert_text = execute_prepared_letter_parameter(
+        ctx.raw(), "doc0377_param_explain_insert_text",
+        "EXPLAIN (ANALYZE, COSTS OFF) "
+        "INSERT INTO public.doc0377_letter_param_target VALUES (7,$1);",
+        letter_oid, text_a, 1, 0);
+    REQUIRE(explain_insert_text.status == PGRES_FATAL_ERROR);
+    REQUIRE(explain_insert_text.sqlstate == "22023");
+}
+
 TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
           "[letter][array][btree][hash][acceptance]") {
     auto ctx = fresh_context({
@@ -1343,14 +1540,17 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         "doc0377_letters_b",
         "doc0377_letters_binary",
         "doc0377_letters_receive",
+        "doc0377_letters_text_copy",
+        "doc0377_letters_typmodless_copy",
         "doc0377_letters_dna5",
         "doc0377_letters_dna5_b",
         "doc0377_letters_dna5_binary",
         "doc0377_letters_dna5_receive",
+        "doc0377_letters_dna5_text",
     });
     exec_sql(ctx,
         "SET search_path TO pg_catalog, bioseq, public; "
-        "CREATE TABLE doc0377_letters_a "
+        "CREATE TABLE public.doc0377_letters_a "
         " (id int, value bioseq.letter('dna4')); "
         "PREPARE doc0377_insert_letter(text,int) AS "
         " INSERT INTO doc0377_letters_a "
@@ -1364,7 +1564,7 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         " ON doc0377_letters_a USING btree(value bioseq.letter_btree_ops); "
         "CREATE INDEX doc0377_letters_a_hash "
         " ON doc0377_letters_a USING hash(value bioseq.letter_hash_ops); "
-        "CREATE TABLE doc0377_letters_b AS "
+        "CREATE TABLE public.doc0377_letters_b AS "
         " SELECT * FROM doc0377_letters_a; "
         "CREATE TEMP VIEW doc0377_letters_view AS "
         " SELECT id,value FROM doc0377_letters_a;");
@@ -1456,7 +1656,7 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         query_scalar_int(ctx, "SELECT pg_backend_pid();"));
     (void) std::remove(binary_path.c_str());
     exec_sql(ctx,
-        "CREATE TABLE doc0377_letters_binary "
+        "CREATE TABLE public.doc0377_letters_binary "
         " (id int, value bioseq.letter('dna4')); ");
     exec_sql(ctx, fmt::format(
         "COPY doc0377_letters_a TO '{}' (FORMAT binary);",
@@ -1468,7 +1668,89 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         ctx,
         "SELECT string_agg(value::text,'' ORDER BY id) "
         "FROM doc0377_letters_binary;") == "ACGT");
+
+    const auto text_copy_path = fmt::format(
+        "/tmp/bioseq_doc0377_letters_text_{}.txt",
+        query_scalar_int(ctx, "SELECT pg_backend_pid();"));
+    const auto id_copy_path = fmt::format(
+        "/tmp/bioseq_doc0377_letters_id_{}.txt",
+        query_scalar_int(ctx, "SELECT pg_backend_pid();"));
+    (void) std::remove(text_copy_path.c_str());
+    (void) std::remove(id_copy_path.c_str());
+    {
+        std::ofstream output(text_copy_path, std::ios::binary);
+        REQUIRE(output.is_open());
+        output << "1\tA\n2\tC\n3\tG\n4\tT\n";
+        REQUIRE(output.good());
+    }
+    {
+        std::ofstream output(id_copy_path, std::ios::binary);
+        REQUIRE(output.is_open());
+        output << "9\n";
+        REQUIRE(output.good());
+    }
+    exec_sql(ctx,
+        "CREATE TABLE public.doc0377_letters_text_copy "
+        " (id int, value bioseq.letter('dna4')); "
+        "CREATE TABLE public.doc0377_letters_typmodless_copy "
+        " (id int, value bioseq.letter);");
+    exec_sql(ctx, fmt::format(
+        "COPY public.doc0377_letters_text_copy FROM '{}' (FORMAT text);",
+        text_copy_path));
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT string_agg(value::text,'' ORDER BY id) "
+        "FROM public.doc0377_letters_text_copy;") == "ACGT");
+
+    const auto text_copy_rejected = sql_error(
+        ctx, fmt::format(
+            "COPY public.doc0377_letters_typmodless_copy "
+            "FROM '{}' (FORMAT text);",
+            text_copy_path));
+    REQUIRE(text_copy_rejected.sqlstate == "22023");
+    REQUIRE(text_copy_rejected.contains("text COPY requires an alphabet typmod"));
+    const auto csv_copy_rejected = sql_error(
+        ctx, fmt::format(
+            "COPY public.doc0377_letters_typmodless_copy "
+            "FROM '{}' (FORMAT csv);",
+            text_copy_path));
+    REQUIRE(csv_copy_rejected.sqlstate == "22023");
+    const auto program_copy_rejected = sql_error(
+        ctx,
+        "COPY public.doc0377_letters_typmodless_copy "
+        "FROM PROGRAM 'true' (FORMAT text);");
+    REQUIRE(program_copy_rejected.sqlstate == "22023");
+
+    PGresult* stdin_copy = PQexec(
+        ctx.raw(),
+        "COPY public.doc0377_letters_typmodless_copy FROM STDIN "
+        "(FORMAT text);");
+    REQUIRE(stdin_copy != nullptr);
+    REQUIRE(PQresultStatus(stdin_copy) == PGRES_FATAL_ERROR);
+    const char* stdin_state = PQresultErrorField(
+        stdin_copy, PG_DIAG_SQLSTATE);
+    REQUIRE(stdin_state != nullptr);
+    REQUIRE(std::string_view{stdin_state} == "22023");
+    PQclear(stdin_copy);
+
+    // The guard is target-column exact: omitting the typmodless letter column
+    // is valid, and binary COPY remains valid because its physical alphabet is
+    // checked by letter_recv.
+    exec_sql(ctx, fmt::format(
+        "COPY public.doc0377_letters_typmodless_copy(id) "
+        "FROM '{}' (FORMAT text);",
+        id_copy_path));
+    exec_sql(ctx, fmt::format(
+        "COPY public.doc0377_letters_typmodless_copy "
+        "FROM '{}' (FORMAT binary);",
+        binary_path));
+    REQUIRE(query_scalar_int(
+        ctx,
+        "SELECT count(*) FROM public.doc0377_letters_typmodless_copy "
+        "WHERE value IS NOT NULL;") == 4);
     REQUIRE(std::remove(binary_path.c_str()) == 0);
+    REQUIRE(std::remove(text_copy_path.c_str()) == 0);
+    REQUIRE(std::remove(id_copy_path.c_str()) == 0);
 
     const auto backend_pid = query_scalar_int(
         ctx, "SELECT pg_backend_pid();");
@@ -1483,7 +1765,7 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         (void) std::remove(path->c_str());
     }
     exec_sql(ctx,
-        "CREATE TABLE doc0377_letters_receive "
+        "CREATE TABLE public.doc0377_letters_receive "
         " (value bioseq.letter('dna4')); ");
     exec_sql(ctx, fmt::format(
         "COPY (SELECT 'A'::bioseq.letter('dna4')) "
@@ -1513,7 +1795,7 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL > 0
     exec_sql(ctx,
-        "CREATE TABLE doc0377_letters_dna5 "
+        "CREATE TABLE public.doc0377_letters_dna5 "
         " (id int, value bioseq.letter('dna5')); "
         "INSERT INTO doc0377_letters_dna5 VALUES "
         " (1,'A'::bioseq.letter('dna5')), "
@@ -1525,12 +1807,14 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         " ON doc0377_letters_dna5 USING btree(value); "
         "CREATE INDEX doc0377_letters_dna5_hash "
         " ON doc0377_letters_dna5 USING hash(value); "
-        "CREATE TABLE doc0377_letters_dna5_b AS "
+        "CREATE TABLE public.doc0377_letters_dna5_b AS "
         " TABLE doc0377_letters_dna5; "
-        "CREATE TABLE doc0377_letters_dna5_binary "
+        "CREATE TABLE public.doc0377_letters_dna5_binary "
         " (id int, value bioseq.letter('dna5')); "
-        "CREATE TABLE doc0377_letters_dna5_receive "
+        "CREATE TABLE public.doc0377_letters_dna5_receive "
         " (value bioseq.letter('dna5')); "
+        "CREATE TABLE public.doc0377_letters_dna5_text "
+        " (id int, value bioseq.letter('dna5')); "
         "CREATE TEMP VIEW doc0377_letters_dna5_view AS "
         " SELECT id,value FROM doc0377_letters_dna5;");
     REQUIRE(query_scalar(
@@ -1626,6 +1910,25 @@ TEST_CASE("DOC0377 physical DNA4 letters support arrays grouping and indexes",
         "FROM doc0377_letters_dna5_binary;") == "ACGTN");
     REQUIRE(std::remove(dna5_binary_path.c_str()) == 0);
 
+    const auto dna5_text_path = fmt::format(
+        "/tmp/bioseq_doc0377_letters_dna5_{}.txt", backend_pid);
+    (void) std::remove(dna5_text_path.c_str());
+    {
+        std::ofstream output(dna5_text_path, std::ios::binary);
+        REQUIRE(output.is_open());
+        output << "1\tA\n2\tC\n3\tG\n4\tT\n5\tN\n";
+        REQUIRE(output.good());
+    }
+    exec_sql(ctx, fmt::format(
+        "COPY public.doc0377_letters_dna5_text "
+        "FROM '{}' (FORMAT text);",
+        dna5_text_path));
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT string_agg(value::text,'' ORDER BY id) "
+        "FROM public.doc0377_letters_dna5_text;") == "ACGTN");
+    REQUIRE(std::remove(dna5_text_path.c_str()) == 0);
+
     const auto typmod_mismatch = sql_error(
         ctx,
         fmt::format(
@@ -1703,28 +2006,49 @@ TEST_CASE("DOC0377 slice algebra is invariant across the required GUC matrix",
 TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
           "[seq][slice][length][overflow][acceptance]") {
     auto ctx = fresh_context({"doc0377_synthetic_length_heap",
-                              "doc0377_synthetic_length_index_input"});
+                              "doc0377_synthetic_length_index_input",
+                              "doc0377_synthetic_length_real_index_input",
+                              "doc0377_synthetic_lengths"});
+    exec_sql(ctx,
+        "CREATE TABLE public.doc0377_synthetic_lengths "
+        " (label text PRIMARY KEY, n bigint NOT NULL); "
+        "INSERT INTO public.doc0377_synthetic_lengths VALUES "
+        " ('above_flat',4294967296), "
+        " ('bigint_max',9223372036854775807);");
 
     const auto above_flat = query_one(
         ctx,
-        "WITH v(s) AS MATERIALIZED ("
-        " SELECT bioseq_internal.synthetic_lazy_sequence(4294967296)) "
         "SELECT bioseq.len(s), "
         "       bioseq.len(s[4294967294::bigint:4294967296::bigint]), "
         "       s[-1]::text, "
         "       bioseq.len(s OPERATOR(bioseq.||) "
         "          bioseq_internal.synthetic_lazy_sequence(0)) "
-        "FROM v;");
+        "FROM public.doc0377_synthetic_lengths AS source "
+        "CROSS JOIN LATERAL ("
+        " SELECT bioseq_internal.synthetic_lazy_sequence(source.n) AS s "
+        " OFFSET 0) AS v "
+        "WHERE source.label='above_flat';");
     REQUIRE(above_flat[0] == "4294967296");
     REQUIRE(above_flat[1] == "2");
     REQUIRE(above_flat[2] == "A");
     REQUIRE(above_flat[3] == "4294967296");
 
-    const auto bigint_max = query_one(
+    // A materialized CTE is an executor-copy boundary: PostgreSQL must ask
+    // the expanded value for a flat pgseq representation before tuplestore
+    // ownership can begin.  The same logical source that stays lazy above
+    // must therefore fail closed at the uint32 flat-format ceiling here.
+    const auto materialized_cte_boundary = sql_error(
         ctx,
         "WITH v(s) AS MATERIALIZED ("
-        " SELECT bioseq_internal.synthetic_lazy_sequence("
-        "          9223372036854775807::bigint)) "
+        " SELECT bioseq_internal.synthetic_lazy_sequence(n) "
+        " FROM public.doc0377_synthetic_lengths "
+        " WHERE label='above_flat') "
+        "SELECT bioseq.len(s) FROM v;");
+    REQUIRE(materialized_cte_boundary.sqlstate == "54000");
+    REQUIRE(materialized_cte_boundary.contains("too long to flatten"));
+
+    const auto bigint_max = query_one(
+        ctx,
         "SELECT bioseq.len(s), s[-1]::text, "
         "       bioseq.len(s[9223372036854775805::bigint:"
         "                         9223372036854775807::bigint]), "
@@ -1732,7 +2056,11 @@ TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
         "          bioseq_internal.synthetic_lazy_sequence(0)), "
         "       bioseq.len(bioseq_internal.synthetic_lazy_sequence(0) "
         "          OPERATOR(bioseq.||) s) "
-        "FROM v;");
+        "FROM public.doc0377_synthetic_lengths AS source "
+        "CROSS JOIN LATERAL ("
+        " SELECT bioseq_internal.synthetic_lazy_sequence(source.n) AS s "
+        " OFFSET 0) AS v "
+        "WHERE source.label='bigint_max';");
     REQUIRE(bigint_max[0] == "9223372036854775807");
     REQUIRE(bigint_max[1] == "A");
     REQUIRE(bigint_max[2] == "2");
@@ -1740,14 +2068,16 @@ TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
     REQUIRE(bigint_max[4] == "9223372036854775807");
 
     constexpr std::array concat_overflow_queries{
-        "SELECT bioseq_internal.synthetic_lazy_sequence("
-        "         9223372036854775807::bigint) "
+        "SELECT bioseq_internal.synthetic_lazy_sequence(n) "
         "       OPERATOR(bioseq.||) "
-        "       bioseq_internal.synthetic_lazy_sequence(1);",
+        "       bioseq_internal.synthetic_lazy_sequence(1) "
+        "FROM public.doc0377_synthetic_lengths "
+        "WHERE label='bigint_max';",
         "SELECT bioseq_internal.synthetic_lazy_sequence(1) "
         "       OPERATOR(bioseq.||) "
-        "       bioseq_internal.synthetic_lazy_sequence("
-        "         9223372036854775807::bigint);",
+        "       bioseq_internal.synthetic_lazy_sequence(n) "
+        "FROM public.doc0377_synthetic_lengths "
+        "WHERE label='bigint_max';",
     };
     for (const char* sql : concat_overflow_queries) {
         REQUIRE(sql_error(ctx, sql).sqlstate == "54000");
@@ -1755,36 +2085,64 @@ TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
 
     const std::array<const char*, 3> materialization_boundaries{
         "SELECT bioseq.to_text("
-        " bioseq_internal.synthetic_lazy_sequence(4294967296));",
+        " bioseq_internal.synthetic_lazy_sequence(n)) "
+        "FROM public.doc0377_synthetic_lengths "
+        "WHERE label='above_flat';",
         "SELECT bioseq.seq_send("
-        " bioseq_internal.synthetic_lazy_sequence(4294967296));",
+        " bioseq_internal.synthetic_lazy_sequence(n)) "
+        "FROM public.doc0377_synthetic_lengths "
+        "WHERE label='above_flat';",
         "SELECT bioseq.to_array("
-        " bioseq_internal.synthetic_lazy_sequence(4294967296));",
+        " bioseq_internal.synthetic_lazy_sequence(n)) "
+        "FROM public.doc0377_synthetic_lengths "
+        "WHERE label='above_flat';",
     };
     for (const char* sql : materialization_boundaries) {
         REQUIRE(sql_error(ctx, sql).sqlstate == "54000");
     }
 
     exec_sql(ctx,
-        "CREATE TABLE doc0377_synthetic_length_index_input (id bigint); "
-        "INSERT INTO doc0377_synthetic_length_index_input VALUES (1);");
-    const auto index_boundary = sql_error(
+        "CREATE TABLE public.doc0377_synthetic_length_index_input "
+        " (n bigint NOT NULL); "
+        "INSERT INTO public.doc0377_synthetic_length_index_input "
+        "VALUES (4294967296);");
+    const auto synthetic_index_boundary = sql_error(
         ctx,
         "CREATE INDEX doc0377_synthetic_length_expr_idx "
-        "ON doc0377_synthetic_length_index_input USING btree "
-        "((bioseq_internal.synthetic_lazy_sequence("
-        "    9223372036854775807::bigint - id + id))); ");
-    REQUIRE(index_boundary.sqlstate == "54000");
-    REQUIRE(index_boundary.contains(
-        "unbound bioseq sequence is too long to flatten"));
+        "ON public.doc0377_synthetic_length_index_input USING btree "
+        "((bioseq_internal.synthetic_lazy_sequence(n)));");
+    REQUIRE(synthetic_index_boundary.sqlstate == "54000");
+    REQUIRE(synthetic_index_boundary.contains("too long to flatten"));
+
+    // Retain a physically stored incompressible value as a separate proof of
+    // PostgreSQL's ordinary btree row-size boundary.  It complements rather
+    // than substitutes for the synthetic UINT32_MAX+1 expression above.
+    exec_sql(ctx,
+        "CREATE TABLE public.doc0377_synthetic_length_real_index_input "
+        " (id bigint, s bioseq.seq('dna4',8)); "
+        "INSERT INTO public.doc0377_synthetic_length_real_index_input "
+        "SELECT 1, translate("
+        " string_agg(md5(i::text), '' ORDER BY i), "
+        " '0123456789abcdef', 'ACGTACGTACGTACGT')"
+        " ::bioseq.seq('dna4',8) "
+        "FROM generate_series(1,1024) AS g(i);");
+    const auto physical_index_boundary = sql_error(
+        ctx,
+        "CREATE INDEX doc0377_physical_length_expr_idx "
+        "ON public.doc0377_synthetic_length_real_index_input USING btree "
+        "((s[0:32768]));");
+    REQUIRE(physical_index_boundary.sqlstate == "54000");
+    REQUIRE(physical_index_boundary.contains("index row"));
 
     exec_sql(ctx,
-        "CREATE TABLE doc0377_synthetic_length_heap "
+        "CREATE TABLE public.doc0377_synthetic_length_heap "
         " (s bioseq.seq('dna4',8));");
     const auto heap_boundary = sql_error(
         ctx,
-        "INSERT INTO doc0377_synthetic_length_heap "
-        "VALUES (bioseq_internal.synthetic_lazy_sequence(4294967296));");
+        "INSERT INTO public.doc0377_synthetic_length_heap "
+        "SELECT bioseq_internal.synthetic_lazy_sequence(n) "
+        "FROM public.doc0377_synthetic_lengths "
+        "WHERE label='above_flat';");
     REQUIRE(heap_boundary.sqlstate == "54000");
 }
 
@@ -1792,9 +2150,12 @@ TEST_CASE("DOC0377 uint64 bigint and MaxAlloc alignment guards are exact",
           "[seq][slice][length][overflow][rope][lifetime][acceptance]") {
     auto ctx = fresh_context();
 
-    // These existing internal seams execute exact INT64_MAX/UINT64_MAX add,
-    // corrupt cached-child, and MaxAllocSize-(MAXALIGN-1)..MaxAllocSize
-    // matrices without allocating the represented logical payloads.
+    // Directly exercise the exported checked Size/flat-size helpers as well as
+    // the independent tree/ownership matrices, without allocating the
+    // represented MaxAlloc/UINT64 payloads.
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT bioseq_internal.materialization_size_self_test();") == "t");
     REQUIRE(query_scalar(
         ctx, "SELECT bioseq_internal.piece_tree_self_test();") == "t");
     REQUIRE(query_scalar(

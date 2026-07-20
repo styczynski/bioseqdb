@@ -11,7 +11,7 @@ export import :packed_output;
 
 import :io;
 import :content;
-import :letter;
+export import :letter;
 import :subscript;
 import :concat_reverse;
 import :array_string;

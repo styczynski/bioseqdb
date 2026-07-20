@@ -703,9 +703,10 @@ TEST_CASE("DOC0377 — flat and fragmented backends erase to one canonical facad
     const auto resident = flat_view.try_resident_packed(3u, 70u, 8u);
     REQUIRE(resident.has_value());
     REQUIRE(resident->storage_unit_byte_width == 8u);
+    REQUIRE(resident->bp_length == 67u);
     REQUIRE(resident->leading_symbol_offset == 3u);
     REQUIRE(resident->unit_count == 3u);
-    REQUIRE(resident->trailing_padding_letters == 23u);
+    REQUIRE(resident->trailing_padding_letters == 26u);
     REQUIRE_FALSE(flat_view.try_resident_packed(3u, 70u, 4u).has_value());
     REQUIRE_FALSE(fragmented_view.try_resident_packed(3u, 70u, 8u).has_value());
 

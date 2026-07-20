@@ -11,12 +11,19 @@ module;
 #include "headers/pg_compat.h"
 #include "fmgr_boundary.h"
 extern "C" {
+#include "catalog/pg_attribute.h"
 #include "common/hashfn.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
+#include "parser/analyze.h"
+#include "parser/parsetree.h"
+#include "parser/parse_func.h"
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wregister"
 #include "libpq/pqformat.h"
 #pragma GCC diagnostic pop
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 }
 
 export module bioseq.types.pg_compact_sequence:letter;
@@ -68,6 +75,342 @@ inline constexpr std::uint8_t unresolved_letter_alphabet_code =
              errmsg("bioseq.letter input requires an alphabet typmod"),
              errhint("cast as bioseq.letter('dna4') or another supported alphabet")));
     __builtin_unreachable();
+}
+
+namespace {
+
+post_parse_analyze_hook_type previous_letter_post_parse_analyze_hook = nullptr;
+std::uint64_t letter_hook_call_count = 0u;
+
+struct unresolved_letter_query_context {
+    Oid letter_oid;
+    Oid typmod_cast_oid;
+};
+
+[[nodiscard]] inline bool unresolved_letter_const(
+    Node const* node,
+    Oid letter_oid) noexcept
+{
+    if (node == nullptr || !IsA(node, Const)) {
+        return false;
+    }
+    auto const* value = castNode(Const, node);
+    return !value->constisnull && value->consttype == letter_oid
+        && datum_get_letter(value->constvalue).alphabet_code
+            == unresolved_letter_alphabet_code;
+}
+
+[[nodiscard]] Oid letter_typmod_cast_oid_missing_ok(Oid letter_oid)
+{
+    const Oid argument_types[]{letter_oid, INT4OID, BOOLOID};
+    List* function_name = list_make2(
+        makeString(pstrdup("bioseq")), makeString(pstrdup("letter")));
+    const Oid result = LookupFuncName(
+        function_name, 3, argument_types, /* missing_ok = */ true);
+    list_free_deep(function_name);
+    return result;
+}
+
+[[nodiscard]] inline bool allowed_unresolved_letter_typmod_cast(
+    FuncExpr const* expression,
+    unresolved_letter_query_context const& context) noexcept
+{
+    if (!OidIsValid(context.typmod_cast_oid)
+        || expression->funcid != context.typmod_cast_oid
+        || list_length(expression->args) != 3) {
+        return false;
+    }
+    Node const* input = reinterpret_cast<Node const*>(
+        linitial(expression->args));
+    Node const* typmod_node = reinterpret_cast<Node const*>(
+        lsecond(expression->args));
+    if (!unresolved_letter_const(input, context.letter_oid)
+        || typmod_node == nullptr || !IsA(typmod_node, Const)) {
+        return false;
+    }
+    auto const* typmod = castNode(Const, typmod_node);
+    return !typmod->constisnull && typmod->consttype == INT4OID
+        && DatumGetInt32(typmod->constvalue) > 0;
+}
+
+[[nodiscard]] inline bool is_letter_persistence_guard(
+    Node const* node,
+    unresolved_letter_query_context const& context) noexcept
+{
+    if (node == nullptr || !IsA(node, FuncExpr)
+        || !OidIsValid(context.typmod_cast_oid)) {
+        return false;
+    }
+    auto const* expression = castNode(FuncExpr, node);
+    if (expression->funcid != context.typmod_cast_oid
+        || list_length(expression->args) != 3) {
+        return false;
+    }
+    Node const* typmod_node = reinterpret_cast<Node const*>(
+        lsecond(expression->args));
+    Node const* explicit_node = reinterpret_cast<Node const*>(
+        lthird(expression->args));
+    if (typmod_node == nullptr || !IsA(typmod_node, Const)
+        || explicit_node == nullptr || !IsA(explicit_node, Const)) {
+        return false;
+    }
+    auto const* typmod = castNode(Const, typmod_node);
+    auto const* explicit_cast = castNode(Const, explicit_node);
+    return !typmod->constisnull && typmod->consttype == INT4OID
+        && DatumGetInt32(typmod->constvalue) < 0
+        && !explicit_cast->constisnull
+        && explicit_cast->consttype == BOOLOID
+        && DatumGetBool(explicit_cast->constvalue);
+}
+
+[[nodiscard]] Expr* make_letter_persistence_guard(
+    Expr* input,
+    unresolved_letter_query_context const& context)
+{
+    if (is_letter_persistence_guard(
+            reinterpret_cast<Node const*>(input), context)) {
+        return input;
+    }
+    const int location = exprLocation(reinterpret_cast<Node*>(input));
+    auto* result = makeFuncExpr(
+        context.typmod_cast_oid, context.letter_oid,
+        list_make3(
+            input,
+            makeConst(INT4OID, -1, InvalidOid, sizeof(std::int32_t),
+                      Int32GetDatum(-1), false, true),
+            makeBoolConst(true, false)),
+        InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
+    result->location = location;
+    return reinterpret_cast<Expr*>(result);
+}
+
+[[nodiscard]] inline bool is_exact_typmodless_letter_attribute(
+    Oid relation_oid,
+    AttrNumber attribute_number,
+    Oid letter_oid)
+{
+    if (!OidIsValid(relation_oid) || attribute_number <= 0) {
+        return false;
+    }
+    Oid type_oid = InvalidOid;
+    Oid collation_oid = InvalidOid;
+    std::int32_t typmod = -1;
+    get_atttypetypmodcoll(
+        relation_oid, attribute_number,
+        &type_oid, &typmod, &collation_oid);
+    return type_oid == letter_oid && typmod < 0;
+}
+
+void guard_letter_persistence_target_list(
+    List* target_list,
+    List* update_column_numbers,
+    Oid relation_oid,
+    unresolved_letter_query_context const& context)
+{
+    ListCell* target_cell = nullptr;
+    ListCell* column_cell = list_head(update_column_numbers);
+    foreach(target_cell, target_list) {
+        auto* target = castNode(TargetEntry, lfirst(target_cell));
+        AttrNumber attribute_number = target->resno;
+        if (update_column_numbers != NIL) {
+            if (column_cell == nullptr) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_INTERNAL_ERROR),
+                         errmsg("bioseq MERGE update-column metadata is incomplete")));
+            }
+            attribute_number = static_cast<AttrNumber>(lfirst_int(column_cell));
+            column_cell = lnext(update_column_numbers, column_cell);
+        }
+        if (!target->resjunk
+            && exprType(reinterpret_cast<Node*>(target->expr))
+                == context.letter_oid
+            && is_exact_typmodless_letter_attribute(
+                relation_oid, attribute_number, context.letter_oid)) {
+            target->expr = make_letter_persistence_guard(
+                target->expr, context);
+        }
+    }
+    if (column_cell != nullptr) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq MERGE update-column metadata has extra entries")));
+    }
+}
+
+void guard_letter_ctas_output(
+    Query* query,
+    unresolved_letter_query_context const& context)
+{
+    ListCell* cell = nullptr;
+    foreach(cell, query->targetList) {
+        auto* target = castNode(TargetEntry, lfirst(cell));
+        if (!target->resjunk
+            && exprType(reinterpret_cast<Node*>(target->expr))
+                == context.letter_oid
+            && exprTypmod(reinterpret_cast<Node*>(target->expr)) < 0) {
+            target->expr = make_letter_persistence_guard(
+                target->expr, context);
+        }
+    }
+}
+
+void validate_and_guard_letter_query(
+    Query* query,
+    unresolved_letter_query_context* context);
+
+void validate_letter_utility_query(
+    Node* utility,
+    unresolved_letter_query_context* context)
+{
+    Node* nested = nullptr;
+    bool ctas_output = false;
+    if (utility == nullptr) {
+        return;
+    }
+    if (IsA(utility, CreateTableAsStmt)) {
+        nested = castNode(CreateTableAsStmt, utility)->query;
+        ctas_output = true;
+    } else if (IsA(utility, ExplainStmt)) {
+        nested = castNode(ExplainStmt, utility)->query;
+    } else if (IsA(utility, DeclareCursorStmt)) {
+        nested = castNode(DeclareCursorStmt, utility)->query;
+    } else if (IsA(utility, PrepareStmt)) {
+        /* PostgreSQL normally stores a raw parsetree here and analyzes the
+         * prepared statement separately, which invokes this hook again.  A
+         * Query is nevertheless handled defensively for callers that provide
+         * an already-analyzed utility tree. */
+        nested = castNode(PrepareStmt, utility)->query;
+    }
+    if (nested == nullptr || !IsA(nested, Query)) {
+        return;
+    }
+    auto* nested_query = castNode(Query, nested);
+    if (ctas_output) {
+        guard_letter_ctas_output(nested_query, *context);
+    }
+    validate_and_guard_letter_query(nested_query, context);
+}
+
+bool validate_unresolved_letter_query_node(
+    Node* node,
+    unresolved_letter_query_context* context)
+{
+    if (node == nullptr) {
+        return false;
+    }
+    if (IsA(node, FuncExpr)
+        && allowed_unresolved_letter_typmod_cast(
+            castNode(FuncExpr, node), *context)) {
+        /* The parser-only token is consumed directly by this positive-typmod
+         * cast.  The other two arguments are canonical int4/bool Consts, so
+         * there is no unresolved subtree to visit below this node. */
+        return false;
+    }
+    if (unresolved_letter_const(node, context->letter_oid)) {
+        unresolved_letter_input_error();
+    }
+    if (IsA(node, RangeTblEntry)) {
+        /* query_tree_walker owns traversal of the RTE's expressions when it
+         * supplies the RTE itself to this callback. */
+        return false;
+    }
+    if (IsA(node, Query)) {
+        validate_and_guard_letter_query(castNode(Query, node), context);
+        return false;
+    }
+    return expression_tree_walker(
+        node, validate_unresolved_letter_query_node, context);
+}
+
+void validate_and_guard_letter_query(
+    Query* query,
+    unresolved_letter_query_context* context)
+{
+    if (query == nullptr) {
+        return;
+    }
+    if (query->resultRelation > 0
+        && (query->commandType == CMD_INSERT
+            || query->commandType == CMD_UPDATE
+            || query->commandType == CMD_MERGE)) {
+        auto* target_rte = rt_fetch(query->resultRelation, query->rtable);
+        if (target_rte != nullptr && target_rte->rtekind == RTE_RELATION) {
+            const Oid relation_oid = target_rte->relid;
+            if (query->commandType == CMD_INSERT
+                || query->commandType == CMD_UPDATE) {
+                guard_letter_persistence_target_list(
+                    query->targetList, NIL, relation_oid, *context);
+            }
+            if (query->onConflict != nullptr) {
+                guard_letter_persistence_target_list(
+                    query->onConflict->onConflictSet, NIL,
+                    relation_oid, *context);
+            }
+            ListCell* action_cell = nullptr;
+            foreach(action_cell, query->mergeActionList) {
+                auto* action = castNode(MergeAction, lfirst(action_cell));
+                if (action->commandType == CMD_INSERT
+                    || action->commandType == CMD_UPDATE) {
+                    guard_letter_persistence_target_list(
+                        action->targetList,
+                        action->commandType == CMD_UPDATE
+                            ? action->updateColnos : NIL,
+                        relation_oid, *context);
+                }
+            }
+        }
+    }
+    if (query->commandType == CMD_UTILITY) {
+        validate_letter_utility_query(query->utilityStmt, context);
+    }
+    (void) query_tree_walker(
+        query, validate_unresolved_letter_query_node, context,
+        QTW_EXAMINE_RTES_BEFORE);
+}
+
+void bioseq_letter_post_parse_analyze(
+    ParseState* parse_state,
+    Query* query,
+    JumbleState* jumble_state)
+{
+    /* Count this callback itself, not only the downstream hook.  PostgreSQL
+     * invokes shared-preload libraries in configured order but their hooks
+     * form a last-installed-first-called chain, so bioseq can sit on either
+     * side of another preload hook.  An inbound count proves exact traversal
+     * of the installed chain independently of that ordering. */
+    if (letter_hook_call_count < static_cast<std::uint64_t>(INT64_MAX)) {
+        ++letter_hook_call_count;
+    }
+    if (previous_letter_post_parse_analyze_hook != nullptr) {
+        previous_letter_post_parse_analyze_hook(
+            parse_state, query, jumble_state);
+    }
+    const Oid letter_oid = bioseq_letter_type_oid_missing_ok();
+    if (!OidIsValid(letter_oid) || query == nullptr) {
+        return;
+    }
+    unresolved_letter_query_context context{
+        .letter_oid = letter_oid,
+        .typmod_cast_oid = letter_typmod_cast_oid_missing_ok(letter_oid),
+    };
+    validate_and_guard_letter_query(query, &context);
+}
+
+} // namespace
+
+export void install_letter_literal_validation_hook() noexcept
+{
+    if (post_parse_analyze_hook == &bioseq_letter_post_parse_analyze) {
+        return;
+    }
+    previous_letter_post_parse_analyze_hook = post_parse_analyze_hook;
+    post_parse_analyze_hook = &bioseq_letter_post_parse_analyze;
+}
+
+export Datum letter_hook_chain_calls_impl(FunctionCallInfo)
+{
+    PG_RETURN_INT64(static_cast<std::int64_t>(
+        letter_hook_call_count));
 }
 
 export [[nodiscard]] inline int32_t encode_letter_typmod(
@@ -226,7 +569,10 @@ export Datum letter_in_impl(FunctionCallInfo fcinfo)
                  errmsg("bioseq.letter input must contain exactly one symbol")));
     }
     if (typmod < 0) {
-      unresolved_letter_input_error();
+        PG_RETURN_DATUM(make_letter_datum(
+            unresolved_letter_alphabet_code,
+            static_cast<std::uint8_t>(
+                static_cast<unsigned char>(input[0]))));
     }
     const auto alphabet = decode_letter_typmod_checked(typmod);
     const auto rank = rank_for_letter_symbol_checked(
@@ -343,6 +689,16 @@ export Datum letter_wire_self_test_impl(FunctionCallInfo) {
 export Datum letter_typmod_cast_impl(FunctionCallInfo fcinfo) {
   const Datum input = PG_GETARG_DATUM(0);
   const int32_t target_typmod = PG_GETARG_INT32(1);
+  const auto unresolved = datum_get_letter(input);
+  if (unresolved.alphabet_code == unresolved_letter_alphabet_code) {
+    if (target_typmod < 0) {
+      unresolved_letter_input_error();
+    }
+    const auto alphabet = decode_letter_typmod_checked(target_typmod);
+    const auto rank = rank_for_letter_symbol_checked(
+        alphabet, unresolved.rank);
+    PG_RETURN_DATUM(make_letter_datum(alphabet, rank));
+  }
   const auto value = validate_letter_datum(input);
   if (target_typmod >= 0 &&
       decode_letter_typmod_checked(target_typmod) != value.alphabet_code) {
@@ -459,6 +815,12 @@ CXX_PG_FUNCTION_INFO_V1(letter_wire_self_test);
 PGDLLEXPORT Datum letter_wire_self_test(PG_FUNCTION_ARGS)
 {
     return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_wire_self_test_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_hook_chain_calls);
+PGDLLEXPORT Datum letter_hook_chain_calls(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_hook_chain_calls_impl, fcinfo);
 }
 
 CXX_PG_FUNCTION_INFO_V1(letter_typmod_cast);
