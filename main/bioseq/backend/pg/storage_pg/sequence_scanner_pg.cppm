@@ -552,6 +552,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     MemoryContext payload_mctx = caches_->read_state_mctx != nullptr
         ? caches_->read_state_mctx
         : CurrentMemoryContext;
+    const ResourceOwner read_resource_owner = caches_->read_resource_owner;
 
     // Compatibility is keyed by the caller-owned source snapshot. The
     // column reader may replace its own snapshot pointer with a refreshed
@@ -559,9 +560,9 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     // incorrectly discard a compatible cached reader.
     if (entry.read_state != nullptr
         && entry.read_snapshot_source != snapshot_) {
-        bioseq::pg_utils::invoke_pg_as_cpp([&] {
-            if (caches_->read_resource_owner != nullptr) {
-                CurrentResourceOwner = caches_->read_resource_owner;
+        bioseq::pg_utils::invoke_pg_as_cpp([read_resource_owner, &entry] {
+            if (read_resource_owner != nullptr) {
+                CurrentResourceOwner = read_resource_owner;
             }
             BioseqColumnEndRead(entry.read_state);
         });
@@ -571,7 +572,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     if (entry.read_state == nullptr) {
         TupleDesc td = RelationGetDescr(shard);
         PBitmapset attr_needed = bioseq::pg_utils::invoke_pg_as_cpp(
-            [&] {
+            [payload_mctx, td] {
                 MemoryContext previous = MemoryContextSwitchTo(payload_mctx);
                 PBitmapset result = PBitmapset::full_range(td->natts);
                 MemoryContextSwitchTo(previous);
@@ -580,9 +581,10 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
         PIntList projected;
         for (int i = 0; i < td->natts; ++i) {
             const bool needed = bioseq::pg_utils::invoke_pg_as_cpp(
-                [&] { return attr_needed.contains(i); });
+                [&attr_needed, i] { return attr_needed.contains(i); });
             if (!TupleDescAttr(td, i)->attisdropped && needed) {
-                bioseq::pg_utils::invoke_pg_as_cpp([&] {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [payload_mctx, &projected, i] {
                     MemoryContext previous = MemoryContextSwitchTo(payload_mctx);
                     projected.append(static_cast<AttrNumber>(i + 1));
                     MemoryContextSwitchTo(previous);
@@ -590,29 +592,33 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
             }
         }
         List* projected_attributes = projected.release();
-        entry.read_state = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+        entry.read_state = bioseq::pg_utils::invoke_pg_as_cpp(
+            [payload_mctx, read_resource_owner, shard, td,
+             projected_attributes, snapshot = snapshot_] {
             MemoryContextSwitchTo(payload_mctx);
-            if (caches_->read_resource_owner != nullptr) {
-                CurrentResourceOwner = caches_->read_resource_owner;
+            if (read_resource_owner != nullptr) {
+                CurrentResourceOwner = read_resource_owner;
             }
             BioseqColumnReadState* result = BioseqColumnBeginRead(
                 shard, td, projected_attributes,
-                /*whereClauseList=*/NIL, payload_mctx, snapshot_,
+                /*whereClauseList=*/NIL, payload_mctx, snapshot,
                 /*randomAccess=*/true, nullptr);
             BioseqColumnReadFlushPendingWrites(result);
             return result;
         });
         entry.read_snapshot_source = snapshot_;
-        bioseq::pg_utils::invoke_pg_as_cpp([&] { attr_needed.free(); });
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [&attr_needed] { attr_needed.free(); });
     }
 
     const std::uint64_t row_no = locator_.first_sub_row_no + fragment_no;
     Datum vals[1]  = { 0 };
     bool  nulls[1] = { true };
-    const bool row_visible = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+    const bool row_visible = bioseq::pg_utils::invoke_pg_as_cpp(
+        [payload_mctx, read_resource_owner, &entry, row_no, &vals, &nulls] {
         MemoryContextSwitchTo(payload_mctx);
-        if (caches_->read_resource_owner != nullptr) {
-            CurrentResourceOwner = caches_->read_resource_owner;
+        if (read_resource_owner != nullptr) {
+            CurrentResourceOwner = read_resource_owner;
         }
 #ifdef BIOSEQ_TEST_INDEXES
         inject_scanner_pg_leaf_failure(

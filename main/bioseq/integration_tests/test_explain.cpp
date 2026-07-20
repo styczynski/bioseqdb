@@ -629,6 +629,51 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
         == std::vector<long long>{4, 4, 4});
 }
 
+TEST_CASE("DOC0377 ordinary INSERT restores the page-cache GUC",
+          "[slice][insert][page-cache][lifetime]") {
+    constexpr std::string_view table = "doc0377_page_cache_insert";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "DROP PUBLICATION IF EXISTS doc0377_page_cache_insert_pub;"
+        "CREATE TABLE doc0377_page_cache_insert "
+        " (id int PRIMARY KEY, s bioseq.seq('dna4',32)) USING bioseq;"
+        "SET bioseq.enable_column_cache=on;");
+    REQUIRE(query_scalar(ctx, "SHOW bioseq.enable_column_cache;") == "on");
+
+    exec_sql(ctx,
+        "INSERT INTO doc0377_page_cache_insert VALUES "
+        " (1, repeat('ACGT',1024)::bioseq.seq('dna4',32));");
+    REQUIRE(query_scalar(ctx, "SHOW bioseq.enable_column_cache;") == "on");
+    REQUIRE(query_int_column(ctx,
+        "SELECT id FROM doc0377_page_cache_insert ORDER BY id;")
+        == std::vector<long long>{1});
+
+    exec_sql(ctx,
+        "CREATE PUBLICATION doc0377_page_cache_insert_pub "
+        "FOR TABLE doc0377_page_cache_insert;");
+    const auto failure = sql_error(ctx,
+        "INSERT INTO doc0377_page_cache_insert VALUES "
+        " (2, repeat('TGCA',1024)::bioseq.seq('dna4',32));");
+    const auto cache_after_error = query_scalar(
+        ctx, "SHOW bioseq.enable_column_cache;");
+    const auto rows_after_error = query_int_column(ctx,
+        "SELECT id FROM doc0377_page_cache_insert ORDER BY id;");
+    exec_sql(ctx,
+        "DROP PUBLICATION doc0377_page_cache_insert_pub;"
+        "INSERT INTO doc0377_page_cache_insert VALUES "
+        " (3, repeat('TGCA',1024)::bioseq.seq('dna4',32));");
+
+    REQUIRE(failure.sqlstate == "0A000");
+    REQUIRE(failure.contains(
+        "cannot insert into columnar table that is a part of a publication"));
+    REQUIRE(cache_after_error == "on");
+    REQUIRE(rows_after_error == std::vector<long long>{1});
+    REQUIRE(query_scalar(ctx, "SHOW bioseq.enable_column_cache;") == "on");
+    REQUIRE(query_int_column(ctx,
+        "SELECT id FROM doc0377_page_cache_insert ORDER BY id;")
+        == std::vector<long long>{1, 3});
+}
+
 TEST_CASE("DOC0377 planned slice recipe is stable between plain and ANALYZE",
           "[explain][slice][recipe]") {
     auto ctx = fresh_context({kTable});
@@ -719,10 +764,12 @@ TEST_CASE("DOC0377 SliceProject shallow publication allocates no payload",
           "[explain][slice][materialization][accounting]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
-    /* Inline flat values require one legitimate backing adoption before they
-     * can become a lazy piece tree.  Use locator-backed rows so this probe
-     * isolates only SliceProject's memcpy + RO publication seam. */
+    /* Two flat slice intermediates per row require legitimate backing adoption
+     * before reverse/concat can form their piece tree.  Keep those six global
+     * executor-copy events visible, and measure SliceProject's memcpy + RO
+     * publication seam independently with its wrapper-local deltas. */
     exec_sql(ctx, fmt::format(
+        "SET max_parallel_workers_per_gather=0; "
         "SET bioseq.update_index_on_insert=off; "
         "TRUNCATE {}; "
         "INSERT INTO {} VALUES "
@@ -744,10 +791,14 @@ TEST_CASE("DOC0377 SliceProject shallow publication allocates no payload",
         expression, kTable)) == "t");
     const auto counters = query_one(ctx,
         "SELECT bioseq_internal.slice_payload_allocation_probe(1), "
-        "       bioseq_internal.slice_payload_allocation_probe(2);");
-    REQUIRE(counters.size() == 2u);
+        "       bioseq_internal.slice_payload_allocation_probe(2), "
+        "       bioseq_internal.slice_payload_allocation_probe(3), "
+        "       bioseq_internal.slice_payload_allocation_probe(4);");
+    REQUIRE(counters.size() == 4u);
     REQUIRE(counters[0].value_or("") == "0");
-    REQUIRE(counters[1].value_or("") == "0");
+    REQUIRE(counters[1].value_or("") == "6");
+    REQUIRE(counters[2].value_or("") == "0");
+    REQUIRE(counters[3].value_or("") == "0");
 }
 #endif
 

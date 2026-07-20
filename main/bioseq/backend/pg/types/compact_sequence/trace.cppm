@@ -43,13 +43,20 @@ export enum class materialization_reason : std::uint8_t {
 #ifdef BIOSEQ_TEST_INDEXES
 /* Independent allocator-side evidence for §17.5.  These counters are not
  * plan instrumentation: allocation sites increment them only after a payload
- * allocation succeeds, so a lazy SliceProject query can prove that its
- * shallow read-only slot publication never reached either flat-payload
- * allocation path.  Backend-local storage is intentional; the SQL probe is
- * used only around one query on one integration-test connection. */
+ * allocation succeeds.  The global totals remain truthful for intermediate
+ * expression adoption, while the publication deltas isolate the shallow
+ * SliceProject slot-copy block.  Backend-local storage is intentional; the
+ * SQL probe is used only around one query on one integration-test connection. */
+export struct slice_payload_allocation_test_snapshot {
+    std::uint64_t packed_full{};
+    std::uint64_t executor_copy{};
+};
+
 struct slice_payload_allocation_test_counters {
     std::uint64_t packed_full{};
     std::uint64_t executor_copy{};
+    std::uint64_t publication_packed_full{};
+    std::uint64_t publication_executor_copy{};
 };
 
 [[nodiscard]] slice_payload_allocation_test_counters&
@@ -57,6 +64,40 @@ slice_payload_allocation_test_storage_noexcept() noexcept
 {
     static thread_local slice_payload_allocation_test_counters counters{};
     return counters;
+}
+
+export [[nodiscard]] inline slice_payload_allocation_test_snapshot
+capture_slice_payload_allocation_test_snapshot_noexcept() noexcept
+{
+    auto const& counters = slice_payload_allocation_test_storage_noexcept();
+    return {
+        .packed_full = counters.packed_full,
+        .executor_copy = counters.executor_copy,
+    };
+}
+
+export [[gnu::noinline]] void
+record_slice_project_publication_allocation_delta_noexcept(
+    slice_payload_allocation_test_snapshot before,
+    slice_payload_allocation_test_snapshot after) noexcept
+{
+    constexpr auto maximum = (std::numeric_limits<std::uint64_t>::max)();
+    auto& counters = slice_payload_allocation_test_storage_noexcept();
+    const auto add_saturated = [maximum](
+        std::uint64_t& destination, std::uint64_t delta) noexcept {
+        destination = delta > maximum - destination
+            ? maximum : destination + delta;
+    };
+    if (after.packed_full < before.packed_full
+        || after.executor_copy < before.executor_copy) {
+        counters.publication_packed_full = maximum;
+        counters.publication_executor_copy = maximum;
+        return;
+    }
+    add_saturated(counters.publication_packed_full,
+        after.packed_full - before.packed_full);
+    add_saturated(counters.publication_executor_copy,
+        after.executor_copy - before.executor_copy);
 }
 
 export [[gnu::noinline]] void note_slice_payload_allocation_test_event_noexcept(
@@ -1867,12 +1908,23 @@ export inline Datum slice_payload_allocation_probe_impl(
           counters.executor_copy,
           static_cast<std::uint64_t>(
               (std::numeric_limits<int64>::max)()))));
+    case 3:
+      PG_RETURN_INT64(static_cast<int64>(std::min(
+          counters.publication_packed_full,
+          static_cast<std::uint64_t>(
+              (std::numeric_limits<int64>::max)()))));
+    case 4:
+      PG_RETURN_INT64(static_cast<int64>(std::min(
+          counters.publication_executor_copy,
+          static_cast<std::uint64_t>(
+              (std::numeric_limits<int64>::max)()))));
     default:
       ereport(ERROR,
               (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                errmsg("invalid slice payload-allocation probe action"),
                errdetail("expected 0 (reset), 1 (packed full), or 2 "
-                         "(executor copy); received %d", action)));
+                         "(executor copy), 3 (publication packed full), or 4 "
+                         "(publication executor copy); received %d", action)));
   }
 #else
   ereport(ERROR,

@@ -4777,6 +4777,10 @@ static void SliceProjectInitializeWorker(
 	TupleTableSlot* child_slot = ExecProcNode(child);
 	TupleTableSlot* scan_slot = custom->ss.ss_ScanTupleSlot;
 	if (TupIsNull(child_slot)) return ExecClearTuple(scan_slot);
+#ifdef BIOSEQ_TEST_INDEXES
+	const auto publication_before =
+		capture_slice_payload_allocation_test_snapshot_noexcept();
+#endif
 	slot_getallattrs(child_slot);
 	const int natts = child_slot->tts_tupleDescriptor->natts;
 	if (natts != scan_slot->tts_tupleDescriptor->natts) {
@@ -4799,6 +4803,11 @@ static void SliceProjectInitializeWorker(
 		}
 	}
 	ExecStoreVirtualTuple(scan_slot);
+#ifdef BIOSEQ_TEST_INDEXES
+	record_slice_project_publication_allocation_delta_noexcept(
+		publication_before,
+		capture_slice_payload_allocation_test_snapshot_noexcept());
+#endif
 	if (count_row) {
 		auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
 		state->runtime.rows_published = bioseq::parallelism::saturating_add(

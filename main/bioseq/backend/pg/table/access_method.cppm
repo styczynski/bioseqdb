@@ -22,6 +22,7 @@ module;
 #include <new>
 #include <map>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 
@@ -190,6 +191,27 @@ static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSor
  * through the per-scan descriptor.
  */
 static bool previousCacheEnabledState = false;
+
+struct OrdinaryInsertPageCacheRestore {
+	ErrorContextCallback callback{};
+	bool previous_value{};
+	bool armed{};
+};
+
+static_assert(std::is_trivially_copyable_v<OrdinaryInsertPageCacheRestore>);
+static_assert(std::is_standard_layout_v<OrdinaryInsertPageCacheRestore>);
+
+static void
+restore_ordinary_insert_page_cache_on_error(void *argument) noexcept
+{
+	auto *restore = static_cast<OrdinaryInsertPageCacheRestore *>(argument);
+	if (geterrlevel() < ERROR || restore == nullptr || !restore->armed)
+	{
+		return;
+	}
+	bioseq_enable_page_cache = restore->previous_value;
+	restore->armed = false;
+}
 
 static TableScanDesc
 bioseq_beginscan(Relation relation, Snapshot snapshot,
@@ -1298,21 +1320,32 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
-	previousCacheEnabledState = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
-
 	/*
 	 * bioseq_init_write_state allocates the write state in a longer
 	 * lasting context, so no need to worry about it.
 	 */
 	BioseqColumnWriteState *writeState = bioseq_init_write_state(relation,
-															   RelationGetDescr(relation),
-																 slot->tts_tableOid,
-															   GetCurrentSubTransactionId());
-	run_tableam_cpp_checked("bioseq tuple insert", [&] {
-		MemoryContextScope ctx_guard{BioseqColumnWritePerTupleContext(writeState)};
-
+														   RelationGetDescr(relation),
+															 slot->tts_tableOid,
+														   GetCurrentSubTransactionId());
+	OrdinaryInsertPageCacheRestore cache_restore{
+		.callback = {
+			.previous = error_context_stack,
+			.callback = &restore_ordinary_insert_page_cache_on_error,
+			.arg = nullptr,
+		},
+		.previous_value = bioseq_enable_page_cache,
+		.armed = true,
+	};
+	cache_restore.callback.arg = &cache_restore;
+	error_context_stack = &cache_restore.callback;
+	bioseq_enable_page_cache = false;
+	run_tableam_cpp_checked("bioseq tuple insert",
+		[relation, slot, writeState] {
 		BioseqColumnCheckLogicalReplication(relation);
+
+		MemoryContextScope ctx_guard{
+			BioseqColumnWritePerTupleContext(writeState)};
 
 		slot_getallattrs(slot);
 
@@ -1322,13 +1355,14 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
-		std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
+		std::vector<std::optional<bioseq::storage::PendingSequenceSource>>
+			pending_sources;
 		Datum *values_for_write = rewrite_seq_columns_to_stubs(
 			relation, slot, writeState, amc, detoasted_values,
 			per_col_locator, pending_sources);
 
-		uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState, values_for_write,
-		                                             slot->tts_isnull);
+		uint64_t writtenRowNumber = BioseqColumnWriteRow(
+			writeState, values_for_write, slot->tts_isnull);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
 		publish_sequence_sources_after_parent_row(pending_sources);
 
@@ -1340,6 +1374,9 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			detoasted_values, per_col_locator, writtenRowNumber,
 			BioseqColumnWritePerTupleContext(writeState));
 	});
+	bioseq_enable_page_cache = cache_restore.previous_value;
+	cache_restore.armed = false;
+	error_context_stack = cache_restore.callback.previous;
 	MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
 
 	pgstat_count_heap_insert(relation, 1);
@@ -1462,7 +1499,8 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 
-	run_tableam_cpp_checked("bioseq multi insert", [&] {
+	run_tableam_cpp_checked("bioseq multi insert",
+		[relation, slots, ntuples, writeState, &amc] {
 		MemoryContextScope ctx_guard{BioseqColumnWritePerTupleContext(writeState)};
 
 		for (int i = 0; i < ntuples; i++)
