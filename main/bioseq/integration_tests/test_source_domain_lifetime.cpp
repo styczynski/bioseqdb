@@ -2,6 +2,7 @@
 
 #include "common_tests_integration.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -98,6 +99,16 @@ source_boundary_actual_calls(
         }
     }
     return std::nullopt;
+}
+
+[[nodiscard]] std::size_t plan_line_count(
+        std::span<const std::string> plan,
+        std::string_view needle) {
+    std::size_t count = 0u;
+    for (const auto& line : plan) {
+        if (line.find(needle) != std::string::npos) ++count;
+    }
+    return count;
 }
 
 struct copy_out_result {
@@ -286,6 +297,166 @@ TEST_CASE("DOC0377 repeated source leaves reuse one callback scanner entry",
     REQUIRE(source_counter(ctx, "domains_created") == 1);
     REQUIRE(source_counter(ctx, "scanner_entries_created") == 1);
     REQUIRE(source_counter(ctx, "scanner_entry_hits") >= 2);
+}
+
+TEST_CASE("DOC0377 cached readers survive serial per-tuple resets",
+          "[seq][slice][source-domain][scanner-cache][memory-context]") {
+    constexpr std::string_view table = "doc0377_source_reader_context";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "CREATE TABLE doc0377_source_reader_context "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO doc0377_source_reader_context "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1,8) AS g;");
+
+    constexpr auto sql =
+        "SELECT bioseq.to_text(s[0:64]) "
+        "FROM doc0377_source_reader_context;";
+    const auto planned = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(planned, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE_FALSE(plan_contains(planned, "Gather"));
+
+    rowset_t expected;
+    expected.reserve(8u);
+    for (int row = 0; row < 8; ++row) {
+        expected.push_back({
+            std::optional<std::string>{
+                "ACGTACGTACGTACGTACGTACGTACGTACGT"
+                "ACGTACGTACGTACGTACGTACGTACGTACGT"},
+        });
+    }
+    for (int execution = 0; execution < 2; ++execution) {
+        reset_source_counters(ctx);
+        REQUIRE(query_rows(ctx, sql) == expected);
+        REQUIRE(source_counter(ctx, "domains_created") == 1);
+        REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+        require_source_resources_balanced(ctx);
+    }
+}
+
+TEST_CASE("DOC0377 SliceProject keeps one lowest owner across ordering and Gather",
+          "[seq][slice][planner][ordered][parallel][owner]") {
+    constexpr std::string_view table = "doc0377_slice_ordered_owner";
+    constexpr std::string_view owner =
+        "Custom Scan (BioseqSliceProject)";
+    auto ctx = fresh_context({table});
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT current_setting('max_parallel_workers')::int;") > 0);
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off;"
+        "SET max_parallel_workers_per_gather=0;"
+        "CREATE TABLE doc0377_slice_ordered_owner ("
+        " pk int, s bioseq.seq('dna4',32)"
+        ") USING bioseq;"
+        "INSERT INTO doc0377_slice_ordered_owner "
+        "SELECT g, repeat('A',4161-g)::bioseq.seq('dna4',32) "
+        "FROM generate_series(64,1,-1) AS g;");
+
+    std::vector<long long> lengths_by_pk;
+    rowset_t length_pk_rows;
+    lengths_by_pk.reserve(64u);
+    length_pk_rows.reserve(64u);
+    for (long long pk = 1; pk <= 64; ++pk) {
+        const long long length = 4161 - pk;
+        lengths_by_pk.push_back(length);
+        length_pk_rows.push_back({
+            std::optional<std::string>{std::to_string(length)},
+            std::optional<std::string>{std::to_string(pk)},
+        });
+    }
+    auto lengths_multiset = lengths_by_pk;
+    std::sort(lengths_multiset.begin(), lengths_multiset.end());
+
+    const auto require_single_owner = [owner](const auto& plan) {
+        REQUIRE(plan_line_count(plan, owner) == 1u);
+        const auto index = plan_line_index(plan, owner);
+        REQUIRE(index.has_value());
+        return *index;
+    };
+    const auto require_exact_multiset = [&ctx, &lengths_multiset](
+            std::string_view sql) {
+        auto actual = query_int_column(ctx, sql);
+        std::sort(actual.begin(), actual.end());
+        REQUIRE(actual == lengths_multiset);
+    };
+
+    constexpr auto unordered_sql =
+        "SELECT bioseq.len(s) FROM doc0377_slice_ordered_owner;";
+    const auto unordered_plan = explain_text<false>(ctx, unordered_sql);
+    (void)require_single_owner(unordered_plan);
+    REQUIRE_FALSE(plan_contains(unordered_plan, "Sort"));
+    REQUIRE_FALSE(plan_contains(unordered_plan, "Gather"));
+    require_exact_multiset(unordered_sql);
+
+    exec_sql(ctx,
+        "SET bioseq.enable_parallel_execution=on;"
+        "SET max_parallel_workers_per_gather=2;"
+        "SET min_parallel_table_scan_size=0;"
+        "SET parallel_setup_cost=0;"
+        "SET parallel_tuple_cost=0;"
+        "SET parallel_leader_participation=off;"
+        "DO $$ BEGIN "
+        " IF EXISTS (SELECT 1 FROM pg_settings "
+        "            WHERE name='debug_parallel_query') THEN "
+        "   PERFORM set_config('debug_parallel_query','on',false);"
+        " ELSIF EXISTS (SELECT 1 FROM pg_settings "
+        "               WHERE name='force_parallel_mode') THEN "
+        "   PERFORM set_config('force_parallel_mode','on',false);"
+        " END IF; END $$;");
+    const auto parallel_plan = explain_text<false>(ctx, unordered_sql);
+    const std::size_t parallel_owner = require_single_owner(parallel_plan);
+    const auto gather = plan_line_index(parallel_plan, "Gather");
+    REQUIRE(gather.has_value());
+    REQUIRE(*gather < parallel_owner);
+    REQUIRE_FALSE(plan_contains(parallel_plan, "Single Copy: true"));
+    REQUIRE_FALSE(plan_contains(parallel_plan, "Sort"));
+    require_exact_multiset(unordered_sql);
+
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "DO $$ BEGIN "
+        " IF EXISTS (SELECT 1 FROM pg_settings "
+        "            WHERE name='debug_parallel_query') THEN "
+        "   PERFORM set_config('debug_parallel_query','off',false);"
+        " ELSIF EXISTS (SELECT 1 FROM pg_settings "
+        "               WHERE name='force_parallel_mode') THEN "
+        "   PERFORM set_config('force_parallel_mode','off',false);"
+        " END IF; END $$;");
+
+    constexpr auto length_order_sql =
+        "SELECT bioseq.len(s) FROM doc0377_slice_ordered_owner ORDER BY 1;";
+    const auto length_order_plan = explain_text<false>(ctx, length_order_sql);
+    const std::size_t length_order_owner =
+        require_single_owner(length_order_plan);
+    const auto length_sort = plan_line_index(length_order_plan, "Sort");
+    REQUIRE(length_sort.has_value());
+    REQUIRE(*length_sort < length_order_owner);
+    REQUIRE_FALSE(plan_contains(length_order_plan, "Gather"));
+    REQUIRE(query_int_column(ctx, length_order_sql) == lengths_multiset);
+
+    constexpr auto length_pk_sql =
+        "SELECT bioseq.len(s),pk FROM doc0377_slice_ordered_owner "
+        "ORDER BY pk;";
+    const auto length_pk_plan = explain_text<false>(ctx, length_pk_sql);
+    const std::size_t length_pk_owner = require_single_owner(length_pk_plan);
+    const auto length_pk_sort = plan_line_index(length_pk_plan, "Sort");
+    REQUIRE(length_pk_sort.has_value());
+    REQUIRE(*length_pk_sort < length_pk_owner);
+    REQUIRE_FALSE(plan_contains(length_pk_plan, "Gather"));
+    REQUIRE(query_rows(ctx, length_pk_sql) == length_pk_rows);
+
+    constexpr auto resjunk_sql =
+        "SELECT bioseq.len(s) FROM doc0377_slice_ordered_owner ORDER BY pk;";
+    const auto resjunk_plan = explain_text<false>(ctx, resjunk_sql);
+    const std::size_t resjunk_owner = require_single_owner(resjunk_plan);
+    const auto resjunk_sort = plan_line_index(resjunk_plan, "Sort");
+    REQUIRE(resjunk_sort.has_value());
+    REQUIRE(*resjunk_sort < resjunk_owner);
+    REQUIRE_FALSE(plan_contains(resjunk_plan, "Gather"));
+    REQUIRE(query_int_column(ctx, resjunk_sql) == lengths_by_pk);
 }
 
 TEST_CASE("DOC0377 nested two-provider projection preserves upper leases",
@@ -767,6 +938,226 @@ TEST_CASE("DOC0377 materialized spill aggregate COPY generated and parallel rout
 
         reset_source_counters(ctx);
         REQUIRE(query_scalar_int(ctx, parallel_sql) == 6144);
+        REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+        require_source_resources_balanced(ctx);
+    }
+}
+
+TEST_CASE("DOC0377 BSS3 keeps child resnos distinct from physical attnos",
+          "[seq][slice][source-domain][bss3][namespace]") {
+    constexpr std::string_view table = "doc0377_bss3_attno_namespace";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off;"
+        "CREATE TABLE doc0377_bss3_attno_namespace ("
+        " pad bioseq.seq('dna4',32),"
+        " id int,"
+        " wanted bioseq.seq('dna4',32)"
+        ") USING bioseq;"
+        "INSERT INTO doc0377_bss3_attno_namespace VALUES ("
+        " repeat('A',4096)::bioseq.seq('dna4',32),"
+        " 7,"
+        " repeat('TGCA',1024)::bioseq.seq('dna4',32)"
+        ");");
+
+    /* The scan projects only wanted: child resno 1 therefore names physical
+     * attribute 3, while physical attribute 1 is a different SEQ locator.
+     * Confusing those namespaces returns the pad slice (AAAAAAAA). */
+    constexpr auto sql =
+        "SELECT bioseq.to_text(wanted[0:8]) "
+        "FROM doc0377_bss3_attno_namespace;";
+    const auto planned = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(planned, "Custom Scan (BioseqSliceProject)"));
+
+    reset_source_counters(ctx);
+    REQUIRE(query_scalar(ctx, sql) == "TGCATGCA");
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+
+    reset_source_counters(ctx);
+    const auto analyzed = explain_text<true>(ctx, sql);
+    REQUIRE(plan_contains(analyzed, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(source_boundary_actual_calls(
+        analyzed, "text", "SQL conversion") == 1u);
+    REQUIRE_FALSE(plan_contains(analyzed, "Counter Overflow: true"));
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+}
+
+TEST_CASE("DOC0377 parallel lazy providers adopt the flushed scan snapshot",
+          "[seq][slice][source-domain][parallel][snapshot][pending-write]") {
+    constexpr std::string_view table = "doc0377_parallel_source_snapshot";
+    auto ctx = fresh_context({table});
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT current_setting('max_parallel_workers')::int;") > 0);
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.enable_parallel_execution=on;"
+        "SET bioseq.min_parallel_processes=2;"
+        "SET max_parallel_workers_per_gather=2;"
+        "SET min_parallel_table_scan_size=0;"
+        "SET parallel_setup_cost=0;"
+        "SET parallel_tuple_cost=0;"
+        "SET parallel_leader_participation=off;"
+        "DO $$ BEGIN "
+        " IF EXISTS (SELECT 1 FROM pg_settings "
+        "            WHERE name='debug_parallel_query') THEN "
+        "   PERFORM set_config('debug_parallel_query','on',false);"
+        " ELSIF EXISTS (SELECT 1 FROM pg_settings "
+        "               WHERE name='force_parallel_mode') THEN "
+        "   PERFORM set_config('force_parallel_mode','on',false);"
+        " END IF; END $$;");
+    exec_sql(ctx,
+        "BEGIN;"
+        "CREATE TABLE doc0377_parallel_source_snapshot "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq "
+        " WITH (autovacuum_enabled=false);"
+        "INSERT INTO doc0377_parallel_source_snapshot "
+        "SELECT g, repeat('TGCA',2048)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1,64) AS g;"
+        "COMMIT;");
+    exec_sql(ctx,
+        "BEGIN;"
+        "INSERT INTO doc0377_parallel_source_snapshot "
+        "SELECT 1000+g, repeat('ACGT',2048)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1,64) AS g;");
+
+    constexpr auto sql =
+        "SELECT id,bioseq.to_text(s[0:8]) "
+        "FROM doc0377_parallel_source_snapshot;";
+    const auto planned = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(planned, "Gather"));
+    REQUIRE(plan_contains(planned, "Workers Planned: 2"));
+    REQUIRE_FALSE(plan_contains(planned, "Single Copy: true"));
+    REQUIRE(plan_line_count(
+        planned, "Custom Scan (BioseqSliceProject)") == 1u);
+    const auto gather = plan_line_index(planned, "Gather");
+    const auto owner = plan_line_index(
+        planned, "Custom Scan (BioseqSliceProject)");
+    REQUIRE(gather.has_value());
+    REQUIRE(owner.has_value());
+    REQUIRE(*gather < *owner);
+
+    rowset_t expected;
+    expected.reserve(128u);
+    for (int id = 1; id <= 64; ++id) {
+        expected.push_back({
+            std::optional<std::string>{std::to_string(id)},
+            std::optional<std::string>{"TGCATGCA"},
+        });
+    }
+    for (int id = 1001; id <= 1064; ++id) {
+        expected.push_back({
+            std::optional<std::string>{std::to_string(id)},
+            std::optional<std::string>{"ACGTACGT"},
+        });
+    }
+    std::sort(expected.begin(), expected.end());
+    reset_source_counters(ctx);
+    auto actual = query_rows(ctx, sql);
+    std::sort(actual.begin(), actual.end());
+    REQUIRE(actual == expected);
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+    exec_sql(ctx, "COMMIT;");
+}
+
+TEST_CASE("DOC0377 parallel stripe claiming skips aborted same-relation gaps",
+          "[seq][slice][source-domain][parallel][dsm][stripe-gap]") {
+    constexpr std::string_view table = "doc0377_parallel_stripe_gaps";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.stripe_row_limit=1000;"
+        "SET bioseq.chunk_group_row_limit=1000;"
+        "CREATE TABLE doc0377_parallel_stripe_gaps "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+
+    /* Stripe ids are relation-local.  A first row reserves the next id in the
+     * relation metapage, which is not rolled back with its MVCC metadata row.
+     * Burn ids 2 and 4 in aborted transactions so the reader must claim
+     * visible stripes 1, 3 and 5 without duplicating a gap successor. */
+    exec_sql(ctx,
+        "INSERT INTO doc0377_parallel_stripe_gaps "
+        "SELECT g, repeat('ACGT',16)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1,1000) AS g;");
+    exec_sql(ctx,
+        "BEGIN;"
+        "INSERT INTO doc0377_parallel_stripe_gaps VALUES (-1,NULL);"
+        "ROLLBACK;");
+    exec_sql(ctx,
+        "INSERT INTO doc0377_parallel_stripe_gaps "
+        "SELECT g, repeat('TGCA',16)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1001,2000) AS g;");
+    exec_sql(ctx,
+        "BEGIN;"
+        "INSERT INTO doc0377_parallel_stripe_gaps VALUES (-2,NULL);"
+        "ROLLBACK;");
+    exec_sql(ctx,
+        "INSERT INTO doc0377_parallel_stripe_gaps "
+        "SELECT g, repeat('GATT',16)::bioseq.seq('dna4',32) "
+        "FROM generate_series(2001,3000) AS g;");
+
+    REQUIRE(query_int_column(ctx,
+        "SELECT stripe_num FROM bioseq.stripe "
+        "WHERE relation='doc0377_parallel_stripe_gaps'::regclass "
+        "ORDER BY stripe_num;") == std::vector<long long>{1, 3, 5});
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT current_setting('max_parallel_workers')::int;") > 0);
+    exec_sql(ctx,
+        "SET bioseq.enable_parallel_execution=on;"
+        "SET max_parallel_workers_per_gather=2;"
+        "SET min_parallel_table_scan_size=0;"
+        "SET parallel_setup_cost=0;"
+        "SET parallel_tuple_cost=0;"
+        "SET parallel_leader_participation=off;"
+        "DO $$ BEGIN "
+        " IF EXISTS (SELECT 1 FROM pg_settings "
+        "            WHERE name='debug_parallel_query') THEN "
+        "   PERFORM set_config('debug_parallel_query','on',false);"
+        " ELSIF EXISTS (SELECT 1 FROM pg_settings "
+        "               WHERE name='force_parallel_mode') THEN "
+        "   PERFORM set_config('force_parallel_mode','on',false);"
+        " END IF; END $$;");
+
+    constexpr auto exact_sql =
+        "SELECT id,bioseq.to_text(s[0:8]) "
+        "FROM doc0377_parallel_stripe_gaps ORDER BY id;";
+    const auto planned = explain_text<false>(ctx, exact_sql);
+    REQUIRE(plan_contains(planned, "Gather"));
+    REQUIRE(plan_contains(planned, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_line_index(planned, "Gather")
+            < plan_line_index(
+                planned, "Custom Scan (BioseqSliceProject)"));
+
+    rowset_t expected;
+    expected.reserve(3000u);
+    for (long long id = 1; id <= 3000; ++id) {
+        const std::string prefix = id <= 1000
+            ? "ACGTACGT" : id <= 2000 ? "TGCATGCA" : "GATTGATT";
+        expected.push_back({
+            std::optional<std::string>{std::to_string(id)},
+            std::optional<std::string>{prefix},
+        });
+    }
+
+    reset_source_counters(ctx);
+    const auto analyzed = explain_text<true>(ctx,
+        "SELECT bioseq.to_text(s[0:8]) "
+        "FROM doc0377_parallel_stripe_gaps;");
+    REQUIRE(plan_contains(analyzed, "Gather"));
+    REQUIRE(plan_contains(
+        analyzed, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(source_boundary_actual_calls(
+        analyzed, "text", "SQL conversion") == 3000u);
+    REQUIRE_FALSE(plan_contains(analyzed, "Incomplete Workers"));
+    REQUIRE_FALSE(plan_contains(analyzed, "Counter Overflow: true"));
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+
+    for (int execution = 0; execution < 2; ++execution) {
+        reset_source_counters(ctx);
+        REQUIRE(query_rows(ctx, exact_sql) == expected);
         REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
         require_source_resources_balanced(ctx);
     }

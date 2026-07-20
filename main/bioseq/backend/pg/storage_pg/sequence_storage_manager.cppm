@@ -1951,7 +1951,7 @@ inline constexpr std::size_t kSequenceFragmentStorageUnits = std::size_t{1024};
 // this only flushes pending columnar writes (it does NOT pop/close the write
 // state); the central xact-commit teardown still owns lifecycle.
 void flush_seq_cache_write_states(seq_caches* caches,
-                                  SubTransactionId current_sub_xid) noexcept;
+                                  SubTransactionId current_sub_xid);
 
 /// DOC0286 §4.3 — bounded streaming fragment writer for one sequence. Accepts
 /// column-native packed bytes, writes full fragment rows (each
@@ -2458,7 +2458,7 @@ void seq_caches::close_all(bool commit) noexcept {
 // so a same-statement index scan sees the just-written fragment rows.
 // `FlushWriteStateForRelfilenode` is keyed on the shard relation's relfilenode.
 void flush_seq_cache_write_states(seq_caches* caches,
-                                  SubTransactionId current_sub_xid) noexcept {
+                                  SubTransactionId current_sub_xid) {
     if (caches == nullptr || caches->side != seq_caches::Side::Write) return;
     for (auto& kv : caches->entries) {
         seq_caches::entry& e = kv.second;

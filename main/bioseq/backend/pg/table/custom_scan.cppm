@@ -289,6 +289,16 @@ struct BioseqPlaceholderConsts {
  * `clear_slots()` runs while the per-query ResourceOwner is still
  * alive) without racing the callback.
  */
+struct SliceProjectProjectedSourceBinding {
+	std::uint32_t producer_id = 0u;
+	AttrNumber physical_attno = InvalidAttrNumber;
+};
+
+enum class SliceProjectSourceSlotLayout : std::uint8_t {
+	physical_relation,
+	projected_child,
+};
+
 struct BioseqScanRuntime {
 	bioseq::scheduler::DispatchBufferRuntime buffer{kBioseqRuntimeBufferReserve};
 	bioseq::pg::alignment_execution::AlignmentNodeRegistrationHandle
@@ -314,8 +324,13 @@ struct BioseqScanRuntime {
 	bioseq::storage::pg_sequence_source_provider*
 	                                          lazy_source_provider = nullptr;
 	slice_trace_attachment*                   lazy_trace_attachment = nullptr;
-	std::vector<std::uint32_t>                lazy_source_producer_ids{};
-	std::vector<AttrNumber>                   lazy_source_column_attnos{};
+	/* BSS3 has two distinct attribute-number namespaces.  The projected map
+	 * is indexed by child targetlist resno; the physical maps are indexed by
+	 * relation varattno.  Never infer one layout from the other. */
+	std::vector<SliceProjectProjectedSourceBinding>
+	                                          lazy_source_projected_bindings{};
+	std::vector<std::uint32_t>                lazy_source_physical_producer_ids{};
+	std::vector<std::uint8_t>                 lazy_source_physical_bound{};
 	int                                       locator_parent_token = 0;
 	AttrNumber                                locator_rowno_resno = InvalidAttrNumber;
 
@@ -494,7 +509,8 @@ static_assert(offsetof(BioseqPerRowJoinState, custom_scanstate) == 0);
 
 static void promote_slice_project_sources(
 	BioseqScanState* state, TupleTableSlot* slot,
-	MemoryContext result_context, bool allow_locator_passthrough);
+	MemoryContext result_context, bool allow_locator_passthrough,
+	SliceProjectSourceSlotLayout layout, TupleDesc expected_descriptor);
 
 /*
  * Centralised accessor: each BioseqScanState owns exactly one
@@ -5459,6 +5475,107 @@ bioseq_slice_project_exec_methods() noexcept {
 	return custom->methods == &bioseq_slice_project_path_methods();
 }
 
+[[nodiscard]] static bool slice_project_targets_match(
+		PathTarget* actual, PathTarget* expected) {
+	const int expression_count = actual == nullptr
+		? 0 : list_length(actual->exprs);
+	if (actual == nullptr || expected == nullptr
+		|| expression_count != list_length(expected->exprs)
+		|| !equal(actual->exprs, expected->exprs)) {
+		return false;
+	}
+	for (int index = 0; index < expression_count; ++index) {
+		if (get_pathtarget_sortgroupref(actual, index)
+			!= get_pathtarget_sortgroupref(expected, index)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* An ordered upper target may omit resjunk entries retained by its child's
+ * full target.  Prove every requested top-level lazy expression, including
+ * its sortgroupref and duplicate multiplicity, is already published by that
+ * full target.  Non-lazy outputs remain core's ordinary projection concern. */
+[[nodiscard]] static bool slice_project_requested_lazy_target_is_subset(
+		PathTarget* full_target, PathTarget* requested_target) {
+	if (full_target == nullptr || requested_target == nullptr) return false;
+	const int full_count = list_length(full_target->exprs);
+	const int requested_count = list_length(requested_target->exprs);
+	bool saw_lazy_expression = false;
+	for (int requested_index = 0;
+		 requested_index < requested_count; ++requested_index) {
+		auto* requested_expression = reinterpret_cast<Node*>(
+			list_nth(requested_target->exprs, requested_index));
+		if (!bioseq_expr_uses_lazy_sequence_projection(
+				requested_expression)) continue;
+		saw_lazy_expression = true;
+		const Index requested_sortgroupref = get_pathtarget_sortgroupref(
+			requested_target, requested_index);
+
+		int required_occurrences = 1;
+		for (int prior_index = 0;
+			 prior_index < requested_index; ++prior_index) {
+			auto* prior_expression = reinterpret_cast<Node*>(
+				list_nth(requested_target->exprs, prior_index));
+			if (bioseq_expr_uses_lazy_sequence_projection(prior_expression)
+				&& get_pathtarget_sortgroupref(
+					requested_target, prior_index) == requested_sortgroupref
+				&& equal(prior_expression, requested_expression)) {
+				++required_occurrences;
+			}
+		}
+
+		int available_occurrences = 0;
+		for (int full_index = 0; full_index < full_count; ++full_index) {
+			auto* full_expression = reinterpret_cast<Node*>(
+				list_nth(full_target->exprs, full_index));
+			if (get_pathtarget_sortgroupref(full_target, full_index)
+					== requested_sortgroupref
+				&& equal(full_expression, requested_expression)) {
+				++available_occurrences;
+			}
+		}
+		if (available_occurrences < required_occurrences) return false;
+	}
+	return saw_lazy_expression;
+}
+
+/* Recognition only: after the subset proof, pin the child's complete target
+ * and cross exactly the ordering/parallel containers which preserve every
+ * expression and sortgroupref.  Never cross projection, materialization,
+ * joins, or any other evaluation frontier. */
+[[nodiscard]] static bool
+slice_project_is_owner_below_target_preserving_ordering(
+		Path* path, PathTarget* requested_target) {
+	if (path == nullptr
+		|| !slice_project_requested_lazy_target_is_subset(
+			path->pathtarget, requested_target)) return false;
+	PathTarget* const full_target = path->pathtarget;
+	while (path != nullptr
+		&& slice_project_targets_match(path->pathtarget, full_target)) {
+		if (slice_project_is_owner_path(path)) return true;
+		if (IsA(path, SortPath)) {
+			path = reinterpret_cast<SortPath*>(path)->subpath;
+			continue;
+		}
+		if (IsA(path, IncrementalSortPath)) {
+			path = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
+			continue;
+		}
+		if (IsA(path, GatherPath)) {
+			path = reinterpret_cast<GatherPath*>(path)->subpath;
+			continue;
+		}
+		if (IsA(path, GatherMergePath)) {
+			path = reinterpret_cast<GatherMergePath*>(path)->subpath;
+			continue;
+		}
+		return false;
+	}
+	return false;
+}
+
 /* Planner Path nodes are deliberately marked `no_copy_equal` by PostgreSQL.
  * `copyObject(path)` therefore reaches copyObjectImpl's "unrecognized node
  * type" branch for every Path-family tag.  Clone exactly the mutable path
@@ -6189,6 +6306,11 @@ static void slice_project_try_install_base_owner(
 	}
 	if (owners.empty()) return;
 
+	/* Gather paths are derived after this hook from reltarget.  Since every
+	 * surviving ordinary and partial path publishes the processed projection,
+	 * make that target canonical before core constructs Gather; otherwise it
+	 * asks a final-expression SliceProject child to publish the old raw Var. */
+	rel->reltarget = copy_pathtarget(projection_target);
 	rel->pathlist = NIL;
 	rel->partial_pathlist = NIL;
 	rel->cheapest_startup_path = nullptr;
@@ -6252,7 +6374,8 @@ static void BioseqSliceProject_CreateUpperPaths(
 			reinterpret_cast<Node*>(child->pathtarget->exprs))) {
 		child = reinterpret_cast<ProjectionPath*>(child)->subpath;
 	}
-	if (slice_project_is_owner_path(child)) return;
+	if (slice_project_is_owner_below_target_preserving_ordering(
+			child, projection_target)) return;
 
 	List* required = NIL;
 	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
@@ -12250,8 +12373,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 	runtime.locator_passthrough = false;
 	runtime.lazy_source_projection = false;
-	runtime.lazy_source_producer_ids.clear();
-	runtime.lazy_source_column_attnos.clear();
+	runtime.lazy_source_projected_bindings.clear();
+	runtime.lazy_source_physical_producer_ids.clear();
+	runtime.lazy_source_physical_bound.clear();
 	runtime.locator_parent_token = 0;
 	runtime.locator_rowno_resno = InvalidAttrNumber;
 	runtime.edit_predicate_active = false;
@@ -12291,15 +12415,18 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 						 errmsg("Bioseq SliceProject source tag is invalid")));
 				}
 				runtime.lazy_source_projection = true;
-				const int relation_natts = RelationGetDescr(
-					cscanstate->ss.ss_currentRelation)->natts;
-				runtime.lazy_source_producer_ids.assign(
-					static_cast<std::size_t>(
-						list_length(cscan->scan.plan.targetlist) + 1), 0u);
-				runtime.lazy_source_column_attnos.assign(
-					static_cast<std::size_t>(
-						list_length(cscan->scan.plan.targetlist) + 1),
-					InvalidAttrNumber);
+				TupleDesc relation_descriptor = RelationGetDescr(
+					cscanstate->ss.ss_currentRelation);
+				const int relation_natts = relation_descriptor->natts;
+				const int projected_natts = list_length(
+					cscan->scan.plan.targetlist);
+				runtime.lazy_source_projected_bindings.assign(
+					static_cast<std::size_t>(projected_natts + 1), {});
+				runtime.lazy_source_physical_producer_ids.assign(
+					static_cast<std::size_t>(relation_natts + 1), 0u);
+				runtime.lazy_source_physical_bound.assign(
+					static_cast<std::size_t>(relation_natts + 1), 0u);
+				const Oid seq_oid = get_cached_stub_oids().bioseq_seq_type_oid;
 				List* bindings = bindings_node == nullptr ? NIL
 					: reinterpret_cast<List*>(bindings_node);
 				for (Node* raw_binding : PList<Node>(bindings)) {
@@ -12316,21 +12443,40 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 					const int resno = intVal(linitial(binding));
 					const int producer_id = intVal(lsecond(binding));
 					const int column_attno = intVal(lthird(binding));
+					TargetEntry* target_entry = resno > 0 && resno <= projected_natts
+						? pg_node_try_as<TargetEntry>(reinterpret_cast<Node*>(
+							list_nth(cscan->scan.plan.targetlist, resno - 1)))
+						: nullptr;
+					Form_pg_attribute relation_attribute =
+						column_attno > 0 && column_attno <= relation_natts
+							? TupleDescAttr(relation_descriptor, column_attno - 1)
+							: nullptr;
 					if (resno <= 0
-						|| resno > list_length(cscan->scan.plan.targetlist)
+						|| resno > projected_natts
 						|| producer_id < 0
 						|| column_attno <= 0
 						|| column_attno > relation_natts
-						|| runtime.lazy_source_column_attnos[resno]
-							!= InvalidAttrNumber) {
+						|| target_entry == nullptr
+						|| exprType(reinterpret_cast<Node*>(target_entry->expr))
+							!= seq_oid
+						|| relation_attribute == nullptr
+						|| relation_attribute->attisdropped
+						|| relation_attribute->atttypid != seq_oid
+						|| runtime.lazy_source_projected_bindings[resno].
+							physical_attno != InvalidAttrNumber
+						|| runtime.lazy_source_physical_bound[column_attno]
+							!= 0u) {
 						ereport(ERROR,
 							(errcode(ERRCODE_DATA_CORRUPTED),
 							 errmsg("Bioseq SliceProject source binding is out of range")));
 					}
-					runtime.lazy_source_producer_ids[resno] =
+					runtime.lazy_source_projected_bindings[resno] = {
+						.producer_id = static_cast<std::uint32_t>(producer_id),
+						.physical_attno = static_cast<AttrNumber>(column_attno),
+					};
+					runtime.lazy_source_physical_producer_ids[column_attno] =
 						static_cast<std::uint32_t>(producer_id);
-					runtime.lazy_source_column_attnos[resno] =
-						static_cast<AttrNumber>(column_attno);
+					runtime.lazy_source_physical_bound[column_attno] = 1u;
 				}
 		} else if (magic == kBioseqEditPredicateMagic) {
 			Const* threshold = list_length(tag) == 4
@@ -13120,7 +13266,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	}
 	/* Plain EXPLAIN must describe the selected pipeline without touching the
 	 * process-owned Vulkan runtime or its immutable Metal policy.  PostgreSQL
-	 * clears EXEC_FLAG_EXPLAIN_ONLY for SELECT and EXPLAIN ANALYZE, so every
+	 * clears EXEC_FLAG_EXPLAIN_ONLY for SELECT and EXPLAIN (ANALYZE), so every
 	 * executable path retains the fail-closed enablement, cache and device
 	 * checks below. */
 	const bool executable_vulkan =
@@ -14220,7 +14366,9 @@ static TupleTableSlot* batch_join_project_output(
 				promote_slice_project_sources(
 					target_state, output.scan_slot_copy,
 					expression_context->ecxt_per_tuple_memory,
-					/*allow_locator_passthrough=*/true);
+					/*allow_locator_passthrough=*/true,
+					SliceProjectSourceSlotLayout::projected_child,
+					ExecGetResultType(reinterpret_cast<PlanState*>(target_custom)));
 				slot_getallattrs(output.scan_slot_copy);
 			}
 		}
@@ -16214,7 +16362,9 @@ populate_symbol_count_placeholders(BioseqPlaceholderConsts& consts,
 static void promote_slice_project_sources(
 		BioseqScanState* state, TupleTableSlot* slot,
 		MemoryContext result_context,
-		const bool allow_locator_passthrough) {
+		const bool allow_locator_passthrough,
+		const SliceProjectSourceSlotLayout layout,
+		TupleDesc expected_descriptor) {
 	BioseqScanRuntime& runtime = bioseq_runtime(state);
 	if (!runtime.lazy_source_projection
 		|| (runtime.locator_passthrough && !allow_locator_passthrough)) return;
@@ -16223,6 +16373,11 @@ static void promote_slice_project_sources(
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			 errmsg("BioseqSliceProject source provider is not initialized")));
 	}
+	if (slot == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("BioseqSliceProject source slot is unavailable")));
+	}
 	slot_getallattrs(slot);
 	const Oid seq_oid = get_cached_stub_oids().bioseq_seq_type_oid;
 	if (result_context == nullptr) {
@@ -16230,22 +16385,104 @@ static void promote_slice_project_sources(
 			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 			 errmsg("BioseqSliceProject result context is unavailable")));
 	}
+	TupleDesc actual_descriptor = slot->tts_tupleDescriptor;
+	if (actual_descriptor == nullptr || expected_descriptor == nullptr
+		|| (actual_descriptor != expected_descriptor
+			&& !equalTupleDescs(actual_descriptor, expected_descriptor))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATATYPE_MISMATCH),
+			 errmsg("BioseqSliceProject source slot layout changed"),
+			 errdetail("layout=%s",
+				layout == SliceProjectSourceSlotLayout::physical_relation
+					? "physical relation" : "projected child")));
+	}
+	const std::size_t required_entries = static_cast<std::size_t>(
+		actual_descriptor->natts + 1);
+	if ((layout == SliceProjectSourceSlotLayout::physical_relation
+			&& (runtime.lazy_source_physical_producer_ids.size()
+				!= required_entries
+				|| runtime.lazy_source_physical_bound.size()
+					!= required_entries))
+		|| (layout == SliceProjectSourceSlotLayout::projected_child
+			&& runtime.lazy_source_projected_bindings.size()
+				!= required_entries)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqSliceProject source binding layout changed")));
+	}
 	for (int index = 0; index < slot->tts_tupleDescriptor->natts; ++index) {
-		if (slot->tts_isnull[index]
-			|| TupleDescAttr(slot->tts_tupleDescriptor, index)->atttypid
-				!= seq_oid) continue;
-		auto* value = reinterpret_cast<const pgseq_t*>(
-			DatumGetPointer(slot->tts_values[index]));
-		if (!bioseq::storage::is_locator_stub(value)) continue;
 		const AttrNumber resno = static_cast<AttrNumber>(index + 1);
-		const std::uint32_t producer_id =
-			static_cast<std::size_t>(resno)
-					< runtime.lazy_source_producer_ids.size()
-				? runtime.lazy_source_producer_ids[resno] : 0u;
-		const AttrNumber column_attno =
-			static_cast<std::size_t>(resno)
-					< runtime.lazy_source_column_attnos.size()
-				? runtime.lazy_source_column_attnos[resno] : InvalidAttrNumber;
+		std::uint32_t producer_id = 0u;
+		AttrNumber column_attno = InvalidAttrNumber;
+		bool bound = false;
+		if (layout == SliceProjectSourceSlotLayout::physical_relation) {
+			bound = runtime.lazy_source_physical_bound[resno] != 0u;
+			producer_id = runtime.lazy_source_physical_producer_ids[resno];
+			column_attno = resno;
+		} else {
+			auto const& binding =
+				runtime.lazy_source_projected_bindings[resno];
+			bound = binding.physical_attno != InvalidAttrNumber;
+			producer_id = binding.producer_id;
+			column_attno = binding.physical_attno;
+		}
+		if (!bound) continue;
+		if (TupleDescAttr(actual_descriptor, index)->atttypid != seq_oid) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("BioseqSliceProject bound source is not a sequence"),
+				 errdetail("layout_attribute=%d physical_attribute=%d",
+					static_cast<int>(resno),
+					static_cast<int>(column_attno))));
+		}
+		if (slot->tts_isnull[index]) continue;
+		Datum source = slot->tts_values[index];
+		if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source))) {
+			if (producer_id != 0u
+				&& runtime.lazy_trace_attachment != nullptr
+				&& runtime.lazy_trace_attachment->runtime != nullptr
+				&& runtime.lazy_trace_attachment->runtime->collection_enabled
+				&& !attach_slice_trace_provenance(
+					source, runtime.lazy_trace_attachment, producer_id)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqSliceProject expanded source lost provenance")));
+			}
+			continue;
+		}
+		auto* value = reinterpret_cast<const pgseq_t*>(
+			DatumGetPointer(source));
+		if (!bioseq::storage::is_locator_stub(value)) {
+			/* A small inline sequence has no EOH metadata field on which to keep
+			 * the planned producer identity.  Under ANALYZE only, adopt that flat
+			 * value once into the row context and attach observation metadata before
+			 * the lazy expression runs.  The backing copy is a real source-adoption
+			 * allocation (and remains visible to the allocator probe); it is not a
+			 * SliceProject slot-publication materialization. */
+			if (producer_id == 0u
+				|| runtime.lazy_trace_attachment == nullptr
+				|| runtime.lazy_trace_attachment->runtime == nullptr
+				|| !runtime.lazy_trace_attachment->runtime->collection_enabled) {
+				continue;
+			}
+			MemoryContext previous = MemoryContextSwitchTo(result_context);
+			try {
+				source = bioseq::pg_utils::invoke_pg_as_cpp(
+					[source, trace = runtime.lazy_trace_attachment,
+					 producer_id] {
+						auto adopted = acquire_writable_pg_sequence(
+							source, trace, producer_id);
+						return MakeExpandedObjectReadOnly(
+							pg_sequence_rw_datum(adopted.value), false, -1);
+					});
+				MemoryContextSwitchTo(previous);
+			} catch (...) {
+				MemoryContextSwitchTo(previous);
+				throw;
+			}
+			slot->tts_values[index] = source;
+			continue;
+		}
 		if (column_attno <= 0) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
@@ -16254,8 +16491,7 @@ static void promote_slice_project_sources(
 		}
 		slot->tts_values[index] =
 			bioseq::storage::promote_pg_sequence_locator(
-				runtime.lazy_source_provider,
-				column_attno, slot->tts_values[index], result_context,
+				runtime.lazy_source_provider, column_attno, source, result_context,
 				runtime.lazy_trace_attachment, producer_id);
 	}
 }
@@ -16490,7 +16726,9 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 					bioseqScanState, slot,
 					bioseqScanState->custom_scanstate.ss.ps.
 						ps_ExprContext->ecxt_per_tuple_memory,
-					/*allow_locator_passthrough=*/false);
+					/*allow_locator_passthrough=*/false,
+					SliceProjectSourceSlotLayout::physical_relation,
+					bioseqScanState->custom_scanstate.ss.ps.scandesc);
 			}
 
 		/*
@@ -16785,19 +17023,21 @@ BioseqColumnScanNext(BioseqScanState *bioseqScanState)
 			BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 			const bool needs_deferred_hydration =
 				(runtime.locator_passthrough
+				 || runtime.lazy_source_projection
 				 || runtime.buffer.mmsearch_active() || runtime.param_rebind.active)
 				&& !runtime.buffer.per_row_self_alignment();
 
 		/*
-		 * DOC0260 §8/§9 — deferred hydration is only valid for the batched
-		 * mmsearch path, where the dispatch buffer consumes locator stubs and
-		 * bulk-hydrates them per bucket. Plain scans may be projected by an
-		 * upper Result node, so they must use the ordinary table-AM scan and
+		 * DOC0260 §8/§9 — the batched mmsearch and locator-passthrough paths
+		 * consume locator stubs directly.  A lazy SliceProject source also stays
+		 * deferred, then promotes only its bound columns through the owning
+		 * provider immediately before projection.  Plain scans may be projected
+		 * by an upper Result node, so they use the ordinary table-AM scan and
 		 * return fully hydrated bioseq.seq varlenas. Same-column self-alignment
-		 * (`mmsearch(seq, seq)`) also stays non-deferred: submit_scan can copy
-		 * the hydrated value once as both target and per-row query, avoiding the
-		 * cold post-load descriptor path while preserving deferred hydration for
-		 * real target/query scans.
+		 * (`mmsearch(seq, seq)`) stays non-deferred: submit_scan can copy the
+		 * hydrated value once as both target and per-row query, avoiding the cold
+		 * post-load descriptor path while preserving deferred hydration for real
+		 * target/query scans.
 		 */
 		if (needs_deferred_hydration) {
 			scandesc = bioseq_beginscan_deferred_c(node->ss.ss_currentRelation,
@@ -18052,7 +18292,7 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 
 /* Parallel Execution */
 
-constexpr std::uint32_t kParallelBioseqColumnScanVersion = 2u;
+constexpr std::uint32_t kParallelBioseqColumnScanVersion = 3u;
 
 [[nodiscard]] static slice_dsm_worker_header*
 BioseqColumnParallelCounterSlot(
@@ -18137,9 +18377,6 @@ BioseqColumn_InitializeDSMCustomScan(CustomScanState *node,
 	 */
 	SerializeSnapshot(bioseqScanState->snapshot, pscan->snapshotData);
 
-	/* Initialize parallel scan mutex */
-	SpinLockInit(&pscan->mutex);
-
 	/* Stripe numbers are starting from index 1 */
 	pg_atomic_init_u64(&pscan->nextStripeId, 1);
 
@@ -18205,8 +18442,16 @@ BioseqColumn_InitializeWorkerCustomScan(CustomScanState *node,
 	bioseqScanState->snapshot = RegisterSnapshot(
 		RestoreSnapshot(pscan->snapshotData));
 	bioseqScanState->snapshotRegisteredByUs = true;
-	bioseq_runtime(bioseqScanState).buffer.replace_executor_snapshot(
-		bioseqScanState->snapshot);
+	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
+	if (runtime.lazy_source_provider != nullptr) {
+		bioseq::storage::rebind_pg_sequence_source_provider_snapshot(
+			runtime.lazy_source_provider, bioseqScanState->snapshot);
+	} else if (runtime.lazy_source_projection || runtime.locator_passthrough) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("BioseqScan worker source provider is unavailable")));
+	}
+	runtime.buffer.replace_executor_snapshot(bioseqScanState->snapshot);
 }
 
 

@@ -491,17 +491,21 @@ TEST_CASE("DOC0377 rescans retain every materialization counter delta",
      * VALUES row.  This is the executor shape used by a parallel worker under
      * a nested loop as well; counters must remain cumulative across rearms. */
     const auto plan = explain_with_options(
-        ctx, "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE TEXT",
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF",
         fmt::format(
-            "SELECT (SELECT source.seq0[0:4] FROM {} AS source "
+            "SELECT (SELECT bioseq.to_text(source.seq0[0:4]) "
+            "FROM {} AS source "
             "WHERE source.pk = driver.pk) "
             "FROM (VALUES (1), (2), (3)) AS driver(pk);",
             kTable));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
-    REQUIRE(boundary_actual_calls(plan, "text", "client output") == 3u);
-    REQUIRE(boundary_actual_bytes(plan, "text", "client output") == 15u);
-    REQUIRE(boundary_actual_calls(plan, "binary", "client output") == 0u);
-    REQUIRE(boundary_actual_bytes(plan, "binary", "client output") == 0u);
+    REQUIRE(boundary_actual_calls(plan, "text", "SQL conversion") == 3u);
+    REQUIRE(boundary_actual_metric(
+        plan, "text", "SQL conversion", "Actual Input Symbols") == 12u);
+    REQUIRE(boundary_actual_metric(
+        plan, "text", "SQL conversion", "Actual Output Symbols") == 12u);
+    /* Three 4-symbol text varlenas: VARHDRSZ + 4 bytes each. */
+    REQUIRE(boundary_actual_bytes(plan, "text", "SQL conversion") == 24u);
 }
 
 TEST_CASE("DOC0377 structured EXPLAIN preserves numeric counter fields",
@@ -594,8 +598,9 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
             "SELECT pk, seq0 FROM {};", kTable));
     REQUIRE_FALSE(plan_contains(
         flat_plan, "Custom Scan (BioseqSliceProject)"));
-    REQUIRE(query_scalar_int(
-        ctx, "SELECT count(*) FROM test_explain_flat_dst;") == 3);
+    REQUIRE(query_int_column(
+        ctx, "SELECT pk FROM test_explain_flat_dst ORDER BY pk;")
+        == std::vector<long long>{1, 2, 3});
 
 #ifdef BIOSEQ_TEST_INDEXES
     exec_sql(ctx,
@@ -615,11 +620,13 @@ TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
     REQUIRE(query_scalar_int(ctx,
         "SELECT bioseq_internal.slice_payload_allocation_probe(1);") == 3);
 #endif
-    REQUIRE(query_scalar_int(
-        ctx, "SELECT count(*) FROM test_explain_slice_dst;") == 3);
-    REQUIRE(query_scalar(
-        ctx, "SELECT bool_and(bioseq.len(seq0) = 4) "
-             "FROM test_explain_slice_dst;") == "t");
+    REQUIRE(query_int_column(
+        ctx, "SELECT pk FROM test_explain_slice_dst ORDER BY pk;")
+        == std::vector<long long>{1, 2, 3});
+    REQUIRE(query_int_column(
+        ctx, "SELECT bioseq.len(seq0) "
+             "FROM test_explain_slice_dst ORDER BY pk;")
+        == std::vector<long long>{4, 4, 4});
 }
 
 TEST_CASE("DOC0377 planned slice recipe is stable between plain and ANALYZE",
@@ -712,6 +719,17 @@ TEST_CASE("DOC0377 SliceProject shallow publication allocates no payload",
           "[explain][slice][materialization][accounting]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
+    /* Inline flat values require one legitimate backing adoption before they
+     * can become a lazy piece tree.  Use locator-backed rows so this probe
+     * isolates only SliceProject's memcpy + RO publication seam. */
+    exec_sql(ctx, fmt::format(
+        "SET bioseq.update_index_on_insert=off; "
+        "TRUNCATE {}; "
+        "INSERT INTO {} VALUES "
+        "(1, repeat('ACGT',262144)::bioseq.seq('dna4',32)), "
+        "(2, repeat('TGCA',262144)::bioseq.seq('dna4',32)), "
+        "(3, repeat('AAAA',262144)::bioseq.seq('dna4',32));",
+        kTable, kTable));
     const auto expression = fmt::format(
         "bioseq.reverse(seq0[0:4]) OPERATOR(bioseq.||) seq0[4:8]");
     const auto plan = explain_with_options(
@@ -764,7 +782,7 @@ TEST_CASE("DOC0377 YAML and XML preserve structured slice fields",
         ctx, "ANALYZE, TIMING OFF, COSTS OFF, FORMAT YAML", sql);
     REQUIRE(plan_contains(yaml, "BioseqSliceProject"));
     REQUIRE(plan_contains(yaml, "Slice Materialization"));
-    REQUIRE(plan_contains(yaml, "Mechanism: text"));
+    REQUIRE(plan_contains(yaml, "Mechanism: \"text\""));
     REQUIRE(plan_contains(yaml, "Actual Calls: 0"));
     const auto yaml_document = plan_document(yaml);
     const auto yaml_materializations = yaml_property_block(
@@ -928,15 +946,21 @@ void require_dsm_fixture_property(
         std::span<const std::string> plan,
         dsm_explain_format format,
         std::string_view name,
-        std::string_view value) {
+        std::string_view value,
+        bool string_value = false) {
     switch (format) {
         case dsm_explain_format::text:
-        case dsm_explain_format::yaml:
             REQUIRE(plan_contains(plan, fmt::format("{}: {}", name, value)));
             return;
+        case dsm_explain_format::yaml:
+            REQUIRE(plan_contains(plan, string_value
+                ? fmt::format("{}: \"{}\"", name, value)
+                : fmt::format("{}: {}", name, value)));
+            return;
         case dsm_explain_format::json:
-            REQUIRE(plan_contains(
-                plan, fmt::format("\"{}\": {}", name, value)));
+            REQUIRE(plan_contains(plan, string_value
+                ? fmt::format("\"{}\": \"{}\"", name, value)
+                : fmt::format("\"{}\": {}", name, value)));
             return;
         case dsm_explain_format::xml: {
             std::string tag{name};
@@ -971,8 +995,7 @@ TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
     for (const auto& [format, options] : formats) {
         const auto plan = explain_with_options(ctx, options, sql);
         require_dsm_fixture_property(
-            plan, format, "DSM Test Fixture", format == dsm_explain_format::json
-                ? "\"malformed\"" : "malformed");
+            plan, format, "DSM Test Fixture", "malformed", true);
         require_dsm_fixture_property(
             plan, format, "DSM Fixture Validated", "true");
         require_dsm_fixture_property(
@@ -1012,8 +1035,7 @@ TEST_CASE("DOC0377 incomplete DSM work is reported but never counted",
     for (const auto& [format, options] : formats) {
         const auto plan = explain_with_options(ctx, options, sql);
         require_dsm_fixture_property(
-            plan, format, "DSM Test Fixture", format == dsm_explain_format::json
-                ? "\"incomplete\"" : "incomplete");
+            plan, format, "DSM Test Fixture", "incomplete", true);
         require_dsm_fixture_property(
             plan, format, "DSM Fixture Validated", "true");
         require_dsm_fixture_property(

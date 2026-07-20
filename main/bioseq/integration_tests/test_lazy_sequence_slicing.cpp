@@ -7,10 +7,55 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 
 import bioseq.integration_tests.common;
 
 using namespace bioseq_int_tests;
+
+namespace {
+
+std::optional<std::string> boundary_explain_property(
+        std::span<const std::string> plan,
+        std::string_view mechanism,
+        std::string_view reason,
+        std::string_view property) {
+    bool mechanism_matches = false;
+    bool reason_matches = false;
+    const auto property_marker = fmt::format("{}:", property);
+    for (const auto& line : plan) {
+        if (line.find("var_") != std::string::npos
+            && line.find(" = ") != std::string::npos) {
+            mechanism_matches = false;
+            reason_matches = false;
+        }
+        if (line.find(fmt::format("Mechanism: {}", mechanism))
+            != std::string::npos) {
+            mechanism_matches = true;
+        }
+        if (line.find(fmt::format("Reason: {}", reason))
+            != std::string::npos) {
+            reason_matches = true;
+        }
+        if (!mechanism_matches || !reason_matches) {
+            continue;
+        }
+        const auto marker = line.find(property_marker);
+        if (marker == std::string::npos) {
+            continue;
+        }
+        const auto value_start = line.find_first_not_of(
+            " \t", marker + property_marker.size());
+        return value_start == std::string::npos
+            ? std::string{} : line.substr(value_start);
+    }
+    return std::nullopt;
+}
+
+}  // namespace
 
 TEST_CASE("DOC0377 trace ABI counters scopes refs and reusable slots are exact",
           "[seq][slice][trace][unit]") {
@@ -366,8 +411,9 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
         const auto provenance_plan = explain_text(ctx, sql);
         REQUIRE(plan_contains(provenance_plan, "Mechanism: text"));
         REQUIRE(plan_contains(provenance_plan, "Reason: SQL conversion"));
-        REQUIRE(find_explain_property(
-            provenance_plan, "Actual Calls") == "1");
+        REQUIRE(boundary_explain_property(
+            provenance_plan, "text", "SQL conversion", "Actual Calls")
+            == "1");
     }
 
     const auto plan = explain_text(
@@ -440,13 +486,14 @@ TEST_CASE("DOC0377 long source slice is faster than whole-sequence materializati
     REQUIRE(plan_contains(trace_plan, "Slice Materialization:"));
     REQUIRE(plan_contains(trace_plan, "Mechanism: text"));
     REQUIRE(plan_contains(trace_plan, "Reason: SQL conversion"));
-    REQUIRE(find_explain_property(trace_plan, "Actual Calls") == "1");
-    const auto traced_input = find_explain_property(
-        trace_plan, "Actual Input Symbols");
-    const auto traced_output = find_explain_property(
-        trace_plan, "Actual Output Symbols");
-    const auto traced_bytes = find_explain_property(
-        trace_plan, "Actual Bytes");
+    REQUIRE(boundary_explain_property(
+        trace_plan, "text", "SQL conversion", "Actual Calls") == "1");
+    const auto traced_input = boundary_explain_property(
+        trace_plan, "text", "SQL conversion", "Actual Input Symbols");
+    const auto traced_output = boundary_explain_property(
+        trace_plan, "text", "SQL conversion", "Actual Output Symbols");
+    const auto traced_bytes = boundary_explain_property(
+        trace_plan, "text", "SQL conversion", "Actual Bytes");
     REQUIRE(traced_input.has_value());
     REQUIRE(traced_output.has_value());
     REQUIRE(traced_bytes.has_value());

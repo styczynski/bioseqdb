@@ -25,6 +25,34 @@ namespace {
 
 static TupleTableSlotOps TTSOpsBioseqColumn;
 
+/* ModifyTable copies a virtual projection result into the destination
+ * relation slot before invoking the TableAM callback.  PostgreSQL's virtual
+ * copyslot materializes expanded datums during that copy, so classify that
+ * unavoidable flatten at the destination heap-tuple boundary. */
+static void
+BioseqColumnSlotCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
+{
+	const auto previous_scope = exchange_slice_materialization_scope({
+		.attachment = nullptr,
+		.boundary_id = 0u,
+		.producer_value_id = 0u,
+		.mechanism = materialization_mechanism::packed_full,
+		.reason = materialization_reason::heap_tuple,
+		.local_sink = nullptr,
+	});
+	PG_TRY();
+	{
+		TTSOpsVirtual.copyslot(dstslot, srcslot);
+		restore_slice_materialization_scope(previous_scope);
+	}
+	PG_CATCH();
+	{
+		restore_slice_materialization_scope(previous_scope);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
 /*
  * Implementation of TupleTableSlotOps.copy_heap_tuple for TTSOpsBioseqColumn.
  */
@@ -69,6 +97,7 @@ export void
 BioseqColumnInitTupleSlotOps()
 {
 	TTSOpsBioseqColumn = TTSOpsVirtual;
+	TTSOpsBioseqColumn.copyslot = BioseqColumnSlotCopySlot;
 	TTSOpsBioseqColumn.copy_heap_tuple = BioseqColumnSlotCopyHeapTuple;
 }
 

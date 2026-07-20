@@ -1257,6 +1257,37 @@ void run_tableam_cpp_checked(const char* operation, Fn&& function) {
 	}
 }
 
+[[nodiscard]] static Datum *
+detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum *values, bool *nulls)
+{
+	Datum *volatile detoasted_values = nullptr;
+	const auto previous_scope = exchange_slice_materialization_scope({
+		.attachment = nullptr,
+		.boundary_id = 0u,
+		.producer_value_id = 0u,
+		.mechanism = materialization_mechanism::packed_full,
+		.reason = materialization_reason::heap_tuple,
+		.local_sink = nullptr,
+	});
+	PG_TRY();
+	{
+		/* Destination-slot copyslot is the primary durable-write boundary.
+		 * Keep this TableAM scope as a fallback when an expanded value reaches
+		 * the access method without having been flattened there.  Each attached
+		 * EOH can still resolve its exact planned producer boundary. */
+		detoasted_values = bioseq::pg_utils::detoast_values(
+			tuple_desc, values, nulls);
+		restore_slice_materialization_scope(previous_scope);
+	}
+	PG_CATCH();
+	{
+		restore_slice_materialization_scope(previous_scope);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	return detoasted_values;
+}
+
 static void
 bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 					  int options, BulkInsertState bistate)
@@ -1285,8 +1316,8 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 
 		slot_getallattrs(slot);
 
-		Datum *detoasted_values = bioseq::pg_utils::detoast_values(slot->tts_tupleDescriptor,
-									   slot->tts_values, slot->tts_isnull);
+		Datum *detoasted_values = detoast_values_for_heap_tuple(
+			slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 
 		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
@@ -1344,8 +1375,8 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 		slot_getallattrs(slot);
 
-		Datum *detoasted_values = bioseq::pg_utils::detoast_values(slot->tts_tupleDescriptor,
-									   slot->tts_values, slot->tts_isnull);
+		Datum *detoasted_values = detoast_values_for_heap_tuple(
+			slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
@@ -1440,8 +1471,9 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			slot_getallattrs(tupleSlot);
 
-			Datum *detoasted_values = bioseq::pg_utils::detoast_values(tupleSlot->tts_tupleDescriptor,
-										   tupleSlot->tts_values, tupleSlot->tts_isnull);
+			Datum *detoasted_values = detoast_values_for_heap_tuple(
+				tupleSlot->tts_tupleDescriptor,
+				tupleSlot->tts_values, tupleSlot->tts_isnull);
 
 			std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
 			std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
@@ -3275,9 +3307,22 @@ BioseqColumnSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 
-// DOC0322 §7.3/§7 — adapter that satisfies the seq_caches_close hook expected
-// by storage_metadata:write_state. It owns the bioseq_storage-side teardown
-// (close_all + destroy) so storage_metadata never has to import bioseq_storage.
+// DOC0322 §7.3/§7 — adapters that keep storage_metadata independent from
+// bioseq_storage.  A parent flush must also flush its cached sequence-fragment
+// shard states before any caller refreshes or serializes a snapshot.
+static void
+bioseq_flush_pending_writes_adapter(BioseqColumnWriteState* write_state)
+{
+	BioseqColumnFlushPendingWrites(write_state);
+	if (write_state->seq_caches != nullptr)
+	{
+		bioseq::storage::flush_seq_cache_write_states(
+			static_cast<bioseq::storage::seq_caches*>(
+				write_state->seq_caches),
+			GetCurrentSubTransactionId());
+	}
+}
+
 static void
 bioseq_seq_caches_close_adapter(void* p, bool commit)
 {
@@ -3423,7 +3468,8 @@ bioseq_tableam_init()
 	// (default nullptr); register the bioseq_table_io / bioseq_storage callees
 	// here so storage_metadata stays free of those module edges.
 	register_write_state_hooks(&BioseqColumnBeginWrite, &BioseqColumnEndWrite,
-							   &BioseqColumnFlushPendingWrites, &ContainsPendingWrites,
+							   &bioseq_flush_pending_writes_adapter,
+							   &ContainsPendingWrites,
 							   &bioseq_seq_caches_close_adapter);
 	register_read_state_hooks(&BioseqColumnEndRead);
 	BioseqColumnTableSetOptions_hook_type **BioseqColumnTableSetOptions_hook_ptr =

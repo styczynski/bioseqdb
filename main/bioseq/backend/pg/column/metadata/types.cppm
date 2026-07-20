@@ -179,8 +179,7 @@ export enum StripeWriteStateEnum
 /* Parallel Custom Scan shared data */
 export struct ParallelBioseqColumnScanData
 {
-	slock_t mutex;
-	pg_atomic_uint64 nextStripeId;	/* Fetch next stripe id to be read and increment */
+	pg_atomic_uint64 nextStripeId;	/* CAS cursor; claims may skip aborted-id gaps */
 	/* DOC0377: fixed, pointer-free instrumentation header.  These fields must
 	 * precede snapshotData because the latter is a flexible-array member. */
 	std::uint32_t version;
@@ -409,7 +408,6 @@ static_assert(std::is_standard_layout_v<BioseqColumnWriteState> &&
 
 struct _ParallelBioseqColumnScanData_ref
 {
-	slock_t mutex;
 	pg_atomic_uint64 nextStripeId;
 	std::uint32_t version;
 	std::uint64_t counters_offset;

@@ -549,21 +549,26 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     seq_caches::entry& entry = caches_->entries[cache_key];
     entry.rel = shard;
 
+    MemoryContext payload_mctx = caches_->read_state_mctx != nullptr
+        ? caches_->read_state_mctx
+        : CurrentMemoryContext;
+
     // Compatibility is keyed by the caller-owned source snapshot. The
     // column reader may replace its own snapshot pointer with a refreshed
     // registered copy after flushing, so comparing read_state->snapshot would
     // incorrectly discard a compatible cached reader.
     if (entry.read_state != nullptr
         && entry.read_snapshot_source != snapshot_) {
-        bioseq::pg_utils::invoke_pg_as_cpp(
-            [&] { BioseqColumnEndRead(entry.read_state); });
+        bioseq::pg_utils::invoke_pg_as_cpp([&] {
+            if (caches_->read_resource_owner != nullptr) {
+                CurrentResourceOwner = caches_->read_resource_owner;
+            }
+            BioseqColumnEndRead(entry.read_state);
+        });
         entry.read_state = nullptr;
         entry.read_snapshot_source = nullptr;
     }
     if (entry.read_state == nullptr) {
-        MemoryContext payload_mctx = caches_->read_state_mctx != nullptr
-            ? caches_->read_state_mctx
-            : CurrentMemoryContext;
         TupleDesc td = RelationGetDescr(shard);
         PBitmapset attr_needed = bioseq::pg_utils::invoke_pg_as_cpp(
             [&] {
@@ -586,13 +591,17 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
         }
         List* projected_attributes = projected.release();
         entry.read_state = bioseq::pg_utils::invoke_pg_as_cpp([&] {
-            return BioseqColumnBeginRead(
+            MemoryContextSwitchTo(payload_mctx);
+            if (caches_->read_resource_owner != nullptr) {
+                CurrentResourceOwner = caches_->read_resource_owner;
+            }
+            BioseqColumnReadState* result = BioseqColumnBeginRead(
                 shard, td, projected_attributes,
                 /*whereClauseList=*/NIL, payload_mctx, snapshot_,
                 /*randomAccess=*/true, nullptr);
+            BioseqColumnReadFlushPendingWrites(result);
+            return result;
         });
-        bioseq::pg_utils::invoke_pg_as_cpp(
-            [&] { BioseqColumnReadFlushPendingWrites(entry.read_state); });
         entry.read_snapshot_source = snapshot_;
         bioseq::pg_utils::invoke_pg_as_cpp([&] { attr_needed.free(); });
     }
@@ -601,6 +610,10 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
     Datum vals[1]  = { 0 };
     bool  nulls[1] = { true };
     const bool row_visible = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+        MemoryContextSwitchTo(payload_mctx);
+        if (caches_->read_resource_owner != nullptr) {
+            CurrentResourceOwner = caches_->read_resource_owner;
+        }
 #ifdef BIOSEQ_TEST_INDEXES
         inject_scanner_pg_leaf_failure(
             ScannerPgLeafFailure::row_read_before);
@@ -3207,6 +3220,38 @@ create_standalone_pg_sequence_source_provider(
                 owning_relation, authoritative_registered_snapshot,
                 pg_sequence_source_provider_kind::standalone_index);
         });
+}
+
+/** Rebind a scan provider to the exact registered snapshot restored from its
+ * parallel DSM coordinate.  Upper owners may already retain leases on this
+ * registry, so the registry is updated in place rather than replaced.  No
+ * source domain may have observed the preceding snapshot. */
+inline void rebind_pg_sequence_source_provider_snapshot(
+        pg_sequence_source_provider* provider,
+        Snapshot authoritative_registered_snapshot) {
+    using namespace sequence_source_detail;
+    if (provider == nullptr || !provider->open
+        || provider->kind != pg_sequence_source_provider_kind::scan
+        || !registry_lease_is_live(provider->lease)) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq scan source provider cannot rebind its snapshot")));
+    }
+    auto* registry = provider->lease.registry;
+    if (authoritative_registered_snapshot == nullptr
+        || !IsMVCCSnapshot(authoritative_registered_snapshot)
+        || authoritative_registered_snapshot->regd_count == 0
+        || registry->authoritative_snapshot == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq scan source provider requires a registered MVCC snapshot")));
+    }
+    if (registry->domains != nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq scan source provider cannot rebind after source activation")));
+    }
+    registry->authoritative_snapshot = authoritative_registered_snapshot;
 }
 
 [[nodiscard]] inline pg_sequence_source_registry_lease
