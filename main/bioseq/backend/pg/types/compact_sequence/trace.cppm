@@ -1580,7 +1580,8 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
           get_current_slice_materialization_scope(), original_scope);
 
   const auto exercise_abandoned_admission =
-      [&](std::size_t index) noexcept {
+      [&consumer_attachment, &consumer_boundaries, &consumer_counters,
+       &consumer_sink](std::size_t index) noexcept {
         const auto &consumer = consumer_boundaries[index];
         const auto calls_before = consumer_counters[index].calls;
         const auto bytes_before = consumer_counters[index].bytes;

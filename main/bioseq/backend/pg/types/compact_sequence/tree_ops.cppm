@@ -1516,6 +1516,24 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
           == static_cast<std::uint32_t>(source_case)
       && external_refcount_restored
       && live_piece_tree_arenas == arena_baseline;
+  if (!result) {
+    ereport(WARNING,
+            (errmsg_internal(
+                "bioseq piece-tree factory failure case: point=%u caught=%d observed=%u callbacks=%u armed_callbacks=%u roots=%u expected_roots=%u arenas=%u source_retains=%u expected_source=%u source_releases=%u external_restored=%d live=%llu baseline=%llu",
+                static_cast<unsigned>(failure_point), caught ? 1 : 0,
+                static_cast<unsigned>(observed_piece_tree_failure),
+                observation->callback_invocations,
+                observation->armed_callback_invocations,
+                observation->root_tokens_released,
+                static_cast<unsigned>(published_root_case),
+                observation->arena_tokens_released,
+                source_state->retain_calls,
+                static_cast<unsigned>(source_case),
+                source_state->release_calls,
+                external_refcount_restored ? 1 : 0,
+                static_cast<unsigned long long>(live_piece_tree_arenas),
+                static_cast<unsigned long long>(arena_baseline))));
+  }
   pfree(source_state);
   pfree(observation);
   return result;

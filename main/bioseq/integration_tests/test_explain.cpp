@@ -388,11 +388,27 @@ TEST_CASE("DOC0377 structured EXPLAIN preserves numeric counter fields",
 
 TEST_CASE("DOC0377 INSERT plan declares a heap-tuple boundary",
           "[explain][slice][insert]") {
-    auto ctx = fresh_context({kTable, "test_explain_slice_dst"});
+    auto ctx = fresh_context({
+        kTable, "test_explain_flat_dst", "test_explain_slice_dst"});
     seed_small_bioseq_column(ctx, kTable);
     exec_sql(ctx,
+        "CREATE TABLE test_explain_flat_dst "
+        "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;"
         "CREATE TABLE test_explain_slice_dst "
         "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;");
+
+    /* Control the ModifyTable/EXPLAIN contract independently of the lazy
+     * wrapper.  A flat Var projection must execute and persist the same three
+     * source rows before the sliced path is allowed to claim a regression. */
+    const auto flat_plan = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF",
+        fmt::format(
+            "INSERT INTO test_explain_flat_dst "
+            "SELECT pk, seq0 FROM {};", kTable));
+    REQUIRE_FALSE(plan_contains(
+        flat_plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(query_scalar_int(
+        ctx, "SELECT count(*) FROM test_explain_flat_dst;") == 3);
 
     const auto plan = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF",

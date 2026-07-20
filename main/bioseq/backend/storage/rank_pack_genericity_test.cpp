@@ -178,10 +178,12 @@ void require_stdc_io_oracle(
     }
 
     std::string converted_text;
+    const std::size_t rank_count = ranks.size();
     value->convert_to(
-        [&]<class Instance>(const compact_sequence_range<Instance>& range) {
+        [&converted_text, rank_count, padding]<class Instance>(
+                const compact_sequence_range<Instance>& range) {
             converted_text = range.to_string();
-            REQUIRE(range.bp_size() == ranks.size());
+            REQUIRE(range.bp_size() == rank_count);
             REQUIRE(range.padding() == padding);
         });
     REQUIRE(converted_text == expected_text);

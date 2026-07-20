@@ -385,6 +385,18 @@ void bioseq_letter_post_parse_analyze(
         previous_letter_post_parse_analyze_hook(
             parse_state, query, jumble_state);
     }
+    /* ROLLBACK is parsed after the failed transaction ResourceOwner has
+     * entered its release phase.  It cannot contain a letter expression, and
+     * even a missing-ok type/function lookup would try to acquire a syscache
+     * reference from that released owner.  Leave transaction control to
+     * PostgreSQL without touching catalogs; query-bearing utility statements
+     * such as EXPLAIN, CTAS, PREPARE and DECLARE CURSOR still take the normal
+     * validation path below. */
+    if (query != nullptr && query->commandType == CMD_UTILITY
+        && query->utilityStmt != nullptr
+        && IsA(query->utilityStmt, TransactionStmt)) {
+        return;
+    }
     const Oid letter_oid = bioseq_letter_type_oid_missing_ok();
     if (!OidIsValid(letter_oid) || query == nullptr) {
         return;

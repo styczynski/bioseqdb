@@ -12669,13 +12669,98 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 }
 
 static void batch_join_release_executor_resources_checked(
-	CustomScanState* node,
-	BioseqBatchJoinRuntime& runtime,
-	bool delete_query_context);
+		CustomScanState* node,
+		BioseqBatchJoinRuntime& runtime,
+		const bool delete_query_context) {
+	if (runtime.cleanup_done) {
+		return;
+	}
+	if (runtime.target_active) {
+		bioseq::pg_utils::invoke_pg_as_cpp([&runtime] {
+			runtime.buffer.finish_join_target();
+		});
+		runtime.target_active = false;
+	}
+	bioseq::pg_utils::invoke_pg_as_cpp([&runtime] {
+		runtime.buffer.reset_join_runtime_for_rescan();
+	});
+	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
+		if (query.slot != nullptr) {
+			TupleTableSlot* finished = query.slot;
+			bioseq::pg_utils::invoke_pg_as_cpp(
+				[finished] { ExecDropSingleTupleTableSlot(finished); });
+			query.slot = nullptr;
+		}
+	}
+	runtime.query_tuples.clear();
+	runtime.all_query_refs.clear();
+	if (runtime.query_tuple_context != nullptr) {
+		MemoryContext context = runtime.query_tuple_context;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[context, delete_query_context] {
+				if (delete_query_context) {
+					MemoryContextDelete(context);
+				} else {
+					MemoryContextReset(context);
+				}
+			});
+		runtime.query_tuple_context = nullptr;
+	}
+	/* Release admission only after the owning tuple context was reset/deleted. */
+	runtime.query_permits.clear();
+	runtime.query_reserved_admission_bytes = 0;
+	runtime.query_actual_materialized_bytes = 0;
+	runtime.queries_materialized = false;
+	if (runtime.query_child_initialized && !runtime.query_child_ended) {
+		PlanState* finished = runtime.query_child;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { ExecEndNode(finished); });
+		runtime.query_child_ended = true;
+	}
+	if (runtime.target_child_initialized && !runtime.target_child_ended) {
+		PlanState* finished = runtime.target_child;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[finished] { ExecEndNode(finished); });
+		runtime.target_child_ended = true;
+	}
+	if (node != nullptr) {
+		node->custom_ps = NIL;
+	}
+	runtime.cleanup_done = true;
+}
 
 static void batch_join_abandon_executor_resources_after_error(
-	CustomScanState* node,
-	BioseqBatchJoinRuntime& runtime) noexcept;
+		CustomScanState* node,
+		BioseqBatchJoinRuntime& runtime) noexcept {
+	if (runtime.cleanup_done) {
+		return;
+	}
+	runtime.buffer.abandon_join_runtime_after_pg_error_noexcept();
+	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
+		query.slot = nullptr;
+		query.tuple = nullptr;
+	}
+	runtime.query_tuples.clear();
+	runtime.all_query_refs.clear();
+	runtime.placeholder_sites.clear();
+	runtime.query_tuple_context = nullptr;
+	runtime.query_permits.clear();
+	runtime.query_reserved_admission_bytes = 0;
+	runtime.query_actual_materialized_bytes = 0;
+	runtime.queries_materialized = false;
+	runtime.target_active = false;
+	runtime.current_target_slot = nullptr;
+	runtime.query_child = nullptr;
+	runtime.target_child = nullptr;
+	runtime.query_child_ended = true;
+	runtime.target_child_ended = true;
+	runtime.query_child_initialized = false;
+	runtime.target_child_initialized = false;
+	if (node != nullptr) {
+		node->custom_ps = NIL;
+	}
+	runtime.cleanup_done = true;
+}
 
 static void batch_join_runtime_cleanup(void* argument) {
 	auto* state = static_cast<BioseqBatchJoinState*>(argument);
@@ -13762,99 +13847,6 @@ static void BioseqBatchJoin_BeginCustomScan(
 			 errmsg("BioseqBatchJoin Begin raised a C++ exception"),
 			 errdetail_internal("%s", detail)));
 	}
-}
-
-static void batch_join_release_executor_resources_checked(
-		CustomScanState* node,
-		BioseqBatchJoinRuntime& runtime,
-		const bool delete_query_context) {
-	if (runtime.cleanup_done) {
-		return;
-	}
-	if (runtime.target_active) {
-		bioseq::pg_utils::invoke_pg_as_cpp([&] {
-			runtime.buffer.finish_join_target();
-		});
-		runtime.target_active = false;
-	}
-	bioseq::pg_utils::invoke_pg_as_cpp([&] {
-		runtime.buffer.reset_join_runtime_for_rescan();
-	});
-	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
-		if (query.slot != nullptr) {
-			TupleTableSlot* finished = query.slot;
-			bioseq::pg_utils::invoke_pg_as_cpp(
-				[finished] { ExecDropSingleTupleTableSlot(finished); });
-			query.slot = nullptr;
-		}
-	}
-	runtime.query_tuples.clear();
-	runtime.all_query_refs.clear();
-	if (runtime.query_tuple_context != nullptr) {
-		MemoryContext context = runtime.query_tuple_context;
-		bioseq::pg_utils::invoke_pg_as_cpp([&] {
-			if (delete_query_context) {
-				MemoryContextDelete(context);
-			} else {
-				MemoryContextReset(context);
-			}
-		});
-		runtime.query_tuple_context = nullptr;
-	}
-	/* Release admission only after the owning tuple context was reset/deleted. */
-	runtime.query_permits.clear();
-	runtime.query_reserved_admission_bytes = 0;
-	runtime.query_actual_materialized_bytes = 0;
-	runtime.queries_materialized = false;
-	if (runtime.query_child_initialized && !runtime.query_child_ended) {
-		PlanState* finished = runtime.query_child;
-		bioseq::pg_utils::invoke_pg_as_cpp(
-			[finished] { ExecEndNode(finished); });
-		runtime.query_child_ended = true;
-	}
-	if (runtime.target_child_initialized && !runtime.target_child_ended) {
-		PlanState* finished = runtime.target_child;
-		bioseq::pg_utils::invoke_pg_as_cpp(
-			[finished] { ExecEndNode(finished); });
-		runtime.target_child_ended = true;
-	}
-	if (node != nullptr) {
-		node->custom_ps = NIL;
-	}
-	runtime.cleanup_done = true;
-}
-
-static void batch_join_abandon_executor_resources_after_error(
-		CustomScanState* node,
-		BioseqBatchJoinRuntime& runtime) noexcept {
-	if (runtime.cleanup_done) {
-		return;
-	}
-	runtime.buffer.abandon_join_runtime_after_pg_error_noexcept();
-	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
-		query.slot = nullptr;
-		query.tuple = nullptr;
-	}
-	runtime.query_tuples.clear();
-	runtime.all_query_refs.clear();
-	runtime.placeholder_sites.clear();
-	runtime.query_tuple_context = nullptr;
-	runtime.query_permits.clear();
-	runtime.query_reserved_admission_bytes = 0;
-	runtime.query_actual_materialized_bytes = 0;
-	runtime.queries_materialized = false;
-	runtime.target_active = false;
-	runtime.current_target_slot = nullptr;
-	runtime.query_child = nullptr;
-	runtime.target_child = nullptr;
-	runtime.query_child_ended = true;
-	runtime.target_child_ended = true;
-	runtime.query_child_initialized = false;
-	runtime.target_child_initialized = false;
-	if (node != nullptr) {
-		node->custom_ps = NIL;
-	}
-	runtime.cleanup_done = true;
 }
 
 static TupleTableSlot* BioseqBatchJoin_ExecCustomScanImpl(
