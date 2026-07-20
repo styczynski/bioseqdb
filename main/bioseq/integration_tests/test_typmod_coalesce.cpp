@@ -23,6 +23,7 @@
 #include "headers/pg_build_config.h"
 
 #include <array>
+#include <set>
 #include <string>
 #include <string_view>
 
@@ -298,50 +299,121 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
           "target/query directions",
           "[mmsearch][typmod_coalesce][join][slice][rewidth]") {
     auto ctx = fresh_context({"doc0377_join_narrow", "doc0377_join_wide"});
-    exec_sql(
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert = on;"
+        "SET bioseq.enable_vectorization = on;");
+    const auto canonical_rows = hoe_seed_rows();
+    create_seq_table(
         ctx,
-        "CREATE TABLE doc0377_join_narrow ("
-        "id integer PRIMARY KEY, seq bioseq.seq('dna4', 8)) USING bioseq; "
-        "CREATE TABLE doc0377_join_wide ("
-        "id integer PRIMARY KEY, seq bioseq.seq('dna4', 64)) USING bioseq; "
-        "INSERT INTO doc0377_join_narrow VALUES "
-        "(1, repeat('ACGT', 400)::bioseq.seq('dna4', 8)); "
-        "INSERT INTO doc0377_join_wide VALUES "
-        "(1, repeat('ACGT', 400)::bioseq.seq('dna4', 64));");
+        seq_table_spec{
+            .name = "doc0377_join_narrow",
+            .typmod = {.alphabet = "dna4", .width = 8},
+            .seq_columns = 2,
+            .using_bioseq = true,
+        },
+        canonical_rows);
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = "doc0377_join_wide",
+            .typmod = {.alphabet = "dna4", .width = 64},
+            .seq_columns = 2,
+            .using_bioseq = true,
+        },
+        canonical_rows);
 
-    const auto narrow_oracle = query_rows(
-        ctx,
-        "SELECT id FROM doc0377_join_narrow WHERE mmsearch("
-        "seq, repeat('ACGT', 400)::bioseq.seq('dna4', 8)) ORDER BY id;");
-    const auto wide_oracle = query_rows(
-        ctx,
-        "SELECT id FROM doc0377_join_wide WHERE mmsearch("
-        "seq, repeat('ACGT', 400)::bioseq.seq('dna4', 64)) ORDER BY id;");
-    REQUIRE_FALSE(narrow_oracle.empty());
-    REQUIRE(wide_oracle == narrow_oracle);
+    const std::string narrow_raw_oracle_sql =
+        "SELECT target.pk, query.pk "
+        "FROM doc0377_join_narrow AS target "
+        "JOIN doc0377_join_narrow AS query "
+        "ON mmsearch(target.seq0, query.seq1) "
+        "ORDER BY target.pk, query.pk;";
+    const std::string wide_raw_oracle_sql =
+        "SELECT target.pk, query.pk "
+        "FROM doc0377_join_wide AS target "
+        "JOIN doc0377_join_wide AS query "
+        "ON mmsearch(target.seq0, query.seq1) "
+        "ORDER BY target.pk, query.pk;";
+    const std::string narrow_slice_oracle_sql =
+        "SELECT target.pk, query.pk "
+        "FROM doc0377_join_narrow AS target "
+        "JOIN doc0377_join_narrow AS query "
+        "ON mmsearch(target.seq0[0:], query.seq1[0:]) "
+        "ORDER BY target.pk, query.pk;";
+    const std::string wide_slice_oracle_sql =
+        "SELECT target.pk, query.pk "
+        "FROM doc0377_join_wide AS target "
+        "JOIN doc0377_join_wide AS query "
+        "ON mmsearch(target.seq0[0:], query.seq1[0:]) "
+        "ORDER BY target.pk, query.pk;";
+
+    /* Raw index reads consume the persisted MPS k/w, while a transformed
+     * operand owns an explicit require-absent recompute route whose short-read
+     * heuristic may select another k/w.  Storage width is the variable under
+     * test, so compare each cross-width result with an identical-width oracle
+     * that has the same ownership/read-index route. */
+    const auto require_canonical_diagonal = [](
+            const auto& rows,
+            const std::set<std::string>& expected_diagonal_pks) {
+        REQUIRE_FALSE(rows.empty());
+        std::set<std::string> diagonal_pks;
+        for (const auto& row : rows) {
+            REQUIRE(row.size() == 2u);
+            REQUIRE(row[0].has_value());
+            REQUIRE(row[1].has_value());
+            if (row[0] == row[1]) {
+                diagonal_pks.insert(*row[0]);
+            }
+        }
+        REQUIRE(diagonal_pks == expected_diagonal_pks);
+    };
+    const std::set<std::string> eager_diagonal_pks{"1", "2", "3", "5"};
+    const std::set<std::string> persisted_diagonal_pks{"1", "3", "5"};
 
     const std::string narrow_join_sql =
-        "SELECT n.id FROM doc0377_join_narrow n "
-        "JOIN doc0377_join_wide w ON mmsearch(n.seq, w.seq) ORDER BY n.id;";
+        "SELECT n.pk, w.pk FROM doc0377_join_narrow AS n "
+        "JOIN doc0377_join_wide AS w ON mmsearch(n.seq0, w.seq1) "
+        "ORDER BY n.pk, w.pk;";
     const std::string wide_join_sql =
-        "SELECT w.id FROM doc0377_join_wide w "
-        "JOIN doc0377_join_narrow n ON mmsearch(w.seq, n.seq) ORDER BY w.id;";
+        "SELECT w.pk, n.pk FROM doc0377_join_wide AS w "
+        "JOIN doc0377_join_narrow AS n ON mmsearch(w.seq0, n.seq1) "
+        "ORDER BY w.pk, n.pk;";
     const std::string narrow_slice_join_sql =
-        "SELECT n.id FROM doc0377_join_narrow n "
-        "JOIN doc0377_join_wide w ON mmsearch(n.seq[0:], w.seq[0:]) "
-        "ORDER BY n.id;";
+        "SELECT n.pk, w.pk FROM doc0377_join_narrow AS n "
+        "JOIN doc0377_join_wide AS w "
+        "ON mmsearch(n.seq0[0:], w.seq1[0:]) "
+        "ORDER BY n.pk, w.pk;";
     const std::string wide_slice_join_sql =
-        "SELECT w.id FROM doc0377_join_wide w "
-        "JOIN doc0377_join_narrow n ON mmsearch(w.seq[0:], n.seq[0:]) "
-        "ORDER BY w.id;";
+        "SELECT w.pk, n.pk FROM doc0377_join_wide AS w "
+        "JOIN doc0377_join_narrow AS n "
+        "ON mmsearch(w.seq0[0:], n.seq1[0:]) "
+        "ORDER BY w.pk, n.pk;";
 
     constexpr std::array<std::string_view, 2> read_index_modes{"off", "on"};
     for (const std::string_view read_index_mode : read_index_modes) {
         DYNAMIC_SECTION("read_sequence_index=" << read_index_mode) {
             guc_scope read_index(
                 ctx, "bioseq.read_sequence_index", read_index_mode);
+            const auto narrow_raw_oracle =
+                query_rows(ctx, narrow_raw_oracle_sql);
+            const auto wide_raw_oracle =
+                query_rows(ctx, wide_raw_oracle_sql);
+            const auto narrow_slice_oracle =
+                query_rows(ctx, narrow_slice_oracle_sql);
+            const auto wide_slice_oracle =
+                query_rows(ctx, wide_slice_oracle_sql);
+            REQUIRE(wide_raw_oracle == narrow_raw_oracle);
+            REQUIRE(wide_slice_oracle == narrow_slice_oracle);
+            require_canonical_diagonal(
+                narrow_raw_oracle,
+                read_index_mode == "on"
+                    ? persisted_diagonal_pks : eager_diagonal_pks);
+            require_canonical_diagonal(
+                narrow_slice_oracle, eager_diagonal_pks);
+
             for (const std::string* raw_sql :
-                 std::array{&narrow_join_sql, &wide_join_sql}) {
+                 std::array{&narrow_raw_oracle_sql, &wide_raw_oracle_sql,
+                            &narrow_join_sql, &wide_join_sql}) {
                 const auto plan = explain_text<false>(ctx, *raw_sql);
                 REQUIRE(plan_contains(
                     plan, "Custom Scan (BioseqBatchJoin)"));
@@ -349,7 +421,8 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
                     plan, "Bioseq Mmsearch Ownership: per-row recipe"));
             }
             for (const std::string* sliced_sql :
-                 std::array{&narrow_slice_join_sql, &wide_slice_join_sql}) {
+                 std::array{&narrow_slice_oracle_sql, &wide_slice_oracle_sql,
+                            &narrow_slice_join_sql, &wide_slice_join_sql}) {
                 const auto plan = explain_text<false>(ctx, *sliced_sql);
                 REQUIRE(plan_contains(
                     plan, "Custom Scan (BioseqBatchJoin)"));
@@ -359,10 +432,12 @@ TEST_CASE("Same-alphabet cross-width raw and sliced joins rewidth in both "
                     plan, "Custom Scan (BioseqSliceProject)"));
             }
 
-            REQUIRE(query_rows(ctx, narrow_join_sql) == narrow_oracle);
-            REQUIRE(query_rows(ctx, wide_join_sql) == wide_oracle);
-            REQUIRE(query_rows(ctx, narrow_slice_join_sql) == narrow_oracle);
-            REQUIRE(query_rows(ctx, wide_slice_join_sql) == wide_oracle);
+            REQUIRE(query_rows(ctx, narrow_join_sql) == narrow_raw_oracle);
+            REQUIRE(query_rows(ctx, wide_join_sql) == wide_raw_oracle);
+            REQUIRE(query_rows(ctx, narrow_slice_join_sql)
+                    == narrow_slice_oracle);
+            REQUIRE(query_rows(ctx, wide_slice_join_sql)
+                    == wide_slice_oracle);
         }
     }
 }

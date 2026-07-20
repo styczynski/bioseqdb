@@ -79,6 +79,25 @@ pg_sequence_facade_test_counters() noexcept {
   return g_pg_sequence_facade_test_counters;
 }
 
+export inline void note_pg_sequence_facade_source_stream_callback() noexcept {
+  ++g_pg_sequence_facade_test_counters.source_stream_callbacks;
+}
+
+export inline void note_pg_sequence_facade_source_resident_probe() noexcept {
+  ++g_pg_sequence_facade_test_counters.source_resident_probes;
+  if (pg_sequence_facade_test_poison_has(
+          PgSequenceFacadeTestPoison::resident_probe)) {
+    ++g_pg_sequence_facade_test_counters.poison_hits;
+  }
+}
+
+export inline void note_pg_sequence_facade_contiguous_access() noexcept {
+  if (pg_sequence_facade_test_poison_has(
+          PgSequenceFacadeTestPoison::contiguous_access)) {
+    ++g_pg_sequence_facade_test_counters.poison_hits;
+  }
+}
+
 export inline void note_pg_sequence_facade_materialization_begin() {
   ++g_pg_sequence_facade_test_counters.declared_materializations;
   if (pg_sequence_facade_test_poison_has(
@@ -577,11 +596,14 @@ facade_ptr_at(pg_sequence_facade_state const &state,
       !reverse ? to : state.descriptor.bp_length - from;
   bool ok = false;
   if (state.flat != nullptr) {
+#ifdef BIOSEQ_TEST_INDEXES
+    note_pg_sequence_facade_contiguous_access();
+#endif
     ok = emit_flat_range<Alphabet>(*state.flat, base_from, base_to,
                                    output.first(count));
   } else {
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_facade_test_counters.source_stream_callbacks;
+    note_pg_sequence_facade_source_stream_callback();
 #endif
     ok = emit_tree_range<Alphabet>(*state.session, state.tree, base_from,
                                    base_to, output.first(count));
@@ -655,17 +677,16 @@ template <class Alphabet>
   auto const &state = *static_cast<pg_sequence_facade_state const *>(opaque);
   if (state.flat == nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
-    ++g_pg_sequence_facade_test_counters.source_resident_probes;
-    if (pg_sequence_facade_test_poison_has(
-            PgSequenceFacadeTestPoison::resident_probe)) {
-      ++g_pg_sequence_facade_test_counters.poison_hits;
-    }
+    note_pg_sequence_facade_source_resident_probe();
 #endif
     return std::nullopt;
   }
   if (state.descriptor.storage_unit_byte_width != requested_width) {
     return std::nullopt;
   }
+#ifdef BIOSEQ_TEST_INDEXES
+  note_pg_sequence_facade_contiguous_access();
+#endif
   using descriptor = typename view::resident_packed_region;
   const auto length = to - from;
   if (length == 0u) {

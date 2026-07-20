@@ -284,10 +284,11 @@ TEST_CASE("DOC0377 slice reverse concat expression indexes survive full lifecycl
         " (4096::bigint * v.storage_unit_byte_width) - 1) / "
         " (4096::bigint * v.storage_unit_byte_width);") == 3);
 
-    // Force PostgreSQL's parallel-maintenance path.  A supported TableAM must
-    // expose a live parallel worker; today's Bioseq TableAM instead rejects at
-    // its explicit parallel-scan capability boundary, which is asserted and
-    // reported rather than silently treating a serial build as coverage.
+    // Request PostgreSQL's parallel-maintenance path.  The Bioseq relation
+    // hook intentionally advertises zero parallel workers, so PostgreSQL may
+    // select a successful serial build instead.  Exact DEBUG selection output
+    // is the capability boundary: it is reported as unsupported, never counted
+    // as parallel coverage.
     REQUIRE(query_scalar_int(ctx,
         "SELECT current_setting('max_parallel_workers')::int;") > 0);
     exec_sql(ctx,
@@ -314,6 +315,7 @@ TEST_CASE("DOC0377 slice reverse concat expression indexes survive full lifecycl
         "ON doc0377_expr_parallel_probe "
         "((bioseq.reverse(s[4:36]) OPERATOR(bioseq.||) s[16380:16412]), "
         " (public.bioseq_test_parallel_index_delay(id)));";
+    parallel_builder.clear_notices();
     REQUIRE(PQsendQuery(parallel_builder.raw(), parallel_sql.c_str()) == 1);
     bool consume_ok = true;
     bool result_ready = false;
@@ -366,12 +368,25 @@ TEST_CASE("DOC0377 slice reverse concat expression indexes survive full lifecycl
     REQUIRE(result_ready);
     REQUIRE(got_result);
     if (parallel_build_succeeded) {
+        const bool selected_serially = parallel_builder.notice_contains(
+            "DEBUG:  building index \"doc0377_expr_parallel_probe_idx\" "
+            "on table \"doc0377_expr_parallel_probe\" serially");
+        INFO("selected_serially=" << selected_serially);
         REQUIRE(saw_progress);
-        REQUIRE(saw_parallel_worker);
         REQUIRE(query_scalar_int(ctx,
             "SELECT count(*) FROM pg_index WHERE "
             "indexrelid='doc0377_expr_parallel_probe_idx'::regclass "
             "AND indisvalid AND indisready;") == 1);
+        if (selected_serially) {
+            REQUIRE_FALSE(saw_parallel_worker);
+            WARN("parallel expression-index build explicitly unsupported: "
+                 "PostgreSQL selected the Bioseq TableAM serial capability");
+        } else {
+            // With no exact serial-selection attestation, a live worker is
+            // mandatory evidence that PostgreSQL actually selected parallel
+            // maintenance rather than silently falling back.
+            REQUIRE(saw_parallel_worker);
+        }
     } else {
         INFO(parallel_sqlstate);
         INFO(parallel_message);

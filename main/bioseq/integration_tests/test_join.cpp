@@ -1054,11 +1054,11 @@ TEST_CASE("DOC0377 dominating SliceProject spans Append branches across rescans"
         "PARTITION OF doc0377_owner_append_queries "
         "FOR VALUES FROM (10) TO (20);"
         "INSERT INTO doc0377_owner_append_queries "
-        "SELECT d.driver * 100 + branch.offset, d.driver, "
+        "SELECT d.driver * 100 + branch.row_delta, d.driver, "
         "       branch.bucket, 1, {} "
         "FROM (VALUES (1), (2), (3)) AS d(driver) "
         "CROSS JOIN (VALUES (1,5), (2,5), (3,15), (4,15)) "
-        "AS branch(offset,bucket);",
+        "AS branch(row_delta,bucket);",
         hoe_probe_literal()));
     configure_doc0377_transformed_join(ctx);
     exec_sql(ctx,

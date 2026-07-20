@@ -4082,8 +4082,10 @@ TEST_CASE("DOC0377 PG index streaming poisons contiguous access and resident "
     REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
   }
 
+  // max_concurrency is PGC_SIGHUP and cannot be changed by a session.  Use
+  // the cluster's effective pool width; the exact resident-probe and
+  // materialization counters below prove that this branch was admitted.
   exec_sql(ctx,
-           "SET bioseq.scheduler.max_concurrency=2;"
            "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
            "SELECT bioseq_internal.reset_sequence_source_counters();");
   const long long mps_rows_before = index_table_row_count(

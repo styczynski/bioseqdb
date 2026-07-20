@@ -1888,8 +1888,12 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	/* no quals for table rewrite */
 	List *scanQual = NIL;
 
-	/* use SnapshotAny when re-writing table as heapAM does */
-	Snapshot snapshot = SnapshotAny;
+	/* Unlike heap tuples, columnar dead-row state lives in an MVCC row-mask
+	 * relation. SnapshotAny would see both the superseded and current mask and
+	 * can therefore copy an UPDATE's dead version into the rewritten table.
+	 * Keep one registered transaction snapshot authoritative for the main row,
+	 * row mask, and sequence-source fragments throughout the rewrite. */
+	Snapshot snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
 	MemoryContext scanContext = CreateBioseqColumnScanMemoryContext();
 	bool randomAccess = false;
@@ -1978,6 +1982,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bioseq::storage::destroy_seq_caches(read_caches);
 
 	BioseqColumnEndRead(readState);
+	UnregisterSnapshot(snapshot);
 	MemoryContextDelete(scanContext);
 
 	/* DOC0260 §8.7 — cascade-drop OldHeap's sub-tables before the

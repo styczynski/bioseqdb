@@ -385,7 +385,42 @@ static_assert(classify_output_cursor(std::size_t{0}, 0)
 static_assert(classify_output_cursor(std::size_t{2}, 1)
     == CursorBoundary::corrupt);
 
+enum class SharedJoinTargetOutcomeTopology : std::uint8_t {
+	invalid,
+	cpu_per_pair,
+	gpu_shared_target,
+};
+
+/* Requested-backend identity is an attestation result, not a dispatch-shape
+ * discriminator. A deliberately unattested mixed CPU tuple still emits one
+ * raw target outcome per target-query pair, whereas the complete Vulkan tuple
+ * emits one already-shared target outcome. Derive that topology from the
+ * immutable selected params and keep the backend identity only as a coherence
+ * check. */
+[[nodiscard]] constexpr SharedJoinTargetOutcomeTopology
+classify_shared_join_target_outcome_topology(
+		const bool any_vulkan_component_requested,
+		const bool complete_vulkan_tuple_requested) noexcept {
+	if (complete_vulkan_tuple_requested) {
+		return any_vulkan_component_requested
+			? SharedJoinTargetOutcomeTopology::gpu_shared_target
+			: SharedJoinTargetOutcomeTopology::invalid;
+	}
+	return any_vulkan_component_requested
+		? SharedJoinTargetOutcomeTopology::invalid
+		: SharedJoinTargetOutcomeTopology::cpu_per_pair;
+}
+static_assert(classify_shared_join_target_outcome_topology(false, false)
+	== SharedJoinTargetOutcomeTopology::cpu_per_pair);
+static_assert(classify_shared_join_target_outcome_topology(true, true)
+	== SharedJoinTargetOutcomeTopology::gpu_shared_target);
+static_assert(classify_shared_join_target_outcome_topology(true, false)
+	== SharedJoinTargetOutcomeTopology::invalid);
+static_assert(classify_shared_join_target_outcome_topology(false, true)
+	== SharedJoinTargetOutcomeTopology::invalid);
+
 [[nodiscard]] constexpr bool shared_join_raw_target_shape_valid(
+		const SharedJoinTargetOutcomeTopology topology,
 		const ::bioseq::pipeline_stats::ExecutedBackend backend,
 		const std::uint64_t query_count,
 		const std::uint64_t attempted_jobs,
@@ -394,41 +429,67 @@ static_assert(classify_output_cursor(std::size_t{2}, 1)
 		return false;
 	}
 	std::uint64_t expected = 0;
-	switch (backend) {
-		case ::bioseq::pipeline_stats::ExecutedBackend::scalar_cpu:
-		case ::bioseq::pipeline_stats::ExecutedBackend::simd_cpu:
+	switch (topology) {
+		case SharedJoinTargetOutcomeTopology::cpu_per_pair:
+			if (backend == ::bioseq::pipeline_stats::ExecutedBackend::none
+				|| backend
+					== ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu) {
+				return false;
+			}
+			/* mixed_invalid is the correct fail-closed identity for a
+			 * heterogeneous CPU tuple such as scalar sketch/chaining plus
+			 * Block Aligner. It remains unattested while retaining CPU
+			 * per-pair target accounting. */
 			expected = query_count;
 			break;
-		case ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu:
+		case SharedJoinTargetOutcomeTopology::gpu_shared_target:
+			if (backend
+					!= ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu) {
+				return false;
+			}
 			expected = 1;
 			break;
-		case ::bioseq::pipeline_stats::ExecutedBackend::none:
-		case ::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid:
+		case SharedJoinTargetOutcomeTopology::invalid:
 			return false;
 	}
 	return raw_target_rows == expected;
 }
 static_assert(shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
 	::bioseq::pipeline_stats::ExecutedBackend::simd_cpu,
 	16, 16, 16));
 static_assert(shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
+	::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid,
+	16, 16, 16));
+static_assert(shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::gpu_shared_target,
 	::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu,
 	16, 16, 1));
 /* Later waves must still carry native raw target/source evidence.  Only the
  * BatchJoin owner suppresses their normalized publication. */
 static_assert(shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
 	::bioseq::pipeline_stats::ExecutedBackend::simd_cpu,
 	8192, 8192, 8192));
 static_assert(!shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
 	::bioseq::pipeline_stats::ExecutedBackend::simd_cpu,
 	1, 1, 0));
 static_assert(!shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::gpu_shared_target,
 	::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid,
+	16, 16, 1));
+static_assert(!shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
+	::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu,
 	16, 16, 16));
 static_assert(!shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
 	::bioseq::pipeline_stats::ExecutedBackend::simd_cpu,
 	16, 15, 16));
 static_assert(!shared_join_raw_target_shape_valid(
+	SharedJoinTargetOutcomeTopology::cpu_per_pair,
 	::bioseq::pipeline_stats::ExecutedBackend::simd_cpu,
 	16, 16, 15));
 
@@ -511,7 +572,8 @@ static_assert(!shared_join_raw_source_shape_valid(
 inline void normalize_shared_join_target_outcomes(
 		::bioseq::pipeline_stats::PipelineExecutionStats& stats,
         const bool record_physical_target,
-        const std::size_t query_count) {
+		const std::size_t query_count,
+		const SharedJoinTargetOutcomeTopology topology) {
 	auto& operational = stats.operational;
     const std::uint64_t target_rows = operational.target_rows;
     const std::uint64_t persisted_rows = operational.persisted_index_rows;
@@ -522,19 +584,17 @@ inline void normalize_shared_join_target_outcomes(
     const std::uint64_t query_count_u64 =
         static_cast<std::uint64_t>(query_count);
 	std::uint64_t expected_raw_target_rows = 0;
-	switch (stats.requested_backend) {
-		case ::bioseq::pipeline_stats::ExecutedBackend::scalar_cpu:
-		case ::bioseq::pipeline_stats::ExecutedBackend::simd_cpu:
+	switch (topology) {
+		case SharedJoinTargetOutcomeTopology::cpu_per_pair:
 			expected_raw_target_rows = query_count_u64;
 			break;
-		case ::bioseq::pipeline_stats::ExecutedBackend::vulkan_gpu:
+		case SharedJoinTargetOutcomeTopology::gpu_shared_target:
 			expected_raw_target_rows = 1;
 			break;
-		case ::bioseq::pipeline_stats::ExecutedBackend::none:
-		case ::bioseq::pipeline_stats::ExecutedBackend::mixed_invalid:
+		case SharedJoinTargetOutcomeTopology::invalid:
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("BioseqBatchJoin target outcomes have no attested requested backend"),
+				 errmsg("BioseqBatchJoin target outcomes have an invalid dispatch topology"),
 				 errdetail("requested_backend=%.*s query_count=%zu",
 					static_cast<int>(
 						::bioseq::pipeline_stats::executed_backend_name(
@@ -550,6 +610,7 @@ inline void normalize_shared_join_target_outcomes(
         || persisted_rows + recomputed_rows != target_rows;
 	const bool raw_target_shape_invalid =
 		!shared_join_raw_target_shape_valid(
+			topology,
 			stats.requested_backend,
 			query_count_u64,
 			stats.attempted_alignment_jobs,
@@ -573,7 +634,8 @@ inline void normalize_shared_join_target_outcomes(
              errmsg("BioseqBatchJoin target outcome accounting is inconsistent"),
              errdetail(
 				"record_physical_target=%s query_count=%zu attempted_jobs=%llu "
-				"requested_backend=%.*s expected_raw_target_rows=%llu "
+				"requested_backend=%.*s dispatch_topology=%s "
+				"expected_raw_target_rows=%llu "
 				"requested_source=%.*s actual_source=%.*s "
 				"target_rows=%llu persisted_rows=%llu recomputed_rows=%llu "
 				"missing_rows=%llu",
@@ -586,6 +648,10 @@ inline void normalize_shared_join_target_outcomes(
 						stats.requested_backend).size()),
 				::bioseq::pipeline_stats::executed_backend_name(
 					stats.requested_backend).data(),
+				topology
+						== SharedJoinTargetOutcomeTopology::cpu_per_pair
+					? "cpu_per_pair"
+					: "gpu_shared_target",
 				static_cast<unsigned long long>(expected_raw_target_rows),
 				static_cast<int>(
 					::bioseq::pipeline_stats::target_index_source_name(
@@ -2343,7 +2409,12 @@ public:
 			normalize_shared_join_target_outcomes(
 				last_stats,
 				record_physical_target,
-				batch_size);
+				batch_size,
+				classify_shared_join_target_outcome_topology(
+					::bioseq::simd::HWY_NAMESPACE::pipe::
+						vulkan_components_requested(base_params),
+					::bioseq::simd::HWY_NAMESPACE::pipe::
+						complete_all_gpu_tuple_selected(base_params)));
 			const auto prepared_after = prepared_counter_totals();
 			if (prepared_after[0] < prepared_before[0]
 				|| prepared_after[1] < prepared_before[1]

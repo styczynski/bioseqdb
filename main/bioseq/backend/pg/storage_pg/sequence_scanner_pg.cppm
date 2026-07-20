@@ -39,6 +39,7 @@ extern "C" {
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <new>
 #include <span>
 #include <type_traits>
@@ -1252,6 +1253,102 @@ struct call_state final {
     sequence_type sequence;
 };
 
+#ifdef BIOSEQ_TEST_INDEXES
+/* The direct PostgreSQL binding is itself a source-backed facade.  Its
+ * existing lazy adapter predates the PG facade diagnostics, so proxy only the
+ * test build's backend table to attest the same ptr_at/resident/bulk-stream
+ * operations without changing the scanner or algorithm surface. */
+template <bool IsReversed, bool WriteReversed, class R>
+[[nodiscard]] const std::uint8_t* observed_call_state_ptr_at(
+        void const* opaque,
+        sequence_size_t from,
+        std::size_t count,
+        std::span<std::uint8_t> output) {
+    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    note_pg_sequence_facade_source_stream_callback();
+    const auto view = as_lazy_sequence_view(state.sequence);
+    const auto cursor = view.template encoded_iter<
+        IsReversed, WriteReversed, std::uint8_t, 2>();
+    return cursor.ptr_at(from, count, output);
+}
+
+template <class R>
+[[nodiscard]] sequence_size_t observed_call_state_bp_size(
+        void const* opaque) noexcept {
+    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    return state.sequence.bp_size();
+}
+
+template <class R>
+[[nodiscard]] auto observed_call_state_resident_probe(
+        void const* opaque,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width) noexcept
+    -> typename basic_lazy_sequence_view<
+        typename postgres_lazy_sequence_binding<R>::alphabet_type>::
+        resident_probe_result {
+    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    note_pg_sequence_facade_source_resident_probe();
+    return as_lazy_sequence_view(state.sequence).try_resident_packed(
+        from, to, requested_width);
+}
+
+template <class R>
+[[nodiscard]] bool observed_call_state_copy_full_packed(
+        void const* opaque,
+        void* destination,
+        std::size_t unit_count,
+        std::uint8_t requested_width) {
+    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    const std::size_t destination_bytes =
+        requested_width == 0u
+            || unit_count > (std::numeric_limits<std::size_t>::max)()
+                         / requested_width
+            ? 0u
+            : unit_count * requested_width;
+    note_pg_sequence_facade_contiguous_access();
+    note_pg_sequence_facade_source_stream_callback();
+    return as_lazy_sequence_view(state.sequence).try_copy_full_packed(
+        std::span<std::uint8_t>{
+            static_cast<std::uint8_t*>(destination), destination_bytes},
+        unit_count, requested_width);
+}
+
+template <class R>
+[[nodiscard]] bool observed_call_state_worker_shareable(
+        void const* opaque) noexcept {
+    auto const& state = *static_cast<call_state<R> const*>(opaque);
+    return as_lazy_sequence_view(state.sequence).worker_shareable();
+}
+
+template <class R>
+struct observed_call_state_adapter final {
+    using alphabet_type =
+        typename postgres_lazy_sequence_binding<R>::alphabet_type;
+    using view_type = basic_lazy_sequence_view<alphabet_type>;
+    static inline const typename view_type::backend_ops ops{
+        .bp_size = &observed_call_state_bp_size<R>,
+        .ptr_at = {
+            &observed_call_state_ptr_at<false, false, R>,
+            &observed_call_state_ptr_at<false, true, R>,
+            &observed_call_state_ptr_at<true, false, R>,
+            &observed_call_state_ptr_at<true, true, R>,
+        },
+        .try_resident_packed = &observed_call_state_resident_probe<R>,
+        .copy_full_packed = &observed_call_state_copy_full_packed<R>,
+        .worker_shareable = &observed_call_state_worker_shareable<R>,
+    };
+};
+
+template <class R>
+[[nodiscard]] auto observed_call_state_view(call_state<R> const& state) {
+    using adapter = observed_call_state_adapter<R>;
+    return typename adapter::view_type{
+        std::addressof(state), std::addressof(adapter::ops)};
+}
+#endif
+
 template <class R>
 struct call_state_factory_argument final {
     const postgres_lazy_sequence_binding<R>* binding;
@@ -1387,7 +1484,11 @@ inline void with_lazy_postgres(
                          errmsg("lazy PostgreSQL read session rejected its binding")));
                 });
             }
+#ifdef BIOSEQ_TEST_INDEXES
+            std::forward<Fn>(fn)(observed_call_state_view(*state));
+#else
             std::forward<Fn>(fn)(as_lazy_sequence_view(state->sequence));
+#endif
         });
 }
 

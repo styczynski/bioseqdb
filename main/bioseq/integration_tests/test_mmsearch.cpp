@@ -374,14 +374,15 @@ void require_no_current_compatible_persisted_index(
         table, kDoc0377LazyQueries);
 }
 
-[[nodiscard]] std::string plain_mmsearch_coordinate_sql(
+[[nodiscard]] std::string eager_mmsearch_coordinate_sql(
         std::string_view table) {
     return fmt::format(
         "SELECT t.pk, bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
         "bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
         "bioseq.cigar(t.pk) "
         "FROM {} AS t INNER JOIN {} AS q "
-        "ON mmsearch(t.seq0, q.seq) ORDER BY t.pk;",
+        "ON mmsearch(t.seq0, q.seq, "
+        "aligner_options(index_read_requirement => 1)) ORDER BY t.pk;",
         table, kDoc0377LazyQueries);
 }
 
@@ -3330,7 +3331,12 @@ TEST_CASE("DOC0377 sliced concat reverse mmsearch preserves coordinates across G
 
     for (const std::string_view table :
          std::array{kHoe, kHoeLazyNoInsert}) {
-        const std::string plain = plain_mmsearch_coordinate_sql(table);
+        /* A persisted fixture sidecar is pinned to k=15,w=10. It is not an
+         * eager oracle for this 29-bp query, whose ordinary recompute path
+         * deliberately applies the short-pair k=8,w=3 heuristic. Require the
+         * absent-index route so this comparison isolates representation and
+         * coordinate parity between a flat target and its streamed recipe. */
+        const std::string plain = eager_mmsearch_coordinate_sql(table);
         const std::string transformed = transformed_mmsearch_sql(table);
         const auto expected = query_rows(ctx, plain);
         const auto plan = explain_text<false>(ctx, transformed);
