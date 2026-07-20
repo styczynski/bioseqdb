@@ -10015,6 +10015,7 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	cscan->methods = &BioseqColumnScanScanMethods;
 	cscan->custom_private = NIL;
 	bool locator_passthrough_requested = false;
+	bool lazy_source_projection_requested = false;
 	FuncExpr* owned_mmsearch_expr = nullptr;
 	for (Node* possible_tag : PList<Node>(best_path->custom_private)) {
 		if (possible_tag == nullptr || !IsA(possible_tag, List)) continue;
@@ -10024,6 +10025,10 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 		if (list_length(tag) == 4
 			&& intVal(list_nth(tag, 0)) == kBioseqLocatorPassthroughMagic) {
 			locator_passthrough_requested = true;
+		}
+		if (list_length(tag) == 3
+			&& intVal(list_nth(tag, 0)) == kBioseqSliceSourceMagic) {
+			lazy_source_projection_requested = true;
 		}
 		if (list_length(tag) == 3
 			&& intVal(list_nth(tag, 0)) == kBioseqMmsearchOwnerMagic) {
@@ -10193,7 +10198,13 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	 * stored in third position of custom_exprs list and rest of
 	 * qual list (which can't be vectorized) in scan.plan.qual.
 	 */
-	if (bioseq_enable_vectorization)
+	/* Locator/source scans deliberately run the scalar executor so every row
+	 * can be promoted through its exact provider.  Do not remove vectorizable
+	 * quals from scan.plan.qual when BeginCustomScan will disable the vector
+	 * executor; doing so turns alias-local restrictions into a cross product. */
+	if (bioseq_enable_vectorization
+		&& !locator_passthrough_requested
+		&& !lazy_source_projection_requested)
 	{
 		List *candidateQualList = CreateVectorizedExprList(cscan->scan.plan.qual);
 		List *listDifference = list_difference(candidateQualList, cscan->scan.plan.qual);

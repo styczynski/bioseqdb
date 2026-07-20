@@ -1367,8 +1367,7 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
         ctx,
         "SELECT bioseq_internal.sequence_source_route_alias_probe();")
         == "t");
-    const auto layouts = query_one(
-        ctx,
+    constexpr auto source_alias_query =
         "SELECT bioseq.seq_eq(a.value,"
         "         'A'::bioseq.seq('dna4',64)), "
         "       bioseq.seq_hash(a.value) = bioseq.seq_hash("
@@ -1383,7 +1382,12 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
         "       bioseq.seq_cmp(a.value,b.value) < 0, "
         "       bioseq.seq_hash(a.value) <> bioseq.seq_hash(b.value) "
         "FROM doc0377_total_key_source a "
-        "JOIN doc0377_total_key_source b ON a.id=1 AND b.id=2;");
+        "JOIN doc0377_total_key_source b ON a.id=1 AND b.id=2;";
+    const auto source_alias_plan = explain_text<false>(
+        ctx, source_alias_query);
+    REQUIRE(plan_contains(source_alias_plan, "id = 1"));
+    REQUIRE(plan_contains(source_alias_plan, "id = 2"));
+    const auto layouts = query_one(ctx, source_alias_query);
     for (const auto& value : layouts) {
         REQUIRE(value == "t");
     }
