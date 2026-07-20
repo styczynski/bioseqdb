@@ -55,6 +55,24 @@ std::optional<std::string> boundary_explain_property(
     return std::nullopt;
 }
 
+std::optional<std::size_t> plan_line_index(
+        std::span<const std::string> plan,
+        std::string_view needle) {
+    for (std::size_t index = 0; index < plan.size(); ++index) {
+        if (plan[index].find(needle) != std::string::npos) return index;
+    }
+    return std::nullopt;
+}
+
+std::size_t plan_line_count(
+        std::span<const std::string> plan,
+        std::string_view needle) {
+    return static_cast<std::size_t>(std::count_if(
+        plan.begin(), plan.end(), [needle](const std::string& line) {
+            return line.find(needle) != std::string::npos;
+        }));
+}
+
 }  // namespace
 
 TEST_CASE("DOC0377 trace ABI counters scopes refs and reusable slots are exact",
@@ -420,12 +438,42 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
         ctx,
         "SELECT s[500000:500064] FROM doc0377_slice_src;");
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_line_count(
+        plan, "Custom Scan (BioseqSliceProject)") == 1u);
     REQUIRE(plan_contains(plan, "Slice Materialization:"));
-    REQUIRE(plan_contains(plan, "s[500000:500064]"));
+    REQUIRE(plan_line_count(plan, "value_1 [source] =") == 1u);
+    REQUIRE(plan_line_count(plan, "value_2 [slice] =") == 1u);
+    const auto slice_node = plan_line_index(plan, "value_2 [slice] =");
+    REQUIRE(slice_node.has_value());
+    REQUIRE(*slice_node + 2u < plan.size());
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{plan}.subspan(*slice_node + 1u, 1u),
+        "Depends On") == "value_1");
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{plan}.subspan(*slice_node + 2u, 1u),
+        "Bounds")
+        == "lower='500000'::bigint upper='500064'::bigint");
     REQUIRE(plan_contains(plan, "Mechanism: text"));
     REQUIRE(plan_contains(plan, "Reason: client output"));
+    REQUIRE(plan_line_count(plan, "Mechanism: text") == 1u);
+    REQUIRE(plan_line_count(plan, "Mechanism: binary") == 1u);
+    REQUIRE(plan_line_count(plan, "Reason: client output") == 2u);
+    for (const std::string_view mechanism : {"text", "binary"}) {
+        CAPTURE(mechanism);
+        REQUIRE(boundary_explain_property(
+            plan, mechanism, "client output", "Producer Value") == "2");
+        REQUIRE(boundary_explain_property(
+            plan, mechanism, "client output", "Estimated Symbols") == "64");
+        REQUIRE(boundary_explain_property(
+            plan, mechanism, "client output", "Estimated Bytes")
+            == "64 bytes");
+    }
     REQUIRE(plan_contains(plan, "Planned Materialized Symbols"));
     REQUIRE(plan_contains(plan, "Planned Materialized Bytes"));
+    REQUIRE(find_explain_property(plan, "Planned Materialized Symbols")
+        == "128");
+    REQUIRE(find_explain_property(plan, "Planned Materialized Bytes")
+        == "128 bytes");
     REQUIRE(plan_contains(plan, "Actual Calls"));
 }
 

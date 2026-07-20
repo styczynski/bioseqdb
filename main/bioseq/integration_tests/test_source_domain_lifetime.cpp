@@ -350,7 +350,7 @@ TEST_CASE("DOC0377 SliceProject keeps one lowest owner across ordering and Gathe
         "SET max_parallel_workers_per_gather=0;"
         "CREATE TABLE doc0377_slice_ordered_owner ("
         " pk int, s bioseq.seq('dna4',32)"
-        ") USING bioseq;"
+        ") USING bioseq WITH (autovacuum_enabled=false);"
         "INSERT INTO doc0377_slice_ordered_owner "
         "SELECT g, repeat('A',4161-g)::bioseq.seq('dna4',32) "
         "FROM generate_series(64,1,-1) AS g;");
