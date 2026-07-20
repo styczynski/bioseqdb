@@ -266,16 +266,19 @@ TEST_CASE("DOC0377 BatchSort retains exact source routes without flattening tupl
         "SELECT id FROM doc0377_source_batch_sort "
         "ORDER BY s NULLS LAST;");
     REQUIRE(ids == std::vector<long long>{2, 3, 1, 4});
-    REQUIRE(source_counter(ctx, "domains_created") == 3);
+    REQUIRE(source_counter(ctx, "registries_created") == 1);
+    REQUIRE(source_counter(ctx, "providers_created") == 1);
+    REQUIRE(source_counter(ctx, "scan_providers_created") == 1);
+    REQUIRE(source_counter(ctx, "domains_created") == 1);
+    REQUIRE(source_counter(ctx, "domains_reused") == 2);
+    REQUIRE(source_counter(ctx, "cache_sets_created") == 1);
+    REQUIRE(source_counter(ctx, "snapshots_registered") == 1);
+    REQUIRE(source_counter(ctx, "scanner_entries_created") == 3);
     REQUIRE(source_counter(ctx, "leases_acquired")
             == source_counter(ctx, "leases_released"));
     REQUIRE(source_counter(ctx, "provider_closed_with_upper_leases") >= 1);
     REQUIRE(source_counter(ctx, "last_upper_lease_after_provider_end") >= 1);
-    REQUIRE(source_counter(ctx, "live_registries") == 0);
-    REQUIRE(source_counter(ctx, "live_domains") == 0);
-    REQUIRE(source_counter(ctx, "live_leases") == 0);
-    REQUIRE(source_counter(ctx, "live_cache_sets") == 0);
-    REQUIRE(source_counter(ctx, "live_snapshots") == 0);
+    require_source_resources_balanced(ctx);
 }
 
 TEST_CASE("DOC0377 repeated source leaves reuse one callback scanner entry",
