@@ -1064,19 +1064,27 @@ TEST_CASE("DOC0377 mmsearch ownership respects RLS barriers and effectful siblin
           "[mmsearch][fail-closed]") {
     constexpr std::string_view table = "doc0377_source_security";
     auto ctx = fresh_context({table});
-    exec_sql(ctx,
-        "SET bioseq.update_index_on_insert=off;"
+    const auto canonical_rows = hoe_seed_rows();
+    const seq_typmod dna4{.alphabet = "dna4", .width = 32};
+    const std::string positive_target = format_literal(
+        canonical_rows.front().sequences.front(), dna4);
+    const std::string alternate_target = format_literal(
+        canonical_rows[1].sequences.front(), dna4);
+    exec_sql(ctx, fmt::format(
+        "SET bioseq.update_index_on_insert=on;"
         "SET bioseq.read_sequence_index=off;"
         "SET bioseq.index_async_persist=off;"
         "SET bioseq.recompute_async_persist=off;"
         "SET bioseq.enable_vectorization=off;"
+        "SET bioseq.aligner.minimizer_algorithm='scalar';"
+        "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm='ksw2';"
         "SET bioseq.aligner.vulkan_enabled=off;"
+        "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
         "CREATE TABLE doc0377_source_security "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
         "INSERT INTO doc0377_source_security VALUES "
-        " (1,repeat('ACGT',4096)::bioseq.seq('dna4',32)),"
-        " (2,repeat('T',16384)::bioseq.seq('dna4',32)),"
-        " (3,repeat('ACGT',4096)::bioseq.seq('dna4',32));"
+        " (1,{}),(2,{}),(3,{});"
         "CREATE FUNCTION pg_temp.doc0377_nonleaky(i int) "
         "RETURNS bool LANGUAGE sql IMMUTABLE LEAKPROOF "
         "AS 'SELECT i > 0';"
@@ -1089,11 +1097,12 @@ TEST_CASE("DOC0377 mmsearch ownership respects RLS barriers and effectful siblin
         "CREATE TEMP VIEW doc0377_source_security_barrier "
         "WITH (security_barrier=true) AS "
         "SELECT id,s FROM doc0377_source_security "
-        "WHERE pg_temp.doc0377_leaky(id);");
+        "WHERE pg_temp.doc0377_leaky(id);",
+        positive_target, alternate_target, positive_target));
 
-    constexpr auto mmsearch_call =
-        "mmsearch(s, repeat('ACGT',32)::bioseq.seq('dna4',32), "
-        "aligner_options(index_read_requirement => 1))";
+    const std::string mmsearch_call = fmt::format(
+        "mmsearch(s, {}, aligner_options(index_read_requirement => 1))",
+        hoe_probe_literal());
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT count(*) FROM {} WHERE pg_temp.doc0377_nonleaky(id) "
         "AND {};", table, mmsearch_call)) >= 1);
