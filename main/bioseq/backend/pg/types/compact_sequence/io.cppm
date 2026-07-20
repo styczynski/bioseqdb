@@ -16,6 +16,7 @@ module;
 
 #include "headers/pg_build_config.h"
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 extern "C" {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wregister"
@@ -38,7 +39,7 @@ import bioseq.sequences.simd;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy;
 
-export [[nodiscard]] inline compact_sequence_stdc_type_params
+export [[nodiscard]] compact_sequence_stdc_type_params
 decode_seq_typmod_checked(int32_t typmod)
 {
     if (typmod < 0) {
@@ -58,7 +59,7 @@ decode_seq_typmod_checked(int32_t typmod)
     return params;
 }
 
-export [[nodiscard]] inline std::uint8_t parse_alphabet_name_checked(
+export [[nodiscard]] std::uint8_t parse_alphabet_name_checked(
     char const* alphabet_name,
     char const* type_name)
 {
@@ -75,6 +76,30 @@ export [[nodiscard]] inline std::uint8_t parse_alphabet_name_checked(
                          static_cast<int>(valid.size()), valid.data())));
     }
     return static_cast<std::uint8_t>(*code);
+}
+
+export [[nodiscard]] std::string_view supported_alphabet_name(
+    std::uint8_t alphabet_code) noexcept
+{
+    return pgseq_supported_alphabets::name_of_alphabet_code(alphabet_code);
+}
+
+export [[nodiscard]] bool pgseq_rank_for_symbol_out_of_line(
+    std::uint8_t alphabet_code,
+    unsigned char input,
+    std::uint8_t& rank,
+    char* canonical = nullptr) noexcept
+{
+    return pgseq_rank_for_symbol(
+        alphabet_code, input, rank, canonical);
+}
+
+export [[nodiscard]] bool pgseq_symbol_for_rank_out_of_line(
+    std::uint8_t alphabet_code,
+    std::uint8_t rank,
+    char& symbol) noexcept
+{
+    return pgseq_symbol_for_rank(alphabet_code, rank, symbol);
 }
 
 namespace {
@@ -348,7 +373,7 @@ void view_to_ascii(
 /* Owned parser-safe literals for concat/array bridges.  The returned Datum is
  * a self-contained flat value and is therefore safe in Const nodes as well as
  * across calls that immediately promote it into a piece tree. */
-export [[nodiscard]] inline Datum make_unbound_sequence_from_ascii(
+export [[nodiscard]] Datum make_unbound_sequence_from_ascii(
     char const* input,
     std::size_t length,
     bool require_already_canonical = false)
@@ -412,6 +437,15 @@ export inline Datum seq_typmod_in_impl(FunctionCallInfo fcinfo)
     PG_RETURN_INT32(params.encode());
 }
 
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_in);
+
+PGDLLEXPORT Datum pg_compact_sequence_typmod_in(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_typmod_in_impl, fcinfo);
+}
+} // extern "C"
+
 export inline Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
 {
     const int32_t typmod = PG_GETARG_INT32(0);
@@ -427,6 +461,15 @@ export inline Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
                   static_cast<unsigned>(params.storage_unit_byte_width) * 8u);
     PG_RETURN_CSTRING(result);
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_out);
+
+PGDLLEXPORT Datum pg_compact_sequence_typmod_out(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_typmod_out_impl, fcinfo);
+}
+} // extern "C"
 
 export inline Datum seq_in_impl(FunctionCallInfo fcinfo)
 {
@@ -886,3 +929,47 @@ export inline Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
     }
     PG_RETURN_INT64(static_cast<int64_t>(units));
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_in);
+PGDLLEXPORT Datum pg_compact_sequence_in(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_in_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_out);
+PGDLLEXPORT Datum pg_compact_sequence_out(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_out_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_recv);
+PGDLLEXPORT Datum pg_compact_sequence_recv(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_recv_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_send);
+PGDLLEXPORT Datum pg_compact_sequence_send(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_send_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cast);
+PGDLLEXPORT Datum pg_compact_sequence_cast(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_cast_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
+PGDLLEXPORT Datum pg_compact_sequence_len(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_len_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_unit_len);
+PGDLLEXPORT Datum pg_compact_sequence_unit_len(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_unit_len_impl, fcinfo);
+}
+} // extern "C"

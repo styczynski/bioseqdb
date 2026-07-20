@@ -1,3 +1,16 @@
+#ifndef NO_POSTGRES
+#error "external rank-pack adapter proof must compile with NO_POSTGRES"
+#endif
+
+#ifndef BIOSEQ_PG_PACK_DENYLIST_ENABLED
+#error "external rank-pack adapter proof requires the PG source denylist"
+#endif
+
+#if defined(POSTGRES_H) || defined(FMGR_H) || defined(PG_VERSION_NUM) \
+    || defined(ereport) || defined(PG_FUNCTION_ARGS)
+#error "PostgreSQL header or API macro leaked into the external rank-pack path"
+#endif
+
 #include <catch2/catch_test_macros.hpp>
 
 #include <array>
@@ -11,6 +24,7 @@
 import bioseq.parallelism.memory_admission;
 import bioseq.sequences;
 import bioseq.sequences.rank_pack;
+import bioseq.sequences.rank_pack_core;
 import bioseq.storage.lazy;
 import bioseq.storage.scanner;
 

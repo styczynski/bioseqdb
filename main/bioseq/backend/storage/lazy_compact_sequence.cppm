@@ -44,6 +44,7 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <climits>
 #include <compare>
 #include <concepts>
@@ -82,6 +83,87 @@ export namespace bioseq::storage {
 // =====================================================================
 // DOC0377 §9 — one alphabet-specialized, representation-erased facade.
 // =====================================================================
+
+enum class sequence_payload_allocation_kind : std::uint8_t {
+    admitted_packed_region = 0u,
+    flat_sequence,
+    backing_copy,
+};
+
+struct sequence_payload_allocation_event {
+    std::uint64_t allocation_id{};
+    std::uint64_t input_symbols{};
+    std::uint64_t output_symbols{};
+    std::uint64_t payload_bytes{};
+    std::uint64_t retained_bytes{};
+    sequence_payload_allocation_kind kind{
+        sequence_payload_allocation_kind::admitted_packed_region};
+};
+
+/**
+ * Allocation-boundary observation without a PostgreSQL dependency.  The two
+ * opaque correlations are copied from the planning/executor owner before a
+ * task is submitted; the callback interprets them and is required to remain
+ * alive until that task has joined/drained.  A null callback is the ordinary
+ * non-traced route and costs only the allocation-path null check.
+ */
+struct sequence_payload_allocation_observer {
+    using publish_fn = void (*)(
+        void*, sequence_payload_allocation_event const&,
+        std::uint64_t, std::uint64_t) noexcept;
+
+    void* context{};
+    publish_fn publish{};
+    std::uint64_t correlation_a{};
+    std::uint64_t correlation_b{};
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return context != nullptr && publish != nullptr;
+    }
+};
+
+static_assert(std::is_trivially_copyable_v<
+              sequence_payload_allocation_observer>);
+static_assert(std::is_standard_layout_v<
+              sequence_payload_allocation_observer>);
+
+namespace lazy_payload_observer_detail {
+
+inline std::atomic<std::uint64_t> next_allocation_id{1u};
+
+} // namespace lazy_payload_observer_detail
+
+[[nodiscard]] inline std::uint64_t observe_sequence_payload_allocation_noexcept(
+        sequence_payload_allocation_observer const* observer,
+        sequence_payload_allocation_kind kind,
+        std::uint64_t input_symbols,
+        std::uint64_t output_symbols,
+        std::uint64_t payload_bytes,
+        std::uint64_t retained_bytes) noexcept {
+    if (observer == nullptr || !*observer) {
+        return 0u;
+    }
+    std::uint64_t allocation_id =
+        lazy_payload_observer_detail::next_allocation_id.fetch_add(
+            1u, std::memory_order_relaxed);
+    if (allocation_id == 0u) {
+        allocation_id =
+            lazy_payload_observer_detail::next_allocation_id.fetch_add(
+                1u, std::memory_order_relaxed);
+    }
+    const sequence_payload_allocation_event event{
+        .allocation_id = allocation_id,
+        .input_symbols = input_symbols,
+        .output_symbols = output_symbols,
+        .payload_bytes = payload_bytes,
+        .retained_bytes = retained_bytes,
+        .kind = kind,
+    };
+    observer->publish(
+        observer->context, event,
+        observer->correlation_a, observer->correlation_b);
+    return allocation_id;
+}
 
 template <sequence_alphabet Alphabet>
 struct lazy_rank_stream_traits {
@@ -147,8 +229,10 @@ public:
 
     explicit basic_lazy_sequence_view(
             void const* state,
-            backend_ops const* ops) noexcept
-        : state_(state), ops_(ops) {
+            backend_ops const* ops,
+            sequence_payload_allocation_observer const* observer = nullptr)
+            noexcept
+        : state_(state), ops_(ops), payload_observer_(observer) {
         DEBUG_ASSERT(
             ops_ != nullptr && ops_->bp_size != nullptr
                 && ops_->worker_shareable != nullptr
@@ -164,9 +248,21 @@ public:
 
     [[nodiscard]] sequence_size_t size() const noexcept { return bp_size(); }
 
-    [[nodiscard]] friend bool lazy_is_worker_shareable(
-            basic_lazy_sequence_view value) noexcept {
-        return value.ops_->worker_shareable(value.state_);
+    [[nodiscard]] bool worker_shareable() const noexcept {
+        return ops_->worker_shareable(state_);
+    }
+
+    [[nodiscard]] basic_lazy_sequence_view with_payload_allocation_observer(
+            sequence_payload_allocation_observer const* observer) const
+            noexcept {
+        auto result = *this;
+        result.payload_observer_ = observer;
+        return result;
+    }
+
+    [[nodiscard]] sequence_payload_allocation_observer const*
+    payload_allocation_observer() const noexcept {
+        return payload_observer_;
     }
 
     [[nodiscard]] resident_probe_result try_resident_packed(
@@ -442,7 +538,14 @@ public:
 private:
     void const* state_{};
     backend_ops const* ops_{};
+    sequence_payload_allocation_observer const* payload_observer_{};
 };
+
+template <sequence_alphabet Alphabet>
+[[nodiscard]] inline bool lazy_is_worker_shareable(
+        basic_lazy_sequence_view<Alphabet> value) noexcept {
+    return value.worker_shareable();
+}
 
 static_assert(supports_lazy_compact_sequence_slice<
               basic_lazy_sequence_view<seq::dna4>>);
@@ -1467,7 +1570,9 @@ void stream_transformed_packed(
                 static_cast<std::size_t>(chunk_from),
                 static_cast<std::size_t>(position));
             if constexpr (has_complement(Transform)) {
-                static_assert(complementable_sequence_alphabet<Alphabet>);
+                static_assert(
+                    lazy_view_detail::complementable_sequence_alphabet<
+                        Alphabet>);
                 for (std::size_t index = 0u; index < count; ++index) {
                     scratch[index] = lazy_rank_stream_traits<Alphabet>::
                         letter_complement(scratch[index]);
@@ -1489,7 +1594,9 @@ void stream_transformed_packed(
                 static_cast<std::size_t>(position),
                 static_cast<std::size_t>(position + count));
             if constexpr (has_complement(Transform)) {
-                static_assert(complementable_sequence_alphabet<Alphabet>);
+                static_assert(
+                    lazy_view_detail::complementable_sequence_alphabet<
+                        Alphabet>);
                 for (std::size_t index = 0u; index < count; ++index) {
                     scratch[index] = lazy_rank_stream_traits<Alphabet>::
                         letter_complement(scratch[index]);
@@ -1922,6 +2029,22 @@ public:
                          std::addressof(adapter::ops)};
     }
 
+#ifdef BIOSEQ_TEST_INDEXES
+    [[nodiscard]] std::uint64_t test_admission_bytes() const noexcept {
+        if (state_ == nullptr) {
+            lazy_fragment_panic("admission query on moved packed region");
+        }
+        return state_->permit_.bytes();
+    }
+
+    [[nodiscard]] std::uintptr_t test_storage_address() const noexcept {
+        if (state_ == nullptr) {
+            lazy_fragment_panic("storage query on moved packed region");
+        }
+        return reinterpret_cast<std::uintptr_t>(state_->descriptor_.units);
+    }
+#endif
+
 private:
     struct stable_state {
         bioseq::parallelism::MemoryPermit permit_;
@@ -2166,6 +2289,11 @@ template <sequence_alphabet Alphabet>
             throw std::runtime_error("checked lazy rank packing failed");
         }
     }
+    (void)observe_sequence_payload_allocation_noexcept(
+        view.payload_allocation_observer(),
+        sequence_payload_allocation_kind::admitted_packed_region,
+        length, length, static_cast<std::uint64_t>(allocation_bytes),
+        admitted_bytes);
     return owner_type{std::move(state)};
 }
 

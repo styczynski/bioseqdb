@@ -41,7 +41,6 @@ extern "C" {
 #include <limits>
 #include <new>
 #include <span>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -53,11 +52,14 @@ import bioseq.common.sequan_compat;              // seq::dna4 in static_assert b
 import bioseq.storage.manager;             // DOC0264 §7.9 — seq_caches + open_sub_table_for_locator
 import bioseq.storage.scanner;     // DOC0263 §3.4 — is_valid/active_sequence_scanner concept
 import bioseq.storage.lazy;        // DOC0264 §9.1 — lazy_compact_sequence + with_lazy_postgres
+import bioseq.storage.coordinates;
+import bioseq.storage.physical;
 import bioseq.storage.size;        // sequence_size_t
 import bioseq.storage.metadata;    // StripeMetadata/FindStripeByRowNumber
 import bioseq.sequences;           // compact_sequence_range, compact_sequence_stdc_instance
 import bioseq.types.pg_compact_sequence;
 import bioseq.table.io;            // BioseqColumnBeginRead/BioseqColumnReadRowByRowNumber
+import bioseq.parallelism.pool;
 
 static_assert(__cplusplus >= 202302L, "DOC0264 requires C++23-or-later");
 
@@ -3664,27 +3666,34 @@ inline void release_pg_sequence_source_routes_noexcept(
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
-/** Prove that the concrete source callback rejects before any PostgreSQL API. */
+/**
+ * Prove on a real TBB arena worker that the concrete source callback rejects
+ * before any PostgreSQL API, cache, snapshot, or logging side effect.
+ */
 [[nodiscard]] inline bool pg_sequence_source_wrong_thread_probe() {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.backend_thread = pg_sequence_backend_thread_token::capture();
     pg_sequence_read_session session{};
     session.backend_thread = pg_sequence_backend_thread_token::capture();
-    pg_sequence_source_read_status observed =
-        pg_sequence_source_read_status::ok;
-    std::thread worker{
-        [&domain, &session, &observed] {
+    struct probe_argument {
+        sequence_source_detail::pg_sequence_source_domain* domain;
+        pg_sequence_read_session* session;
+    } argument{&domain, &session};
+    const bool rejected =
+        bioseq::parallelism::GlobalPool::instance().invoke_worker_probe_noexcept(
+        &argument, +[](void* opaque) noexcept {
+            auto* probe = static_cast<probe_argument*>(opaque);
             const seq_locator locator{};
             const compact_sequence_stdc_type_params stored_type{};
-            observed = sequence_source_detail::read_domain_ranks(
-                &domain, session, locator, stored_type,
+            return sequence_source_detail::read_domain_ranks(
+                probe->domain, *probe->session, locator, stored_type,
                 sequence_transform::identity, 0u,
-                std::span<std::uint8_t>{});
-        }};
-    worker.join();
-    const bool rejected =
-        observed == pg_sequence_source_read_status::wrong_thread;
+                std::span<std::uint8_t>{})
+                == pg_sequence_source_read_status::wrong_thread;
+        });
     if (rejected) {
+        /* Worker diagnostics are thread-local; mirror the attested rejection
+         * once on the backend so SQL can assert it without reading worker TLS. */
         ++g_pg_sequence_source_debug_counters.wrong_thread_rejections;
     }
     return rejected;

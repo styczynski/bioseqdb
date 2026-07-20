@@ -9,6 +9,7 @@ module;
 #include <type_traits>
 
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 extern "C" {
 #include "common/hashfn.h"
 #pragma GCC diagnostic push
@@ -81,7 +82,7 @@ export [[nodiscard]] inline int32_t encode_letter_typmod(
     return static_cast<int32_t>(alphabet_code) + 1;
 }
 
-export [[nodiscard]] inline std::uint8_t decode_letter_typmod_checked(
+export [[nodiscard]] std::uint8_t decode_letter_typmod_checked(
     int32_t typmod)
 {
     if (typmod <= 0
@@ -123,7 +124,7 @@ export [[nodiscard]] inline pg_letter validate_letter_datum(Datum datum)
     }
     char symbol = '\0';
     if (!is_supported_alphabet_code(value.alphabet_code)
-        || !pgseq_symbol_for_rank(
+        || !pgseq_symbol_for_rank_out_of_line(
             value.alphabet_code, value.rank, symbol)) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -165,9 +166,8 @@ letter_hash_bytes(Datum datum)
     unsigned char symbol)
 {
     std::uint8_t rank = 0u;
-    if (!pgseq_rank_for_symbol(alphabet, symbol, rank)) {
-        const auto name = pgseq_supported_alphabets::name_of_alphabet_code(
-            alphabet);
+    if (!pgseq_rank_for_symbol_out_of_line(alphabet, symbol, rank)) {
+        const auto name = supported_alphabet_name(alphabet);
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
                  errmsg("invalid symbol for bioseq.letter('%.*s')",
@@ -178,7 +178,7 @@ letter_hash_bytes(Datum datum)
 
 } // namespace
 
-export inline Datum letter_typmod_in_impl(FunctionCallInfo fcinfo)
+export Datum letter_typmod_in_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     if (ARR_NDIM(array) != 1) {
@@ -202,22 +202,21 @@ export inline Datum letter_typmod_in_impl(FunctionCallInfo fcinfo)
     PG_RETURN_INT32(encode_letter_typmod(alphabet));
 }
 
-export inline Datum letter_typmod_out_impl(FunctionCallInfo fcinfo)
+export Datum letter_typmod_out_impl(FunctionCallInfo fcinfo)
 {
     const int32_t typmod = PG_GETARG_INT32(0);
     if (typmod < 0) {
         PG_RETURN_CSTRING(pstrdup(""));
     }
     const auto alphabet = decode_letter_typmod_checked(typmod);
-    const auto name = pgseq_supported_alphabets::name_of_alphabet_code(
-        alphabet);
+    const auto name = supported_alphabet_name(alphabet);
     auto* result = static_cast<char*>(palloc(name.size() + 5u));
     std::snprintf(result, name.size() + 5u, "('%.*s')",
                   static_cast<int>(name.size()), name.data());
     PG_RETURN_CSTRING(result);
 }
 
-export inline Datum letter_in_impl(FunctionCallInfo fcinfo)
+export Datum letter_in_impl(FunctionCallInfo fcinfo)
 {
     const char* input = PG_GETARG_CSTRING(0);
     const int32_t typmod = PG_GETARG_INT32(2);
@@ -235,10 +234,11 @@ export inline Datum letter_in_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(make_letter_datum(alphabet, rank));
 }
 
-export inline Datum letter_out_impl(FunctionCallInfo fcinfo) {
+export Datum letter_out_impl(FunctionCallInfo fcinfo) {
   const auto value = validate_letter_datum(PG_GETARG_DATUM(0));
   char symbol = '\0';
-  (void)pgseq_symbol_for_rank(value.alphabet_code, value.rank, symbol);
+  (void)pgseq_symbol_for_rank_out_of_line(
+      value.alphabet_code, value.rank, symbol);
   auto *result = static_cast<char *>(palloc(2u));
   result[0] = symbol;
   result[1] = '\0';
@@ -261,7 +261,7 @@ namespace {
   char symbol = '\0';
   if (alphabet == unresolved_letter_alphabet_code ||
       !is_supported_alphabet_code(alphabet) ||
-      !pgseq_symbol_for_rank(alphabet, rank, symbol)) {
+      !pgseq_symbol_for_rank_out_of_line(alphabet, rank, symbol)) {
     ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
                     errmsg("invalid physical bioseq.letter wire value"),
                     errdetail("alphabet code=%u, rank=%u",
@@ -305,12 +305,12 @@ namespace {
 
 } // namespace
 
-export inline Datum letter_recv_impl(FunctionCallInfo fcinfo) {
+export Datum letter_recv_impl(FunctionCallInfo fcinfo) {
   auto *buffer = reinterpret_cast<StringInfo>(PG_GETARG_POINTER(0));
   PG_RETURN_DATUM(decode_letter_wire(buffer, PG_GETARG_INT32(2)));
 }
 
-export inline Datum letter_send_impl(FunctionCallInfo fcinfo) {
+export Datum letter_send_impl(FunctionCallInfo fcinfo) {
   const auto value = validate_letter_datum(PG_GETARG_DATUM(0));
   StringInfoData buffer;
   pq_begintypsend(&buffer);
@@ -320,7 +320,7 @@ export inline Datum letter_send_impl(FunctionCallInfo fcinfo) {
   PG_RETURN_BYTEA_P(pq_endtypsend(&buffer));
 }
 
-export inline Datum letter_wire_self_test_impl(FunctionCallInfo) {
+export Datum letter_wire_self_test_impl(FunctionCallInfo) {
   constexpr std::uint8_t dna4_code =
       pgseq_supported_alphabets::index_of<seq::dna4>();
   const bool unknown_version =
@@ -340,7 +340,7 @@ export inline Datum letter_wire_self_test_impl(FunctionCallInfo) {
   PG_RETURN_BOOL(unknown_version && bad_rank && typmod_mismatch);
 }
 
-export inline Datum letter_typmod_cast_impl(FunctionCallInfo fcinfo) {
+export Datum letter_typmod_cast_impl(FunctionCallInfo fcinfo) {
   const Datum input = PG_GETARG_DATUM(0);
   const int32_t target_typmod = PG_GETARG_INT32(1);
   const auto value = validate_letter_datum(input);
@@ -353,66 +353,177 @@ export inline Datum letter_typmod_cast_impl(FunctionCallInfo fcinfo) {
   PG_RETURN_DATUM(input);
 }
 
-export inline Datum letter_to_text_impl(FunctionCallInfo fcinfo) {
+export Datum letter_to_text_impl(FunctionCallInfo fcinfo) {
   const auto value = validate_letter_datum(PG_GETARG_DATUM(0));
   char symbol = '\0';
-  (void)pgseq_symbol_for_rank(value.alphabet_code, value.rank, symbol);
+  (void)pgseq_symbol_for_rank_out_of_line(
+      value.alphabet_code, value.rank, symbol);
   PG_RETURN_TEXT_P(cstring_to_text_with_len(&symbol, 1));
 }
 
-export inline Datum letter_cmp_impl(FunctionCallInfo fcinfo)
+export Datum letter_cmp_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_INT32(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)));
 }
 
-export inline Datum letter_eq_impl(FunctionCallInfo fcinfo)
+export Datum letter_eq_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) == 0);
 }
 
-export inline Datum letter_ne_impl(FunctionCallInfo fcinfo)
+export Datum letter_ne_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) != 0);
 }
 
-export inline Datum letter_lt_impl(FunctionCallInfo fcinfo)
+export Datum letter_lt_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) < 0);
 }
 
-export inline Datum letter_le_impl(FunctionCallInfo fcinfo)
+export Datum letter_le_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) <= 0);
 }
 
-export inline Datum letter_gt_impl(FunctionCallInfo fcinfo)
+export Datum letter_gt_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) > 0);
 }
 
-export inline Datum letter_ge_impl(FunctionCallInfo fcinfo)
+export Datum letter_ge_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(compare_letters(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) >= 0);
 }
 
-export inline Datum letter_hash_impl(FunctionCallInfo fcinfo)
+export Datum letter_hash_impl(FunctionCallInfo fcinfo)
 {
     const auto bytes = letter_hash_bytes(PG_GETARG_DATUM(0));
     PG_RETURN_INT32(static_cast<std::int32_t>(hash_bytes(
         bytes.data(), bytes.size())));
 }
 
-export inline Datum letter_hash_extended_impl(FunctionCallInfo fcinfo)
+export Datum letter_hash_extended_impl(FunctionCallInfo fcinfo)
 {
     const auto bytes = letter_hash_bytes(PG_GETARG_DATUM(0));
     const auto seed = static_cast<std::uint64_t>(PG_GETARG_INT64(1));
     PG_RETURN_INT64(static_cast<std::int64_t>(hash_bytes_extended(
         bytes.data(), bytes.size(), seed)));
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(letter_typmod_in);
+PGDLLEXPORT Datum letter_typmod_in(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_typmod_in_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_typmod_out);
+PGDLLEXPORT Datum letter_typmod_out(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_typmod_out_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_in);
+PGDLLEXPORT Datum letter_in(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_in_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_out);
+PGDLLEXPORT Datum letter_out(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_out_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_recv);
+PGDLLEXPORT Datum letter_recv(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_recv_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_send);
+PGDLLEXPORT Datum letter_send(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_send_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_wire_self_test);
+PGDLLEXPORT Datum letter_wire_self_test(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_wire_self_test_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_typmod_cast);
+PGDLLEXPORT Datum letter_typmod_cast(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_typmod_cast_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_to_text);
+PGDLLEXPORT Datum letter_to_text(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_to_text_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_cmp);
+PGDLLEXPORT Datum letter_cmp(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_cmp_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_eq);
+PGDLLEXPORT Datum letter_eq(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_eq_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_ne);
+PGDLLEXPORT Datum letter_ne(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_ne_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_lt);
+PGDLLEXPORT Datum letter_lt(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_lt_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_le);
+PGDLLEXPORT Datum letter_le(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_le_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_gt);
+PGDLLEXPORT Datum letter_gt(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_gt_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_ge);
+PGDLLEXPORT Datum letter_ge(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_ge_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_hash);
+PGDLLEXPORT Datum letter_hash(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_hash_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(letter_hash_extended);
+PGDLLEXPORT Datum letter_hash_extended(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_hash_extended_impl, fcinfo);
+}
+} // extern "C"

@@ -21,6 +21,7 @@ module;
 export module bioseq.sequences.rank_pack;
 
 import bioseq.sequences;
+import bioseq.sequences.rank_pack_core;
 
 export namespace bioseq::sequences {
 
@@ -133,14 +134,16 @@ public:
             status_ = rank_pack_status::length_mismatch;
             return status_;
         }
-
-        const auto shift = partial_letters_ * traits::bits_per_char;
-        partial_word_ |= static_cast<storage_unit>(
-            static_cast<storage_unit>(rank) << shift);
-        ++partial_letters_;
-        ++emitted_symbols_;
-        if (partial_letters_ == traits::letters_per_unit) {
-            flush_partial();
+        auto write_unit = [this](storage_unit value) {
+            return sink_.try_write(value);
+        };
+        if (!rank_pack_detail::append_valid_rank_lsb<
+                storage_unit,
+                traits::bits_per_char,
+                traits::letters_per_unit>(
+                    partial_word_, partial_letters_, emitted_symbols_, rank,
+                    write_unit)) {
+            status_ = rank_pack_status::capacity_overflow;
         }
         return status_;
     }
@@ -163,11 +166,20 @@ public:
             return result_;
         }
 
-        std::uint16_t padding = 0;
+        std::uint16_t padding = 0u;
         if (status_ == rank_pack_status::ok && partial_letters_ != 0u) {
-            padding = static_cast<std::uint16_t>(
-                traits::letters_per_unit - partial_letters_);
-            flush_partial();
+            auto write_unit = [this](storage_unit value) {
+                return sink_.try_write(value);
+            };
+            const auto finished = rank_pack_detail::finish_lsb<
+                storage_unit,
+                traits::bits_per_char,
+                traits::letters_per_unit>(
+                    partial_word_, partial_letters_, write_unit);
+            padding = finished.padding_letters;
+            if (!finished.capacity_ok) {
+                status_ = rank_pack_status::capacity_overflow;
+            }
         }
         if (status_ == rank_pack_status::ok && expected_symbols.has_value()
             && emitted_symbols_ != *expected_symbols) {
@@ -192,18 +204,6 @@ public:
     }
 
 private:
-    void flush_partial() {
-        if (status_ != rank_pack_status::ok || partial_letters_ == 0u) {
-            return;
-        }
-        if (!sink_.try_write(partial_word_)) {
-            status_ = rank_pack_status::capacity_overflow;
-            return;
-        }
-        partial_word_ = 0;
-        partial_letters_ = 0;
-    }
-
     UnitSink sink_;
     storage_unit partial_word_{};
     std::size_t partial_letters_{};

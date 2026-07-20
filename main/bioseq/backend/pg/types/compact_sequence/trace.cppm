@@ -13,10 +13,12 @@ module;
 #include <type_traits>
 
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 
 export module bioseq.types.pg_compact_sequence:trace;
 
 import bioseq.parallelism.pool;
+import bioseq.storage.lazy;
 
 export enum class materialization_mechanism : std::uint8_t {
     backing_copy = 0u,
@@ -383,6 +385,25 @@ find_unique_boundary(slice_materialization_runtime const &runtime,
   return result;
 }
 
+[[nodiscard]] inline slice_materialization_boundary const *
+find_unique_boundary_by_classification(
+    slice_materialization_runtime const &runtime,
+    materialization_mechanism mechanism,
+    materialization_reason reason) noexcept {
+  slice_materialization_boundary const *result = nullptr;
+  for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
+    auto const &candidate = runtime.boundaries[index];
+    if (candidate.mechanism != mechanism || candidate.reason != reason) {
+      continue;
+    }
+    if (result != nullptr) {
+      return nullptr;
+    }
+    result = std::addressof(candidate);
+  }
+  return result;
+}
+
 [[nodiscard]] inline std::uint64_t steady_clock_now_ns() noexcept {
   using namespace std::chrono;
   const auto value =
@@ -423,7 +444,7 @@ export [[nodiscard]] inline std::uint64_t begin_slice_materialization_timing(
              : 0u;
 }
 
-export inline void record_slice_materialization_success(
+[[nodiscard]] inline bool try_record_slice_materialization_success(
     slice_trace_attachment *attachment, std::uint32_t producer_value_id,
     materialization_mechanism default_mechanism,
     materialization_reason default_reason, std::uint64_t input_symbols,
@@ -435,11 +456,11 @@ export inline void record_slice_materialization_success(
     attachment = scope.attachment;
   }
   if (!slice_trace_attachment_live(attachment)) {
-    return;
+    return false;
   }
   auto &runtime = *attachment->runtime;
   if (!runtime.collection_enabled || runtime.boundaries == nullptr) {
-    return;
+    return false;
   }
 
   slice_counter_sink *sink = std::addressof(runtime.cumulative_sink);
@@ -455,25 +476,25 @@ export inline void record_slice_materialization_success(
           boundary->reason != scope.reason ||
           (producer_value_id != 0u &&
            producer_value_id != scope.producer_value_id)) {
-        return;
+        return false;
       }
     } else {
       /* An asynchronous job owns an isolated full counter sink, not one
        * plan boundary. Resolve each observation exactly as the local
        * executor sink would, then publish into the job-local delta. */
       if (producer_value_id == 0u) {
-        return;
+        return false;
       }
       boundary = find_unique_boundary(runtime, producer_value_id,
                                       default_mechanism, default_reason);
       if (boundary == nullptr) {
-        return;
+        return false;
       }
     }
     sink = scope.local_sink;
   } else {
     if (producer_value_id == 0u) {
-      return;
+      return false;
     }
     const bool boundary_reason_scope =
         scope.attachment == nullptr && scope.boundary_id == 0u &&
@@ -487,13 +508,13 @@ export inline void record_slice_materialization_success(
         boundary_reason_scope ? scope.mechanism : default_mechanism,
         boundary_reason_scope ? scope.reason : default_reason);
     if (boundary == nullptr) {
-      return;
+      return false;
     }
   }
   if (sink == nullptr || sink->entries == nullptr ||
       boundary->counter_index >= sink->entry_count) {
     runtime.invalid = true;
-    return;
+    return false;
   }
   std::uint64_t elapsed_ns = 0u;
   if (runtime.timing_enabled && started_at_ns != 0u) {
@@ -507,6 +528,224 @@ export inline void record_slice_materialization_success(
   if (!scoped) {
     runtime.overflowed = runtime.overflowed || counter.overflowed != 0u;
   }
+  return true;
+}
+
+/* One allocation/admission attempt owns one terminal token.  Callers publish
+ * it only after the allocation and complete touch have succeeded; ERROR,
+ * cancellation and early-stop paths abandon it.  The terminal bit makes a
+ * repeated cleanup/commit callback harmless and keeps Actual Calls/Bytes
+ * bijective with completed materializations.  Tokens are call-lifetime views
+ * and deliberately do not retain the query-owned attachment. */
+export struct slice_materialization_admission {
+  slice_trace_attachment *attachment;
+  std::uint32_t producer_value_id;
+  materialization_mechanism mechanism;
+  materialization_reason reason;
+  std::uint64_t started_at_ns;
+  slice_materialization_scope scope;
+  bool terminal;
+};
+
+static_assert(std::is_trivially_copyable_v<slice_materialization_admission>);
+static_assert(std::is_standard_layout_v<slice_materialization_admission>);
+
+export [[nodiscard]] inline slice_materialization_admission
+admit_slice_materialization_noexcept(
+    slice_trace_attachment *attachment, std::uint32_t producer_value_id,
+    materialization_mechanism mechanism,
+    materialization_reason reason) noexcept {
+  const auto scope = get_current_slice_materialization_scope();
+  if (attachment == nullptr) {
+    attachment = scope.attachment;
+  }
+  return {
+      .attachment = attachment,
+      .producer_value_id = producer_value_id,
+      .mechanism = mechanism,
+      .reason = reason,
+      .started_at_ns = begin_slice_materialization_timing(attachment),
+      .scope = scope,
+      .terminal = false,
+  };
+}
+
+export [[nodiscard]] inline bool publish_slice_materialization_success_noexcept(
+    slice_materialization_admission &admission,
+    std::uint64_t input_symbols, std::uint64_t output_symbols,
+    std::uint64_t bytes, bool reused,
+    std::uint64_t peak_retained_bytes) noexcept {
+  if (admission.terminal) {
+    return false;
+  }
+  admission.terminal = true;
+  const auto previous_scope =
+      exchange_slice_materialization_scope(admission.scope);
+  const bool published = try_record_slice_materialization_success(
+      admission.attachment, admission.producer_value_id,
+      admission.mechanism, admission.reason,
+      input_symbols, output_symbols, bytes, reused, peak_retained_bytes,
+      admission.started_at_ns);
+  restore_slice_materialization_scope(previous_scope);
+  return published;
+}
+
+export [[nodiscard]] inline bool abandon_slice_materialization_noexcept(
+    slice_materialization_admission &admission) noexcept {
+  if (admission.terminal) {
+    return false;
+  }
+  admission.terminal = true;
+  return true;
+}
+
+export inline void record_slice_materialization_success(
+    slice_trace_attachment *attachment, std::uint32_t producer_value_id,
+    materialization_mechanism default_mechanism,
+    materialization_reason default_reason, std::uint64_t input_symbols,
+    std::uint64_t output_symbols, std::uint64_t bytes, bool reused,
+    std::uint64_t peak_retained_bytes,
+    std::uint64_t started_at_ns = 0u) noexcept {
+  slice_materialization_admission admission{
+      .attachment = attachment,
+      .producer_value_id = producer_value_id,
+      .mechanism = default_mechanism,
+      .reason = default_reason,
+      .started_at_ns = started_at_ns,
+      .scope = get_current_slice_materialization_scope(),
+      .terminal = false,
+  };
+  (void)publish_slice_materialization_success_noexcept(
+      admission, input_symbols, output_symbols, bytes, reused,
+      peak_retained_bytes);
+}
+
+namespace {
+
+inline void publish_sequence_payload_allocation_noexcept(
+    void *opaque,
+    bioseq::storage::sequence_payload_allocation_event const &event,
+    std::uint64_t correlation_a,
+    std::uint64_t correlation_b) noexcept {
+  auto *attachment = static_cast<slice_trace_attachment *>(opaque);
+  if (!slice_trace_attachment_live(attachment)
+      || event.allocation_id == 0u
+      || event.output_symbols > event.input_symbols
+      || event.payload_bytes > event.retained_bytes) {
+    if (slice_trace_attachment_live(attachment)) {
+      attachment->runtime->invalid = true;
+    }
+    return;
+  }
+  const auto boundary_id = static_cast<std::uint32_t>(correlation_a >> 32u);
+  const auto producer_value_id = static_cast<std::uint32_t>(correlation_a);
+  const auto mechanism = static_cast<materialization_mechanism>(
+      correlation_b & std::uint64_t{0xff});
+  const auto reason = static_cast<materialization_reason>(
+      (correlation_b >> 8u) & std::uint64_t{0xff});
+  if (!valid_mechanism(mechanism) || !valid_reason(reason)) {
+    attachment->runtime->invalid = true;
+    return;
+  }
+  const bool kind_matches =
+      (event.kind
+           == bioseq::storage::sequence_payload_allocation_kind::
+               admitted_packed_region
+       && mechanism == materialization_mechanism::packed_region)
+      || (event.kind
+              == bioseq::storage::sequence_payload_allocation_kind::
+                  flat_sequence
+          && mechanism == materialization_mechanism::packed_full)
+      || (event.kind
+              == bioseq::storage::sequence_payload_allocation_kind::
+                  backing_copy
+          && mechanism == materialization_mechanism::backing_copy);
+  if (!kind_matches) {
+    attachment->runtime->invalid = true;
+    return;
+  }
+  auto scope = get_current_slice_materialization_scope();
+  if (scope.attachment != attachment || scope.local_sink == nullptr) {
+    scope.local_sink = std::addressof(attachment->runtime->cumulative_sink);
+  }
+  scope.attachment = attachment;
+  scope.boundary_id = boundary_id;
+  scope.producer_value_id = producer_value_id;
+  scope.mechanism = mechanism;
+  scope.reason = reason;
+  slice_materialization_admission admission{
+      .attachment = attachment,
+      .producer_value_id = producer_value_id,
+      .mechanism = mechanism,
+      .reason = reason,
+      .started_at_ns = begin_slice_materialization_timing(attachment),
+      .scope = scope,
+      .terminal = false,
+  };
+  (void)publish_slice_materialization_success_noexcept(
+      admission, event.input_symbols, event.output_symbols,
+      event.payload_bytes, false, event.retained_bytes);
+}
+
+} // namespace
+
+export [[nodiscard]] inline
+bioseq::storage::sequence_payload_allocation_observer
+make_slice_payload_allocation_observer_noexcept(
+    slice_trace_attachment *attachment,
+    std::uint32_t producer_value_id,
+    materialization_mechanism mechanism,
+    materialization_reason reason) noexcept {
+  if (!slice_trace_attachment_live(attachment)
+      || !valid_mechanism(mechanism) || !valid_reason(reason)) {
+    return {};
+  }
+  auto const &runtime = *attachment->runtime;
+  const auto scope = get_current_slice_materialization_scope();
+  slice_materialization_boundary const *boundary = nullptr;
+  if (scope.attachment == attachment && scope.boundary_id != 0u
+      && (producer_value_id == 0u
+          || producer_value_id == scope.producer_value_id)) {
+    boundary = find_boundary_by_id(runtime, scope.boundary_id);
+    mechanism = scope.mechanism;
+    reason = scope.reason;
+    producer_value_id = scope.producer_value_id;
+    if (boundary == nullptr
+        || boundary->producer_value_id != producer_value_id
+        || boundary->mechanism != mechanism
+        || boundary->reason != reason) {
+      return {};
+    }
+  } else {
+    const bool caller_classification =
+        scope.attachment == nullptr && scope.boundary_id == 0u
+        && scope.producer_value_id == 0u && scope.local_sink == nullptr
+        && mechanism == materialization_mechanism::packed_full
+        && reason == materialization_reason::executor_copy
+        && (scope.mechanism != materialization_mechanism::backing_copy
+            || scope.reason != materialization_reason::executor_copy);
+    if (caller_classification) {
+      mechanism = scope.mechanism;
+      reason = scope.reason;
+    }
+    boundary = producer_value_id == 0u
+        ? find_unique_boundary_by_classification(runtime, mechanism, reason)
+        : find_unique_boundary(
+            runtime, producer_value_id, mechanism, reason);
+  }
+  if (boundary == nullptr) {
+    return {};
+  }
+  return {
+      .context = attachment,
+      .publish = &publish_sequence_payload_allocation_noexcept,
+      .correlation_a =
+          (static_cast<std::uint64_t>(boundary->boundary_id) << 32u)
+          | boundary->producer_value_id,
+      .correlation_b =
+          static_cast<std::uint64_t>(mechanism)
+          | (static_cast<std::uint64_t>(reason) << 8u),
+  };
 }
 
 /* Fixed scheduler-independent owner state.  Concrete executors install only
@@ -642,12 +881,21 @@ inline void merge_job_counters_noexcept(slice_async_owner_guard *guard,
     }
     return;
   }
+  /* Validate the entire delta and destination before committing any prefix.
+   * This mirrors the DSM two-pass merge contract: malformed accounting is
+   * visible as invalid/overflowed, never as a plausible partial success. */
   for (std::uint32_t index = 0u; index < job.counter_count; ++index) {
-    if (!slice_dsm_counter_reserved_valid(job.counters[index])) {
+    if (job.counters[index].overflowed > 1u ||
+        !slice_dsm_counter_reserved_valid(job.counters[index]) ||
+        guard->runtime->cumulative_sink.entries[index].overflowed > 1u ||
+        !slice_dsm_counter_reserved_valid(
+            guard->runtime->cumulative_sink.entries[index])) {
       guard->runtime->invalid = true;
       guard->runtime->overflowed = true;
       return;
     }
+  }
+  for (std::uint32_t index = 0u; index < job.counter_count; ++index) {
     merge_slice_dsm_counter_noexcept(
         guard->runtime->cumulative_sink.entries[index], job.counters[index]);
     guard->runtime->overflowed =
@@ -853,7 +1101,13 @@ export [[nodiscard]] inline bool drain_slice_async_job_noexcept(
     }
   }
   if (job.state == slice_async_job_state::joined) {
-    merge_job_counters_noexcept(guard, job);
+    /* A job-local sink is a tentative delta until the worker has published a
+     * complete outcome.  Cancellation, ERROR, scheduler rejection, and an
+     * early drain can all leave a valid-looking prefix in that sink; merging
+     * it would invent a completed materialization in Actual Calls/Bytes. */
+    if (!incomplete) {
+      merge_job_counters_noexcept(guard, job);
+    }
     job.state = slice_async_job_state::merged;
   }
   if (job.state == slice_async_job_state::merged) {
@@ -1188,6 +1442,140 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
       scope_equal(get_current_slice_materialization_scope(), original_scope);
   reset_slice_dsm_counter_noexcept(cumulative);
 
+  /* One producer may fan out into several independently-accounted consumers.
+   * Exercise the production admission token rather than mutating counters as
+   * a test shortcut: success publishes once, while ERROR/cancel abandonment
+   * and a repeated terminal callback publish nothing. */
+  constexpr std::uint32_t shared_producer_value_id = 77u;
+  constexpr std::array<slice_materialization_boundary, 5>
+      consumer_boundaries{{
+          {101u, shared_producer_value_id, 0u,
+           materialization_mechanism::text,
+           materialization_reason::client_output, {}},
+          {102u, shared_producer_value_id, 1u,
+           materialization_mechanism::packed_full,
+           materialization_reason::index_tuple, {}},
+          {103u, shared_producer_value_id, 2u,
+           materialization_mechanism::packed_full,
+           materialization_reason::mmsearch_target, {}},
+          {104u, shared_producer_value_id, 3u,
+           materialization_mechanism::packed_region,
+           materialization_reason::resident_algorithm, {}},
+          {105u, shared_producer_value_id, 4u,
+           materialization_mechanism::packed_full,
+           materialization_reason::executor_copy, {}},
+      }};
+  std::array<slice_dsm_counter, consumer_boundaries.size()>
+      consumer_counters{};
+  slice_materialization_runtime consumer_runtime{};
+  valid = valid && initialize_slice_materialization_runtime_noexcept(
+                       std::addressof(consumer_runtime),
+                       consumer_boundaries.data(),
+                       static_cast<std::uint32_t>(consumer_boundaries.size()),
+                       consumer_counters.data(),
+                       static_cast<std::uint32_t>(consumer_counters.size()),
+                       true, false);
+  slice_trace_attachment consumer_attachment{
+      .refcount = 1u,
+      .generation = 12u,
+      .runtime = std::addressof(consumer_runtime),
+      .async_owner = nullptr,
+      .async_owner_generation = 0u,
+      .valid = true,
+  };
+  slice_counter_sink consumer_sink{
+      consumer_counters.data(),
+      static_cast<std::uint32_t>(consumer_counters.size())};
+  constexpr std::array<std::uint64_t, consumer_boundaries.size()>
+      initial_bytes{{11u, 22u, 33u, 44u, 55u}};
+  for (std::size_t index = 0u; index < consumer_boundaries.size(); ++index) {
+    const auto &consumer = consumer_boundaries[index];
+    const slice_materialization_scope consumer_scope{
+        .attachment = std::addressof(consumer_attachment),
+        .boundary_id = consumer.boundary_id,
+        .producer_value_id = consumer.producer_value_id,
+        .mechanism = consumer.mechanism,
+        .reason = consumer.reason,
+        .local_sink = std::addressof(consumer_sink),
+    };
+    const auto saved_scope =
+        exchange_slice_materialization_scope(consumer_scope);
+    auto admission = admit_slice_materialization_noexcept(
+        std::addressof(consumer_attachment), shared_producer_value_id,
+        consumer.mechanism, consumer.reason);
+    /* Publication remains attached to the admitted stable boundary even when
+     * an intervening caller temporarily restores the ambient TLS scope. */
+    const auto admitted_scope = exchange_slice_materialization_scope({});
+    const bool published = publish_slice_materialization_success_noexcept(
+        admission, 100u + index, 10u + index, initial_bytes[index], false,
+        initial_bytes[index]);
+    restore_slice_materialization_scope(admitted_scope);
+    const bool duplicate_rejected =
+        !publish_slice_materialization_success_noexcept(
+            admission, 1u, 1u, 1u, false, 1u);
+    restore_slice_materialization_scope(saved_scope);
+    valid = valid && published && duplicate_rejected &&
+            consumer.producer_value_id == shared_producer_value_id &&
+            consumer_counters[index].calls == 1u &&
+            consumer_counters[index].bytes == initial_bytes[index];
+  }
+
+  const auto exercise_abandoned_admission =
+      [&](std::size_t index) noexcept {
+        const auto &consumer = consumer_boundaries[index];
+        const auto calls_before = consumer_counters[index].calls;
+        const auto bytes_before = consumer_counters[index].bytes;
+        const slice_materialization_scope consumer_scope{
+            .attachment = std::addressof(consumer_attachment),
+            .boundary_id = consumer.boundary_id,
+            .producer_value_id = consumer.producer_value_id,
+            .mechanism = consumer.mechanism,
+            .reason = consumer.reason,
+            .local_sink = std::addressof(consumer_sink),
+        };
+        const auto saved_scope =
+            exchange_slice_materialization_scope(consumer_scope);
+        auto admission = admit_slice_materialization_noexcept(
+            std::addressof(consumer_attachment), shared_producer_value_id,
+            consumer.mechanism, consumer.reason);
+        const bool abandoned = abandon_slice_materialization_noexcept(admission);
+        const bool repeated_abandonment_rejected =
+            !abandon_slice_materialization_noexcept(admission);
+        const bool late_publication_rejected =
+            !publish_slice_materialization_success_noexcept(
+                admission, 999u, 999u, 999u, false, 999u);
+        restore_slice_materialization_scope(saved_scope);
+        return abandoned && repeated_abandonment_rejected &&
+               late_publication_rejected &&
+               consumer_counters[index].calls == calls_before &&
+               consumer_counters[index].bytes == bytes_before;
+      };
+  /* Separate attempts model an injected allocator ERROR and cancellation. */
+  valid = valid && exercise_abandoned_admission(1u) &&
+          exercise_abandoned_admission(2u);
+
+  /* A rescan contributes only its fresh delta to the same stable boundary. */
+  const auto &rescan_consumer = consumer_boundaries.front();
+  const slice_materialization_scope rescan_scope{
+      .attachment = std::addressof(consumer_attachment),
+      .boundary_id = rescan_consumer.boundary_id,
+      .producer_value_id = rescan_consumer.producer_value_id,
+      .mechanism = rescan_consumer.mechanism,
+      .reason = rescan_consumer.reason,
+      .local_sink = std::addressof(consumer_sink),
+  };
+  const auto saved_rescan_scope =
+      exchange_slice_materialization_scope(rescan_scope);
+  auto rescan_admission = admit_slice_materialization_noexcept(
+      std::addressof(consumer_attachment), shared_producer_value_id,
+      rescan_consumer.mechanism, rescan_consumer.reason);
+  const bool rescan_published = publish_slice_materialization_success_noexcept(
+      rescan_admission, 7u, 7u, 7u, true, 7u);
+  restore_slice_materialization_scope(saved_rescan_scope);
+  valid = valid && rescan_published && consumer_counters[0].calls == 2u &&
+          consumer_counters[0].bytes == initial_bytes[0] + 7u &&
+          consumer_counters[0].reused_calls == 1u;
+
   slice_async_owner_guard guard{};
   slice_async_job_slot jobs[2]{};
   slice_dsm_counter job_counters[2]{};
@@ -1215,15 +1603,20 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
 
   struct async_trace_probe {
     std::atomic<std::uint8_t> *release;
-    slice_trace_attachment *attachment;
+    bioseq::storage::sequence_payload_allocation_observer observer;
     std::uint32_t iterations;
   };
   constexpr std::uint32_t probe_iterations = 4096u;
   std::atomic<std::uint8_t> release_async_probes{0u};
+  const auto async_payload_observer =
+      make_slice_payload_allocation_observer_noexcept(
+          std::addressof(attachment), 7u,
+          materialization_mechanism::packed_full,
+          materialization_reason::executor_copy);
   std::array<async_trace_probe, 2> probe_contexts{{
-      {std::addressof(release_async_probes), std::addressof(attachment),
+      {std::addressof(release_async_probes), async_payload_observer,
        probe_iterations},
-      {std::addressof(release_async_probes), std::addressof(attachment),
+      {std::addressof(release_async_probes), async_payload_observer,
        probe_iterations},
   }};
   std::array<bioseq::parallelism::tracked_task_submission, 2>
@@ -1237,9 +1630,10 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
     }
     for (std::uint32_t iteration = 0u; iteration < probe->iterations;
          ++iteration) {
-      record_slice_materialization_success(
-          probe->attachment, 7u, materialization_mechanism::packed_full,
-          materialization_reason::executor_copy, 1u, 1u, 1u, false, 1u, 0u);
+      (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+          std::addressof(probe->observer),
+          bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
+          1u, 1u, 1u, 1u);
     }
   };
   const auto observer =
@@ -1252,6 +1646,7 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
         {std::addressof(probe_contexts[index]), probe_task}, observer);
   }
   valid = valid &&
+          static_cast<bool>(async_payload_observer) &&
           probe_statuses[0] ==
               bioseq::parallelism::tracked_submit_status::submitted &&
           probe_statuses[1] ==
@@ -1302,16 +1697,53 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
           !guard.slot_generation_overflow;
   slice_async_completion_handle cancelled_handle{};
   bool cancelled_incomplete = false;
-  valid =
-      valid &&
-      enroll_slice_async_job_noexcept(std::addressof(guard), {},
-                                      std::addressof(cancelled_handle)) &&
-      mark_slice_async_job_scheduled_noexcept(std::addressof(guard),
-                                              cancelled_handle) &&
-      drain_slice_async_job_noexcept(std::addressof(guard), cancelled_handle,
-                                     std::addressof(cancelled_incomplete)) &&
-      cancelled_incomplete && guard.enrolled_jobs == 0u &&
-      attachment.refcount == 32u && cumulative.calls == 128u;
+  const bool cancelled_enrolled = enroll_slice_async_job_noexcept(
+      std::addressof(guard), {}, std::addressof(cancelled_handle));
+  const bool cancelled_scheduled =
+      cancelled_enrolled && mark_slice_async_job_scheduled_noexcept(
+                                std::addressof(guard), cancelled_handle);
+  if (cancelled_scheduled) {
+    update_slice_dsm_counter_noexcept(
+        guard.jobs[cancelled_handle.slot_index].counters[0],
+        9u, 9u, 72u, false, 72u, 0u);
+  }
+  const bool cancelled_drained =
+      cancelled_scheduled && drain_slice_async_job_noexcept(
+                                 std::addressof(guard), cancelled_handle,
+                                 std::addressof(cancelled_incomplete));
+  valid = valid && cancelled_drained && cancelled_incomplete &&
+          guard.enrolled_jobs == 0u && attachment.refcount == 32u &&
+          cumulative.calls == 128u && cumulative.bytes == 1024u;
+
+  slice_async_completion_handle failed_handle{};
+  bool failed_incomplete = false;
+  bioseq::parallelism::tracked_job_outcome failed_outcome{};
+  const bool failed_enrolled = enroll_slice_async_job_noexcept(
+      std::addressof(guard), {}, std::addressof(failed_handle));
+  const bool failed_scheduled =
+      failed_enrolled && mark_slice_async_job_scheduled_noexcept(
+                             std::addressof(guard), failed_handle);
+  if (failed_scheduled) {
+    update_slice_dsm_counter_noexcept(
+        guard.jobs[failed_handle.slot_index].counters[0],
+        10u, 10u, 80u, false, 80u, 0u);
+    handoff_slice_async_job_error_noexcept(
+        std::addressof(guard), failed_handle, 123u,
+        "injected trace accounting failure", true);
+  }
+  const bool failed_finished =
+      failed_scheduled && mark_slice_async_job_finished_noexcept(
+                              std::addressof(guard), failed_handle);
+  const bool failed_drained =
+      failed_finished && drain_slice_async_job_noexcept(
+                             std::addressof(guard), failed_handle,
+                             std::addressof(failed_incomplete),
+                             std::addressof(failed_outcome));
+  valid = valid && failed_drained && failed_incomplete &&
+          failed_outcome.incomplete && failed_outcome.failed &&
+          failed_outcome.sqlstate == 123u && guard.enrolled_jobs == 0u &&
+          attachment.refcount == 32u && cumulative.calls == 128u &&
+          cumulative.bytes == 1024u;
   restore_slice_materialization_scope(original_scope);
   return valid;
 }
@@ -1319,3 +1751,11 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
 export inline Datum slice_trace_self_test_impl(FunctionCallInfo) {
   PG_RETURN_BOOL(slice_trace_self_test_noexcept());
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(slice_trace_self_test);
+PGDLLEXPORT Datum slice_trace_self_test(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&slice_trace_self_test_impl, fcinfo);
+}
+} // extern "C"

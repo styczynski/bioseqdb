@@ -524,6 +524,14 @@ enum class AsyncMpsWorkerPgFailure : std::uint32_t {
     materialize_scanner_read = 10,
 };
 
+inline constexpr std::uint32_t kAsyncMpsWorkerInjectedFailureFlag =
+    std::uint32_t{1} << 31u;
+
+#ifdef BIOSEQ_TEST_INDEXES
+inline thread_local AsyncMpsWorkerPgFailure
+    g_async_mps_worker_injected_failure = AsyncMpsWorkerPgFailure::none;
+#endif
+
 struct AsyncMpsWorkerBoundaryStatsSnapshot {
     std::uint64_t relation_leaf_calls = 0;
     std::uint64_t spi_leaf_calls = 0;
@@ -537,6 +545,7 @@ struct AsyncMpsWorkerBoundaryStatsSnapshot {
     std::uint64_t materialize_admission_mismatches = 0;
     AsyncMpsWorkerPgFailure last_failure_point =
         AsyncMpsWorkerPgFailure::none;
+    bool last_failure_injected = false;
     AsyncMpsWorkerPgFailure armed_failure_point =
         AsyncMpsWorkerPgFailure::none;
 };
@@ -561,37 +570,55 @@ enum class AsyncMpsStagePgFailure : std::uint8_t {
     dsm_detach = 4,
 };
 
+#ifdef BIOSEQ_TEST_INDEXES
 inline thread_local AsyncMpsStagePgFailure
     g_async_mps_stage_pg_failure = AsyncMpsStagePgFailure::none;
 inline thread_local std::uint64_t
     g_async_mps_stage_injected_failures = 0;
+#endif
 
 [[nodiscard]] bool arm_async_mps_stage_pg_failure(
         AsyncMpsStagePgFailure point) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     if (point == AsyncMpsStagePgFailure::none
         || point > AsyncMpsStagePgFailure::dsm_detach) {
         return false;
     }
     g_async_mps_stage_pg_failure = point;
     return true;
+#else
+    (void)point;
+    return false;
+#endif
 }
 
 void disarm_async_mps_stage_pg_failure() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     g_async_mps_stage_pg_failure = AsyncMpsStagePgFailure::none;
+#endif
 }
 
 [[nodiscard]] AsyncMpsStagePgFailure
 async_mps_stage_pg_failure_armed() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     return g_async_mps_stage_pg_failure;
+#else
+    return AsyncMpsStagePgFailure::none;
+#endif
 }
 
 [[nodiscard]] std::uint64_t
 async_mps_stage_injected_failure_count() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     return g_async_mps_stage_injected_failures;
+#else
+    return 0u;
+#endif
 }
 
 void inject_async_mps_stage_pg_failure_leaf(
         AsyncMpsStagePgFailure point) {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_async_mps_stage_pg_failure != point) {
         return;
     }
@@ -601,6 +628,9 @@ void inject_async_mps_stage_pg_failure_leaf(
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous MPS staging PostgreSQL leaf failure"),
          errdetail("failure_point=%u", static_cast<unsigned>(point))));
+#else
+    (void)point;
+#endif
 }
 
 template <class F>
@@ -2648,8 +2678,12 @@ async_mps_worker_boundary_stats_snapshot() noexcept {
         pg_atomic_read_u64(&src.materialize_admission_restored);
     out.materialize_admission_mismatches =
         pg_atomic_read_u64(&src.materialize_admission_mismatches);
+    const std::uint32_t last_failure =
+        pg_atomic_read_u32(&src.last_failure_point);
     out.last_failure_point = static_cast<AsyncMpsWorkerPgFailure>(
-        pg_atomic_read_u32(&src.last_failure_point));
+        last_failure & ~kAsyncMpsWorkerInjectedFailureFlag);
+    out.last_failure_injected =
+        (last_failure & kAsyncMpsWorkerInjectedFailureFlag) != 0u;
     out.armed_failure_point = static_cast<AsyncMpsWorkerPgFailure>(
         pg_atomic_read_u32(&src.armed_failure_point));
     return out;
@@ -2657,6 +2691,7 @@ async_mps_worker_boundary_stats_snapshot() noexcept {
 
 [[nodiscard]] bool arm_async_mps_worker_pg_failure(
         AsyncMpsWorkerPgFailure point) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr
         || point == AsyncMpsWorkerPgFailure::none
         || point > AsyncMpsWorkerPgFailure::materialize_scanner_read) {
@@ -2666,15 +2701,21 @@ async_mps_worker_boundary_stats_snapshot() noexcept {
         &g_shared->async_mps_worker_boundary_stats.armed_failure_point,
         static_cast<std::uint32_t>(point));
     return true;
+#else
+    (void)point;
+    return false;
+#endif
 }
 
 void disarm_async_mps_worker_pg_failure() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
         return;
     }
     pg_atomic_write_u32(
         &g_shared->async_mps_worker_boundary_stats.armed_failure_point,
         static_cast<std::uint32_t>(AsyncMpsWorkerPgFailure::none));
+#endif
 }
 
 [[nodiscard]] const char* async_mps_worker_failure_point_name(
@@ -2746,14 +2787,26 @@ void record_async_mps_worker_pg_leaf_failure(
     }
     PgAsyncMpsWorkerBoundaryStats& stats =
         g_shared->async_mps_worker_boundary_stats;
+    bool injected = false;
+#ifdef BIOSEQ_TEST_INDEXES
+    if (g_async_mps_worker_injected_failure == point) {
+        injected = true;
+        g_async_mps_worker_injected_failure =
+            AsyncMpsWorkerPgFailure::none;
+    }
+#endif
     pg_atomic_fetch_add_u64(&stats.pg_leaf_failures, 1);
+    const std::uint32_t encoded_failure =
+        static_cast<std::uint32_t>(point) |
+        (injected ? kAsyncMpsWorkerInjectedFailureFlag : 0u);
     pg_atomic_write_u32(
-        &stats.last_failure_point, static_cast<std::uint32_t>(point));
+        &stats.last_failure_point, encoded_failure);
 }
 
 /* Must be called from one invoke_pg_as_cpp callback, never from C++ scope. */
 void inject_async_mps_worker_pg_failure_leaf(
         AsyncMpsWorkerPgFailure point) {
+#ifdef BIOSEQ_TEST_INDEXES
     if (g_shared == nullptr) {
         return;
     }
@@ -2767,13 +2820,15 @@ void inject_async_mps_worker_pg_failure_leaf(
         return;
     }
     pg_atomic_fetch_add_u64(&stats.injected_pg_leaf_failures, 1);
-    pg_atomic_write_u32(
-        &stats.last_failure_point, static_cast<std::uint32_t>(point));
+    g_async_mps_worker_injected_failure = point;
     ereport(ERROR,
         (errcode(ERRCODE_INTERNAL_ERROR),
          errmsg("injected asynchronous MPS worker PostgreSQL leaf failure"),
          errdetail("failure_point=%s",
             async_mps_worker_failure_point_name(point))));
+#else
+    (void)point;
+#endif
 }
 
 template <class F>

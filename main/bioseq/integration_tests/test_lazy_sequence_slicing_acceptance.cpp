@@ -5,10 +5,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
+#include <libpq-fe.h>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,31 @@ import bioseq.integration_tests.common;
 using namespace bioseq_int_tests;
 
 namespace {
+
+class database_cleanup_guard {
+public:
+    database_cleanup_guard(PGconn* connection, const char* drop_sql) noexcept
+        : connection_(connection), drop_sql_(drop_sql) {}
+
+    database_cleanup_guard(const database_cleanup_guard&) = delete;
+    database_cleanup_guard& operator=(const database_cleanup_guard&) = delete;
+
+    ~database_cleanup_guard() noexcept {
+        if (!active_ || connection_ == nullptr || drop_sql_ == nullptr) {
+            return;
+        }
+        if (PGresult* result = PQexec(connection_, drop_sql_)) {
+            PQclear(result);
+        }
+    }
+
+    void release() noexcept { active_ = false; }
+
+private:
+    PGconn* connection_ = nullptr;
+    const char* drop_sql_ = nullptr;
+    bool active_ = true;
+};
 
 void write_letter_binary_copy_variant(
     const std::string& source_path,
@@ -57,6 +84,116 @@ void write_letter_binary_copy_variant(
         reinterpret_cast<const char*>(bytes.data()),
         static_cast<std::streamsize>(bytes.size()));
     REQUIRE(output.good());
+}
+
+std::string doc0377_rank_pattern(
+    const std::string& alphabet_symbols,
+    std::size_t length)
+{
+    REQUIRE_FALSE(alphabet_symbols.empty());
+    std::string result;
+    result.reserve(length);
+    for (std::size_t index = 0; index < length; ++index) {
+        result.push_back(alphabet_symbols[index % alphabet_symbols.size()]);
+    }
+    return result;
+}
+
+void require_doc0377_sql_packing_profile(
+    connection_test_context& ctx,
+    const char* alphabet,
+    std::uint32_t storage_width_bits,
+    std::uint32_t bits_per_symbol,
+    const char* alphabet_symbols)
+{
+    REQUIRE(alphabet != nullptr);
+    REQUIRE(alphabet_symbols != nullptr);
+    REQUIRE(bits_per_symbol > 0u);
+    REQUIRE(storage_width_bits % 8u == 0u);
+
+    const auto letters_per_unit = storage_width_bits / bits_per_symbol;
+    REQUIRE(letters_per_unit > 0u);
+
+    std::string cases;
+    std::size_t case_id = 0;
+    for (std::size_t length = 0;
+         length <= static_cast<std::size_t>(letters_per_unit) + 1u;
+         ++length) {
+        const auto whole = doc0377_rank_pattern(alphabet_symbols, length);
+        for (std::size_t split = 0; split <= length; ++split) {
+            if (!cases.empty()) {
+                cases.push_back(',');
+            }
+            cases += fmt::format("({},'{}',{})", case_id, whole, split);
+            ++case_id;
+        }
+    }
+
+    const auto expected_case_count =
+        (static_cast<std::size_t>(letters_per_unit) + 2u)
+        * (static_cast<std::size_t>(letters_per_unit) + 3u) / 2u;
+    REQUIRE(case_id == expected_case_count);
+    CAPTURE(
+        alphabet,
+        storage_width_bits,
+        bits_per_symbol,
+        letters_per_unit,
+        expected_case_count);
+
+    const auto cte = fmt::format(
+        "WITH cases(case_id,whole,split_at) AS (VALUES {}), "
+        "eager_values AS MATERIALIZED ("
+        " SELECT case_id,whole,split_at,"
+        "        whole::bioseq.seq('{}',{}) AS eager_value "
+        " FROM cases), "
+        "lazy_values AS ("
+        " SELECT case_id,whole,eager_value,"
+        "        eager_value[:split_at] OPERATOR(bioseq.||) "
+        "        eager_value[split_at:] AS lazy_value "
+        " FROM eager_values) ",
+        cases,
+        alphabet,
+        storage_width_bits);
+
+    const auto direct = query_one(
+        ctx,
+        cte
+            + "SELECT count(*)::text, "
+              "       bool_and(bioseq.to_text(lazy_value)=whole), "
+              "       bool_and(bioseq.seq_send(lazy_value)="
+              "                bioseq.seq_send(eager_value)), "
+              "       bool_and(bioseq.len(lazy_value)="
+              "                char_length(whole)) "
+              "FROM lazy_values;");
+    REQUIRE(direct.size() == 4u);
+    REQUIRE(direct[0] == std::to_string(expected_case_count));
+    REQUIRE(direct[1] == "t");
+    REQUIRE(direct[2] == "t");
+    REQUIRE(direct[3] == "t");
+
+    exec_sql(ctx, "TRUNCATE doc0377_packing_flatten;");
+    exec_sql(
+        ctx,
+        cte
+            + "INSERT INTO doc0377_packing_flatten "
+              " (case_id,expected_text,expected_binary,"
+              "  expected_length,value) "
+              "SELECT case_id,whole,bioseq.seq_send(eager_value),"
+              "       char_length(whole),lazy_value "
+              "FROM lazy_values;");
+
+    const auto flattened = query_one(
+        ctx,
+        "SELECT count(*)::text, "
+        "       bool_and(bioseq.to_text(value)=expected_text), "
+        "       bool_and(bioseq.seq_send(value)=expected_binary), "
+        "       bool_and(bioseq.len(value)=expected_length) "
+        "FROM doc0377_packing_flatten;");
+    REQUIRE(flattened.size() == 4u);
+    REQUIRE(flattened[0] == std::to_string(expected_case_count));
+    REQUIRE(flattened[1] == "t");
+    REQUIRE(flattened[2] == "t");
+    REQUIRE(flattened[3] == "t");
 }
 
 } // namespace
@@ -844,7 +981,7 @@ TEST_CASE("DOC0377 self casts preserve logical values across widths and layouts"
         "INSERT INTO doc0377_cast_layout_assign VALUES "
         " (2,'ACGT'::bioseq.seq); "
         "INSERT INTO doc0377_cast_layout_assign VALUES "
-        " (3,'AC'::bioseq.seq('dna4',8) || "
+        " (3,'AC'::bioseq.seq('dna4',8) OPERATOR(bioseq.||) "
         "    'GT'::bioseq.seq('dna4',8)); "
         "INSERT INTO doc0377_cast_layout_assign "
         "SELECT 4,s FROM doc0377_cast_matrix WHERE id=2; "
@@ -907,7 +1044,8 @@ TEST_CASE("DOC0377 self casts preserve logical values across widths and layouts"
 
     const auto expanded = query_one(
         ctx,
-        "SELECT ((('AC'::bioseq.seq || 'GT'::bioseq.seq)"
+        "SELECT ((('AC'::bioseq.seq OPERATOR(bioseq.||) "
+        "          'GT'::bioseq.seq)"
         "          ::bioseq.seq('dna4',64)))::text, "
         "       (bioseq.reverse("
         "          'ACGT'::bioseq.seq('dna4',8))"
@@ -956,7 +1094,7 @@ TEST_CASE("DOC0377 self casts preserve logical values across widths and layouts"
     constexpr std::array cross_alphabet_explicit{
         "SELECT 'A'::bioseq.seq('dna4',8)"
         "         ::bioseq.seq('dna5',64);",
-        "SELECT ('A'::bioseq.seq('dna4',8) || "
+        "SELECT ('A'::bioseq.seq('dna4',8) OPERATOR(bioseq.||) "
         "        'C'::bioseq.seq('dna4',8))"
         "         ::bioseq.seq('dna5',64);",
         "SELECT s::bioseq.seq('dna5',64) "
@@ -971,7 +1109,7 @@ TEST_CASE("DOC0377 self casts preserve logical values across widths and layouts"
         "INSERT INTO doc0377_cast_dna5 "
         "VALUES ('A'::bioseq.seq('dna4',8));",
         "INSERT INTO doc0377_cast_dna5 "
-        "VALUES ('A'::bioseq.seq('dna4',8) || "
+        "VALUES ('A'::bioseq.seq('dna4',8) OPERATOR(bioseq.||) "
         "        'C'::bioseq.seq('dna4',8));",
         "INSERT INTO doc0377_cast_dna5 "
         "SELECT s FROM doc0377_cast_source WHERE id=1;",
@@ -1564,7 +1702,8 @@ TEST_CASE("DOC0377 slice algebra is invariant across the required GUC matrix",
 
 TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
           "[seq][slice][length][overflow][acceptance]") {
-    auto ctx = fresh_context({"doc0377_synthetic_length_heap"});
+    auto ctx = fresh_context({"doc0377_synthetic_length_heap",
+                              "doc0377_synthetic_length_index_input"});
 
     const auto above_flat = query_one(
         ctx,
@@ -1590,20 +1729,29 @@ TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
         "       bioseq.len(s[9223372036854775805::bigint:"
         "                         9223372036854775807::bigint]), "
         "       bioseq.len(s OPERATOR(bioseq.||) "
-        "          bioseq_internal.synthetic_lazy_sequence(0)) "
+        "          bioseq_internal.synthetic_lazy_sequence(0)), "
+        "       bioseq.len(bioseq_internal.synthetic_lazy_sequence(0) "
+        "          OPERATOR(bioseq.||) s) "
         "FROM v;");
     REQUIRE(bigint_max[0] == "9223372036854775807");
     REQUIRE(bigint_max[1] == "A");
     REQUIRE(bigint_max[2] == "2");
     REQUIRE(bigint_max[3] == "9223372036854775807");
+    REQUIRE(bigint_max[4] == "9223372036854775807");
 
-    const auto concat_overflow = sql_error(
-        ctx,
+    constexpr std::array concat_overflow_queries{
         "SELECT bioseq_internal.synthetic_lazy_sequence("
         "         9223372036854775807::bigint) "
         "       OPERATOR(bioseq.||) "
-        "       bioseq_internal.synthetic_lazy_sequence(1);");
-    REQUIRE(concat_overflow.sqlstate == "54000");
+        "       bioseq_internal.synthetic_lazy_sequence(1);",
+        "SELECT bioseq_internal.synthetic_lazy_sequence(1) "
+        "       OPERATOR(bioseq.||) "
+        "       bioseq_internal.synthetic_lazy_sequence("
+        "         9223372036854775807::bigint);",
+    };
+    for (const char* sql : concat_overflow_queries) {
+        REQUIRE(sql_error(ctx, sql).sqlstate == "54000");
+    }
 
     const std::array<const char*, 3> materialization_boundaries{
         "SELECT bioseq.to_text("
@@ -1618,6 +1766,19 @@ TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
     }
 
     exec_sql(ctx,
+        "CREATE TABLE doc0377_synthetic_length_index_input (id bigint); "
+        "INSERT INTO doc0377_synthetic_length_index_input VALUES (1);");
+    const auto index_boundary = sql_error(
+        ctx,
+        "CREATE INDEX doc0377_synthetic_length_expr_idx "
+        "ON doc0377_synthetic_length_index_input USING btree "
+        "((bioseq_internal.synthetic_lazy_sequence("
+        "    9223372036854775807::bigint - id + id))); ");
+    REQUIRE(index_boundary.sqlstate == "54000");
+    REQUIRE(index_boundary.contains(
+        "unbound bioseq sequence is too long to flatten"));
+
+    exec_sql(ctx,
         "CREATE TABLE doc0377_synthetic_length_heap "
         " (s bioseq.seq('dna4',8));");
     const auto heap_boundary = sql_error(
@@ -1627,11 +1788,22 @@ TEST_CASE("DOC0377 synthetic logical lengths stay lazy through bigint limits",
     REQUIRE(heap_boundary.sqlstate == "54000");
 }
 
+TEST_CASE("DOC0377 uint64 bigint and MaxAlloc alignment guards are exact",
+          "[seq][slice][length][overflow][rope][lifetime][acceptance]") {
+    auto ctx = fresh_context();
+
+    // These existing internal seams execute exact INT64_MAX/UINT64_MAX add,
+    // corrupt cached-child, and MaxAllocSize-(MAXALIGN-1)..MaxAllocSize
+    // matrices without allocating the represented logical payloads.
+    REQUIRE(query_scalar(
+        ctx, "SELECT bioseq_internal.piece_tree_self_test();") == "t");
+    REQUIRE(query_scalar(
+        ctx, "SELECT bioseq_internal.expanded_ownership_self_test();") == "t");
+}
+
 TEST_CASE("DOC0377 literal coalescing and arena guards are exact",
           "[seq][concat][rope][lifetime][acceptance]") {
     auto ctx = fresh_context();
-    REQUIRE(query_scalar(
-        ctx, "SELECT bioseq_internal.piece_tree_self_test();") == "t");
 
     const auto thresholds = query_one(
         ctx,
@@ -1683,9 +1855,10 @@ TEST_CASE("DOC0377 persistent ropes survive PLpgSQL transfer heap flatten and ER
         "         OPERATOR(bioseq.=) s "
         "FROM LATERAL ("
         " SELECT pg_temp.doc0377_build_rope(8192) AS s OFFSET 0"
-        ") AS built;");
+    ") AS built;");
     REQUIRE(expanded[0] == "8192");
-    REQUIRE(std::stoll(expanded[1]) <= 16);
+    REQUIRE(expanded[1].has_value());
+    REQUIRE(std::stoll(expanded[1].value()) <= 16);
     REQUIRE(expanded[2] == "CGTACGTA");
     REQUIRE(expanded[3] == "t");
 
@@ -1731,6 +1904,16 @@ TEST_CASE("DOC0377 source-domain faults unwind every partial lifetime stage",
         "SELECT bioseq_internal.arm_sequence_source_failure("
         " 'not_a_failure_point');");
     REQUIRE(unknown.sqlstate == "22023");
+
+    const auto translated_cpp = sql_error(
+        ctx,
+        "SELECT bioseq_internal.arm_sequence_source_failure("
+        " 'diagnostic_std_exception');");
+    REQUIRE(translated_cpp.sqlstate == "XX000");
+    REQUIRE(translated_cpp.contains(
+        "bioseq sequence callback raised a C++ exception"));
+    REQUIRE(translated_cpp.contains(
+        "injected DOC0377 diagnostic C++ exception"));
 
     constexpr std::array failure_points{
         "provider_after_registry_control",
@@ -1911,8 +2094,10 @@ TEST_CASE("DOC0377 fresh install catalogs expose exact public objects",
     const auto database = fmt::format(
         "bioseq_doc0377_fresh_install_{}",
         query_scalar_int(admin, "SELECT pg_backend_pid();"));
-    exec_sql(admin, fmt::format(
-        "DROP DATABASE IF EXISTS {} WITH (FORCE);", database));
+    const auto cleanup_sql = fmt::format(
+        "DROP DATABASE IF EXISTS {} WITH (FORCE);", database);
+    database_cleanup_guard cleanup{admin.raw(), cleanup_sql.c_str()};
+    exec_sql(admin, cleanup_sql);
     exec_sql(admin, fmt::format("CREATE DATABASE {};", database));
 
     row_t catalog;
@@ -2050,6 +2235,7 @@ TEST_CASE("DOC0377 fresh install catalogs expose exact public objects",
             "       ('ACGT'::bioseq.seq('dna4',8))[2]::text;");
     }
     exec_sql(admin, fmt::format("DROP DATABASE {};", database));
+    cleanup.release();
 
     for (const auto& value : catalog) {
         REQUIRE(value == "t");
@@ -2061,4 +2247,34 @@ TEST_CASE("DOC0377 fresh install catalogs expose exact public objects",
     for (std::size_t index = 0; index < runtime_expected.size(); ++index) {
         REQUIRE(runtime[index] == runtime_expected[index]);
     }
+}
+
+TEST_CASE("DOC0377 SQL packing is identical across tails and slice splits",
+          "[seq][slice][concat][packing][binary][acceptance]") {
+    auto ctx = fresh_context();
+    exec_sql(
+        ctx,
+        "CREATE TEMP TABLE doc0377_packing_flatten ("
+        " case_id integer PRIMARY KEY,"
+        " expected_text text NOT NULL,"
+        " expected_binary bytea NOT NULL,"
+        " expected_length bigint NOT NULL,"
+        " value bioseq.seq NOT NULL);");
+
+    // Level zero deliberately exercises the widest DNA4 packing profile so
+    // fast local iteration still crosses the largest tail boundary.
+    require_doc0377_sql_packing_profile(ctx, "dna4", 64u, 2u, "ACGT");
+
+#if BIOSEQ_OPTTIMIZATION_LEVEL > 0
+    require_doc0377_sql_packing_profile(ctx, "dna5", 64u, 3u, "ACGTN");
+#endif
+
+#if BIOSEQ_OPTTIMIZATION_LEVEL > 1
+    for (const std::uint32_t storage_width_bits : {8u, 16u, 32u}) {
+        require_doc0377_sql_packing_profile(
+            ctx, "dna4", storage_width_bits, 2u, "ACGT");
+        require_doc0377_sql_packing_profile(
+            ctx, "dna5", storage_width_bits, 3u, "ACGTN");
+    }
+#endif
 }

@@ -55,6 +55,7 @@ import bioseq.io.options;                   // sequence_io_file_type, writer_opt
 import bioseq.indexing.type;                 // canonical minimizer index names
 import bioseq.indexing.minimizer_hashmap;    // exact-SIMD sketch proof + rev3 sizing constants
 import bioseq.parallelism.memory_admission;  // bounded prototype-owned routing state
+import bioseq.storage.lazy;                  // canonical lazy sequence facade
 import bioseq.sequences.kmers;               // sketch_collector / MinimapSketchData
 import bioseq.sequences.chaining.utils;      // Anchor exact-final-byte equation
 import bioseq.sequences.pipe;                // canonical execution-stage matrix
@@ -9540,9 +9541,6 @@ template <class Sequence>
         std::uint16_t kmer_size,
         std::uint64_t& peak_transient_bytes,
         bioseq::indexing::ExactSimdIndexExecutionProof& aggregate_proof) {
-    using sequence_type = std::remove_cvref_t<Sequence>;
-    using traits = typename sequence_type::traits;
-    constexpr std::uint64_t letters_per_unit = traits::letters_per_unit;
     const std::uint64_t target_bp = sequence.bp_size();
     const std::uint64_t halo = static_cast<std::uint64_t>(window_size)
         + kmer_size - 2u;
@@ -9552,17 +9550,14 @@ template <class Sequence>
         target_bp,
         core_end_bp > target_bp - std::min(target_bp, halo)
             ? target_bp : core_end_bp + halo);
-    const std::uint64_t begin_unit = collect_begin / letters_per_unit;
-    const std::uint64_t end_unit = collect_end / letters_per_unit
-        + (collect_end % letters_per_unit != 0u ? 1u : 0u);
-    const std::uint64_t emitted_base = begin_unit * letters_per_unit;
+    const std::uint64_t emitted_base = collect_begin;
 
     bioseq::indexing::sketch_collector collector;
     const auto proof = bioseq::indexing::collect_exact_simd_index_range_or_throw(
         collector,
-        sequence,
-        static_cast<std::size_t>(begin_unit),
-        static_cast<std::size_t>(end_unit),
+        bioseq::storage::as_lazy_sequence_view(sequence),
+        collect_begin,
+        collect_end,
         window_size,
         kmer_size,
         0u,
@@ -9608,9 +9603,9 @@ template <class Sequence>
     bioseq::indexing::sketch_collector collector;
     const auto proof = bioseq::indexing::collect_exact_simd_index_range_or_throw(
         collector,
-        sequence,
+        bioseq::storage::as_lazy_sequence_view(sequence),
         0u,
-        static_cast<std::size_t>(sequence.size()),
+        sequence.bp_size(),
         window_size,
         kmer_size,
         0u,

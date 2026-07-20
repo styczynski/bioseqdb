@@ -11,6 +11,7 @@ module;
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <condition_variable>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -233,6 +234,15 @@ public:
   [[nodiscard]] tracked_job_outcome join_and_drain_tracked_task_noexcept(
       tracked_task_submission *submission) noexcept;
 
+  /**
+   * Schedule one callback with task_arena::enqueue and wait for its result.
+   * The callback therefore runs on a TBB arena worker, never on the backend
+   * thread that invokes this function.  This is deliberately callback-only:
+   * PostgreSQL-backed state must already have been materialized before submit.
+   */
+  [[nodiscard]] bool invoke_worker_probe_noexcept(
+      void *argument, bool (*callback)(void *) noexcept) const noexcept;
+
   // DOC0346 — TBB parallel sort wrapped in the pool's arena (mirrors
   // parallel_for). Defined inline because it is a template; the wrapper keeps
   // oneTBB the ONLY module that includes its headers (guideline Top-rule).
@@ -436,6 +446,44 @@ void GlobalPool::parallel_for_with_context(
     });
 }
 
+bool GlobalPool::invoke_worker_probe_noexcept(
+    void *argument, bool (*callback)(void *) noexcept) const noexcept {
+  if (callback == nullptr) {
+    return false;
+  }
+  try {
+    ensure_configured();
+    const auto impl = impl_;
+    if (impl == nullptr || !impl->arena.has_value()) {
+      return false;
+    }
+    struct probe_state {
+      std::mutex mutex;
+      std::condition_variable completed;
+      bool done{false};
+      bool result{false};
+    };
+    auto state = std::make_shared<probe_state>();
+    impl->arena->enqueue([state, argument, callback] {
+      const bool result = callback(argument);
+      {
+        std::lock_guard<std::mutex> guard(state->mutex);
+        state->result = result;
+        state->done = true;
+      }
+      state->completed.notify_one();
+    });
+    std::unique_lock<std::mutex> guard(state->mutex);
+    state->completed.wait(guard, [&state] { return state->done; });
+    return state->result;
+  } catch (...) {
+    return false;
+  }
+}
+
+} // namespace bioseq::parallelism
+
+namespace bioseq::parallelism {
 namespace {
 
 void cancel_tracked_pool_task(void *argument) noexcept {
@@ -509,6 +557,9 @@ void execute_tracked_pool_task(tracked_task_submission *submission) noexcept {
 }
 
 } // namespace
+} // namespace bioseq::parallelism
+
+export namespace bioseq::parallelism {
 
 tracked_submit_status GlobalPool::submit_tracked_task_noexcept(
     tracked_task_submission *submission, tracked_task_ref task,

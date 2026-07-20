@@ -3387,8 +3387,12 @@ template <class S>
         row_query_minimizer_proof;
     const BatchProcessor::CpuPreparedQuerySketch*
         retained_prepared_query_sketch = nullptr;
-    const auto lazy_query_view =
+    const auto unobserved_query_view =
         bioseq::storage::as_lazy_sequence_view(query_seq);
+    const auto lazy_query_view =
+        unobserved_query_view.with_payload_allocation_observer(
+            std::addressof(
+                scanner_pg_ctx->mmsearch_query_payload_observer));
     const auto fq_pg_view = lazy_query_view;
     const auto& loc_opt = scanner_pg_ctx->target_locators[i];
     const bool persisted_required =
@@ -3452,6 +3456,9 @@ template <class S>
              &collection, &row_consumed_persisted_query_sketch,
              &retained_prepared_query_sketch,
              &query_sketch_host_wall_ns](auto ft_pg_view) {
+        ft_pg_view = ft_pg_view.with_payload_allocation_observer(
+            std::addressof(
+                scanner_pg_ctx->mmsearch_target_payload_observer));
         // DOC0279 §11.3a — ASSEMBLE from the stored
         // per-fragment minimizer index if present
         // (deserialise + globalise, no re-collection);

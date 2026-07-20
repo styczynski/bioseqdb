@@ -741,10 +741,9 @@ inline constexpr std::size_t logical_bits_per_symbol_v = [] {
 }();
 
 // DOC0263 §8 — `SeqView` (was `supports_compact_sequence_range R`) so this
-// scalar kernel runs over EITHER a compact_sequence_range OR a
-// lazy_compact_sequence<R, Scanner> (forwarding to the underlying range under
-// scanner_none — zero overhead; streaming one fragment at a time under a
-// fragmented scanner). The kernel only ever touches `seq` via `SeqView::traits`
+// scalar kernel runs over either a compact range or an erased lazy view
+// (zero overhead for resident input; streaming one fragment at a time for
+// fragmented input). The kernel only ever touches `seq` via `SeqView::traits`
 // and `seq.iter<BP>(...)`, both of which the lazy wrapper provides; this is how
 // the fragmented minimizer reuses the bit-identical scalar logic (DOC0263 §8.4)
 // without the SIMD lane-replay's boundary-emit-gate fragility (§11.2.2).

@@ -1599,6 +1599,21 @@ build_params_from_gucs()
 	return params;
 }
 
+[[nodiscard]] static bool mmsearch_plans_admitted_packed_regions(
+		bioseq::simd::active_target::Minimap2Params const& params) noexcept {
+	using Algorithm = bioseq::simd::active_target::MinimizerAlgorithmType;
+	switch (params.minimizer_algorithm) {
+		case Algorithm::SCALAR:
+		case Algorithm::SIMD_MINIMAP2_SLOW:
+			return false;
+		case Algorithm::TWO_STACK_NTHASH:
+		case Algorithm::PAPER_NTHASH_SIMD:
+		case Algorithm::VULKAN_MINIMAP_INT:
+			return true;
+	}
+	return false;
+}
+
 [[nodiscard]] static Const*
 require_aligner_options_const(FuncExpr* mmsearch_fe, const BioseqStubOids& oids)
 {
@@ -3069,6 +3084,9 @@ struct BioseqSliceProjectState {
 static_assert(std::is_standard_layout_v<BioseqSliceProjectState>);
 static_assert(offsetof(BioseqSliceProjectState, custom_scanstate) == 0);
 
+[[nodiscard]] static bool slice_project_rearm_worker_for_rescan_noexcept(
+	BioseqSliceProjectState* state) noexcept;
+
 [[nodiscard]] static CustomExecMethods const&
 bioseq_slice_project_exec_methods() noexcept;
 [[nodiscard]] static CustomScanMethods const&
@@ -3707,8 +3725,10 @@ static void slice_project_merge_dsm_cycle_noexcept(
 		return;
 	}
 	if (audit != nullptr) audit->mapping_valid = true;
-	/* First pass validates the complete waited cycle before a single counter is
-	 * merged.  A malformed slot therefore cannot create a plausible prefix. */
+	/* First pass validates every published-complete slot before a single
+	 * counter is merged.  Running and incomplete slots own tentative deltas:
+	 * never dereference those payloads, because a valid-looking prefix is not a
+	 * completed materialization. */
 	for (std::uint32_t slot_index = 0u;
 		 slot_index < slot_count; ++slot_index) {
 		auto* worker = slice_project_worker_slot(header, slot_index);
@@ -3725,6 +3745,7 @@ static void slice_project_merge_dsm_cycle_noexcept(
 			}
 			continue;
 		}
+		if (state == slice_dsm_publish_state::attached_running) continue;
 		pg_read_barrier();
 		if (worker->cycle != expected_cycle || worker->overflowed > 1u
 			|| std::any_of(worker->reserved.begin(), worker->reserved.end(),
@@ -3732,6 +3753,7 @@ static void slice_project_merge_dsm_cycle_noexcept(
 			slice_project_mark_trace_invalid_noexcept(attachment);
 			return;
 		}
+		if (state == slice_dsm_publish_state::published_incomplete) continue;
 		auto* counters = slice_project_worker_counters(worker);
 		for (std::uint32_t counter_index = 0u;
 			 counter_index < trace.boundary_count; ++counter_index) {
@@ -3757,7 +3779,7 @@ static void slice_project_merge_dsm_cycle_noexcept(
 				++incomplete;
 			}
 		}
-		if (state == slice_dsm_publish_state::never_launched) continue;
+		if (state != slice_dsm_publish_state::published_complete) continue;
 		if (audit != nullptr) ++audit->merged_slots;
 		auto* counters = slice_project_worker_counters(worker);
 		for (std::uint32_t counter_index = 0u;
@@ -3974,7 +3996,7 @@ static void slice_project_test_release_backing(void* argument) noexcept {
 		&& guard.enrolled_jobs == 0u
 		&& jobs[handle.slot_index].state == slice_async_job_state::unused
 		&& jobs[handle.slot_index].generation == handle.generation + 1u
-		&& cumulative.calls == 1u
+		&& cumulative.calls == 0u && cumulative.bytes == 0u
 		&& callbacks.cancelled == 1u && callbacks.joined == 1u
 		&& callbacks.backings_released == 1u
 		&& attachment->refcount == 1u;
@@ -4025,7 +4047,9 @@ static void slice_project_apply_dsm_test_fixture(
 		return;
 	}
 
-	constexpr std::uint32_t slot_count = 3u;
+	/* Complete, unpublished-running, published-incomplete, and never-launched
+	 * slots share one fixture.  Only the complete slot may contribute counters. */
+	constexpr std::uint32_t slot_count = 4u;
 	constexpr std::uint64_t cycle = 23u;
 	const SliceProjectDsmLayout layout = slice_project_dsm_layout(
 		runtime.boundary_count, slot_count);
@@ -4062,27 +4086,82 @@ static void slice_project_apply_dsm_test_fixture(
 			counters[index].bytes = slot_index == 0u ? 30u : 20u;
 		}
 	}
+	auto* incomplete_worker = slice_project_worker_slot(header, 2u);
+	incomplete_worker->cycle = cycle;
+	incomplete_worker->publish_state =
+		slice_dsm_publish_state::published_incomplete;
+	auto* incomplete_counters =
+		slice_project_worker_counters(incomplete_worker);
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		incomplete_counters[index].calls = 4u;
+		incomplete_counters[index].bytes = 40u;
+	}
 	SliceProjectDsmMergeAudit audit{};
 	slice_project_merge_dsm_cycle_noexcept(
 		header, reinterpret_cast<std::uintptr_t>(bytes), layout.total_bytes,
 		slot_count, &attachment, cycle, &audit);
+	SliceProjectDsmMergeAudit repeated_audit{};
+	slice_project_merge_dsm_cycle_noexcept(
+		header, reinterpret_cast<std::uintptr_t>(bytes), layout.total_bytes,
+		slot_count, &attachment, cycle, &repeated_audit);
 	bool valid = audit.header_valid && audit.mapping_valid && audit.merged
-		&& audit.merged_slots == 2u && audit.incomplete_slots == 1u
+		&& audit.merged_slots == 1u && audit.incomplete_slots == 2u
+		&& !repeated_audit.merged && repeated_audit.merged_slots == 0u
 		&& trace.last_merged_cycle == cycle
-		&& trace.incomplete_workers == 1u && !trace.invalid
+		&& trace.incomplete_workers == 2u && !trace.invalid
 		&& !trace.overflowed;
 	for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
-		valid = valid && local_counters[index].calls == 5u
-			&& local_counters[index].bytes == 50u;
+		valid = valid && local_counters[index].calls == 3u
+			&& local_counters[index].bytes == 30u;
 		if (runtime.counters != nullptr) {
 			merge_slice_dsm_counter_noexcept(
 				runtime.counters[index], local_counters[index]);
 		}
 	}
-	if (runtime.trace_runtime.incomplete_workers == UINT32_MAX) {
+	BioseqSliceProjectState complete_rearm_state{};
+	complete_rearm_state.runtime.boundary_count = runtime.boundary_count;
+	complete_rearm_state.runtime.mapped_worker =
+		slice_project_worker_slot(header, 0u);
+	complete_rearm_state.runtime.mapped_cycle = cycle;
+	complete_rearm_state.runtime.attachment = &attachment;
+	const bool complete_rearmed =
+		slice_project_rearm_worker_for_rescan_noexcept(
+			&complete_rearm_state);
+	auto* complete_counters = slice_project_worker_counters(
+		complete_rearm_state.runtime.mapped_worker);
+	valid = valid && complete_rearmed
+		&& complete_rearm_state.runtime.mapped_worker->publish_state
+			== slice_dsm_publish_state::attached_running;
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		valid = valid && complete_counters[index].calls == 3u
+			&& complete_counters[index].bytes == 30u;
+	}
+
+	BioseqSliceProjectState incomplete_rearm_state{};
+	incomplete_rearm_state.runtime.boundary_count = runtime.boundary_count;
+	incomplete_rearm_state.runtime.mapped_worker = incomplete_worker;
+	incomplete_rearm_state.runtime.mapped_cycle = cycle;
+	incomplete_rearm_state.runtime.attachment = &attachment;
+	const bool incomplete_rearmed =
+		slice_project_rearm_worker_for_rescan_noexcept(
+			&incomplete_rearm_state);
+	valid = valid && incomplete_rearmed
+		&& incomplete_worker->publish_state
+			== slice_dsm_publish_state::attached_running
+		&& incomplete_worker->overflowed == 0u;
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		valid = valid && incomplete_counters[index].calls == 0u
+			&& incomplete_counters[index].bytes == 0u;
+	}
+	if (audit.incomplete_slots
+		> UINT32_MAX - runtime.trace_runtime.incomplete_workers) {
+		runtime.trace_runtime.incomplete_workers = UINT32_MAX;
 		runtime.trace_runtime.overflowed = true;
 	} else {
-		++runtime.trace_runtime.incomplete_workers;
+		runtime.trace_runtime.incomplete_workers += audit.incomplete_slots;
 	}
 	runtime.dsm_test_checks = 1u;
 	runtime.dsm_test_slot_headers_read = audit.slot_headers_read;
@@ -4204,9 +4283,17 @@ static void slice_project_publish_worker_noexcept(
 		slice_project_mark_trace_invalid_noexcept(runtime.attachment);
 		return false;
 	}
-	/* The preceding publish made every cumulative counter visible.  Retain
-	 * those values and reopen only the state byte; the next publish merges a
-	 * fresh backend-local delta instead of overwriting earlier rescans. */
+	/* Completed slots are cumulative across rescans.  An incomplete slot is a
+	 * tentative delta and must be discarded before a later rescan can publish
+	 * the same stable worker slot as complete. */
+	if (worker->publish_state
+		== slice_dsm_publish_state::published_incomplete) {
+		auto* counters = slice_project_worker_counters(worker);
+		for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
+			reset_slice_dsm_counter_noexcept(counters[index]);
+		}
+		worker->overflowed = 0u;
+	}
 	pg_write_barrier();
 	worker->publish_state = slice_dsm_publish_state::attached_running;
 	return true;
@@ -5659,7 +5746,6 @@ static void slice_project_try_install_base_owner(
 		owner->path.parallel_safe = child->parallel_safe;
 		owner->path.parallel_workers = child->parallel_workers;
 		owner->path.rows = child->rows;
-		owner->path.disabled_nodes = child->disabled_nodes;
 		owner->path.startup_cost = child->startup_cost
 			+ expression_cost.startup;
 		const double rows = std::max(0.0, child->rows);
@@ -5795,7 +5881,6 @@ static void BioseqSliceProject_CreateUpperPaths(
 	path->path.parallel_safe = child->parallel_safe;
 	path->path.parallel_workers = child->parallel_workers;
 	path->path.rows = child->rows;
-	path->path.disabled_nodes = child->disabled_nodes;
 	path->path.startup_cost = child->startup_cost + expression_cost.startup;
 	path->path.total_cost = child->total_cost + expression_cost.startup
 		+ rows * (expression_cost.per_tuple
@@ -6163,11 +6248,6 @@ struct batch_join_target_projection_visitor {
 		case T_Append: {
 			auto const* append = reinterpret_cast<AppendPath const*>(path);
 			for (Path* child : PList<Path>(append->subpaths)) {
-				if (batch_join_path_contains_parallel_execution(child)) {
-					return true;
-				}
-			}
-			for (Path* child : PList<Path>(append->partial_subpaths)) {
 				if (batch_join_path_contains_parallel_execution(child)) {
 					return true;
 				}
@@ -6921,9 +7001,6 @@ struct per_row_operand_source_visitor {
 			for (Path* child : PList<Path>(append->subpaths)) {
 				if (per_row_descendant_owns_restriction(child, owned)) return true;
 			}
-			for (Path* child : PList<Path>(append->partial_subpaths)) {
-				if (per_row_descendant_owns_restriction(child, owned)) return true;
-			}
 			return false;
 		}
 		case T_MergeAppend: {
@@ -6935,6 +7012,191 @@ struct per_row_operand_source_visitor {
 		}
 		default:
 			return false;
+	}
+}
+
+struct PerRowMmsearchPlanAudit {
+	std::size_t executable_qual_copies = 0u;
+	std::size_t vector_qual_copies = 0u;
+	std::size_t storage_qual_copies = 0u;
+	std::size_t descendant_owner_copies = 0u;
+
+	[[nodiscard]] bool clean() const noexcept {
+		return executable_qual_copies == 0u
+			&& vector_qual_copies == 0u
+			&& storage_qual_copies == 0u
+			&& descendant_owner_copies == 0u;
+	}
+};
+
+static void per_row_audit_mmsearch_expression(
+		Node* expression, std::size_t& destination,
+		BioseqStubOids const& oids) {
+	if (expression == nullptr) return;
+	const std::size_t additional = count_mmsearch_occurrences(
+		expression, oids);
+	destination = additional > std::numeric_limits<std::size_t>::max()
+			- destination
+		? std::numeric_limits<std::size_t>::max()
+		: destination + additional;
+}
+
+/* Audit the serialized child plan that will execute below the transformed
+ * owner.  `Plan::qual` is only one of PostgreSQL's executable-qual stores:
+ * join/index/recheck fields and the Bioseq reader's storage/vector lists must
+ * be inspected independently.  The fourth BioseqScan expression list is an
+ * executor-only mmsearch owner, so finding it below this owner is a duplicate
+ * descendant owner rather than an ordinary qual copy. */
+static void per_row_audit_mmsearch_plan(
+		Plan* plan, PerRowMmsearchPlanAudit& audit,
+		BioseqStubOids const& oids) {
+	if (plan == nullptr) return;
+	per_row_audit_mmsearch_expression(
+		reinterpret_cast<Node*>(plan->qual),
+		audit.executable_qual_copies, oids);
+
+	if (IsA(plan, NestLoop)) {
+		auto* join = &reinterpret_cast<NestLoop*>(plan)->join;
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(join->joinqual),
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, MergeJoin)) {
+		auto* merge = reinterpret_cast<MergeJoin*>(plan);
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(merge->join.joinqual),
+			audit.executable_qual_copies, oids);
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(merge->mergeclauses),
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, HashJoin)) {
+		auto* hash = reinterpret_cast<HashJoin*>(plan);
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(hash->join.joinqual),
+			audit.executable_qual_copies, oids);
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(hash->hashclauses),
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, Result)) {
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Result*>(plan)->resconstantqual,
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, IndexScan)) {
+		auto* scan = reinterpret_cast<IndexScan*>(plan);
+		for (List* expressions : {scan->indexqual, scan->indexqualorig,
+				scan->indexorderby, scan->indexorderbyorig}) {
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(expressions),
+				audit.executable_qual_copies, oids);
+		}
+	} else if (IsA(plan, IndexOnlyScan)) {
+		auto* scan = reinterpret_cast<IndexOnlyScan*>(plan);
+		for (List* expressions : {scan->indexqual, scan->recheckqual,
+				scan->indexorderby}) {
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(expressions),
+				audit.executable_qual_copies, oids);
+		}
+	} else if (IsA(plan, BitmapIndexScan)) {
+		auto* scan = reinterpret_cast<BitmapIndexScan*>(plan);
+		for (List* expressions : {scan->indexqual, scan->indexqualorig}) {
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(expressions),
+				audit.executable_qual_copies, oids);
+		}
+	} else if (IsA(plan, BitmapHeapScan)) {
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<BitmapHeapScan*>(plan)->bitmapqualorig),
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, TidScan)) {
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<TidScan*>(plan)->tidquals),
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, TidRangeScan)) {
+		per_row_audit_mmsearch_expression(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<TidRangeScan*>(plan)->tidrangequals),
+			audit.executable_qual_copies, oids);
+	} else if (IsA(plan, ForeignScan)) {
+		auto* scan = reinterpret_cast<ForeignScan*>(plan);
+		for (List* expressions : {scan->fdw_exprs,
+				scan->fdw_recheck_quals}) {
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(expressions),
+				audit.executable_qual_copies, oids);
+		}
+	}
+
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		if (custom->methods == &BioseqColumnScanScanMethods
+			&& list_length(custom->custom_exprs) >= 3) {
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(list_nth(
+					custom->custom_exprs, 0)),
+				audit.storage_qual_copies, oids);
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(list_nth(
+					custom->custom_exprs, 1)),
+				audit.storage_qual_copies, oids);
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(list_nth(
+					custom->custom_exprs, 2)),
+				audit.vector_qual_copies, oids);
+			for (int index = 3;
+				 index < list_length(custom->custom_exprs); ++index) {
+				per_row_audit_mmsearch_expression(
+					reinterpret_cast<Node*>(list_nth(
+						custom->custom_exprs, index)),
+					audit.descendant_owner_copies, oids);
+			}
+		} else {
+			per_row_audit_mmsearch_expression(
+				reinterpret_cast<Node*>(custom->custom_exprs),
+				audit.executable_qual_copies, oids);
+		}
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			per_row_audit_mmsearch_plan(child, audit, oids);
+		}
+		return;
+	}
+	if (IsA(plan, Append)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<Append*>(plan)->appendplans)) {
+			per_row_audit_mmsearch_plan(child, audit, oids);
+		}
+		return;
+	}
+	if (IsA(plan, MergeAppend)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<MergeAppend*>(plan)->mergeplans)) {
+			per_row_audit_mmsearch_plan(child, audit, oids);
+		}
+		return;
+	}
+	if (IsA(plan, BitmapAnd)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<BitmapAnd*>(plan)->bitmapplans)) {
+			per_row_audit_mmsearch_plan(child, audit, oids);
+		}
+		return;
+	}
+	if (IsA(plan, BitmapOr)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<BitmapOr*>(plan)->bitmapplans)) {
+			per_row_audit_mmsearch_plan(child, audit, oids);
+		}
+		return;
+	}
+	if (IsA(plan, SubqueryScan)) {
+		per_row_audit_mmsearch_plan(
+			reinterpret_cast<SubqueryScan*>(plan)->subplan, audit, oids);
+		return;
+	}
+	per_row_audit_mmsearch_plan(outerPlan(plan), audit, oids);
+	if (innerPlan(plan) != outerPlan(plan)) {
+		per_row_audit_mmsearch_plan(innerPlan(plan), audit, oids);
 	}
 }
 
@@ -7095,12 +7357,20 @@ struct per_row_operand_source_visitor {
 		builder, target_expression);
 	const std::uint32_t query_producer = slice_project_add_producer(
 		builder, query_expression);
-	slice_project_add_boundary(builder, target_expression, target_producer,
-		materialization_mechanism::packed_full,
-		materialization_reason::mmsearch_target, true);
-	slice_project_add_boundary(builder, query_expression, query_producer,
-		materialization_mechanism::packed_full,
-		materialization_reason::mmsearch_query, true);
+	bioseq::simd::active_target::Minimap2Params planned_params =
+		build_params_from_gucs();
+	bioseq::indexing::IndexReadRequirement planned_requirement =
+		bioseq::indexing::IndexReadRequirement::allow;
+	(void)apply_aligner_options_override(
+		executable_mmsearch, planned_params, planned_requirement, oids);
+	if (mmsearch_plans_admitted_packed_regions(planned_params)) {
+		slice_project_add_boundary(builder, target_expression, target_producer,
+			materialization_mechanism::packed_region,
+			materialization_reason::mmsearch_target, true);
+		slice_project_add_boundary(builder, query_expression, query_producer,
+			materialization_mechanism::packed_region,
+			materialization_reason::mmsearch_query, true);
+	}
 
 	PList<Path> owners;
 	List* incumbent_paths = list_copy(joinrel->pathlist);
@@ -7116,6 +7386,15 @@ struct per_row_operand_source_visitor {
 		Path* reconstructed = per_row_reconstruct_inner_join_path(
 			root, joinrel, incumbent, restriction, *extra);
 		if (reconstructed == nullptr) continue;
+		/* Re-run the exact pointer audit on the finished reconstructed path,
+		 * before copyObject can turn a leaked RestrictInfo into a merely-equal
+		 * private copy and before any Plan node exists. */
+		if (per_row_descendant_owns_restriction(
+				reconstructed, restriction)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqPerRowMmsearch reconstructed path retained its owned RestrictInfo")));
+		}
 		Path* private_join = reinterpret_cast<Path*>(copyObject(reconstructed));
 		private_join->pathtarget = copy_pathtarget(required_target);
 		bool tagged_source = false;
@@ -7134,7 +7413,6 @@ struct per_row_operand_source_visitor {
 		recipe_path->path.parallel_safe = false;
 		recipe_path->path.parallel_workers = 0;
 		recipe_path->path.rows = source_path->rows;
-		recipe_path->path.disabled_nodes = source_path->disabled_nodes;
 		QualCost recipe_cost{};
 		cost_qual_eval(&recipe_cost, recipe_target->exprs, root);
 		recipe_path->path.startup_cost = source_path->startup_cost
@@ -7185,7 +7463,6 @@ struct per_row_operand_source_visitor {
 		owner->path.parallel_safe = false;
 		owner->path.parallel_workers = 0;
 		owner->path.rows = recipe_path->path.rows;
-		owner->path.disabled_nodes = recipe_path->path.disabled_nodes;
 		owner->path.startup_cost = startup;
 		owner->path.total_cost = total;
 		owner->path.pathkeys = recipe_path->path.pathkeys;
@@ -10156,6 +10433,20 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqPerRowMmsearch child plan is missing")));
+	}
+	PerRowMmsearchPlanAudit child_audit{};
+	per_row_audit_mmsearch_plan(
+		child_plan, child_audit, get_cached_stub_oids());
+	if (!child_audit.clean()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqPerRowMmsearch reconstructed child retained owned mmsearch state"),
+			 errdetail(
+				"executable=%zu vector=%zu storage=%zu descendant_owner=%zu",
+				child_audit.executable_qual_copies,
+				child_audit.vector_qual_copies,
+				child_audit.storage_qual_copies,
+				child_audit.descendant_owner_copies)));
 	}
 	const AttrNumber target_resno = find_plan_tlist_expression_resno(
 		child_plan->targetlist, target_expression);
@@ -14093,6 +14384,31 @@ static void BioseqPerRowJoin_ExplainCustomScan(
 	BioseqPerRowJoinRuntime* runtime = per_row_join_runtime(node);
 	ExplainPropertyText("Bioseq Mmsearch Ownership", "per-row recipe", es);
 	ExplainPropertyText("Bioseq Reconstructed Join", "child plan", es);
+	PerRowMmsearchPlanAudit child_audit{};
+	auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+	if (cscan != nullptr && list_length(cscan->custom_plans) == 1) {
+		per_row_audit_mmsearch_plan(
+			reinterpret_cast<Plan*>(linitial(cscan->custom_plans)),
+			child_audit, get_cached_stub_oids());
+	}
+	/* A nonzero path count cannot reach plan creation: the exact pointer gate
+	 * above runs on the reconstructed Path before copyObject.  The remaining
+	 * values are recomputed from the serialized executable plan, not constants. */
+	ExplainPropertyInteger(
+		"Bioseq Owned RestrictInfo Path Copies", nullptr, 0, es);
+	ExplainPropertyInteger(
+		"Bioseq Executable Mmsearch Qual Copies", nullptr,
+		static_cast<std::int64_t>(child_audit.executable_qual_copies), es);
+	ExplainPropertyInteger(
+		"Bioseq Vector Mmsearch Qual Copies", nullptr,
+		static_cast<std::int64_t>(child_audit.vector_qual_copies), es);
+	ExplainPropertyInteger(
+		"Bioseq Storage Mmsearch Qual Copies", nullptr,
+		static_cast<std::int64_t>(child_audit.storage_qual_copies), es);
+	ExplainPropertyInteger(
+		"Bioseq Descendant Mmsearch Owner Copies", nullptr,
+		static_cast<std::int64_t>(child_audit.descendant_owner_copies), es);
+	ExplainPropertyText("Bioseq Residual Mmsearch Qual", "absent", es);
 	ExplainPropertyInteger("Bioseq Batch Capacity", nullptr,
 		static_cast<std::int64_t>(kBioseqRuntimeBufferReserve), es);
 	ExplainPropertyText("Bioseq Index Read Requirement",

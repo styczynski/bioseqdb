@@ -33,6 +33,7 @@ export module bioseq.sequences:sequences;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.common.templating;
+import bioseq.sequences.rank_pack_core;
 
 export {
 
@@ -1821,28 +1822,45 @@ public:
         std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, typename C::alphabet_type> == true
     )
     static constexpr std::pair<base_container, size_t> _convert(R&& input_seq) {
-        const size_t f_len = input_seq.size() / traits::letters_per_unit + (input_seq.size() % traits::letters_per_unit != 0);
-        base_container data(f_len);
-        typename traits::storage_unit buf = 0;
-        size_t bit_count = traits::letters_per_unit;
-        size_t write_pos = 0;
+        const size_t f_len = input_seq.size() / traits::letters_per_unit
+            + (input_seq.size() % traits::letters_per_unit != 0);
+        base_container data;
+        data.reserve(f_len);
+        typename traits::storage_unit partial_word{};
+        size_t partial_letters = 0u;
+        size_t emitted_symbols = 0u;
+        auto write_unit = [&data](typename traits::storage_unit unit) {
+            data.push_back(unit);
+            return true;
+        };
         for(const auto& letter : input_seq) {
-            buf >>= traits::bits_per_char;
-            buf |= static_cast<typename traits::storage_unit>(letter.to_rank()) << (traits::unit_used_bits - traits::bits_per_char);
-            if (--bit_count == 0) {
-                bit_count = traits::letters_per_unit;
-                data[write_pos++] = buf;
-                if (traits::unit_leftover_bits > 0) {
-                    buf = 0;
-                }
-            }
+            const bool appended =
+                bioseq::sequences::rank_pack_detail::append_valid_rank_lsb<
+                    typename traits::storage_unit,
+                    traits::bits_per_char,
+                    traits::letters_per_unit>(
+                        partial_word,
+                        partial_letters,
+                        emitted_symbols,
+                        letter.to_rank(),
+                        write_unit);
+            DEBUG_ASSERT(appended,
+                         "growing legacy rank pack unexpectedly overflowed");
         }
-        if (bit_count == traits::letters_per_unit) {
-            bit_count = 0;
-        } else {
-            data[write_pos] = buf >> (traits::bits_per_char * bit_count);
-        }
-        return std::make_pair(data, bit_count);
+        const auto finished =
+            bioseq::sequences::rank_pack_detail::finish_lsb<
+                typename traits::storage_unit,
+                traits::bits_per_char,
+                traits::letters_per_unit>(
+                    partial_word, partial_letters, write_unit);
+        DEBUG_ASSERT(finished.capacity_ok,
+                     "growing legacy rank pack unexpectedly overflowed");
+        DEBUG_ASSERT(emitted_symbols == input_seq.size(),
+                     "legacy rank pack emitted-symbol mismatch");
+        DEBUG_ASSERT(data.size() == f_len,
+                     "legacy rank pack unit-count mismatch");
+        return std::make_pair(
+            std::move(data), static_cast<size_t>(finished.padding_letters));
     }
 
     template <typename R>

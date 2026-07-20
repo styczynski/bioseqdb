@@ -4,6 +4,7 @@ module;
 #include <cstdint>
 
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 extern "C" {
 #include "catalog/pg_type_d.h"
 #include "executor/execExpr.h"
@@ -213,3 +214,11 @@ export inline Datum seq_subscript_handler_impl(FunctionCallInfo)
     };
     PG_RETURN_POINTER(&routines);
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(seq_subscript_handler);
+PGDLLEXPORT Datum seq_subscript_handler(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_subscript_handler_impl, fcinfo);
+}
+} // extern "C"

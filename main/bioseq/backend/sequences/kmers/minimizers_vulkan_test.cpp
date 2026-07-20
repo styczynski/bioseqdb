@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <span>
 #include <sstream>
@@ -70,10 +71,13 @@ using vulkan_lifetime_facade =
 
 struct VulkanLifetimeSourceState {
   std::vector<std::uint8_t> ranks;
+  std::vector<std::uint32_t> packed;
+  bool expose_resident = false;
   std::thread::id backend_thread;
   std::atomic<std::uint64_t> *destructions = nullptr;
   mutable std::atomic<std::uint64_t> read_calls{0u};
   mutable std::atomic<std::uint64_t> resident_probes{0u};
+  mutable std::atomic<std::uint64_t> resident_borrows{0u};
   mutable std::atomic<bool> wrong_thread{false};
 
   ~VulkanLifetimeSourceState() {
@@ -116,12 +120,59 @@ vulkan_lifetime_bp_size(const void *opaque) noexcept {
 
 [[nodiscard]] vulkan_lifetime_facade::resident_probe_result
 vulkan_lifetime_resident_probe(const void *opaque,
-                               bioseq::storage::sequence_size_t,
-                               bioseq::storage::sequence_size_t,
-                               std::uint8_t) noexcept {
-  static_cast<const VulkanLifetimeSourceState *>(opaque)
-      ->resident_probes.fetch_add(1u, std::memory_order_relaxed);
-  return std::nullopt;
+                               bioseq::storage::sequence_size_t from,
+                               bioseq::storage::sequence_size_t to,
+                               std::uint8_t requested_width) noexcept {
+  const auto &state =
+      *static_cast<const VulkanLifetimeSourceState *>(opaque);
+  state.resident_probes.fetch_add(1u, std::memory_order_relaxed);
+  if (!state.expose_resident || requested_width != sizeof(std::uint32_t) ||
+      from > to || to > state.ranks.size()) {
+    return std::nullopt;
+  }
+  constexpr bioseq::storage::sequence_size_t letters_per_unit = 16u;
+  const bioseq::storage::sequence_size_t length = to - from;
+  if (length == 0u) {
+    state.resident_borrows.fetch_add(1u, std::memory_order_relaxed);
+    return vulkan_lifetime_facade::resident_packed_region{
+        .units = nullptr,
+        .unit_count = 0u,
+        .bp_length = 0u,
+        .storage_unit_byte_width = sizeof(std::uint32_t),
+        .bits_per_symbol = 2u,
+        .leading_symbol_offset = 0u,
+        .trailing_padding_letters = 0u,
+        .bit_order = vulkan_lifetime_facade::packed_bit_order::
+            least_significant_symbol_first,
+    };
+  }
+  const bioseq::storage::sequence_size_t first_unit =
+      from / letters_per_unit;
+  const bioseq::storage::sequence_size_t leading =
+      from % letters_per_unit;
+  const bioseq::storage::sequence_size_t occupied = leading + length;
+  const bioseq::storage::sequence_size_t unit_count =
+      occupied / letters_per_unit +
+      static_cast<bioseq::storage::sequence_size_t>(
+          occupied % letters_per_unit != 0u);
+  const bioseq::storage::sequence_size_t trailing =
+      unit_count * letters_per_unit - occupied;
+  if (first_unit > state.packed.size() ||
+      unit_count > state.packed.size() - first_unit) {
+    return std::nullopt;
+  }
+  state.resident_borrows.fetch_add(1u, std::memory_order_relaxed);
+  return vulkan_lifetime_facade::resident_packed_region{
+      .units = state.packed.data() + static_cast<std::size_t>(first_unit),
+      .unit_count = static_cast<std::size_t>(unit_count),
+      .bp_length = length,
+      .storage_unit_byte_width = sizeof(std::uint32_t),
+      .bits_per_symbol = 2u,
+      .leading_symbol_offset = static_cast<std::uint16_t>(leading),
+      .trailing_padding_letters = static_cast<std::uint16_t>(trailing),
+      .bit_order = vulkan_lifetime_facade::packed_bit_order::
+          least_significant_symbol_first,
+  };
 }
 
 [[nodiscard]] bool vulkan_lifetime_worker_shareable(const void *) noexcept {
@@ -144,7 +195,8 @@ inline const vulkan_lifetime_facade::backend_ops vulkan_lifetime_ops{
 
 [[nodiscard]] vulkan_lifetime_facade
 vulkan_lifetime_view(const VulkanLifetimeSourceState &state) noexcept {
-  return {std::addressof(state), std::addressof(vulkan_lifetime_ops)};
+  return vulkan_lifetime_facade{
+      std::addressof(state), std::addressof(vulkan_lifetime_ops)};
 }
 #endif
 
@@ -2180,8 +2232,8 @@ TEST_CASE(
   }
 
   static constexpr std::size_t source_size = 8192u;
-  static constexpr bioseq::storage::sequence_size_t selected_from = 61u;
-  static constexpr bioseq::storage::sequence_size_t selected_to = 8123u;
+  static constexpr bioseq::storage::sequence_size_t selected_from = 64u;
+  static constexpr bioseq::storage::sequence_size_t selected_to = 8128u;
   std::vector<seq::dna4> prewarm_letters(source_size);
   for (std::size_t index = 0u; index < prewarm_letters.size(); ++index) {
     prewarm_letters[index].assign_rank(
@@ -2198,101 +2250,181 @@ TEST_CASE(
   auto &admission = bioseq::parallelism::MemoryAdmissionController::instance();
   const std::uint64_t baseline = admission.reserved_bytes();
 
-  const auto run_fault = [&admission,
-                          baseline](vk::VulkanSubmissionTestFault fault,
-                                    std::string_view expected_error) {
+  const auto run_fault = [&admission, baseline](
+                             vk::VulkanSubmissionTestFault fault,
+                             std::string_view expected_error,
+                             bool expose_resident) {
     std::atomic<std::uint64_t> destructions{0u};
     auto source = std::make_shared<VulkanLifetimeSourceState>();
+    source->expose_resident = expose_resident;
     source->backend_thread = std::this_thread::get_id();
     source->destructions = std::addressof(destructions);
     source->ranks.resize(source_size);
+    source->packed.resize((source_size + 15u) / 16u);
     for (std::size_t index = 0u; index < source->ranks.size(); ++index) {
       source->ranks[index] =
           static_cast<std::uint8_t>((index * 13u + index / 17u) & 3u);
+      source->packed[index / 16u] |=
+          static_cast<std::uint32_t>(source->ranks[index])
+          << (2u * (index % 16u));
     }
     const std::weak_ptr<VulkanLifetimeSourceState> weak_source = source;
     const auto source_view = vulkan_lifetime_view(*source);
 
     struct Observation {
       bool reached_delayed_submit = false;
-      bool backing_live = false;
-      bool permit_charged = false;
+      bool source_released_before_wait = false;
+      bool permit_charged_before_wait = false;
       bool one_admitted_window_live = false;
       bool backend_materialized = false;
-      bool fence_drained = false;
+      bool reached_post_drain_gate = false;
+      bool same_admitted_owner_after_wait = false;
+      bool permit_charged_after_wait = false;
+      std::uint64_t admitted_permit_bytes = 0u;
+      std::uintptr_t admitted_buffer_address = 0u;
+      std::uint64_t source_reads = 0u;
+      std::uint64_t resident_probes = 0u;
+      std::uint64_t resident_borrows = 0u;
+      bool wrong_thread = false;
     } observed{};
+    std::atomic<bool> call_finished{false};
 
     vk::arm_vulkan_admitted_window_test_seam();
     vk::arm_vulkan_submission_test_seam(fault);
     struct ResetSeams {
       ~ResetSeams() {
         vk::release_vulkan_submission_test_fence();
+        vk::release_vulkan_submission_test_delivery();
         vk::reset_vulkan_submission_test_seam();
         vk::reset_vulkan_admitted_window_test_seam();
       }
     } reset_seams;
 
     std::thread observer{
-        [&admission, baseline, weak_source, &destructions, &observed] {
+        [&admission, baseline, weak_source, &destructions, &observed,
+         &call_finished, source = std::move(source)]() mutable {
           const auto submit_deadline =
               std::chrono::steady_clock::now() + std::chrono::seconds{5};
           auto submission = vk::vulkan_submission_test_snapshot();
           while (!submission.waiting_after_submit &&
+                 !call_finished.load(std::memory_order_acquire) &&
                  std::chrono::steady_clock::now() < submit_deadline) {
             std::this_thread::yield();
             submission = vk::vulkan_submission_test_snapshot();
           }
           observed.reached_delayed_submit =
               submission.waiting_after_submit && submission.submissions == 1u;
+          if (!observed.reached_delayed_submit) {
+            vk::release_vulkan_submission_test_fence();
+            vk::release_vulkan_submission_test_delivery();
+            while (!call_finished.load(std::memory_order_acquire)) {
+              std::this_thread::yield();
+            }
+            return;
+          }
+
           const auto admitted = vk::vulkan_admitted_window_test_snapshot();
-          observed.backing_live =
-              !weak_source.expired() &&
-              destructions.load(std::memory_order_relaxed) == 0u;
-          observed.permit_charged = admission.reserved_bytes() > baseline;
+          observed.admitted_permit_bytes =
+              admitted.live_admitted_permit_bytes;
+          observed.admitted_buffer_address =
+              admitted.live_admitted_buffer_address;
+          const std::uint64_t reserved_before_wait =
+              admission.reserved_bytes();
+          observed.permit_charged_before_wait =
+              admitted.live_admitted_permit_bytes > 0u &&
+              admitted.live_admitted_buffer_address != 0u &&
+              reserved_before_wait >= baseline &&
+              reserved_before_wait - baseline >=
+                  admitted.live_admitted_permit_bytes;
           observed.one_admitted_window_live =
               admitted.admitted_materializations == 1u &&
               admitted.live_admitted_windows == 1u;
           observed.backend_materialized =
               admitted.backend_thread_materializations == 1u &&
               admitted.off_backend_materializations == 0u;
+
+          observed.source_reads =
+              source->read_calls.load(std::memory_order_relaxed);
+          observed.resident_probes =
+              source->resident_probes.load(std::memory_order_relaxed);
+          observed.resident_borrows =
+              source->resident_borrows.load(std::memory_order_relaxed);
+          observed.wrong_thread =
+              source->wrong_thread.load(std::memory_order_relaxed);
+          source.reset();
+          observed.source_released_before_wait =
+              weak_source.expired() &&
+              destructions.load(std::memory_order_relaxed) == 1u;
           vk::release_vulkan_submission_test_fence();
 
           const auto drain_deadline =
               std::chrono::steady_clock::now() + std::chrono::seconds{5};
-          while (vk::vulkan_submission_test_snapshot().fence_drains == 0u &&
+          auto drained = vk::vulkan_submission_test_snapshot();
+          while (!drained.waiting_after_drain &&
+                 !call_finished.load(std::memory_order_acquire) &&
                  std::chrono::steady_clock::now() < drain_deadline) {
             std::this_thread::yield();
+            drained = vk::vulkan_submission_test_snapshot();
           }
-          observed.fence_drained =
-              vk::vulkan_submission_test_snapshot().fence_drains == 1u;
+          observed.reached_post_drain_gate =
+              drained.waiting_after_drain && drained.fence_drains == 1u;
+          if (observed.reached_post_drain_gate) {
+            const auto admitted_after_wait =
+                vk::vulkan_admitted_window_test_snapshot();
+            observed.same_admitted_owner_after_wait =
+                admitted_after_wait.live_admitted_windows == 1u &&
+                admitted_after_wait.live_admitted_permit_bytes ==
+                    observed.admitted_permit_bytes &&
+                admitted_after_wait.live_admitted_buffer_address ==
+                    observed.admitted_buffer_address &&
+                weak_source.expired() &&
+                destructions.load(std::memory_order_relaxed) == 1u;
+            const std::uint64_t reserved_after_wait =
+                admission.reserved_bytes();
+            observed.permit_charged_after_wait =
+                reserved_after_wait >= baseline &&
+                reserved_after_wait - baseline >=
+                    observed.admitted_permit_bytes;
+          }
+          vk::release_vulkan_submission_test_delivery();
         }};
 
     std::string failure;
+    std::exception_ptr unexpected{};
     try {
       sketch_collector_t<MinimapSketchData> collector;
       vk::collect_minimizers_vulkan_segment_or_throw<MinimapSketchData>(
           collector, source_view, selected_from, selected_to, 10u, 15u);
     } catch (const vk::VulkanRuntimeError &error) {
-      failure = error.what();
+      try {
+        failure = error.what();
+      } catch (...) {
+        unexpected = std::current_exception();
+      }
+    } catch (...) {
+      unexpected = std::current_exception();
     }
+    call_finished.store(true, std::memory_order_release);
+    vk::release_vulkan_submission_test_fence();
+    vk::release_vulkan_submission_test_delivery();
     observer.join();
+    if (unexpected) {
+      std::rethrow_exception(unexpected);
+    }
 
     const auto submission = vk::vulkan_submission_test_snapshot();
     const auto admitted = vk::vulkan_admitted_window_test_snapshot();
-    const std::uint64_t resident_probes =
-        source->resident_probes.load(std::memory_order_relaxed);
-    const std::uint64_t source_reads =
-        source->read_calls.load(std::memory_order_relaxed);
-    const bool wrong_thread =
-        source->wrong_thread.load(std::memory_order_relaxed);
-    source.reset();
 
     REQUIRE(observed.reached_delayed_submit);
-    REQUIRE(observed.backing_live);
-    REQUIRE(observed.permit_charged);
+    REQUIRE(observed.source_released_before_wait);
+    REQUIRE(observed.permit_charged_before_wait);
     REQUIRE(observed.one_admitted_window_live);
     REQUIRE(observed.backend_materialized);
-    REQUIRE(observed.fence_drained);
+    REQUIRE(observed.reached_post_drain_gate);
+    REQUIRE(observed.same_admitted_owner_after_wait);
+    REQUIRE(observed.permit_charged_after_wait);
+    REQUIRE(observed.admitted_permit_bytes > 0u);
+    REQUIRE(observed.admitted_buffer_address != 0u);
     REQUIRE(submission.upload_latches >= 1u);
     REQUIRE(submission.submissions == 1u);
     REQUIRE(submission.fence_drains == 1u);
@@ -2306,20 +2438,26 @@ TEST_CASE(
     REQUIRE(failure.find(expected_error) != std::string::npos);
     REQUIRE(admitted.admitted_materializations == 1u);
     REQUIRE(admitted.live_admitted_windows == 0u);
+    REQUIRE(admitted.live_admitted_permit_bytes == 0u);
+    REQUIRE(admitted.live_admitted_buffer_address == 0u);
     REQUIRE(admitted.backend_thread_materializations == 1u);
     REQUIRE(admitted.off_backend_materializations == 0u);
-    REQUIRE(resident_probes == 1u);
-    REQUIRE(source_reads > 0u);
-    REQUIRE_FALSE(wrong_thread);
+    REQUIRE(observed.resident_probes == 1u);
+    REQUIRE(observed.resident_borrows == (expose_resident ? 1u : 0u));
+    REQUIRE(observed.source_reads > 0u);
+    REQUIRE_FALSE(observed.wrong_thread);
     REQUIRE(weak_source.expired());
     REQUIRE(destructions.load(std::memory_order_relaxed) == 1u);
     REQUIRE(admission.reserved_bytes() == baseline);
   };
 
-  run_fault(vk::VulkanSubmissionTestFault::cancellation_after_submit,
-            "cancellation after fence drain");
-  run_fault(vk::VulkanSubmissionTestFault::upload_failure_after_submit,
-            "upload failure after fence drain");
+  for (const bool expose_resident : std::array<bool, 2>{false, true}) {
+    INFO("resident source=" << (expose_resident ? "borrowable" : "absent"));
+    run_fault(vk::VulkanSubmissionTestFault::cancellation_after_submit,
+              "cancellation after fence drain", expose_resident);
+    run_fault(vk::VulkanSubmissionTestFault::upload_failure_after_submit,
+              "upload failure after fence drain", expose_resident);
+  }
 }
 #endif
 

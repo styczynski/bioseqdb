@@ -21,6 +21,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -51,6 +52,25 @@ using bioseq::storage::basic_lazy_sequence_view;
 using bioseq::storage::admitted_packed_region;
 using bioseq::storage::sequence_size_t;
 
+struct payload_observer_probe {
+    std::array<bioseq::storage::sequence_payload_allocation_event, 8> events{};
+    std::size_t count{};
+    bool overflow{};
+};
+
+void collect_payload_allocation_noexcept(
+        void* opaque,
+        bioseq::storage::sequence_payload_allocation_event const& event,
+        std::uint64_t,
+        std::uint64_t) noexcept {
+    auto& probe = *static_cast<payload_observer_probe*>(opaque);
+    if (probe.count >= probe.events.size()) {
+        probe.overflow = true;
+        return;
+    }
+    probe.events[probe.count++] = event;
+}
+
 using dna4_u64 = sequence_custom_alphabet<seq::dna4, std::uint64_t>;  // 32 letters / uint64 unit
 using range_t  = compact_sequence_range<dna4_u64>;
 
@@ -73,8 +93,11 @@ static_assert(bioseq::storage::supports_lazy_compact_sequence_slice<facade_t>);
 static_assert(bioseq::storage::supports_resident_packed_probe<facade_t>);
 static_assert(!bioseq::storage::supports_lazy_sequence_view<range_t>);
 static_assert(std::is_move_constructible_v<admitted_packed_region<seq::dna4>>);
+static_assert(std::is_nothrow_move_constructible_v<
+              admitted_packed_region<seq::dna4>>);
 static_assert(!std::is_move_assignable_v<admitted_packed_region<seq::dna4>>);
 static_assert(!std::is_copy_constructible_v<admitted_packed_region<seq::dna4>>);
+static_assert(!std::is_copy_assignable_v<admitted_packed_region<seq::dna4>>);
 
 // Deterministic pseudo-random dna4 vector (xorshift-ish LCG → ranks 0..3).
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {
@@ -905,6 +928,143 @@ TEST_CASE("DOC0377 — admitted packed owners retain permits and stable views ac
     require_materialized_width<std::uint16_t>(source, expected, 2u);
     require_materialized_width<std::uint32_t>(source, expected, 4u);
     require_materialized_width<std::uint64_t>(source, expected, 8u);
+}
+
+TEST_CASE("DOC0377 payload observer is bijective across copied views and failed admission",
+          "[lazy-view][resident][allocation-observer][unit]") {
+    auto data = make_dna4(257u);
+    range_t range(data);
+    auto lazy = make_lazy_in_memory(range);
+    const facade_t source = as_lazy_sequence_view(lazy);
+    payload_observer_probe probe{};
+    const bioseq::storage::sequence_payload_allocation_observer observer{
+        .context = std::addressof(probe),
+        .publish = &collect_payload_allocation_noexcept,
+        .correlation_a = 17u,
+        .correlation_b = 23u,
+    };
+    const facade_t observed =
+        source.with_payload_allocation_observer(std::addressof(observer));
+    facade_t copied = observed;
+    const facade_t moved{std::move(copied)};
+    REQUIRE(moved.payload_allocation_observer() == std::addressof(observer));
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+    const std::uint64_t retained_bytes =
+        bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            moved.bp_size(), 8u);
+    auto permit = admission.try_reserve(retained_bytes);
+    REQUIRE(permit.has_value());
+    {
+        auto owner = bioseq::storage::materialize_packed_region(
+            moved, 0u, moved.bp_size(), 8u, std::move(*permit));
+        const std::uint64_t payload_bytes =
+            static_cast<std::uint64_t>(owner.descriptor().unit_count)
+            * owner.descriptor().storage_unit_byte_width;
+        REQUIRE(probe.count == 1u);
+        REQUIRE_FALSE(probe.overflow);
+        REQUIRE(probe.events[0].allocation_id != 0u);
+        REQUIRE(probe.events[0].input_symbols == moved.bp_size());
+        REQUIRE(probe.events[0].output_symbols == moved.bp_size());
+        REQUIRE(probe.events[0].payload_bytes == payload_bytes);
+        REQUIRE(probe.events[0].retained_bytes == retained_bytes);
+        REQUIRE(probe.events[0].kind
+                == bioseq::storage::sequence_payload_allocation_kind::
+                    admitted_packed_region);
+    }
+
+    const std::uint64_t calls_before_failure = probe.count;
+    auto short_permit = admission.try_reserve(retained_bytes - 1u);
+    REQUIRE(short_permit.has_value());
+    REQUIRE_THROWS_AS(
+        bioseq::storage::materialize_packed_region(
+            moved, 0u, moved.bp_size(), 8u, std::move(*short_permit)),
+        std::length_error);
+    REQUIRE(probe.count == calls_before_failure);
+
+    auto second_permit = admission.try_reserve(retained_bytes);
+    REQUIRE(second_permit.has_value());
+    {
+        auto owner = bioseq::storage::materialize_packed_region(
+            observed, 0u, observed.bp_size(), 8u,
+            std::move(*second_permit));
+        REQUIRE(owner.descriptor().bp_length == observed.bp_size());
+    }
+    REQUIRE(probe.count == 2u);
+    REQUIRE(probe.events[1].allocation_id != 0u);
+    REQUIRE(probe.events[1].allocation_id != probe.events[0].allocation_id);
+    REQUIRE(probe.events[1].payload_bytes == probe.events[0].payload_bytes);
+    REQUIRE(probe.events[1].retained_bytes == probe.events[0].retained_bytes);
+}
+
+TEST_CASE("DOC0377 — admitted packed move construction holds a saturated budget and backing",
+          "[lazy-view][resident][admission][saturation][lifetime][unit]") {
+    using owner_type = admitted_packed_region<seq::dna4>;
+    static_assert(std::is_nothrow_move_constructible_v<owner_type>);
+    static_assert(!std::is_move_assignable_v<owner_type>);
+    static_assert(!std::is_copy_constructible_v<owner_type>);
+    static_assert(!std::is_copy_assignable_v<owner_type>);
+
+    bioseq::parallelism::MemoryAdmissionController admission;
+
+    auto data = make_dna4(257u);
+    range_t range(data);
+    auto lazy = make_lazy_in_memory(range);
+    const facade_t source = as_lazy_sequence_view(lazy);
+    const std::uint64_t admitted_bytes =
+        bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+            source.bp_size(), 8u);
+    REQUIRE(admitted_bytes > 0u);
+    REQUIRE(admission.reserved_bytes() == 0u);
+
+    const std::uint64_t saturated_cap = admitted_bytes;
+    admission.set_index_memory_cap_bytes(saturated_cap);
+    auto permit = admission.try_reserve(admitted_bytes);
+    REQUIRE(permit.has_value());
+    REQUIRE(admission.reserved_bytes() == saturated_cap);
+    REQUIRE(admission.allocatable_after_reservations() == 0u);
+
+    bioseq::parallelism::MemoryAdmissionFailure failure{};
+    REQUIRE_FALSE(admission.try_reserve(1u, std::addressof(failure)));
+    REQUIRE(failure.reason ==
+            bioseq::parallelism::MemoryAdmissionFailureReason::budget_exhausted);
+    REQUIRE(failure.reserved_bytes == saturated_cap);
+
+    {
+        owner_type initial = bioseq::storage::materialize_packed_region(
+            source, 0u, source.bp_size(), 8u, std::move(*permit));
+        const auto* const backing = initial.descriptor().units;
+        REQUIRE(backing != nullptr);
+        REQUIRE(admission.reserved_bytes() == saturated_cap);
+
+        // First move happens before any facade is issued.
+        owner_type moved_before_view{std::move(initial)};
+        REQUIRE(moved_before_view.descriptor().units == backing);
+        const facade_t issued = moved_before_view.view();
+
+        // The second move happens after the facade captured stable_state.
+        owner_type moved_after_view{std::move(moved_before_view)};
+        REQUIRE(moved_after_view.descriptor().units == backing);
+        REQUIRE(admission.reserved_bytes() == saturated_cap);
+        REQUIRE_FALSE(admission.try_reserve(1u));
+
+        std::vector<std::uint8_t> observed(data.size());
+        issued.template to_encoded_into<false, false>(
+            observed, 0u, observed.size());
+        for (std::size_t index = 0u; index < data.size(); ++index) {
+            REQUIRE(observed[index]
+                    == static_cast<std::uint8_t>(data[index].to_rank()));
+        }
+        REQUIRE(moved_after_view.view().bp_size() == source.bp_size());
+        REQUIRE(admission.reserved_bytes() == saturated_cap);
+    }
+
+    REQUIRE(admission.reserved_bytes() == 0u);
+    auto reused = admission.try_reserve(admitted_bytes);
+    REQUIRE(reused.has_value());
+    REQUIRE(admission.reserved_bytes() == saturated_cap);
+    reused.reset();
+    REQUIRE(admission.reserved_bytes() == 0u);
 }
 
 TEST_CASE("DOC0377 — call owner releases adopted backing exactly once",

@@ -13,6 +13,7 @@ module;
 #include <utility>
 
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 
 export module bioseq.types.pg_compact_sequence:tree_ops;
 
@@ -26,6 +27,42 @@ namespace {
 
 std::uint64_t next_piece_tree_generation = 1u;
 std::uint64_t live_piece_tree_arenas = 0u;
+
+/* Backend-local acceptance seam.  Production calls leave this disarmed; the
+ * internal SQL self-test arms one dependency-registration point at a time so
+ * PostgreSQL ERROR can interrupt a factory at the only point where a returned
+ * edge has not yet made the partial retain visible to its caller. */
+enum class piece_tree_injected_failure_point : std::uint8_t {
+    none,
+    arena_factory,
+    literal_storage_factory,
+    literal_leaf_factory,
+    branch_factory,
+    arena_dependency_registration,
+    source_dependency_registration,
+    source_leaf_factory,
+    literal_binding_factory,
+};
+
+piece_tree_injected_failure_point armed_piece_tree_failure =
+    piece_tree_injected_failure_point::none;
+piece_tree_injected_failure_point observed_piece_tree_failure =
+    piece_tree_injected_failure_point::none;
+
+inline void inject_piece_tree_failure(
+    piece_tree_injected_failure_point point)
+{
+    if (armed_piece_tree_failure != point) {
+        return;
+    }
+    armed_piece_tree_failure = piece_tree_injected_failure_point::none;
+    observed_piece_tree_failure = point;
+    ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("injected bioseq piece-tree factory failure"),
+             errdetail("failure_point=%u",
+                       static_cast<unsigned>(point))));
+}
 
 constexpr int postgres_panic_level = ERROR + 2;
 
@@ -196,7 +233,17 @@ enum class arena_allocation_kind : std::uint8_t {
                            static_cast<std::size_t>(nonzero),
                            static_cast<std::size_t>(MaxAllocSize))));
     }
-    return MAXALIGN(nonzero);
+    const Size aligned = MAXALIGN(nonzero);
+    if (aligned < nonzero || aligned > MaxAllocSize) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq aligned piece arena allocation exceeds MaxAllocSize"),
+                 errdetail("requested_bytes=%zu aligned_bytes=%zu limit_bytes=%zu",
+                           static_cast<std::size_t>(nonzero),
+                           static_cast<std::size_t>(aligned),
+                           static_cast<std::size_t>(MaxAllocSize))));
+    }
+    return aligned;
 }
 
 inline void reserve_arena_allocation(
@@ -205,7 +252,9 @@ inline void reserve_arena_allocation(
     arena_allocation_kind kind)
 {
     const Size aligned = checked_arena_allocation_size(requested);
-    if (destination.accounted_bytes > MaxAllocSize - aligned) {
+    if (aligned > MaxAllocSize
+        || destination.accounted_bytes > MaxAllocSize
+        || destination.accounted_bytes > MaxAllocSize - aligned) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq piece metadata exceeds MaxAllocSize"),
@@ -290,6 +339,8 @@ inline void register_arena_dependency(
     dependency->child = child;
     dependency->next = destination.arena_dependencies;
     destination.arena_dependencies = dependency;
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::arena_dependency_registration);
 }
 
 inline void register_source_dependency(
@@ -311,6 +362,8 @@ inline void register_source_dependency(
     dependency->source = source;
     dependency->next = destination.source_dependencies;
     destination.source_dependencies = dependency;
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::source_dependency_registration);
 }
 
 [[nodiscard]] inline piece_node* allocate_piece_node(
@@ -327,7 +380,10 @@ inline void register_source_dependency(
     std::uint64_t left,
     std::uint64_t right)
 {
-    if (right > static_cast<std::uint64_t>(INT64_MAX) - left) {
+    constexpr auto max_logical_length =
+        static_cast<std::uint64_t>(INT64_MAX);
+    if (left > max_logical_length || right > max_logical_length
+        || right > max_logical_length - left) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq logical length exceeds bigint")));
@@ -1057,7 +1113,11 @@ inline void validate_arena_accounting(piece_tree_arena const& arena)
             branch.left, result_type, alphabet_bound);
         const auto right = validate_tree_node(
             branch.right, result_type, alphabet_bound);
-        if (right.length > static_cast<std::uint64_t>(INT64_MAX) - left.length
+        constexpr auto max_logical_length =
+            static_cast<std::uint64_t>(INT64_MAX);
+        if (left.length > max_logical_length
+            || right.length > max_logical_length
+            || right.length > max_logical_length - left.length
             || left.length + right.length != node.bp_length
             || static_cast<std::uint64_t>(left.pieces) + right.pieces
                 != node.piece_count
@@ -1158,9 +1218,491 @@ build_balanced_literal_probe(piece_tree_arena &arena, literal_piece literal,
   return make_branch_node(arena, left, right);
 }
 
+struct factory_failure_observation {
+  std::uint32_t callback_invocations;
+  std::uint32_t armed_callback_invocations;
+  std::uint32_t root_tokens_released;
+  std::uint32_t arena_tokens_released;
+};
+
+struct factory_failure_pending_root {
+  MemoryContextCallback callback;
+  piece_tree_arena *destination_arena;
+  piece_edge root;
+  factory_failure_observation *observation;
+  bool armed;
+};
+
+inline void factory_failure_pending_root_reset(void *argument) noexcept {
+  auto *guard = static_cast<factory_failure_pending_root *>(argument);
+  if (guard == nullptr || guard->observation == nullptr) {
+    return;
+  }
+  ++guard->observation->callback_invocations;
+  if (!guard->armed) {
+    return;
+  }
+  guard->armed = false;
+  ++guard->observation->armed_callback_invocations;
+  if (guard->root) {
+    ++guard->observation->root_tokens_released;
+    release_edge(guard->root);
+    guard->root = {};
+  }
+  if (guard->destination_arena != nullptr) {
+    ++guard->observation->arena_tokens_released;
+    release_arena(guard->destination_arena);
+    guard->destination_arena = nullptr;
+  }
+}
+
+struct factory_failure_source_state {
+  std::uint32_t retain_calls;
+  std::uint32_t release_calls;
+};
+
+inline void factory_failure_source_retain(void *argument) noexcept {
+  ++static_cast<factory_failure_source_state *>(argument)->retain_calls;
+}
+
+inline void factory_failure_source_release(void *argument) noexcept {
+  ++static_cast<factory_failure_source_state *>(argument)->release_calls;
+}
+
+[[nodiscard]] inline pg_sequence_source_identity
+factory_failure_source_identity(void const *argument) noexcept {
+  return {
+      .control_address = reinterpret_cast<std::uintptr_t>(argument),
+      .generation = 1u,
+  };
+}
+
+[[nodiscard]] inline bool
+factory_failure_source_worker_shareable(void const *) noexcept {
+  return false;
+}
+
+[[nodiscard]] inline pg_sequence_source_read_status
+factory_failure_source_read(
+    void const *, pg_sequence_read_session &,
+    bioseq::storage::seq_locator const &,
+    compact_sequence_stdc_type_params,
+    bioseq::storage::sequence_transform,
+    std::uint64_t, std::span<std::uint8_t>) {
+  return pg_sequence_source_read_status::ok;
+}
+
+constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
+    .retain = factory_failure_source_retain,
+    .release = factory_failure_source_release,
+    .identity = factory_failure_source_identity,
+    .worker_shareable = factory_failure_source_worker_shareable,
+    .read_ranks = factory_failure_source_read,
+};
+
+[[nodiscard]] inline literal_piece factory_failure_unbound_literal(
+    piece_tree_arena *storage_arena,
+    std::byte const *bytes,
+    std::uint64_t from,
+    std::uint64_t to) noexcept {
+  return {
+      .storage_arena = storage_arena,
+      .bytes = bytes,
+      .symbol_from = from,
+      .symbol_to = to,
+      .stored_type_params =
+          {
+              .alphabet_code = pgseq_unbound_alphabet_code,
+              .storage_unit_byte_width = pgseq_unbound_width_tag,
+          },
+      .encoding = literal_encoding::unbound_ascii,
+      .validation = literal_validation::unvalidated,
+  };
+}
+
+[[nodiscard]] inline bool run_piece_tree_factory_failure_case(
+    piece_tree_injected_failure_point failure_point) {
+  const std::uint64_t arena_baseline = live_piece_tree_arenas;
+  piece_tree_arena *external_arena = nullptr;
+  piece_edge external_root{};
+  std::byte *external_storage = nullptr;
+
+  if (failure_point
+          == piece_tree_injected_failure_point::
+              arena_dependency_registration
+      || failure_point
+          == piece_tree_injected_failure_point::literal_binding_factory) {
+    external_arena = make_piece_tree_arena();
+    external_storage = allocate_piece_literal_storage(*external_arena, 2u);
+    external_storage[0] = std::byte{0x41};
+    external_storage[1] = std::byte{0x43};
+    if (failure_point
+        == piece_tree_injected_failure_point::literal_binding_factory) {
+      external_root = make_literal_node(
+          *external_arena,
+          factory_failure_unbound_literal(
+              external_arena, external_storage, 0u, 2u));
+    }
+  }
+
+  auto *observation = static_cast<factory_failure_observation *>(
+      palloc0(sizeof(factory_failure_observation)));
+  auto *source_state = static_cast<factory_failure_source_state *>(
+      palloc0(sizeof(factory_failure_source_state)));
+  const pg_sequence_source_handle source{
+      .state = source_state,
+      .ops = std::addressof(factory_failure_source_ops),
+  };
+  const compact_sequence_stdc_type_params bound_type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 8u,
+  };
+  const bioseq::storage::seq_locator locator{
+      .num_fragments = 1u,
+      .total_bp_size = 1u,
+      .source_epoch = 1u,
+  };
+  const source_piece source_leaf{
+      .source = source,
+      .locator = locator,
+      .stored_type_params = bound_type,
+      .last_padding_letters = 0u,
+      .from = 0u,
+      .to = 1u,
+  };
+
+  MemoryContext build_context = AllocSetContextCreate(
+      CurrentMemoryContext, "bioseq injected piece build",
+      ALLOCSET_SMALL_SIZES);
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile caught = false;
+  observed_piece_tree_failure = piece_tree_injected_failure_point::none;
+  armed_piece_tree_failure = failure_point;
+
+  PG_TRY();
+  {
+    auto *guard = static_cast<factory_failure_pending_root *>(
+        MemoryContextAllocZero(
+            build_context, sizeof(factory_failure_pending_root)));
+    guard->callback.func = factory_failure_pending_root_reset;
+    guard->callback.arg = guard;
+    guard->observation = observation;
+    guard->armed = true;
+    MemoryContextRegisterResetCallback(
+        build_context, std::addressof(guard->callback));
+
+    guard->destination_arena = make_piece_tree_arena();
+    switch (failure_point) {
+      case piece_tree_injected_failure_point::arena_factory:
+        inject_piece_tree_failure(failure_point);
+        break;
+      case piece_tree_injected_failure_point::literal_storage_factory: {
+        (void)allocate_piece_literal_storage(
+            *guard->destination_arena, 1u);
+        inject_piece_tree_failure(failure_point);
+        break;
+      }
+      case piece_tree_injected_failure_point::literal_leaf_factory: {
+        auto *storage = allocate_piece_literal_storage(
+            *guard->destination_arena, 1u);
+        storage[0] = std::byte{0x41};
+        guard->root = make_literal_node(
+            *guard->destination_arena,
+            factory_failure_unbound_literal(
+                guard->destination_arena, storage, 0u, 1u));
+        inject_piece_tree_failure(failure_point);
+        break;
+      }
+      case piece_tree_injected_failure_point::branch_factory: {
+        auto *storage = allocate_piece_literal_storage(
+            *guard->destination_arena, 2u);
+        storage[0] = std::byte{0x41};
+        storage[1] = std::byte{0x43};
+        piece_edge left = make_literal_node(
+            *guard->destination_arena,
+            factory_failure_unbound_literal(
+                guard->destination_arena, storage, 0u, 1u));
+        piece_edge right = make_literal_node(
+            *guard->destination_arena,
+            factory_failure_unbound_literal(
+                guard->destination_arena, storage, 1u, 2u));
+        guard->root = make_branch_node(
+            *guard->destination_arena, left, right);
+        inject_piece_tree_failure(failure_point);
+        break;
+      }
+      case piece_tree_injected_failure_point::
+          arena_dependency_registration:
+        guard->root = make_literal_node(
+            *guard->destination_arena,
+            factory_failure_unbound_literal(
+                external_arena, external_storage, 0u, 1u));
+        break;
+      case piece_tree_injected_failure_point::
+          source_dependency_registration:
+        guard->root = make_source_node(
+            *guard->destination_arena, source_leaf);
+        break;
+      case piece_tree_injected_failure_point::source_leaf_factory:
+        guard->root = make_source_node(
+            *guard->destination_arena, source_leaf);
+        inject_piece_tree_failure(failure_point);
+        break;
+      case piece_tree_injected_failure_point::literal_binding_factory:
+        guard->root = bind_literals_copy(
+            *guard->destination_arena, external_root, bound_type);
+        inject_piece_tree_failure(failure_point);
+        break;
+      case piece_tree_injected_failure_point::none:
+        break;
+    }
+
+    armed_piece_tree_failure = piece_tree_injected_failure_point::none;
+    MemoryContextDelete(build_context);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    armed_piece_tree_failure = piece_tree_injected_failure_point::none;
+    FlushErrorState();
+    MemoryContextDelete(build_context);
+    caught = true;
+  }
+  PG_END_TRY();
+
+  const bool source_case =
+      failure_point
+          == piece_tree_injected_failure_point::
+              source_dependency_registration
+      || failure_point
+          == piece_tree_injected_failure_point::source_leaf_factory;
+  const bool published_root_case =
+      failure_point
+          == piece_tree_injected_failure_point::literal_leaf_factory
+      || failure_point
+          == piece_tree_injected_failure_point::branch_factory
+      || failure_point
+          == piece_tree_injected_failure_point::source_leaf_factory
+      || failure_point
+          == piece_tree_injected_failure_point::literal_binding_factory;
+  const bool external_refcount_restored =
+      external_arena == nullptr
+      || (failure_point
+              == piece_tree_injected_failure_point::
+                  arena_dependency_registration
+              ? external_arena->refcount == 1u
+              : external_arena->refcount == 2u);
+
+  if (external_root) {
+    release_edge(external_root);
+    external_root = {};
+  }
+  if (external_arena != nullptr) {
+    release_arena(external_arena);
+    external_arena = nullptr;
+  }
+
+  const bool result =
+      caught
+      && observed_piece_tree_failure == failure_point
+      && observation->callback_invocations == 1u
+      && observation->armed_callback_invocations == 1u
+      && observation->root_tokens_released
+          == static_cast<std::uint32_t>(published_root_case)
+      && observation->arena_tokens_released == 1u
+      && source_state->retain_calls
+          == static_cast<std::uint32_t>(source_case)
+      && source_state->release_calls
+          == static_cast<std::uint32_t>(source_case)
+      && external_refcount_restored
+      && live_piece_tree_arenas == arena_baseline;
+  pfree(source_state);
+  pfree(observation);
+  return result;
+}
+
+[[nodiscard]] inline bool run_piece_tree_factory_failure_matrix() {
+  for (std::uint8_t ordinal = static_cast<std::uint8_t>(
+           piece_tree_injected_failure_point::arena_factory);
+       ordinal <= static_cast<std::uint8_t>(
+           piece_tree_injected_failure_point::literal_binding_factory);
+       ++ordinal) {
+    if (!run_piece_tree_factory_failure_case(
+            static_cast<piece_tree_injected_failure_point>(ordinal))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+[[nodiscard]] inline bool consume_expected_error(
+    int expected_sqlstate, MemoryContext destination_context) {
+  MemoryContextSwitchTo(destination_context);
+  ErrorData *error = CopyErrorData();
+  const bool matched =
+      error != nullptr && error->sqlerrcode == expected_sqlstate;
+  FlushErrorState();
+  if (error != nullptr) {
+    FreeErrorData(error);
+  }
+  return matched;
+}
+
+[[nodiscard]] inline bool tree_length_add_raises_program_limit(
+    std::uint64_t left, std::uint64_t right) {
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)checked_tree_length_add(left, right);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_PROGRAM_LIMIT_EXCEEDED, saved_context);
+  }
+  PG_END_TRY();
+  return matched;
+}
+
+[[nodiscard]] inline bool run_tree_length_add_guardrail_matrix() {
+  constexpr auto max_logical_length =
+      static_cast<std::uint64_t>(INT64_MAX);
+  return checked_tree_length_add(max_logical_length, 0u)
+             == max_logical_length
+      && checked_tree_length_add(max_logical_length - 1u, 1u)
+             == max_logical_length
+      && tree_length_add_raises_program_limit(max_logical_length, 1u)
+      && tree_length_add_raises_program_limit(UINT64_MAX, 0u)
+      && tree_length_add_raises_program_limit(0u, UINT64_MAX);
+}
+
+[[nodiscard]] inline bool arena_size_raises_program_limit(Size requested) {
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)checked_arena_allocation_size(requested);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_PROGRAM_LIMIT_EXCEEDED, saved_context);
+  }
+  PG_END_TRY();
+  return matched;
+}
+
+[[nodiscard]] inline bool arena_reservation_raises_program_limit(
+    piece_tree_arena &arena, Size requested) {
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    reserve_arena_allocation(
+        arena, requested, arena_allocation_kind::literal_storage);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_PROGRAM_LIMIT_EXCEEDED, saved_context);
+  }
+  PG_END_TRY();
+  return matched;
+}
+
+[[nodiscard]] inline bool run_arena_alignment_guardrail_matrix() {
+  const Size alignment = MAXALIGN(1u);
+  if (alignment == 0u || alignment - 1u > MaxAllocSize) {
+    return false;
+  }
+  const Size first_boundary = MaxAllocSize - (alignment - 1u);
+  for (Size offset = 0u; offset < alignment; ++offset) {
+    const Size requested = first_boundary + offset;
+    if (offset == 0u) {
+      if (checked_arena_allocation_size(requested) != requested) {
+        return false;
+      }
+    } else {
+      piece_tree_arena rejected_budget{};
+      if (!arena_size_raises_program_limit(requested)
+          || !arena_reservation_raises_program_limit(
+              rejected_budget, requested)
+          || rejected_budget.accounted_bytes != 0u
+          || rejected_budget.literal_storage_bytes != 0u) {
+        return false;
+      }
+    }
+  }
+
+  piece_tree_arena exact_budget{};
+  reserve_arena_allocation(
+      exact_budget, first_boundary,
+      arena_allocation_kind::literal_storage);
+  const bool budget_rejected = arena_reservation_raises_program_limit(
+      exact_budget, 1u);
+  return exact_budget.accounted_bytes == first_boundary
+      && exact_budget.literal_storage_bytes == first_boundary
+      && budget_rejected;
+}
+
+[[nodiscard]] inline bool corrupt_tree_length_raises_data_corrupted(
+    bool oversized_left) {
+  auto *arena = make_piece_tree_arena();
+  auto *storage = allocate_piece_literal_storage(*arena, 1u);
+  storage[0] = std::byte{0x41};
+  const compact_sequence_stdc_type_params unbound_type{
+      .alphabet_code = pgseq_unbound_alphabet_code,
+      .storage_unit_byte_width = pgseq_unbound_width_tag,
+  };
+  const std::uint64_t left_length = oversized_left ? UINT64_MAX : 1u;
+  const std::uint64_t right_length = oversized_left ? 1u : UINT64_MAX;
+  const piece_edge left = make_literal_node(
+      *arena, factory_failure_unbound_literal(
+                  arena, storage, 0u, left_length));
+  const piece_edge right = make_literal_node(
+      *arena, factory_failure_unbound_literal(
+                  arena, storage, 0u, right_length));
+  auto *branch = allocate_piece_node(*arena);
+  branch->node_kind = piece_node::kind::branch;
+  branch->bp_length = 0u;
+  branch->piece_count = 2u;
+  branch->height = 2u;
+  ::new (static_cast<void *>(std::addressof(branch->payload.branch)))
+      branch_piece{left, right};
+  const piece_edge root{
+      .arena = arena,
+      .node = branch,
+      .transform = bioseq::storage::sequence_transform::identity,
+  };
+
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    validate_tree_and_limits(root, unbound_type, 0u, false);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_DATA_CORRUPTED, saved_context);
+  }
+  PG_END_TRY();
+
+  release_edge(left);
+  release_edge(right);
+  release_arena(arena);
+  return matched;
+}
+
+[[nodiscard]] inline bool run_corrupt_tree_length_guardrail_matrix() {
+  return corrupt_tree_length_raises_data_corrupted(true)
+      && corrupt_tree_length_raises_data_corrupted(false);
+}
+
 } // namespace
 
-/* Internal source-only lifetime seam. It deliberately catches recoverable
+/* Internal lifetime acceptance seam. It deliberately catches recoverable
  * construction errors; impossible release underflow remains a PANIC and is
  * therefore covered by static invariants rather than executed in-process. */
 export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
@@ -1170,6 +1712,14 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   bool volatile million_piece_balanced = false;
   bool volatile deep_release_iterative = false;
   const std::uint64_t arena_baseline = live_piece_tree_arenas;
+  const bool factory_failure_matrix =
+      run_piece_tree_factory_failure_matrix();
+  const bool tree_length_guardrail_matrix =
+      run_tree_length_add_guardrail_matrix();
+  const bool arena_alignment_guardrail_matrix =
+      run_arena_alignment_guardrail_matrix();
+  const bool corrupt_tree_length_guardrail_matrix =
+      run_corrupt_tree_length_guardrail_matrix();
 
   auto *saturation_arena = make_piece_tree_arena();
   saturation_arena->refcount = UINT32_MAX;
@@ -1338,6 +1888,18 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   PG_END_TRY();
 
   PG_RETURN_BOOL(saturation_caught && budget_caught && generation_caught &&
-                 million_piece_balanced && deep_release_iterative &&
+                 factory_failure_matrix && tree_length_guardrail_matrix &&
+                 arena_alignment_guardrail_matrix &&
+                 corrupt_tree_length_guardrail_matrix &&
+                 million_piece_balanced &&
+                 deep_release_iterative &&
                  live_piece_tree_arenas == arena_baseline);
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(piece_tree_self_test);
+PGDLLEXPORT Datum piece_tree_self_test(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&piece_tree_self_test_impl, fcinfo);
+}
+} // extern "C"

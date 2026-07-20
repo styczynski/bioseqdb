@@ -787,17 +787,23 @@ public:
 		GpuPreparedShapeV5Target& prepared_target);
 
     /*
-     * DOC0264 / DOC0274 — context required to wire scanner_pg into the
-     * per-row pipeline dispatch. When non-null, the dispatch loop uses
-     * `sequence_scanner_pg<S>` (PG-backed for stub-backed targets, in-memory
-     * for the query literal). When null, the dispatch loop falls back to
-     * the Phase B baseline `with_lazy_in_memory`.
+     * DOC0264 / DOC0274 — context required to wire the PostgreSQL facade
+     * adapter into per-row pipeline dispatch. When non-null, stub-backed
+     * targets stay source-backed while query literals use resident facades.
+     * When null, the loop uses the Phase B in-memory baseline.
      */
     struct ScannerPgContext {
         /* Optional statement-root async ownership observer.  It is generic at
          * the pipeline boundary; the PostgreSQL trace owner supplies the
          * concrete enrollment/state-machine adapter. */
         bioseq::parallelism::tracked_job_observer async_job_observer{};
+        /* Stable for the complete process_sequences call. Views copy only a
+         * pointer to these records; every tracked task joins/drains before
+         * ScannerPgContext leaves its owning dispatch frame. */
+        bioseq::storage::sequence_payload_allocation_observer
+            mmsearch_target_payload_observer{};
+        bioseq::storage::sequence_payload_allocation_observer
+            mmsearch_query_payload_observer{};
         Oid                                              db_oid               = InvalidOid;
         Oid                                              tablespace_oid       = InvalidOid;
         Oid                                              main_relfilenode     = InvalidOid;
@@ -805,7 +811,7 @@ public:
         bioseq::storage::seq_caches*                     caches               = nullptr;
         MemoryContext                                    parent_mctx          = nullptr;
         // Borrowed statement snapshot owned by the executor/admin caller.
-        // scanner_pg validates that it is registered MVCC state and never
+        // The facade adapter validates registered MVCC state and never
         // changes its registration count.
         Snapshot                                         snapshot             = nullptr;
         // Borrowed statement-root sink. It is required only by the accepted
@@ -813,7 +819,7 @@ public:
         ::bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
             persisted_gpu_operation_evidence_sink = nullptr;
         // Per-row optional locator. nullopt means "use the inline pgseq_t at
-        // target_hdrs[i]" — scanner_pg is then constructed in in-memory mode.
+        // target_hdrs[i]" — the target then uses an in-memory facade.
         std::array<std::optional<bioseq::storage::seq_locator>,
             kDispatchBatchCapacity>                       target_locators{};
         // DOC0279 §11.3c — per-row columnar rowno (== index query_key) and the
@@ -856,20 +862,16 @@ public:
      *
      * DOC0264 / DOC0274 — production dispatch posture.
      *
-     * The Phase C `sequence_scanner_pg<S>` (in module
-     * `bioseq_storage_scanner_pg`) is now wired into the dispatch loop.
-     * `scanner_pg_ctx` carries the per-batch identity (db/spc/relfilenode/
+     * The Phase C PostgreSQL facade adapter is now wired into the dispatch
+     * loop. `scanner_pg_ctx` carries the per-batch identity (db/spc/relfilenode/
      * attno/seq_caches/parent_mctx) plus the per-row optional locator the
      * caller decoded at submit_scan time. When `scanner_pg_ctx` is non-null
      * AND the user has not forced the in-memory baseline via
      * `bioseq.test_force_inmemory_scanner = on`, the loop dispatches:
-     *   - target through `sequence_scanner_pg<S>` (PG-backed when locator
-     *     present; in-memory wrap of the inline pgseq_t otherwise);
-     *   - query through `sequence_scanner_pg<S>` in-memory wrap of the
-     *     batch's query literal.
-     * Both share the same `Scanner = sequence_scanner_pg<S>` template, so
-     * the pipeline tree adds one instantiation (alongside the existing
-     * `sequence_scanner_none` and `sequence_scanner_test_chunked` trees).
+     *   - target through a source-backed facade when a locator is present,
+     *     or an in-memory facade for an inline value;
+     *   - query through an in-memory facade over the batch literal.
+     * Consumer algorithms see only the alphabet-specialized erased view.
      *
      * NOTE on parameter passing: `target_hdrs` and `query_ids` are full-size
      * `kDispatchBatchCapacity`-element arrays passed by const-ref so the call

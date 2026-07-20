@@ -36,11 +36,14 @@ extern "C" {
 #include <limits>
 #include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <variant>
 #include <vector>
+
+#include "types/compact_sequence/fmgr_boundary.h"
 
 export module bioseq.mod;
 
@@ -68,74 +71,6 @@ import bioseq.column.tam; // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumn
 import bioseq.pg_utils.nodes; // DOC0333 — pg_node_try_as (support-request dispatch), expression walker adapter (find_first_var)
 import bioseq.table.scan_state;
 import bioseq.sequences.pipe;
-
-/* The split compact-sequence module keeps the C entrypoint bodies in its
- * sql_entrypoints partition.  Keep fmgr V1 metadata centralized in the
- * extension module so every symbol named by bioseq--1.0.sql is exported. */
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_in);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_out);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_in);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_out);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_recv);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_send);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cast);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cmp);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_lt);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_le);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_eq);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ne);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ge);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_gt);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_unit_len);
-CXX_PG_FUNCTION_INFO_V1(seq_hash);
-CXX_PG_FUNCTION_INFO_V1(seq_hash_extended);
-CXX_PG_FUNCTION_INFO_V1(slice_trace_self_test);
-CXX_PG_FUNCTION_INFO_V1(synthetic_lazy_sequence);
-CXX_PG_FUNCTION_INFO_V1(sequence_piece_count);
-CXX_PG_FUNCTION_INFO_V1(piece_tree_self_test);
-CXX_PG_FUNCTION_INFO_V1(expanded_ownership_self_test);
-
-CXX_PG_FUNCTION_INFO_V1(letter_typmod_in);
-CXX_PG_FUNCTION_INFO_V1(letter_typmod_out);
-CXX_PG_FUNCTION_INFO_V1(letter_in);
-CXX_PG_FUNCTION_INFO_V1(letter_out);
-CXX_PG_FUNCTION_INFO_V1(letter_recv);
-CXX_PG_FUNCTION_INFO_V1(letter_send);
-CXX_PG_FUNCTION_INFO_V1(letter_wire_self_test);
-CXX_PG_FUNCTION_INFO_V1(letter_typmod_cast);
-CXX_PG_FUNCTION_INFO_V1(letter_to_text);
-CXX_PG_FUNCTION_INFO_V1(letter_cmp);
-CXX_PG_FUNCTION_INFO_V1(letter_eq);
-CXX_PG_FUNCTION_INFO_V1(letter_ne);
-CXX_PG_FUNCTION_INFO_V1(letter_lt);
-CXX_PG_FUNCTION_INFO_V1(letter_le);
-CXX_PG_FUNCTION_INFO_V1(letter_gt);
-CXX_PG_FUNCTION_INFO_V1(letter_ge);
-CXX_PG_FUNCTION_INFO_V1(letter_hash);
-CXX_PG_FUNCTION_INFO_V1(letter_hash_extended);
-
-CXX_PG_FUNCTION_INFO_V1(seq_subscript_handler);
-CXX_PG_FUNCTION_INFO_V1(seq_concat);
-CXX_PG_FUNCTION_INFO_V1(seq_concat_text);
-CXX_PG_FUNCTION_INFO_V1(text_concat_seq);
-CXX_PG_FUNCTION_INFO_V1(seq_concat_varchar);
-CXX_PG_FUNCTION_INFO_V1(varchar_concat_seq);
-CXX_PG_FUNCTION_INFO_V1(seq_concat_text_array);
-CXX_PG_FUNCTION_INFO_V1(text_array_concat_seq);
-CXX_PG_FUNCTION_INFO_V1(seq_concat_letter_array);
-CXX_PG_FUNCTION_INFO_V1(letter_array_concat_seq);
-CXX_PG_FUNCTION_INFO_V1(seq_reverse);
-CXX_PG_FUNCTION_INFO_V1(seq_reverse_complement);
-CXX_PG_FUNCTION_INFO_V1(seq_array_length);
-CXX_PG_FUNCTION_INFO_V1(seq_cardinality);
-CXX_PG_FUNCTION_INFO_V1(seq_to_text);
-CXX_PG_FUNCTION_INFO_V1(seq_to_varchar);
-CXX_PG_FUNCTION_INFO_V1(seq_to_array);
-CXX_PG_FUNCTION_INFO_V1(seq_from_letter_array_infer);
-CXX_PG_FUNCTION_INFO_V1(seq_from_letter_array_named);
-}
 
 using namespace bioseq::pg_utils;   // DOC0333 — node view/walker helpers live in bioseq::pg_utils
 
@@ -2630,6 +2565,9 @@ _PG_init()
  */
 CXX_PG_FUNCTION_INFO_V1(mmsearch);
 Datum mmsearch(PG_FUNCTION_ARGS) {
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1)) {
+		PG_RETURN_NULL();
+	}
 	ereport(ERROR,
 		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 		 errmsg("mmsearch qualifier has no Bioseq executor owner"),
@@ -3549,6 +3487,7 @@ Datum bioseq_scheduler_mps_build_stats(PG_FUNCTION_ARGS) {
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_internal_arm_async_mps_worker_failure);
 Datum bioseq_internal_arm_async_mps_worker_failure(PG_FUNCTION_ARGS) {
+#ifdef BIOSEQ_TEST_INDEXES
 	text* point_text = PG_GETARG_TEXT_PP(0);
 	const std::string_view point_name{
 		VARDATA_ANY(point_text),
@@ -3592,13 +3531,28 @@ Datum bioseq_internal_arm_async_mps_worker_failure(PG_FUNCTION_ARGS) {
 	}
 	PG_RETURN_BOOL(
 		bioseq::parallelism::pg::arm_async_mps_worker_pg_failure(point));
+#else
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("asynchronous MPS worker failure injection is unavailable"),
+		 errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
+	PG_RETURN_BOOL(false);
+#endif
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_internal_disarm_async_mps_worker_failure);
 Datum bioseq_internal_disarm_async_mps_worker_failure(PG_FUNCTION_ARGS) {
+#ifdef BIOSEQ_TEST_INDEXES
 	bioseq::parallelism::pg::disarm_async_mps_worker_pg_failure();
 	bioseq::parallelism::pg::disarm_async_mps_stage_pg_failure();
 	PG_RETURN_VOID();
+#else
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("asynchronous MPS worker failure injection is unavailable"),
+		 errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
+	PG_RETURN_VOID();
+#endif
 }
 
 CXX_PG_FUNCTION_INFO_V1(bioseq_internal_async_mps_worker_boundary_stats);
@@ -3639,12 +3593,10 @@ Datum bioseq_internal_async_mps_worker_boundary_stats(PG_FUNCTION_ARGS) {
 	values.set_raw(12, bioseq::pg_utils::pg_datum::from_text_cstring(
 		armed_point));
 	values.set_raw(13, bioseq::pg_utils::pg_datum::from_text_cstring(
-		stats.last_failure_point
-				== bioseq::parallelism::pg::AsyncMpsWorkerPgFailure::none
+		!stats.last_failure_injected
 			? "" : "XX000"));
 	values.set_raw(14, bioseq::pg_utils::pg_datum::from_text_cstring(
-		stats.last_failure_point
-				== bioseq::parallelism::pg::AsyncMpsWorkerPgFailure::none
+		!stats.last_failure_injected
 			? ""
 			: "injected asynchronous MPS worker PostgreSQL leaf failure"));
 	HeapTuple tuple = values.form_tuple(tupdesc);
@@ -5354,13 +5306,17 @@ Datum bioseq_test_delete_index_manifest(PG_FUNCTION_ARGS) {
 /* DOC0377 §7/§17.4 — fixed, test-build-only source-domain fault and lifetime
  * diagnostics.  SQL declarations are always present so extension schemas do
  * not differ; production builds fail closed when a test hook is invoked. */
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_arm_sequence_source_failure);
-Datum bioseq_internal_arm_sequence_source_failure(PG_FUNCTION_ARGS) {
+static Datum bioseq_internal_arm_sequence_source_failure_impl(
+		FunctionCallInfo fcinfo) {
 #ifdef BIOSEQ_TEST_INDEXES
   text *point_text = PG_GETARG_TEXT_PP(0);
   const std::string_view point{
       VARDATA_ANY(point_text),
       static_cast<std::size_t>(VARSIZE_ANY_EXHDR(point_text))};
+  if (point == "diagnostic_std_exception") {
+    throw std::runtime_error(
+        "injected DOC0377 diagnostic C++ exception");
+  }
   if (point == "facade_resident_probe") {
     arm_pg_sequence_facade_test_poison(
         PgSequenceFacadeTestPoison::resident_probe);
@@ -5412,8 +5368,15 @@ Datum bioseq_internal_arm_sequence_source_failure(PG_FUNCTION_ARGS) {
 	PG_RETURN_VOID();
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_disarm_sequence_source_failure);
-Datum bioseq_internal_disarm_sequence_source_failure(PG_FUNCTION_ARGS) {
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_arm_sequence_source_failure);
+PGDLLEXPORT Datum bioseq_internal_arm_sequence_source_failure(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_arm_sequence_source_failure_impl, fcinfo);
+}
+
+static Datum bioseq_internal_disarm_sequence_source_failure_impl(
+		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
 	PG_RETURN_VOID();
@@ -5425,8 +5388,15 @@ Datum bioseq_internal_disarm_sequence_source_failure(PG_FUNCTION_ARGS) {
 #endif
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_reset_sequence_source_counters);
-Datum bioseq_internal_reset_sequence_source_counters(PG_FUNCTION_ARGS) {
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_disarm_sequence_source_failure);
+PGDLLEXPORT Datum bioseq_internal_disarm_sequence_source_failure(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_disarm_sequence_source_failure_impl, fcinfo);
+}
+
+static Datum bioseq_internal_reset_sequence_source_counters_impl(
+		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::disarm_pg_sequence_source_failure();
 	bioseq::storage::reset_pg_sequence_source_debug_counters();
@@ -5439,8 +5409,15 @@ Datum bioseq_internal_reset_sequence_source_counters(PG_FUNCTION_ARGS) {
 #endif
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_counters);
-Datum bioseq_internal_sequence_source_counters(PG_FUNCTION_ARGS) {
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_reset_sequence_source_counters);
+PGDLLEXPORT Datum bioseq_internal_reset_sequence_source_counters(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_reset_sequence_source_counters_impl, fcinfo);
+}
+
+static Datum bioseq_internal_sequence_source_counters_impl(
+		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES
   const auto c = bioseq::storage::pg_sequence_source_debug_counters();
   const std::string encoded = fmt::format(
@@ -5497,8 +5474,15 @@ Datum bioseq_internal_sequence_source_counters(PG_FUNCTION_ARGS) {
 #endif
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_wrong_thread_probe);
-Datum bioseq_internal_sequence_source_wrong_thread_probe(PG_FUNCTION_ARGS) {
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_counters);
+PGDLLEXPORT Datum bioseq_internal_sequence_source_counters(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_sequence_source_counters_impl, fcinfo);
+}
+
+static Datum bioseq_internal_sequence_source_wrong_thread_probe_impl(
+		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES
 	PG_RETURN_BOOL(bioseq::storage::pg_sequence_source_wrong_thread_probe());
 #else
@@ -5509,8 +5493,15 @@ Datum bioseq_internal_sequence_source_wrong_thread_probe(PG_FUNCTION_ARGS) {
 #endif
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_fault_contract_probe);
-Datum bioseq_internal_sequence_source_fault_contract_probe(PG_FUNCTION_ARGS) {
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_wrong_thread_probe);
+PGDLLEXPORT Datum bioseq_internal_sequence_source_wrong_thread_probe(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_sequence_source_wrong_thread_probe_impl, fcinfo);
+}
+
+static Datum bioseq_internal_sequence_source_fault_contract_probe_impl(
+		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES
 	PG_RETURN_BOOL(bioseq::storage::pg_sequence_source_fault_contract_probe());
 #else
@@ -5521,8 +5512,15 @@ Datum bioseq_internal_sequence_source_fault_contract_probe(PG_FUNCTION_ARGS) {
 #endif
 }
 
-CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_pre_prepare_probe);
-Datum bioseq_internal_sequence_source_pre_prepare_probe(PG_FUNCTION_ARGS) {
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_fault_contract_probe);
+PGDLLEXPORT Datum bioseq_internal_sequence_source_fault_contract_probe(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_sequence_source_fault_contract_probe_impl, fcinfo);
+}
+
+static Datum bioseq_internal_sequence_source_pre_prepare_probe_impl(
+		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES
 	bioseq::storage::pg_sequence_source_pre_prepare_probe();
 	PG_RETURN_VOID();
@@ -5532,5 +5530,12 @@ Datum bioseq_internal_sequence_source_pre_prepare_probe(PG_FUNCTION_ARGS) {
 		 errmsg("bioseq sequence source-domain diagnostics require a test build")));
 	PG_RETURN_VOID();
 #endif
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_source_pre_prepare_probe);
+PGDLLEXPORT Datum bioseq_internal_sequence_source_pre_prepare_probe(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_sequence_source_pre_prepare_probe_impl, fcinfo);
 }
 }

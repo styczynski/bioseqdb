@@ -368,7 +368,8 @@ void require_no_current_compatible_persisted_index(
         "bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
         "bioseq.cigar(t.pk) "
         "FROM {} AS t INNER JOIN {} AS q ON mmsearch("
-        "bioseq.reverse(bioseq.reverse(t.seq0[0:16] || t.seq0[16:])), "
+        "bioseq.reverse(bioseq.reverse(t.seq0[0:16] "
+        "OPERATOR(bioseq.||) t.seq0[16:])), "
         "q.seq[0:]) ORDER BY t.pk;",
         table, kDoc0377LazyQueries);
 }
@@ -452,7 +453,8 @@ doc0377_transform_cases(const std::string& source) {
     std::string concat_query = concat_target.substr(65u, 60u);
     cases.push_back({
         .name = "hit crossing a concat join",
-        .target_expression = "t.seq0[10:90] || t.seq0[150:230]",
+        .target_expression =
+            "t.seq0[10:90] OPERATOR(bioseq.||) t.seq0[150:230]",
         .query_expression = "q.source_seq",
         .logical_target = std::move(concat_target),
         .stored_query = concat_query,
@@ -3386,23 +3388,32 @@ TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",
 
     exec_sql(ctx, "SET max_parallel_workers_per_gather = 0;");
     exec_sql(ctx, "SET bioseq.read_sequence_index = off;");
-    exec_sql(ctx, "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner';");
     exec_sql(ctx, "SET bioseq.aligner.min_chain_score = 20;");
 
     struct AlgorithmRoute {
         std::string_view name;
         std::string_view minimizer;
         std::string_view chaining;
+        std::string_view base_alignment;
+        std::string_view requested_backend;
+        std::string_view actual_backend;
+        std::size_t execution_column = 0u;
+        bool fully_attested = true;
         bool vulkan = false;
     };
     std::vector<AlgorithmRoute> routes{
-        {"scalar", "scalar", "scalar_mm2", false},
-        {"exact SIMD", "two_stack_nthash", "simd_mm2", false},
-        {"paper ntHash SIMD", "paper_nthash_simd", "simd_mm2", false},
+        {"scalar", "scalar", "scalar_mm2", "ksw2",
+         "scalar_cpu", "scalar_cpu", 26u, true, false},
+        {"exact SIMD", "two_stack_nthash", "simd_mm2", "block_aligner",
+         "simd_cpu", "simd_cpu", 27u, true, false},
+        {"paper ntHash SIMD", "paper_nthash_simd", "simd_mm2",
+         "block_aligner", "simd_cpu", "simd_cpu", 27u, true, false},
     };
     if (!selected_vulkan_runtime_untrusted(ctx)) {
         routes.push_back({
-            "Vulkan", "vulkan_minimap_int", "vulkan_tiled_dp", true});
+            "Vulkan", "vulkan_minimap_int", "vulkan_tiled_dp",
+            "block_aligner", "vulkan_gpu", "mixed_invalid", 28u,
+            false, true});
     }
 
     for (const auto& route : routes) {
@@ -3413,6 +3424,9 @@ TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",
             exec_sql(ctx, fmt::format(
                 "SET bioseq.aligner.chaining_algorithm = '{}';",
                 route.chaining));
+            exec_sql(ctx, fmt::format(
+                "SET bioseq.aligner.base_alignment_algorithm = '{}';",
+                route.base_alignment));
             exec_sql(ctx, fmt::format(
                 "SET bioseq.aligner.vulkan_enabled = {};",
                 route.vulkan ? "on" : "off"));
@@ -3458,8 +3472,67 @@ TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",
 
                     const rowset_t expected = query_rows(ctx, oracle);
                     const rowset_t actual = query_rows(ctx, transformed);
+                    const auto execution_stats = last_alignment_stats(ctx);
                     REQUIRE(actual == expected);
                     REQUIRE_FALSE(actual.empty());
+                    REQUIRE(execution_stats.size() == 20u);
+                    for (const auto& stage : execution_stats) {
+                        REQUIRE(stage.size() == 150u);
+                        REQUIRE(stage[16].value_or("")
+                                == route.requested_backend);
+                        REQUIRE(stage[17].value_or("")
+                                == route.actual_backend);
+                        REQUIRE(stats_bool(stage, 13));
+                        REQUIRE_FALSE(stats_bool(stage, 14));
+                        REQUIRE(stats_bool(stage, 15));
+                        REQUIRE(stats_i64(stage, 33) > 0);
+                        if (route.fully_attested) {
+                            REQUIRE(stats_i64(stage, 34)
+                                    == stats_i64(stage, 33));
+                            REQUIRE(stats_i64(stage, 35) == 0);
+                        } else {
+                            REQUIRE(stats_i64(stage, 34) == 0);
+                            REQUIRE(stats_i64(stage, 35)
+                                    == stats_i64(stage, 33));
+                        }
+                        REQUIRE(stats_i64(stage, 29) == 0);
+                    }
+                    REQUIRE_FALSE(stats_bool(execution_stats.front(), 141));
+                    REQUIRE(stats_i64(execution_stats.front(), 139) == 0);
+                    REQUIRE(stats_i64(execution_stats.front(), 140) == 0);
+
+                    if (route.fully_attested) {
+                        /* A concrete CPU actual_backend is retained only
+                         * after the selected minimizer/chaining/alignment
+                         * tuple supplies its algorithm-local proof. */
+                        for (const std::size_t stage_no : {
+                                 std::size_t{0}, std::size_t{1},
+                                 std::size_t{7}, std::size_t{8}}) {
+                            const auto& stage = execution_stats[stage_no];
+                            REQUIRE(stats_i64(stage, 24) > 0);
+                            REQUIRE(stats_i64(stage, route.execution_column)
+                                    == stats_i64(stage, 24));
+                            for (const std::size_t execution_column : {
+                                     std::size_t{26}, std::size_t{27},
+                                     std::size_t{28}}) {
+                                if (execution_column
+                                        != route.execution_column) {
+                                    REQUIRE(stats_i64(
+                                        stage, execution_column) == 0);
+                                }
+                            }
+                            REQUIRE(stats_i64(stage, 25) == 0);
+                            REQUIRE(stats_i64(stage, 29) == 0);
+                        }
+                    } else {
+                        /* Recomputed transformed targets cannot enter the
+                         * persisted Shape-V5 attestation route.  Demand the
+                         * actual Vulkan operation receipts while preserving
+                         * truthful unattested backend identity. */
+                        REQUIRE(stats_i64(execution_stats.front(), 113) > 0);
+                        REQUIRE(stats_i64(execution_stats.front(), 114) > 0);
+                        REQUIRE(stats_i64(execution_stats.front(), 115) > 0);
+                    }
                     bool found_exact_logical_hit = false;
                     for (const auto& row : actual) {
                         REQUIRE(row.size() == 8u);
@@ -3527,9 +3600,9 @@ TEST_CASE("DOC0377 transformed ownership reconstructs INNER join algorithms",
         DYNAMIC_SECTION(route.name) {
             exec_sql(ctx, route.settings);
             for (const auto options_suffix : options_suffixes) {
-                DYNAMIC_SECTION(options_suffix.empty()
+                DYNAMIC_SECTION((options_suffix.empty()
                         ? "two-argument OID"
-                        : "three-argument OID") {
+                        : "three-argument OID")) {
                     const std::string sql = fmt::format(
                         "SELECT t.pk, q.id FROM {} AS t INNER JOIN "
                         "doc0377_join_shape_queries AS q "
@@ -3597,7 +3670,8 @@ TEST_CASE("DOC0377 transformed mmsearch owns cross-table concat",
         "bioseq.target_end(t.pk) FROM {} AS t INNER JOIN "
         "doc0377_cross_concat_queries AS q "
         "ON t.pk=q.id AND mmsearch("
-        "t.seq0[0:32] || q.prefix[0:32], q.needle[0:]) "
+        "t.seq0[0:32] OPERATOR(bioseq.||) q.prefix[0:32], "
+        "q.needle[0:]) "
         "ORDER BY 3, 4;",
         kDoc0377TransformTarget);
     const auto plan = explain_text<false>(ctx, sql);
@@ -3649,11 +3723,11 @@ TEST_CASE("DOC0377 outer-join match quals fail closed",
 
 TEST_CASE("DOC0377 projection-only slicing is legal above outer joins",
           "[slice][concat][outer-join][projection][doc0377]") {
-    connection_test_context ctx;
+    auto ctx = fresh_context({"doc0377_outer_projection_target"});
     const seq_typmod dna4{.alphabet = "dna4", .width = 32};
     exec_sql(ctx,
-        "CREATE TEMP TABLE doc0377_outer_projection_target "
-        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));"
+        "CREATE TABLE doc0377_outer_projection_target "
+        "(id int PRIMARY KEY, seq bioseq.seq('dna4',32)) USING bioseq;"
         "CREATE TEMP TABLE doc0377_outer_projection_query "
         "(id int PRIMARY KEY, seq bioseq.seq('dna4',32));");
     exec_sql(ctx, fmt::format(
@@ -3678,7 +3752,7 @@ TEST_CASE("DOC0377 projection-only slicing is legal above outer joins",
     for (const auto& test_case : cases) {
         const std::string inner = fmt::format(
             "SELECT COALESCE(t.id,q.id) AS id, "
-            "bioseq.len(t.seq[0:4] || q.seq[0:4]) AS n "
+            "bioseq.len(t.seq[0:4] OPERATOR(bioseq.||) q.seq[0:4]) AS n "
             "FROM doc0377_outer_projection_target AS t {} JOIN "
             "doc0377_outer_projection_query AS q ON t.id=q.id",
             test_case.join_type);

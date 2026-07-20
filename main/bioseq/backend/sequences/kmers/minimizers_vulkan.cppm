@@ -556,6 +556,8 @@ template <class Seq>
 struct VulkanAdmittedWindowTestSnapshot {
   std::uint64_t admitted_materializations = 0u;
   std::uint64_t live_admitted_windows = 0u;
+  std::uint64_t live_admitted_permit_bytes = 0u;
+  std::uintptr_t live_admitted_buffer_address = 0u;
   std::uint64_t backend_thread_materializations = 0u;
   std::uint64_t off_backend_materializations = 0u;
 };
@@ -564,6 +566,8 @@ namespace admitted_window_test_detail {
 inline std::atomic<std::uint8_t> enabled{0u};
 inline std::atomic<std::uint64_t> admitted_materializations{0u};
 inline std::atomic<std::uint64_t> live_admitted_windows{0u};
+inline std::atomic<std::uint64_t> live_admitted_permit_bytes{0u};
+inline std::atomic<std::uintptr_t> live_admitted_buffer_address{0u};
 inline std::atomic<std::uint64_t> backend_thread_materializations{0u};
 inline std::atomic<std::uint64_t> off_backend_materializations{0u};
 inline std::thread::id backend_thread{};
@@ -574,6 +578,8 @@ inline void arm_vulkan_admitted_window_test_seam() noexcept {
   enabled.store(0u, std::memory_order_release);
   admitted_materializations.store(0u, std::memory_order_relaxed);
   live_admitted_windows.store(0u, std::memory_order_relaxed);
+  live_admitted_permit_bytes.store(0u, std::memory_order_relaxed);
+  live_admitted_buffer_address.store(0u, std::memory_order_relaxed);
   backend_thread_materializations.store(0u, std::memory_order_relaxed);
   off_backend_materializations.store(0u, std::memory_order_relaxed);
   backend_thread = std::this_thread::get_id();
@@ -592,6 +598,10 @@ vulkan_admitted_window_test_snapshot() noexcept {
           admitted_materializations.load(std::memory_order_acquire),
       .live_admitted_windows =
           live_admitted_windows.load(std::memory_order_acquire),
+      .live_admitted_permit_bytes =
+          live_admitted_permit_bytes.load(std::memory_order_acquire),
+      .live_admitted_buffer_address =
+          live_admitted_buffer_address.load(std::memory_order_acquire),
       .backend_thread_materializations =
           backend_thread_materializations.load(std::memory_order_acquire),
       .off_backend_materializations =
@@ -599,13 +609,17 @@ vulkan_admitted_window_test_snapshot() noexcept {
   };
 }
 
-[[nodiscard]] inline bool note_vulkan_admitted_window_begin() noexcept {
+[[nodiscard]] inline bool note_vulkan_admitted_window_begin(
+    std::uint64_t permit_bytes, std::uintptr_t buffer_address) noexcept {
   using namespace admitted_window_test_detail;
   if (enabled.load(std::memory_order_acquire) == 0u) {
     return false;
   }
   admitted_materializations.fetch_add(1u, std::memory_order_relaxed);
   live_admitted_windows.fetch_add(1u, std::memory_order_release);
+  live_admitted_permit_bytes.store(permit_bytes, std::memory_order_release);
+  live_admitted_buffer_address.store(buffer_address,
+                                     std::memory_order_release);
   if (std::this_thread::get_id() == backend_thread) {
     backend_thread_materializations.fetch_add(1u, std::memory_order_relaxed);
   } else {
@@ -616,7 +630,10 @@ vulkan_admitted_window_test_snapshot() noexcept {
 
 inline void note_vulkan_admitted_window_end(bool tracked) noexcept {
   if (tracked) {
-    admitted_window_test_detail::live_admitted_windows.fetch_sub(
+    using namespace admitted_window_test_detail;
+    live_admitted_buffer_address.store(0u, std::memory_order_release);
+    live_admitted_permit_bytes.store(0u, std::memory_order_release);
+    live_admitted_windows.fetch_sub(
         1u, std::memory_order_release);
   }
 }
@@ -660,17 +677,6 @@ decltype(auto) with_borrowed_u32_range(
   return std::forward<Fn>(fn)(range);
 }
 
-template <sequence_alphabet Alphabet>
-[[nodiscard]] bool descriptor_is_canonical_u32(
-    const typename bioseq::storage::basic_lazy_sequence_view<
-        Alphabet>::resident_packed_region &descriptor) noexcept {
-  return descriptor.storage_unit_byte_width == sizeof(std::uint32_t) &&
-         descriptor.bits_per_symbol ==
-             bioseq::storage::basic_lazy_sequence_view<
-                 Alphabet>::traits::logical_bits_per_symbol &&
-         descriptor.leading_symbol_offset == 0u;
-}
-
 template <sequence_alphabet Alphabet> struct canonical_u32_window {
   using owner_type = bioseq::storage::admitted_packed_region<Alphabet>;
   using descriptor_type = typename bioseq::storage::basic_lazy_sequence_view<
@@ -682,15 +688,13 @@ template <sequence_alphabet Alphabet> struct canonical_u32_window {
   bool test_admitted_window_tracked = false;
 #endif
 
-  explicit canonical_u32_window(descriptor_type borrowed) noexcept
-      : descriptor(borrowed) {}
-
   explicit canonical_u32_window(owner_type &&admitted)
       : owner(std::in_place, std::move(admitted)),
         descriptor(owner->descriptor())
 #ifdef BIOSEQ_TEST_INDEXES
         ,
-        test_admitted_window_tracked(note_vulkan_admitted_window_begin())
+        test_admitted_window_tracked(note_vulkan_admitted_window_begin(
+            owner->test_admission_bytes(), owner->test_storage_address()))
 #endif
   {
   }
@@ -731,17 +735,15 @@ prepare_canonical_u32_window(
       sequence,
       bioseq::storage::sequence_access_requirement::contiguous_resident, from,
       to, sizeof(std::uint32_t));
-  if (access.route == bioseq::storage::sequence_access_route::borrow_resident &&
-      access.resident.has_value() &&
-      descriptor_is_canonical_u32<Alphabet>(*access.resident)) {
-    return std::optional<canonical_u32_window<Alphabet>>{std::in_place,
-                                                         *access.resident};
-  }
-
+  const std::uint64_t admission_bytes =
+      access.route == bioseq::storage::sequence_access_route::borrow_resident
+          ? bioseq::storage::packed_region_admission_bytes<Alphabet>(
+                to - from, sizeof(std::uint32_t))
+          : access.admission_bytes;
   bioseq::parallelism::MemoryAdmissionFailure failure{};
   auto permit =
       bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
-          access.admission_bytes, &failure);
+          admission_bytes, &failure);
   if (!permit) {
     if (decline_out != nullptr) {
       decline_out->reason = VulkanSketchDeclineReason::memory_admission_denied;

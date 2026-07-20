@@ -10,6 +10,7 @@ module;
 #include <span>
 
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 extern "C" {
 #include "utils/expandeddatum.h"
 }
@@ -284,3 +285,59 @@ export inline Datum seq_hash_extended_impl(FunctionCallInfo fcinfo)
     PG_RETURN_INT64(static_cast<std::int64_t>(
         seq_hash_internal(fcinfo, seed)));
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cmp);
+PGDLLEXPORT Datum pg_compact_sequence_cmp(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_cmp_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_lt);
+PGDLLEXPORT Datum pg_compact_sequence_lt(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_lt_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_le);
+PGDLLEXPORT Datum pg_compact_sequence_le(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_le_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_eq);
+PGDLLEXPORT Datum pg_compact_sequence_eq(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_eq_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ne);
+PGDLLEXPORT Datum pg_compact_sequence_ne(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_ne_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ge);
+PGDLLEXPORT Datum pg_compact_sequence_ge(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_ge_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_gt);
+PGDLLEXPORT Datum pg_compact_sequence_gt(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_gt_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(seq_hash);
+PGDLLEXPORT Datum seq_hash(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_hash_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(seq_hash_extended);
+PGDLLEXPORT Datum seq_hash_extended(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_hash_extended_impl, fcinfo);
+}
+} // extern "C"

@@ -88,12 +88,14 @@ struct VulkanSubmissionTestSnapshot {
   std::uint64_t fence_drains = 0u;
   std::uint64_t delivered_faults = 0u;
   bool waiting_after_submit = false;
+  bool waiting_after_drain = false;
   bool cancellation_requested = false;
   bool upload_failure_latched = false;
 };
 
 void arm_vulkan_submission_test_seam(VulkanSubmissionTestFault fault) noexcept;
 void release_vulkan_submission_test_fence() noexcept;
+void release_vulkan_submission_test_delivery() noexcept;
 void reset_vulkan_submission_test_seam() noexcept;
 [[nodiscard]] VulkanSubmissionTestSnapshot
 vulkan_submission_test_snapshot() noexcept;
@@ -5521,7 +5523,9 @@ struct VulkanSubmissionTestState {
   std::atomic<std::uint8_t> fault{
       static_cast<std::uint8_t>(VulkanSubmissionTestFault::none)};
   std::atomic<std::uint8_t> release_gate{1u};
+  std::atomic<std::uint8_t> delivery_gate{1u};
   std::atomic<std::uint8_t> waiting_after_submit{0u};
+  std::atomic<std::uint8_t> waiting_after_drain{0u};
   std::atomic<std::uint8_t> cancellation_requested{0u};
   std::atomic<std::uint8_t> upload_failure_latched{0u};
   std::atomic<std::uint64_t> upload_latches{0u};
@@ -5574,13 +5578,28 @@ delay_vulkan_submission_test_after_submit() noexcept {
   return fault;
 }
 
+void delay_vulkan_submission_test_after_drain(
+    VulkanSubmissionTestFault fault) noexcept {
+  if (fault == VulkanSubmissionTestFault::none) {
+    return;
+  }
+  auto &state = g_vulkan_submission_test_state;
+  state.fence_drains.fetch_add(1u, std::memory_order_release);
+  state.waiting_after_drain.store(1u, std::memory_order_release);
+  std::uint8_t released =
+      state.delivery_gate.load(std::memory_order_acquire);
+  while (released == 0u) {
+    state.delivery_gate.wait(0u, std::memory_order_acquire);
+    released = state.delivery_gate.load(std::memory_order_acquire);
+  }
+  state.waiting_after_drain.store(0u, std::memory_order_release);
+}
+
 void deliver_vulkan_submission_test_fault_after_drain(
     VulkanSubmissionTestFault fault) {
   if (fault == VulkanSubmissionTestFault::none) {
     return;
   }
-  g_vulkan_submission_test_state.fence_drains.fetch_add(
-      1u, std::memory_order_release);
   g_vulkan_submission_test_state.delivered_faults.fetch_add(
       1u, std::memory_order_release);
   g_vulkan_submission_test_state.fault.store(
@@ -5761,7 +5780,9 @@ runtime_metal_archive_configuration_snapshot() {
 void arm_vulkan_submission_test_seam(VulkanSubmissionTestFault fault) noexcept {
   auto &state = g_vulkan_submission_test_state;
   state.release_gate.store(0u, std::memory_order_relaxed);
+  state.delivery_gate.store(0u, std::memory_order_relaxed);
   state.waiting_after_submit.store(0u, std::memory_order_relaxed);
+  state.waiting_after_drain.store(0u, std::memory_order_relaxed);
   state.cancellation_requested.store(0u, std::memory_order_relaxed);
   state.upload_failure_latched.store(0u, std::memory_order_relaxed);
   state.upload_latches.store(0u, std::memory_order_relaxed);
@@ -5782,13 +5803,22 @@ void release_vulkan_submission_test_fence() noexcept {
   state.release_gate.notify_all();
 }
 
+void release_vulkan_submission_test_delivery() noexcept {
+  auto &state = g_vulkan_submission_test_state;
+  state.delivery_gate.store(1u, std::memory_order_release);
+  state.delivery_gate.notify_all();
+}
+
 void reset_vulkan_submission_test_seam() noexcept {
   auto &state = g_vulkan_submission_test_state;
   state.fault.store(static_cast<std::uint8_t>(VulkanSubmissionTestFault::none),
                     std::memory_order_release);
   state.release_gate.store(1u, std::memory_order_release);
   state.release_gate.notify_all();
+  state.delivery_gate.store(1u, std::memory_order_release);
+  state.delivery_gate.notify_all();
   state.waiting_after_submit.store(0u, std::memory_order_relaxed);
+  state.waiting_after_drain.store(0u, std::memory_order_relaxed);
   state.cancellation_requested.store(0u, std::memory_order_relaxed);
   state.upload_failure_latched.store(0u, std::memory_order_relaxed);
   state.upload_latches.store(0u, std::memory_order_relaxed);
@@ -5809,6 +5839,8 @@ vulkan_submission_test_snapshot() noexcept {
           state.delivered_faults.load(std::memory_order_acquire),
       .waiting_after_submit =
           state.waiting_after_submit.load(std::memory_order_acquire) != 0u,
+      .waiting_after_drain =
+          state.waiting_after_drain.load(std::memory_order_acquire) != 0u,
       .cancellation_requested =
           state.cancellation_requested.load(std::memory_order_acquire) != 0u,
       .upload_failure_latched =
@@ -12537,9 +12569,10 @@ RuntimeSketchResult Runtime::run_phase_c_sketch_roundtrip(
 #endif
     check_vk(vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX),
              "vkWaitForFences(pc_sketch)");
-    require_immutable_metal_policy_live("sketch operation completion");
     check_vk(vkResetFences(device_, 1, &fence_), "vkResetFences(pc_sketch)");
+    require_immutable_metal_policy_live("sketch operation completion");
 #ifdef BIOSEQ_TEST_INDEXES
+    delay_vulkan_submission_test_after_drain(submission_test_fault);
     deliver_vulkan_submission_test_fault_after_drain(submission_test_fault);
 #endif
 

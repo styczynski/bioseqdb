@@ -5,6 +5,9 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <libpq-fe.h>
+#include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -52,6 +55,49 @@ void require_source_resources_balanced(connection_test_context& ctx) {
     REQUIRE(source_counter(ctx, "leases_acquired")
             == source_counter(ctx, "leases_released"));
     require_source_quiescent(ctx);
+}
+
+[[nodiscard]] std::optional<unsigned long long>
+source_boundary_actual_calls(
+        std::span<const std::string> plan,
+        std::string_view mechanism,
+        std::string_view reason) {
+    bool mechanism_matches = false;
+    bool reason_matches = false;
+    for (const auto& line : plan) {
+        if (line.find("var_") != std::string::npos
+            && line.find(" = ") != std::string::npos) {
+            mechanism_matches = false;
+            reason_matches = false;
+        }
+        if (line.find(fmt::format("Mechanism: {}", mechanism))
+            != std::string::npos) {
+            mechanism_matches = true;
+        }
+        if (line.find(fmt::format("Reason: {}", reason))
+            != std::string::npos) {
+            reason_matches = true;
+        }
+        if (mechanism_matches && reason_matches) {
+            const auto marker = line.find("Actual Calls:");
+            if (marker != std::string::npos) {
+                return std::stoull(line.substr(
+                    marker + std::string_view("Actual Calls:").size()));
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+[[nodiscard]] std::optional<std::size_t> plan_line_index(
+        std::span<const std::string> plan,
+        std::string_view needle) {
+    for (std::size_t index = 0; index < plan.size(); ++index) {
+        if (plan[index].find(needle) != std::string::npos) {
+            return index;
+        }
+    }
+    return std::nullopt;
 }
 
 struct copy_out_result {
@@ -692,6 +738,30 @@ TEST_CASE("DOC0377 materialized spill aggregate COPY generated and parallel rout
             "FROM doc0377_source_boundaries;";
         const auto parallel_plan = explain_text<false>(ctx, parallel_sql);
         REQUIRE(plan_contains(parallel_plan, "Gather"));
+
+        /* Leader participation is disabled, so these actual counters can
+         * reach the leader only through SliceProject's DSM worker slots.  A
+         * full 96-call aggregate is process-shared evidence that the workers
+         * collectively executed every source-backed slice and conversion. */
+        constexpr auto worker_materialization_sql =
+            "SELECT bioseq.to_text(s[0:64]) "
+            "FROM doc0377_source_boundaries;";
+        reset_source_counters(ctx);
+        const auto worker_plan = explain_text<true>(
+            ctx, worker_materialization_sql);
+        REQUIRE(plan_contains(worker_plan, "Gather"));
+        REQUIRE(plan_contains(
+            worker_plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE(plan_line_index(worker_plan, "Gather")
+                < plan_line_index(
+                    worker_plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE(source_boundary_actual_calls(
+            worker_plan, "text", "SQL conversion") == 96u);
+        REQUIRE_FALSE(plan_contains(worker_plan, "Incomplete Workers"));
+        REQUIRE_FALSE(plan_contains(worker_plan, "Counter Overflow: true"));
+        REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+        require_source_resources_balanced(ctx);
+
         reset_source_counters(ctx);
         REQUIRE(query_scalar_int(ctx, parallel_sql) == 6144);
         REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
@@ -710,6 +780,8 @@ TEST_CASE("DOC0377 production source routes never invoke PostgreSQL off backend"
         "SET bioseq.index_async_persist=off;"
         "SET bioseq.recompute_async_persist=off;"
         "SET bioseq.aligner.minimizer_algorithm='scalar';"
+        "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm='ksw2';"
         "SET bioseq.aligner.vulkan_enabled=off;"
         "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
         "CREATE TABLE doc0377_source_routes "
@@ -756,10 +828,49 @@ TEST_CASE("DOC0377 production source routes never invoke PostgreSQL off backend"
     REQUIRE(matches == std::vector<long long>{1});
     REQUIRE(source_counter(ctx, "domains_created") >= 1);
     REQUIRE(source_counter(ctx, "scanner_entries_created") >= 1);
+    REQUIRE(source_counter(ctx, "facade_source_stream_callbacks") > 0);
+
+    /* The source callbacks above are backend-thread-only.  This immutable
+     * execution snapshot proves the selected scalar tuple completed without
+     * fallback or unattested work while the task-parallel pool exposed at
+     * least two CPU slots.  The cross-thread return-value probe below is the
+     * authoritative worker-thread tripwire evidence; the backend-local TLS
+     * counter is not used as a substitute for it. */
+    const auto task_evidence = query_one(ctx,
+        "SELECT effective_cpu_workers::text, requested_backend, "
+        "       actual_backend, completed::text, partial::text, "
+        "       fully_drained::text, attempted_alignment_jobs::text, "
+        "       fully_attested_alignment_jobs::text, "
+        "       unattested_alignment_jobs::text, eligible_jobs::text, "
+        "       executed_scalar_cpu_jobs::text, "
+        "       executed_simd_cpu_jobs::text, "
+        "       executed_vulkan_gpu_jobs::text, fallback_jobs::text, "
+        "       backend_declines::text, backend_fallbacks::text "
+        "FROM bioseq.last_alignment_execution_stats() "
+        "WHERE stage='query_sketch';");
+    REQUIRE(task_evidence.size() == 16u);
+    for (const auto& value : task_evidence) REQUIRE(value.has_value());
+    REQUIRE(std::stoll(*task_evidence[0]) >= 2);
+    REQUIRE(*task_evidence[1] == "scalar_cpu");
+    REQUIRE(*task_evidence[2] == "scalar_cpu");
+    REQUIRE(*task_evidence[3] == "true");
+    REQUIRE(*task_evidence[4] == "false");
+    REQUIRE(*task_evidence[5] == "true");
+    REQUIRE(std::stoll(*task_evidence[6]) > 0);
+    REQUIRE(*task_evidence[7] == *task_evidence[6]);
+    REQUIRE(*task_evidence[8] == "0");
+    REQUIRE(std::stoll(*task_evidence[9]) > 0);
+    REQUIRE(*task_evidence[10] == *task_evidence[9]);
+    for (const std::size_t zero : {11u, 12u, 13u, 14u, 15u}) {
+        REQUIRE(*task_evidence[zero] == "0");
+    }
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 
     reset_source_counters(ctx);
+    /* The SQL boolean carries the status written by the spawned std::thread
+     * after join.  The TLS counter increment is deliberately replayed on the
+     * backend thread and remains only a local diagnostic assertion. */
     REQUIRE(query_scalar(
         ctx, "SELECT bioseq_internal.sequence_source_wrong_thread_probe();")
         == "t");

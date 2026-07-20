@@ -45,7 +45,7 @@ import bioseq.alignment;
 import bioseq.alignment.utils;
 import bioseq.common.context;
 import bioseq.storage.scanner;   // DOC0263 — sequence_scanner_none default
-import bioseq.storage.lazy;      // DOC0263 — lazy_compact_sequence<R, Scanner>
+import bioseq.storage.lazy;      // DOC0263 — canonical erased lazy view
 
 export {
 

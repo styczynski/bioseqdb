@@ -4086,10 +4086,44 @@ TEST_CASE("DOC0377 PG index streaming poisons contiguous access and resident "
            "SET bioseq.scheduler.max_concurrency=2;"
            "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
            "SELECT bioseq_internal.reset_sequence_source_counters();");
+  const long long mps_rows_before = index_table_row_count(
+      ctx, "minimizers_per_sequence", target_table);
+  const long long reserved_before = query_scalar_int(
+      ctx, "SELECT index_memory_reserved_bytes "
+           "FROM bioseq.scheduler_stats();");
+  exec_sql(ctx, "SELECT bioseq_internal.arm_sequence_source_failure("
+                " 'facade_materialization');");
+  const auto materialization_error = sql_error(
+      ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                       " 'minimizers_per_sequence');",
+                       target_table));
+  exec_sql(ctx, "SELECT bioseq_internal.disarm_sequence_source_failure();");
+
+  REQUIRE(materialization_error.sqlstate == "XX000");
+  REQUIRE(materialization_error.contains(
+      "poisoned PostgreSQL sequence facade materialization"));
+  REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+  REQUIRE(index_table_row_count(
+              ctx, "minimizers_per_sequence", target_table) ==
+          mps_rows_before);
+  REQUIRE(query_scalar_int(
+              ctx, "SELECT index_memory_reserved_bytes "
+                   "FROM bioseq.scheduler_stats();") == reserved_before);
+  REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") ==
+          1);
+  REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") ==
+          0);
+  REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 1);
+
+  exec_sql(ctx, "SELECT bioseq_internal.reset_sequence_source_counters();");
   REQUIRE(query_scalar_int(
               ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
                                " 'minimizers_per_sequence');",
                                target_table)) == 1);
+  REQUIRE(index_table_row_count(
+              ctx, "minimizers_per_sequence", target_table) >
+          mps_rows_before);
   REQUIRE(facade_source_counter(ctx, "facade_source_stream_callbacks") > 0);
   REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 1);
   REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") == 1);

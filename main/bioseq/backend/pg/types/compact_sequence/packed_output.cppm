@@ -14,6 +14,7 @@ module;
 #include <utility>
 
 #include "headers/pg_compat.h"
+#include "fmgr_boundary.h"
 extern "C" {
 #include "storage/shmem.h"
 #include "utils/datum.h"
@@ -28,6 +29,7 @@ import :trace;
 import :tree_types;
 import :tree_ops;
 import :view_session;
+import bioseq.pg_utils;
 import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy;
@@ -292,8 +294,6 @@ export inline void pg_sequence_flatten_into(
     Size allocated_size)
 {
     auto& value = *reinterpret_cast<pg_sequence_expanded*>(header);
-    const std::uint64_t trace_started =
-        begin_slice_materialization_timing(value.trace);
     const Size expected = expanded_flat_size(value);
     if (allocated_size != expected) {
         ereport(ERROR,
@@ -318,13 +318,16 @@ export inline void pg_sequence_flatten_into(
                     (errcode(ERRCODE_DATA_CORRUPTED),
                      errmsg("unbound bioseq tree cannot be flattened")));
         }
-        record_slice_materialization_success(
+        const auto observer = make_slice_payload_allocation_observer_noexcept(
             value.trace, value.producer_value_id,
             materialization_mechanism::packed_full,
-            materialization_reason::executor_copy,
+            materialization_reason::executor_copy);
+        (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+            std::addressof(observer),
+            bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
             value.bp_length, value.bp_length,
-            static_cast<std::uint64_t>(allocated_size), false,
-            static_cast<std::uint64_t>(allocated_size), trace_started);
+            static_cast<std::uint64_t>(allocated_size),
+            static_cast<std::uint64_t>(allocated_size));
         return;
     }
 
@@ -335,7 +338,10 @@ export inline void pg_sequence_flatten_into(
         .alphabet_bound = true,
         .bp_length = value.bp_length,
     };
-    std::exception_ptr callback_failure;
+    ErrorData* callback_exact_error = nullptr;
+    bool callback_standard_error = false;
+    bool callback_unknown_error = false;
+    char callback_detail[512] = "std::exception without detail";
     pg_sequence_read_session* volatile session = nullptr;
     PG_TRY();
     {
@@ -355,8 +361,20 @@ export inline void pg_sequence_flatten_into(
                         destination, owner->view(), value.bp_length);
                 });
             finish_pg_sequence_read_session(local_session, true);
+        } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+            callback_exact_error = error.release_error_data();
+        } catch (std::exception const& error) {
+            strlcpy(callback_detail,
+                    error.what() == nullptr
+                        ? "std::exception without detail"
+                        : error.what(),
+                    sizeof(callback_detail));
+            callback_standard_error = true;
         } catch (...) {
-            callback_failure = std::current_exception();
+            callback_unknown_error = true;
+        }
+        if (callback_exact_error != nullptr || callback_standard_error
+            || callback_unknown_error) {
             abort_pg_sequence_read_session_noexcept(local_session);
         }
         session = nullptr;
@@ -369,20 +387,30 @@ export inline void pg_sequence_flatten_into(
         PG_RE_THROW();
     }
     PG_END_TRY();
-    if (callback_failure != nullptr) {
-        rethrow_pg_sequence_cpp_at_c_boundary(
-            std::move(callback_failure));
+    if (callback_exact_error != nullptr) {
+        ReThrowError(callback_exact_error);
     }
-    record_slice_materialization_success(
+    if (callback_standard_error || callback_unknown_error) {
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("bioseq sequence callback raised a C++ exception"),
+                 errdetail("%s", callback_unknown_error
+                         ? "unknown non-standard C++ exception"
+                         : callback_detail)));
+    }
+    const auto observer = make_slice_payload_allocation_observer_noexcept(
         value.trace, value.producer_value_id,
         materialization_mechanism::packed_full,
-        materialization_reason::executor_copy,
+        materialization_reason::executor_copy);
+    (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+        std::addressof(observer),
+        bioseq::storage::sequence_payload_allocation_kind::flat_sequence,
         value.bp_length, value.bp_length,
-        static_cast<std::uint64_t>(allocated_size), false,
-        static_cast<std::uint64_t>(allocated_size), trace_started);
+        static_cast<std::uint64_t>(allocated_size),
+        static_cast<std::uint64_t>(allocated_size));
 }
 
-export [[nodiscard]] inline ExpandedObjectMethods const&
+export [[nodiscard, gnu::used, gnu::noinline]] ExpandedObjectMethods const&
 pg_sequence_expanded_methods() noexcept
 {
     static const ExpandedObjectMethods methods{
@@ -515,20 +543,21 @@ namespace {
         ? static_cast<std::size_t>(descriptor.bp_length)
         : static_cast<std::size_t>(VARSIZE(&flat)) - pgseq_t::header_bytes();
     const std::size_t allocation_bytes = std::max<std::size_t>(count, 1u);
-    const std::uint64_t trace_started =
-        begin_slice_materialization_timing(trace);
     auto* bytes = allocate_piece_literal_storage(
         arena, allocation_bytes);
     if (count != 0u) {
         std::memcpy(bytes, flat.data, count);
     }
-    record_slice_materialization_success(
+    const auto observer = make_slice_payload_allocation_observer_noexcept(
         trace, producer_value_id,
         materialization_mechanism::backing_copy,
-        materialization_reason::executor_copy,
+        materialization_reason::executor_copy);
+    (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+        std::addressof(observer),
+        bioseq::storage::sequence_payload_allocation_kind::backing_copy,
         descriptor.bp_length, descriptor.bp_length,
-        static_cast<std::uint64_t>(allocation_bytes), false,
-        static_cast<std::uint64_t>(allocation_bytes), trace_started);
+        static_cast<std::uint64_t>(allocation_bytes),
+        static_cast<std::uint64_t>(allocation_bytes));
     return {
         .storage_arena = std::addressof(arena),
         .bytes = bytes,
@@ -680,13 +709,55 @@ export [[nodiscard]] inline std::uint64_t checked_add_bp_lengths(
     std::uint64_t left,
     std::uint64_t right)
 {
-    if (right > static_cast<std::uint64_t>(INT64_MAX) - left) {
+    constexpr auto max_logical_length =
+        static_cast<std::uint64_t>(INT64_MAX);
+    if (left > max_logical_length || right > max_logical_length
+        || right > max_logical_length - left) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq concatenation exceeds bigint logical length")));
     }
     return left + right;
 }
+
+namespace {
+
+[[nodiscard]] inline bool concat_length_add_raises_program_limit(
+    std::uint64_t left, std::uint64_t right) {
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)checked_add_bp_lengths(left, right);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    ErrorData *error = CopyErrorData();
+    matched = error != nullptr
+        && error->sqlerrcode == ERRCODE_PROGRAM_LIMIT_EXCEEDED;
+    FlushErrorState();
+    if (error != nullptr) {
+      FreeErrorData(error);
+    }
+  }
+  PG_END_TRY();
+  return matched;
+}
+
+[[nodiscard]] inline bool run_concat_length_guardrail_matrix() {
+  constexpr auto max_logical_length =
+      static_cast<std::uint64_t>(INT64_MAX);
+  return checked_add_bp_lengths(max_logical_length, 0u)
+             == max_logical_length
+      && checked_add_bp_lengths(max_logical_length - 1u, 1u)
+             == max_logical_length
+      && concat_length_add_raises_program_limit(max_logical_length, 1u)
+      && concat_length_add_raises_program_limit(UINT64_MAX, 0u)
+      && concat_length_add_raises_program_limit(0u, UINT64_MAX);
+}
+
+} // namespace
 
 export [[nodiscard]] inline compact_sequence_stdc_type_params
 resolve_concat_type(
@@ -724,7 +795,7 @@ resolve_concat_type(
     };
 }
 
-export [[nodiscard]] inline Datum concat_pg_sequences(
+export [[nodiscard]] Datum concat_pg_sequences(
     Datum left_datum,
     Datum right_datum)
 {
@@ -750,7 +821,7 @@ export [[nodiscard]] inline Datum concat_pg_sequences(
     return pg_sequence_rw_datum(left.value);
 }
 
-export [[nodiscard]] inline Datum slice_pg_sequence(
+export [[nodiscard]] Datum slice_pg_sequence(
     Datum input,
     std::uint64_t from,
     std::uint64_t to)
@@ -770,7 +841,7 @@ export [[nodiscard]] inline Datum slice_pg_sequence(
     return pg_sequence_rw_datum(acquired.value);
 }
 
-export [[nodiscard]] inline Datum transform_pg_sequence(
+export [[nodiscard]] Datum transform_pg_sequence(
     Datum input,
     bioseq::storage::sequence_transform transform)
 {
@@ -792,6 +863,34 @@ export [[nodiscard]] inline Datum transform_pg_sequence(
             return next;
         });
     return pg_sequence_rw_datum(acquired.value);
+}
+
+export [[nodiscard]] bool alphabet_has_complete_complement(
+    std::uint8_t alphabet_code)
+{
+    bool complete = true;
+    pgseq_supported_alphabets::dispatch_alphabet_by_code(
+        alphabet_code,
+        [alphabet_code, &complete]<class Alphabet>() {
+            for (std::uint16_t rank = 0u; rank <= UINT8_MAX; ++rank) {
+                char original = '\0';
+                if (!pgseq_symbol_for_rank(
+                        alphabet_code, static_cast<std::uint8_t>(rank),
+                        original)) {
+                    continue;
+                }
+                const auto complemented =
+                    bioseq::storage::lazy_rank_stream_traits<Alphabet>::
+                        letter_complement(static_cast<std::uint8_t>(rank));
+                char symbol = '\0';
+                if (!pgseq_symbol_for_rank(
+                        alphabet_code, complemented, symbol)) {
+                    complete = false;
+                    return;
+                }
+            }
+        });
+    return complete;
 }
 
 /* Table-AM promotion entrypoint.  The caller has already acquired a retained
@@ -941,6 +1040,8 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
   MemoryContext volatile copy_parent = nullptr;
   bool volatile valid = false;
   const std::uint64_t arena_baseline = piece_tree_live_arena_count_noexcept();
+  const bool concat_length_guardrail_matrix =
+      run_concat_length_guardrail_matrix();
   PG_TRY();
   {
     transfer_input = AllocSetContextCreate(saved, "bioseq EOH transfer input",
@@ -1023,7 +1124,8 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
         copied_flat->storage_unit_byte_width == pgseq_unbound_width_tag &&
         copied_flat->bp_size == transferred_text.size() &&
         std::memcmp(copied_flat->data, "TGA", transferred_text.size()) == 0;
-    valid = reparented && transfer_survived && copy_survived;
+    valid = concat_length_guardrail_matrix && reparented
+        && transfer_survived && copy_survived;
 
     MemoryContextDelete(const_cast<MemoryContext>(copy_input));
     copy_input = nullptr;
@@ -1083,3 +1185,23 @@ attach_slice_trace_provenance(Datum expanded, slice_trace_attachment *trace,
   value->producer_value_id = trace == nullptr ? 0u : producer_value_id;
   return true;
 }
+
+extern "C" {
+CXX_PG_FUNCTION_INFO_V1(synthetic_lazy_sequence);
+PGDLLEXPORT Datum synthetic_lazy_sequence(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&synthetic_lazy_sequence_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(sequence_piece_count);
+PGDLLEXPORT Datum sequence_piece_count(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&sequence_piece_count_impl, fcinfo);
+}
+
+CXX_PG_FUNCTION_INFO_V1(expanded_ownership_self_test);
+PGDLLEXPORT Datum expanded_ownership_self_test(PG_FUNCTION_ARGS)
+{
+    return bioseq_invoke_pg_sequence_fmgr_boundary(&expanded_ownership_self_test_impl, fcinfo);
+}
+} // extern "C"

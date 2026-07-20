@@ -29,7 +29,6 @@ import :flat_abi;
 import :source_abi;
 import :tree_types;
 import :tree_ops;
-import bioseq.pg_utils;
 import bioseq.storage.bucket_math;
 import bioseq.storage.coordinates;
 import bioseq.storage.lazy;
@@ -180,7 +179,7 @@ get_pg_sequence_expanded_rw(Datum datum)
     return const_cast<pg_sequence_expanded*>(get_pg_sequence_expanded_ro(datum));
 }
 
-export [[nodiscard]] inline pg_sequence_descriptor
+export [[nodiscard]] pg_sequence_descriptor
 classify_and_describe_sequence(Datum detoasted_or_expanded)
 {
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(detoasted_or_expanded))) {
@@ -286,7 +285,7 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
 /* Metadata-only inspection for length, identical self-casts, and locating one
  * packed unit.  TOAST fetches only the fixed payload header; it never reads a
  * whole sequence merely to learn its logical shape. */
-export [[nodiscard]] inline pg_sequence_descriptor
+export [[nodiscard]] pg_sequence_descriptor
 classify_and_describe_sequence_header(Datum input)
 {
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
@@ -771,54 +770,6 @@ inline constexpr bool is_borrowed_view_result_v =
     std::ranges::view<std::remove_cvref_t<T>>
     || std::input_or_output_iterator<std::remove_cvref_t<T>>;
 
-/* Translate a C++ failure only after every inner PG_TRY scope has restored
- * PostgreSQL's exception stack and every callback-scoped owner has unwound.
- * PostgresErrorAsCpp carries the exact ErrorData (including SQLSTATE and
- * context); do not replace it with a generic C++ error. */
-export [[noreturn]] inline void rethrow_pg_sequence_cpp_at_c_boundary(
-    std::exception_ptr failure)
-{
-    ErrorData* exact_error = nullptr;
-    bool standard_error = false;
-    bool unknown_error = false;
-    char detail[512] = "std::exception without detail";
-    try {
-        std::rethrow_exception(std::move(failure));
-    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
-        exact_error = error.release_error_data();
-    } catch (std::exception const& error) {
-        strlcpy(detail,
-                error.what() == nullptr
-                    ? "std::exception without detail"
-                    : error.what(),
-                sizeof(detail));
-        standard_error = true;
-    } catch (...) {
-        unknown_error = true;
-    }
-    if (exact_error != nullptr) {
-        ReThrowError(exact_error);
-    }
-    ereport(ERROR,
-            (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("bioseq sequence callback raised a C++ exception"),
-             errdetail("%s", unknown_error
-                     ? "unknown non-standard C++ exception"
-                     : (standard_error ? detail
-                                       : "empty C++ exception state"))));
-    pg_unreachable();
-}
-
-export template<class Invoke>
-Datum invoke_pg_sequence_fmgr_boundary(Invoke&& invoke)
-{
-    try {
-        return std::forward<Invoke>(invoke)();
-    } catch (...) {
-        rethrow_pg_sequence_cpp_at_c_boundary(std::current_exception());
-    }
-}
-
 export template <typename Result, typename Fn>
 Result with_pg_sequence_view(
     FunctionCallInfo fcinfo,
@@ -984,7 +935,7 @@ export struct pg_sequence_rank_value {
 /* One-symbol scalar path used by the subscript handler.  It deliberately owns
  * a normal source read session and asks the facade for exactly one rank, so an
  * element lookup never flattens an EOH or reads a whole source fragment. */
-export [[nodiscard]] inline pg_sequence_rank_value
+export [[nodiscard]] pg_sequence_rank_value
 read_pg_sequence_rank_at(Datum input, std::uint64_t index)
 {
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {

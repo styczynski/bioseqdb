@@ -46,12 +46,14 @@ std::vector<std::string> explain_with_options(
     return lines;
 }
 
-std::optional<unsigned long long> boundary_actual_calls(
+std::optional<unsigned long long> boundary_actual_metric(
     std::span<const std::string> plan,
     std::string_view mechanism,
-    std::string_view reason) {
+    std::string_view reason,
+    std::string_view property) {
     bool mechanism_matches = false;
     bool reason_matches = false;
+    const auto property_marker = fmt::format("{}:", property);
     for (const auto& line : plan) {
         if (line.find("var_") != std::string::npos
             && line.find(" = ") != std::string::npos) {
@@ -67,14 +69,30 @@ std::optional<unsigned long long> boundary_actual_calls(
             reason_matches = true;
         }
         if (mechanism_matches && reason_matches) {
-            const auto marker = line.find("Actual Calls:");
+            const auto marker = line.find(property_marker);
             if (marker != std::string::npos) {
                 return std::stoull(line.substr(
-                    marker + std::string_view("Actual Calls:").size()));
+                    marker + property_marker.size()));
             }
         }
     }
     return std::nullopt;
+}
+
+std::optional<unsigned long long> boundary_actual_calls(
+    std::span<const std::string> plan,
+    std::string_view mechanism,
+    std::string_view reason) {
+    return boundary_actual_metric(
+        plan, mechanism, reason, "Actual Calls");
+}
+
+std::optional<unsigned long long> boundary_actual_bytes(
+    std::span<const std::string> plan,
+    std::string_view mechanism,
+    std::string_view reason) {
+    return boundary_actual_metric(
+        plan, mechanism, reason, "Actual Bytes");
 }
 
 std::vector<std::string> planned_slice_signature(
@@ -98,6 +116,62 @@ std::vector<std::string> planned_slice_signature(
             ? std::string{} : line.substr(first));
     }
     return signature;
+}
+
+struct materialization_signature {
+    std::string variable;
+    std::string mechanism;
+    std::string reason;
+    std::string depends_on;
+    std::optional<unsigned long long> producer_value;
+};
+
+std::vector<materialization_signature> materialization_signatures(
+    std::span<const std::string> plan) {
+    std::vector<materialization_signature> result;
+    materialization_signature current;
+    auto property = [](const std::string& line, std::string_view name)
+        -> std::optional<std::string> {
+        const auto marker = fmt::format("{}:", name);
+        const auto position = line.find(marker);
+        if (position == std::string::npos) {
+            return std::nullopt;
+        }
+        const auto value_start = line.find_first_not_of(
+            " \t", position + marker.size());
+        return value_start == std::string::npos
+            ? std::string{} : line.substr(value_start);
+    };
+    for (const auto& line : plan) {
+        const auto variable_start = line.find("var_");
+        const auto expression_separator = line.find(" = ");
+        if (variable_start != std::string::npos
+            && expression_separator != std::string::npos) {
+            if (!current.variable.empty()) {
+                result.push_back(std::move(current));
+                current = {};
+            }
+            current.variable = line.substr(
+                variable_start, expression_separator - variable_start);
+            continue;
+        }
+        if (current.variable.empty()) {
+            continue;
+        }
+        if (auto value = property(line, "Mechanism")) {
+            current.mechanism = std::move(*value);
+        } else if (auto value = property(line, "Reason")) {
+            current.reason = std::move(*value);
+        } else if (auto value = property(line, "Depends On")) {
+            current.depends_on = std::move(*value);
+        } else if (auto value = property(line, "Producer Value")) {
+            current.producer_value = std::stoull(*value);
+        }
+    }
+    if (!current.variable.empty()) {
+        result.push_back(std::move(current));
+    }
+    return result;
 }
 
 }  // namespace
@@ -234,17 +308,42 @@ TEST_CASE("DOC0377 EXPLAIN SERIALIZE records only the observed client boundary",
         ctx, "ANALYZE, TIMING OFF, COSTS OFF", sql);
     REQUIRE(boundary_actual_calls(none, "text", "client output") == 0u);
     REQUIRE(boundary_actual_calls(none, "binary", "client output") == 0u);
+    REQUIRE(boundary_actual_bytes(none, "text", "client output") == 0u);
+    REQUIRE(boundary_actual_bytes(none, "binary", "client output") == 0u);
     REQUIRE_FALSE(plan_contains(none, "Actual Time:"));
 
     const auto text = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE TEXT", sql);
     REQUIRE(boundary_actual_calls(text, "text", "client output") == 1u);
+    REQUIRE(boundary_actual_bytes(text, "text", "client output") == 5u);
     REQUIRE(boundary_actual_calls(text, "binary", "client output") == 0u);
+    REQUIRE(boundary_actual_bytes(text, "binary", "client output") == 0u);
 
     const auto binary = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE BINARY", sql);
     REQUIRE(boundary_actual_calls(binary, "text", "client output") == 0u);
+    REQUIRE(boundary_actual_bytes(binary, "text", "client output") == 0u);
     REQUIRE(boundary_actual_calls(binary, "binary", "client output") == 1u);
+    REQUIRE(boundary_actual_bytes(binary, "binary", "client output") == 20u);
+}
+
+TEST_CASE("DOC0377 SQL materialization calls and bytes match allocations",
+          "[explain][slice][materialization][accounting]") {
+    auto ctx = fresh_context({kTable});
+    seed_small_bioseq_column(ctx, kTable);
+
+    const auto plan = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF",
+        fmt::format("SELECT bioseq.to_text(seq0[0:4]) FROM {};", kTable));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(boundary_actual_calls(plan, "text", "SQL conversion") == 3u);
+    REQUIRE(boundary_actual_metric(
+        plan, "text", "SQL conversion", "Actual Input Symbols") == 12u);
+    REQUIRE(boundary_actual_metric(
+        plan, "text", "SQL conversion", "Actual Output Symbols") == 12u);
+    /* Three 4-symbol text varlenas: VARHDRSZ + 4 bytes each. */
+    REQUIRE(boundary_actual_bytes(plan, "text", "SQL conversion") == 24u);
+    REQUIRE_FALSE(plan_contains(plan, "Mechanism: packed full"));
 }
 
 TEST_CASE("DOC0377 rescans retain every materialization counter delta",
@@ -264,7 +363,9 @@ TEST_CASE("DOC0377 rescans retain every materialization counter delta",
             kTable));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(boundary_actual_calls(plan, "text", "client output") == 3u);
+    REQUIRE(boundary_actual_bytes(plan, "text", "client output") == 15u);
     REQUIRE(boundary_actual_calls(plan, "binary", "client output") == 0u);
+    REQUIRE(boundary_actual_bytes(plan, "binary", "client output") == 0u);
 }
 
 TEST_CASE("DOC0377 structured EXPLAIN preserves numeric counter fields",
@@ -279,6 +380,7 @@ TEST_CASE("DOC0377 structured EXPLAIN preserves numeric counter fields",
     REQUIRE(json.find("\"Reason\": \"client output\"")
             != std::string::npos);
     REQUIRE(json.find("\"Actual Calls\": 0") != std::string::npos);
+    REQUIRE(json.find("\"Actual Bytes\": 0") != std::string::npos);
     REQUIRE(json.find("\"Depends On\": []") != std::string::npos);
     REQUIRE(json.find("\"Counter Overflow\": false")
             != std::string::npos);
@@ -321,8 +423,28 @@ TEST_CASE("DOC0377 planned slice recipe is stable between plain and ANALYZE",
         ctx, "ANALYZE, VERBOSE, TIMING OFF, COSTS OFF", sql);
     REQUIRE(planned_slice_signature(plain)
             == planned_slice_signature(analyzed));
+    REQUIRE(plan_contains(plain, "var_1 ="));
+    REQUIRE(plan_contains(plain, "var_2 ="));
     REQUIRE(plan_contains(plain, "var_3 ="));
-    REQUIRE(plan_contains(plain, "Depends On: var_1"));
+    REQUIRE(plan_contains(plain, "Depends On: var_1, var_2"));
+    const auto boundaries = materialization_signatures(plain);
+    REQUIRE(boundaries.size() == 4u);
+    REQUIRE(boundaries[0].variable == "var_1");
+    REQUIRE(boundaries[0].mechanism == "text");
+    REQUIRE(boundaries[0].reason == "client output");
+    REQUIRE(boundaries[0].depends_on == "none");
+    REQUIRE(boundaries[0].producer_value == 2u);
+    REQUIRE(boundaries[1].variable == "var_2");
+    REQUIRE(boundaries[1].mechanism == "binary");
+    REQUIRE(boundaries[1].reason == "client output");
+    REQUIRE(boundaries[1].depends_on == "none");
+    REQUIRE(boundaries[1].producer_value == boundaries[0].producer_value);
+    REQUIRE(boundaries[2].variable == "var_3");
+    REQUIRE(boundaries[2].depends_on == "var_1, var_2");
+    REQUIRE(boundaries[2].producer_value == 3u);
+    REQUIRE(boundaries[3].variable == "var_4");
+    REQUIRE(boundaries[3].depends_on == "var_1, var_2");
+    REQUIRE(boundaries[3].producer_value == boundaries[2].producer_value);
     REQUIRE_FALSE(plan_contains(plain, "Actual Calls:"));
     REQUIRE(plan_contains(analyzed, "Actual Calls:"));
 }
@@ -343,7 +465,7 @@ TEST_CASE("DOC0377 LIMIT and skipped CASE arms retain zero boundary calls",
     const auto skipped = explain_with_options(
         ctx, "ANALYZE, TIMING OFF, COSTS OFF, SERIALIZE TEXT",
         fmt::format(
-            "SELECT CASE WHEN false THEN seq0[0:4] "
+            "SELECT CASE WHEN seq0 IS NULL THEN seq0[0:4] "
             "ELSE 'ACGT'::bioseq.seq('dna4',32) END FROM {} WHERE pk = 1;",
             kTable));
     REQUIRE(plan_contains(skipped, "Custom Scan (BioseqSliceProject)"));
@@ -361,7 +483,8 @@ TEST_CASE("DOC0377 lazy-only slice concat reverse has no allocation boundary",
     const auto plan = explain_with_options(
         ctx, "ANALYZE, VERBOSE, TIMING OFF, COSTS OFF",
         fmt::format(
-            "SELECT bioseq.len(bioseq.reverse(seq0[0:4]) || seq0[4:8]) "
+            "SELECT bioseq.len(bioseq.reverse(seq0[0:4]) "
+            "OPERATOR(bioseq.||) seq0[4:8]) "
             "FROM {};",
             kTable));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
@@ -436,6 +559,66 @@ TEST_CASE("DOC0377 transformed INNER mmsearch explains one per-row BatchJoin own
     REQUIRE(plan_contains(plan, "Bioseq Mmsearch Ownership: per-row recipe"));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+}
+
+TEST_CASE("DOC0377 mmsearch slice boundaries follow the selected minimizer route",
+          "[explain][slice][batch-join][materialization]") {
+    constexpr std::string_view target =
+        "test_explain_slice_join_materialization_target";
+    auto ctx = fresh_context({target});
+    seed_small_bioseq_column(ctx, target);
+    exec_sql(ctx, fmt::format(
+        "TRUNCATE {}; "
+        "INSERT INTO {} VALUES "
+        "(1, repeat('ACGT',64)::bioseq.seq('dna4',32));",
+        target, target));
+    exec_sql(ctx,
+        "CREATE TEMP TABLE test_explain_slice_join_materialization_query "
+        "(id int, seq bioseq.seq('dna4',32)); "
+        "INSERT INTO test_explain_slice_join_materialization_query VALUES "
+        "(1, repeat('ACGT',64)::bioseq.seq('dna4',32)); "
+        "SET max_parallel_workers_per_gather=0; "
+        "SET bioseq.read_sequence_index=off; "
+        "SET bioseq.aligner.vulkan_enabled=off;");
+
+    const auto sql = fmt::format(
+        "SELECT q.id, t.pk FROM {} AS t "
+        "JOIN test_explain_slice_join_materialization_query AS q "
+        "ON mmsearch("
+        "t.seq0[1:128] OPERATOR(bioseq.||) t.seq0[128:], "
+        "q.seq[1:128] OPERATOR(bioseq.||) q.seq[128:]);",
+        target);
+
+    {
+        guc_scope scalar(
+            ctx, "bioseq.aligner.minimizer_algorithm", "scalar");
+        const auto streaming = explain_with_options(
+            ctx, "ANALYZE, TIMING OFF, COSTS OFF", sql);
+        REQUIRE(plan_contains(streaming, "Custom Scan (BioseqBatchJoin)"));
+        REQUIRE(plan_contains(streaming, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE_FALSE(plan_contains(streaming, "Reason: mmsearch target"));
+        REQUIRE_FALSE(plan_contains(streaming, "Reason: mmsearch query"));
+        REQUIRE_FALSE(plan_contains(streaming, "Mechanism: packed region"));
+        REQUIRE_FALSE(plan_contains(streaming, "Mechanism: packed full"));
+    }
+
+    {
+        guc_scope admitted(
+            ctx, "bioseq.aligner.minimizer_algorithm", "two_stack_nthash");
+        const auto resident = explain_with_options(
+            ctx, "ANALYZE, TIMING OFF, COSTS OFF", sql);
+        REQUIRE(plan_contains(resident, "Custom Scan (BioseqBatchJoin)"));
+        REQUIRE(plan_contains(resident, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE_FALSE(plan_contains(resident, "Mechanism: packed full"));
+        REQUIRE(boundary_actual_calls(
+            resident, "packed region", "mmsearch target") == 1u);
+        REQUIRE(boundary_actual_bytes(
+            resident, "packed region", "mmsearch target") == 64u);
+        REQUIRE(boundary_actual_calls(
+            resident, "packed region", "mmsearch query") == 1u);
+        REQUIRE(boundary_actual_bytes(
+            resident, "packed region", "mmsearch query") == 64u);
+    }
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -515,7 +698,7 @@ TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
-TEST_CASE("DOC0377 incomplete DSM worker and async drain render exact evidence",
+TEST_CASE("DOC0377 incomplete DSM work is reported but never counted",
           "[explain][slice][dsm][incomplete]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
@@ -545,20 +728,28 @@ TEST_CASE("DOC0377 incomplete DSM worker and async drain render exact evidence",
         require_dsm_fixture_property(
             plan, format, "DSM Fixture Checks", "1");
         require_dsm_fixture_property(
-            plan, format, "DSM Fixture Slot Headers Read", "3");
+            plan, format, "DSM Fixture Slot Headers Read", "4");
         require_dsm_fixture_property(
-            plan, format, "DSM Fixture Counter Records Read", "4");
+            plan, format, "DSM Fixture Counter Records Read", "2");
         require_dsm_fixture_property(
             plan, format, "DSM Async Cleanup Callbacks", "3");
         require_dsm_fixture_property(
-            plan, format, "Incomplete Workers", "1");
+            plan, format, "Incomplete Workers", "2");
         require_dsm_fixture_property(
             plan, format, "Counter Overflow", "false");
+        require_dsm_fixture_property(
+            plan, format, "Actual Calls", "3");
+        require_dsm_fixture_property(
+            plan, format, "Actual Bytes", "30");
         if (format == dsm_explain_format::text) {
             REQUIRE(boundary_actual_calls(
-                plan, "text", "client output") == 5u);
+                plan, "text", "client output") == 3u);
+            REQUIRE(boundary_actual_bytes(
+                plan, "text", "client output") == 30u);
             REQUIRE(boundary_actual_calls(
-                plan, "binary", "client output") == 5u);
+                plan, "binary", "client output") == 3u);
+            REQUIRE(boundary_actual_bytes(
+                plan, "binary", "client output") == 30u);
         }
     }
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);

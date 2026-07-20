@@ -46,6 +46,7 @@ list(REMOVE_ITEM SRC_FILES
   ${BIOSEQ_GPU_METAL_ARCHIVE_SRC}
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe_helper.cpp
   ${CMAKE_CURRENT_LIST_DIR}/backend/gpu/metal_archive_probe.cpp)
+
 file(GLOB_RECURSE SRC_MOD_FILES CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_LIST_DIR}/backend/*.cppm
   ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cppm
@@ -136,8 +137,13 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
   endif()
   file(STRINGS "${_bioseq_lazy_source}" _bioseq_lazy_source_lines)
   foreach(_bioseq_lazy_source_line IN LISTS _bioseq_lazy_source_lines)
-    string(REGEX REPLACE "//.*$" "" _bioseq_lazy_code_line
-      "${_bioseq_lazy_source_line}")
+    set(_bioseq_lazy_code_line "${_bioseq_lazy_source_line}")
+    string(FIND "${_bioseq_lazy_code_line}" "//"
+      _bioseq_lazy_line_comment_offset)
+    if(NOT _bioseq_lazy_line_comment_offset EQUAL -1)
+      string(SUBSTRING "${_bioseq_lazy_code_line}" 0
+        ${_bioseq_lazy_line_comment_offset} _bioseq_lazy_code_line)
+    endif()
     string(STRIP "${_bioseq_lazy_code_line}" _bioseq_lazy_code_line)
     if(_bioseq_lazy_code_line STREQUAL ""
         OR _bioseq_lazy_code_line MATCHES "^(/\\*|\\*|\\*/|\")")
@@ -147,7 +153,8 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
         "(\\.scanner[ \t]*\\(|\\.underlying[ \t]*\\(|lazy_compact_sequence[ \t]*<|sequence_scanner_pg[ \t]*<)")
       message(FATAL_ERROR
         "DOC0377 concrete lazy/scanner dependency in ${_bioseq_lazy_source}; "
-        "consume basic_lazy_sequence_view or update the documented ownership boundary")
+        "consume basic_lazy_sequence_view or update the documented ownership boundary; "
+        "matched code: ${_bioseq_lazy_code_line}")
     endif()
   endforeach()
 endforeach()
@@ -912,6 +919,7 @@ option(BIOSEQ_TEST_INDEXES
   "Compile the test-only indexing descriptors into the extension + test execs" OFF)
 if(BIOSEQ_TEST_INDEXES)
   target_compile_definitions(postgresql_bioseq PRIVATE BIOSEQ_TEST_INDEXES=1)
+  target_compile_definitions(bioseq_modules_nopg PRIVATE BIOSEQ_TEST_INDEXES=1)
   if(TARGET bioseq_aligner_int_tests_exec)
     target_compile_definitions(bioseq_aligner_int_tests_exec PRIVATE BIOSEQ_TEST_INDEXES=1)
   endif()

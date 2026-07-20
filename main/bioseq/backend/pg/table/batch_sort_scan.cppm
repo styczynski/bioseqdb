@@ -58,6 +58,7 @@ export module bioseq.table.batch_sort_scan;
 import bioseq.common.mlogging;          // bioseq_log
 import bioseq.storage.batch_processor;  // lazy_compact_sequence_batch_processor, batch_sort_spec
 import bioseq.storage.lazy;             // canonical lazy sequence facade
+import bioseq.storage.scanner;          // sequence_access_requirement
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
 import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance

@@ -22,6 +22,7 @@ export module bioseq.sequences.simd;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
+import bioseq.sequences.rank_pack_core;
 import bioseq.common.circular_append_buffer;
 import bioseq.storage.lazy;
 
@@ -404,27 +405,26 @@ inline void append_ranks(
     DEBUG_ASSERT(state.partial_letters < LettersPerUnit,
                  "encode_state::partial_letters must be < LettersPerUnit on entry");
     auto* output = state.output_storage;
-    storage_unit_t local_partial_word = state.partial_word;
-    std::size_t local_partial_letters = state.partial_letters;
-    std::size_t local_total_letters = state.total_letters;
+    auto write_unit = [output](storage_unit_t value) {
+        output->push_back(value);
+        return true;
+    };
     for (std::size_t rank_index = 0; rank_index < count; ++rank_index) {
         const std::uint8_t letter_rank = ranks[rank_index];
         if (letter_rank == 0xFF) continue;
         DEBUG_ASSERT(letter_rank < (1u << BitsPerChar),
                      "letter rank exceeds BitsPerChar range");
-        local_partial_word |= static_cast<storage_unit_t>(letter_rank)
-                              << (BitsPerChar * local_partial_letters);
-        local_partial_letters += 1;
-        local_total_letters += 1;
-        if (local_partial_letters == LettersPerUnit) {
-            output->push_back(local_partial_word);
-            local_partial_word = 0;
-            local_partial_letters = 0;
-        }
+        const bool appended =
+            bioseq::sequences::rank_pack_detail::append_valid_rank_lsb<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    state.partial_word,
+                    state.partial_letters,
+                    state.total_letters,
+                    letter_rank,
+                    write_unit);
+        DEBUG_ASSERT(appended,
+                     "growing SIMD rank pack unexpectedly overflowed");
     }
-    state.partial_word = local_partial_word;
-    state.partial_letters = local_partial_letters;
-    state.total_letters = local_total_letters;
 }
 
 template <typename storage_unit_t,
@@ -449,16 +449,19 @@ finalize_encode_state(
     DEBUG_ASSERT(state.output_storage != nullptr,
                  "encode_state::output_storage must be configured before finalize");
     auto* output = state.output_storage;
-    std::size_t padding = 0;
-    if (state.partial_letters > 0) {
-        output->push_back(state.partial_word);
-        padding = LettersPerUnit - state.partial_letters;
-    }
+    auto write_unit = [output](storage_unit_t value) {
+        output->push_back(value);
+        return true;
+    };
+    const auto finished =
+        bioseq::sequences::rank_pack_detail::finish_lsb<
+            storage_unit_t, BitsPerChar, LettersPerUnit>(
+                state.partial_word, state.partial_letters, write_unit);
+    DEBUG_ASSERT(finished.capacity_ok,
+                 "growing SIMD rank pack unexpectedly overflowed");
     const std::size_t n_words = output->size() - state.record_start_offset;
-    state.partial_word = 0;
-    state.partial_letters = 0;
     state.total_letters = 0;
-    return {n_words, padding};
+    return {n_words, finished.padding_letters};
 }
 
 /// Convert `size` ASCII bytes to ranks via the alphabet's 256-entry
@@ -1313,19 +1316,22 @@ HWY_INLINE void merge_packed_chunk_into_partial(
     std::size_t& local_partial_letters,
     std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk) noexcept {
-    const std::size_t shift_amount = 2 * local_partial_letters;
-    local_partial_word |= static_cast<storage_unit_t>(packed_chunk) << shift_amount;
-    const std::size_t new_letters = local_partial_letters + 16;
-    if (new_letters >= 32) {
-        packed_words->push_back(local_partial_word);
-        local_partial_word =
-            (shift_amount > 32)
-                ? (static_cast<storage_unit_t>(packed_chunk) >> (64 - shift_amount))
-                : storage_unit_t{0};
-        local_partial_letters = new_letters - 32;
-    } else {
-        local_partial_letters = new_letters;
-    }
+    std::size_t appended_letters = 0u;
+    auto write_unit = [packed_words](storage_unit_t value) {
+        packed_words->push_back(value);
+        return true;
+    };
+    const bool appended =
+        bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
+            storage_unit_t, 2u, 32u>(
+                local_partial_word,
+                local_partial_letters,
+                appended_letters,
+                packed_chunk,
+                16u,
+                write_unit);
+    DEBUG_ASSERT(appended && appended_letters == 16u,
+                 "growing SIMD rank chunk pack unexpectedly failed");
 }
 
 /// Variable-count merge of a packed chunk into the partial-word
@@ -1339,27 +1345,22 @@ HWY_INLINE void merge_variable_chunk_into_partial(
     std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
     std::uint32_t packed_chunk,
     std::size_t count) noexcept {
-    if (count == 0) return;
-    const std::uint32_t valid_mask = (count >= 16)
-        ? std::uint32_t{0xFFFFFFFFu}
-        : static_cast<std::uint32_t>((std::uint64_t{1} << (2 * count)) - 1u);
-    const storage_unit_t valid_chunk =
-        static_cast<storage_unit_t>(packed_chunk & valid_mask);
-    const std::size_t shift_amount = 2 * local_partial_letters;
-    local_partial_word |= valid_chunk << shift_amount;
-    const std::size_t new_total = local_partial_letters + count;
-    if (new_total >= 32) {
-        packed_words->push_back(local_partial_word);
-        if (new_total > 32) {
-            local_partial_word = valid_chunk >> (64 - shift_amount);
-            local_partial_letters = new_total - 32;
-        } else {
-            local_partial_word = 0;
-            local_partial_letters = 0;
-        }
-    } else {
-        local_partial_letters = new_total;
-    }
+    std::size_t appended_letters = 0u;
+    auto write_unit = [packed_words](storage_unit_t value) {
+        packed_words->push_back(value);
+        return true;
+    };
+    const bool appended =
+        bioseq::sequences::rank_pack_detail::append_prepacked_ranks_lsb<
+            storage_unit_t, 2u, 32u>(
+                local_partial_word,
+                local_partial_letters,
+                appended_letters,
+                packed_chunk,
+                count,
+                write_unit);
+    DEBUG_ASSERT(appended && appended_letters == count,
+                 "growing SIMD variable rank chunk pack unexpectedly failed");
 }
 
 // ============================================================================

@@ -69,6 +69,7 @@ import bioseq.config;                               // DOC0322 §9.3 — bioseq_
 import bioseq.indexing.type;                 // DOC0279 — DIRECTORY_SUB_KEY
 import bioseq.storage.indexing_pg.handles;      // DOC0279 §8.7/§12.3 — lightweight storage handles + active index
 import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.storage.lazy;                  // allocation observer for route-aware sequence payload tracing
 import bioseq.scheduler.dispatch_processor;   // fixed-shape BatchProcessor, heavy pipeline in its own module
 import bioseq.sequences;
 import bioseq.sequences.minimap_port;
@@ -928,6 +929,10 @@ private:
     bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
         persisted_gpu_operation_evidence_sink = nullptr;
     slice_async_owner_guard* slice_async_owner = nullptr;
+    bioseq::storage::sequence_payload_allocation_observer
+        mmsearch_target_payload_observer{};
+    bioseq::storage::sequence_payload_allocation_observer
+        mmsearch_query_payload_observer{};
     MemoryContext batch_payload_ctx = nullptr;
     std::array<std::vector<SM::fetch_request>, SM::bucket_count>
         per_bucket_target_requests{};
@@ -984,6 +989,16 @@ public:
                  errmsg("bioseq async owner changed during dispatch")));
         }
         slice_async_owner = owner;
+        mmsearch_target_payload_observer =
+            make_slice_payload_allocation_observer_noexcept(
+                owner->attachment, 0u,
+                materialization_mechanism::packed_region,
+                materialization_reason::mmsearch_target);
+        mmsearch_query_payload_observer =
+            make_slice_payload_allocation_observer_noexcept(
+                owner->attachment, 0u,
+                materialization_mechanism::packed_region,
+                materialization_reason::mmsearch_query);
     }
 
     /*
@@ -1955,7 +1970,7 @@ public:
      * into one contiguous varlena, bounded by MaxAllocSize. The dispatch
      * loop continues to use `with_lazy_in_memory` over the hydrated varlena
      * (Phase B baseline) — see DOC0273 §3.2 for the design trade-off: the
-     * Phase C `sequence_scanner_pg<S>` + `with_lazy_postgres<R>` machinery
+     * Phase C PostgreSQL facade adapter machinery
      * is built but not wired into the single-Scanner pipeline tree, to keep
      * dispatch_buffer.cppm under the DOC0271 template-explosion budget.
      * Hydration here also serves output projection (write-back into the
@@ -2128,6 +2143,10 @@ public:
             auto& scanner_pg_ctx = *join_scanner_pg_ctx;
             scanner_pg_ctx.async_job_observer =
                 make_slice_async_pool_observer_noexcept(slice_async_owner);
+            scanner_pg_ctx.mmsearch_target_payload_observer =
+                mmsearch_target_payload_observer;
+            scanner_pg_ctx.mmsearch_query_payload_observer =
+                mmsearch_query_payload_observer;
             scanner_pg_ctx.db_oid = user_main_database_oid;
             scanner_pg_ctx.tablespace_oid = user_main_tablespace_oid;
             scanner_pg_ctx.main_relfilenode = user_main_relfilenode;
@@ -2945,6 +2964,10 @@ public:
         typename ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext scanner_pg_ctx{};
         scanner_pg_ctx.async_job_observer =
             make_slice_async_pool_observer_noexcept(slice_async_owner);
+        scanner_pg_ctx.mmsearch_target_payload_observer =
+            mmsearch_target_payload_observer;
+        scanner_pg_ctx.mmsearch_query_payload_observer =
+            mmsearch_query_payload_observer;
         scanner_pg_ctx.db_oid             = user_main_database_oid;
         scanner_pg_ctx.tablespace_oid     = user_main_tablespace_oid;
         scanner_pg_ctx.main_relfilenode   = user_main_relfilenode;

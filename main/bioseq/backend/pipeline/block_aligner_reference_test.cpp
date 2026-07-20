@@ -12,9 +12,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -276,7 +278,122 @@ void check_region_alignment_identical(
     CHECK(format_cigar(optimized.cigar) == format_cigar(forced_dp.cigar));
 }
 
+struct ScoringMatrixGenerationCase {
+    std::int8_t match;
+    std::int8_t mismatch;
+    std::int8_t ambiguity;
+    std::string_view description;
+};
+
+constexpr std::array<ScoringMatrixGenerationCase, 6>
+    scoring_matrix_generation_cases{{
+        {4, 6, 1, "positive penalty magnitudes"},
+        {-4, -6, -1, "fully signed scores"},
+        {7, -3, -2, "positive match and signed penalties"},
+        {-7, 3, 2, "signed match and positive penalties"},
+        {0, 0, 0, "zero scores"},
+        {127, 126, 125, "positive int8 limits"},
+    }};
+
+template<class Alphabet>
+void check_scoring_matrix_facade_parity(std::string_view alphabet_name) {
+    using legacy_source =
+        sequence_custom_alphabet<Alphabet, std::uint64_t>;
+    using canonical_matrix = ScoringMatrix<Alphabet>;
+    using legacy_matrix = ScoringMatrix<legacy_source>;
+
+    static_assert(std::is_same_v<canonical_matrix, legacy_matrix>);
+    static_assert(std::is_same_v<
+        typename canonical_matrix::alphabet_type, Alphabet>);
+    static_assert(canonical_matrix::alphabet_dim
+                  == legacy_matrix::alphabet_dim);
+    static_assert(canonical_matrix::SIMD_ROWS
+                  == legacy_matrix::SIMD_ROWS);
+    static_assert(canonical_matrix::SIMD_COLS
+                  == legacy_matrix::SIMD_COLS);
+    static_assert(canonical_matrix::NULL_BYTE
+                  == legacy_matrix::NULL_BYTE);
+
+    constexpr auto sentinel = std::numeric_limits<std::int8_t>::min();
+    constexpr std::size_t dim = canonical_matrix::alphabet_dim;
+    static_assert(dim > 1u);
+    static_assert(canonical_matrix::SIMD_ROWS == dim + 1u);
+    static_assert(canonical_matrix::SIMD_COLS >= dim + 1u);
+    static_assert(canonical_matrix::NULL_BYTE == dim);
+
+    for (const auto& generation : scoring_matrix_generation_cases) {
+        const auto canonical = canonical_matrix::generate(
+            generation.match, generation.mismatch, generation.ambiguity);
+        const auto legacy = legacy_matrix::generate(
+            generation.match, generation.mismatch, generation.ambiguity);
+
+        INFO("alphabet=" << alphabet_name
+             << " score-case=" << generation.description
+             << " scores=(" << static_cast<int>(generation.match)
+             << ',' << static_cast<int>(generation.mismatch)
+             << ',' << static_cast<int>(generation.ambiguity) << ')');
+        REQUIRE(canonical.block_layout_valid());
+        REQUIRE(legacy.block_layout_valid());
+        CHECK(canonical.block_semantic_identity()
+              == legacy.block_semantic_identity());
+        CHECK(canonical.match_score() == legacy.match_score());
+        CHECK(canonical.mismatch_score() == legacy.mismatch_score());
+        CHECK(canonical.wildcard_score() == legacy.wildcard_score());
+
+        const auto expected_match = generation.match > 0
+            ? generation.match
+            : static_cast<std::int8_t>(-generation.match);
+        const auto expected_mismatch = generation.mismatch > 0
+            ? static_cast<std::int8_t>(-generation.mismatch)
+            : generation.mismatch;
+        const auto expected_ambiguity = generation.ambiguity > 0
+            ? static_cast<std::int8_t>(-generation.ambiguity)
+            : generation.ambiguity;
+
+        for (std::size_t row = 0; row < dim; ++row) {
+            for (std::size_t col = 0; col < dim; ++col) {
+                INFO("scalar-cell row=" << row << " col=" << col);
+                const auto expected = row == dim - 1u || col == dim - 1u
+                    ? expected_ambiguity
+                    : row == col ? expected_match : expected_mismatch;
+                CHECK(canonical.at(static_cast<int>(row),
+                                   static_cast<int>(col)) == expected);
+                CHECK(legacy.at(static_cast<int>(row),
+                                static_cast<int>(col)) == expected);
+                CHECK(legacy.at(static_cast<int>(row),
+                                static_cast<int>(col))
+                      == canonical.at(static_cast<int>(row),
+                                      static_cast<int>(col)));
+            }
+        }
+
+        for (std::size_t row = 0;
+             row < canonical_matrix::SIMD_ROWS; ++row) {
+            for (std::size_t col = 0;
+                 col < canonical_matrix::SIMD_COLS; ++col) {
+                INFO("simd-cell row=" << row << " col=" << col);
+                const auto expected = row < dim && col < dim
+                    ? canonical.at(static_cast<int>(row),
+                                   static_cast<int>(col))
+                    : sentinel;
+                CHECK(canonical.simd_row_ptr(row)[col] == expected);
+                CHECK(legacy.simd_row_ptr(row)[col] == expected);
+                CHECK(legacy.simd_row_ptr(row)[col]
+                      == canonical.simd_row_ptr(row)[col]);
+            }
+        }
+    }
+}
+
 }  // namespace
+
+TEST_CASE("ScoringMatrix boundary adapters exhaustively match the canonical facade",
+          "[block-aligner][scoring-matrix][facade][doc0377]") {
+    check_scoring_matrix_facade_parity<seq::dna4>("dna4");
+    check_scoring_matrix_facade_parity<seq::dna5>("dna5");
+    check_scoring_matrix_facade_parity<seq::aa20>("aa20");
+    check_scoring_matrix_facade_parity<seq::aa27>("aa27");
+}
 
 TEST_CASE("Block Aligner Global score/endpoints/CIGAR match scan_block.rs",
           "[block-aligner][reference-golden][global]") {

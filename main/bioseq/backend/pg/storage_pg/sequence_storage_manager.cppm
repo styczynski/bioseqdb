@@ -1999,7 +1999,7 @@ struct sequence_storage_manager {
     // contiguous palloc'd `pgseq_t*` in `out_mctx`. Used by the legacy
     // hydration path; Phase C raises bioseq_log<ERR, PG>() if the stitched varlena
     // would exceed MaxAllocSize (DOC0264 §9.4). Streaming readers should
-    // use `sequence_scanner_pg<S>` directly.
+    // use the source-backed facade adapter directly.
     [[nodiscard]] static pgseq_t*
     fetch_payload(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                   std::int16_t column_attno, const seq_locator& loc,
@@ -2037,8 +2037,8 @@ struct sequence_storage_manager {
 using bioseq_default_storage_manager =
     sequence_storage_manager<sequence_size_t, /*min=*/8, /*max=*/42>;
 
-// DOC0264 §7.9 — exported entry point so the Phase C `sequence_scanner_pg<S>`
-// (in `bioseq_storage_scanner_pg`) can resolve a sub-table relation via the
+// DOC0264 §7.9 — exported entry point so the Phase C source-backed adapter
+// can resolve a sub-table relation via the
 // per-scan `seq_caches`. Implementation lives below in the .cppm body.
 [[nodiscard]] Relation
 open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
@@ -3593,7 +3593,7 @@ void sequence_stream_writer::abort() {
 // the right offset of the destination varlena's payload region.
 //
 // Raises bioseq_log<ERR, PG>() if the assembled varlena would exceed MaxAllocSize —
-// streaming readers must use `sequence_scanner_pg<S>` instead. The legacy
+// streaming readers must use the source-backed facade instead. The legacy
 // callers (auto-hydration of stub-backed scan slots) are bounded by the
 // MaxAllocSize gate in `hydrate_seq_columns_in_slot` (§9.4 access_method).
 // ---------------------------------------------------------------------------
@@ -3755,7 +3755,7 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         bioseq_log<ERR, PG>(
                "bioseq storage Phase C: sequence too large to materialise as a "
                "single varlena ({} bp ⇒ ~{} bytes > MaxAllocSize). Stream via "
-               "sequence_scanner_pg<S> or wait for Phase D D-VARLENA.",
+               "the source-backed facade or wait for Phase D D-VARLENA.",
                loc.total_bp_size,
                assembled_varlena_bytes);
     }
