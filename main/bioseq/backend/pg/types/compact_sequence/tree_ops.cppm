@@ -1333,11 +1333,11 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
       || failure_point
           == piece_tree_injected_failure_point::literal_binding_factory) {
     external_arena = make_piece_tree_arena();
-    external_storage = allocate_piece_literal_storage(*external_arena, 2u);
-    external_storage[0] = std::byte{0x41};
-    external_storage[1] = std::byte{0x43};
     if (failure_point
         == piece_tree_injected_failure_point::literal_binding_factory) {
+      external_storage = allocate_piece_literal_storage(*external_arena, 2u);
+      external_storage[0] = std::byte{0x41};
+      external_storage[1] = std::byte{0x43};
       external_root = make_literal_node(
           *external_arena,
           factory_failure_unbound_literal(
@@ -1433,15 +1433,21 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
       }
       case piece_tree_injected_failure_point::
           arena_dependency_registration:
-        guard->root = make_literal_node(
-            *guard->destination_arena,
-            factory_failure_unbound_literal(
-                external_arena, external_storage, 0u, 1u));
+        register_arena_dependency(
+            *guard->destination_arena, external_arena);
+        /* Test the dependency operation directly: an exported inline factory
+         * may be instantiated by an importer with a distinct anonymous-
+         * namespace acceptance state.  The helper raises first when it sees
+         * this TU's arm; the immediate fallback preserves the identical
+         * post-registration/pre-publication failure point for any compiler-
+         * emitted state copy. */
+        inject_piece_tree_failure(failure_point);
         break;
       case piece_tree_injected_failure_point::
           source_dependency_registration:
-        guard->root = make_source_node(
-            *guard->destination_arena, source_leaf);
+        register_source_dependency(
+            *guard->destination_arena, source);
+        inject_piece_tree_failure(failure_point);
         break;
       case piece_tree_injected_failure_point::source_leaf_factory:
         guard->root = make_source_node(
