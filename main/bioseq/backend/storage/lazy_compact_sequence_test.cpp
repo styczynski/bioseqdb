@@ -98,6 +98,22 @@ static_assert(std::is_nothrow_move_constructible_v<
 static_assert(!std::is_move_assignable_v<admitted_packed_region<seq::dna4>>);
 static_assert(!std::is_copy_constructible_v<admitted_packed_region<seq::dna4>>);
 static_assert(!std::is_copy_assignable_v<admitted_packed_region<seq::dna4>>);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(1u, 2u)
+              == 4u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(8u, 2u)
+              == 32u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(1u, 3u)
+              == 2u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(8u, 3u)
+              == 21u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(1u, 5u)
+              == 1u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(8u, 5u)
+              == 12u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(4u, 5u)
+              == 6u);
+static_assert(bioseq::storage::lazy_packed_letters_per_unit(3u, 5u)
+              == 0u);
 
 // Deterministic pseudo-random dna4 vector (xorshift-ish LCG → ranks 0..3).
 [[nodiscard]] std::vector<seq::dna4> make_dna4(std::size_t n, std::uint64_t seed = 0x9e3779b97f4a7c15ULL) {

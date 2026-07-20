@@ -2563,6 +2563,7 @@ namespace packed_paper_nthash_internal {
  * selected [begin,end) interval, so iterator offset zero maps to local
  * position zero and every emitted position is segment-local.
  */
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN bounded_u32_dna4_view
 struct bounded_u32_dna4_view {
     using output_sequence = sequence_custom_alphabet<
         seq::dna4, std::uint32_t, 2>;
@@ -2606,6 +2607,7 @@ struct bounded_u32_dna4_view {
         return static_cast<std::size_t>(last - first);
     }
 };
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END bounded_u32_dna4_view
 
 template<class D, std::size_t NumStreams>
 [[nodiscard]] HWY_INLINE auto lookup_table_stream(
@@ -3139,6 +3141,7 @@ template<
     class Collector,
     supports_compact_sequence_bitcast_view View,
     class Iterator>
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN run_packed_kernel
 [[gnu::always_inline]] [[gnu::flatten]] inline void run_packed_kernel(
     Collector& collector,
     const View& view,
@@ -3294,6 +3297,7 @@ template<
     proof.scalar_collector_appends =
         state.evidence.scalar_collector_appends;
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END run_packed_kernel
 
 } // namespace packed_paper_nthash_internal
 
@@ -3311,6 +3315,7 @@ template<
     class Iterator = decltype(compact_sequence_range<R>().begin()),
     class Collector = sketch_collector_t<MinimizerT>>
 [[nodiscard]] inline PackedPaperNthashResult
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_packed_paper_nthash_simd_checked
 collect_minimizers_packed_paper_nthash_simd_checked(
     Collector& collector,
     compact_sequence_range<R>& sequence,
@@ -3441,6 +3446,7 @@ collect_minimizers_packed_paper_nthash_simd_checked(
 #endif
     }
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_packed_paper_nthash_simd_checked
 
 /** Whole-resident convenience overload; still performs the checked gate. */
 template<
@@ -5884,6 +5890,7 @@ template<
     supports_compact_sequence_range R,
     class Collector>
 [[nodiscard]] inline TwoStackContinuationStatus
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN consume_two_stack_nthash_fragment
 consume_two_stack_nthash_fragment(
     TwoStackContinuationState<
         W, K, typename compact_sequence_range<R>::traits>& state,
@@ -5909,6 +5916,7 @@ consume_two_stack_nthash_fragment(
         consume_begin_bp,
         consume_end_bp);
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END consume_two_stack_nthash_fragment
 
 
 template<std::size_t W, std::size_t K, class AlphabetTraits, class Collector>
@@ -6025,6 +6033,7 @@ template<
     class Sequence,
     class Collector>
 [[nodiscard]] inline TwoStackFinalizeResult
+// BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
 collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
     Collector& collector,
     Sequence& sequence,
@@ -6125,6 +6134,7 @@ collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked(
         return finalize_two_stack_nthash(state, collector);
     }
 }
+// BIOSEQ_DOC0377_PRIVATE_PACKED_END collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked
 
 template<
     std::size_t W,

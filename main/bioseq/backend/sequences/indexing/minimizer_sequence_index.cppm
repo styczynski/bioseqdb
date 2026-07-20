@@ -686,36 +686,6 @@ inline void sort_pair_run(std::vector<sorted_pair_t>& pairs) {
         std::min({scalar_fragments_per_block, by_pos_field, by_dispatch}));
 }
 
-template <class Traits, std::size_t WindowSize, std::size_t KmerSize>
-[[nodiscard]] inline std::uint64_t vulkan_segment_pair_collect_peak_bytes(
-    std::uint64_t upload_bp) noexcept
-{
-    using storage_unit = typename Traits::storage_unit;
-    constexpr std::uint64_t lpu =
-        Traits::letters_per_unit == 0u ? 1u : Traits::letters_per_unit;
-    const std::uint64_t unit_count = upload_bp / lpu + (upload_bp % lpu != 0u ? 1u : 0u);
-    const std::uint64_t sequence_bytes_unaligned =
-        bioseq::parallelism::saturating_mul(
-            unit_count,
-            static_cast<std::uint64_t>(sizeof(storage_unit)));
-    const std::uint64_t sequence_bytes =
-        bioseq::gpu::vulkan::phase_c_align_up(sequence_bytes_unaligned, 4u);
-    const std::uint64_t max_minimizers = std::max<std::uint64_t>(64u, upload_bp);
-    const bioseq::gpu::vulkan::PhaseCSketchMemoryPlan plan =
-        bioseq::gpu::vulkan::phase_c_sketch_memory_plan(
-            upload_bp,
-            sequence_bytes,
-            sizeof(bioseq::gpu::vulkan::VulkanRankLut),
-            max_minimizers,
-            0u,
-            bioseq::gpu::vulkan::PhaseCSketchUse::sorted_pairs,
-            static_cast<std::uint32_t>(KmerSize),
-            static_cast<std::uint32_t>(WindowSize),
-            static_cast<std::uint32_t>(lpu));
-    return plan.valid
-        ? plan.admission_bytes
-        : (std::numeric_limits<std::uint64_t>::max)();
-}
 }  // namespace detail
 
 struct MpsSegmentMergeProbe {

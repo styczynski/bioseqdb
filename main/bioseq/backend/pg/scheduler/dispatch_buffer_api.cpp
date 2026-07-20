@@ -110,6 +110,10 @@ void DispatchBufferRuntime::bind_slice_async_owner(
     as_buffer(impl)->bind_slice_async_owner(owner);
 }
 
+void DispatchBufferRuntime::release_per_row_slice_async_owner_after_drain() {
+    as_buffer(impl)->release_per_row_slice_async_owner_after_drain();
+}
+
 void DispatchBufferRuntime::configure_mmsearch(
     const AttrNumber seq_attno,
     std::string column_name,
@@ -133,6 +137,8 @@ void DispatchBufferRuntime::configure_mmsearch_per_row(
     const bool per_row_self_alignment,
     const std::uint8_t alphabet_code,
     const std::uint8_t storage_unit_byte_width,
+    const std::uint8_t query_alphabet_code,
+    const std::uint8_t query_storage_unit_byte_width,
     const AttrNumber primary_key_attno) {
     as_buffer(impl)->configure_mmsearch_per_row(
         seq_attno,
@@ -141,16 +147,14 @@ void DispatchBufferRuntime::configure_mmsearch_per_row(
         per_row_self_alignment,
         alphabet_code,
         storage_unit_byte_width,
+        query_alphabet_code,
+        query_storage_unit_byte_width,
         primary_key_attno);
 }
 
 void DispatchBufferRuntime::apply_typmod_coalesce(
     std::vector<char> coalesced_bytes) {
     as_buffer(impl)->apply_typmod_coalesce(std::move(coalesced_bytes));
-}
-
-void DispatchBufferRuntime::mark_alphabet_mismatch_recompute() {
-    as_buffer(impl)->mark_alphabet_mismatch_recompute();
 }
 
 void DispatchBufferRuntime::clear_mmsearch_context(const bool clear_extras) {
@@ -170,7 +174,9 @@ void DispatchBufferRuntime::configure_mmsearch_join(
     const AttrNumber query_slot_seq_resno,
     std::string target_column_name,
     const std::uint8_t alphabet_code,
-    const std::uint8_t storage_unit_byte_width) {
+    const std::uint8_t storage_unit_byte_width,
+    const std::uint8_t query_alphabet_code,
+    const std::uint8_t query_storage_unit_byte_width) {
     as_buffer(impl)->configure_mmsearch_join(
         target_relation_oid,
         target_storage_seq_attno,
@@ -179,7 +185,9 @@ void DispatchBufferRuntime::configure_mmsearch_join(
         query_slot_seq_resno,
         std::move(target_column_name),
         alphabet_code,
-        storage_unit_byte_width);
+        storage_unit_byte_width,
+        query_alphabet_code,
+        query_storage_unit_byte_width);
 }
 
 void DispatchBufferRuntime::begin_join_target(
@@ -287,24 +295,12 @@ bool DispatchBufferRuntime::coalesce_active() const {
     return as_buffer(impl)->coalesce_active();
 }
 
-bool DispatchBufferRuntime::recompute_due_to_alphabet_mismatch() const {
-    return as_buffer(impl)->recompute_due_to_alphabet_mismatch();
-}
-
 std::uint8_t DispatchBufferRuntime::mmsearch_alphabet_code() const {
     return as_buffer(impl)->mmsearch_alphabet_code();
 }
 
 std::uint8_t DispatchBufferRuntime::mmsearch_storage_unit_byte_width() const {
     return as_buffer(impl)->mmsearch_storage_unit_byte_width();
-}
-
-std::uint8_t DispatchBufferRuntime::raw_query_alphabet_code() const {
-    return as_buffer(impl)->raw_query_alphabet_code();
-}
-
-std::uint8_t DispatchBufferRuntime::raw_query_storage_unit_byte_width() const {
-    return as_buffer(impl)->raw_query_storage_unit_byte_width();
 }
 
 } // namespace bioseq::scheduler

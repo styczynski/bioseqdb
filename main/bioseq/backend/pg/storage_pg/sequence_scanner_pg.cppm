@@ -536,8 +536,22 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
         }
     }
 
-    // Resolve the sub-table relation + read state via Phase A's cache.
-    Relation shard = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+    MemoryContext payload_mctx = caches_->read_state_mctx != nullptr
+        ? caches_->read_state_mctx
+        : mctx_;
+    const ResourceOwner read_resource_owner = caches_->read_resource_owner;
+
+    // Resolve the sub-table relation + read state via Phase A's cache.  The
+    // system-catalog scan allocates its SysScanDesc in CurrentMemoryContext,
+    // so keep the complete lookup in the same stable ownership domain as the
+    // cached column reader.  invoke_pg_as_cpp restores the caller's context
+    // and ResourceOwner at the checked leaf boundary.
+    Relation shard = bioseq::pg_utils::invoke_pg_as_cpp(
+        [&, payload_mctx, read_resource_owner] {
+        MemoryContextSwitchTo(payload_mctx);
+        if (read_resource_owner != nullptr) {
+            CurrentResourceOwner = read_resource_owner;
+        }
         return open_sub_table_for_locator(
             db_oid_, tablespace_oid_, main_relfilenode_, column_attno_,
             locator_, AccessShareLock, caches_);
@@ -548,11 +562,6 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
         static_cast<std::int32_t>(locator_.shard_idx));
     seq_caches::entry& entry = caches_->entries[cache_key];
     entry.rel = shard;
-
-    MemoryContext payload_mctx = caches_->read_state_mctx != nullptr
-        ? caches_->read_state_mctx
-        : CurrentMemoryContext;
-    const ResourceOwner read_resource_owner = caches_->read_resource_owner;
 
     // Compatibility is keyed by the caller-owned source snapshot. The
     // column reader may replace its own snapshot pointer with a refreshed
@@ -806,6 +815,7 @@ inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
         .destination_bytes = destination.size_bytes(),
         .expected_row = locator_.first_sub_row_no,
     };
+    const ResourceOwner read_resource_owner = caches_->read_resource_owner;
 
     /*
      * Keep this as one checked PostgreSQL leaf. The callback owns only POD
@@ -815,7 +825,15 @@ inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
      * sigsetjmp instead of one per fragment.
      */
     poisoned_ = true;
-    bioseq::pg_utils::invoke_pg_as_cpp([this, &state] {
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [this, &state, read_resource_owner] {
+        // The shard lookup itself opens a system-catalog scan, so enter the
+        // dedicated scanner context and domain ResourceOwner before opening
+        // the relation.  The checked leaf restores both caller globals.
+        MemoryContextSwitchTo(mctx_);
+        if (read_resource_owner != nullptr) {
+            CurrentResourceOwner = read_resource_owner;
+        }
         Relation shard = open_sub_table_for_locator(
             db_oid_, tablespace_oid_, main_relfilenode_, column_attno_,
             locator_, AccessShareLock, caches_);
@@ -826,7 +844,6 @@ inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
         seq_caches::entry& entry = caches_->entries[cache_key];
         entry.rel = shard;
 
-        MemoryContext previous = MemoryContextSwitchTo(mctx_);
         TupleDesc td = RelationGetDescr(shard);
         List* projected_attributes = list_make1_int(1);
         BioseqColumnReadState* read_state = BioseqColumnBeginRead(
@@ -916,7 +933,6 @@ inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
         }
 
         BioseqColumnEndRead(read_state);
-        MemoryContextSwitchTo(previous);
     });
 
     if (state.status != bulk_copy_status::ok
@@ -2166,7 +2182,7 @@ inline void drop_registry_token_noexcept(
 
 inline void sweep_registry(
         pg_sequence_source_registry& registry,
-        pg_sequence_source_sweep_boundary,
+        pg_sequence_source_sweep_boundary boundary,
         bool is_commit) {
 #ifdef BIOSEQ_TEST_INDEXES
     ++g_pg_sequence_source_debug_counters.sweeps;
@@ -2178,7 +2194,18 @@ inline void sweep_registry(
             && domain->refcount == 1u
             && !domain->refcount_fault
             && domain->lifecycle == domain_lifecycle::live;
-        if (reclaimable) {
+        /* A parameterized rescan starts a fresh callback/read session but may
+         * retain the registry's current verified binding.  Keeping that one
+         * bounded domain preserves its snapshot/cache and lets the next row
+         * hit the exact (attribute,type,binding-generation) key.  A stale
+         * generation and every terminal/provider boundary still reclaim in
+         * the ordinary owner-first order below. */
+        const bool reusable_after_rescan =
+            boundary == pg_sequence_source_sweep_boundary::rescan
+            && !registry.provider_closed && registry.accepting_lookups
+            && domain->binding_generation != 0u
+            && domain->binding_generation == registry.binding_generation;
+        if (reclaimable && !reusable_after_rescan) {
             cleanup_domain(*domain, is_commit);
             unlink_domain(registry, *domain);
             drop_registry_token_noexcept(*domain);

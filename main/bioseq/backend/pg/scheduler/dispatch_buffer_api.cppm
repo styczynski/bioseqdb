@@ -70,6 +70,7 @@ public:
         bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink);
 
     void bind_slice_async_owner(slice_async_owner_guard* owner);
+    void release_per_row_slice_async_owner_after_drain();
 
     void configure_mmsearch(
         AttrNumber seq_attno,
@@ -86,10 +87,11 @@ public:
         bool per_row_self_alignment,
         std::uint8_t alphabet_code,
         std::uint8_t storage_unit_byte_width,
+        std::uint8_t query_alphabet_code,
+        std::uint8_t query_storage_unit_byte_width,
         AttrNumber primary_key_attno);
 
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes);
-    void mark_alphabet_mismatch_recompute();
     void clear_mmsearch_context(bool clear_extras = false);
     void add_extra_const_query(std::vector<char> query_varlena_bytes);
 
@@ -101,7 +103,9 @@ public:
         AttrNumber query_slot_seq_resno,
         std::string target_column_name,
         std::uint8_t alphabet_code,
-        std::uint8_t storage_unit_byte_width);
+        std::uint8_t storage_unit_byte_width,
+        std::uint8_t query_alphabet_code,
+        std::uint8_t query_storage_unit_byte_width);
     void begin_join_target(TupleTableSlot* locator_passthrough_target);
     void prepare_join_target_queries(
         std::span<const DispatchJoinQueryRef> all_queries);
@@ -124,11 +128,8 @@ public:
     [[nodiscard]] bool mmsearch_active() const;
     [[nodiscard]] bool per_row_self_alignment() const;
     [[nodiscard]] bool coalesce_active() const;
-    [[nodiscard]] bool recompute_due_to_alphabet_mismatch() const;
     [[nodiscard]] std::uint8_t mmsearch_alphabet_code() const;
     [[nodiscard]] std::uint8_t mmsearch_storage_unit_byte_width() const;
-    [[nodiscard]] std::uint8_t raw_query_alphabet_code() const;
-    [[nodiscard]] std::uint8_t raw_query_storage_unit_byte_width() const;
 
 private:
     void* impl = nullptr;

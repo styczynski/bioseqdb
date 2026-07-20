@@ -187,6 +187,30 @@ struct lazy_rank_stream_traits {
     }
 };
 
+/**
+ * Return the canonical packed-symbol geometry for one facade alphabet and
+ * physical storage-unit width.  Facade consumers use this instead of
+ * recovering geometry through a concrete compact range's traits.
+ *
+ * A zero result is the fail-closed spelling for widths outside the supported
+ * 1/2/4/8-byte packed ABI.  Non-power-of-two alphabet bit widths intentionally
+ * use floor division, matching compact_sequence_range's packed layout.
+ */
+[[nodiscard]] constexpr std::size_t lazy_packed_letters_per_unit(
+        std::uint8_t storage_unit_byte_width,
+        std::uint8_t bits_per_symbol) noexcept {
+    if (!(storage_unit_byte_width == 1u
+          || storage_unit_byte_width == 2u
+          || storage_unit_byte_width == 4u
+          || storage_unit_byte_width == 8u)
+        || bits_per_symbol == 0u
+        || bits_per_symbol > CHAR_BIT) {
+        return 0u;
+    }
+    return static_cast<std::size_t>(storage_unit_byte_width) * CHAR_BIT
+        / bits_per_symbol;
+}
+
 template <sequence_alphabet Alphabet>
 class basic_lazy_sequence_view {
 public:
@@ -286,7 +310,8 @@ public:
         constexpr std::uint8_t bits = static_cast<std::uint8_t>(
             traits::logical_bits_per_symbol);
         const sequence_size_t letters_per_unit =
-            static_cast<sequence_size_t>(requested_width * CHAR_BIT / bits);
+            static_cast<sequence_size_t>(
+                lazy_packed_letters_per_unit(requested_width, bits));
         const resident_packed_region& region = *result;
 
         if (letters_per_unit == 0u || region.bp_length != length
@@ -2088,14 +2113,15 @@ template <sequence_alphabet Alphabet>
         sequence_size_t logical_length,
         std::uint8_t requested_width) {
     using owner_type = admitted_packed_region<Alphabet>;
-    constexpr std::uint8_t bits = static_cast<std::uint8_t>(
-        lazy_rank_stream_traits<Alphabet>::logical_bits_per_symbol);
     if (!(requested_width == 1u || requested_width == 2u
           || requested_width == 4u || requested_width == 8u)) {
         throw std::invalid_argument("invalid packed storage-unit width");
     }
     const sequence_size_t letters_per_unit =
-        requested_width * CHAR_BIT / bits;
+        lazy_packed_letters_per_unit(
+            requested_width,
+            static_cast<std::uint8_t>(
+                lazy_rank_stream_traits<Alphabet>::logical_bits_per_symbol));
     const sequence_size_t unit_count =
         logical_length / letters_per_unit
         + static_cast<sequence_size_t>(
@@ -2210,7 +2236,7 @@ template <sequence_alphabet Alphabet>
 
     const sequence_size_t length = to - from;
     const sequence_size_t letters_per_unit =
-        requested_width * CHAR_BIT / bits;
+        lazy_packed_letters_per_unit(requested_width, bits);
     const sequence_size_t unit_count =
         length / letters_per_unit
         + static_cast<sequence_size_t>(length % letters_per_unit != 0u);

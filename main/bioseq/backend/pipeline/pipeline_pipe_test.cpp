@@ -5992,18 +5992,6 @@ TEST_CASE("Paper ntHash fragmented ranges materialize only their packed slice wi
           "[paper-nthash][simd][pipe][fragmented][range][fail-closed]") {
     check_fragmented_paper_range_materialization<std::uint32_t>();
     check_fragmented_paper_range_materialization<std::uint64_t>();
-
-    using noncanonical_packing =
-        sequence_custom_alphabet<seq::dna4, std::uint32_t, 4>;
-    using noncanonical_range = compact_sequence_range<noncanonical_packing>;
-    using noncanonical_scanner =
-        bioseq::storage::sequence_scanner_test_chunked<std::uint32_t, 2>;
-    using noncanonical_lazy = bioseq::storage::lazy_compact_sequence<
-        noncanonical_packing, noncanonical_scanner>;
-    static_assert(!::bioseq::simd::HWY_NAMESPACE::pipe::
-        paper_nthash_has_canonical_two_bit_packing<noncanonical_range>);
-    static_assert(!::bioseq::simd::HWY_NAMESPACE::pipe::
-        paper_nthash_has_canonical_two_bit_packing<noncanonical_lazy>);
 }
 
 enum class InjectedScannerLeaf {

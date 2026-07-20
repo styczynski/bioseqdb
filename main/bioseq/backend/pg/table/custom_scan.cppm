@@ -75,7 +75,7 @@ import bioseq.parallelism.mode;
 import bioseq.parallelism.memory_admission;
 import bioseq.gpu.vulkan.runtime;
 import bioseq.sequences;                  // compact_sequence_stdc_type_params, sequence_custom_alphabet
-import bioseq.sequences.simd;             // stdc_recode_to_type_params
+import bioseq.sequences.simd;             // stdc_rewidth_to_type_params
 import bioseq.sequences.minimap_port;  // for MatchResult
 import bioseq.sequences.pipe;            // for PipelineDescription / describe_pipeline_for
 import bioseq.sequences.cigar;                    // for format_cigar
@@ -361,9 +361,9 @@ constexpr int kBioseqBatchJoinPrivateFields = 17;
  * child is a reconstructed core INNER join with the exact mmsearch
  * RestrictInfo removed, wrapped in BioseqSliceProject to compute the two
  * per-row operand Datums. */
-constexpr int kBioseqPerRowJoinPlanVersion = 2;
+constexpr int kBioseqPerRowJoinPlanVersion = 3;
 constexpr int kBioseqPerRowJoinPathPrivateFields = 13;
-constexpr int kBioseqPerRowJoinPrivateFields = 16;
+constexpr int kBioseqPerRowJoinPrivateFields = 18;
 
 enum BioseqPerRowJoinPrivateIndex : int {
 	kPerRowVersion = 0,
@@ -374,14 +374,16 @@ enum BioseqPerRowJoinPrivateIndex : int {
 	kPerRowChildColumnCount = 5,
 	kPerRowAlphabetCode = 6,
 	kPerRowStorageUnitByteWidth = 7,
-	kPerRowTargetTypmodErasedProof = 8,
-	kPerRowQueryTypmodErasedProof = 9,
-	kPerRowPlaceholderSites = 10,
-	kPerRowMmsearchExpr = 11,
-	kPerRowIndexReadRequirement = 12,
-	kPerRowHonestStartupCost = 13,
-	kPerRowHonestTotalCost = 14,
-	kPerRowIncumbentCostFloor = 15,
+	kPerRowQueryAlphabetCode = 8,
+	kPerRowQueryStorageUnitByteWidth = 9,
+	kPerRowTargetTypmodErasedProof = 10,
+	kPerRowQueryTypmodErasedProof = 11,
+	kPerRowPlaceholderSites = 12,
+	kPerRowMmsearchExpr = 13,
+	kPerRowIndexReadRequirement = 14,
+	kPerRowHonestStartupCost = 15,
+	kPerRowHonestTotalCost = 16,
+	kPerRowIncumbentCostFloor = 17,
 };
 
 enum BioseqBatchJoinPrivateIndex : int {
@@ -448,6 +450,8 @@ struct BioseqBatchJoinRuntime {
 	int query_column_count = 0;
 	std::uint8_t alphabet_code = 0;
 	std::uint8_t storage_unit_byte_width = 0;
+	std::uint8_t query_alphabet_code = 0;
+	std::uint8_t query_storage_unit_byte_width = 0;
 	std::uint64_t distinct_targets = 0;
 	std::uint64_t query_batch_count = 0;
 	std::uint64_t query_planner_admission_bytes = 0;
@@ -486,6 +490,8 @@ struct BioseqPerRowJoinRuntime {
 	int child_column_count = 0;
 	std::uint8_t alphabet_code = 0;
 	std::uint8_t storage_unit_byte_width = 0;
+	std::uint8_t query_alphabet_code = 0;
+	std::uint8_t query_storage_unit_byte_width = 0;
 	bool source_exhausted = false;
 	bool pass_fully_drained = false;
 	bool child_initialized = false;
@@ -3188,6 +3194,11 @@ static_assert(offsetof(BioseqSliceProjectState, custom_scanstate) == 0);
 bioseq_slice_project_exec_methods() noexcept;
 [[nodiscard]] static CustomScanMethods const&
 bioseq_slice_project_scan_methods() noexcept;
+/* A nested SliceProject must initialize its child's trace before it can bind
+ * the parent projector, while child initialization calls back through the
+ * parent-aware binding path. This forward declaration closes that genuine
+ * initialization cycle without moving either executor phase out of order. */
+static void slice_project_ensure_trace_initialized(CustomScanState* custom);
 
 [[nodiscard]] static List* slice_project_header(
 		const SliceProjectIrBuilder& builder) {
@@ -4414,6 +4425,28 @@ static void slice_project_attach_sources_from_plan_state(
 	if (child == nullptr || state == nullptr) return;
 	if (IsA(child, CustomScanState)) {
 		auto* child_custom = reinterpret_cast<CustomScanState*>(child);
+		if (child_custom->methods == &bioseq_slice_project_exec_methods()) {
+			/* Nested projectors form an async-owner boundary.  Initialize the
+			 * lower projector first, then retain its exact source routes instead
+			 * of descending through it and rebinding the same leaf buffers to a
+			 * second owner.  The lower projector owns work below the boundary;
+			 * this projector owns only provenance it publishes above it. */
+			slice_project_ensure_trace_initialized(child_custom);
+			auto* child_state = reinterpret_cast<BioseqSliceProjectState*>(
+				child_custom);
+			if (!child_state->runtime.source_routes_acquired
+					|| child_state->runtime.source_routes.count == 0u
+					|| !bioseq::storage::merge_pg_sequence_source_routes(
+						state->runtime.source_routes,
+						child_state->runtime.source_routes)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("BioseqSliceProject nested source route is unavailable")));
+			}
+			state->runtime.source_routes_acquired = true;
+			++tagged_sources;
+			return;
+		}
 		if (child_custom->methods == &BioseqColumnScanExecuteMethods) {
 			auto* bioseq_state =
 				BioseqScanState::from_custom_scan_state(child_custom);
@@ -6746,6 +6779,39 @@ struct batch_join_target_projection_visitor {
 		&& decoded.encode() == typmod;
 }
 
+[[noreturn]] static void raise_mmsearch_alphabet_mismatch(
+		const compact_sequence_stdc_type_params target,
+		const compact_sequence_stdc_type_params query,
+		const char* phase) {
+	const auto target_name =
+		pgseq_supported_alphabets::name_of_alphabet_code(
+			target.alphabet_code);
+	const auto query_name =
+		pgseq_supported_alphabets::name_of_alphabet_code(
+			query.alphabet_code);
+	ereport(ERROR,
+		(errcode(ERRCODE_DATATYPE_MISMATCH),
+		 errmsg("bioseq mmsearch requires operands with the same bound alphabet"),
+		 errdetail(
+			"phase=%s target=seq('%.*s', %u) query=seq('%.*s', %u)",
+			phase,
+			static_cast<int>(target_name.size()), target_name.data(),
+			static_cast<unsigned>(target.storage_unit_byte_width) * 8u,
+			static_cast<int>(query_name.size()), query_name.data(),
+			static_cast<unsigned>(query.storage_unit_byte_width) * 8u),
+		 errhint("Explicitly convert the data before binding it to one alphabet; mmsearch never performs cross-alphabet recoding.")));
+	pg_unreachable();
+}
+
+[[nodiscard]] static bool mmsearch_typmods_share_alphabet(
+		const int32 target_typmod,
+		const int32 query_typmod) noexcept {
+	return batch_join_typmod_is_supported(target_typmod)
+		&& batch_join_typmod_is_supported(query_typmod)
+		&& compact_sequence_stdc_type_params::decode(target_typmod).alphabet_code
+			== compact_sequence_stdc_type_params::decode(query_typmod).alphabet_code;
+}
+
 struct PerRowSequenceTypmodProof {
 	int32 typmod = -1;
 	bool descriptor_erased = false;
@@ -8433,11 +8499,27 @@ static void per_row_record_path_identity(
 		target_expression, oids);
 	const auto query_typmod_proof = per_row_sequence_typmod_proof(
 		query_expression, oids);
+	if (target_typmod_proof.has_value()
+		&& query_typmod_proof.has_value()
+		&& batch_join_typmod_is_supported(target_typmod_proof->typmod)
+		&& batch_join_typmod_is_supported(query_typmod_proof->typmod)
+		&& !mmsearch_typmods_share_alphabet(
+			target_typmod_proof->typmod, query_typmod_proof->typmod)) {
+		raise_mmsearch_alphabet_mismatch(
+			compact_sequence_stdc_type_params::decode(
+				target_typmod_proof->typmod),
+			compact_sequence_stdc_type_params::decode(
+				query_typmod_proof->typmod),
+			"join planning");
+	}
 	if (exprType(target_expression) != oids.bioseq_seq_type_oid
 		|| exprType(query_expression) != oids.bioseq_seq_type_oid
 		|| !target_typmod_proof.has_value()
 		|| !query_typmod_proof.has_value()
-		|| target_typmod_proof->typmod != query_typmod_proof->typmod
+		|| !batch_join_typmod_is_supported(target_typmod_proof->typmod)
+		|| !batch_join_typmod_is_supported(query_typmod_proof->typmod)
+		|| !mmsearch_typmods_share_alphabet(
+			target_typmod_proof->typmod, query_typmod_proof->typmod)
 		|| exprCollation(target_expression) != exprCollation(query_expression)
 		|| requirement
 			== bioseq::indexing::IndexReadRequirement::require_compatible_persisted) {
@@ -8889,9 +8971,17 @@ BioseqBatchJoinSetJoinPathlistHook(
 		|| target_var->vartype != oids.bioseq_seq_type_oid
 		|| query_var->vartype != oids.bioseq_seq_type_oid
 		|| !batch_join_typmod_is_supported(target_var->vartypmod)
-		|| target_var->vartypmod != query_var->vartypmod
+		|| !batch_join_typmod_is_supported(query_var->vartypmod)
 		|| target_var->varcollid != query_var->varcollid) {
 		return;
+	}
+	const auto target_type_params =
+		compact_sequence_stdc_type_params::decode(target_var->vartypmod);
+	const auto query_type_params =
+		compact_sequence_stdc_type_params::decode(query_var->vartypmod);
+	if (target_type_params.alphabet_code != query_type_params.alphabet_code) {
+		raise_mmsearch_alphabet_mismatch(
+			target_type_params, query_type_params, "join planning");
 	}
 	RelOptInfo* target_rel = nullptr;
 	RelOptInfo* query_rel = nullptr;
@@ -9690,18 +9780,11 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 		return false;
 	}
 	/*
-	 * Typmod compatibility check. We accept any bioseq.seq arg1
-	 * here and let BeginCustomScan decide whether (and how) to
-	 * coalesce / cross-alphabet-recompute. The classification at
-	 * runtime:
-	 *   - same (alphabet, width)    → direct dispatch
-	 *   - same alphabet, diff width → coalesce (re-encode arg1 at
-	 *                                  column's width) + index OK
-	 *   - diff alphabet, same width → coalesce (re-encode arg1 at
-	 *                                  column's alphabet) + index
-	 *                                  recompute (sidecar minimizers
-	 *                                  no longer match)
-	 *   - diff alphabet, diff width → coalesce both and recompute
+	 * Typmod compatibility check. We accept a supported bioseq.seq arg1
+	 * here and let BeginCustomScan enforce the binding contract:
+	 *   - same (alphabet, width)     → direct dispatch
+	 *   - same alphabet, diff width → rewidth arg1 to the column width
+	 *   - different bound alphabet  → SQLSTATE 42804 before dispatch
 	 *
 	 * The previous version of this helper rejected any mismatch up
 	 * here, which resulted in the parameterised path never being
@@ -11556,7 +11639,9 @@ BioseqBatchJoin_PlanCustomPath(
 		|| !bioseq::indexing::index_read_requirement_ordinal_valid(
 			index_read_requirement)
 		|| !batch_join_typmod_is_supported(target_var->vartypmod)
-		|| target_var->vartypmod != query_var->vartypmod
+		|| !batch_join_typmod_is_supported(query_var->vartypmod)
+		|| !mmsearch_typmods_share_alphabet(
+			target_var->vartypmod, query_var->vartypmod)
 		|| target_var->varcollid != query_var->varcollid) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -11870,7 +11955,9 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		|| !target_typmod_proof.has_value()
 		|| !query_typmod_proof.has_value()
 		|| target_typmod_proof->typmod != expected_typmod
-		|| query_typmod_proof->typmod != expected_typmod
+		|| !batch_join_typmod_is_supported(query_typmod_proof->typmod)
+		|| !mmsearch_typmods_share_alphabet(
+			target_typmod_proof->typmod, query_typmod_proof->typmod)
 		|| alphabet_code < 0 || alphabet_code > UINT8_MAX
 		|| (storage_unit_byte_width != 1 && storage_unit_byte_width != 2
 			&& storage_unit_byte_width != 4
@@ -11977,6 +12064,12 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		makeInteger(alphabet_code));
 	cscan->custom_private = lappend(cscan->custom_private,
 		makeInteger(storage_unit_byte_width));
+	const auto query_type_params = compact_sequence_stdc_type_params::decode(
+		query_typmod_proof->typmod);
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(query_type_params.alphabet_code));
+	cscan->custom_private = lappend(cscan->custom_private,
+		makeInteger(query_type_params.storage_unit_byte_width));
 	cscan->custom_private = lappend(cscan->custom_private,
 		makeInteger(target_typmod_proof->descriptor_erased ? 1 : 0));
 	cscan->custom_private = lappend(cscan->custom_private,
@@ -12294,10 +12387,41 @@ enum class MmsearchParamResolution : std::uint8_t {
 	pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
 		PG_DETOAST_DATUM(query_const->constvalue));
 	const auto query_type_params = query_hdr->get_type_params();
+	if (runtime.param_rebind.param_typmod >= 0) {
+		const auto declared_type_params =
+			compact_sequence_stdc_type_params::decode(
+				runtime.param_rebind.param_typmod);
+		if (query_type_params != declared_type_params) {
+			if (reinterpret_cast<void*>(query_hdr)
+				!= reinterpret_cast<void*>(
+					DatumGetPointer(query_const->constvalue))) {
+				pfree(query_hdr);
+			}
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("bioseq mmsearch Param payload disagrees with its declared typmod"),
+				 errdetail("phase=%s paramid=%d paramkind=%d",
+					phase,
+					runtime.param_rebind.paramid,
+					runtime.param_rebind.paramkind)));
+		}
+	}
+	const compact_sequence_stdc_type_params target_type_params{
+		runtime.param_rebind.alphabet_code,
+		runtime.param_rebind.storage_unit_byte_width};
 	if (query_type_params.alphabet_code
-			!= runtime.param_rebind.alphabet_code
-		|| query_type_params.storage_unit_byte_width
-			!= runtime.param_rebind.storage_unit_byte_width) {
+			!= target_type_params.alphabet_code) {
+		const auto mismatched_query_type_params = query_type_params;
+		if (reinterpret_cast<void*>(query_hdr)
+			!= reinterpret_cast<void*>(
+				DatumGetPointer(query_const->constvalue))) {
+			pfree(query_hdr);
+		}
+		raise_mmsearch_alphabet_mismatch(
+			target_type_params, mismatched_query_type_params, phase);
+	}
+	if (!pgseq_supported_storage_unit_byte_widths::contains_runtime(
+			query_type_params.storage_unit_byte_width)) {
 		const unsigned actual_alphabet = query_type_params.alphabet_code;
 		const unsigned actual_width =
 			query_type_params.storage_unit_byte_width;
@@ -12316,10 +12440,9 @@ enum class MmsearchParamResolution : std::uint8_t {
 				phase,
 				runtime.param_rebind.paramid,
 				runtime.param_rebind.paramkind,
+				static_cast<unsigned>(target_type_params.alphabet_code),
 				static_cast<unsigned>(
-					runtime.param_rebind.alphabet_code),
-				static_cast<unsigned>(
-					runtime.param_rebind.storage_unit_byte_width),
+					target_type_params.storage_unit_byte_width),
 				actual_alphabet,
 				actual_width)));
 	}
@@ -12329,6 +12452,29 @@ enum class MmsearchParamResolution : std::uint8_t {
 	std::memcpy(
 		query_varlena_bytes.data(), query_hdr, query_total_bytes);
 	const std::uint32_t bp_size = query_hdr->bp_size;
+	std::vector<char> rewidthed_query_varlena_bytes;
+	if (query_type_params.storage_unit_byte_width
+			!= target_type_params.storage_unit_byte_width) {
+		pgseq_t* rewidthed = ::bioseq::simd::active_target::
+			stdc_rewidth_to_type_params(
+				*query_hdr, target_type_params, pg_alloc);
+		if (rewidthed == nullptr) {
+			if (reinterpret_cast<void*>(query_hdr)
+				!= reinterpret_cast<void*>(
+					DatumGetPointer(query_const->constvalue))) {
+				pfree(query_hdr);
+			}
+			ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("bioseq mmsearch Param rewidth rejected an incompatible alphabet")));
+		}
+		const std::size_t rewidthed_bytes =
+			static_cast<std::size_t>(VARSIZE(rewidthed));
+		rewidthed_query_varlena_bytes.assign(
+			reinterpret_cast<const char*>(rewidthed),
+			reinterpret_cast<const char*>(rewidthed) + rewidthed_bytes);
+		pfree(rewidthed);
+	}
 	if (reinterpret_cast<void*>(query_hdr)
 		!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
 		pfree(query_hdr);
@@ -12340,6 +12486,10 @@ enum class MmsearchParamResolution : std::uint8_t {
 		runtime.param_rebind.alphabet_code,
 		runtime.param_rebind.storage_unit_byte_width,
 		runtime.param_rebind.primary_key_attno);
+	if (!rewidthed_query_varlena_bytes.empty()) {
+		runtime.buffer.apply_typmod_coalesce(
+			std::move(rewidthed_query_varlena_bytes));
+	}
 	runtime.mmsearch_null_input = false;
 	bioseq_log<DBG>(
 		"[bioseq] pg: {} rebound mmsearch query bp_size={} extras_count={} "
@@ -12886,19 +13036,12 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		}
 
 		/*
-		 * Resolve arg1's typmod and decide if a coalesce or
-		 * cross-alphabet recompute is required. Three classification
-		 * outcomes:
+		 * Resolve arg1's typmod. There are exactly three outcomes:
 		 *   - same (alphabet, width): direct dispatch, no extras.
-		 *   - same alphabet, different width: coalesce (cast arg1 to
-		 *     column's typmod). Index reuse is safe because the
-		 *     sidecar's minimizers were sketched against the
-		 *     column's alphabet — width is irrelevant for the
-		 *     dna4/dna5 minimizer hash.
-		 *   - different alphabet: coalesce AND mark for recompute.
-		 *     The sidecar minimizers are alphabet-specific (bp_size
-		 *     of dna4 = 2 bits/base, dna5 = 3 bits/base), so reusing
-		 *     them would silently produce zero seed hits.
+		 *   - same alphabet, different width: deterministic rewidth to
+		 *     the target column's physical shape.
+		 *   - different bound alphabets: SQLSTATE 42804 before any
+		 *     detoast, dispatch, sidecar read, or generic recoder.
 		 */
 		if (col_var->vartypmod < 0)
 		{
@@ -12929,40 +13072,12 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		const auto unpacked_arg1_typmod = runtime_typed_external_param
 			? unpacked_typmod
 			: compact_sequence_stdc_type_params::decode(arg1_typmod);
-		const bool typmod_match =
-			(unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code)
-			&& (unpacked_typmod.storage_unit_byte_width == unpacked_arg1_typmod.storage_unit_byte_width);
 		const bool same_alphabet =
 			unpacked_typmod.alphabet_code == unpacked_arg1_typmod.alphabet_code;
-		/*
-		 * PARAM_EXEC and any PARAM_EXTERN carrying a planner typmod require an
-		 * exact match; the rebind path has no implicit re-encode. A generic
-		 * PARAM_EXTERN with paramtypmod=-1 is checked against the same target
-		 * shape from its physical pgseq header at runtime instead.
-		 */
-		if (arg1_is_param && !runtime_typed_external_param && !typmod_match)
-		{
-			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch typmod mismatch (Param) col=({},{}) arg1=({},{}) — rejecting (Param coalesce not yet supported)",
-					static_cast<unsigned>(unpacked_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width),
-					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_arg1_typmod.storage_unit_byte_width));
-			continue;
-		}
-		/*
-		 * Var-same-rel ALWAYS shares the column's typmod (every Var
-		 * of column type bioseq.seq inherits the column's vartypmod
-		 * during planning), so we don't have to coalesce here. Log a
-		 * defensive mismatch in case the planner ever surprises us.
-		 */
-		if (arg1_is_var_same_rel && !typmod_match)
-		{
-			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() unexpected same-rel Var typmod mismatch col=({},{}) arg1=({},{}) — rejecting",
-					static_cast<unsigned>(unpacked_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width),
-					static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code),
-					static_cast<unsigned>(unpacked_arg1_typmod.storage_unit_byte_width));
-			continue;
+		if (!runtime_typed_external_param && !same_alphabet) {
+			raise_mmsearch_alphabet_mismatch(
+				unpacked_typmod, unpacked_arg1_typmod,
+				"column scan begin");
 		}
 
 		/*
@@ -13011,6 +13126,18 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			} else {
 			pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
 				PG_DETOAST_DATUM(query_const->constvalue));
+			const auto physical_query_type = query_hdr->get_type_params();
+			if (physical_query_type.alphabet_code
+					!= unpacked_typmod.alphabet_code) {
+				const auto mismatch = physical_query_type;
+				if (reinterpret_cast<void*>(query_hdr)
+					!= reinterpret_cast<void*>(
+						DatumGetPointer(query_const->constvalue))) {
+					pfree(query_hdr);
+				}
+				raise_mmsearch_alphabet_mismatch(
+					unpacked_typmod, mismatch, "literal binding");
+			}
 			const size_t query_total_bytes = static_cast<size_t>(VARSIZE(query_hdr));
 			std::vector<char> query_varlena_bytes(query_total_bytes);
 			std::memcpy(query_varlena_bytes.data(), query_hdr, query_total_bytes);
@@ -13026,26 +13153,13 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 										  unpacked_typmod.alphabet_code,
 										  unpacked_typmod.storage_unit_byte_width,
 										  primary_key_attno);
-			/*
-			 * Typmod-coalesce path: when the column and literal
-			 * share the alphabet but differ in width — e.g. column
-			 * is dna4/32, literal is dna4/64 — re-encode the
-			 * literal at the column's width so the static dispatch
-			 * agrees. The sidecar's minimizers stay valid because
-			 * width does not affect dna4 minimizer hashes (the
-			 * encoder collapses storage_unit at sketch time).
-			 *
-			 * Cross-alphabet path: when alphabets differ — e.g.
-			 * column is dna4, literal is dna5 — we still re-encode
-			 * the literal at the column's typmod, but ALSO mark
-			 * the buffer for minimizer recompute. The sidecar
-			 * minimizers were sketched at dna4; a dna5 query
-			 * routes through a different bits-per-letter encoding
-			 * and the hashes are incompatible.
-			 */
-			if (!typmod_match) {
+			/* Same-alphabet width coalescing preserves logical letters and keeps
+			 * the target column's sidecar valid. Alphabet mismatch was rejected
+			 * above and can never enter this block. */
+			if (physical_query_type != unpacked_typmod) {
 				/*
-				 * Re-encode the literal at the column's typmod. We
+				 * Rewidth the literal at the column's typmod when its physical
+				 * payload has not already been normalized to that shape. We
 				 * have to re-detoast here because the previous
 				 * detoast scope above already pfree'd the local
 				 * copy. apply_typmod_coalesce stores the result
@@ -13054,27 +13168,27 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				pgseq_t* src_hdr2 =
 					reinterpret_cast<pgseq_t*>(
 						PG_DETOAST_DATUM(query_const->constvalue));
-				pgseq_t* recoded =
-					(src_hdr2->get_type_params() == unpacked_typmod)
-						? nullptr
-						: ::bioseq::simd::active_target::stdc_recode_to_type_params(
-							*src_hdr2, unpacked_typmod, pg_alloc);
+				pgseq_t* rewidthed = ::bioseq::simd::active_target::
+					stdc_rewidth_to_type_params(
+						*src_hdr2, unpacked_typmod, pg_alloc);
 				if (reinterpret_cast<void*>(src_hdr2)
 					!= reinterpret_cast<void*>(DatumGetPointer(query_const->constvalue))) {
 					pfree(src_hdr2);
 				}
-				if (recoded != nullptr) {
-					const size_t recoded_bytes = static_cast<size_t>(VARSIZE(recoded));
-					std::vector<char> coalesced_bytes(recoded_bytes);
-					std::memcpy(coalesced_bytes.data(), recoded, recoded_bytes);
-					pfree(recoded);
-					runtime.buffer.apply_typmod_coalesce(std::move(coalesced_bytes));
-					if (!same_alphabet) {
-						runtime.buffer.mark_alphabet_mismatch_recompute();
-						bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() cross-alphabet recompute set; col_alphabet={} arg1_alphabet={}",
-								static_cast<unsigned>(unpacked_typmod.alphabet_code),
-								static_cast<unsigned>(unpacked_arg1_typmod.alphabet_code));
-					}
+				if (rewidthed == nullptr) {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("bioseq mmsearch literal rewidth rejected an incompatible alphabet")));
+				}
+				if (rewidthed != nullptr) {
+					const size_t rewidthed_bytes =
+						static_cast<size_t>(VARSIZE(rewidthed));
+					std::vector<char> coalesced_bytes(rewidthed_bytes);
+					std::memcpy(
+						coalesced_bytes.data(), rewidthed, rewidthed_bytes);
+					pfree(rewidthed);
+					runtime.buffer.apply_typmod_coalesce(
+						std::move(coalesced_bytes));
 				}
 			}
 			}
@@ -13129,6 +13243,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				self_alignment,
 				unpacked_typmod.alphabet_code,
 				unpacked_typmod.storage_unit_byte_width,
+				unpacked_arg1_typmod.alphabet_code,
+				unpacked_arg1_typmod.storage_unit_byte_width,
 				primary_key_attno);
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
 					static_cast<int>(col_var->varattno),
@@ -14110,8 +14226,8 @@ static void batch_join_materialize_queries(
 			runtime.query_column_count,
 			runtime.query_slot_seq_resno,
 			InvalidAttrNumber,
-			runtime.alphabet_code,
-			runtime.storage_unit_byte_width,
+			runtime.query_alphabet_code,
+			runtime.query_storage_unit_byte_width,
 			"query");
 		slot_getallattrs(source);
 		bool query_is_null = source->tts_isnull[
@@ -14188,9 +14304,9 @@ static void batch_join_materialize_queries(
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("BioseqBatchJoin query child did not materialize its sequence")));
 		}
-		if (flat->alphabet_code != runtime.alphabet_code
+		if (flat->alphabet_code != runtime.query_alphabet_code
 			|| flat->storage_unit_byte_width
-				!= runtime.storage_unit_byte_width) {
+				!= runtime.query_storage_unit_byte_width) {
 			if (reinterpret_cast<void*>(flat)
 				!= reinterpret_cast<void*>(DatumGetPointer(original))) {
 				pfree(flat);
@@ -14201,6 +14317,10 @@ static void batch_join_materialize_queries(
 		}
 		source->tts_values[runtime.query_slot_seq_resno - 1] =
 			PointerGetDatum(flat);
+		/* The MinimalTuple and its owning slot are one retained query-row
+		 * object.  Allocate both in the dedicated query context: execution may
+		 * enter here with a transient expression context current, and retaining
+		 * only the tuple there leaves the slot itself dangling before EndScan. */
 		MemoryContext old = MemoryContextSwitchTo(
 			runtime.query_tuple_context);
 		MinimalTuple copy = ExecCopySlotMinimalTuple(source);
@@ -14240,10 +14360,12 @@ static void batch_join_materialize_queries(
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("BioseqBatchJoin query ordinal exceeds int32 dispatch ABI")));
 		}
+		old = MemoryContextSwitchTo(runtime.query_tuple_context);
 		TupleTableSlot* stable_slot = MakeSingleTupleTableSlot(
 			source->tts_tupleDescriptor, &TTSOpsMinimalTuple);
 		ExecStoreMinimalTuple(copy, stable_slot, /*shouldFree=*/false);
 		slot_getallattrs(stable_slot);
+		MemoryContextSwitchTo(old);
 		runtime.query_tuples.push_back(BioseqBatchJoinQueryTuple{
 			.tuple = copy,
 			.slot = stable_slot,
@@ -14825,6 +14947,13 @@ static void BioseqBatchJoin_BeginCustomScan(
 			compact_sequence_stdc_type_params{
 				runtime->alphabet_code,
 				runtime->storage_unit_byte_width}.encode();
+		const int32 query_sequence_typmod = query_seq_entry == nullptr
+			? -1 : exprTypmod(reinterpret_cast<Node*>(query_seq_entry->expr));
+		const bool query_typmod_supported =
+			batch_join_typmod_is_supported(query_sequence_typmod);
+		const auto query_sequence_type_params = query_typmod_supported
+			? compact_sequence_stdc_type_params::decode(query_sequence_typmod)
+			: compact_sequence_stdc_type_params{};
 		const Oid sequence_type =
 			get_cached_stub_oids().bioseq_seq_type_oid;
 		if (target_seq_entry == nullptr || target_rowno_entry == nullptr
@@ -14839,8 +14968,9 @@ static void BioseqBatchJoin_BeginCustomScan(
 				!= get_cached_stub_oids().bioseq_seq_type_oid
 			|| exprTypmod(reinterpret_cast<Node*>(target_seq_entry->expr))
 				!= expected_sequence_typmod
-			|| exprTypmod(reinterpret_cast<Node*>(query_seq_entry->expr))
-				!= expected_sequence_typmod
+			|| !query_typmod_supported
+			|| query_sequence_type_params.alphabet_code
+				!= runtime->alphabet_code
 			|| exprCollation(reinterpret_cast<Node*>(target_seq_entry->expr))
 				!= exprCollation(reinterpret_cast<Node*>(query_seq_entry->expr))
 			|| exprCollation(reinterpret_cast<Node*>(target_seq_entry->expr))
@@ -14876,6 +15006,10 @@ static void BioseqBatchJoin_BeginCustomScan(
 					target_rowno_entry != nullptr && target_rowno_entry->resjunk
 						? "true" : "false")));
 		}
+		runtime->query_alphabet_code =
+			query_sequence_type_params.alphabet_code;
+		runtime->query_storage_unit_byte_width =
+			query_sequence_type_params.storage_unit_byte_width;
 
 		bioseq::simd::active_target::Minimap2Params params =
 			build_params_from_gucs();
@@ -14973,7 +15107,9 @@ static void BioseqBatchJoin_BeginCustomScan(
 			runtime->query_slot_seq_resno,
 			std::string{target_column_name},
 			runtime->alphabet_code,
-			runtime->storage_unit_byte_width);
+			runtime->storage_unit_byte_width,
+			runtime->query_alphabet_code,
+			runtime->query_storage_unit_byte_width);
 		pfree(target_column_name);
 
 		runtime->query_tuple_context = AllocSetContextCreate(
@@ -15427,6 +15563,7 @@ static void per_row_join_release_checked(
 		CustomScanState* node, BioseqPerRowJoinRuntime& runtime) {
 	if (runtime.cleanup_done) return;
 	runtime.buffer.clear_slots();
+	runtime.buffer.release_per_row_slice_async_owner_after_drain();
 	if (runtime.child_initialized && !runtime.child_ended
 		&& runtime.child != nullptr) {
 		ExecEndNode(runtime.child);
@@ -15498,6 +15635,9 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	runtime->child_column_count = private_integer(kPerRowChildColumnCount);
 	const int raw_alphabet = private_integer(kPerRowAlphabetCode);
 	const int raw_width = private_integer(kPerRowStorageUnitByteWidth);
+	const int raw_query_alphabet = private_integer(kPerRowQueryAlphabetCode);
+	const int raw_query_width = private_integer(
+		kPerRowQueryStorageUnitByteWidth);
 	const int target_typmod_erased = private_integer(
 		kPerRowTargetTypmodErasedProof);
 	const int query_typmod_erased = private_integer(
@@ -15526,6 +15666,9 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		|| raw_alphabet < 0 || raw_alphabet > UINT8_MAX
 		|| (raw_width != 1 && raw_width != 2
 			&& raw_width != 4 && raw_width != 8)
+		|| raw_query_alphabet < 0 || raw_query_alphabet > UINT8_MAX
+		|| (raw_query_width != 1 && raw_query_width != 2
+			&& raw_query_width != 4 && raw_query_width != 8)
 		|| (target_typmod_erased != 0 && target_typmod_erased != 1)
 		|| (query_typmod_erased != 0 && query_typmod_erased != 1)
 		|| raw_requirement != static_cast<int>(
@@ -15537,6 +15680,20 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	}
 	runtime->alphabet_code = static_cast<std::uint8_t>(raw_alphabet);
 	runtime->storage_unit_byte_width = static_cast<std::uint8_t>(raw_width);
+	runtime->query_alphabet_code = static_cast<std::uint8_t>(
+		raw_query_alphabet);
+	runtime->query_storage_unit_byte_width = static_cast<std::uint8_t>(
+		raw_query_width);
+	if (runtime->alphabet_code != runtime->query_alphabet_code) {
+		raise_mmsearch_alphabet_mismatch(
+			compact_sequence_stdc_type_params{
+				runtime->alphabet_code,
+				runtime->storage_unit_byte_width},
+			compact_sequence_stdc_type_params{
+				runtime->query_alphabet_code,
+				runtime->query_storage_unit_byte_width},
+			"post-join recipe begin");
+	}
 	TupleDesc scan_desc = node->ss.ss_ScanTupleSlot == nullptr
 		? nullptr : node->ss.ss_ScanTupleSlot->tts_tupleDescriptor;
 	if (scan_desc == nullptr
@@ -15551,6 +15708,9 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	}
 	const int32 expected_typmod = compact_sequence_stdc_type_params{
 		runtime->alphabet_code, runtime->storage_unit_byte_width}.encode();
+	const int32 expected_query_typmod = compact_sequence_stdc_type_params{
+		runtime->query_alphabet_code,
+		runtime->query_storage_unit_byte_width}.encode();
 	const std::array<AttrNumber, 2> operand_resnos{
 		runtime->target_slot_resno, runtime->query_slot_resno};
 	const std::array<int, 2> erased_proofs{
@@ -15561,7 +15721,10 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		if (attribute->atttypid
 				!= get_cached_stub_oids().bioseq_seq_type_oid
 			|| attribute->atttypmod
-				!= (erased_proofs[index] != 0 ? -1 : expected_typmod)) {
+				!= (erased_proofs[index] != 0
+					? -1
+					: (index == 0u
+						? expected_typmod : expected_query_typmod))) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("BioseqPerRowMmsearch operand type is invalid")));
@@ -15685,6 +15848,8 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		runtime->query_slot_resno,
 		runtime->target_slot_resno == runtime->query_slot_resno,
 		runtime->alphabet_code, runtime->storage_unit_byte_width,
+		runtime->query_alphabet_code,
+		runtime->query_storage_unit_byte_width,
 		InvalidAttrNumber);
 	pfree(column_name);
 	const int plan_node_id = cscan->scan.plan.plan_node_id;
@@ -15833,6 +15998,7 @@ static TupleTableSlot* BioseqPerRowJoin_ExecCustomScanImpl(
 				return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
 			}
 			runtime->buffer.clear_slots();
+			runtime->buffer.release_per_row_slice_async_owner_after_drain();
 			continue;
 		}
 		TupleTableSlot* child_slot = ExecProcNode(runtime->child);
@@ -15988,6 +16154,7 @@ static void BioseqPerRowJoin_ReScanCustomScan(CustomScanState* node) {
 	bioseq::pg::alignment_execution::mark_alignment_rescan(
 		runtime->alignment_registration);
 	runtime->buffer.clear_slots();
+	runtime->buffer.release_per_row_slice_async_owner_after_drain();
 	runtime->source_exhausted = false;
 	runtime->pass_fully_drained = false;
 	/* Like SliceProject, this CustomScan owns its child through custom_ps.
@@ -17822,17 +17989,9 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				 * "fetched from sidecar" and "recomputed" halves so the
 				 * user can see exactly what the pipeline did (or will
 				 * do): fetched = min(presence, 1), recomputed = 1 -
-				 * fetched. The two lines sum to 100%.
-				 *
-				 * The cross-alphabet recompute path overrides everything
-				 * here: a query against a different alphabet than the
-				 * column's makes the sidecar's minimizers structurally
-				 * incompatible (different bits-per-letter encoding), so
-				 * the buffer's `recompute_due_to_alphabet_mismatch` flag
-				 * forces a 100% recompute regardless of how full the
-				 * sidecar actually is. We surface this with an explicit
-				 * "Performance reduced" hint so users understand why a
-				 * sidecar-backed scan suddenly gets slower.
+				 * fetched. The two lines sum to 100%. Different bound
+				 * alphabets are rejected before a scan reaches EXPLAIN runtime
+				 * state, so there is no alphabet-specific recompute branch.
 				 */
 				const float index_presence =
 					bioseq::storage::indexing::estimate_index_presence(
@@ -17840,51 +17999,10 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 						bioseq::indexing::DEFAULT_ACTIVE_READ_INDEX);
 				float fetched_pct    = 0.0f;
 				float recomputed_pct = 100.0f;
-				const bool runtime_alphabet_recompute =
-					(explain_runtime != nullptr)
-					&& explain_runtime->buffer.recompute_due_to_alphabet_mismatch();
 				const bool runtime_coalesce_active =
 					(explain_runtime != nullptr)
 					&& explain_runtime->buffer.coalesce_active();
-				if (runtime_alphabet_recompute) {
-					/*
-					 * Cross-alphabet path: always 100% recompute. Print
-					 * the explanatory note next to the line so the user
-					 * sees WHY the sidecar didn't apply. We accept that
-					 * the message reaches into runtime state (raw vs
-					 * coalesced typmod) which EXPLAIN-without-ANALYZE
-					 * may not have populated yet.
-					 */
-					StringInfoData recompute_buf;
-					initStringInfo(&recompute_buf);
-					appendStringInfo(&recompute_buf, "minimizers 100%%");
-					ExplainPropertyText("Bioseq Recomputed", recompute_buf.data, es);
-					pfree(recompute_buf.data);
-
-					if (explain_runtime != nullptr) {
-						const auto raw_alpha = explain_runtime->buffer.raw_query_alphabet_code();
-						const auto raw_width = explain_runtime->buffer.raw_query_storage_unit_byte_width();
-						const auto col_alpha = explain_runtime->buffer.mmsearch_alphabet_code();
-						const auto col_width = explain_runtime->buffer.mmsearch_storage_unit_byte_width();
-						const auto width_to_bits = [](uint8_t code) {
-							return static_cast<unsigned>(8u << code);
-						};
-						StringInfoData hint_buf;
-						initStringInfo(&hint_buf);
-						const auto col_name =
-							pgseq_supported_alphabets::name_of_alphabet_code(col_alpha);
-						const auto raw_name =
-							pgseq_supported_alphabets::name_of_alphabet_code(raw_alpha);
-						appendStringInfo(&hint_buf,
-							"column is seq('%.*s', %u), but query is seq('%.*s', %u), so index needs to be recomputed",
-							static_cast<int>(col_name.size()), col_name.data(),
-							width_to_bits(col_width),
-							static_cast<int>(raw_name.size()), raw_name.data(),
-							width_to_bits(raw_width));
-						ExplainPropertyText("Performance reduced", hint_buf.data, es);
-						pfree(hint_buf.data);
-					}
-				} else if (bioseq_read_sequence_index) {
+				if (bioseq_read_sequence_index) {
 					fetched_pct    = index_presence * 100.0f;
 					recomputed_pct = (1.0f - index_presence) * 100.0f;
 					if (fetched_pct > 0.0f) {

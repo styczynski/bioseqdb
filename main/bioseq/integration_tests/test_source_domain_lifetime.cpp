@@ -615,23 +615,22 @@ TEST_CASE("DOC0377 source bindings obey MVCC epoch rewrite and relcache invalida
 
 TEST_CASE("DOC0377 attribute snapshot and callback session keys remain distinct",
           "[seq][slice][source-domain][binding-key][scanner-cache][rescan]") {
-    auto ctx = fresh_context(
-        {"doc0377_source_binding", "doc0377_source_driver"});
+    auto ctx = fresh_context({"doc0377_source_binding"});
     exec_sql(ctx,
         "CREATE TABLE doc0377_source_binding "
         " (id int, left_seq bioseq.seq('dna4',32), "
         "  right_seq bioseq.seq('dna4',32)) USING bioseq;"
-        "INSERT INTO doc0377_source_binding VALUES "
-        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32), "
-        "     repeat('TGCA',2048)::bioseq.seq('dna4',32));"
-        "CREATE TEMP TABLE doc0377_source_driver(id int);"
-        "INSERT INTO doc0377_source_driver VALUES (1),(2),(3),(4);");
+        "INSERT INTO doc0377_source_binding "
+        "SELECT g, repeat('ACGT',2048)::bioseq.seq('dna4',32), "
+        "          repeat('TGCA',2048)::bioseq.seq('dna4',32) "
+        "FROM generate_series(1,4) AS g;");
 
     reset_source_counters(ctx);
     REQUIRE(query_scalar(ctx,
         "SELECT bioseq.to_text(left_seq[0:8] "
         "       OPERATOR(bioseq.||) right_seq[0:8]) "
-        "FROM doc0377_source_binding;") == "ACGTACGTTGCATGCA");
+        "FROM doc0377_source_binding WHERE id=1;")
+        == "ACGTACGTTGCATGCA");
     REQUIRE(source_counter(ctx, "registries_created") == 1);
     REQUIRE(source_counter(ctx, "domains_created") == 2);
     REQUIRE(source_counter(ctx, "cache_sets_created") == 2);
@@ -639,23 +638,35 @@ TEST_CASE("DOC0377 attribute snapshot and callback session keys remain distinct"
     REQUIRE(source_counter(ctx, "scanner_entries_created") == 2);
     require_source_resources_balanced(ctx);
 
-    reset_source_counters(ctx);
-    const auto rows = query_rows(ctx,
-        "SELECT d.id, x.fragment "
-        "FROM doc0377_source_driver AS d "
-        "CROSS JOIN LATERAL ("
-        " SELECT bioseq.to_text(s.left_seq[0:8]) AS fragment "
+    exec_sql(ctx,
+        "CREATE FUNCTION pg_temp.doc0377_read_source_text(value bioseq.seq) "
+        "RETURNS text LANGUAGE plpgsql VOLATILE STRICT AS $$ "
+        "BEGIN RETURN bioseq.to_text(value); END $$;");
+    constexpr std::string_view callback_sql =
+        "SELECT g, pg_temp.doc0377_read_source_text(("
+        " SELECT s.left_seq[0:8] "
         " FROM doc0377_source_binding AS s "
-        " WHERE s.id=1 AND d.id IS NOT NULL OFFSET 0"
-        ") AS x ORDER BY d.id;");
+        " WHERE s.id=g LIMIT 1"
+        ")) AS fragment FROM generate_series(1,4) AS g;";
+    const auto callback_plan = explain_text<false>(ctx, callback_sql);
+    REQUIRE(plan_contains(callback_plan, "SubPlan"));
+    REQUIRE(plan_contains(
+        callback_plan, "Custom Scan (BioseqSliceProject)"));
+
+    reset_source_counters(ctx);
+    const auto rows = query_rows(ctx, callback_sql);
     REQUIRE(rows.size() == 4);
     for (const auto& row : rows) {
         REQUIRE(row.size() == 2);
         REQUIRE(row[1].value_or("") == "ACGTACGT");
     }
-    REQUIRE(source_counter(ctx, "domains_created") >= 1);
+    REQUIRE(source_counter(ctx, "registries_created") == 1);
+    REQUIRE(source_counter(ctx, "domains_created") == 1);
     REQUIRE(source_counter(ctx, "domains_reused") >= 3);
-    REQUIRE(source_counter(ctx, "scanner_entries_created") >= 4);
+    REQUIRE(source_counter(ctx, "cache_sets_created") == 1);
+    REQUIRE(source_counter(ctx, "snapshots_registered") == 1);
+    REQUIRE(source_counter(ctx, "scanner_entries_created") == 4);
+    REQUIRE(source_counter(ctx, "facade_source_stream_callbacks") == 4);
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 }
@@ -726,23 +737,36 @@ TEST_CASE("DOC0377 LIMIT Portal cancellation and xact release phases quiesce exa
     connection_test_context controller;
     exec_sql(worker,
         "CREATE FUNCTION pg_temp.doc0377_hold_source(value bioseq.seq) "
-        "RETURNS bigint LANGUAGE plpgsql VOLATILE AS $$ "
+        "RETURNS bigint LANGUAGE plpgsql VOLATILE STRICT AS $$ "
         "DECLARE held bioseq.seq; BEGIN "
-        " held := value[0:64]; "
+        " held := value; "
         " PERFORM pg_sleep(0.25); RETURN bioseq.len(held); END $$;");
+    constexpr std::string_view cancel_sql =
+        "/* doc0377 source cancel */ "
+        "SELECT pg_temp.doc0377_hold_source(("
+        " SELECT t.s[0:64] "
+        " FROM doc0377_source_control_flow AS t "
+        " WHERE t.id=1 LIMIT 1"
+        "));";
+    const auto cancel_plan = explain_text<false>(worker, cancel_sql);
+    REQUIRE(plan_contains(cancel_plan, "Custom Scan (BioseqSliceProject)"));
     reset_source_counters(worker);
     const auto cancelled = cancel_sleeping_query(
-        worker,
-        controller,
-        "/* doc0377 source cancel */ "
-        "SELECT sum(pg_temp.doc0377_hold_source(t.s)) "
-        "FROM doc0377_source_control_flow AS t;");
+        worker, controller, cancel_sql);
     REQUIRE(cancelled.sent);
     REQUIRE(cancelled.wait_observed);
     REQUIRE(cancelled.cancel_requested);
     REQUIRE(cancelled.drained);
     REQUIRE(cancelled.sqlstate == "57014");
-    REQUIRE(source_counter(worker, "cleanup_abort") >= 1);
+    REQUIRE(source_counter(worker, "domains_created") == 1);
+    REQUIRE(source_counter(worker, "cleanup_abort")
+            == source_counter(worker, "domains_created"));
+    REQUIRE(source_counter(worker, "release_before_locks")
+            == source_counter(worker, "domains_created"));
+    REQUIRE(source_counter(worker, "release_locks")
+            == source_counter(worker, "domains_created"));
+    REQUIRE(source_counter(worker, "release_after_locks")
+            == source_counter(worker, "domains_created"));
     REQUIRE(source_counter(worker, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(worker);
     REQUIRE(query_scalar_int(worker, "SELECT 1;") == 1);
@@ -1377,34 +1401,38 @@ TEST_CASE("DOC0377 locator columns never trust physical minmax metadata",
     const std::string a = "repeat('A',8192)::bioseq.seq('dna4',32)";
     const std::string c = "repeat('C',8192)::bioseq.seq('dna4',32)";
     const std::string g = "repeat('G',8192)::bioseq.seq('dna4',32)";
-    REQUIRE(query_scalar_int(ctx, fmt::format(
-        "SELECT count(*) FROM {} WHERE s OPERATOR(bioseq.<) {};",
-        table, c)) == 2);
-    REQUIRE(query_scalar_int(ctx, fmt::format(
-        "SELECT count(*) FROM {} WHERE s OPERATOR(bioseq.=) {};",
-        table, g)) == 2);
-    REQUIRE(query_scalar_int(ctx, fmt::format(
-        "SELECT count(*) FROM {} WHERE s OPERATOR(bioseq.>) {};",
-        table, g)) == 1);
-    REQUIRE(query_scalar_int(ctx,
-        "SELECT count(*) FROM ("
-        " SELECT s FROM doc0377_locator_minmax GROUP BY s"
-        ") AS grouped;") == 4);
-    REQUIRE(query_scalar_int(ctx,
-        "SELECT count(DISTINCT s) FROM doc0377_locator_minmax;") == 4);
+    REQUIRE(query_int_column(ctx, fmt::format(
+        "SELECT id FROM {} WHERE s OPERATOR(bioseq.<) {} ORDER BY id;",
+        table, c)) == std::vector<long long>{1, 5});
+    REQUIRE(query_int_column(ctx, fmt::format(
+        "SELECT id FROM {} WHERE s OPERATOR(bioseq.=) {} ORDER BY id;",
+        table, g)) == std::vector<long long>{3, 6});
+    REQUIRE(query_int_column(ctx, fmt::format(
+        "SELECT id FROM {} WHERE s OPERATOR(bioseq.>) {} ORDER BY id;",
+        table, g)) == std::vector<long long>{4});
+    const rowset_t expected_groups{{"A"}, {"C"}, {"G"}, {"T"}};
+    REQUIRE(query_rows(ctx,
+        "SELECT bioseq.to_text(s[0:1]) "
+        "FROM doc0377_locator_minmax GROUP BY s ORDER BY s;")
+        == expected_groups);
+    REQUIRE(query_rows(ctx,
+        "SELECT bioseq.to_text(s[0:1]) FROM ("
+        " SELECT DISTINCT s FROM doc0377_locator_minmax"
+        ") AS distinct_sequences ORDER BY 1;") == expected_groups);
 
     exec_sql(ctx,
         "SET enable_nestloop=off; SET enable_mergejoin=off; "
         "SET enable_hashjoin=on;");
     const auto hash_plan = explain_text<false>(ctx,
-        "SELECT count(*) FROM doc0377_locator_minmax AS l "
+        "SELECT l.id, r.id FROM doc0377_locator_minmax AS l "
         "JOIN doc0377_locator_minmax AS r "
         "ON l.s OPERATOR(bioseq.=) r.s;");
     REQUIRE(plan_contains(hash_plan, "Hash Join"));
-    REQUIRE(query_scalar_int(ctx,
-        "SELECT count(*) FROM doc0377_locator_minmax AS l "
+    REQUIRE(query_int_column(ctx,
+        "SELECT l.id * 10 + r.id FROM doc0377_locator_minmax AS l "
         "JOIN doc0377_locator_minmax AS r "
-        "ON l.s OPERATOR(bioseq.=) r.s;") == 10);
+        "ON l.s OPERATOR(bioseq.=) r.s ORDER BY 1;")
+        == std::vector<long long>{11, 15, 22, 33, 36, 44, 51, 55, 63, 66});
 
     /* Forge hasMinMax=true with structurally valid varlena bytes borrowed from
      * the text column. The seq reader must ignore them before comparison. The
@@ -1433,9 +1461,9 @@ TEST_CASE("DOC0377 locator columns never trust physical minmax metadata",
         "AND attr_num=3 "
         "AND minimum_value IS NOT NULL AND maximum_value IS NOT NULL;")
         == sequence_chunks);
-    REQUIRE(query_scalar_int(ctx, fmt::format(
-        "SELECT count(*) FROM {} WHERE s OPERATOR(bioseq.>) {};",
-        table, c)) == 3);
+    REQUIRE(query_int_column(ctx, fmt::format(
+        "SELECT id FROM {} WHERE s OPERATOR(bioseq.>) {} ORDER BY id;",
+        table, c)) == std::vector<long long>{3, 4, 6});
     exec_sql(ctx, "ROLLBACK;");
     REQUIRE(query_scalar_int(ctx,
         "SELECT count(*) FROM bioseq.chunk "

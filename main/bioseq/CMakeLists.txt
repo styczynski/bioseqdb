@@ -158,6 +158,416 @@ foreach(_bioseq_lazy_source IN LISTS BIOSEQ_LAZY_BOUNDARY_GUARD_SOURCES)
     endif()
   endforeach()
 endforeach()
+
+# DOC0377 §14.2 completion gate.  The broad boundary gate above prevents a
+# concrete lazy/scanner type from escaping anywhere in backend code; this
+# narrower production-owner sweep also rejects the physical-geometry escape
+# hatches named by the specification.
+set(BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/pipe.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pipeline/minimap_port.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/block_aligner.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/alignment_hwy/ksw2_batched.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/storage/lazy_compact_sequence_batch_processor.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/scheduler/dispatch_processor_typed_impl.inc)
+file(GLOB_RECURSE BIOSEQ_LAZY_FACADE_INDEX_GUARD_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/sequences/indexing/*.hpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.cppm
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.inc
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.h
+  ${CMAKE_CURRENT_LIST_DIR}/backend/pg/storage_pg/indexing/*.hpp)
+list(APPEND BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES
+  ${BIOSEQ_LAZY_FACADE_INDEX_GUARD_SOURCES})
+list(REMOVE_DUPLICATES BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES)
+
+# Exact forbidden-token exceptions are valid only between balanced named
+# sentinels in the two large minimizer modules.  The state machine rejects
+# malformed, nested, duplicate, unknown, mismatched, missing, and unclosed
+# scopes.  An exact line is then checked against both its source and active
+# private resident/admitted scope, so copying an allowed spelling elsewhere is
+# still a configure-time failure.
+function(bioseq_doc0377_private_packed_scope_names
+    _bioseq_source _bioseq_result)
+  set(_bioseq_scopes)
+  if("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm")
+    set(_bioseq_scopes
+      bounded_u32_dna4_view
+      run_packed_kernel
+      collect_minimizers_packed_paper_nthash_simd_checked
+      consume_two_stack_nthash_fragment
+      collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked)
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
+    set(_bioseq_scopes
+      vulkan_sketchable_sequence
+      compute_segment_descriptor
+      make_phase_c_segment_window
+      phase_c_segment_windows
+      make_upload_view_from_window
+      make_sequence_upload_view
+      build_gpu_segment_index_on_device_resident_impl
+      collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw
+      collect_minimizers_vulkan_segment_resident_impl_or_throw)
+  endif()
+  set(${_bioseq_result} "${_bioseq_scopes}" PARENT_SCOPE)
+endfunction()
+
+# Pure transition helper: production turns a nonempty error into FATAL_ERROR,
+# while the configure-time self-check below proves every rejection branch.
+function(bioseq_doc0377_private_packed_scope_transition
+    _bioseq_active _bioseq_seen _bioseq_allowed _bioseq_kind _bioseq_name
+    _bioseq_result_active _bioseq_result_seen _bioseq_result_error)
+  set(_bioseq_next_active "${_bioseq_active}")
+  set(_bioseq_next_seen "${_bioseq_seen}")
+  set(_bioseq_error "")
+  list(FIND _bioseq_allowed "${_bioseq_name}" _bioseq_allowed_index)
+  if(NOT _bioseq_kind STREQUAL "BEGIN"
+      AND NOT _bioseq_kind STREQUAL "END")
+    set(_bioseq_error "unknown marker kind '${_bioseq_kind}'")
+  elseif(_bioseq_allowed_index EQUAL -1)
+    set(_bioseq_error "unknown private packed scope '${_bioseq_name}'")
+  elseif(_bioseq_kind STREQUAL "BEGIN")
+    if(NOT _bioseq_active STREQUAL "")
+      set(_bioseq_error
+        "nested private packed scope '${_bioseq_name}' inside '${_bioseq_active}'")
+    else()
+      list(FIND _bioseq_seen "${_bioseq_name}" _bioseq_seen_index)
+      if(NOT _bioseq_seen_index EQUAL -1)
+        set(_bioseq_error "duplicate private packed scope '${_bioseq_name}'")
+      else()
+        set(_bioseq_next_active "${_bioseq_name}")
+        list(APPEND _bioseq_next_seen "${_bioseq_name}")
+      endif()
+    endif()
+  elseif(_bioseq_active STREQUAL "")
+    set(_bioseq_error "unbalanced END for private packed scope '${_bioseq_name}'")
+  elseif(NOT "${_bioseq_active}" STREQUAL "${_bioseq_name}")
+    set(_bioseq_error
+      "mismatched END '${_bioseq_name}' for private packed scope '${_bioseq_active}'")
+  else()
+    set(_bioseq_next_active "")
+  endif()
+  set(${_bioseq_result_active} "${_bioseq_next_active}" PARENT_SCOPE)
+  set(${_bioseq_result_seen} "${_bioseq_next_seen}" PARENT_SCOPE)
+  set(${_bioseq_result_error} "${_bioseq_error}" PARENT_SCOPE)
+endfunction()
+
+function(bioseq_doc0377_private_packed_line_allowed
+    _bioseq_source _bioseq_scope _bioseq_line _bioseq_result)
+  set(_bioseq_allowed FALSE)
+  if("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm")
+    if("${_bioseq_scope}" STREQUAL "bounded_u32_dna4_view"
+        AND ("${_bioseq_line}" STREQUAL
+          "return local_view_units * traits::letters_per_unit - local_bp_size;"
+        OR "${_bioseq_line}" STREQUAL
+          "[[nodiscard]] HWY_INLINE const std::uint32_t* read_cptr("))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "run_packed_kernel"
+        AND "${_bioseq_line}" STREQUAL
+          "static_cast<std::uint64_t>(view.padding())")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "collect_minimizers_packed_paper_nthash_simd_checked"
+        AND ("${_bioseq_line}" STREQUAL "traits::letters_per_unit;"
+          OR "${_bioseq_line}" STREQUAL "sequence.read_cptr(begin));"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "consume_two_stack_nthash_fragment"
+        AND "${_bioseq_line}" STREQUAL
+          ": fragment.read_cptr(fragment.cbegin());")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "collect_minimizers_two_stack_nthash_exact_range_resident_impl_checked"
+        AND ("${_bioseq_line}" STREQUAL "|| traits::letters_per_unit"
+          OR "${_bioseq_line}" STREQUAL
+            "constexpr std::size_t lpu = traits::letters_per_unit;"
+          OR "${_bioseq_line}" STREQUAL
+            ": resident.read_cptr(resident.cbegin());"))
+      set(_bioseq_allowed TRUE)
+    endif()
+  elseif("${_bioseq_source}" STREQUAL
+      "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
+    if("${_bioseq_scope}" STREQUAL "vulkan_sketchable_sequence"
+        AND ("${_bioseq_line}" STREQUAL "{ seq.padding() };"
+          OR "${_bioseq_line}" STREQUAL "{ seq.read_cptr(seq.cbegin()) };"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "compute_segment_descriptor"
+        AND ("${_bioseq_line}" STREQUAL
+          "constexpr std::size_t letters_per_unit = traits::letters_per_unit;"
+          OR "${_bioseq_line}" STREQUAL
+            "? static_cast<std::uint32_t>(seq.padding())"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "make_phase_c_segment_window"
+        AND "${_bioseq_line}" STREQUAL
+          "const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "phase_c_segment_windows"
+        AND "${_bioseq_line}" STREQUAL
+          "const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "make_upload_view_from_window"
+        AND "${_bioseq_line}" STREQUAL
+          ".letters_per_unit = static_cast<std::uint32_t>(traits::letters_per_unit),")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "make_sequence_upload_view"
+        AND ("${_bioseq_line}" STREQUAL
+          "seq.byte_size() == 0 ? nullptr : seq.read_cptr(begin);"
+          OR "${_bioseq_line}" STREQUAL
+            ".tail_padding = static_cast<std::uint32_t>(seq.padding()),"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "build_gpu_segment_index_on_device_resident_impl"
+        AND "${_bioseq_line}" STREQUAL
+          "const auto* base = seq.read_cptr(begin_iter);")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw"
+        AND ("${_bioseq_line}" STREQUAL
+          "std::max<std::size_t>(1u, traits::letters_per_unit);"
+          OR "${_bioseq_line}" STREQUAL
+            "const storage_unit* base = seq.read_cptr(begin_iter);"))
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL
+        "collect_minimizers_vulkan_segment_resident_impl_or_throw"
+        AND ("${_bioseq_line}" STREQUAL
+          "const std::size_t lpu = std::max<std::size_t>(1u, traits::letters_per_unit);"
+          OR "${_bioseq_line}" STREQUAL
+            "const auto* base = seq.read_cptr(begin_iter);"))
+      set(_bioseq_allowed TRUE)
+    endif()
+  endif()
+  set(${_bioseq_result} ${_bioseq_allowed} PARENT_SCOPE)
+endfunction()
+
+# Convert a source file to a CMake-safe list with exactly one element per
+# physical line. C++ semicolons, bracket nesting, and trailing preprocessor
+# backslashes all affect CMake list parsing, so encode each before introducing
+# the newline separators. Decoding happens only after foreach selects one
+# encoded element.
+function(bioseq_doc0377_read_encoded_physical_lines
+    _bioseq_source _bioseq_result)
+  file(READ "${_bioseq_source}" _bioseq_contents)
+  string(REPLACE "\r\n" "\n" _bioseq_contents "${_bioseq_contents}")
+  string(REPLACE "\r" "\n" _bioseq_contents "${_bioseq_contents}")
+  set(_bioseq_backslash_token
+    "__BIOSEQ_DOC0377_LINE_ESCAPE_BACKSLASH_9F2D__")
+  set(_bioseq_semicolon_token
+    "__BIOSEQ_DOC0377_LINE_ESCAPE_SEMICOLON_9F2D__")
+  set(_bioseq_open_bracket_token
+    "__BIOSEQ_DOC0377_LINE_ESCAPE_OPEN_BRACKET_9F2D__")
+  set(_bioseq_close_bracket_token
+    "__BIOSEQ_DOC0377_LINE_ESCAPE_CLOSE_BRACKET_9F2D__")
+  foreach(_bioseq_escape_token IN ITEMS
+      "${_bioseq_backslash_token}"
+      "${_bioseq_semicolon_token}"
+      "${_bioseq_open_bracket_token}"
+      "${_bioseq_close_bracket_token}")
+    string(FIND "${_bioseq_contents}" "${_bioseq_escape_token}"
+      _bioseq_escape_collision)
+    if(NOT _bioseq_escape_collision EQUAL -1)
+      message(FATAL_ERROR
+        "DOC0377 physical-line escape token collision in ${_bioseq_source}")
+    endif()
+  endforeach()
+  string(REPLACE "\\" "${_bioseq_backslash_token}"
+    _bioseq_contents "${_bioseq_contents}")
+  string(REPLACE ";" "${_bioseq_semicolon_token}"
+    _bioseq_contents "${_bioseq_contents}")
+  string(REPLACE "[" "${_bioseq_open_bracket_token}"
+    _bioseq_contents "${_bioseq_contents}")
+  string(REPLACE "]" "${_bioseq_close_bracket_token}"
+    _bioseq_contents "${_bioseq_contents}")
+  string(REPLACE "\n" ";" _bioseq_lines "${_bioseq_contents}")
+  set(${_bioseq_result} "${_bioseq_lines}" PARENT_SCOPE)
+endfunction()
+
+function(bioseq_doc0377_decode_physical_line
+    _bioseq_encoded _bioseq_result)
+  set(_bioseq_line "${_bioseq_encoded}")
+  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_SEMICOLON_9F2D__" ";"
+    _bioseq_line "${_bioseq_line}")
+  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_OPEN_BRACKET_9F2D__" "["
+    _bioseq_line "${_bioseq_line}")
+  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_CLOSE_BRACKET_9F2D__" "]"
+    _bioseq_line "${_bioseq_line}")
+  string(REPLACE "__BIOSEQ_DOC0377_LINE_ESCAPE_BACKSLASH_9F2D__" "\\"
+    _bioseq_line "${_bioseq_line}")
+  set(${_bioseq_result} "${_bioseq_line}" PARENT_SCOPE)
+endfunction()
+
+# Configure-time negative self-checks for the marker state machine and the
+# source+scope+exact-line binding.  These do not touch production files.
+set(_bioseq_doc0377_self_allowed alpha beta)
+bioseq_doc0377_private_packed_scope_transition(
+  "" "" "${_bioseq_doc0377_self_allowed}" BEGIN alpha
+  _bioseq_self_active _bioseq_self_seen _bioseq_self_error)
+if(NOT _bioseq_self_error STREQUAL "" OR NOT _bioseq_self_active STREQUAL "alpha")
+  message(FATAL_ERROR "DOC0377 private-scope guard positive self-check failed")
+endif()
+bioseq_doc0377_private_packed_scope_transition(
+  "${_bioseq_self_active}" "${_bioseq_self_seen}"
+  "${_bioseq_doc0377_self_allowed}" BEGIN beta
+  _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_nested)
+bioseq_doc0377_private_packed_scope_transition(
+  "${_bioseq_self_active}" "${_bioseq_self_seen}"
+  "${_bioseq_doc0377_self_allowed}" END beta
+  _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_mismatch)
+bioseq_doc0377_private_packed_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" END alpha
+  _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_unbalanced)
+bioseq_doc0377_private_packed_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" BEGIN alpha
+  _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_duplicate)
+bioseq_doc0377_private_packed_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" BEGIN gamma
+  _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_unknown)
+bioseq_doc0377_private_packed_scope_transition(
+  "" "${_bioseq_self_seen}" "${_bioseq_doc0377_self_allowed}" OTHER alpha
+  _bioseq_self_ignored_active _bioseq_self_ignored_seen _bioseq_self_kind)
+if(_bioseq_self_nested STREQUAL "" OR _bioseq_self_mismatch STREQUAL ""
+    OR _bioseq_self_unbalanced STREQUAL "" OR _bioseq_self_duplicate STREQUAL ""
+    OR _bioseq_self_unknown STREQUAL "" OR _bioseq_self_kind STREQUAL "")
+  message(FATAL_ERROR "DOC0377 private-scope guard negative self-check failed")
+endif()
+set(_bioseq_doc0377_self_source
+  "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/two_stacks_minimizers.cppm")
+bioseq_doc0377_private_packed_line_allowed(
+  "${_bioseq_doc0377_self_source}" bounded_u32_dna4_view
+  "return local_view_units * traits::letters_per_unit - local_bp_size;"
+  _bioseq_self_exact_allowed)
+bioseq_doc0377_private_packed_line_allowed(
+  "${_bioseq_doc0377_self_source}" run_packed_kernel
+  "return local_view_units * traits::letters_per_unit - local_bp_size;"
+  _bioseq_self_wrong_scope_allowed)
+bioseq_doc0377_private_packed_line_allowed(
+  "${_bioseq_doc0377_self_source}" bounded_u32_dna4_view
+  "return traits::letters_per_unit;" _bioseq_self_inexact_allowed)
+if(NOT _bioseq_self_exact_allowed OR _bioseq_self_wrong_scope_allowed
+    OR _bioseq_self_inexact_allowed)
+  message(FATAL_ERROR "DOC0377 private-scope exact-line self-check failed")
+endif()
+
+foreach(_bioseq_facade_source IN LISTS
+    BIOSEQ_LAZY_FACADE_COMPLETION_GUARD_SOURCES)
+  list(FIND BIOSEQ_LAZY_CONCRETE_FIXTURE_ALLOWLIST
+    "${_bioseq_facade_source}" _bioseq_facade_fixture_index)
+  if(NOT _bioseq_facade_fixture_index EQUAL -1)
+    continue()
+  endif()
+  bioseq_doc0377_private_packed_scope_names(
+    "${_bioseq_facade_source}" _bioseq_facade_allowed_scopes)
+  set(_bioseq_facade_active_scope "")
+  set(_bioseq_facade_seen_scopes)
+  set(_bioseq_facade_seen_token_hashes)
+  set(_bioseq_facade_marker_count 0)
+  bioseq_doc0377_read_encoded_physical_lines(
+    "${_bioseq_facade_source}" _bioseq_facade_encoded_lines)
+  foreach(_bioseq_facade_encoded_line IN LISTS
+      _bioseq_facade_encoded_lines)
+    bioseq_doc0377_decode_physical_line(
+      "${_bioseq_facade_encoded_line}" _bioseq_facade_source_line)
+    string(FIND "${_bioseq_facade_source_line}"
+      "BIOSEQ_DOC0377_PRIVATE_PACKED_" _bioseq_facade_marker_offset)
+    if(NOT _bioseq_facade_marker_offset EQUAL -1)
+      string(STRIP "${_bioseq_facade_source_line}" _bioseq_facade_marker_line)
+      if(_bioseq_facade_marker_line MATCHES
+          "^//[ \t]*BIOSEQ_DOC0377_PRIVATE_PACKED_(BEGIN|END)[ \t]+([A-Za-z][A-Za-z0-9_]*)[ \t]*$")
+        set(_bioseq_facade_marker_kind "${CMAKE_MATCH_1}")
+        set(_bioseq_facade_marker_name "${CMAKE_MATCH_2}")
+      else()
+        message(FATAL_ERROR
+          "DOC0377 malformed private packed scope marker in ${_bioseq_facade_source}: "
+          "${_bioseq_facade_marker_line}")
+      endif()
+      bioseq_doc0377_private_packed_scope_transition(
+        "${_bioseq_facade_active_scope}" "${_bioseq_facade_seen_scopes}"
+        "${_bioseq_facade_allowed_scopes}"
+        "${_bioseq_facade_marker_kind}" "${_bioseq_facade_marker_name}"
+        _bioseq_facade_active_scope _bioseq_facade_seen_scopes
+        _bioseq_facade_marker_error)
+      if(NOT _bioseq_facade_marker_error STREQUAL "")
+        message(FATAL_ERROR
+          "DOC0377 ${_bioseq_facade_marker_error} in ${_bioseq_facade_source}")
+      endif()
+      math(EXPR _bioseq_facade_marker_count
+        "${_bioseq_facade_marker_count} + 1")
+      continue()
+    endif()
+    set(_bioseq_facade_code_line "${_bioseq_facade_source_line}")
+    string(FIND "${_bioseq_facade_code_line}" "//"
+      _bioseq_facade_comment_offset)
+    if(NOT _bioseq_facade_comment_offset EQUAL -1)
+      string(SUBSTRING "${_bioseq_facade_code_line}" 0
+        ${_bioseq_facade_comment_offset} _bioseq_facade_code_line)
+    endif()
+    string(STRIP "${_bioseq_facade_code_line}" _bioseq_facade_code_line)
+    if(_bioseq_facade_code_line STREQUAL ""
+        OR _bioseq_facade_code_line MATCHES "^(/\\*|\\*|\\*/|\")")
+      continue()
+    endif()
+    if(_bioseq_facade_code_line MATCHES
+        "(scanner_type|(^|[^A-Za-z0-9_])underlying[ \\t]*\\(|\\.scanner[ \\t]*\\(|fragment_storage_units|traits[ \\t]*::[ \\t]*letters_per_unit|sizeof[ \\t]*\\([^)]*\\)[ \\t]*\\*[ \\t]*CHAR_BIT|\\.padding[ \\t]*\\(|read_cptr)")
+      bioseq_doc0377_private_packed_line_allowed(
+        "${_bioseq_facade_source}" "${_bioseq_facade_active_scope}"
+        "${_bioseq_facade_code_line}"
+        _bioseq_facade_private_allowed)
+      if(NOT _bioseq_facade_private_allowed)
+        message(FATAL_ERROR
+          "DOC0377 facade completion dependency in ${_bioseq_facade_source}; "
+          "physical scanner/packed access is permitted only in a named private "
+          "resident/admitted kernel; matched code: ${_bioseq_facade_code_line}")
+      endif()
+      string(SHA256 _bioseq_facade_token_hash
+        "${_bioseq_facade_active_scope}|${_bioseq_facade_code_line}")
+      list(FIND _bioseq_facade_seen_token_hashes
+        "${_bioseq_facade_token_hash}" _bioseq_facade_token_hash_index)
+      if(NOT _bioseq_facade_token_hash_index EQUAL -1)
+        message(FATAL_ERROR
+          "DOC0377 duplicate exact private packed token in scope "
+          "${_bioseq_facade_active_scope} in ${_bioseq_facade_source}: "
+          "${_bioseq_facade_code_line}")
+      endif()
+      list(APPEND _bioseq_facade_seen_token_hashes
+        "${_bioseq_facade_token_hash}")
+    endif()
+  endforeach()
+  if(NOT _bioseq_facade_active_scope STREQUAL "")
+    message(FATAL_ERROR
+      "DOC0377 unclosed private packed scope '${_bioseq_facade_active_scope}' "
+      "in ${_bioseq_facade_source}")
+  endif()
+  list(LENGTH _bioseq_facade_allowed_scopes
+    _bioseq_facade_allowed_scope_count)
+  math(EXPR _bioseq_facade_expected_marker_count
+    "${_bioseq_facade_allowed_scope_count} * 2")
+  if(NOT _bioseq_facade_marker_count EQUAL
+      _bioseq_facade_expected_marker_count)
+    message(FATAL_ERROR
+      "DOC0377 private packed marker count mismatch in ${_bioseq_facade_source}; "
+      "expected=${_bioseq_facade_expected_marker_count} "
+      "actual=${_bioseq_facade_marker_count}")
+  endif()
+  foreach(_bioseq_facade_required_scope IN LISTS
+      _bioseq_facade_allowed_scopes)
+    list(FIND _bioseq_facade_seen_scopes
+      "${_bioseq_facade_required_scope}" _bioseq_facade_required_scope_index)
+    if(_bioseq_facade_required_scope_index EQUAL -1)
+      message(FATAL_ERROR
+        "DOC0377 missing private packed scope '${_bioseq_facade_required_scope}' "
+        "in ${_bioseq_facade_source}")
+    endif()
+  endforeach()
+endforeach()
 message("SOURCES ${SRC_FILES}")
 
 message("MODULES? ${SRC_MOD_FILES}")

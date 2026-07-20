@@ -3394,6 +3394,15 @@ template <class S>
             std::addressof(
                 scanner_pg_ctx->mmsearch_query_payload_observer));
     const auto fq_pg_view = lazy_query_view;
+    const std::size_t target_letters_per_unit =
+        bioseq::storage::lazy_packed_letters_per_unit(
+            storage_unit_byte_width,
+            static_cast<std::uint8_t>(S::letter_bit_width));
+    if (target_letters_per_unit == 0u) {
+        raise_typed_dispatch_pg_error_as_cpp(
+            ERRCODE_INTERNAL_ERROR,
+            "PG lazy facade has invalid packed storage geometry");
+    }
     const auto& loc_opt = scanner_pg_ctx->target_locators[i];
     const bool persisted_required =
         scanner_pg_ctx->index_read_requirement
@@ -3422,16 +3431,16 @@ template <class S>
             "logical target row identity is unavailable");
     }
     if (loc_opt.has_value()) {
-        // DOC0274 — compute last-fragment padding from
-        // total_bp_size and S's letters_per_unit. For
+        // DOC0274 — compute last-fragment padding from the canonical facade
+        // geometry. For
         // total_bp = N, padding = ceil(N/lpu)*lpu - N.
-        constexpr std::size_t _lpu =
-            compact_sequence_range<S>::traits::letters_per_unit;
         const std::uint64_t _total_units =
-            (loc_opt->total_bp_size + _lpu - 1) / _lpu;
+            (loc_opt->total_bp_size + target_letters_per_unit - 1)
+            / target_letters_per_unit;
         const std::size_t _padding =
             static_cast<std::size_t>(
-                _total_units * _lpu - loc_opt->total_bp_size);
+                _total_units * target_letters_per_unit
+                - loc_opt->total_bp_size);
         using TargetBinding =
             bioseq::storage::postgres_lazy_sequence_binding<S>;
         const TargetBinding target_binding{
@@ -3453,6 +3462,7 @@ template <class S>
              &cached_query_minimizer_proof, &query_seq, lazy_query_view,
              fq_pg_view, target_bp_size, alphabet_code,
              storage_unit_byte_width, i, &loc_opt, _padding, &pool,
+             target_letters_per_unit,
              &collection, &row_consumed_persisted_query_sketch,
              &retained_prepared_query_sketch,
              &query_sketch_host_wall_ns](auto ft_pg_view) {
@@ -3914,6 +3924,7 @@ template <class S>
                          &query_seq, &query_minimizers,
                          &collection, &assembled,
                          &make_cache_key, fq_pg_view, ft_pg_view,
+		                 target_letters_per_unit,
 		                 pg_gpu_index_cache_ptr, prepared_group,
 		                 cpu_prepared_target](
                                 IStore& fragment_store,
@@ -3922,7 +3933,7 @@ template <class S>
 	                                    const sequence_size_t total_bp =
 	                                        loc_opt->total_bp_size;
 	                                    const std::size_t a_lpu =
-	                                        compact_sequence_range<S>::traits::letters_per_unit;
+	                                        target_letters_per_unit;
 	                                    const std::size_t frag_units =
 	                                        static_cast<std::size_t>(
 	                                            TargetBinding::fragment_bp_capacity())
@@ -4140,8 +4151,8 @@ template <class S>
 	                                            ensure_q();
 	                                            const sequence_size_t total_bp =
 	                                                loc_opt->total_bp_size;
-	                                            constexpr std::size_t a_lpu =
-	                                                compact_sequence_range<S>::traits::letters_per_unit;
+	                                            const std::size_t a_lpu =
+	                                                target_letters_per_unit;
 	                                            const std::vector<MinimapSketchData>& query_vec =
 	                                                *query_minimizers;
 	                                            const std::vector<MinimapSketchData>& assembly_query_vec =
@@ -4335,7 +4346,7 @@ template <class S>
                     params,
                     static_cast<sequence_size_t>(
                         loc_opt->total_bp_size),
-                    compact_sequence_range<S>::traits::letters_per_unit);
+                    target_letters_per_unit);
                 assembled = true;
                 bioseq_log<DBG>("[bioseq] index: recompute real-mps-readindex row={} target_bp={} backend={}",
                         static_cast<unsigned long long>(
@@ -4384,8 +4395,7 @@ template <class S>
                             staged);
 
                     const sequence_size_t total_bp = loc_opt->total_bp_size;
-                    const std::size_t a_lpu =
-                        compact_sequence_range<S>::traits::letters_per_unit;
+                    const std::size_t a_lpu = target_letters_per_unit;
                     const std::size_t frag_units =
                         static_cast<std::size_t>(
                             TargetBinding::fragment_bp_capacity())
@@ -4545,7 +4555,7 @@ template <class S>
                 params,
                 static_cast<sequence_size_t>(
                     loc_opt->total_bp_size),
-                compact_sequence_range<S>::traits::letters_per_unit);
+                target_letters_per_unit);
 			// build_and_align_transient_mps always builds and queries the
 			// persisted MPS scheme. Pass that concrete scheme to staging even
 			// when the short-query heuristic changed the outer alignment pair;
@@ -4600,7 +4610,7 @@ template <class S>
                     params,
                     static_cast<sequence_size_t>(
                         loc_opt->total_bp_size),
-                    compact_sequence_range<S>::traits::letters_per_unit);
+                    target_letters_per_unit);
 				const bool async_staged =
 					stage_recompute_mps_build_if_selected(
 						*scanner_pg_ctx, *loc_opt, rowno,
@@ -4932,6 +4942,15 @@ template <class S>
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
     std::map<int32_t, std::vector<MatchResult>> results;
+    const std::size_t facade_letters_per_unit =
+        bioseq::storage::lazy_packed_letters_per_unit(
+            storage_unit_byte_width,
+            static_cast<std::uint8_t>(S::letter_bit_width));
+    if (facade_letters_per_unit == 0u) {
+        raise_typed_dispatch_pg_error_as_cpp(
+            ERRCODE_INTERNAL_ERROR,
+            "typed batch facade has invalid packed storage geometry");
+    }
     const bool per_row_query_mode = per_row_query_hdrs != nullptr;
     const bool record_target_operational_outcomes =
         invocation_role == BatchInvocationRole::primary
@@ -6068,8 +6087,7 @@ template <class S>
                     const auto frozen_gate_identity =
                         frozen_query_gate.canonical_identity();
 
-                    constexpr std::size_t lpu =
-                        compact_sequence_range<S>::traits::letters_per_unit;
+                    const std::size_t lpu = facade_letters_per_unit;
                     for (std::size_t target_index = 0;
                          target_index < targets.size();
                         ++target_index) {
@@ -6900,8 +6918,8 @@ template <class S>
                         || shape_v5_parallel_reader_identity_valid(
                             *native_group, shared_target_bp_size));
                 if (batch_identity_valid) {
-                    constexpr std::size_t letters_per_unit =
-                        compact_sequence_range<S>::traits::letters_per_unit;
+                    const std::size_t letters_per_unit =
+                        facade_letters_per_unit;
                     const std::uint64_t total_units =
                         (shared_target_bp_size + letters_per_unit - 1u)
                         / letters_per_unit;

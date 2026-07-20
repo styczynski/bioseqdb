@@ -122,7 +122,7 @@
           "rules": [
             [ "lazy_expression_output_bp_matches_samplewise",
               { "key": "bioseq_lazy_expr_deferred" },
-              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+              { "compare": "=", "tolerance%": 0,
                 "aggregate": "min", "pairing": "by_iteration_exact" },
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
@@ -132,7 +132,7 @@
           "rules": [
             [ "lazy_expression_hash_hi_matches_samplewise",
               { "key": "bioseq_lazy_expr_deferred" },
-              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+              { "compare": "=", "tolerance%": 0,
                 "aggregate": "min", "pairing": "by_iteration_exact" },
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
@@ -142,7 +142,7 @@
           "rules": [
             [ "lazy_expression_hash_lo_matches_samplewise",
               { "key": "bioseq_lazy_expr_deferred" },
-              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+              { "compare": "=", "tolerance%": 0,
                 "aggregate": "min", "pairing": "by_iteration_exact" },
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
@@ -176,7 +176,7 @@
           "rules": [
             [ "lazy_expression_boundary_count_matches_samplewise",
               { "key": "bioseq_lazy_expr_deferred" },
-              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+              { "compare": "=", "tolerance%": 0,
                 "aggregate": "min", "pairing": "by_iteration_exact" },
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
@@ -234,7 +234,7 @@
           "rules": [
             [ "lazy_expression_correctness_contract_matches_samplewise",
               { "key": "bioseq_lazy_expr_deferred" },
-              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+              { "compare": "=", "tolerance%": 0,
                 "aggregate": "min", "pairing": "by_iteration_exact" },
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]
@@ -244,7 +244,7 @@
           "rules": [
             [ "lazy_expression_allocation_contract_matches_samplewise",
               { "key": "bioseq_lazy_expr_deferred" },
-              { "compare": "=", "threshold%": 0, "tolerance%": 0,
+              { "compare": "=", "tolerance%": 0,
                 "aggregate": "min", "pairing": "by_iteration_exact" },
               { "key": "bioseq_lazy_expr_eager_each_step" } ]
           ]

@@ -574,14 +574,15 @@ TEST_CASE("DOC0377 concat overloads are symmetric strict and typed",
         "       ('AC'::bioseq.seq('dna4',8) || "
         "        ARRAY['G'::bioseq.letter('dna4'), "
         "              'T'::bioseq.letter('dna4')])::text, "
-        "       pg_typeof('AC'::bioseq.seq('dna4',8) || 'GT')::text;");
+        "       pg_typeof('AC'::bioseq.seq('dna4',8) || 'GT') = "
+        "         'bioseq.seq'::regtype;");
     REQUIRE(symmetric[0] == "GTAC");
     REQUIRE(symmetric[1] == "ACGT");
     REQUIRE(symmetric[2] == "GTAC");
     REQUIRE(symmetric[3] == "ACGT");
     REQUIRE(symmetric[4] == "GTAC");
     REQUIRE(symmetric[5] == "ACGT");
-    REQUIRE(symmetric[6] == "bioseq.seq");
+    REQUIRE(symmetric[6] == "t");
 
     const auto identities = query_one(
         ctx,
@@ -940,7 +941,7 @@ TEST_CASE("DOC0377 unsupported subscript shapes fail explicitly",
     const auto multidimensional = sql_error(
         ctx,
         "SELECT s[0:3][0:1] FROM doc0377_subscript_errors;");
-    REQUIRE(multidimensional.sqlstate == "0A000");
+    REQUIRE(multidimensional.sqlstate == "2202E");
 
     const auto stepped = sql_error(
         ctx,
@@ -2176,21 +2177,25 @@ TEST_CASE("DOC0377 uint64 bigint and MaxAlloc alignment guards are exact",
 TEST_CASE("DOC0377 literal coalescing and arena guards are exact",
           "[seq][concat][rope][lifetime][acceptance]") {
     auto ctx = fresh_context();
+    exec_sql(ctx,
+        "CREATE FUNCTION pg_temp.doc0377_runtime_length(value integer) "
+        "RETURNS integer LANGUAGE plpgsql VOLATILE STRICT AS $$ "
+        "BEGIN RETURN value; END $$;");
 
     const auto thresholds = query_one(
         ctx,
         "SELECT bioseq_internal.sequence_piece_count("
-        "         repeat('A',2047)::bioseq.seq "
+        "         repeat('A',pg_temp.doc0377_runtime_length(2047))::bioseq.seq "
         "         OPERATOR(bioseq.||) "
-        "         repeat('C',2048)::bioseq.seq), "
+        "         repeat('C',pg_temp.doc0377_runtime_length(2048))::bioseq.seq), "
         "       bioseq_internal.sequence_piece_count("
-        "         repeat('A',2048)::bioseq.seq "
+        "         repeat('A',pg_temp.doc0377_runtime_length(2048))::bioseq.seq "
         "         OPERATOR(bioseq.||) "
-        "         repeat('C',2048)::bioseq.seq), "
+        "         repeat('C',pg_temp.doc0377_runtime_length(2048))::bioseq.seq), "
         "       bioseq_internal.sequence_piece_count("
-        "         repeat('A',2048)::bioseq.seq "
+        "         repeat('A',pg_temp.doc0377_runtime_length(2048))::bioseq.seq "
         "         OPERATOR(bioseq.||) "
-        "         repeat('C',2049)::bioseq.seq);");
+        "         repeat('C',pg_temp.doc0377_runtime_length(2049))::bioseq.seq);");
     REQUIRE(thresholds[0] == "1");
     REQUIRE(thresholds[1] == "1");
     REQUIRE(thresholds[2] == "2");

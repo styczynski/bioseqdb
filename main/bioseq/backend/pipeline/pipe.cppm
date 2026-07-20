@@ -3765,13 +3765,6 @@ public:
               + std::move(detail)) {}
 };
 
-template <class Sequence>
-inline constexpr bool paper_nthash_has_canonical_two_bit_packing =
-    Sequence::traits::bits_per_char == 2u
-    && Sequence::traits::unit_leftover_bits == 0u
-    && Sequence::traits::letters_per_unit
-        == sizeof(typename Sequence::traits::storage_unit) * 4u;
-
 // DOC0263 §10.1 — pipeline lengths/positions use the 64-bit sequence_size_t.
 using bioseq::storage::sequence_size_t;
 

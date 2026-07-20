@@ -30,6 +30,7 @@ import bioseq.sequences.kmers;
 import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.simd;
 import bioseq.simd.utils;
+import bioseq.storage.lazy;
 
 namespace bioseq::indexing::detail {
 
@@ -386,7 +387,10 @@ template<std::size_t W, std::size_t K, class Alphabet, class StorageUnit>
     using traits = typename range_type::traits;
     using State = bioseq::simd::HWY_NAMESPACE::
         TwoStackContinuationState<W, K, traits>;
-    constexpr std::size_t lpu = traits::letters_per_unit;
+    const std::size_t lpu = bioseq::storage::lazy_packed_letters_per_unit(
+        request.storage_unit_bytes,
+        static_cast<std::uint8_t>(
+            seqan3::detail::ceil_log2(seqan3::alphabet_size<Alphabet>)));
 
     if (request.read_fragment == nullptr
         || request.release_fragment == nullptr
@@ -395,7 +399,8 @@ template<std::size_t W, std::size_t K, class Alphabet, class StorageUnit>
         || request.collector_context == nullptr) {
         return rejected_bridge_result(ExactSimdIndexStatus::invalid_state);
     }
-    if (request.storage_unit_bytes != sizeof(StorageUnit)
+    if (lpu == 0u
+        || request.storage_unit_bytes != sizeof(StorageUnit)
         || request.letters_per_unit != lpu) {
         return rejected_bridge_result(ExactSimdIndexStatus::unsupported_storage);
     }
@@ -617,14 +622,17 @@ bridge_paper_proof(const PackedPaperProof& proof) noexcept {
 }
 
 template<class StorageUnit>
-[[nodiscard]] PackedPaperNthashIndexBridgeResult collect_paper_storage(
+[[nodiscard]] PackedPaperNthashIndexBridgeResult
+collect_paper_storage_resident_impl(
         const PackedPaperNthashIndexBridgeRequest& request) {
     using sequence_config = sequence_custom_alphabet<seq::dna4, StorageUnit>;
     using range_type = compact_sequence_range<sequence_config>;
-    using traits = typename range_type::traits;
-    constexpr std::size_t letters_per_unit = traits::letters_per_unit;
+    const std::size_t letters_per_unit =
+        bioseq::storage::lazy_packed_letters_per_unit(
+            request.storage_unit_bytes, 2u);
 
-    if (request.storage_unit_bytes != sizeof(StorageUnit)
+    if (letters_per_unit == 0u
+        || request.storage_unit_bytes != sizeof(StorageUnit)
         || request.letters_per_unit != letters_per_unit) {
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_storage);
@@ -709,9 +717,9 @@ collect_packed_paper_nthash_index_erased(
     }
     switch (request.storage_unit_bytes) {
         case sizeof(std::uint32_t):
-            return collect_paper_storage<std::uint32_t>(request);
+            return collect_paper_storage_resident_impl<std::uint32_t>(request);
         case sizeof(std::uint64_t):
-            return collect_paper_storage<std::uint64_t>(request);
+            return collect_paper_storage_resident_impl<std::uint64_t>(request);
         default:
             return rejected_packed_paper_nthash_index_result(
                 PackedPaperNthashIndexStatus::unsupported_storage);

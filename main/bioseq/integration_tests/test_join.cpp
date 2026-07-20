@@ -671,8 +671,11 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
 	REQUIRE(bad_typmod.contains("Valid alphabets: 'dna4'"));
 #else
 	REQUIRE(bad_typmod.sqlstate == "42804");
-	REQUIRE(bad_typmod.contains(
-		"bioseq mmsearch Param payload typmod is incompatible"));
+	REQUIRE(
+		bad_typmod.contains(
+			"bioseq mmsearch requires operands with the same bound alphabet")
+		|| bad_typmod.contains(
+			"cannot cast bound bioseq.seq across alphabets"));
 #endif
 	/* A generic PREPARE Param loses its declared typmod in the plan, so the
 	 * pgseq payload is checked at runtime when dna5 is enabled. The level-0
@@ -730,33 +733,37 @@ TEST_CASE("JOIN under update_index_on_insert=off and read_sequence_index=off "
     REQUIRE(saw_valid_cigar);
 }
 
-TEST_CASE("Mismatched typmod JOIN raises a clear error and the session survives",
-          "[join][typmod_mismatch][error][lifecycle]") {
-    // Cross-typmod mmsearch is undefined; the failure mode must
-    // remain at SQL/parse-error or ereport level, not SIGSEGV /
-    // connection drop. The post-failure session-reuse half
-    // exercises the MemoryContext reset callback's mid-scan-error
-    // path.
+TEST_CASE("Same-alphabet cross-width JOIN matches the identical-width oracle",
+          "[join][typmod_coalesce][rewidth][regression]") {
     auto ctx = fresh_context({kHoeJoin});
     seed_hoe_fixture(ctx, kHoeJoin);
-    exec_sql(ctx,
-             "DROP TABLE IF EXISTS hoe_64 CASCADE; "
-             "CREATE TABLE hoe_64 (pk INT PRIMARY KEY, seq0 bioseq.seq('dna4', 64)) USING bioseq; "
-             "SET bioseq.update_index_on_insert = on;");
+    exec_sql(
+        ctx,
+        fmt::format(
+            "DROP TABLE IF EXISTS hoe_64 CASCADE; "
+            "CREATE TABLE hoe_64 ("
+            "pk INT PRIMARY KEY, seq0 bioseq.seq('dna4', 64)) USING bioseq; "
+            "INSERT INTO hoe_64 SELECT pk, seq0 FROM {};",
+            kHoeJoin));
 
-    const std::string mismatch_sql = fmt::format(
-        "SELECT t1.pk FROM {} t1 JOIN hoe_64 t2 ON mmsearch(t1.seq0, t2.seq0);",
-        kHoeJoin);
-    // mismatch_sql either raises (preferred) or returns 0 rows with
-    // mmsearch acting as a tautology; what we MUST avoid is a
-    // backend crash. We accept either outcome via sql_fails (which
-    // intentionally swallows server errors) and then verify the
-    // session is still usable.
-    (void)sql_fails(ctx, mismatch_sql);
+    const auto same_width = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
+            "FROM {} t1 JOIN {} t2 ON mmsearch(t1.seq0, t2.seq0) "
+            "ORDER BY t1.pk, t2.pk;",
+            kHoeJoin,
+            kHoeJoin));
+    const auto cross_width = query_rows(
+        ctx,
+        fmt::format(
+            "SELECT t1.pk, t2.pk, bioseq.cigar(t1.pk) "
+            "FROM {} t1 JOIN hoe_64 t2 ON mmsearch(t1.seq0, t2.seq0) "
+            "ORDER BY t1.pk, t2.pk;",
+            kHoeJoin));
 
-    // Session must remain usable (no transaction abort, no
-    // connection drop) after the (potentially-failing) statement.
-    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    REQUIRE_FALSE(same_width.empty());
+    REQUIRE(cross_width == same_width);
     exec_sql(ctx, "DROP TABLE IF EXISTS hoe_64 CASCADE;");
 }
 
@@ -1030,6 +1037,150 @@ TEST_CASE("DOC0377 partition child reparameterization retains one owner",
     REQUIRE_FALSE(rows[1][1].has_value());
     REQUIRE(rows[2][0] == "3");
     REQUIRE(rows[2][1] == "1");
+}
+
+TEST_CASE("DOC0377 dominating SliceProject spans Append branches across rescans",
+          "[doc0377][mmsearch][slice][partition][append][lateral][rescan][owner-dominance]") {
+    auto ctx = fresh_context({kDoc0377PlannerTarget});
+    seed_hoe_fixture(ctx, kDoc0377PlannerTarget);
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE doc0377_owner_append_queries ("
+        "id int, driver int, bucket int, target_pk int NOT NULL, "
+        "seq bioseq.seq('dna4',32)) PARTITION BY RANGE(bucket);"
+        "CREATE TEMP TABLE doc0377_owner_append_queries_lo "
+        "PARTITION OF doc0377_owner_append_queries "
+        "FOR VALUES FROM (0) TO (10);"
+        "CREATE TEMP TABLE doc0377_owner_append_queries_hi "
+        "PARTITION OF doc0377_owner_append_queries "
+        "FOR VALUES FROM (10) TO (20);"
+        "INSERT INTO doc0377_owner_append_queries "
+        "SELECT d.driver * 100 + branch.offset, d.driver, "
+        "       branch.bucket, 1, {} "
+        "FROM (VALUES (1), (2), (3)) AS d(driver) "
+        "CROSS JOIN (VALUES (1,5), (2,5), (3,15), (4,15)) "
+        "AS branch(offset,bucket);",
+        hoe_probe_literal()));
+    configure_doc0377_transformed_join(ctx);
+    exec_sql(ctx,
+        "SET enable_partition_pruning = off;"
+        "SET enable_hashjoin = off;"
+        "SET enable_mergejoin = off;"
+        "SET enable_nestloop = on;"
+        "SET enable_memoize = off;");
+
+    const std::string sql = fmt::format(
+        "SELECT d.pass_no, d.driver, matched.ids, matched.hit_count "
+        "FROM (VALUES (1,1), (2,2), (3,3), "
+        "             (4,1), (5,2), (6,3)) AS d(pass_no,driver) "
+        "CROSS JOIN LATERAL ("
+        "  SELECT string_agg(hit.id::text, ',' ORDER BY hit.id) AS ids, "
+        "         count(*)::bigint AS hit_count "
+        "  FROM ("
+        "    SELECT DISTINCT q.id, t.pk "
+        "    FROM {} AS t "
+        "    INNER JOIN doc0377_owner_append_queries AS q "
+        "      ON t.pk=q.target_pk "
+        "     AND mmsearch("
+        "       t.seq0[0:16] OPERATOR(bioseq.||) t.seq0[16:], "
+        "       q.seq[0:]) "
+        "    WHERE q.driver=d.driver "
+        "    OFFSET 0"
+        "  ) AS hit"
+        ") AS matched "
+        "ORDER BY d.pass_no;",
+        kDoc0377PlannerTarget);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Nested Loop"));
+    REQUIRE(plan_contains(plan, "Values Scan"));
+    REQUIRE(plan_contains(plan, "Append"));
+    REQUIRE(plan_contains(plan, "doc0377_owner_append_queries_lo"));
+    REQUIRE(plan_contains(plan, "doc0377_owner_append_queries_hi"));
+    REQUIRE(plan_contains(plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+    require_doc0377_owned_qual_audit(plan);
+
+    std::size_t batch_join_count = 0u;
+    std::size_t slice_project_count = 0u;
+    std::optional<std::size_t> batch_join_line;
+    std::optional<std::size_t> slice_project_line;
+    std::optional<std::size_t> append_line;
+    for (std::size_t index = 0u; index < plan.size(); ++index) {
+        if (plan[index].find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos) {
+            ++batch_join_count;
+            if (!batch_join_line.has_value()) batch_join_line = index;
+        }
+        if (plan[index].find("Custom Scan (BioseqSliceProject)")
+                != std::string::npos) {
+            ++slice_project_count;
+            if (!slice_project_line.has_value()) slice_project_line = index;
+        }
+        if (!append_line.has_value()
+            && plan[index].find("Append") != std::string::npos) {
+            append_line = index;
+        }
+    }
+    REQUIRE(batch_join_count == 1u);
+    REQUIRE(slice_project_count == 1u);
+    REQUIRE(batch_join_line.has_value());
+    REQUIRE(slice_project_line.has_value());
+    REQUIRE(append_line.has_value());
+    REQUIRE(*batch_join_line < *slice_project_line);
+    REQUIRE(*slice_project_line < *append_line);
+
+    const auto batch_capacity = find_explain_property(
+        plan, "Bioseq Batch Capacity");
+    REQUIRE(batch_capacity.has_value());
+    const long long capacity = std::stoll(*batch_capacity);
+    REQUIRE(capacity == 8192);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT max(branch_rows) FROM ("
+        " SELECT count(*) AS branch_rows "
+        " FROM doc0377_owner_append_queries_lo "
+        " UNION ALL "
+        " SELECT count(*) AS branch_rows "
+        " FROM doc0377_owner_append_queries_hi"
+        ") AS branch_counts;") < capacity);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT max(driver_rows) FROM ("
+        " SELECT driver, count(*) AS driver_rows "
+        " FROM doc0377_owner_append_queries "
+        " GROUP BY driver"
+        ") AS driver_counts;") == 4);
+
+#ifdef BIOSEQ_TEST_INDEXES
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_sequence_source_counters();");
+#endif
+    const rowset_t rows = query_rows(ctx, sql);
+    const rowset_t expected{
+        {"1", "1", "101,102,103,104", "4"},
+        {"2", "2", "201,202,203,204", "4"},
+        {"3", "3", "301,302,303,304", "4"},
+        {"4", "1", "101,102,103,104", "4"},
+        {"5", "2", "201,202,203,204", "4"},
+        {"6", "3", "301,302,303,304", "4"},
+    };
+    REQUIRE(rows == expected);
+
+#ifdef BIOSEQ_TEST_INDEXES
+    const auto source_counter = [&ctx](const std::string_view name) {
+        return query_scalar_int(ctx, fmt::format(
+            "SELECT (bioseq_internal.sequence_source_counters()"
+            "        ->>'{}')::bigint;", name));
+    };
+    REQUIRE(source_counter("registries_created") == 1);
+    REQUIRE(source_counter("domains_created") == 1);
+    REQUIRE(source_counter("domains_reused") >= 5);
+    REQUIRE(source_counter("registries_created")
+            == source_counter("registries_destroyed"));
+    REQUIRE(source_counter("domains_created")
+            == source_counter("domains_destroyed"));
+    REQUIRE(source_counter("leases_acquired")
+            == source_counter("leases_released"));
+    REQUIRE(source_counter("live_registries") == 0);
+    REQUIRE(source_counter("live_domains") == 0);
+    REQUIRE(source_counter("live_leases") == 0);
+#endif
 }
 
 TEST_CASE("DOC0377 generic and custom plans retain transformed ownership",

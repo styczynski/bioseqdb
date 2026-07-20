@@ -72,6 +72,7 @@ import bioseq.storage.indexing_pg.chunked_storage;
 import bioseq.storage.lazy;                  // allocation observer for route-aware sequence payload tracing
 import bioseq.scheduler.dispatch_processor;   // fixed-shape BatchProcessor, heavy pipeline in its own module
 import bioseq.sequences;
+import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.cigar;
 import bioseq.sequences.pipe;
@@ -635,6 +636,8 @@ public:
         std::vector<char> query_varlena;  // full detoasted varlena bytes, 16-byte aligned by std::allocator
         uint8_t alphabet_code          = 0;
         uint8_t storage_unit_byte_width             = 0;
+        uint8_t query_alphabet_code    = 0;
+        uint8_t query_storage_unit_byte_width = 0;
         bool active                    = false;
 
         /*
@@ -680,25 +683,6 @@ public:
          */
         std::vector<char> coalesced_query_varlena;
         bool       coalesce_active          = false;
-        uint8_t    raw_query_alphabet_code  = 0;
-        uint8_t    raw_query_storage_unit_byte_width     = 0;
-
-        /*
-         * Cross-alphabet recompute: when the column and the query
-         * differ in alphabet (e.g. column is dna4/32, query is
-         * dna5/32), the sidecar minimizers — sketched at INSERT time
-         * under the COLUMN's alphabet — are hash-incompatible with the
-         * query. We can still align (dispatch on the column's
-         * alphabet, after coalescing the query bytes), but the stored
-         * index must be ignored so we recompute minimizers per row.
-         * `recompute_due_to_alphabet_mismatch` is set at
-         * configure_mmsearch time and consumed by run_batch to disable
-         * stored-index assembly (read_index_active). EXPLAIN reads the
-         * same flag to print the "Bioseq Recomputed" line with an
-         * explanatory "Performance reduced" note.
-         */
-        bool       recompute_due_to_alphabet_mismatch = false;
-
         [[nodiscard]] const pgseq_t* query_hdr() const {
             const std::vector<char>& bytes =
                 coalesce_active ? coalesced_query_varlena : query_varlena;
@@ -878,6 +862,7 @@ private:
     std::array<const pgseq_t*, kDispatchBatchCapacity> join_query_hdrs{};
     std::array<int32_t, kDispatchBatchCapacity> join_query_ids{};
     std::array<pgseq_t*, kDispatchBatchCapacity> join_query_detoast_copies{};
+    std::vector<std::vector<char>> join_query_rewidth_varlenas{};
     std::unique_ptr<
         ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext>
         join_scanner_pg_ctx{};
@@ -1001,6 +986,28 @@ public:
                 materialization_reason::mmsearch_query);
     }
 
+    /**
+     * Release a provenance binding discovered from one PerRowJoin batch.
+     *
+     * Leaf scan buffers are bound once by their owning SliceProject and must
+     * retain that binding across ordinary clear_slots() calls.  A PerRowJoin
+     * buffer is different: its owner is discovered from the returned operand
+     * EOHs, and a parameterized/partitioned rescan may legitimately return a
+     * different owning projector after the previous batch is fully drained.
+     */
+    void release_per_row_slice_async_owner_after_drain() {
+        if (join_mode || !buffered_entries.empty() || !match_map.empty()
+            || !output_cursors.empty() || output_position != -1
+            || active_wave_permit.has_value()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq per-row async owner was released before dispatch drained")));
+        }
+        slice_async_owner = nullptr;
+        mmsearch_target_payload_observer = {};
+        mmsearch_query_payload_observer = {};
+    }
+
     /*
      * Install the per-scan aligner parameters. Called from
      * BioseqColumnScan_BeginCustomScan after the GUC snapshot + any per-call
@@ -1120,24 +1127,13 @@ public:
         mmsearch_context.query_varlena      = std::move(query_varlena_bytes);
         mmsearch_context.alphabet_code      = alphabet_code;
         mmsearch_context.storage_unit_byte_width         = storage_unit_byte_width;
+        mmsearch_context.query_alphabet_code = alphabet_code;
+        mmsearch_context.query_storage_unit_byte_width =
+            storage_unit_byte_width;
         mmsearch_context.coalesce_active    = false;
         mmsearch_context.coalesced_query_varlena.clear();
-        mmsearch_context.recompute_due_to_alphabet_mismatch = false;
         mmsearch_context.per_row_query_attno = InvalidAttrNumber;
         mmsearch_context.per_row_self_alignment = false;
-        /* Capture the raw query's typmod from the header (best-effort: the
-         * header may be empty if the caller passed bogus bytes, in which
-         * case the configure_mmsearch fast-path already logs and skips.) */
-        if (!mmsearch_context.query_varlena.empty()) {
-            const pgseq_t* hdr =
-                reinterpret_cast<const pgseq_t*>(
-                    mmsearch_context.query_varlena.data());
-            mmsearch_context.raw_query_alphabet_code = hdr->alphabet_code;
-            mmsearch_context.raw_query_storage_unit_byte_width    = hdr->storage_unit_byte_width;
-        } else {
-            mmsearch_context.raw_query_alphabet_code = alphabet_code;
-            mmsearch_context.raw_query_storage_unit_byte_width    = storage_unit_byte_width;
-        }
         mmsearch_context.active             = true;
 
         uint32_t query_bp_size = 0;
@@ -1173,7 +1169,14 @@ public:
                                     bool per_row_self_alignment,
                                     uint8_t alphabet_code,
                                     uint8_t storage_unit_byte_width,
+                                    uint8_t query_alphabet_code,
+                                    uint8_t query_storage_unit_byte_width,
                                     AttrNumber primary_key_attno) {
+        if (alphabet_code != query_alphabet_code) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("bioseq mmsearch requires operands with the same bound alphabet")));
+        }
         mmsearch_context.seq_attno              = seq_attno;
         mmsearch_context.primary_key_attno      = primary_key_attno;
         mmsearch_context.column_name            = std::move(column_name);
@@ -1182,19 +1185,21 @@ public:
         mmsearch_context.coalesce_active        = false;
         mmsearch_context.alphabet_code          = alphabet_code;
         mmsearch_context.storage_unit_byte_width             = storage_unit_byte_width;
-        mmsearch_context.raw_query_alphabet_code = alphabet_code;
-        mmsearch_context.raw_query_storage_unit_byte_width    = storage_unit_byte_width;
+        mmsearch_context.query_alphabet_code = query_alphabet_code;
+        mmsearch_context.query_storage_unit_byte_width =
+            query_storage_unit_byte_width;
         mmsearch_context.per_row_query_attno    = per_row_query_attno;
         mmsearch_context.per_row_self_alignment = per_row_self_alignment;
-        mmsearch_context.recompute_due_to_alphabet_mismatch = false;
         mmsearch_context.active                 = true;
 
-        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} typmod=({},{})",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} target_typmod=({},{}) query_typmod=({},{})",
                 static_cast<int>(seq_attno),
                 static_cast<int>(per_row_query_attno),
                 per_row_self_alignment,
                 static_cast<unsigned>(alphabet_code),
-                static_cast<unsigned>(storage_unit_byte_width));
+                static_cast<unsigned>(storage_unit_byte_width),
+                static_cast<unsigned>(query_alphabet_code),
+                static_cast<unsigned>(query_storage_unit_byte_width));
     }
 
     /* Configure the narrow two-child BioseqBatchJoin seam. */
@@ -1206,7 +1211,9 @@ public:
             const AttrNumber query_slot_seq_resno,
             std::string target_column_name,
             const std::uint8_t alphabet_code,
-            const std::uint8_t storage_unit_byte_width) {
+            const std::uint8_t storage_unit_byte_width,
+            const std::uint8_t query_alphabet_code,
+            const std::uint8_t query_storage_unit_byte_width) {
         if (!OidIsValid(target_relation_oid)
             || target_storage_seq_attno <= 0
             || target_slot_seq_resno <= 0
@@ -1215,6 +1222,11 @@ public:
             ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("BioseqBatchJoin received invalid relation/attribute metadata")));
+        }
+        if (alphabet_code != query_alphabet_code) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("bioseq mmsearch requires operands with the same bound alphabet")));
         }
         if (OidIsValid(user_relid) && user_relid != target_relation_oid) {
             ereport(ERROR,
@@ -1233,8 +1245,9 @@ public:
         mmsearch_context.column_name = std::move(target_column_name);
         mmsearch_context.alphabet_code = alphabet_code;
         mmsearch_context.storage_unit_byte_width = storage_unit_byte_width;
-        mmsearch_context.raw_query_alphabet_code = alphabet_code;
-        mmsearch_context.raw_query_storage_unit_byte_width = storage_unit_byte_width;
+        mmsearch_context.query_alphabet_code = query_alphabet_code;
+        mmsearch_context.query_storage_unit_byte_width =
+            query_storage_unit_byte_width;
         mmsearch_context.active = true;
         reset_join_runtime_for_rescan();
     }
@@ -1340,6 +1353,8 @@ public:
 		std::vector<const pgseq_t*> query_headers;
 		std::vector<std::uint64_t> query_ordinals;
 		std::vector<pgseq_t*> detoast_copies;
+		std::vector<std::vector<char>> rewidthed_query_varlenas(
+			all_queries.size());
 		query_headers.reserve(all_queries.size());
 		query_ordinals.reserve(all_queries.size());
 		detoast_copies.reserve(all_queries.size());
@@ -1373,9 +1388,10 @@ public:
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("BioseqBatchJoin query preparation received a locator stub")));
 			}
-			if (query_header->alphabet_code != mmsearch_context.alphabet_code
+			if (query_header->alphabet_code
+					!= mmsearch_context.query_alphabet_code
 				|| query_header->storage_unit_byte_width
-					!= mmsearch_context.storage_unit_byte_width) {
+					!= mmsearch_context.query_storage_unit_byte_width) {
 				if (reinterpret_cast<void*>(query_header)
 					!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
 					pfree(query_header);
@@ -1384,7 +1400,38 @@ public:
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("BioseqBatchJoin query typmod changed during preparation")));
 			}
-			query_headers.push_back(query_header);
+			const pgseq_t* preparation_query_header = query_header;
+			if (query_header->storage_unit_byte_width
+					!= mmsearch_context.storage_unit_byte_width) {
+				pgseq_t* rewidthed = ::bioseq::simd::active_target::
+					stdc_rewidth_to_type_params(
+						*query_header,
+						compact_sequence_stdc_type_params{
+							mmsearch_context.alphabet_code,
+							mmsearch_context.storage_unit_byte_width},
+						pg_alloc);
+				if (rewidthed == nullptr) {
+					if (reinterpret_cast<void*>(query_header)
+						!= reinterpret_cast<void*>(
+							DatumGetPointer(query_datum))) {
+						pfree(query_header);
+					}
+					ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						 errmsg("BioseqBatchJoin query preparation rewidth rejected an incompatible alphabet")));
+				}
+				const std::size_t rewidthed_bytes =
+					static_cast<std::size_t>(VARSIZE(rewidthed));
+				auto& owned = rewidthed_query_varlenas[query_headers.size()];
+				owned.assign(
+					reinterpret_cast<const char*>(rewidthed),
+					reinterpret_cast<const char*>(rewidthed)
+						+ rewidthed_bytes);
+				pfree(rewidthed);
+				preparation_query_header =
+					reinterpret_cast<const pgseq_t*>(owned.data());
+			}
+			query_headers.push_back(preparation_query_header);
 			query_ordinals.push_back(query.ordinal);
 			if (reinterpret_cast<void*>(query_header)
 				!= reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
@@ -1537,27 +1584,20 @@ public:
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
         mmsearch_context.coalesced_query_varlena = std::move(coalesced_bytes);
         mmsearch_context.coalesce_active = true;
+        const pgseq_t* raw_query = mmsearch_context.query_varlena.empty()
+            ? nullptr : reinterpret_cast<const pgseq_t*>(
+                mmsearch_context.query_varlena.data());
         bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
-                static_cast<unsigned>(mmsearch_context.raw_query_alphabet_code),
-                static_cast<unsigned>(mmsearch_context.raw_query_storage_unit_byte_width),
+                static_cast<unsigned>(raw_query == nullptr
+                    ? mmsearch_context.alphabet_code
+                    : raw_query->alphabet_code),
+                static_cast<unsigned>(raw_query == nullptr
+                    ? mmsearch_context.storage_unit_byte_width
+                    : raw_query->storage_unit_byte_width),
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
                 mmsearch_context.query_varlena.size(),
                 mmsearch_context.coalesced_query_varlena.size());
-    }
-
-    /*
-     * Toggle: in cross-alphabet recompute mode the run-batch path
-     * MUST recompute minimizers for every target. Sidecar blobs are
-     * sketched under the column's alphabet, but the alignment now
-     * runs against a query that lives in a different alphabet —
-     * minimizer hashes are not cross-alphabet compatible. Setting
-     * this disables the index-blob fast path until the next
-     * configure_mmsearch.
-     */
-    void mark_alphabet_mismatch_recompute() {
-        mmsearch_context.recompute_due_to_alphabet_mismatch = true;
-        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::mark_alphabet_mismatch_recompute() set");
     }
 
     [[nodiscard]] bool per_row_mode() const {
@@ -1570,9 +1610,6 @@ public:
     [[nodiscard]] bool coalesce_active() const {
         return mmsearch_context.coalesce_active;
     }
-    [[nodiscard]] bool recompute_due_to_alphabet_mismatch() const {
-        return mmsearch_context.recompute_due_to_alphabet_mismatch;
-    }
     [[nodiscard]] bool per_row_self_alignment() const {
         return mmsearch_context.per_row_self_alignment;
     }
@@ -1581,12 +1618,6 @@ public:
     }
     [[nodiscard]] uint8_t mmsearch_storage_unit_byte_width() const {
         return mmsearch_context.storage_unit_byte_width;
-    }
-    [[nodiscard]] uint8_t raw_query_alphabet_code() const {
-        return mmsearch_context.raw_query_alphabet_code;
-    }
-    [[nodiscard]] uint8_t raw_query_storage_unit_byte_width() const {
-        return mmsearch_context.raw_query_storage_unit_byte_width;
     }
 
     /*
@@ -1748,9 +1779,9 @@ public:
          * per_row_query_attno == seq_attno) this is literally the same
          * column we just buffered — we still re-extract so the path is
          * uniform between sibling-column and self-column shapes.
-         * Per-row-query bytes carry the column's typmod (no coalesce
-         * needed here because both arg0 and arg1 are Vars of the same
-         * relation, so both inherit the same column typmod).
+         * Per-row-query bytes retain the query column's declared typmod in the
+         * copied output slot. The private dispatch copy is rewidthed once to
+         * the target shape when both operands bind the same alphabet.
          */
         if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
             bool query_null = true;
@@ -1768,10 +1799,41 @@ public:
                         bioseq::storage::decode_locator_from_stub(src_hdr);
                     entry.per_row_query_is_null = false;
                 } else {
-                    const size_t total_bytes = static_cast<size_t>(VARSIZE(src_hdr));
+                    if (src_hdr->alphabet_code
+                            != mmsearch_context.query_alphabet_code
+                        || src_hdr->storage_unit_byte_width
+                            != mmsearch_context.query_storage_unit_byte_width) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATATYPE_MISMATCH),
+                             errmsg("bioseq mmsearch query payload typmod changed after planning")));
+                    }
+                    const pgseq_t* dispatch_hdr = src_hdr;
+                    pgseq_t* rewidth = nullptr;
+                    if (src_hdr->storage_unit_byte_width
+                            != mmsearch_context.storage_unit_byte_width) {
+                        rewidth = ::bioseq::simd::active_target::
+                            stdc_rewidth_to_type_params(
+                                *src_hdr,
+                                compact_sequence_stdc_type_params{
+                                    mmsearch_context.alphabet_code,
+                                    mmsearch_context.storage_unit_byte_width},
+                                pg_alloc);
+                        if (rewidth == nullptr) {
+                            ereport(ERROR,
+                                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                                 errmsg("bioseq mmsearch query rewidth rejected an incompatible alphabet")));
+                        }
+                        dispatch_hdr = rewidth;
+                    }
+                    const size_t total_bytes =
+                        static_cast<size_t>(VARSIZE(dispatch_hdr));
                     entry.per_row_query_varlena.assign(
-                        reinterpret_cast<const char*>(src_hdr),
-                        reinterpret_cast<const char*>(src_hdr) + total_bytes);
+                        reinterpret_cast<const char*>(dispatch_hdr),
+                        reinterpret_cast<const char*>(dispatch_hdr)
+                            + total_bytes);
+                    if (rewidth != nullptr) {
+                        pfree(rewidth);
+                    }
                     entry.per_row_query_is_null = false;
                 }
 	                src.free_if_copy();
@@ -1857,9 +1919,15 @@ public:
         // visible rule on the hot path is no capture-all lambdas.
         std::size_t lpu_for_column          = 0;
         std::size_t bytes_per_unit_for_col  = 0;
+        const std::uint8_t column_alphabet_code = is_query
+            ? mmsearch_context.query_alphabet_code
+            : mmsearch_context.alphabet_code;
+        const std::uint8_t column_storage_unit_byte_width = is_query
+            ? mmsearch_context.query_storage_unit_byte_width
+            : mmsearch_context.storage_unit_byte_width;
         pgseq_t::dispatch_instance(
-            mmsearch_context.alphabet_code,
-            mmsearch_context.storage_unit_byte_width,
+            column_alphabet_code,
+            column_storage_unit_byte_width,
             [&lpu_for_column, &bytes_per_unit_for_col]<class S>() noexcept {
                 using traits = typename compact_sequence_range<S>::traits;
                 lpu_for_column         = traits::letters_per_unit;
@@ -1869,8 +1937,8 @@ public:
             bioseq_log<ERR, PG>(
                 "hydrate_one_column: dispatch_instance returned zero lpu / "
                 "bytes_per_unit for (alphabet={}, width={})",
-                static_cast<unsigned>(mmsearch_context.alphabet_code),
-                static_cast<unsigned>(mmsearch_context.storage_unit_byte_width));
+                static_cast<unsigned>(column_alphabet_code),
+                static_cast<unsigned>(column_storage_unit_byte_width));
         }
         const size_t batch_size = buffered_entries.size();
         bool any = false;
@@ -1943,7 +2011,36 @@ public:
                 continue;
             }
             if (is_query) {
-                buffered_entries[i].hydrated_per_row_query_hdr = out_payloads[i];
+                pgseq_t* source_query = out_payloads[i];
+                if (source_query->alphabet_code
+                        != mmsearch_context.query_alphabet_code
+                    || source_query->storage_unit_byte_width
+                        != mmsearch_context.query_storage_unit_byte_width) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                         errmsg("bioseq mmsearch hydrated query typmod changed after planning")));
+                }
+                pgseq_t* dispatch_query = source_query;
+                if (source_query->storage_unit_byte_width
+                        != mmsearch_context.storage_unit_byte_width) {
+                    MemoryContext old_context = MemoryContextSwitchTo(
+                        batch_payload_ctx);
+                    dispatch_query = ::bioseq::simd::active_target::
+                        stdc_rewidth_to_type_params(
+                            *source_query,
+                            compact_sequence_stdc_type_params{
+                                mmsearch_context.alphabet_code,
+                                mmsearch_context.storage_unit_byte_width},
+                            pg_alloc);
+                    MemoryContextSwitchTo(old_context);
+                    if (dispatch_query == nullptr) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATATYPE_MISMATCH),
+                             errmsg("bioseq mmsearch hydrated query rewidth rejected an incompatible alphabet")));
+                    }
+                }
+                buffered_entries[i].hydrated_per_row_query_hdr =
+                    dispatch_query;
             } else {
                 buffered_entries[i].hydrated_seq_hdr = out_payloads[i];
             }
@@ -1953,7 +2050,7 @@ public:
 	                if (idx >= 0 && idx < sslot->tts_tupleDescriptor->natts) {
 	                    bioseq::pg_utils::pg_slot_datums_view{sslot}.set_raw(
 	                        column_attno,
-	                        bioseq::pg_utils::pg_datum::from_pointer(out_payloads[i]));
+                        bioseq::pg_utils::pg_datum::from_pointer(out_payloads[i]));
 	                }
 	            }
         }
@@ -2051,6 +2148,8 @@ public:
         join_query_hdrs.fill(nullptr);
         join_query_ids.fill(0);
         join_query_detoast_copies.fill(nullptr);
+        join_query_rewidth_varlenas.clear();
+        join_query_rewidth_varlenas.resize(batch_size);
         join_result_scratch.clear();
         if (!join_scanner_pg_ctx) {
             join_scanner_pg_ctx = std::make_unique<
@@ -2108,9 +2207,10 @@ public:
                          errmsg("BioseqBatchJoin query child returned a locator stub"),
                          errhint("The bounded query child must materialize its compact sequence before join dispatch.")));
                 }
-                if (query_hdr->alphabet_code != mmsearch_context.alphabet_code
+                if (query_hdr->alphabet_code
+                        != mmsearch_context.query_alphabet_code
                     || query_hdr->storage_unit_byte_width
-                        != mmsearch_context.storage_unit_byte_width) {
+                        != mmsearch_context.query_storage_unit_byte_width) {
                     ereport(ERROR,
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("BioseqBatchJoin query typmod changed after planning")));
@@ -2119,7 +2219,32 @@ public:
                     != reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
                     join_query_detoast_copies[i] = query_hdr;
                 }
-                join_query_hdrs[i] = query_hdr;
+                const pgseq_t* dispatch_query_hdr = query_hdr;
+                if (query_hdr->storage_unit_byte_width
+                        != mmsearch_context.storage_unit_byte_width) {
+                    pgseq_t* rewidth = ::bioseq::simd::active_target::
+                        stdc_rewidth_to_type_params(
+                            *query_hdr,
+                            compact_sequence_stdc_type_params{
+                                mmsearch_context.alphabet_code,
+                                mmsearch_context.storage_unit_byte_width},
+                            pg_alloc);
+                    if (rewidth == nullptr) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATATYPE_MISMATCH),
+                             errmsg("BioseqBatchJoin query rewidth rejected an incompatible alphabet")));
+                    }
+                    const std::size_t rewidth_bytes =
+                        static_cast<std::size_t>(VARSIZE(rewidth));
+                    join_query_rewidth_varlenas[i].assign(
+                        reinterpret_cast<const char*>(rewidth),
+                        reinterpret_cast<const char*>(rewidth)
+                            + rewidth_bytes);
+                    pfree(rewidth);
+                    dispatch_query_hdr = reinterpret_cast<const pgseq_t*>(
+                        join_query_rewidth_varlenas[i].data());
+                }
+                join_query_hdrs[i] = dispatch_query_hdr;
                 join_target_hdrs[i] = target.seq_hdr();
                 join_query_ids[i] = static_cast<std::int32_t>(query.ordinal);
             }
@@ -2668,6 +2793,7 @@ public:
             abandoned->~seq_caches();
         }
         join_query_detoast_copies.fill(nullptr);
+        join_query_rewidth_varlenas.clear();
         join_scanner_pg_ctx.reset();
         join_result_scratch.clear();
         join_queries.clear();
@@ -2936,14 +3062,13 @@ public:
 
         const pgseq_t* query_hdr = mmsearch_context.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
-        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={} alphabet_recompute={}",
+        bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={}",
                 batch_size,
                 static_cast<unsigned>(mmsearch_context.alphabet_code),
                 static_cast<unsigned>(mmsearch_context.storage_unit_byte_width),
                 query_bp_size,
                 read_sequence_index_active,
-                per_row_mode(),
-                mmsearch_context.recompute_due_to_alphabet_mismatch);
+                per_row_mode());
 
         // DOC0264 §9.2 / DOC0274 — wire scanner_pg into the dispatch loop.
         // Allocates a fresh seq_caches for scanner_pg's PG-backed reads.
@@ -2993,8 +3118,7 @@ public:
         }
         scanner_pg_ctx.user_relid        = user_relid;
         scanner_pg_ctx.index_read_requirement = index_read_requirement;
-        scanner_pg_ctx.read_index_active = read_sequence_index_active
-            && !mmsearch_context.recompute_due_to_alphabet_mismatch;
+        scanner_pg_ctx.read_index_active = read_sequence_index_active;
         scanner_pg_ctx.index_async_persist_active = bioseq_index_async_persist;
         scanner_pg_ctx.recompute_async_persist_active =
             bioseq_recompute_async_persist;

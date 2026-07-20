@@ -1178,6 +1178,12 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
   const std::uint64_t arena_baseline = piece_tree_live_arena_count_noexcept();
   const bool concat_length_guardrail_matrix =
       run_concat_length_guardrail_matrix();
+#ifdef BIOSEQ_TEST_INDEXES
+  const bool read_session_parent_reset =
+      pg_sequence_read_session_parent_reset_self_test();
+#else
+  const bool read_session_parent_reset = true;
+#endif
   PG_TRY();
   {
     transfer_input = AllocSetContextCreate(saved, "bioseq EOH transfer input",
@@ -1260,8 +1266,8 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
         copied_flat->storage_unit_byte_width == pgseq_unbound_width_tag &&
         copied_flat->bp_size == transferred_text.size() &&
         std::memcmp(copied_flat->data, "TGA", transferred_text.size()) == 0;
-    valid = concat_length_guardrail_matrix && reparented
-        && transfer_survived && copy_survived;
+    valid = concat_length_guardrail_matrix && read_session_parent_reset
+        && reparented && transfer_survived && copy_survived;
 
     MemoryContextDelete(const_cast<MemoryContext>(copy_input));
     copy_input = nullptr;

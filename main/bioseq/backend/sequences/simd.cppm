@@ -2050,41 +2050,44 @@ requires (
     && stdc_allocator<Alloc, StdcT>
 )
 [[nodiscard]]
-inline StdcT* stdc_recode_to_type_params(
+inline StdcT* stdc_rewidth_to_type_params(
     const StdcT& src,
     compact_sequence_stdc_type_params target,
     Alloc&& alloc)
 {
-    if (target.alphabet_code == src.alphabet_code) {
-        // Same alphabet, width change. recast_storage_width copies the
-        // packed payload with a raw memcpy, which preserves the sequence
-        // ONLY when the alphabet's letters pack identically across storage
-        // widths — i.e. each byte holds a whole number of letters
-        // (8 % letter_bit_width == 0). dna4 (2 bits/letter) qualifies; dna5
-        // (3 bits/letter) does NOT — its letters straddle byte boundaries
-        // differently at each width, so a memcpy garbles the value
-        // (DOC0268 Appendix: 'ACGTN'::seq('dna5',32) decoded as "ACACG").
-        // For non-byte-aligned alphabets fall through to the
-        // alphabet-preserving ASCII round-trip below, which re-packs the
-        // letters correctly for the target width.
-        bool byte_aligned = false;
-        StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
-            src.alphabet_code,
-            [&byte_aligned]<class A>() {
-                constexpr std::size_t lbw =
-                    seqan3::detail::ceil_log2(
-                        static_cast<std::size_t>(seqan3::alphabet_size<A>));
-                byte_aligned = (lbw != 0u) && (8u % lbw == 0u);
-            });
-        if (byte_aligned) {
-            return src.recast_storage_width(target.storage_unit_byte_width,
-                                            std::forward<Alloc>(alloc));
-        }
+    // DOC0377: width coalescing is never an alphabet conversion. Callers
+    // reject two differently bound alphabets with SQLSTATE 42804 before this
+    // helper; retain the guard here so no future caller can silently enter the
+    // generic target-alphabet recoder.
+    if (target.alphabet_code != src.alphabet_code) {
+        return nullptr;
+    }
+
+    // Same alphabet, width change. recast_storage_width copies the packed
+    // payload with a raw memcpy, which preserves the sequence ONLY when the
+    // alphabet's letters pack identically across storage widths — i.e. each
+    // byte holds a whole number of letters (8 % letter_bit_width == 0). dna4
+    // (2 bits/letter) qualifies; dna5 (3 bits/letter) does NOT — its letters
+    // straddle byte boundaries differently at each width. For non-byte-aligned
+    // alphabets use an alphabet-preserving ASCII round-trip below.
+    bool byte_aligned = false;
+    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
+        src.alphabet_code,
+        [&byte_aligned]<class A>() {
+            constexpr std::size_t lbw =
+                seqan3::detail::ceil_log2(
+                    static_cast<std::size_t>(seqan3::alphabet_size<A>));
+            byte_aligned = (lbw != 0u) && (8u % lbw == 0u);
+        });
+    if (byte_aligned) {
+        return src.recast_storage_width(target.storage_unit_byte_width,
+                                        std::forward<Alloc>(alloc));
     }
     StdcT* result = nullptr;
-    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(target.alphabet_code,
-        [&]<class TargetA>() {
-            result = stdc_recode_to<StdcT, TargetA>(
+    StdcT::supported_alphabets_type::dispatch_alphabet_by_code(
+        src.alphabet_code,
+        [&result, &src, target, &alloc]<class SourceA>() {
+            result = stdc_recode_to<StdcT, SourceA>(
                 src, target.storage_unit_byte_width,
                 std::forward<Alloc>(alloc));
         });

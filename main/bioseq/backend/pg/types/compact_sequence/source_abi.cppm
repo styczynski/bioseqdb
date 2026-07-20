@@ -116,6 +116,11 @@ export struct pg_sequence_session_owner_entry {
 };
 
 export struct pg_sequence_read_session {
+    /* The control shell must survive a reset of the caller-owned payload
+     * parent long enough for the surrounding PG_CATCH to perform its
+     * idempotent abort.  It is therefore one small TopMemoryContext
+     * allocation; every potentially large/session-specific allocation stays
+     * below payload_context. */
     MemoryContext control_context{};
     MemoryContext payload_context{};
     MemoryContextCallback reset_callback{};
@@ -131,7 +136,7 @@ export using create_pg_sequence_read_entry_fn = void* (*)(
 
 namespace {
 
-[[nodiscard]] inline bool same_locator(
+[[nodiscard]] inline bool same_read_entry_locator(
     bioseq::storage::seq_locator const& left,
     bioseq::storage::seq_locator const& right) noexcept
 {
@@ -143,7 +148,7 @@ namespace {
     pg_sequence_read_entry_key const& right) noexcept
 {
     return left.source == right.source
-        && same_locator(left.locator, right.locator)
+        && same_read_entry_locator(left.locator, right.locator)
         && left.stored_type_params == right.stored_type_params;
 }
 
@@ -183,7 +188,69 @@ inline void pg_sequence_read_session_reset(void* argument) noexcept
     auto* session = static_cast<pg_sequence_read_session*>(argument);
     if (session != nullptr) {
         close_pg_sequence_read_session_noexcept(*session);
+        /* This callback runs while payload_context is being reset/deleted.
+         * The independently allocated control shell remains addressable by
+         * the enclosing PG_CATCH, but the payload pointer must never be used
+         * again after the callback returns. */
+        session->payload_context = nullptr;
     }
+}
+
+[[nodiscard]] inline bool memory_context_is_within(
+    MemoryContext candidate, MemoryContext ancestor) noexcept
+{
+    for (MemoryContext current = candidate; current != nullptr;
+         current = MemoryContextGetParent(current)) {
+        if (current == ancestor) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void delete_session_payload(
+    pg_sequence_read_session& session, bool swallow_error)
+{
+    MemoryContext payload = session.payload_context;
+    session.payload_context = nullptr;
+    if (payload == nullptr) {
+        return;
+    }
+    const MemoryContext active = CurrentMemoryContext;
+    const bool active_inside_payload =
+        memory_context_is_within(active, payload);
+    const MemoryContext safe_context = active_inside_payload
+        ? MemoryContextGetParent(payload) : active;
+    if (active_inside_payload) {
+        MemoryContextSwitchTo(safe_context != nullptr
+            ? safe_context : TopMemoryContext);
+    }
+    if (!swallow_error) {
+        MemoryContextDelete(payload);
+        return;
+    }
+    PG_TRY();
+    {
+        MemoryContextDelete(payload);
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(safe_context != nullptr
+            ? safe_context : TopMemoryContext);
+        FlushErrorState();
+    }
+    PG_END_TRY();
+}
+
+inline void release_session_control(
+    pg_sequence_read_session* session) noexcept
+{
+    if (session == nullptr) {
+        return;
+    }
+    session->control_context = nullptr;
+    session->backend_thread.~pg_sequence_backend_thread_token();
+    pfree(session);
 }
 
 } // namespace
@@ -195,14 +262,20 @@ begin_pg_sequence_read_session(MemoryContext parent)
     bool volatile token_constructed = false;
     PG_TRY();
     {
+        if (parent == nullptr) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                     errmsg("bioseq sequence read session requires a parent context")));
+        }
         auto* session = static_cast<pg_sequence_read_session*>(
-            MemoryContextAllocZero(parent, sizeof(pg_sequence_read_session)));
+            MemoryContextAllocZero(
+                TopMemoryContext, sizeof(pg_sequence_read_session)));
         pending = session;
         ::new (static_cast<void*>(&session->backend_thread))
             pg_sequence_backend_thread_token(
                 pg_sequence_backend_thread_token::capture());
         token_constructed = true;
-        session->control_context = parent;
+        session->control_context = TopMemoryContext;
         session->payload_context = AllocSetContextCreate(
             parent, "bioseq sequence read session", ALLOCSET_SMALL_SIZES);
         session->accepting_entries = true;
@@ -217,8 +290,7 @@ begin_pg_sequence_read_session(MemoryContext parent)
         auto* session = const_cast<pg_sequence_read_session*>(pending);
         if (session != nullptr) {
             if (session->payload_context != nullptr) {
-                MemoryContextDelete(session->payload_context);
-                session->payload_context = nullptr;
+                delete_session_payload(*session, /*swallow_error=*/true);
             }
             if (token_constructed) {
                 session->backend_thread.~pg_sequence_backend_thread_token();
@@ -318,7 +390,14 @@ export inline void finish_pg_sequence_read_session(
     pg_sequence_read_session* session,
     bool is_commit)
 {
-    if (session == nullptr || !session->callback_armed) {
+    if (session == nullptr) {
+        return;
+    }
+    /* A caller-parent reset may have already run the owner-first abort
+     * callback.  The TopMemory control shell deliberately survives that
+     * reset, so normal/catch cleanup still owns exactly one final release. */
+    if (!session->callback_armed) {
+        release_session_control(session);
         return;
     }
     session->accepting_entries = false;
@@ -344,11 +423,8 @@ export inline void finish_pg_sequence_read_session(
     }
 
     session->callback_armed = false;
-    MemoryContext payload = session->payload_context;
-    session->payload_context = nullptr;
-    MemoryContextDelete(payload);
-    session->backend_thread.~pg_sequence_backend_thread_token();
-    pfree(session);
+    delete_session_payload(*session, /*swallow_error=*/false);
+    release_session_control(session);
 }
 
 export inline void abort_pg_sequence_read_session_noexcept(
@@ -358,19 +434,118 @@ export inline void abort_pg_sequence_read_session_noexcept(
         return;
     }
     close_pg_sequence_read_session_noexcept(*session);
-    MemoryContext payload = session->payload_context;
-    session->payload_context = nullptr;
-    if (payload != nullptr) {
-        PG_TRY();
-        {
-            MemoryContextDelete(payload);
-        }
-        PG_CATCH();
-        {
-            FlushErrorState();
-        }
-        PG_END_TRY();
-    }
-    session->backend_thread.~pg_sequence_backend_thread_token();
-    pfree(session);
+    delete_session_payload(*session, /*swallow_error=*/true);
+    release_session_control(session);
 }
+
+#ifdef BIOSEQ_TEST_INDEXES
+namespace {
+
+struct read_session_reset_probe {
+    std::uint32_t next_order{};
+    std::uint32_t owner_release_order{};
+    std::uint32_t entry_abort_order{};
+    std::uint32_t owner_release_calls{};
+    std::uint32_t entry_abort_calls{};
+};
+
+struct read_session_reset_entry {
+    read_session_reset_probe* probe{};
+};
+
+inline void read_session_reset_release_owner(void* opaque) noexcept
+{
+    auto& probe = *static_cast<read_session_reset_probe*>(opaque);
+    ++probe.owner_release_calls;
+    probe.owner_release_order = ++probe.next_order;
+}
+
+[[nodiscard]] inline void* read_session_reset_create_entry(
+    void* opaque, MemoryContext payload_context)
+{
+    auto* entry = static_cast<read_session_reset_entry*>(
+        MemoryContextAllocZero(
+            payload_context, sizeof(read_session_reset_entry)));
+    entry->probe = static_cast<read_session_reset_probe*>(opaque);
+    return entry;
+}
+
+inline void read_session_reset_finish_entry(void*, bool) {}
+
+inline void read_session_reset_abort_entry(void* opaque) noexcept
+{
+    auto& probe = *static_cast<read_session_reset_entry*>(opaque)->probe;
+    ++probe.entry_abort_calls;
+    probe.entry_abort_order = ++probe.next_order;
+}
+
+} // namespace
+
+/**
+ * Exercise the exact tuplesort/error frontier: the caller-owned parent resets
+ * while one read session is live.  The payload callback must close owner first
+ * and entry second, while the independent control shell remains valid for the
+ * enclosing catch/abort to release exactly once.
+ */
+export [[nodiscard]] inline bool
+pg_sequence_read_session_parent_reset_self_test()
+{
+    const MemoryContext saved_context = CurrentMemoryContext;
+    MemoryContext volatile parent_context = nullptr;
+    pg_sequence_read_session* volatile session = nullptr;
+    bool volatile valid = false;
+    PG_TRY();
+    {
+        parent_context = AllocSetContextCreate(
+            saved_context, "bioseq read session reset probe",
+            ALLOCSET_SMALL_SIZES);
+        auto* local_session = begin_pg_sequence_read_session(
+            const_cast<MemoryContext>(parent_context));
+        session = local_session;
+        read_session_reset_probe probe{};
+        register_pg_sequence_call_owner(
+            *local_session, &probe, read_session_reset_release_owner);
+        const pg_sequence_read_entry_key key{
+            .source = {
+                .control_address = reinterpret_cast<std::uintptr_t>(&probe),
+                .generation = 1u,
+            },
+            .locator = {},
+            .stored_type_params = {},
+        };
+        void* entry = find_or_create_pg_sequence_read_entry(
+            *local_session, key, &probe, read_session_reset_create_entry,
+            read_session_reset_finish_entry,
+            read_session_reset_abort_entry);
+        MemoryContextReset(const_cast<MemoryContext>(parent_context));
+        valid = entry != nullptr
+            && local_session->control_context == TopMemoryContext
+            && local_session->payload_context == nullptr
+            && !local_session->callback_armed
+            && probe.owner_release_calls == 1u
+            && probe.entry_abort_calls == 1u
+            && probe.owner_release_order == 1u
+            && probe.entry_abort_order == 2u;
+        abort_pg_sequence_read_session_noexcept(local_session);
+        session = nullptr;
+        MemoryContextDelete(const_cast<MemoryContext>(parent_context));
+        parent_context = nullptr;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        abort_pg_sequence_read_session_noexcept(
+            const_cast<pg_sequence_read_session*>(session));
+        session = nullptr;
+        if (parent_context != nullptr) {
+            MemoryContextDelete(const_cast<MemoryContext>(parent_context));
+            parent_context = nullptr;
+        }
+        FlushErrorState();
+        valid = false;
+    }
+    PG_END_TRY();
+    MemoryContextSwitchTo(saved_context);
+    return valid;
+}
+#endif
