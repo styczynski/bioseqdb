@@ -1090,6 +1090,51 @@ bioseq_index_delete_tuples(Relation rel,
 }
 
 
+[[nodiscard]] static bioseq::storage::seq_caches*
+ensure_write_side_seq_caches(Relation relation,
+                             BioseqColumnWriteState* write_state)
+{
+	if (relation == nullptr || write_state == nullptr
+		|| write_state->stripeWriteContext == nullptr)
+	{
+		bioseq_log<ERR, PG>(
+			"bioseq storage: sequence write cache owner is unavailable");
+	}
+
+	if (write_state->seq_caches == nullptr)
+	{
+		MemoryContext owner = MemoryContextGetParent(
+			write_state->stripeWriteContext);
+		if (owner == nullptr)
+		{
+			bioseq_log<ERR, PG>(
+				"bioseq storage: sequence write cache context is unavailable");
+		}
+		auto* fresh = bioseq::storage::alloc_seq_caches(owner);
+		fresh->side = bioseq::storage::seq_caches::Side::Write;
+		fresh->lock_mode = RowExclusiveLock;
+		fresh->main_database_oid = relation->rd_locator.dbOid;
+		fresh->main_tablespace_oid = relation->rd_locator.spcOid;
+		fresh->main_relfilenode = relation->rd_locator.relNumber;
+		fresh->cap_bytes_snapshot =
+			bioseq::storage::read_max_sub_table_cap_bytes();
+		write_state->seq_caches = fresh;
+	}
+
+	auto* caches = static_cast<bioseq::storage::seq_caches*>(
+		write_state->seq_caches);
+	if (caches->side != bioseq::storage::seq_caches::Side::Write
+		|| caches->main_database_oid != relation->rd_locator.dbOid
+		|| caches->main_tablespace_oid != relation->rd_locator.spcOid
+		|| caches->main_relfilenode != relation->rd_locator.relNumber)
+	{
+		bioseq_log<ERR, PG>(
+			"bioseq storage: sequence write cache relation identity changed");
+	}
+	return caches;
+}
+
+
 /*
  * DOC0260 Phase A — rewrite every non-NULL SEQ column in `detoasted_values`
  * to a 40-byte locator stub. The original payload bytes are written to the
@@ -1124,25 +1169,10 @@ rewrite_seq_columns_to_stubs(Relation relation,
 	if (amc.seq_attnos.empty()) {
 		return values_for_write;
 	}
-	// DOC0260 Phase A — lazily allocate the seq_caches on first call,
-	// because write_state_management.cppm intentionally does not import
-	// bioseq_storage (would cycle with bioseq_table). Allocate in the
-	// stable owner of `stripeWriteContext`.  The stripe context itself is
-	// reset after every full stripe, while seq_caches must survive for the
-	// complete write state.  The per-tuple context is also too short-lived.
-	if (writeState->seq_caches == nullptr) {
-		auto *fresh = bioseq::storage::alloc_seq_caches(
-			MemoryContextGetParent(writeState->stripeWriteContext));
-		fresh->side = bioseq::storage::seq_caches::Side::Write;
-		fresh->lock_mode = RowExclusiveLock;
-		fresh->main_database_oid   = relation->rd_locator.dbOid;
-		fresh->main_tablespace_oid = relation->rd_locator.spcOid;
-		fresh->main_relfilenode    = relation->rd_locator.relNumber;
-		fresh->cap_bytes_snapshot  =
-			bioseq::storage::read_max_sub_table_cap_bytes();
-		writeState->seq_caches = fresh;
-	}
-	auto *caches = static_cast<bioseq::storage::seq_caches *>(writeState->seq_caches);
+	// write_state_management.cppm cannot import bioseq_storage without a
+	// module cycle, so the TableAM owns this lazy initialization.  The cache
+	// lives above stripeWriteContext and therefore survives stripe resets.
+	auto* caches = ensure_write_side_seq_caches(relation, writeState);
 	const auto cap_bytes = caches->cap_bytes_snapshot;
 	const std::uint64_t main_storage_id =
 		BioseqColumnStorageGetStorageId(relation, false);
@@ -1778,6 +1808,8 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 */
 	BioseqColumnWriteState *writeState = bioseq_init_write_state(NewHeap, targetDesc,
 		RelationGetRelid(NewHeap), GetCurrentSubTransactionId());
+	auto* write_caches = ensure_write_side_seq_caches(NewHeap, writeState);
+	const auto cap_bytes = write_caches->cap_bytes_snapshot;
 
 	/* we need all columns */
 	int natts = OldHeap->rd_att->natts;
@@ -1828,17 +1860,16 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			if (!bioseq::storage::is_locator_stub(hdr)) continue;
 			const auto loc = bioseq::storage::decode_locator_from_stub(hdr);
 			bioseq::storage::validate_locator_flat_materialization_length(loc);
-			pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
-				OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
-				OldHeap->rd_locator.relNumber, attno, loc,
-				readState->snapshot, scanContext, read_caches);
+			pgseq_t* real =
+				bioseq::storage::bioseq_default_storage_manager::fetch_payload(
+					OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
+					OldHeap->rd_locator.relNumber, attno, loc,
+					readState->snapshot, scanContext, read_caches);
 			values[idx] = PointerGetDatum(real);
 		}
 
 		/* Rewrite SEQ columns into stubs targeting NewHeap's sub-tables.
-		 * We mimic the per-tuple insert path by using the write-side cache. */
-		auto* write_caches = static_cast<bioseq::storage::seq_caches*>(
-			writeState->seq_caches);
+		 * The write-side cache shares the destination write state's lifetime. */
 		for (std::int16_t attno : source_amc.seq_attnos) {
 			const int idx = attno - 1;
 			if (idx < 0 || idx >= sourceDesc->natts) continue;
@@ -1846,9 +1877,6 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			auto* hdr = reinterpret_cast<const pgseq_t*>(
 				DatumGetPointer(values[idx]));
 			if (bioseq::storage::is_locator_stub(hdr)) continue;
-			const auto cap_bytes = write_caches != nullptr
-				? write_caches->cap_bytes_snapshot
-				: bioseq::storage::read_max_sub_table_cap_bytes();
 			auto pending =
 				bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
 					RelationGetRelid(OldHeap), new_main_storage_id,

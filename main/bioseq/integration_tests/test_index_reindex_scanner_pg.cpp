@@ -146,12 +146,22 @@ TEST_CASE("DOC0377 expression index CREATE REINDEX and VACUUM FULL hydrate locat
         "SELECT bioseq.to_text(s[16380:16412]) "
         "FROM doc0377_expr_rewrite WHERE id=1;")
         == std::string(32u, 'A'));
+    INFO(query_scalar(ctx,
+        "SELECT coalesce(jsonb_agg(jsonb_build_object("
+        " 'user_relid',v.user_relid,'state',v.state,"
+        " 'main_relfilenode',v.main_relfilenode,"
+        " 'current_relfilenode',c.relfilenode,"
+        " 'num_fragments',v.num_fragments) ORDER BY v.source_epoch)::text,"
+        " '[]') FROM bioseq_internal.sequence_source_version v "
+        "LEFT JOIN pg_class c ON c.oid=v.user_relid "
+        "WHERE v.user_relid='doc0377_expr_rewrite'::regclass;"));
     REQUIRE(query_scalar_int(ctx,
         "SELECT count(*) FROM bioseq_internal.sequence_source_version v "
         "JOIN pg_class c ON c.oid=v.user_relid "
         "WHERE v.user_relid='doc0377_expr_rewrite'::regclass "
         "AND v.state=1 AND v.main_relfilenode=c.relfilenode "
-        "AND v.num_fragments=3;") == 2);
+        // dna4/32 stores 32 letters per unit: ceil(40000/(1024*32)) = 2.
+        "AND v.num_fragments=2;") == 2);
 
     // The direct helper pins zero/aligned/overflow and exact MaxAlloc edges
     // in the same storage/index boundary suite.
