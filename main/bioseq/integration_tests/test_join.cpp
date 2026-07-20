@@ -1244,31 +1244,43 @@ TEST_CASE("DOC0377 ineligible mmsearch arguments keep target query options order
 TEST_CASE("DOC0377 projection-only EPQ evaluates volatile final once",
           "[doc0377][slice][epq][volatile][exactly-once]") {
     constexpr std::string_view table = "doc0377_projection_epq";
+    constexpr std::string_view source = "doc0377_projection_epq_source";
     constexpr std::string_view log = "doc0377_projection_epq_log";
-    auto setup = fresh_context({log, table});
+    auto setup = fresh_context({log, source, table});
     exec_sql(setup,
         "DROP FUNCTION IF EXISTS public.doc0377_projection_epq_once("
         "text,text);"
         "CREATE TABLE doc0377_projection_epq ("
-        "id int PRIMARY KEY, seq bioseq.seq('dna4',32), touch int) "
+        "id int PRIMARY KEY, source_id int NOT NULL, use_suffix boolean "
+        "NOT NULL, touch int, sliced text);"
+        "CREATE TABLE doc0377_projection_epq_source ("
+        "id int PRIMARY KEY, seq bioseq.seq('dna4',32)) "
         "USING bioseq;"
         "CREATE TABLE doc0377_projection_epq_log ("
-        "ordinal bigserial PRIMARY KEY, label text UNIQUE NOT NULL);"
-        "INSERT INTO doc0377_projection_epq VALUES "
-        "(1, 'ACGTACGT'::bioseq.seq('dna4',32), 0);"
+        "ordinal bigserial PRIMARY KEY, label text UNIQUE NOT NULL, "
+        "observed text);"
+        "INSERT INTO doc0377_projection_epq VALUES (1,1,false,0,NULL);"
+        "INSERT INTO doc0377_projection_epq_source VALUES "
+        "(1,'AAAACCCC'::bioseq.seq('dna4',32));"
         "CREATE FUNCTION public.doc0377_projection_epq_once("
         "label text, value text) RETURNS text LANGUAGE plpgsql VOLATILE "
         "AS $$BEGIN "
-        "INSERT INTO public.doc0377_projection_epq_log(label) "
-        "VALUES(label); RETURN value; END$$;");
+        "INSERT INTO public.doc0377_projection_epq_log(label,observed) "
+        "VALUES(label,value); RETURN value; END$$;");
 
     const std::string update_sql =
-        "UPDATE public.doc0377_projection_epq "
-        "SET touch=touch+1 WHERE id=1 "
+        "UPDATE public.doc0377_projection_epq AS h "
+        "SET touch=h.touch+1, sliced=CASE WHEN h.use_suffix "
+        "THEN s.suffix ELSE s.prefix END "
+        "FROM (SELECT id, seq[0:4]::text AS prefix, "
+        "seq[4:]::text AS suffix "
+        "FROM public.doc0377_projection_epq_source OFFSET 0) AS s "
+        "WHERE h.id=1 AND h.source_id=s.id "
         "RETURNING public.doc0377_projection_epq_once("
-        "'projection-final', seq[0:]::text);";
+        "'projection-final',h.sliced);";
     const auto plan = explain_text<false>(setup, update_sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(plan, "Subquery Scan on s"));
     REQUIRE(query_scalar_int(setup,
         "SELECT count(*) FROM doc0377_projection_epq_log;") == 0);
 
@@ -1279,7 +1291,7 @@ TEST_CASE("DOC0377 projection-only EPQ evaluates volatile final once",
     const auto outcome = run_doc0377_locked_update(
         blocker, worker, observer,
         "UPDATE public.doc0377_projection_epq "
-        "SET touch=touch+1 WHERE id=1;",
+        "SET use_suffix=true,touch=touch+1 WHERE id=1;",
         update_sql);
     INFO(outcome.error);
     REQUIRE(outcome.sent);
@@ -1291,8 +1303,18 @@ TEST_CASE("DOC0377 projection-only EPQ evaluates volatile final once",
     REQUIRE(query_scalar(setup,
         "SELECT string_agg(label,',' ORDER BY ordinal) "
         "FROM doc0377_projection_epq_log;") == "projection-final");
+    REQUIRE(query_scalar(setup,
+        "SELECT observed FROM doc0377_projection_epq_log;") == "CCCC");
     REQUIRE(query_scalar_int(setup,
         "SELECT touch FROM doc0377_projection_epq WHERE id=1;") == 2);
+    REQUIRE(query_scalar_int(setup,
+        "SELECT source_id FROM doc0377_projection_epq WHERE id=1;") == 1);
+    REQUIRE(query_scalar_int(setup,
+        "SELECT use_suffix::int FROM doc0377_projection_epq WHERE id=1;")
+        == 1);
+    REQUIRE(query_scalar(setup,
+        "SELECT sliced FROM doc0377_projection_epq WHERE id=1;")
+        == "CCCC");
     exec_sql(setup,
         "DROP FUNCTION public.doc0377_projection_epq_once(text,text);");
 }
@@ -1301,39 +1323,84 @@ TEST_CASE("DOC0377 BatchJoin EPQ preserves final effect order exactly once",
           "[doc0377][mmsearch][slice][batchjoin][epq][effects]") {
     constexpr std::string_view target = "doc0377_batchjoin_epq_target";
     constexpr std::string_view queries = "doc0377_batchjoin_epq_queries";
+    constexpr std::string_view slice_source =
+        "doc0377_batchjoin_epq_slice_source";
+    constexpr std::string_view result = "doc0377_batchjoin_epq_result";
     constexpr std::string_view log = "doc0377_batchjoin_epq_log";
-    auto setup = fresh_context({log, queries, target});
-    seed_hoe_fixture(setup, target);
+    auto setup = fresh_context({log, result, slice_source, queries, target});
+    create_seq_table(
+        setup,
+        seq_table_spec{
+            .name = std::string{target},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{
+            .pk = 1,
+            .sequences = {hoe_seed_rows().front().sequences.front()},
+        }});
     exec_sql(setup, fmt::format(
         "DROP FUNCTION IF EXISTS public.doc0377_batchjoin_epq_once("
         "text,text);"
         "CREATE TABLE {} (id int PRIMARY KEY, target_pk int NOT NULL, "
         "seq bioseq.seq('dna4',32));"
-        "INSERT INTO {} VALUES (1,1,{});"
+        "INSERT INTO {} SELECT id,1,{} "
+        "FROM generate_series(1,16) AS ids(id);"
+        "CREATE TABLE {} (id int PRIMARY KEY, "
+        "seq bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO {} VALUES (1,{});"
+        "CREATE TABLE {} (id int PRIMARY KEY, target_pk int NOT NULL, "
+        "query_id int NOT NULL, use_suffix boolean NOT NULL, touch int, "
+        "matched_query text);"
+        "INSERT INTO {} VALUES (1,1,1,false,0,NULL);"
         "CREATE TABLE {} (ordinal bigserial PRIMARY KEY, "
-        "label text UNIQUE NOT NULL);"
+        "label text UNIQUE NOT NULL, observed text);"
         "CREATE FUNCTION public.doc0377_batchjoin_epq_once("
         "label text, value text) RETURNS text LANGUAGE plpgsql VOLATILE "
-        "AS $$BEGIN INSERT INTO public.{}(label) VALUES(label); "
+        "AS $$BEGIN INSERT INTO public.{}(label,observed) "
+        "VALUES(label,value); "
         "RETURN value; END$$;",
-        queries, queries, hoe_probe_literal(), log, log));
+        queries, queries, hoe_probe_literal(),
+        slice_source, slice_source, hoe_probe_literal(),
+        result, result, log, log));
     configure_doc0377_transformed_join(setup);
 
     const std::string update_sql = fmt::format(
-        "UPDATE public.{} AS t SET seq1=t.seq1 "
-        "FROM public.{} AS q "
-        "WHERE t.pk=q.target_pk AND q.id=1 "
-        "AND mmsearch(t.seq0[0:], q.seq[0:], "
-        "NULL::bioseq_aligner_options) "
+        "UPDATE public.{} AS h "
+        "SET touch=h.touch+1, "
+        "matched_query=CASE WHEN h.use_suffix "
+        "THEN sliced.query_suffix ELSE sliced.query_prefix END "
+        "FROM (SELECT t.pk AS target_pk, q.id AS query_id "
+        "FROM public.{} AS t INNER JOIN public.{} AS q "
+        "ON mmsearch(t.seq0, q.seq, "
+        "aligner_options(index_read_requirement => 1)) "
+        "OFFSET 0) AS matched "
+        "INNER JOIN (SELECT q.id AS query_id, "
+        "q.seq[0:1]::text AS query_prefix, "
+        "q.seq[1:]::text AS query_suffix "
+        "FROM public.{} AS q OFFSET 0) AS sliced "
+        "ON sliced.query_id=matched.query_id "
+        "WHERE h.id=1 AND h.target_pk=matched.target_pk "
+        "AND h.query_id=matched.query_id "
         "RETURNING "
-        "public.doc0377_batchjoin_epq_once('target',t.seq0[0:]::text), "
-        "public.doc0377_batchjoin_epq_once('query',q.seq[0:]::text), "
-        "public.doc0377_batchjoin_epq_once('options','default');",
-        target, queries);
+        "public.doc0377_batchjoin_epq_once("
+        "'target',matched.target_pk::text), "
+        "public.doc0377_batchjoin_epq_once('query',h.matched_query), "
+        "public.doc0377_batchjoin_epq_once("
+        "'options',CASE WHEN h.use_suffix "
+        "THEN 'suffix' ELSE 'prefix' END);",
+        result, target, queries, slice_source);
     const auto plan = explain_text<false>(setup, update_sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
-    require_doc0377_owned_qual_audit(plan);
+    REQUIRE(plan_contains(plan, "Subquery Scan on matched"));
+    REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
+    REQUIRE(plan_contains(
+        plan, "Bioseq Residual Mmsearch Qual: absent"));
+    REQUIRE_FALSE(plan_contains(
+        plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+    REQUIRE_FALSE(doc0377_plan_has_executable_mmsearch(plan));
     REQUIRE(query_scalar_int(setup, fmt::format(
         "SELECT count(*) FROM {};", log)) == 0);
 
@@ -1345,7 +1412,8 @@ TEST_CASE("DOC0377 BatchJoin EPQ preserves final effect order exactly once",
     const auto outcome = run_doc0377_locked_update(
         blocker, worker, observer,
         fmt::format(
-            "UPDATE public.{} SET seq1=seq1 WHERE pk=1;", target),
+            "UPDATE public.{} SET use_suffix=true,touch=touch+1 "
+            "WHERE id=1;", result),
         update_sql);
     INFO(outcome.error);
     REQUIRE(outcome.sent);
@@ -1354,9 +1422,28 @@ TEST_CASE("DOC0377 BatchJoin EPQ preserves final effect order exactly once",
     REQUIRE(outcome.result_ok);
     REQUIRE(outcome.got_tuple_result);
     REQUIRE(outcome.returned_rows == 1u);
+    REQUIRE(query_scalar_int(worker,
+        "SELECT scan_node_count FROM "
+        "bioseq.last_alignment_execution_stats() LIMIT 1;") == 1);
+    REQUIRE(query_scalar_int(worker,
+        "SELECT nested_alignment_executor_count FROM "
+        "bioseq.last_alignment_execution_stats() LIMIT 1;") == 0);
     REQUIRE(query_scalar(setup, fmt::format(
         "SELECT string_agg(label,',' ORDER BY ordinal) FROM {};", log))
         == "target,query,options");
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT observed FROM {} WHERE label='query';", log))
+        == std::string{kHoeProbeSequence.substr(1)});
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT observed FROM {} WHERE label='options';", log))
+        == "suffix");
+    REQUIRE(query_scalar_int(setup, fmt::format(
+        "SELECT touch FROM {} WHERE id=1;", result)) == 2);
+    REQUIRE(query_scalar_int(setup, fmt::format(
+        "SELECT use_suffix::int FROM {} WHERE id=1;", result)) == 1);
+    REQUIRE(query_scalar(setup, fmt::format(
+        "SELECT matched_query FROM {} WHERE id=1;", result))
+        == std::string{kHoeProbeSequence.substr(1)});
     exec_sql(setup,
         "DROP FUNCTION public.doc0377_batchjoin_epq_once(text,text);");
 }

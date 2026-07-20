@@ -311,20 +311,41 @@ bind_alignment_node_to_starting_frame(
 		EState* estate,
 		std::uint32_t scan_node_id)
 {
-	if (estate == nullptr || alignment_start_in_progress.empty()) {
+	if (estate == nullptr) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("bioseq alignment node began outside ExecutorStart")));
 	}
-	AlignmentExecutorFrame* frame = alignment_start_in_progress.back();
-	if (frame == nullptr || frame->query_desc == nullptr
-		|| frame->query_desc->estate != estate) {
-		ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("bioseq alignment node could not bind to its ExecutorStart frame")));
+	AlignmentExecutorFrame* frame = nullptr;
+	if (!alignment_start_in_progress.empty()) {
+		frame = alignment_start_in_progress.back();
+		if (frame == nullptr || frame->query_desc == nullptr
+			|| frame->query_desc->estate != estate) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq alignment node could not bind to its ExecutorStart frame")));
+		}
+		frame->estate = estate;
+	} else {
+		frame = find_alignment_frame(estate);
+		if (frame == nullptr && estate->es_epq_active != nullptr) {
+			EState* const parent_estate =
+				estate->es_epq_active->parentestate;
+			if (parent_estate != nullptr && parent_estate != estate) {
+				frame = find_alignment_frame(parent_estate);
+			}
+		}
+		if (frame == nullptr || frame->finished
+			|| alignment_current_run.empty()
+			|| alignment_current_run.back() != frame
+			|| frame->collector_binding.retired
+			|| frame->collector_binding.root == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq alignment node began outside ExecutorStart")));
+		}
 	}
-	frame->estate = estate;
-	ensure_alignment_frame_cleanup(frame, estate);
+	ensure_alignment_frame_cleanup(frame, frame->estate);
 	return alignment_exec::AlignmentNodeRegistrationHandle{
 		.binding = &frame->collector_binding,
 		.scan_node_id = scan_node_id,

@@ -773,6 +773,42 @@ TEST_CASE("mmsearch on columnar table runs without errors and stays in domain",
     }
 }
 
+TEST_CASE("scalar mmsearch count retains its privately owned target column",
+          "[mmsearch][scalar][count][projection-dependency][doc0377]") {
+    auto ctx = fresh_context({kHoe});
+    seed_hoe_fixture(ctx, kHoe);
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.read_sequence_index=off;"
+        "SET bioseq.index_async_persist=off;"
+        "SET bioseq.recompute_async_persist=off;"
+        "SET bioseq.enable_vectorization=off;"
+        "SET bioseq.aligner.minimizer_algorithm='scalar';"
+        "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm='ksw2';"
+        "SET bioseq.aligner.min_chain_score=20;"
+        "SET bioseq.aligner.vulkan_enabled=off;");
+
+    const std::string hidden_dependency_sql = fmt::format(
+        "SELECT count(*) FROM {} WHERE mmsearch(seq0, {}, "
+        "aligner_options(index_read_requirement => 1));",
+        kHoe, hoe_probe_literal());
+    const std::string projected_dependency_sql = fmt::format(
+        "SELECT count(seq0) FROM {} WHERE mmsearch(seq0, {}, "
+        "aligner_options(index_read_requirement => 1));",
+        kHoe, hoe_probe_literal());
+
+    const auto plan = explain_text<false>(ctx, hidden_dependency_sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+    REQUIRE_FALSE(plan_contains(plan, "One-Time Filter: mmsearch"));
+
+    const long long projected_count = query_scalar_int(
+        ctx, projected_dependency_sql);
+    REQUIRE(projected_count > 0);
+    REQUIRE(query_scalar_int(ctx, hidden_dependency_sql) == projected_count);
+}
+
 TEST_CASE("alignment execution SRF is empty before the first published root",
           "[mmsearch][pipeline-stats][statement][srf]") {
     connection_test_context ctx;
@@ -3638,8 +3674,12 @@ TEST_CASE("DOC0377 transformed mmsearch owns cross-table concat",
     auto ctx = fresh_context({kDoc0377TransformTarget});
     const std::string source = doc0377_high_entropy_sequence(320u);
     const std::string prefix = doc0377_high_entropy_sequence(96u);
-    const std::string needle = source.substr(16u, 16u)
-        + prefix.substr(0u, 16u);
+    /* Keep enough independent minimizers on both sides of the concat seam for
+     * every admitted scalar/SIMD backend.  The hit still necessarily crosses
+     * the logical boundary, but is not sensitive to short-query chain
+     * thresholds. */
+    const std::string needle = source.substr(16u, 48u)
+        + prefix.substr(0u, 48u);
     const seq_typmod dna4{.alphabet = "dna4", .width = 32};
     create_seq_table(
         ctx,
@@ -3667,10 +3707,11 @@ TEST_CASE("DOC0377 transformed mmsearch owns cross-table concat",
 
     const std::string sql = fmt::format(
         "SELECT t.pk, q.id, bioseq.target_start(t.pk), "
-        "bioseq.target_end(t.pk) FROM {} AS t INNER JOIN "
+        "bioseq.target_end(t.pk), bioseq.has_cigar(t.pk) "
+        "FROM {} AS t INNER JOIN "
         "doc0377_cross_concat_queries AS q "
         "ON t.pk=q.id AND mmsearch("
-        "t.seq0[0:32] OPERATOR(bioseq.||) q.prefix[0:32], "
+        "t.seq0[0:64] OPERATOR(bioseq.||) q.prefix[0:64], "
         "q.needle[0:]) "
         "ORDER BY 3, 4;",
         kDoc0377TransformTarget);
@@ -3685,11 +3726,12 @@ TEST_CASE("DOC0377 transformed mmsearch owns cross-table concat",
     REQUIRE_FALSE(rows.empty());
     bool found_boundary_hit = false;
     for (const auto& row : rows) {
-        REQUIRE(row.size() == 4u);
+        REQUIRE(row.size() == 5u);
         for (const auto& value : row) REQUIRE(value.has_value());
+        REQUIRE(*row[4] == "t");
         found_boundary_hit = found_boundary_hit
             || (std::stoull(*row[2]) == 16u
-                && std::stoull(*row[3]) == 48u);
+                && std::stoull(*row[3]) == 112u);
     }
     REQUIRE(found_boundary_hit);
 }

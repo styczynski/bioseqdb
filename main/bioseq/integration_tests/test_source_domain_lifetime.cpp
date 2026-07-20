@@ -1079,6 +1079,7 @@ TEST_CASE("DOC0377 mmsearch ownership respects RLS barriers and effectful siblin
         "SET bioseq.aligner.minimizer_algorithm='scalar';"
         "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
         "SET bioseq.aligner.base_alignment_algorithm='ksw2';"
+        "SET bioseq.aligner.min_chain_score=20;"
         "SET bioseq.aligner.vulkan_enabled=off;"
         "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
         "CREATE TABLE doc0377_source_security "
@@ -1102,7 +1103,7 @@ TEST_CASE("DOC0377 mmsearch ownership respects RLS barriers and effectful siblin
 
     const std::string mmsearch_call = fmt::format(
         "mmsearch(s, {}, aligner_options(index_read_requirement => 1))",
-        hoe_probe_literal());
+        positive_target);
     REQUIRE(query_scalar_int(ctx, fmt::format(
         "SELECT count(*) FROM {} WHERE pg_temp.doc0377_nonleaky(id) "
         "AND {};", table, mmsearch_call)) >= 1);
