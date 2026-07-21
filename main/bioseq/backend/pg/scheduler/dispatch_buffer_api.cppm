@@ -63,7 +63,8 @@ public:
         Oid scan_user_tablespace_oid,
         Oid scan_user_main_relfilenode,
         Relation executor_relation,
-        Snapshot executor_snapshot);
+        Snapshot executor_snapshot,
+        MemoryContext executor_query_context);
 
     void replace_executor_snapshot(Snapshot executor_snapshot);
 
@@ -79,6 +80,7 @@ public:
 
     void bind_slice_async_owner(slice_async_owner_guard* owner);
     void release_per_row_slice_async_owner_after_drain();
+	void release_join_slice_async_owner_after_drain();
 
     void configure_mmsearch(
         AttrNumber seq_attno,

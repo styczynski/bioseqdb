@@ -83,7 +83,8 @@ void DispatchBufferRuntime::configure_params(
     const Oid scan_user_tablespace_oid,
     const Oid scan_user_main_relfilenode,
     Relation executor_relation,
-    Snapshot executor_snapshot) {
+    Snapshot executor_snapshot,
+    MemoryContext executor_query_context) {
     as_buffer(impl)->configure_params(
         params,
         index_read_requirement,
@@ -93,7 +94,8 @@ void DispatchBufferRuntime::configure_params(
         scan_user_tablespace_oid,
         scan_user_main_relfilenode,
         executor_relation,
-        executor_snapshot);
+        executor_snapshot,
+        executor_query_context);
 }
 
 void DispatchBufferRuntime::replace_executor_snapshot(
@@ -124,6 +126,10 @@ void DispatchBufferRuntime::bind_slice_async_owner(
 
 void DispatchBufferRuntime::release_per_row_slice_async_owner_after_drain() {
     as_buffer(impl)->release_per_row_slice_async_owner_after_drain();
+}
+
+void DispatchBufferRuntime::release_join_slice_async_owner_after_drain() {
+	as_buffer(impl)->release_join_slice_async_owner_after_drain();
 }
 
 void DispatchBufferRuntime::configure_mmsearch(

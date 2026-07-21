@@ -22,6 +22,7 @@ import bioseq.integration_tests.common;
 
 #include <array>
 #include <bit>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -53,6 +54,57 @@ constexpr std::string_view kSneakySnakeEdits = "mmsearch_sneaky_snake_edits_int"
 constexpr std::string_view kGatekeeperEdits = "gatekeeper_edits";
 constexpr std::string_view kAsyncMpsWorkerLeaves =
 	"mmsearch_async_mps_worker_leaves_int";
+#ifdef BIOSEQ_TEST_INDEXES
+constexpr std::string_view kDoc0377OutputRestore =
+    "doc0377_mmsearch_output_restore_int";
+constexpr std::string_view kDoc0377BatchRecipeQueries32 =
+    "doc0377_batch_recipe_queries32_int";
+constexpr std::string_view kDoc0377BatchRecipeQueries64 =
+    "doc0377_batch_recipe_queries64_int";
+constexpr std::string_view kDoc0377BatchRecipeOracle32 =
+    "doc0377_batch_recipe_oracle32_int";
+constexpr std::string_view kDoc0377BatchRecipeOracle64 =
+    "doc0377_batch_recipe_oracle64_int";
+
+[[nodiscard]] std::int64_t mmsearch_source_counter(
+        const connection_test_context& ctx,
+        const std::string_view name) {
+    return query_scalar_int(ctx, fmt::format(
+        "SELECT (bioseq_internal.sequence_source_counters()"
+        "        ->>'{}')::bigint;", name));
+}
+
+void reset_mmsearch_source_counters(
+        const connection_test_context& ctx) {
+    exec_sql(ctx,
+        "SELECT bioseq_internal.reset_sequence_source_counters();");
+}
+
+void require_mmsearch_source_resources_balanced(
+        const connection_test_context& ctx) {
+    REQUIRE(mmsearch_source_counter(ctx, "registries_created")
+            == mmsearch_source_counter(ctx, "registries_destroyed"));
+    REQUIRE(mmsearch_source_counter(ctx, "providers_created")
+            == mmsearch_source_counter(ctx, "providers_destroyed"));
+    REQUIRE(mmsearch_source_counter(ctx, "domains_created")
+            == mmsearch_source_counter(ctx, "domains_destroyed"));
+    REQUIRE(mmsearch_source_counter(ctx, "cache_sets_created")
+            == mmsearch_source_counter(ctx, "cache_sets_destroyed"));
+    REQUIRE(mmsearch_source_counter(ctx, "snapshots_registered")
+            == mmsearch_source_counter(ctx, "snapshots_unregistered"));
+    REQUIRE(mmsearch_source_counter(ctx, "leases_acquired")
+            == mmsearch_source_counter(ctx, "leases_released"));
+    REQUIRE(mmsearch_source_counter(ctx, "wrong_thread_rejections") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "refcount_faults") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "lease_faults") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "live_registries") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "live_providers") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "live_domains") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "live_leases") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "live_cache_sets") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "live_snapshots") == 0);
+}
+#endif
 
 // Byte-for-byte parity with
 // storage::indexing::index_advisory_xact_lock_key(). Integration tests are
@@ -810,6 +862,142 @@ TEST_CASE("scalar mmsearch count retains its privately owned target column",
     REQUIRE(query_scalar_int(ctx, hidden_dependency_sql) == projected_count);
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 locator output survives every multi-match context reset",
+          "[mmsearch][doc0377][locator][multi-match][memory-context]"
+          "[error-cleanup]") {
+    auto ctx = fresh_context({kDoc0377OutputRestore});
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.read_sequence_index=off;"
+        "SET bioseq.index_async_persist=off;"
+        "SET bioseq.recompute_async_persist=off;"
+        "SET bioseq.enable_vectorization=off;"
+        "SET bioseq.aligner.minimizer_algorithm='scalar';"
+        "SET bioseq.aligner.chaining_algorithm='scalar_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm='ksw2';"
+        "SET bioseq.aligner.min_chain_score=20;"
+        "SET bioseq.aligner.best_n=5;"
+        "SET bioseq.aligner.vulkan_enabled=off;");
+
+    /* Canonical row five is the suite's established three-MatchResult row.
+     * The homogeneous suffix cannot add the diverse 29-base probe, but makes
+     * the stored value unambiguously locator-backed. */
+    const auto canonical_rows = hoe_seed_rows();
+    std::string target = canonical_rows.back().sequences.front();
+    target.append(16384u, 'A');
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377OutputRestore},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 5, .sequences = {target}}});
+
+    /* Coordinate-only plans intentionally retain chain-only candidates, whose
+     * absent base alignment may carry the documented 0/0 sentinel.  Request
+     * has_cigar so this lifetime test exercises the three usable alignments;
+     * the dispatch cursor then rejects every degenerate candidate before the
+     * per-output reset/promotion path being proved below. */
+    const std::string output_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0), "
+        "       bioseq.target_end(seq0), seq0::text, "
+        "       bioseq.has_cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, {}, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
+        kDoc0377OutputRestore, hoe_probe_literal());
+    const auto plan = explain_text<false>(ctx, output_sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+
+    const auto require_exact_outputs = [&target](const rowset_t& outputs) {
+        REQUIRE(outputs.size() >= 3u);
+        std::set<long long> starts;
+        for (const auto& row : outputs) {
+            REQUIRE(row.size() == 5u);
+            REQUIRE(row[0] == std::optional<std::string>{"5"});
+            REQUIRE(row[1].has_value());
+            REQUIRE(row[2].has_value());
+            REQUIRE(row[3] == std::optional<std::string>{target});
+            REQUIRE(row[4] == std::optional<std::string>{"t"});
+            const long long start = std::stoll(*row[1]);
+            const long long end = std::stoll(*row[2]);
+            REQUIRE(start >= 0);
+            REQUIRE(start < end);
+            starts.insert(start);
+        }
+        REQUIRE(starts.size() >= 3u);
+    };
+
+    reset_mmsearch_source_counters(ctx);
+    const rowset_t baseline = query_rows(ctx, output_sql);
+    require_exact_outputs(baseline);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets")
+        == static_cast<std::int64_t>(baseline.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions")
+        == static_cast<std::int64_t>(baseline.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_pg_error_restores") == 0);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "scan_providers_created") == 1);
+    REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 1);
+    REQUIRE(mmsearch_source_counter(ctx, "domains_reused")
+        >= static_cast<std::int64_t>(baseline.size() - 1u));
+    require_mmsearch_source_resources_balanced(ctx);
+
+    /* This one-shot ERROR occurs after the locator Datum was replaced by an
+     * EOH and before ExecProject.  The PG_CATCH path must put the exact
+     * MinimalTuple Datum back before ordinary statement-error cleanup. */
+    reset_mmsearch_source_counters(ctx);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.arm_sequence_source_failure("
+        " 'mmsearch_output_after_promotion');");
+    const auto injected = sql_error(ctx, output_sql);
+    REQUIRE(injected.sqlstate == "XX000");
+    REQUIRE(injected.contains(
+        "injected PostgreSQL sequence source-domain failure"));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets") == 1);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions") == 1);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_pg_error_restores") == 1);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "fault_injections") == 1);
+    require_mmsearch_source_resources_balanced(ctx);
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    /* Do not disarm before this replay: success proves the fixture was
+     * consumed before raising and cannot poison a later scan in the backend. */
+    const rowset_t replay = query_rows(ctx, output_sql);
+    REQUIRE(replay == baseline);
+    require_exact_outputs(replay);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets")
+        == 1 + static_cast<std::int64_t>(replay.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions")
+        == 1 + static_cast<std::int64_t>(replay.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_pg_error_restores") == 1);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    REQUIRE(mmsearch_source_counter(ctx, "fault_injections") == 1);
+    require_mmsearch_source_resources_balanced(ctx);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.disarm_sequence_source_failure();");
+}
+#endif
+
 TEST_CASE("alignment execution SRF is empty before the first published root",
           "[mmsearch][pipeline-stats][statement][srf]") {
     connection_test_context ctx;
@@ -1563,6 +1751,431 @@ TEST_CASE("BioseqBatchJoin headline evidence is one target crossed with 16 queri
 	require_batch_join_aligned_query_rows(ctx, sql, 16, "t");
     require_batch_join_stats(ctx, 1, 16);
 }
+
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 ordinary BatchJoin retains an upper-tagged lazy query child",
+          "[mmsearch][batch-join][doc0377][slice][concat][reverse]"
+          "[source-backed][prepared][rescan][fault]") {
+    auto ctx = fresh_context({
+        kBatchJoinTarget,
+        kDoc0377BatchRecipeQueries32,
+        kDoc0377BatchRecipeQueries64,
+        kDoc0377BatchRecipeOracle32,
+        kDoc0377BatchRecipeOracle64,
+    });
+    exec_sql(ctx,
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.index_async_persist=off;"
+        "SET bioseq.recompute_async_persist=off;"
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.aligner.min_chain_score=20;"
+        "SET bioseq.aligner.vulkan_enabled=off;");
+
+    const std::string target = doc0377_high_entropy_sequence(320u);
+    const std::string logical_query = target.substr(80u, 96u);
+    seed_batch_join_target(ctx, target);
+    /* Build exactly the legacy MPF payload used by the scalar and Exact-SIMD
+     * prepared-target routes.  Query-source indexes remain disabled. */
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass,"
+        "'minimizers_per_fragment');", kBatchJoinTarget)) == 1);
+    const std::int64_t target_rowno = query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.column_row_number('{}'::regclass,ctid) "
+        "FROM {} WHERE pk=1;", kBatchJoinTarget, kBatchJoinTarget));
+    REQUIRE(target_rowno >= 0);
+    const std::vector<seq_row> query_rows_fixture{
+        seq_row{.pk = 1, .sequences = {logical_query}},
+        seq_row{.pk = 2, .sequences = {logical_query}},
+        seq_row{.pk = 3, .sequences = {logical_query}},
+    };
+
+    struct WidthCase {
+        std::string_view name;
+        std::string_view source_table;
+        std::string_view oracle_table;
+        std::uint8_t width = 0u;
+    };
+    constexpr std::array<WidthCase, 2u> width_cases{{
+        {"query width 32", kDoc0377BatchRecipeQueries32,
+         kDoc0377BatchRecipeOracle32, 32u},
+        {"query width 64", kDoc0377BatchRecipeQueries64,
+         kDoc0377BatchRecipeOracle64, 64u},
+    }};
+    for (const WidthCase& width_case : width_cases) {
+        create_seq_table(
+            ctx,
+            seq_table_spec{
+                .name = std::string{width_case.source_table},
+                .typmod = {.alphabet = "dna4", .width = width_case.width},
+                .seq_columns = 1,
+                .using_bioseq = true,
+            },
+            query_rows_fixture);
+        create_seq_table(
+            ctx,
+            seq_table_spec{
+                .name = std::string{width_case.oracle_table},
+                .typmod = {.alphabet = "dna4", .width = width_case.width},
+                .seq_columns = 1,
+                .using_bioseq = false,
+            },
+            query_rows_fixture);
+    }
+
+    struct AlgorithmRoute {
+        std::string_view name;
+        std::string_view minimizer;
+        std::string_view chaining;
+        std::string_view base_alignment;
+        std::string_view backend;
+        bool consumes_legacy_prepared_target = false;
+    };
+    constexpr std::array<AlgorithmRoute, 3u> routes{{
+        {"scalar", "scalar", "scalar_mm2", "ksw2", "scalar_cpu", true},
+        {"Exact SIMD", "two_stack_nthash", "simd_mm2",
+         "block_aligner", "simd_cpu", true},
+        {"paper ntHash SIMD", "paper_nthash_simd", "simd_mm2",
+         "block_aligner", "simd_cpu", false},
+    }};
+    struct ScannerMode {
+        std::string_view name;
+        bool force_inmemory = false;
+        bool force_chunked = false;
+    };
+    constexpr std::array<ScannerMode, 3u> scanner_modes{{
+        {"production", false, false},
+        {"forced in-memory baseline", true, false},
+        {"forced chunked baseline", false, true},
+    }};
+
+    const auto transformed_sql = [target_table = kBatchJoinTarget](
+            const std::string_view query_table,
+            const std::string_view limit_expression) {
+        constexpr std::string_view recipe =
+            "bioseq.reverse(bioseq.reverse("
+            "q.seq0[0:48] OPERATOR(bioseq.||) q.seq0[48:96]))";
+        return fmt::format(
+            "SELECT q.pk, bioseq.len({0}), "
+            "       {0} OPERATOR(bioseq.=) q.seq0, "
+            "       bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
+            "       bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
+            "       bioseq.has_cigar(t.pk) "
+            "FROM {1} AS t JOIN {2} AS q "
+            "ON mmsearch(t.seq0, q.seq0, "
+            " aligner_options(index_read_requirement=>0)) "
+            "WHERE q.pk <= {3} ORDER BY q.pk, 4, 5, 6, 7",
+            recipe, target_table, query_table, limit_expression);
+    };
+    const auto oracle_sql = [target_table = kBatchJoinTarget](
+            const std::string_view query_table,
+            const std::string_view limit_expression) {
+        return fmt::format(
+            "SELECT q.pk, bioseq.len(q.seq0), "
+            "       q.seq0 OPERATOR(bioseq.=) q.seq0, "
+            "       bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
+            "       bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
+            "       bioseq.has_cigar(t.pk) "
+            "FROM {0} AS t JOIN {1} AS q "
+            "ON mmsearch(t.seq0, q.seq0, "
+            " aligner_options(index_read_requirement=>0)) "
+            "WHERE q.pk <= {2} ORDER BY q.pk, 4, 5, 6, 7",
+            target_table, query_table, limit_expression);
+    };
+    const auto require_ordinary_tagged_query_child = [](
+            const std::span<const std::string> plan) {
+        std::size_t batch_line = plan.size();
+        std::size_t batch_indent = 0u;
+        std::size_t slice_line = plan.size();
+        std::size_t slice_indent = 0u;
+        std::size_t slice_count = 0u;
+        for (std::size_t index = 0u; index < plan.size(); ++index) {
+            const std::string& line = plan[index];
+            std::size_t indent = 0u;
+            while (indent < line.size()
+                   && std::isspace(static_cast<unsigned char>(line[indent]))) {
+                ++indent;
+            }
+            if (line.find("Custom Scan (BioseqBatchJoin)")
+                    != std::string::npos
+                && batch_line == plan.size()) {
+                batch_line = index;
+                batch_indent = indent;
+            }
+            if (line.find("Custom Scan (BioseqSliceProject)")
+                    != std::string::npos) {
+                ++slice_count;
+                if (slice_line == plan.size()) {
+                    slice_line = index;
+                    slice_indent = indent;
+                }
+            }
+        }
+        REQUIRE(batch_line < plan.size());
+        REQUIRE(slice_count == 1u);
+        /* A two-baserel PlannerInfo cannot install a base-local SliceProject.
+         * The final-output recipe therefore has one upper owner; its private
+         * path walk tags q's BioseqScan so BatchJoin receives and retains the
+         * source-backed expanded Datum before the upper recipe is evaluated. */
+        REQUIRE(slice_line < batch_line);
+        REQUIRE(slice_indent < batch_indent);
+        REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
+        REQUIRE_FALSE(plan_contains(
+            plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+        REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
+    };
+    const auto reset_payload_probe = [&ctx] {
+        exec_sql(ctx,
+            "SELECT bioseq_internal.slice_payload_allocation_probe(0);");
+    };
+    const auto require_streaming_query_child = [&ctx] {
+        REQUIRE(mmsearch_source_counter(
+            ctx, "scan_providers_created") == 2);
+        REQUIRE(mmsearch_source_counter(
+            ctx, "facade_source_stream_callbacks") > 0);
+        REQUIRE(mmsearch_source_counter(
+            ctx, "facade_declared_materializations") == 0);
+        REQUIRE(mmsearch_source_counter(
+            ctx, "facade_completed_materializations") == 0);
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT bioseq_internal.slice_payload_allocation_probe(1);")
+            == 0);
+        REQUIRE(query_scalar_int(ctx,
+            "SELECT bioseq_internal.slice_payload_allocation_probe(2);")
+            == 0);
+        require_mmsearch_source_resources_balanced(ctx);
+    };
+    const auto prepared_proof = [&ctx, target_rowno](
+            const AlgorithmRoute& route,
+            const long long expected_jobs) {
+        const row_t proof = query_one(ctx,
+            "SELECT cpu_prepared_index_builds::text, "
+            "       cpu_prepared_index_reuses::text, "
+            "       cpu_prepared_unique_keys::text, "
+            "       cpu_prepared_duplicate_build_attempts::text, "
+            "       cpu_prepared_key_set_checksum, "
+            "       cpu_prepared_build_set_checksum, "
+            "       requested_backend, actual_backend, "
+            "       attempted_alignment_jobs::text, "
+            "       fully_attested_alignment_jobs::text, "
+            "       unattested_alignment_jobs::text, "
+            "       requested_target_index_source, "
+            "       actual_target_index_source, "
+            "       persisted_generation_id::text, "
+            "       persisted_index_rows::text, "
+            "       missing_persisted_index_rows::text, "
+            "       recomputed_target_index_rows::text, "
+            "       first_unattested_target_row::text, "
+            "       first_unattested_query_ordinal::text "
+            "FROM bioseq.last_alignment_execution_stats() "
+            "WHERE stage='query_sketch';");
+        REQUIRE(proof.size() == 19u);
+        constexpr std::array<std::string_view, 19u> proof_fields{{
+            "cpu_prepared_index_builds",
+            "cpu_prepared_index_reuses",
+            "cpu_prepared_unique_keys",
+            "cpu_prepared_duplicate_build_attempts",
+            "cpu_prepared_key_set_checksum",
+            "cpu_prepared_build_set_checksum",
+            "requested_backend",
+            "actual_backend",
+            "attempted_alignment_jobs",
+            "fully_attested_alignment_jobs",
+            "unattested_alignment_jobs",
+            "requested_target_index_source",
+            "actual_target_index_source",
+            "persisted_generation_id",
+            "persisted_index_rows",
+            "missing_persisted_index_rows",
+            "recomputed_target_index_rows",
+            "first_unattested_target_row",
+            "first_unattested_query_ordinal",
+        }};
+        for (std::size_t field = 0u; field < proof.size(); ++field) {
+            INFO(fmt::format(
+                "prepared proof field {} ({})={}",
+                field, proof_fields[field], proof[field].value_or("NULL")));
+            if (field != 5u) REQUIRE(proof[field].has_value());
+        }
+        REQUIRE(std::stoll(*proof[2]) > 0);
+        REQUIRE(proof[3] == std::optional<std::string>{"0"});
+        /* The build-set identity is published only after every prepared
+         * parameter group has built a target index.  Paper ntHash rejects the
+         * legacy scheme-less MPF payload, so its query-union identity remains
+         * valid while target-build evidence is intentionally absent. */
+        if (route.consumes_legacy_prepared_target) {
+            REQUIRE(proof[0] == std::optional<std::string>{"1"});
+            REQUIRE(std::stoll(*proof[1]) == expected_jobs - 1);
+            REQUIRE(proof[5].has_value());
+            REQUIRE(proof[5] == proof[4]);
+        } else {
+            REQUIRE(proof[0] == std::optional<std::string>{"0"});
+            REQUIRE(proof[1] == std::optional<std::string>{"0"});
+            REQUIRE_FALSE(proof[5].has_value());
+        }
+        REQUIRE(proof[6] == std::optional<std::string>{
+            std::string{route.backend}});
+        REQUIRE(proof[7] == std::optional<std::string>{
+            std::string{route.backend}});
+        REQUIRE(std::stoll(*proof[8]) == expected_jobs);
+        REQUIRE(proof[9] == std::optional<std::string>{"0"});
+        REQUIRE(std::stoll(*proof[10]) == expected_jobs);
+        REQUIRE(std::stoll(*proof[9]) + std::stoll(*proof[10])
+                == std::stoll(*proof[8]));
+        REQUIRE(proof[11] == std::optional<std::string>{"persisted"});
+        REQUIRE(proof[13] == std::optional<std::string>{"0"});
+        if (route.consumes_legacy_prepared_target) {
+            /* The legacy reader proves real prepared build/reuse work but has
+             * no READY-generation/source identity, so job attestation fails
+             * closed even when every selected CPU stage was accepted. */
+            REQUIRE(proof[12] == std::optional<std::string>{"persisted"});
+            REQUIRE(proof[14] == std::optional<std::string>{"1"});
+            REQUIRE(proof[15] == std::optional<std::string>{"0"});
+            REQUIRE(proof[16] == std::optional<std::string>{"0"});
+        } else {
+            /* Paper ntHash cannot consume the scheme-less legacy MPF.  The
+             * allow/read-on request is persisted while execution recomputes,
+             * and the requested/actual source mismatch is intentionally
+             * unattested rather than laundered as a prepared build. */
+            REQUIRE(proof[12] == std::optional<std::string>{"recomputed"});
+            REQUIRE(proof[14] == std::optional<std::string>{"0"});
+            REQUIRE(proof[15] == std::optional<std::string>{"1"});
+            REQUIRE(proof[16] == std::optional<std::string>{"1"});
+        }
+        REQUIRE(std::stoll(*proof[17]) == target_rowno);
+        REQUIRE(proof[18] == std::optional<std::string>{"0"});
+        return std::pair{*proof[4], proof[5]};
+    };
+
+    exec_sql(ctx,
+        "SET bioseq.read_sequence_index=on;"
+        "SET plan_cache_mode=force_generic_plan;");
+    for (const WidthCase& width_case : width_cases) {
+        INFO(fmt::format("DOC0377 query width: {}", width_case.name));
+        for (const AlgorithmRoute& route : routes) {
+            INFO(fmt::format("DOC0377 algorithm route: {}", route.name));
+            exec_sql(ctx, fmt::format(
+                "SET bioseq.aligner.minimizer_algorithm='{}';"
+                "SET bioseq.aligner.chaining_algorithm='{}';"
+                "SET bioseq.aligner.base_alignment_algorithm='{}';",
+                route.minimizer, route.chaining,
+                route.base_alignment));
+            const rowset_t expected_two = query_rows(
+                ctx, oracle_sql(width_case.oracle_table, "2"));
+            const rowset_t expected_three = query_rows(
+                ctx, oracle_sql(width_case.oracle_table, "3"));
+            REQUIRE_FALSE(expected_two.empty());
+            REQUIRE_FALSE(expected_three.empty());
+
+            for (const ScannerMode& scanner_mode : scanner_modes) {
+                INFO(fmt::format(
+                    "DOC0377 scanner mode: {}", scanner_mode.name));
+                exec_sql(ctx, fmt::format(
+                    "SET bioseq.test_force_inmemory_scanner={};"
+                    "SET bioseq.test_force_chunked_scanner={};",
+                    scanner_mode.force_inmemory ? "on" : "off",
+                    scanner_mode.force_chunked ? "on" : "off"));
+                reset_mmsearch_source_counters(ctx);
+                reset_payload_probe();
+                const rowset_t actual = query_rows(
+                    ctx,
+                    transformed_sql(width_case.source_table, "3"));
+                REQUIRE(actual == expected_three);
+                require_streaming_query_child();
+            }
+
+            exec_sql(ctx,
+                "SET bioseq.test_force_inmemory_scanner=off;"
+                "SET bioseq.test_force_chunked_scanner=off;"
+                "DEALLOCATE ALL;");
+            constexpr std::string_view statement_name =
+                "doc0377_batch_recipe_plan";
+            exec_sql(ctx, fmt::format(
+                "PREPARE {} (int) AS {};",
+                statement_name,
+                transformed_sql(width_case.source_table, "$1")));
+            const auto plan = explain_text<false>(ctx, fmt::format(
+                "EXECUTE {}(3)", statement_name));
+            require_ordinary_tagged_query_child(plan);
+
+            reset_mmsearch_source_counters(ctx);
+            reset_payload_probe();
+            const rowset_t first = query_rows(ctx, fmt::format(
+                "EXECUTE {}(2);", statement_name));
+            REQUIRE(first == expected_two);
+            const auto first_checksums = prepared_proof(route, 2);
+            require_streaming_query_child();
+
+            reset_mmsearch_source_counters(ctx);
+            reset_payload_probe();
+            const rowset_t expanded = query_rows(ctx, fmt::format(
+                "EXECUTE {}(3);", statement_name));
+            REQUIRE(expanded == expected_three);
+            const auto expanded_checksums = prepared_proof(route, 3);
+            REQUIRE(expanded_checksums == first_checksums);
+            require_streaming_query_child();
+
+            reset_mmsearch_source_counters(ctx);
+            reset_payload_probe();
+            const rowset_t replay = query_rows(ctx, fmt::format(
+                "EXECUTE {}(2);", statement_name));
+            REQUIRE(replay == first);
+            REQUIRE(prepared_proof(route, 2) == first_checksums);
+            require_streaming_query_child();
+            exec_sql(ctx, "DEALLOCATE ALL;");
+        }
+    }
+
+    /* One exact-SIMD, cross-width execution forces ERROR during the query
+     * recipe's first source callback.  The prepared plan, read session,
+     * retained expanded attributes, permits, and provider leases must unwind
+     * together, and the same generic plan must be reusable immediately. */
+    exec_sql(ctx,
+        "SET bioseq.aligner.minimizer_algorithm='two_stack_nthash';"
+        "SET bioseq.aligner.chaining_algorithm='simd_mm2';"
+        "SET bioseq.aligner.base_alignment_algorithm='block_aligner';"
+        "SET bioseq.test_force_inmemory_scanner=off;"
+        "SET bioseq.test_force_chunked_scanner=off;"
+        "DEALLOCATE ALL;");
+    constexpr std::string_view failure_statement =
+        "doc0377_batch_recipe_failure";
+    exec_sql(ctx, fmt::format(
+        "PREPARE {} (int) AS {};",
+        failure_statement,
+        transformed_sql(kDoc0377BatchRecipeQueries64, "$1")));
+    reset_mmsearch_source_counters(ctx);
+    reset_payload_probe();
+    exec_sql(ctx,
+        "SELECT bioseq_internal.arm_sequence_source_failure("
+        " 'read_before_scanner');");
+    const auto injected = sql_error(ctx, fmt::format(
+        "EXECUTE {}(3);", failure_statement));
+    REQUIRE(injected.sqlstate == "XX000");
+    REQUIRE(injected.contains(
+        "injected PostgreSQL sequence source-domain failure"));
+    REQUIRE(mmsearch_source_counter(ctx, "fault_injections") == 1);
+    REQUIRE(mmsearch_source_counter(ctx, "read_fault_injections") == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(1);") == 0);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(2);") == 0);
+    require_mmsearch_source_resources_balanced(ctx);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.disarm_sequence_source_failure();");
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+    const rowset_t recovered_oracle = query_rows(ctx, oracle_sql(
+        kDoc0377BatchRecipeOracle64, "3"));
+    reset_mmsearch_source_counters(ctx);
+    reset_payload_probe();
+    const rowset_t recovered = query_rows(ctx, fmt::format(
+        "EXECUTE {}(3);", failure_statement));
+    REQUIRE(recovered == recovered_oracle);
+    const auto recovered_checksums = prepared_proof(routes[1], 3);
+    REQUIRE(recovered_checksums.first == recovered_checksums.second);
+    require_streaming_query_child();
+    exec_sql(ctx, "DEALLOCATE ALL;");
+}
+#endif
 
 TEST_CASE("BioseqBatchJoin dispatches exactly one full 8192-query wave",
           "[mmsearch][batch-join][rollover][8192]") {

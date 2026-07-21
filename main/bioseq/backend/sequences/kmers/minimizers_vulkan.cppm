@@ -1141,6 +1141,81 @@ template <vulkan_sketchable_sequence Seq>
     };
     return make_upload_view_from_window<Seq>(seq, ptr, descriptor);
 }
+
+/* Canonical lazy-facade bridge for callers that admitted a contiguous packed
+ * region explicitly.  The descriptor's backing owner must outlive the Vulkan
+ * upload and completion fence; this view never acquires or copies ownership. */
+template <sequence_alphabet Alphabet>
+[[nodiscard]] inline SequenceUploadView make_sequence_upload_view(
+    const bioseq::storage::admitted_packed_region<Alphabet>& owner) {
+    using lazy_traits = bioseq::storage::lazy_rank_stream_traits<Alphabet>;
+    const auto& descriptor = owner.descriptor();
+    constexpr std::uint32_t bits = static_cast<std::uint32_t>(
+        lazy_traits::logical_bits_per_symbol);
+    const std::uint32_t letters_per_unit = static_cast<std::uint32_t>(
+        bioseq::storage::lazy_packed_letters_per_unit(
+            descriptor.storage_unit_byte_width,
+            static_cast<std::uint8_t>(bits)));
+    const std::uint64_t expected_units = letters_per_unit == 0u
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : descriptor.bp_length / letters_per_unit
+            + static_cast<std::uint64_t>(
+                descriptor.bp_length % letters_per_unit != 0u);
+    const bool geometry_overflow = letters_per_unit == 0u
+        || expected_units > (std::numeric_limits<std::uint64_t>::max)()
+            / std::max<std::uint32_t>(letters_per_unit, 1u);
+    const std::uint64_t expected_padding = geometry_overflow
+        ? (std::numeric_limits<std::uint64_t>::max)()
+        : expected_units * letters_per_unit - descriptor.bp_length;
+    const bool bytes_overflow = descriptor.unit_count
+        > (std::numeric_limits<std::uint64_t>::max)()
+            / std::max<std::uint8_t>(
+                descriptor.storage_unit_byte_width, 1u);
+    if (descriptor.bit_order
+            != bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                packed_bit_order::least_significant_symbol_first
+        || descriptor.leading_symbol_offset != 0u
+        || descriptor.bits_per_symbol != bits
+        || letters_per_unit == 0u
+        || geometry_overflow
+        || descriptor.unit_count != expected_units
+        || descriptor.trailing_padding_letters != expected_padding
+        || bytes_overflow
+        || (descriptor.unit_count != 0u && descriptor.units == nullptr)) {
+        throw VulkanRuntimeError(
+            "admitted packed-region upload descriptor is invalid");
+    }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(
+        descriptor.unit_count) * descriptor.storage_unit_byte_width;
+    constexpr AlphabetKernelKind kernel = [] {
+        if constexpr (seqan3::nucleotide_alphabet<Alphabet>
+            && bits == 2u && seqan3::alphabet_size<Alphabet> == 4u) {
+            return AlphabetKernelKind::dna4_nt4;
+        } else if constexpr (seqan3::nucleotide_alphabet<Alphabet>
+            && bits == 3u && seqan3::alphabet_size<Alphabet> == 5u) {
+            return AlphabetKernelKind::dna5_nt4;
+        } else {
+            return AlphabetKernelKind::generic;
+        }
+    }();
+    return SequenceUploadView{
+        .bytes = bytes == 0u ? nullptr : descriptor.units,
+        .byte_size = bytes,
+        .padded_byte_size = round_up4(bytes),
+        .bp_size = descriptor.bp_length,
+        .unit_bits = static_cast<std::uint32_t>(
+            descriptor.storage_unit_byte_width * 8u),
+        .bits_per_char = bits,
+        .letters_per_unit = letters_per_unit,
+        .alphabet_size = static_cast<std::uint32_t>(
+            seqan3::alphabet_size<Alphabet>),
+        .char_mask = bits == 32u
+            ? std::numeric_limits<std::uint32_t>::max()
+            : static_cast<std::uint32_t>((std::uint64_t{1u} << bits) - 1u),
+        .padding_letters = descriptor.trailing_padding_letters,
+        .alphabet_kind = kernel,
+    };
+}
 // BIOSEQ_DOC0377_PRIVATE_PACKED_END make_sequence_upload_view
 
 // ===========================================================================

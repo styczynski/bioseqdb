@@ -5356,7 +5356,7 @@ static Datum bioseq_internal_arm_sequence_source_failure_impl(
     PG_RETURN_VOID();
   }
   using Failure = bioseq::storage::PgSequenceSourceFailure;
-  constexpr std::array<std::pair<std::string_view, Failure>, 13> points{{
+  constexpr std::array<std::pair<std::string_view, Failure>, 14> points{{
       {"provider_after_registry_control",
        Failure::provider_after_registry_control},
       {"provider_after_provider_control",
@@ -5372,6 +5372,8 @@ static Datum bioseq_internal_arm_sequence_source_failure_impl(
       {"close_before_locks", Failure::close_before_locks},
       {"close_before_after_locks", Failure::close_before_after_locks},
       {"read_before_scanner", Failure::read_before_scanner},
+      {"mmsearch_output_after_promotion",
+       Failure::mmsearch_output_after_promotion},
   }};
   for (const auto &[name, failure] : points) {
     if (name == point) {
@@ -5461,6 +5463,10 @@ static Datum bioseq_internal_sequence_source_counters_impl(
       "\"wrong_thread_rejections\":{},\"refcount_faults\":{},"
       "\"lease_faults\":{},\"fault_injections\":{},"
       "\"read_fault_injections\":{},"
+      "\"mmsearch_output_context_resets\":{},"
+      "\"mmsearch_output_locator_promotions\":{},"
+      "\"mmsearch_output_pg_error_restores\":{},"
+      "\"mmsearch_output_restore_mismatches\":{},"
       "\"facade_source_stream_callbacks\":{},"
       "\"facade_source_resident_probes\":{},"
       "\"facade_declared_materializations\":{},"
@@ -5481,6 +5487,10 @@ static Datum bioseq_internal_sequence_source_counters_impl(
       c.pre_prepare_rejections, c.release_before_locks, c.release_locks,
       c.release_after_locks, c.wrong_thread_rejections, c.refcount_faults,
       c.lease_faults, c.fault_injections, c.read_fault_injections,
+      c.mmsearch_output_context_resets,
+      c.mmsearch_output_locator_promotions,
+      c.mmsearch_output_pg_error_restores,
+      c.mmsearch_output_restore_mismatches,
       c.facade_source_stream_callbacks, c.facade_source_resident_probes,
       c.facade_declared_materializations, c.facade_completed_materializations,
       c.facade_poison_hits, c.live_registries, c.live_providers, c.live_domains,

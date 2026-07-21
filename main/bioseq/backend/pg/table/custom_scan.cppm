@@ -467,10 +467,27 @@ struct BioseqBatchJoinPlaceholderSite {
 };
 
 struct BioseqBatchJoinQueryTuple {
+	struct RetainedExpandedAttribute {
+		AttrNumber attno = InvalidAttrNumber;
+		Datum datum = Datum{0};
+		pg_sequence_descriptor descriptor{};
+	};
 	MinimalTuple tuple = nullptr;
 	TupleTableSlot* slot = nullptr;
 	std::uint64_t ordinal = 0;
+	Datum recipe_datum = Datum{0};
+	pg_sequence_descriptor recipe_descriptor{};
+	std::vector<RetainedExpandedAttribute> expanded_sequence_attributes{};
 };
+
+/* Retaining an expanded sequence copies one EOH wrapper into its own
+ * ALLOCSET_SMALL child context and retains the existing tree edge; it never
+ * copies piece nodes or packed payload.  Admit both the child context's first
+ * block and a conservative parent/context-header block, plus the wrapper
+ * itself, without making the allowance depend on logical sequence length. */
+inline constexpr std::uint64_t kBatchJoinRetainedRecipeAdmissionBytes =
+	static_cast<std::uint64_t>(2u * ALLOCSET_SMALL_INITSIZE)
+	+ static_cast<std::uint64_t>(MAXALIGN(sizeof(pg_sequence_expanded)));
 
 struct BioseqBatchJoinRuntime {
 	bioseq::scheduler::DispatchBufferRuntime buffer{kBioseqRuntimeBufferReserve};
@@ -483,6 +500,7 @@ struct BioseqBatchJoinRuntime {
 	bool target_child_ended = false;
 	bool query_child_ended = false;
 	MemoryContext query_tuple_context = nullptr;
+	TupleTableSlot* query_staging_slot = nullptr;
 	std::vector<bioseq::parallelism::MemoryPermit> query_permits{};
 	std::vector<BioseqBatchJoinQueryTuple> query_tuples{};
 	std::vector<bioseq::scheduler::DispatchJoinQueryRef> all_query_refs{};
@@ -7465,7 +7483,18 @@ static inline void BioseqSliceProject_CreateUpperPaths(
 	List* required = NIL;
 	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
 		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
-	for (Node* expression : PList<Node>(projection_target->exprs)) {
+	/* Only the owned recipe graph needs raw child inputs.  Ordinary projection
+	 * expressions are already represented by the chosen child's PathTarget and
+	 * must remain atomic here.  In particular, a raw ABI-v3 BatchJoin publishes
+	 * each MatchResult helper as one exact output identity; descending through
+	 * bioseq.query_start(t.pk) would synthesize a new t.pk requirement above the
+	 * owner even though that raw Var is intentionally absent from its public
+	 * target.  Core setrefs would then fail while binding the intermediate
+	 * ProjectionPath.  The IR expression list contains every lazy producer,
+	 * source, concat operand, and bound expression, so pulling from it retains
+	 * the complete SliceProject dependency closure without opening non-lazy
+	 * helper identities. */
+	for (Node* expression : PList<Node>(builder.expressions)) {
 		required = list_concat(required,
 			pull_var_clause(expression, pull_flags));
 	}
@@ -19152,7 +19181,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 							resolved_user_relid,
 							scan_db_oid, scan_spc_oid, scan_relfile,
 							cscanstate->ss.ss_currentRelation,
-							bioseqScanState->snapshot);
+							bioseqScanState->snapshot,
+							estate->es_query_cxt);
 	if (features.has_mmsearch) {
 		const int plan_node_id = cscan->scan.plan.plan_node_id;
 		if (plan_node_id < 0) {
@@ -19676,6 +19706,41 @@ populate_placeholder_consts(BioseqPlaceholderConsts& consts,
 		: static_cast<BioseqBatchJoinRuntime*>(state->runtime);
 }
 
+/* Recipe-aware custom scans expose virtual rows which borrow retained EOH
+ * wrappers. Clear every parent-visible slot and expression-context pointer
+ * before the owning dispatch arena is reset. */
+static void clear_recipe_scan_parent_tuple_references(
+		CustomScanState* node) {
+	if (node == nullptr) return;
+	std::array<TupleTableSlot*, 2> slots{
+		node->ss.ps.ps_ResultTupleSlot,
+		node->ss.ss_ScanTupleSlot,
+	};
+	for (std::size_t index = 0u; index < slots.size(); ++index) {
+		TupleTableSlot* slot = slots[index];
+		if (slot == nullptr) continue;
+		bool duplicate = false;
+		for (std::size_t previous = 0u; previous < index; ++previous) {
+			duplicate = duplicate || slots[previous] == slot;
+		}
+		if (!duplicate) ExecClearTuple(slot);
+	}
+	if (ExprContext* context = node->ss.ps.ps_ExprContext;
+		context != nullptr) {
+		context->ecxt_scantuple = nullptr;
+		context->ecxt_outertuple = nullptr;
+		context->ecxt_innertuple = nullptr;
+		ResetExprContext(context);
+	}
+}
+
+static void batch_join_clear_parent_tuple_references(
+		CustomScanState* node,
+		BioseqBatchJoinRuntime& runtime) {
+	clear_recipe_scan_parent_tuple_references(node);
+	runtime.current_target_slot = nullptr;
+}
+
 static void batch_join_release_executor_resources_checked(
 		CustomScanState* node,
 		BioseqBatchJoinRuntime& runtime,
@@ -19683,6 +19748,9 @@ static void batch_join_release_executor_resources_checked(
 	if (runtime.cleanup_done) {
 		return;
 	}
+	bioseq::pg_utils::invoke_pg_as_cpp([node, &runtime] {
+		batch_join_clear_parent_tuple_references(node, runtime);
+	});
 	if (runtime.target_active) {
 		bioseq::pg_utils::invoke_pg_as_cpp([&runtime] {
 			runtime.buffer.finish_join_target();
@@ -19691,6 +19759,9 @@ static void batch_join_release_executor_resources_checked(
 	}
 	bioseq::pg_utils::invoke_pg_as_cpp([&runtime] {
 		runtime.buffer.reset_join_runtime_for_rescan();
+	});
+	bioseq::pg_utils::invoke_pg_as_cpp([&runtime] {
+		runtime.buffer.release_join_slice_async_owner_after_drain();
 	});
 	runtime.buffer.clear_sequence_source_provider_binding();
 	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
@@ -19703,6 +19774,12 @@ static void batch_join_release_executor_resources_checked(
 	}
 	runtime.query_tuples.clear();
 	runtime.all_query_refs.clear();
+	if (runtime.query_staging_slot != nullptr) {
+		TupleTableSlot* staging = runtime.query_staging_slot;
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[staging] { ExecDropSingleTupleTableSlot(staging); });
+		runtime.query_staging_slot = nullptr;
+	}
 	if (runtime.query_tuple_context != nullptr) {
 		MemoryContext context = runtime.query_tuple_context;
 		bioseq::pg_utils::invoke_pg_as_cpp(
@@ -19754,6 +19831,7 @@ static void batch_join_abandon_executor_resources_after_error(
 	runtime.all_query_refs.clear();
 	runtime.placeholder_sites.clear();
 	runtime.query_tuple_context = nullptr;
+	runtime.query_staging_slot = nullptr;
 	runtime.query_permits.clear();
 	runtime.query_reserved_admission_bytes = 0;
 	runtime.query_actual_materialized_bytes = 0;
@@ -19797,6 +19875,10 @@ static void batch_join_clear_query_tuples(
 	}
 	runtime.query_tuples.clear();
 	runtime.all_query_refs.clear();
+	if (runtime.query_staging_slot != nullptr) {
+		ExecDropSingleTupleTableSlot(runtime.query_staging_slot);
+		runtime.query_staging_slot = nullptr;
+	}
 	if (runtime.query_tuple_context != nullptr) {
 		MemoryContextReset(runtime.query_tuple_context);
 	}
@@ -19869,6 +19951,27 @@ static void batch_join_validate_returned_child_slot(
 	}
 }
 
+/* Convert validation failures raised while automatic C++ row metadata is live
+ * into normal C++ unwinding. A raw PostgreSQL longjmp here would skip the two
+ * retained-attribute vector destructors. */
+[[noreturn]] static void batch_join_raise_materialization_as_cpp(
+		const int sqlstate,
+		const char* message,
+		const std::string detail = {}) {
+	const char* detail_cstr = detail.c_str();
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[sqlstate, message, detail_cstr] {
+			if (detail_cstr[0] == '\0') {
+				ereport(ERROR,
+					(errcode(sqlstate), errmsg("%s", message)));
+			}
+			ereport(ERROR,
+				(errcode(sqlstate), errmsg("%s", message),
+				 errdetail("%s", detail_cstr)));
+		});
+	pg_unreachable();
+}
+
 static void batch_join_materialize_queries(
 		BioseqBatchJoinRuntime& runtime) {
 	if (runtime.queries_materialized) {
@@ -19902,25 +20005,45 @@ static void batch_join_materialize_queries(
 				+ sizeof(BioseqBatchJoinQueryTuple)
 				+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
 				+ 256u));
-	runtime.query_planner_admission_bytes =
+	const std::uint64_t scratch_metadata_bytes =
 		bioseq::parallelism::saturating_mul(
-			planner_rows, planner_tuple_bytes);
-	auto planner_permit =
-		bioseq::parallelism::MemoryAdmissionController::instance()
-			.try_reserve(runtime.query_planner_admission_bytes);
-	if (!planner_permit.has_value()) {
-		ereport(ERROR,
-			(errcode(ERRCODE_OUT_OF_MEMORY),
-			 errmsg("BioseqBatchJoin planned query relation cannot be admitted"),
-			 errdetail("planned_rows=%.0f planned_width=%d required_bytes=%llu",
-				runtime.query_planner_rows,
-				runtime.query_planner_width,
-				static_cast<unsigned long long>(
-					runtime.query_planner_admission_bytes))));
+			bioseq::parallelism::saturating_add(
+				static_cast<std::uint64_t>(sizeof(TupleTableSlot)),
+				bioseq::parallelism::saturating_mul(
+					static_cast<std::uint64_t>(runtime.query_column_count),
+					static_cast<std::uint64_t>(
+						sizeof(Datum) + sizeof(bool)
+						+ sizeof(BioseqBatchJoinQueryTuple::
+							RetainedExpandedAttribute)))),
+			bioseq::parallelism::kVectorPreallocationHeadroomFactor);
+	/* One reusable virtual staging slot and one per-row descriptor vector are
+	 * allocated after the planner permit but before the row-specific extension.
+	 * Admit their worst query-column-count shape once, even when the planner
+	 * estimated zero rows/width. */
+	runtime.query_planner_admission_bytes =
+		bioseq::parallelism::saturating_add(
+			bioseq::parallelism::saturating_mul(
+				planner_rows, planner_tuple_bytes),
+			scratch_metadata_bytes);
+	{
+		auto planner_permit =
+			bioseq::parallelism::MemoryAdmissionController::instance()
+				.try_reserve(runtime.query_planner_admission_bytes);
+		if (!planner_permit.has_value()) {
+			batch_join_raise_materialization_as_cpp(
+				ERRCODE_OUT_OF_MEMORY,
+				"BioseqBatchJoin planned query relation cannot be admitted",
+				fmt::format(
+					"planned_rows={:.0f} planned_width={} required_bytes={}",
+					runtime.query_planner_rows,
+					runtime.query_planner_width,
+					runtime.query_planner_admission_bytes));
+		}
+		runtime.query_reserved_admission_bytes =
+			runtime.query_planner_admission_bytes;
+		runtime.query_permits.push_back(std::move(*planner_permit));
 	}
-	runtime.query_reserved_admission_bytes =
-		runtime.query_planner_admission_bytes;
-	runtime.query_permits.push_back(std::move(*planner_permit));
+	slice_async_owner_guard* query_async_owner = nullptr;
 	for (;;) {
 		TupleTableSlot* source = ExecProcNode(runtime.query_child);
 		if (TupIsNull(source)) {
@@ -19943,12 +20066,155 @@ static void batch_join_materialize_queries(
 		}
 		const Datum original = source->tts_values[
 			runtime.query_slot_seq_resno - 1];
-		const std::uint64_t raw_query_bytes = static_cast<std::uint64_t>(
-			toast_raw_datum_size(original));
-		const Size source_tuple_data = heap_compute_data_size(
-			source->tts_tupleDescriptor,
-			source->tts_values,
-			source->tts_isnull);
+		const bool expanded_query =
+			VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(original));
+		const Oid sequence_type = get_cached_stub_oids().bioseq_seq_type_oid;
+		pg_sequence_descriptor recipe_descriptor{};
+		std::vector<BioseqBatchJoinQueryTuple::RetainedExpandedAttribute>
+			expanded_source_attributes{};
+		expanded_source_attributes.reserve(
+			static_cast<std::size_t>(source->tts_tupleDescriptor->natts));
+		for (int index = 0; index < source->tts_tupleDescriptor->natts;
+			 ++index) {
+			if (source->tts_isnull[index]
+				|| TupleDescAttr(source->tts_tupleDescriptor, index)->atttypid
+					!= sequence_type) {
+				continue;
+			}
+			const Datum attribute = source->tts_values[index];
+			if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(attribute))) {
+				continue;
+			}
+			const pg_sequence_descriptor descriptor =
+				bioseq::pg_utils::invoke_pg_as_cpp([attribute] {
+					return classify_and_describe_sequence(attribute);
+				});
+			const bool expanded_kind = descriptor.kind
+					== pg_sequence_datum_kind::expanded_read_only
+				|| descriptor.kind
+					== pg_sequence_datum_kind::expanded_read_write;
+			if (!expanded_kind) {
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_DATA_CORRUPTED,
+					"BioseqBatchJoin expanded output descriptor is invalid");
+			}
+			const AttrNumber attno = static_cast<AttrNumber>(index + 1);
+			expanded_source_attributes.push_back({
+				.attno = attno,
+				.datum = attribute,
+				.descriptor = descriptor,
+			});
+			if (attno == runtime.query_slot_seq_resno) {
+				recipe_descriptor = descriptor;
+			}
+		}
+		if (expanded_query) {
+			const bool valid_query_descriptor =
+				recipe_descriptor.alphabet_bound
+				&& recipe_descriptor.alphabet_code
+					== runtime.query_alphabet_code
+				&& recipe_descriptor.storage_unit_byte_width
+					== runtime.query_storage_unit_byte_width;
+			if (!valid_query_descriptor) {
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_DATATYPE_MISMATCH,
+					"BioseqBatchJoin expanded query typmod changed after planning");
+			}
+			auto* attachment = bioseq::pg_utils::invoke_pg_as_cpp(
+				[original] {
+					return pg_sequence_trace_attachment_for_datum(original);
+				});
+			auto* candidate =
+				borrow_slice_async_owner_noexcept(attachment);
+			if (candidate == nullptr) {
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+					"BioseqBatchJoin expanded query has no live async owner");
+			}
+			if (query_async_owner != nullptr
+				&& query_async_owner != candidate) {
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+					"BioseqBatchJoin expanded queries have distinct async owners");
+			}
+			query_async_owner = candidate;
+		}
+		const bool row_has_expanded_sequence =
+			!expanded_source_attributes.empty();
+		if (row_has_expanded_sequence) {
+			if (runtime.query_staging_slot == nullptr) {
+				MemoryContext old = MemoryContextSwitchTo(
+					runtime.query_tuple_context);
+				try {
+					runtime.query_staging_slot =
+						bioseq::pg_utils::invoke_pg_as_cpp([source] {
+							return MakeSingleTupleTableSlot(
+								source->tts_tupleDescriptor, &TTSOpsVirtual);
+						});
+					MemoryContextSwitchTo(old);
+				} catch (...) {
+					MemoryContextSwitchTo(old);
+					throw;
+				}
+			} else if (runtime.query_staging_slot->tts_tupleDescriptor
+					!= source->tts_tupleDescriptor
+				&& !bioseq::pg_utils::invoke_pg_as_cpp(
+					[staging_descriptor =
+						runtime.query_staging_slot->tts_tupleDescriptor,
+					 source_descriptor = source->tts_tupleDescriptor] {
+						return equalTupleDescs(
+							staging_descriptor, source_descriptor);
+					})) {
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_DATA_CORRUPTED,
+					"BioseqBatchJoin query staging descriptor changed");
+			}
+			TupleTableSlot* staging_slot = runtime.query_staging_slot;
+			bioseq::pg_utils::invoke_pg_as_cpp(
+				[staging_slot] { ExecClearTuple(staging_slot); });
+			const int natts = source->tts_tupleDescriptor->natts;
+			std::memcpy(
+				runtime.query_staging_slot->tts_values,
+				source->tts_values,
+				static_cast<std::size_t>(natts) * sizeof(Datum));
+			std::memcpy(
+				runtime.query_staging_slot->tts_isnull,
+				source->tts_isnull,
+				static_cast<std::size_t>(natts) * sizeof(bool));
+			for (const auto& attribute : expanded_source_attributes) {
+				runtime.query_staging_slot->tts_values[
+					attribute.attno - 1] = Datum{0};
+				runtime.query_staging_slot->tts_isnull[
+					attribute.attno - 1] = true;
+			}
+			runtime.query_staging_slot->tts_nvalid = natts;
+			bioseq::pg_utils::invoke_pg_as_cpp(
+				[staging_slot] { ExecStoreVirtualTuple(staging_slot); });
+		}
+		const std::uint64_t retained_recipe_bytes = row_has_expanded_sequence
+			? bioseq::parallelism::saturating_mul(
+				static_cast<std::uint64_t>(
+					expanded_source_attributes.size()),
+				kBatchJoinRetainedRecipeAdmissionBytes)
+			: 0u;
+		const std::uint64_t flat_query_bytes = expanded_query
+			? 0u
+			: static_cast<std::uint64_t>(
+				bioseq::pg_utils::invoke_pg_as_cpp([original] {
+					return toast_raw_datum_size(original);
+				}));
+		const std::uint64_t retained_expanded_bytes =
+			bioseq::parallelism::saturating_add(
+				retained_recipe_bytes, flat_query_bytes);
+		TupleTableSlot* tuple_shape_source = row_has_expanded_sequence
+			? runtime.query_staging_slot : source;
+		const Size source_tuple_data = bioseq::pg_utils::invoke_pg_as_cpp(
+			[tuple_shape_source] {
+				return heap_compute_data_size(
+					tuple_shape_source->tts_tupleDescriptor,
+					tuple_shape_source->tts_values,
+					tuple_shape_source->tts_isnull);
+			});
 		std::uint64_t tuple_upper_bound =
 			bioseq::parallelism::saturating_add(
 				static_cast<std::uint64_t>(
@@ -19959,7 +20225,16 @@ static void batch_join_materialize_queries(
 		 * is deliberately conservative and covers the flat replacement without
 		 * inspecting or allocating any pass-by-reference value. */
 		tuple_upper_bound = bioseq::parallelism::saturating_add(
-			tuple_upper_bound, raw_query_bytes);
+			tuple_upper_bound, retained_expanded_bytes);
+		tuple_upper_bound = bioseq::parallelism::saturating_add(
+			tuple_upper_bound,
+			bioseq::parallelism::saturating_mul(
+				bioseq::parallelism::saturating_mul(
+					static_cast<std::uint64_t>(
+						expanded_source_attributes.size()),
+					static_cast<std::uint64_t>(sizeof(
+						BioseqBatchJoinQueryTuple::RetainedExpandedAttribute))),
+				bioseq::parallelism::kVectorPreallocationHeadroomFactor));
 		tuple_upper_bound = bioseq::parallelism::saturating_add(
 			tuple_upper_bound,
 			static_cast<std::uint64_t>(
@@ -19975,9 +20250,9 @@ static void batch_join_materialize_queries(
 				tuple_upper_bound);
 		if (required_after_row
 			== (std::numeric_limits<std::uint64_t>::max)()) {
-			ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("BioseqBatchJoin query admission size overflow")));
+			batch_join_raise_materialization_as_cpp(
+				ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+				"BioseqBatchJoin query admission size overflow");
 		}
 		if (required_after_row > runtime.query_reserved_admission_bytes) {
 			const std::uint64_t additional_bytes = required_after_row
@@ -19986,96 +20261,202 @@ static void batch_join_materialize_queries(
 				bioseq::parallelism::MemoryAdmissionController::instance()
 					.try_reserve(additional_bytes);
 			if (!additional_permit.has_value()) {
-				ereport(ERROR,
-					(errcode(ERRCODE_OUT_OF_MEMORY),
-					 errmsg("BioseqBatchJoin query child cannot be admitted"),
-					 errdetail("query_ordinal=%zu required_additional_bytes=%llu whole_tuple_upper_bound=%llu",
-						runtime.query_tuples.size(),
-						static_cast<unsigned long long>(additional_bytes),
-						static_cast<unsigned long long>(tuple_upper_bound))));
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_OUT_OF_MEMORY,
+					"BioseqBatchJoin query child cannot be admitted",
+					fmt::format(
+						"query_ordinal={} required_additional_bytes={} whole_tuple_upper_bound={}",
+						runtime.query_tuples.size(), additional_bytes,
+						tuple_upper_bound));
 			}
 			runtime.query_permits.push_back(std::move(*additional_permit));
 			runtime.query_reserved_admission_bytes = required_after_row;
 		}
 		/* Every following operation may allocate; the complete tuple upper
-		 * bound is owned before the first detoast/copy. */
-		pgseq_t* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(original));
-		if (bioseq::storage::is_locator_stub(flat)) {
-			if (reinterpret_cast<void*>(flat)
-				!= reinterpret_cast<void*>(DatumGetPointer(original))) {
-				pfree(flat);
+		 * bound is owned before the first retain/detoast/copy. */
+		Datum retained_recipe = Datum{0};
+		std::vector<BioseqBatchJoinQueryTuple::RetainedExpandedAttribute>
+			retained_expanded_attributes{};
+		retained_expanded_attributes.reserve(
+			expanded_source_attributes.size());
+		std::uint64_t newly_retained_wrapper_bytes = 0u;
+		pgseq_t* flat = nullptr;
+		TupleTableSlot* serialization_source = row_has_expanded_sequence
+			? runtime.query_staging_slot : source;
+		if (row_has_expanded_sequence) {
+			MemoryContext old = MemoryContextSwitchTo(
+				runtime.query_tuple_context);
+			try {
+				for (const auto& attribute : expanded_source_attributes) {
+					const acquired_sequence acquired =
+						bioseq::pg_utils::invoke_pg_as_cpp(
+							[attribute_datum = attribute.datum] {
+								const Datum read_only =
+									MakeExpandedObjectReadOnly(
+										attribute_datum, false, -1);
+								return acquire_writable_pg_sequence(read_only);
+							});
+					newly_retained_wrapper_bytes =
+						bioseq::parallelism::saturating_add(
+							newly_retained_wrapper_bytes,
+							static_cast<std::uint64_t>(
+								MemoryContextMemAllocated(
+									acquired.value->object_context,
+									/*recurse=*/true)));
+					const Datum retained =
+						pg_sequence_ro_datum(acquired.value);
+					retained_expanded_attributes.push_back({
+						.attno = attribute.attno,
+						.datum = retained,
+						.descriptor = attribute.descriptor,
+					});
+					if (attribute.attno == runtime.query_slot_seq_resno) {
+						retained_recipe = retained;
+					}
+				}
+			} catch (...) {
+				MemoryContextSwitchTo(old);
+				throw;
 			}
-				ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("BioseqBatchJoin query child did not materialize its sequence")));
-		}
-		if (flat->alphabet_code != runtime.query_alphabet_code
-			|| flat->storage_unit_byte_width
-				!= runtime.query_storage_unit_byte_width) {
-			if (reinterpret_cast<void*>(flat)
-				!= reinterpret_cast<void*>(DatumGetPointer(original))) {
-				pfree(flat);
+			MemoryContextSwitchTo(old);
+			if (newly_retained_wrapper_bytes > retained_recipe_bytes) {
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_INTERNAL_ERROR,
+					"BioseqBatchJoin retained recipe admission was under-estimated");
 			}
-			ereport(ERROR,
-				(errcode(ERRCODE_DATATYPE_MISMATCH),
-				 errmsg("BioseqBatchJoin query typmod changed after planning")));
 		}
-		source->tts_values[runtime.query_slot_seq_resno - 1] =
-			PointerGetDatum(flat);
+		if (!expanded_query) {
+			flat = bioseq::pg_utils::invoke_pg_as_cpp([original] {
+				return reinterpret_cast<pgseq_t*>(
+					PG_DETOAST_DATUM(original));
+			});
+			if (bioseq::storage::is_locator_stub(flat)) {
+				if (reinterpret_cast<void*>(flat)
+					!= reinterpret_cast<void*>(DatumGetPointer(original))) {
+					pfree(flat);
+				}
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_FEATURE_NOT_SUPPORTED,
+					"BioseqBatchJoin query child returned an unresolved locator");
+			}
+			if (flat->alphabet_code != runtime.query_alphabet_code
+				|| flat->storage_unit_byte_width
+					!= runtime.query_storage_unit_byte_width) {
+				if (reinterpret_cast<void*>(flat)
+					!= reinterpret_cast<void*>(DatumGetPointer(original))) {
+					pfree(flat);
+				}
+				batch_join_raise_materialization_as_cpp(
+					ERRCODE_DATATYPE_MISMATCH,
+					"BioseqBatchJoin query typmod changed after planning");
+			}
+			TupleTableSlot* flat_destination = row_has_expanded_sequence
+				? runtime.query_staging_slot : source;
+			flat_destination->tts_values[runtime.query_slot_seq_resno - 1] =
+				PointerGetDatum(flat);
+			flat_destination->tts_isnull[
+				runtime.query_slot_seq_resno - 1] = false;
+		}
 		/* The MinimalTuple and its owning slot are one retained query-row
 		 * object.  Allocate both in the dedicated query context: execution may
 		 * enter here with a transient expression context current, and retaining
 		 * only the tuple there leaves the slot itself dangling before EndScan. */
 		MemoryContext old = MemoryContextSwitchTo(
 			runtime.query_tuple_context);
-		MinimalTuple copy = ExecCopySlotMinimalTuple(source);
-		MemoryContextSwitchTo(old);
-		if (reinterpret_cast<void*>(flat)
+		MinimalTuple copy = nullptr;
+		try {
+			copy = bioseq::pg_utils::invoke_pg_as_cpp(
+				[serialization_source] {
+					return ExecCopySlotMinimalTuple(serialization_source);
+				});
+			MemoryContextSwitchTo(old);
+		} catch (...) {
+			MemoryContextSwitchTo(old);
+			throw;
+		}
+		if (flat != nullptr && reinterpret_cast<void*>(flat)
 			!= reinterpret_cast<void*>(DatumGetPointer(original))) {
 			pfree(flat);
-			source->tts_values[runtime.query_slot_seq_resno - 1] = original;
+			if (!row_has_expanded_sequence) {
+				source->tts_values[runtime.query_slot_seq_resno - 1] = original;
+			}
 		}
 		if (copy == nullptr) {
-			ereport(ERROR,
-				(errcode(ERRCODE_OUT_OF_MEMORY),
-				 errmsg("BioseqBatchJoin failed to copy a query tuple")));
+			batch_join_raise_materialization_as_cpp(
+				ERRCODE_OUT_OF_MEMORY,
+				"BioseqBatchJoin failed to copy a query tuple");
 		}
+		const std::uint64_t ordinal = runtime.query_tuples.size();
+		if (ordinal
+			> static_cast<std::uint64_t>(
+				(std::numeric_limits<std::int32_t>::max)())) {
+			batch_join_raise_materialization_as_cpp(
+				ERRCODE_PROGRAM_LIMIT_EXCEEDED,
+				"BioseqBatchJoin query ordinal exceeds int32 dispatch ABI");
+		}
+		old = MemoryContextSwitchTo(runtime.query_tuple_context);
+		TupleTableSlot* stable_slot = nullptr;
+		try {
+			stable_slot = bioseq::pg_utils::invoke_pg_as_cpp(
+				[source, copy] {
+					TupleTableSlot* result = MakeSingleTupleTableSlot(
+						source->tts_tupleDescriptor, &TTSOpsMinimalTuple);
+					ExecStoreMinimalTuple(copy, result, /*shouldFree=*/false);
+					slot_getallattrs(result);
+					return result;
+				});
+			for (const auto& attribute : retained_expanded_attributes) {
+				stable_slot->tts_values[attribute.attno - 1] = attribute.datum;
+				stable_slot->tts_isnull[attribute.attno - 1] = false;
+			}
+			MemoryContextSwitchTo(old);
+		} catch (...) {
+			MemoryContextSwitchTo(old);
+			throw;
+		}
+		const std::uint64_t retained_vector_bytes =
+			bioseq::parallelism::saturating_mul(
+				static_cast<std::uint64_t>(
+					retained_expanded_attributes.capacity()),
+				static_cast<std::uint64_t>(
+					sizeof(BioseqBatchJoinQueryTuple::
+						RetainedExpandedAttribute)));
 		const std::uint64_t actual_tuple_bytes =
 			bioseq::parallelism::saturating_add(
 				static_cast<std::uint64_t>(copy->t_len),
-				static_cast<std::uint64_t>(
-					sizeof(BioseqBatchJoinQueryTuple)
-					+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
-					+ sizeof(TupleTableSlot)));
+				bioseq::parallelism::saturating_add(
+					newly_retained_wrapper_bytes,
+					bioseq::parallelism::saturating_add(
+						retained_vector_bytes,
+						static_cast<std::uint64_t>(
+							sizeof(BioseqBatchJoinQueryTuple)
+								+ sizeof(bioseq::scheduler::DispatchJoinQueryRef)
+								+ sizeof(TupleTableSlot)
+								+ static_cast<std::size_t>(
+									source->tts_tupleDescriptor->natts)
+									* (sizeof(Datum) + sizeof(bool))))));
 		runtime.query_actual_materialized_bytes =
 			bioseq::parallelism::saturating_add(
 				runtime.query_actual_materialized_bytes,
 				actual_tuple_bytes);
 		if (runtime.query_actual_materialized_bytes
 			> runtime.query_reserved_admission_bytes) {
-			ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("BioseqBatchJoin whole-tuple admission under-estimated its allocation")));
+			batch_join_raise_materialization_as_cpp(
+				ERRCODE_INTERNAL_ERROR,
+				"BioseqBatchJoin whole-tuple admission under-estimated its allocation");
 		}
-		const std::uint64_t ordinal = runtime.query_tuples.size();
-		if (ordinal
-			> static_cast<std::uint64_t>(
-				(std::numeric_limits<std::int32_t>::max)())) {
-			ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("BioseqBatchJoin query ordinal exceeds int32 dispatch ABI")));
-		}
-		old = MemoryContextSwitchTo(runtime.query_tuple_context);
-		TupleTableSlot* stable_slot = MakeSingleTupleTableSlot(
-			source->tts_tupleDescriptor, &TTSOpsMinimalTuple);
-		ExecStoreMinimalTuple(copy, stable_slot, /*shouldFree=*/false);
-		slot_getallattrs(stable_slot);
-		MemoryContextSwitchTo(old);
 		runtime.query_tuples.push_back(BioseqBatchJoinQueryTuple{
 			.tuple = copy,
 			.slot = stable_slot,
 			.ordinal = ordinal,
+			.recipe_datum = retained_recipe,
+			.recipe_descriptor = recipe_descriptor,
+			.expanded_sequence_attributes =
+				std::move(retained_expanded_attributes),
 		});
+	}
+	if (query_async_owner != nullptr) {
+		runtime.buffer.bind_slice_async_owner(query_async_owner);
 	}
 	runtime.all_query_refs.reserve(runtime.query_tuples.size());
 	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
@@ -20239,6 +20620,10 @@ static TupleTableSlot* batch_join_project_output(
 	if (node->ss.ps.qual != nullptr
 		&& !ExecQual(node->ss.ps.qual, expression_context)) {
 		InstrCountFiltered1(&node->ss, 1);
+		/* A rejected output can be followed by finish_join_target() inside this
+		 * same executor call. Drop borrowed query/target recipe Datums before that
+		 * transition resets the dispatch arena. */
+		clear_recipe_scan_parent_tuple_references(node);
 		return nullptr;
 	}
 	return node->ss.ps.ps_ProjInfo != nullptr
@@ -20823,7 +21208,8 @@ static void BioseqBatchJoin_BeginCustomScan(
 			target_relation->rd_locator.spcOid,
 			target_relation->rd_locator.relNumber,
 			target_relation,
-			target_snapshot);
+			target_snapshot,
+			estate->es_query_cxt);
 		runtime->buffer.bind_sequence_source_provider(
 			target_scan_runtime.lazy_source_provider);
 		runtime->buffer.configure_mmsearch_join(
@@ -20919,6 +21305,7 @@ static TupleTableSlot* BioseqBatchJoin_ExecCustomScanImpl(
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqBatchJoin runtime is missing")));
 	}
+	batch_join_clear_parent_tuple_references(node, *runtime);
 	bioseq::pg::alignment_execution::ensure_alignment_node_registered(
 		runtime->alignment_registration);
 	batch_join_materialize_queries(*runtime);
@@ -21125,12 +21512,14 @@ static void BioseqBatchJoin_ReScanCustomScan(CustomScanState* node) {
 	PG_TRY();
 	{
 		try {
+			batch_join_clear_parent_tuple_references(node, *runtime);
 			bioseq::pg::alignment_execution::mark_alignment_rescan(
 				runtime->alignment_registration);
 			if (runtime->target_active) {
 				runtime->buffer.finish_join_target();
 			}
 			runtime->buffer.reset_join_runtime_for_rescan();
+			runtime->buffer.release_join_slice_async_owner_after_drain();
 			batch_join_clear_query_tuples(*runtime, /*drop_slots=*/true);
 			runtime->target_active = false;
 			runtime->target_eof = false;
@@ -21289,6 +21678,7 @@ static void per_row_join_runtime_cleanup(void* argument) {
 static void per_row_join_release_checked(
 		CustomScanState* node, BioseqPerRowJoinRuntime& runtime) {
 	if (runtime.cleanup_done) return;
+	clear_recipe_scan_parent_tuple_references(node);
 	runtime.buffer.clear_slots();
 	runtime.buffer.release_per_row_slice_async_owner_after_drain();
 	if (runtime.child_initialized && !runtime.child_ended
@@ -21604,7 +21994,8 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		runtime->target_relation->rd_locator.dbOid,
 		runtime->target_relation->rd_locator.spcOid,
 		runtime->target_relation->rd_locator.relNumber,
-		runtime->target_relation, estate->es_snapshot);
+		runtime->target_relation, estate->es_snapshot,
+		estate->es_query_cxt);
 	char* column_name = get_attname(
 		target_relation_oid, target_storage_attno, /*missing_ok=*/false);
 	runtime->buffer.configure_mmsearch_per_row(
@@ -21744,6 +22135,11 @@ static TupleTableSlot* BioseqPerRowJoin_ExecCustomScanImpl(
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqPerRowMmsearch runtime is missing")));
 	}
+	/* ExecScan may reject an Access result and call us again without returning
+	 * through BioseqPerRowJoin_ExecCustomScan. Clear that prior virtual row on
+	 * every Access entry so a subsequent clear_slots() cannot invalidate a
+	 * still-parent-visible expanded recipe. */
+	clear_recipe_scan_parent_tuple_references(node);
 	bioseq::pg::alignment_execution::ensure_alignment_node_registered(
 		runtime->alignment_registration);
 	for (;;) {
@@ -21837,6 +22233,7 @@ static TupleTableSlot* BioseqPerRowJoin_ExecCustomScan(
 	PG_TRY();
 	{
 		try {
+			clear_recipe_scan_parent_tuple_references(node);
 			result = ExecScan(
 				&node->ss, BioseqPerRowJoin_Access,
 				BioseqPerRowJoin_Recheck);
@@ -21917,6 +22314,7 @@ static void BioseqPerRowJoin_ReScanCustomScan(CustomScanState* node) {
 	}
 	bioseq::pg::alignment_execution::mark_alignment_rescan(
 		runtime->alignment_registration);
+	clear_recipe_scan_parent_tuple_references(node);
 	runtime->buffer.clear_slots();
 	runtime->buffer.release_per_row_slice_async_owner_after_drain();
 	runtime->source_exhausted = false;
@@ -22472,15 +22870,16 @@ static MmsearchOutputSourceRestore capture_mmsearch_output_sources(
 	return restore;
 }
 
-static void promote_mmsearch_output_sources(
+[[nodiscard]] static std::size_t promote_mmsearch_output_sources(
 		BioseqScanRuntime& runtime,
 		TupleTableSlot* slot,
 		MemoryContext output_context,
 		const MmsearchOutputSourceRestore& restore) {
 	if (runtime.lazy_source_provider == nullptr || slot == nullptr
 		|| output_context == nullptr) {
-		return;
+		return 0u;
 	}
+	std::size_t promoted_count = 0u;
 	for (std::size_t index = 0u; index < restore.count; ++index) {
 		const AttrNumber attno = restore.attnos[index];
 		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts) continue;
@@ -22508,13 +22907,30 @@ static void promote_mmsearch_output_sources(
 					static_cast<std::size_t>(VARSIZE(flat)))));
 		}
 		if (!bioseq::storage::is_locator_stub(flat)) continue;
+		std::uint32_t producer_id = 0u;
+		slice_trace_attachment* trace_attachment = nullptr;
+		if (runtime.lazy_source_projection) {
+			const std::size_t binding_index = static_cast<std::size_t>(attno);
+			if (binding_index < runtime.lazy_source_physical_bound.size()
+				&& binding_index
+					< runtime.lazy_source_physical_producer_ids.size()
+				&& runtime.lazy_source_physical_bound[binding_index] != 0u) {
+				trace_attachment = runtime.lazy_trace_attachment;
+				producer_id =
+					runtime.lazy_source_physical_producer_ids[binding_index];
+			}
+		}
 		slot->tts_values[attno - 1] =
 			bioseq::storage::promote_pg_sequence_locator(
 				runtime.lazy_source_provider,
 				attno,
 				PointerGetDatum(flat),
-				output_context);
+				output_context,
+				trace_attachment,
+				producer_id);
+		++promoted_count;
 	}
+	return promoted_count;
 }
 
 static void restore_mmsearch_output_sources(
@@ -22527,6 +22943,22 @@ static void restore_mmsearch_output_sources(
 			slot->tts_values[attno - 1] = restore.datums[index];
 		}
 	}
+}
+
+[[nodiscard]] static bool mmsearch_output_sources_restored_exactly(
+		TupleTableSlot* slot,
+		const MmsearchOutputSourceRestore& restore) noexcept {
+	if (slot == nullptr || slot->tts_tupleDescriptor == nullptr) {
+		return restore.count == 0u;
+	}
+	for (std::size_t index = 0u; index < restore.count; ++index) {
+		const AttrNumber attno = restore.attnos[index];
+		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts
+			|| slot->tts_values[attno - 1] != restore.datums[index]) {
+			return false;
+		}
+	}
+	return true;
 }
 
 static TupleTableSlot *
@@ -22571,21 +23003,32 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 		if (runtime.buffer.has_finished_writing())
 		{
 			bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() draining output cursor");
-				auto next = runtime.buffer.read_next_output();
-				if (!next)
-				{
-					if (runtime.source_exhausted) {
-						bioseq::pg::alignment_execution::
-							mark_alignment_pass_fully_drained(
-								runtime.alignment_registration);
-						bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() final output cursor drained; returning empty slot (EOF)");
-						return ExecClearTuple(node->ps.ps_ResultTupleSlot);
-					}
-					/* A capacity rollover completed. Drop only that physical
-					 * batch and resume the still-live access-method scan. */
-					runtime.buffer.clear_slots();
-					continue;
+			/* The parent has consumed the previously returned result before it
+			 * invokes this scan again.  Drop that tuple-visible EOH first, then
+			 * release every detoasted locator and source-backed output allocated
+			 * in the ordinary executor per-tuple context.  Buffered MinimalTuple
+			 * slots and MatchResults have independent lifetimes. */
+			ExecClearTuple(node->ps.ps_ResultTupleSlot);
+			ResetExprContext(econtext);
+			econtext->ecxt_scantuple = nullptr;
+			econtext->ecxt_outertuple = nullptr;
+			econtext->ecxt_innertuple = nullptr;
+			auto next = runtime.buffer.read_next_output();
+			if (!next)
+			{
+				if (runtime.source_exhausted) {
+					bioseq::pg::alignment_execution::
+						mark_alignment_pass_fully_drained(
+							runtime.alignment_registration);
+					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() final output cursor drained; returning empty slot (EOF)");
+					return ExecClearTuple(node->ps.ps_ResultTupleSlot);
 				}
+				/* A capacity rollover completed. Drop only that physical
+				 * batch and resume the still-live access-method scan. */
+				runtime.buffer.clear_slots();
+				continue;
+			}
+			bioseq::storage::note_mmsearch_output_context_reset_for_test();
 
 			if (runtime.edit_predicate_active
 				&& (runtime.edit_exclusive_upper_bound <= 0
@@ -22634,11 +23077,17 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			PG_TRY();
 			{
 				try {
-					promote_mmsearch_output_sources(
+					const std::size_t promoted_source_count =
+						promote_mmsearch_output_sources(
 						runtime,
 						next->scan_slot_copy,
 						econtext->ecxt_per_tuple_memory,
 						source_restore);
+					bioseq::storage::
+						note_mmsearch_output_locator_promotion_for_test(
+							promoted_source_count != 0u);
+					bioseq::storage::
+						inject_mmsearch_output_after_promotion_failure_for_test();
 
 					/* Re-install the buffered scan slot as the current scan
 					 * tuple so Var references resolve off the right row. */
@@ -22665,6 +23114,10 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 				MemoryContextSwitchTo(saved_context);
 				restore_mmsearch_output_sources(
 					next->scan_slot_copy, source_restore);
+				bioseq::storage::
+					note_mmsearch_output_pg_error_restore_for_test(
+						mmsearch_output_sources_restored_exactly(
+							next->scan_slot_copy, source_restore));
 				projection_pg_error = CopyErrorData();
 				FlushErrorState();
 			}
@@ -22926,7 +23379,6 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 
 	ScanState *node = reinterpret_cast<ScanState *>(&bioseqScanState->custom_scanstate.ss);
 	PlanState ps = node->ps;
-	auto context = ps.ps_ExprContext;
 	BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
 
 	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() reading plan targetlist");
@@ -23051,15 +23503,6 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 	bioseq_log<DBG>("[bioseq] pg: CustomExecScan() dispatching to Inner_CustomExecScan");
 
 	auto tupleSlot = Inner_CustomExecScan(bioseqScanState, accessMtd, recheckMtd);
-
-
-
-	//MemoryContextReset(econtext->ecxt_per_tuple_memory);
-
-	// (*(*state.projection_info()).pi_exprContext).ecxt_per_tuple_memory,
-	//ExecProject(newProj);
-
-
 	return tupleSlot;
 }
 
@@ -23309,31 +23752,23 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 		 * and SIGSEGV on context teardown. The callback handles the
 		 * delete safely once the context begins to tear down.
 		 */
-		runtime_ptr->buffer.clear_slots();
-
 		/* Drop every tuple-visible reference before resetting the expression
 		 * contexts that own promoted EOHs. Result and scan slots may alias in a
 		 * projection-free shape, so clear the physical slot exactly once. */
-		TupleTableSlot* result_slot = node->ss.ps.ps_ResultTupleSlot;
-		TupleTableSlot* scan_slot = node->ss.ss_ScanTupleSlot;
-		if (result_slot != nullptr) {
-			ExecClearTuple(result_slot);
-		}
-		if (scan_slot != nullptr && scan_slot != result_slot) {
-			ExecClearTuple(scan_slot);
-		}
+		clear_recipe_scan_parent_tuple_references(node);
 
 		/* Locator promotion uses the ordinary executor ExprContext. The private
 		 * runtime context can independently retain evaluated Params, so drain it
 		 * too while the exact source provider remains live. */
 		ExprContext* expression_context = node->ss.ps.ps_ExprContext;
-		if (expression_context != nullptr) {
-			ReScanExprContext(expression_context);
-		}
 		if (bioseqScanState->css_RuntimeContext != nullptr
 			&& bioseqScanState->css_RuntimeContext != expression_context) {
 			ReScanExprContext(bioseqScanState->css_RuntimeContext);
 		}
+
+		/* Tuple-visible EOH references are gone; the retained batch arena may
+		 * now release its wrappers and source-domain edges. */
+		runtime_ptr->buffer.clear_slots();
 
 		if (runtime_ptr->lazy_source_provider != nullptr) {
 			bioseq::storage::close_pg_sequence_source_provider(
@@ -23390,7 +23825,11 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	bioseq::pg::alignment_execution::mark_alignment_rescan(
 		runtime.alignment_registration);
 
-	ResetExprContext(bioseqScanState->css_RuntimeContext);
+	clear_recipe_scan_parent_tuple_references(node);
+	if (bioseqScanState->css_RuntimeContext
+			!= node->ss.ps.ps_ExprContext) {
+		ResetExprContext(bioseqScanState->css_RuntimeContext);
+	}
 	List *allClauses = PList<List>(cscan->custom_exprs).second();
 	List *storageClauses = storage_prunable_quals_without_mmsearch(
 		allClauses, get_cached_stub_oids());

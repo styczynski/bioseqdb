@@ -1680,6 +1680,7 @@ enum class PgSequenceSourceFailure : std::uint8_t {
   close_before_locks,
   close_before_after_locks,
   read_before_scanner,
+  mmsearch_output_after_promotion,
 };
 
 struct PgSequenceSourceDebugCounters {
@@ -1717,6 +1718,10 @@ struct PgSequenceSourceDebugCounters {
   std::uint64_t lease_faults = 0u;
   std::uint64_t fault_injections = 0u;
   std::uint64_t read_fault_injections = 0u;
+  std::uint64_t mmsearch_output_context_resets = 0u;
+  std::uint64_t mmsearch_output_locator_promotions = 0u;
+  std::uint64_t mmsearch_output_pg_error_restores = 0u;
+  std::uint64_t mmsearch_output_restore_mismatches = 0u;
   std::uint64_t facade_source_stream_callbacks = 0u;
   std::uint64_t facade_source_resident_probes = 0u;
   std::uint64_t facade_declared_materializations = 0u;
@@ -2002,6 +2007,49 @@ pg_sequence_source_debug_counters() noexcept {
     return sequence_source_detail::collect_pg_sequence_source_debug_counters();
 }
 #endif
+
+/* DOC0377 output-lifetime diagnostics stay behind the same test-build-only
+ * counter surface as the source domain they exercise.  Production callers
+ * retain one unconditional, inlinable no-op at each proof point. */
+inline void note_mmsearch_output_context_reset_for_test() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    ++g_pg_sequence_source_debug_counters
+        .mmsearch_output_context_resets;
+#endif
+}
+
+inline void note_mmsearch_output_locator_promotion_for_test(
+        const bool promoted_locator) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    if (promoted_locator) {
+        ++g_pg_sequence_source_debug_counters
+            .mmsearch_output_locator_promotions;
+    }
+#else
+    (void)promoted_locator;
+#endif
+}
+
+inline void note_mmsearch_output_pg_error_restore_for_test(
+        const bool exact_restore) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    ++g_pg_sequence_source_debug_counters
+        .mmsearch_output_pg_error_restores;
+    if (!exact_restore) {
+        ++g_pg_sequence_source_debug_counters
+            .mmsearch_output_restore_mismatches;
+    }
+#else
+    (void)exact_restore;
+#endif
+}
+
+inline void inject_mmsearch_output_after_promotion_failure_for_test() {
+#ifdef BIOSEQ_TEST_INDEXES
+    sequence_source_detail::inject_pg_sequence_source_failure(
+        PgSequenceSourceFailure::mmsearch_output_after_promotion);
+#endif
+}
 
 namespace sequence_source_detail {
 

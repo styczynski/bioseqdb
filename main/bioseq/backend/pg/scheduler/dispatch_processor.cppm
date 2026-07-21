@@ -737,6 +737,11 @@ public:
 		std::uint8_t storage_unit_byte_width,
 		std::uint64_t target_bp_size,
 		std::span<const pgseq_t* const> query_headers,
+		std::span<const Datum> query_recipe_datums,
+		std::span<const pg_sequence_descriptor> query_recipe_descriptors,
+		pg_sequence_read_session* query_read_session,
+		const bioseq::storage::sequence_payload_allocation_observer*
+			query_payload_observer,
 		std::span<const std::uint64_t> query_ordinals,
 		const Minimap2Params& base_params,
 		bool include_persisted_parameter_group,
@@ -755,6 +760,11 @@ public:
 		std::uint8_t alphabet_code,
 		std::uint8_t storage_unit_byte_width,
 		std::span<const pgseq_t* const> query_headers,
+		std::span<const Datum> query_recipe_datums,
+		std::span<const pg_sequence_descriptor> query_recipe_descriptors,
+		pg_sequence_read_session* query_read_session,
+		const bioseq::storage::sequence_payload_allocation_observer*
+			query_payload_observer,
 		std::span<const std::uint64_t> query_ordinals,
 		const Minimap2Params& base_params,
 		const bioseq::storage::indexing::BorrowedExecutorReadContextPg&
@@ -813,6 +823,9 @@ public:
         std::uint8_t                                     query_storage_unit_byte_width = 0;
         bioseq::storage::seq_caches*                     caches               = nullptr;
         MemoryContext                                    parent_mctx          = nullptr;
+        /* Wave-owned and borrowed. The dispatch buffer closes it only after
+         * process_sequences and every synchronous GPU fence have returned. */
+        pg_sequence_read_session*                        read_session         = nullptr;
         // Borrowed statement snapshot owned by the executor/admin caller.
         // The facade adapter validates registered MVCC state and never
         // changes its registration count.
@@ -833,6 +846,17 @@ public:
         // exact provider but retain their own physical attno and storage width.
         std::array<std::optional<bioseq::storage::seq_locator>,
             kDispatchBatchCapacity>                       query_locators{};
+        /* Borrowed, batch-arena-owned expanded wrappers captured by
+         * TupleDispatchBuffer.  A nonzero Datum is always paired with its
+         * validated descriptor.  Typed dispatch adapts these through the same
+         * alphabet-only basic_lazy_sequence_view ABI as locator and flat
+         * inputs; it never owns or flattens the wrappers on CPU/SIMD paths. */
+        std::array<Datum, kDispatchBatchCapacity>          target_recipe_datums{};
+        std::array<Datum, kDispatchBatchCapacity>          query_recipe_datums{};
+        std::array<pg_sequence_descriptor,
+            kDispatchBatchCapacity>                       target_recipe_descriptors{};
+        std::array<pg_sequence_descriptor,
+            kDispatchBatchCapacity>                       query_recipe_descriptors{};
         // DOC0279 §11.3c — per-row columnar rowno (== index query_key) and the
         // user relation oid, so the stored per-fragment index can be assembled.
         std::array<std::int64_t, kDispatchBatchCapacity>  target_rownos{};
