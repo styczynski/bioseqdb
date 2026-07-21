@@ -1816,6 +1816,18 @@ CREATE FUNCTION bioseq_internal.slice_trace_worker_failure_probe(integer)
 REVOKE ALL ON FUNCTION
     bioseq_internal.slice_trace_worker_failure_probe(integer) FROM PUBLIC;
 
+-- Revoked, test-build-only replacement for the former diagnostic GUC. Each
+-- non-none call arms exactly one analyzed SliceProject in this backend; the
+-- fixture is consumed before it runs. Production builds fail closed.
+CREATE FUNCTION bioseq_internal.arm_slice_dsm_fixture(text)
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_arm_slice_dsm_fixture'
+    LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.arm_slice_dsm_fixture(text) FROM PUBLIC;
+COMMENT ON FUNCTION bioseq_internal.arm_slice_dsm_fixture(text) IS
+    'Integration-only one-shot SliceProject DSM diagnostic seam; accepts incomplete, malformed, or none.';
+
 CREATE FUNCTION bioseq_internal.synthetic_lazy_sequence(bigint)
     RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'synthetic_lazy_sequence'
     LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;

@@ -1097,13 +1097,19 @@ void require_dsm_fixture_property(
     }
 }
 
+void arm_dsm_fixture(
+        const connection_test_context& ctx, std::string_view mode) {
+    exec_sql(ctx, fmt::format(
+        "SELECT bioseq_internal.arm_slice_dsm_fixture('{}');", mode));
+}
+
 }  // namespace
 
 TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
           "[explain][slice][dsm][malformed]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
-    guc_scope fixture(ctx, "bioseq.test_slice_dsm_fixture", "malformed");
+    arm_dsm_fixture(ctx, "none");
     const auto sql = fmt::format(
         "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
     const std::array formats{
@@ -1118,6 +1124,7 @@ TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
     };
 
     for (const auto& [format, options] : formats) {
+        arm_dsm_fixture(ctx, "malformed");
         const auto plan = explain_with_options(ctx, options, sql);
         require_dsm_fixture_property(
             plan, format, "DSM Test Fixture", "malformed", true);
@@ -1136,6 +1143,24 @@ TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
         REQUIRE_FALSE(plan_contains(plan, "Incomplete Workers"));
         REQUIRE_FALSE(plan_contains(plan, "Incomplete-Workers"));
     }
+    const auto unarmed = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF", sql);
+    REQUIRE_FALSE(plan_contains(unarmed, "DSM Test Fixture"));
+
+    const auto failing_sql = fmt::format(
+        "SELECT seq0[0:4], 1 / (pk - pk) FROM {} WHERE pk = 1;", kTable);
+    const auto failing_plan = explain_with_options(
+        ctx, "COSTS OFF", failing_sql);
+    REQUIRE(plan_contains(
+        failing_plan, "Custom Scan (BioseqSliceProject)"));
+    arm_dsm_fixture(ctx, "malformed");
+    const auto execution_error = sql_error(ctx, fmt::format(
+        "EXPLAIN (ANALYZE, TIMING OFF, COSTS OFF) {}", failing_sql));
+    REQUIRE(execution_error.sqlstate == "22012");
+    const auto after_error = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF", sql);
+    REQUIRE_FALSE(plan_contains(after_error, "DSM Test Fixture"));
+    arm_dsm_fixture(ctx, "none");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
@@ -1144,7 +1169,7 @@ TEST_CASE("DOC0377 two-cycle DSM rescan counts incomplete work exactly once",
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
     exec_sql(ctx, "SET max_parallel_workers_per_gather=0;");
-    guc_scope fixture(ctx, "bioseq.test_slice_dsm_fixture", "incomplete");
+    arm_dsm_fixture(ctx, "none");
     const auto sql = fmt::format(
         "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
     const std::array formats{
@@ -1159,6 +1184,7 @@ TEST_CASE("DOC0377 two-cycle DSM rescan counts incomplete work exactly once",
     };
 
     for (const auto& [format, options] : formats) {
+        arm_dsm_fixture(ctx, "incomplete");
         const auto plan = explain_with_options(ctx, options, sql);
         require_dsm_fixture_property(
             plan, format, "DSM Test Fixture", "incomplete", true);
@@ -1193,6 +1219,10 @@ TEST_CASE("DOC0377 two-cycle DSM rescan counts incomplete work exactly once",
                 plan, "binary", "client output") == 150u);
         }
     }
+    const auto unarmed = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF", sql);
+    REQUIRE_FALSE(plan_contains(unarmed, "DSM Test Fixture"));
+    arm_dsm_fixture(ctx, "none");
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 #endif

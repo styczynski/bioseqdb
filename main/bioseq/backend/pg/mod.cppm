@@ -70,6 +70,7 @@ import bioseq.common.sequan_compat;
 import bioseq.column.tam; // DOC0322 §7.4 — tid_to_row_number, IsBioseqColumnTableAmTable (the leaf replaces the former extern "C++" reaches)
 import bioseq.pg_utils.nodes; // DOC0333 — pg_node_try_as (support-request dispatch), expression walker adapter (find_first_var)
 import bioseq.table.scan_state;
+import bioseq.table;
 import bioseq.sequences.pipe;
 
 using namespace bioseq::pg_utils;   // DOC0333 — node view/walker helpers live in bioseq::pg_utils
@@ -5501,6 +5502,22 @@ PGDLLEXPORT Datum bioseq_internal_sequence_source_counters(
 		PG_FUNCTION_ARGS) {
 	return bioseq_invoke_pg_sequence_fmgr_boundary(
 		&bioseq_internal_sequence_source_counters_impl, fcinfo);
+}
+
+static Datum bioseq_internal_arm_slice_dsm_fixture_impl(
+		FunctionCallInfo fcinfo) {
+	text* mode_text = PG_GETARG_TEXT_PP(0);
+	const std::string_view mode{
+		VARDATA_ANY(mode_text),
+		static_cast<std::size_t>(VARSIZE_ANY_EXHDR(mode_text))};
+	bioseq_arm_slice_dsm_fixture_for_test(mode);
+	PG_RETURN_VOID();
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_arm_slice_dsm_fixture);
+PGDLLEXPORT Datum bioseq_internal_arm_slice_dsm_fixture(PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_arm_slice_dsm_fixture_impl, fcinfo);
 }
 
 static Datum bioseq_internal_sequence_source_wrong_thread_probe_impl(

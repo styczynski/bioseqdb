@@ -1,6 +1,7 @@
 module;
 
 #include "common.h"
+#include <string_view>
 
 export module bioseq.table:api;
 
@@ -20,6 +21,7 @@ export bool bioseq_expr_uses_bioseq_projection(Node* node);
 export void bioseq_customscan_init(void);
 export void bioseq_validate_raw_mmsearch_options(Query* query);
 export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement);
+export void bioseq_arm_slice_dsm_fixture_for_test(std::string_view mode);
 
 export CustomScan* bioseq_create_indexscan_node(void);
 export void bioseq_register_indexscan_node(void);

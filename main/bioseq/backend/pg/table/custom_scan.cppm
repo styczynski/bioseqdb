@@ -40,10 +40,10 @@ module;
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
-
 
 extern "C" {
 #include "catalog/pg_aggregate.h"
@@ -2337,15 +2337,46 @@ enum SliceProjectDsmTestFixture : int {
 	kSliceDsmTestMalformed = 2,
 };
 
-static int BioseqSliceDsmTestFixture = kSliceDsmTestNone;
-
-static const config_enum_entry slice_dsm_test_fixture_options[] = {
-	{"none", kSliceDsmTestNone, false},
-	{"incomplete", kSliceDsmTestIncomplete, false},
-	{"malformed", kSliceDsmTestMalformed, false},
-	{nullptr, 0, false},
-};
+/* Backend-local, one-shot diagnostic state.  The revoked SQL seam arms one
+ * mode; the next analyzed SliceProject takes it before running any fixture
+ * code, so ERROR during the fixture cannot leave a latent injection behind. */
+static int PendingSliceDsmTestFixture = kSliceDsmTestNone;
 #endif
+
+void bioseq_arm_slice_dsm_fixture_for_test(std::string_view mode) {
+#ifdef BIOSEQ_TEST_INDEXES
+	int requested_mode = kSliceDsmTestNone;
+	if (mode == "incomplete") {
+		requested_mode = kSliceDsmTestIncomplete;
+	} else if (mode == "malformed") {
+		requested_mode = kSliceDsmTestMalformed;
+	} else if (mode != "none") {
+		ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("unknown SliceProject DSM diagnostic fixture"),
+			 errdetail("fixture=%.*s",
+				 static_cast<int>(mode.size()), mode.data()),
+			 errhint("Expected incomplete, malformed, or none.")));
+	}
+	if (requested_mode == kSliceDsmTestNone) {
+		PendingSliceDsmTestFixture = kSliceDsmTestNone;
+		return;
+	}
+	if (PendingSliceDsmTestFixture != kSliceDsmTestNone) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("a SliceProject DSM diagnostic fixture is already armed"),
+			 errhint("Run the analyzed SliceProject or disarm it with fixture 'none'.")));
+	}
+	PendingSliceDsmTestFixture = requested_mode;
+#else
+	(void)mode;
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("SliceProject DSM diagnostics require a test build"),
+		 errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
+#endif
+}
 
 
 const CustomPathMethods BioseqColumnScanPathMethods = {
@@ -4355,18 +4386,19 @@ static void slice_project_test_publish_incomplete(void* argument) noexcept {
 
 static void slice_project_apply_dsm_test_fixture(
 		BioseqSliceProjectState* state) {
-	if (state == nullptr || BioseqSliceDsmTestFixture == kSliceDsmTestNone) return;
+	if (state == nullptr) return;
 	auto& runtime = state->runtime;
 	if (runtime.dsm_test_fixture_applied) return;
+	const int fixture_mode = runtime.dsm_test_fixture_mode;
+	if (fixture_mode == kSliceDsmTestNone) return;
 	runtime.dsm_test_fixture_applied = true;
-	runtime.dsm_test_fixture_mode = BioseqSliceDsmTestFixture;
 	if (runtime.boundary_count == 0u || runtime.boundaries == nullptr) {
 		runtime.dsm_test_fixture_validated = false;
 		return;
 	}
 	runtime.dsm_test_async_validated = slice_project_run_incomplete_async_test(
 		runtime, &runtime.dsm_test_cleanup_callbacks);
-	if (BioseqSliceDsmTestFixture == kSliceDsmTestMalformed) {
+	if (fixture_mode == kSliceDsmTestMalformed) {
 		constexpr std::array corruptions{
 			SliceProjectDsmCorruption::version,
 			SliceProjectDsmCorruption::recipe_count,
@@ -5286,6 +5318,15 @@ static void SliceProjectInitializeWorker(
 
 static void SliceProjectBegin(
 		CustomScanState* custom, EState* estate, int eflags) {
+	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
+#ifdef BIOSEQ_TEST_INDEXES
+	/* Claim the backend-local one-shot before any plan validation or child
+	 * initialization can ERROR.  The claimed mode stays on this executor node
+	 * for post-execution EXPLAIN diagnostics; an aborted statement destroys it
+	 * instead of leaking the injection to a later query. */
+	state->runtime.dsm_test_fixture_mode = std::exchange(
+		PendingSliceDsmTestFixture, kSliceDsmTestNone);
+#endif
 	auto* scan = reinterpret_cast<CustomScan*>(custom->ss.ps.plan);
 	scan->methods = &bioseq_slice_project_scan_methods();
 	slice_project_validate_codec(scan);
@@ -5294,7 +5335,6 @@ static void SliceProjectBegin(
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqSliceProject requires exactly one child plan")));
 	}
-	auto* state = reinterpret_cast<BioseqSliceProjectState*>(custom);
 	List* header = slice_project_plan_header(scan);
 	state->runtime.planned_symbols = slice_project_int8_value(
 		reinterpret_cast<Node*>(list_nth(header, kSliceHeaderPlannedSymbols)));
@@ -7564,21 +7604,6 @@ bioseq_customscan_init()
 		NULL,
 		NULL,
 		NULL);
-#ifdef BIOSEQ_TEST_INDEXES
-	DefineCustomEnumVariable(
-		"bioseq.test_slice_dsm_fixture",
-		"Injects an isolated SliceProject DSM lifecycle fixture for tests.",
-		NULL,
-		&BioseqSliceDsmTestFixture,
-		kSliceDsmTestNone,
-		slice_dsm_test_fixture_options,
-		PGC_USERSET,
-		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-		NULL,
-		NULL,
-		NULL);
-#endif
-
 	RegisterCustomScanMethods(&BioseqColumnScanScanMethods);
 	RegisterCustomScanMethods(&BioseqBatchJoinScanMethods);
 	RegisterCustomScanMethods(&bioseq_slice_project_scan_methods());

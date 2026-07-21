@@ -175,6 +175,42 @@ struct async_cancel_result {
     std::string sqlstate;
 };
 
+class prepared_transaction_cleanup_guard {
+private:
+    PGconn* connection_ = nullptr;
+    std::string rollback_sql_;
+    bool armed_ = false;
+
+public:
+    prepared_transaction_cleanup_guard(
+            PGconn* connection, std::string_view gid)
+        : connection_(connection),
+          rollback_sql_(fmt::format("ROLLBACK PREPARED '{}';", gid)) {}
+
+    prepared_transaction_cleanup_guard(
+        const prepared_transaction_cleanup_guard&) = delete;
+    prepared_transaction_cleanup_guard& operator=(
+        const prepared_transaction_cleanup_guard&) = delete;
+
+    ~prepared_transaction_cleanup_guard() {
+        if (!armed_ || connection_ == nullptr
+            || PQstatus(connection_) != CONNECTION_OK) {
+            return;
+        }
+        if (PQtransactionStatus(connection_) != PQTRANS_IDLE) {
+            if (PGresult* result = PQexec(connection_, "ROLLBACK;")) {
+                PQclear(result);
+            }
+        }
+        if (PGresult* result = PQexec(connection_, rollback_sql_.c_str())) {
+            PQclear(result);
+        }
+    }
+
+    void arm() noexcept { armed_ = true; }
+    void release() noexcept { armed_ = false; }
+};
+
 [[nodiscard]] async_cancel_result cancel_sleeping_query(
         connection_test_context& worker,
         connection_test_context& controller,
@@ -582,6 +618,75 @@ TEST_CASE("DOC0377 cursor-held source registries promote or abort with subxact",
     REQUIRE(source_counter(ctx, "live_registries") == 0);
     REQUIRE(source_counter(ctx, "live_domains") == 0);
     exec_sql(ctx, "RELEASE SAVEPOINT source_abort; COMMIT;");
+}
+
+TEST_CASE("DOC0377 empty source registry reaches real prepared commit",
+          "[seq][slice][source-domain][prepared-xact][acceptance]") {
+    auto owner = fresh_context({"doc0377_source_prepared_marker"});
+    connection_test_context resolver;
+
+    const auto max_prepared = query_scalar_int(
+        owner,
+        "SELECT current_setting('max_prepared_transactions')::bigint;");
+    INFO("DOC0377 prepared-transaction acceptance requires "
+         "max_prepared_transactions > 0");
+    REQUIRE(max_prepared > 0);
+
+    exec_sql(owner,
+        "CREATE TABLE doc0377_source_prepared_marker "
+        " (id bigint PRIMARY KEY);");
+    const auto owner_pid = query_scalar_int(owner, "SELECT pg_backend_pid();");
+    const auto nonce = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+    const auto gid = fmt::format(
+        "doc0377_empty_registry_{}_{}", owner_pid, nonce);
+    const auto prepare_sql = fmt::format(
+        "PREPARE TRANSACTION '{}';", gid);
+    const auto commit_prepared_sql = fmt::format(
+        "COMMIT PREPARED '{}';", gid);
+    const auto prepared_count_sql = fmt::format(
+        "SELECT count(*) FROM pg_catalog.pg_prepared_xacts "
+        "WHERE gid='{}' AND database=current_database();", gid);
+    prepared_transaction_cleanup_guard cleanup{resolver.raw(), gid};
+
+    reset_source_counters(owner);
+    exec_sql(owner, "BEGIN;");
+    exec_sql(owner,
+        "INSERT INTO doc0377_source_prepared_marker VALUES (377);");
+    exec_sql(owner,
+        "DO $$ BEGIN "
+        "  PERFORM bioseq_internal.sequence_source_pre_prepare_probe(); "
+        "  RAISE EXCEPTION 'DOC0377 PRE_PREPARE probe did not reject'; "
+        "EXCEPTION WHEN feature_not_supported THEN "
+        "  IF SQLERRM NOT LIKE "
+        "    'cannot PREPARE TRANSACTION with live bioseq source domains%' "
+        "  THEN RAISE; END IF; "
+        "END $$;");
+    REQUIRE(source_counter(owner, "pre_prepare_rejections") == 1);
+    require_source_quiescent(owner);
+
+    // PREPARE and COMMIT PREPARED must each be their own top-level command.
+    exec_sql(owner, prepare_sql);
+    cleanup.arm();
+    REQUIRE(PQtransactionStatus(owner.raw()) == PQTRANS_IDLE);
+    require_source_quiescent(owner);
+    REQUIRE(query_scalar_int(resolver, prepared_count_sql) == 1);
+    REQUIRE(query_scalar_int(
+        resolver,
+        "SELECT count(*) FROM doc0377_source_prepared_marker;") == 0);
+    REQUIRE(PQtransactionStatus(resolver.raw()) == PQTRANS_IDLE);
+
+    exec_sql(resolver, commit_prepared_sql);
+    cleanup.release();
+    REQUIRE(PQtransactionStatus(resolver.raw()) == PQTRANS_IDLE);
+    REQUIRE(query_scalar_int(resolver, prepared_count_sql) == 0);
+    REQUIRE(query_scalar_int(
+        resolver,
+        "SELECT count(*) FROM doc0377_source_prepared_marker "
+        "WHERE id=377;") == 1);
+    require_source_quiescent(owner);
+    exec_sql(resolver, "DROP TABLE doc0377_source_prepared_marker;");
 }
 
 TEST_CASE("DOC0377 source bindings obey MVCC epoch rewrite and relcache invalidation",
