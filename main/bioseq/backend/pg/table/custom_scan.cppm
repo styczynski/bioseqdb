@@ -47,12 +47,15 @@ module;
 
 extern "C" {
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_language_d.h"
+#include "catalog/pg_proc.h"
 #include "commands/extension.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/planmain.h"
 #include "storage/dsm.h"
 #include "storage/shmem.h"
 #include "utils/inval.h"
+#include "utils/syscache.h"
 }
 
 export module bioseq.table:custom_scan;
@@ -1115,6 +1118,54 @@ struct RawMmsearchOptionsValidation {
 	const BioseqStubOids* oids = nullptr;
 };
 
+[[nodiscard]] static inline bool is_volatile_sql_function(
+		const Oid function_oid) {
+	HeapTuple procedure_tuple = SearchSysCache1(
+		PROCOID, ObjectIdGetDatum(function_oid));
+	if (!HeapTupleIsValid(procedure_tuple)) return false;
+	const Form_pg_proc procedure = reinterpret_cast<Form_pg_proc>(
+		GETSTRUCT(procedure_tuple));
+	const bool result = procedure->provolatile == PROVOLATILE_VOLATILE
+		&& procedure->prolang == SQLlanguageId;
+	ReleaseSysCache(procedure_tuple);
+	return result;
+}
+
+static inline bool contains_volatile_sql_function_node(
+	Node* node, void* context);
+
+[[nodiscard]] static inline bool contains_volatile_sql_function_query(
+		Query* query, void* context) {
+	return query != nullptr && query_tree_walker(
+		query, contains_volatile_sql_function_node, context,
+		QTW_EXAMINE_RTES_BEFORE);
+}
+
+[[nodiscard]] static inline bool contains_volatile_sql_function_node(
+		Node* node, void* context) {
+	if (node == nullptr) return false;
+	if (FuncExpr* expression = pg_node_try_as<FuncExpr>(node);
+		expression != nullptr
+		&& is_volatile_sql_function(expression->funcid)) return true;
+	if (IsA(node, RangeTblEntry)) {
+		/* query_tree_walker owns traversal of RTE expressions and subqueries. */
+		return false;
+	}
+	if (Query* query = pg_node_try_as<Query>(node)) {
+		return contains_volatile_sql_function_query(query, context);
+	}
+	return expression_tree_walker(
+		node, contains_volatile_sql_function_node, context);
+}
+
+/* Identify only volatile SQL functions whose wrapper provenance can be lost
+ * when standard_planner simplifies their options subtree.  This catalog walk
+ * inspects nodes without invoking any expression. */
+[[nodiscard]] static inline bool contains_volatile_sql_function(
+		Node* expression) {
+	return contains_volatile_sql_function_node(expression, nullptr);
+}
+
 static inline bool validate_raw_mmsearch_options_node(
 	Node* node, RawMmsearchOptionsValidation* validation);
 
@@ -1142,7 +1193,7 @@ static inline bool validate_raw_mmsearch_options_node(
 		&& list_length(expression->args) == 3) {
 		Node* options = reinterpret_cast<Node*>(
 			list_nth(expression->args, 2));
-		if (contain_volatile_functions(options)) {
+		if (contains_volatile_sql_function(options)) {
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("mmsearch qualifier is not owned by a Bioseq executor"),
