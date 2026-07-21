@@ -1856,7 +1856,15 @@ TEST_CASE("COUNT(*) over an mmsearch-filtered bioseq table compiles and runs",
         "  FROM {} "
         " WHERE mmsearch(seq0, '{}'::bioseq.seq('dna4', 32));",
         kHoeJoin, kHoeProbeSequence);
-    const auto count_row = query_one(ctx, count_sql);
+    const auto count_plan = explain_text<false>(ctx, count_sql);
+    REQUIRE(plan_contains(count_plan, "Aggregate"));
+    REQUIRE(plan_contains(count_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(plan_contains(
+        count_plan, "Custom Scan (VectorAggNode)"));
+    const auto count_rows = expect_invariant_under_guc_toggle(
+        ctx, count_sql, "bioseq.enable_vectorization");
+    REQUIRE(count_rows.size() == 1);
+    const auto& count_row = count_rows.front();
     REQUIRE(count_row.size() == 1);
     REQUIRE(count_row[0].has_value());
     const long long hits = std::stoll(count_row[0].value());

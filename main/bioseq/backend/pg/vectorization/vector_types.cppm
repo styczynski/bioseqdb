@@ -259,6 +259,12 @@ export void
 ExtractTupleFromVectorSlot(TupleTableSlot* output_slot, VectorTupleTableSlot* vector_slot,
 						   int32_t row_index, List* attr_needed_list)
 {
+	/* Only attrNeededList is materialized below, but ExecStoreVirtualTuple
+	 * publishes every descriptor attribute as valid.  Establish canonical
+	 * virtual-slot contents first so omitted columns are NULL rather than stale
+	 * Datums left behind by an earlier row. */
+	bioseq::pg_utils::pg_slot_datums_view{output_slot}.clear_all_to_null();
+	output_slot->tts_nvalid = 0;
 	foreach_int(attribute_number, attr_needed_list)
 	{
 		if (!TupleDescAttr(output_slot->tts_tupleDescriptor, attribute_number)->attisdropped)

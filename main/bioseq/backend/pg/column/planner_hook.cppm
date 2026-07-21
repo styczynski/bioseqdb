@@ -67,6 +67,26 @@ struct PlanTreeMutatorContext
 			"BioseqSliceProject") == 0;
 }
 
+/* BioseqScan removes its executor-owned mmsearch from Plan.qual and stores
+ * the expression in custom_exprs[3].  Aggregate eligibility must inspect that
+ * private expression slot as well as the ordinary targetlist/qual trees;
+ * VectorAgg cannot consume the scalar, per-match rows published by this scan. */
+[[nodiscard]] static inline bool BioseqScanOwnsMmsearch(
+		const CustomScan* custom_scan) {
+	constexpr int kOwnedMmsearchExprIndex = 3;
+	if (custom_scan == nullptr || custom_scan->methods == nullptr
+		|| custom_scan->methods->CustomName == nullptr
+		|| (custom_scan->methods != bioseq_customscan_methods()
+			&& strcmp(custom_scan->methods->CustomName, "BioseqScan") != 0)
+		|| list_length(custom_scan->custom_exprs)
+			<= kOwnedMmsearchExprIndex) {
+		return false;
+	}
+	return bioseq_expr_uses_bioseq_projection(
+		reinterpret_cast<Node*>(list_nth(
+			custom_scan->custom_exprs, kOwnedMmsearchExprIndex)));
+}
+
 /*
  * FlatCopyPlan clones the body of a plan node of the given concrete type.
  * Replaces the classic FLATCOPY token-pasting macro with a type-checked
@@ -287,6 +307,8 @@ struct plan_tree_mutator {
 			if (agg_node->plan.lefttree->type == T_CustomScan)
 			{
 				bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg has CustomScan child");
+				auto* aggregate_input = reinterpret_cast<CustomScan*>(
+					agg_node->plan.lefttree);
 				/*
 				 * Skip the vectorised-aggregator rewrite when the Agg
 				 * pulls a value from a bioseq.<projection>(...) call or
@@ -309,8 +331,11 @@ struct plan_tree_mutator {
 						reinterpret_cast<Node*>(agg_node->plan.lefttree->targetlist))
 					|| bioseq_expr_uses_bioseq_projection(
 						reinterpret_cast<Node*>(agg_node->plan.lefttree->qual));
-				if (agg_input_uses_bioseq_projection) {
-					bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg input depends on bioseq projection / mmsearch — skipping vectorised aggregator rewrite");
+				const bool agg_input_owns_mmsearch =
+					BioseqScanOwnsMmsearch(aggregate_input);
+				if (agg_input_uses_bioseq_projection
+					|| agg_input_owns_mmsearch) {
+					bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg input depends on bioseq projection / executor-owned mmsearch — skipping vectorised aggregator rewrite");
 					return pg_plan_mutation::descend();
 				}
 				if (agg_node->aggstrategy == AGG_PLAIN)

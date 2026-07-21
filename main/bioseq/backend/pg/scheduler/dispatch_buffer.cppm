@@ -1242,6 +1242,12 @@ private:
                 continue;
             }
             const Datum value = slot->tts_values[index];
+            if (value == Datum{0}) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("non-NULL bioseq dispatch output has a null Datum"),
+                     errdetail("attribute=%d", index + 1)));
+            }
             if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value))) {
                 continue;
             }
