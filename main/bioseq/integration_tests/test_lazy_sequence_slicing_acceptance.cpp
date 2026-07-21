@@ -242,6 +242,19 @@ void require_doc0377_sql_packing_profile(
     REQUIRE(flattened[3] == "t");
 }
 
+[[nodiscard]] std::string doc0377_match_binding_motif() {
+    constexpr std::string_view alphabet = "ACGT";
+    std::string sequence(128u, 'A');
+    std::uint64_t state = 0x243f6a8885a308d3ull;
+    for (char& base : sequence) {
+        state ^= state << 13u;
+        state ^= state >> 7u;
+        state ^= state << 17u;
+        base = alphabet[static_cast<std::size_t>(state & 3u)];
+    }
+    return sequence;
+}
+
 } // namespace
 
 TEST_CASE("DOC0377 exact Python slicing examples and prompt algebra",
@@ -306,6 +319,443 @@ TEST_CASE("DOC0377 exact Python slicing examples and prompt algebra",
     REQUIRE(algebra[0] == "GTACAGCT");
     REQUIRE(algebra[1] == "GTACAGCT");
     REQUIRE(algebra[2] == "t");
+}
+
+TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
+          "[seq][slice][mmsearch][binding][nested][acceptance]") {
+    constexpr std::string_view target_table =
+        "doc0377_match_binding_target";
+    constexpr std::string_view secondary_table =
+        "doc0377_match_binding_secondary";
+    auto ctx = fresh_context({target_table, secondary_table});
+    const std::string motif = doc0377_match_binding_motif();
+    const std::string short_motif = motif.substr(0u, 96u);
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{target_table},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {motif + short_motif}}});
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{secondary_table},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {short_motif}}});
+    exec_sql(ctx, fmt::format(
+        "CREATE TEMP TABLE doc0377_match_binding_queries ("
+        " id integer PRIMARY KEY, seq bioseq.seq('dna4',32)); "
+        "INSERT INTO doc0377_match_binding_queries VALUES "
+        " (1, '{}'::bioseq.seq('dna4',32)),"
+        " (2, '{}'::bioseq.seq('dna4',32));",
+        motif, short_motif));
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather = 0; "
+        "SET bioseq.read_sequence_index = off; "
+        "SET bioseq.aligner.vulkan_enabled = off; "
+        "SET bioseq.aligner.min_chain_score = 10; "
+        "SET bioseq.aligner.minimizer_algorithm = 'two_stack_nthash'; "
+        "SET bioseq.aligner.chaining_algorithm = 'simd_mm2'; "
+        "SET bioseq.aligner.base_alignment_algorithm = 'block_aligner'; "
+        "SET join_collapse_limit = 1; "
+        "SET from_collapse_limit = 1; "
+        "SET geqo = off;");
+
+    /* Core does not expose stable SQL knobs for all five wrapper Path types.
+     * This revoked seam runs the real production owner proof/COW propagation
+     * over their exact planner nodes. The nested SQL below then supplies the
+     * genuine finalized-plan/executor proof: helper values come from each
+     * MatchResult and never from an executable projection stub. */
+    const auto wrapper_proof = query_one(
+        ctx,
+        "SELECT exact_owner_found::text, clone_applied::text, "
+        "owner_cloned::text, projection_cloned::text, "
+        "material_cloned::text, memoize_cloned::text, "
+        "unique_cloned::text, append_cloned::text, "
+        "helper_on_owner::text, helper_on_projection::text, "
+        "helper_on_material::text, helper_on_memoize::text, "
+        "helper_on_unique::text, helper_on_append::text, "
+        "originals_unchanged::text, sibling_unchanged::text, "
+        "duplicate_owner_rejected::text, "
+        "unknown_wrapper_rejected::text "
+        "FROM bioseq_internal."
+        "match_helper_wrapper_propagation_probe();");
+    REQUIRE(wrapper_proof.size() == 18u);
+    for (const auto& field : wrapper_proof) {
+        REQUIRE(field.has_value());
+        REQUIRE(*field == "true");
+    }
+	const auto executor_translation_proof = query_one(
+		ctx,
+		"SELECT target_offset_accepted::text, "
+		"target_attno_disagreement_rejected::text, "
+		"exact_site_offset_accepted::text, "
+		"lineage_alias_disagreement_rejected::text "
+		"FROM bioseq_internal."
+		"base_match_executor_translation_probe();");
+	REQUIRE(executor_translation_proof.size() == 4u);
+	for (const auto& field : executor_translation_proof) {
+		REQUIRE(field.has_value());
+		REQUIRE(*field == "true");
+	}
+
+    /* A base BioseqScan is itself a stable match owner.  Its helpers must be
+     * finalized against the exact sequence column before executor rewriting. */
+    const auto base_owner_rows = query_rows(ctx, fmt::format(
+        "SELECT bioseq.query_len(t.seq0), bioseq.target_len(t.seq0), "
+        "       bioseq.cigar(t.seq0) "
+        "FROM {} AS t "
+        "WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))",
+        target_table, motif));
+    REQUIRE(base_owner_rows.size() == 1u);
+    REQUIRE(base_owner_rows.front()[0]
+        == std::optional<std::string>{"128"});
+    REQUIRE(base_owner_rows.front()[1]
+        == std::optional<std::string>{"224"});
+    REQUIRE(base_owner_rows.front()[2].has_value());
+    REQUIRE(*base_owner_rows.front()[2] != "!UNEXPECTED!");
+
+	/* The second materialized CTE is planned after an unrelated query level,
+	 * so its BioseqScan Vars receive a nonzero final-rtable offset.  The
+	 * planner-scope owner image must remain local for ambiguity resolution,
+	 * while the executor image uses the shifted target and helper Vars. */
+	const std::string offset_base_owner_sql = fmt::format(
+		"WITH pad AS MATERIALIZED ("
+		"  SELECT count(*) AS n FROM {}"
+		"), owned AS MATERIALIZED ("
+		"  SELECT bioseq.query_len(t.seq0) AS query_len, "
+		"         bioseq.target_len(t.seq0) AS target_len, "
+		"         bioseq.cigar(t.seq0) AS exact_cigar, "
+		"         bioseq.query_start(t.pk) AS query_start, "
+		"         bioseq.query_end(t.pk) AS query_end, "
+		"         bioseq.cigar(t.pk) AS lineage_cigar "
+		"  FROM {} AS t "
+		"  WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))"
+		") "
+		"SELECT owned.query_len, owned.target_len, owned.exact_cigar, "
+		"       owned.query_start, owned.query_end, owned.lineage_cigar "
+		"FROM pad CROSS JOIN owned WHERE pad.n >= 0",
+		secondary_table, target_table, motif);
+	const auto offset_base_owner_plan = explain_text<false>(
+		ctx, offset_base_owner_sql);
+	REQUIRE(std::any_of(
+		offset_base_owner_plan.begin(), offset_base_owner_plan.end(),
+		[](const std::string& line) {
+			return line.find("CTE Scan on owned") != std::string::npos;
+		}));
+	REQUIRE(std::any_of(
+		offset_base_owner_plan.begin(), offset_base_owner_plan.end(),
+		[](const std::string& line) {
+			return line.find("Custom Scan (BioseqScan)")
+				!= std::string::npos;
+		}));
+	const auto offset_base_owner_rows = query_rows(
+		ctx, offset_base_owner_sql);
+	REQUIRE(offset_base_owner_rows.size() == 1u);
+	REQUIRE(offset_base_owner_rows.front().size() == 6u);
+	REQUIRE(offset_base_owner_rows.front()[0] == base_owner_rows.front()[0]);
+	REQUIRE(offset_base_owner_rows.front()[1] == base_owner_rows.front()[1]);
+	REQUIRE(offset_base_owner_rows.front()[2] == base_owner_rows.front()[2]);
+	REQUIRE(offset_base_owner_rows.front()[3]
+		== std::optional<std::string>{"0"});
+	REQUIRE(offset_base_owner_rows.front()[4]
+		== std::optional<std::string>{"128"});
+	REQUIRE(offset_base_owner_rows.front()[5] == base_owner_rows.front()[2]);
+	exec_sql(ctx,
+		std::string{"PREPARE doc0377_base_match_owner_offset AS "}
+			+ offset_base_owner_sql);
+	REQUIRE(query_rows(ctx, "EXECUTE doc0377_base_match_owner_offset;")
+		== offset_base_owner_rows);
+	REQUIRE(query_rows(ctx, "EXECUTE doc0377_base_match_owner_offset;")
+		== offset_base_owner_rows);
+	exec_sql(ctx, "DEALLOCATE doc0377_base_match_owner_offset;");
+
+    /* The base owner and an outer sliced owner share t.seq0 lineage.  A row
+     * marker cannot select between their MatchResults and must fail closed. */
+    const auto base_outer_ambiguous = sql_error(ctx, fmt::format(
+        "SELECT bioseq.cigar(t.pk) "
+        "FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=2 AND mmsearch(t.seq0[128:224],q.seq) "
+        "WHERE mmsearch(t.seq0, '{}'::bioseq.seq('dna4',32))",
+        target_table, motif));
+    REQUIRE(base_outer_ambiguous.sqlstate == "42702");
+    REQUIRE(base_outer_ambiguous.contains(
+        "bioseq match-result helper binding is ambiguous"));
+    REQUIRE(base_outer_ambiguous.contains("candidate_match_owners=2"));
+
+    /* Every result helper names the complete transformed target recipe.  In
+     * particular, the coordinate helpers must describe the 128-letter logical
+     * slice rather than the 224-letter stored source. */
+    const std::string exact_helpers_sql = fmt::format(
+        "SELECT bioseq.query_len(t.seq0[0:128]), "
+        "       bioseq.query_start(t.seq0[0:128]), "
+        "       bioseq.query_end(t.seq0[0:128]), "
+        "       bioseq.target_len(t.seq0[0:128]), "
+        "       bioseq.target_start(t.seq0[0:128]), "
+        "       bioseq.target_end(t.seq0[0:128]), "
+        "       bioseq.num_matches(t.seq0[0:128]), "
+        "       bioseq.block_length(t.seq0[0:128]), "
+        "       bioseq.edit(t.seq0[0:128]), "
+        "       bioseq.cigar(t.seq0[0:128]), "
+        "       bioseq.has_cigar(t.seq0[0:128]) "
+        "FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch(t.seq0[0:128],q.seq) "
+        "ORDER BY t.pk",
+        target_table);
+    const std::string ordered_suffix = " ORDER BY t.pk";
+    REQUIRE(exact_helpers_sql.ends_with(ordered_suffix));
+    const std::string exact_helpers_unordered_sql = exact_helpers_sql.substr(
+        0u, exact_helpers_sql.size() - ordered_suffix.size());
+    const auto exact_helpers_unordered_plan = explain_text<false>(
+        ctx, exact_helpers_unordered_sql);
+    REQUIRE(std::count_if(
+        exact_helpers_unordered_plan.begin(),
+        exact_helpers_unordered_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos;
+        }) == 1);
+    /* EXPLAIN itself reaches core setrefs.  Keeping pk out of the visible
+     * SELECT list makes this a direct resjunk-sort carrier regression for the
+     * transformed owner, before any executor behavior can mask the defect. */
+    const auto exact_helpers_plan = explain_text<false>(
+        ctx, exact_helpers_sql);
+    REQUIRE(std::count_if(
+        exact_helpers_plan.begin(), exact_helpers_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos;
+        }) == 1);
+    const auto exact_rows = expect_query_invariant_under_options(
+        ctx, exact_helpers_sql,
+        {
+            {"bioseq.enable_vectorization", {"on", "off"}},
+            {"bioseq.enable_column_cache", {"on", "off"}},
+        });
+    REQUIRE(exact_rows.size() == 1u);
+    REQUIRE(exact_rows.front().size() == 11u);
+    for (const auto& value : exact_rows.front()) {
+        REQUIRE(value.has_value());
+    }
+    REQUIRE(exact_rows.front()[0] == std::optional<std::string>{"128"});
+    REQUIRE(exact_rows.front()[1] == std::optional<std::string>{"0"});
+    REQUIRE(exact_rows.front()[2] == std::optional<std::string>{"128"});
+    REQUIRE(exact_rows.front()[3] == std::optional<std::string>{"128"});
+    REQUIRE(exact_rows.front()[4] == std::optional<std::string>{"0"});
+    REQUIRE(exact_rows.front()[5] == std::optional<std::string>{"128"});
+    REQUIRE(std::stoll(*exact_rows.front()[6]) > 0);
+    REQUIRE(std::stoll(*exact_rows.front()[7]) >= 128);
+    REQUIRE(exact_rows.front()[8] == std::optional<std::string>{"0"});
+    REQUIRE(*exact_rows.front()[9] != "!UNEXPECTED!");
+    REQUIRE(exact_rows.front()[9]->find('M') != std::string::npos);
+    REQUIRE(exact_rows.front()[10] == std::optional<std::string>{"t"});
+
+    /* The historical primary-key spelling remains the unique-lineage
+     * fallback when there is exactly one owner in the statement. */
+    const std::string lineage_fallback_sql = fmt::format(
+        "SELECT bioseq.query_start(t.pk), bioseq.query_end(t.pk), "
+        "       bioseq.target_start(t.pk), bioseq.target_end(t.pk), "
+        "       bioseq.edit(t.pk), bioseq.cigar(t.pk), "
+        "       bioseq.has_cigar(t.pk) "
+        "FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch(t.seq0[0:128],q.seq) "
+        "ORDER BY t.pk",
+        target_table);
+    const auto fallback_rows = query_rows(ctx, lineage_fallback_sql);
+    REQUIRE(fallback_rows.size() == 1u);
+    REQUIRE(fallback_rows.front().size() == 7u);
+    REQUIRE(fallback_rows.front()[0] == std::optional<std::string>{"0"});
+    REQUIRE(fallback_rows.front()[1] == std::optional<std::string>{"128"});
+    REQUIRE(fallback_rows.front()[2] == std::optional<std::string>{"0"});
+    REQUIRE(fallback_rows.front()[3] == std::optional<std::string>{"128"});
+    REQUIRE(fallback_rows.front()[4] == std::optional<std::string>{"0"});
+    REQUIRE(fallback_rows.front()[5] == exact_rows.front()[9]);
+    REQUIRE(fallback_rows.front()[6] == std::optional<std::string>{"t"});
+
+    /* A sequence-valued edit argument is never a legacy lineage marker: for
+     * transformed targets it must equal the complete target recipe. */
+    const auto mismatched_edit = sql_error(ctx, fmt::format(
+        "SELECT bioseq.edit(t.seq0) FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch(t.seq0[0:128],q.seq)",
+        target_table));
+    REQUIRE(mismatched_edit.sqlstate == "0A000");
+    REQUIRE(mismatched_edit.contains(
+        "bioseq.edit projection must reference the mmsearch target"));
+
+    const auto raw_exact = query_rows(ctx, fmt::format(
+        "SELECT bioseq.query_len(t.seq0), bioseq.target_len(t.seq0), "
+        "       bioseq.cigar(t.seq0) "
+        "FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch(t.seq0,q.seq)",
+        target_table));
+    REQUIRE(raw_exact.size() == 1u);
+    REQUIRE(raw_exact.front()[0] == std::optional<std::string>{"128"});
+    REQUIRE(raw_exact.front()[1] == std::optional<std::string>{"224"});
+    REQUIRE(raw_exact.front()[2].has_value());
+    REQUIRE(*raw_exact.front()[2] != "!UNEXPECTED!");
+    const auto tail_exact = query_rows(ctx, fmt::format(
+        "SELECT bioseq.query_len(t.seq0[128:224]), "
+        "       bioseq.target_len(t.seq0[128:224]), "
+        "       bioseq.cigar(t.seq0[128:224]) "
+        "FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=2 AND mmsearch(t.seq0[128:224],q.seq)",
+        target_table));
+    REQUIRE(tail_exact.size() == 1u);
+    REQUIRE(tail_exact.front()[0] == std::optional<std::string>{"96"});
+    REQUIRE(tail_exact.front()[1] == std::optional<std::string>{"96"});
+    REQUIRE(tail_exact.front()[2].has_value());
+    REQUIRE(*tail_exact.front()[2] != "!UNEXPECTED!");
+    REQUIRE(raw_exact.front()[2] != tail_exact.front()[2]);
+
+    /* A parenthesized, collapse-disabled join tree creates two owner nodes in
+     * one PlannerInfo and therefore one stable-binding scope.  The inner raw
+     * owner aligns the 224-letter whole source; the outer transformed owner
+     * aligns its 96-letter tail.  Keeping only the outer owner transformed
+     * also proves nested ownership without stacking two SliceProject source
+     * tags on the same BioseqScan. */
+    const std::string nested_owner_sql = fmt::format(
+        "SELECT t.pk, q1.id, q2.id, "
+        "       bioseq.query_len(t.seq0), "
+        "       bioseq.target_len(t.seq0), bioseq.cigar(t.seq0), "
+        "       bioseq.query_len(t.seq0[128:224]), "
+        "       bioseq.target_len(t.seq0[128:224]), "
+        "       bioseq.cigar(t.seq0[128:224]) "
+        "FROM ({} AS t "
+        " INNER JOIN doc0377_match_binding_queries AS q1 "
+        " ON q1.id=1 AND mmsearch(t.seq0,q1.seq)) "
+        "INNER JOIN doc0377_match_binding_queries AS q2 "
+        " ON q2.id=2 AND mmsearch(t.seq0[128:224],q2.seq) "
+        "ORDER BY t.pk",
+        target_table);
+    const auto exact_plan = explain_text<false>(ctx, nested_owner_sql);
+    const auto owner_count = std::count_if(
+        exact_plan.begin(), exact_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos;
+        });
+    REQUIRE(owner_count == 2);
+    const auto nested_rows = query_rows(ctx, nested_owner_sql);
+    REQUIRE(nested_rows.size() == 1u);
+    REQUIRE(nested_rows.front() == std::vector<std::optional<std::string>>{
+        std::optional<std::string>{"1"},
+        std::optional<std::string>{"1"},
+        std::optional<std::string>{"2"},
+        raw_exact.front()[0], raw_exact.front()[1], raw_exact.front()[2],
+        tail_exact.front()[0], tail_exact.front()[1], tail_exact.front()[2]});
+    exec_sql(ctx,
+        std::string{"PREPARE doc0377_exact_match_owners AS "}
+            + nested_owner_sql);
+    const auto prepared_first = query_rows(
+        ctx, "EXECUTE doc0377_exact_match_owners;");
+    const auto prepared_second = query_rows(
+        ctx, "EXECUTE doc0377_exact_match_owners;");
+    REQUIRE(prepared_first == nested_rows);
+    REQUIRE(prepared_second == nested_rows);
+    exec_sql(ctx, "DEALLOCATE doc0377_exact_match_owners;");
+
+    /* Force a safe SortPath on the route from the raw descendant owner to the
+     * transformed owner.  The exact inner helper identities must survive each
+     * wrapper targetlist edge and remain MatchResult-backed after setrefs. */
+    exec_sql(ctx,
+        "SET enable_nestloop = off; "
+        "SET enable_hashjoin = off; "
+        "SET enable_mergejoin = on;");
+    const std::string wrapped_owner_sql = fmt::format(
+        "SELECT t.pk, q1.id, q2.id, "
+        "       bioseq.query_len(t.seq0), "
+        "       bioseq.target_len(t.seq0), bioseq.cigar(t.seq0), "
+        "       bioseq.query_len(t.seq0[128:224]), "
+        "       bioseq.target_len(t.seq0[128:224]), "
+        "       bioseq.cigar(t.seq0[128:224]) "
+        "FROM ({} AS t "
+        " INNER JOIN doc0377_match_binding_queries AS q1 "
+        " ON q1.id=1 AND mmsearch(t.seq0,q1.seq)) "
+        "INNER JOIN doc0377_match_binding_queries AS q2 "
+        " ON q2.id=t.pk+1 "
+        "AND mmsearch(t.seq0[128:224],q2.seq) "
+        "ORDER BY t.pk",
+        target_table);
+    const auto wrapped_plan = explain_text<false>(ctx, wrapped_owner_sql);
+    REQUIRE(std::any_of(
+        wrapped_plan.begin(), wrapped_plan.end(),
+        [](const std::string& line) {
+            return line.find("Merge Join") != std::string::npos;
+        }));
+    REQUIRE(std::any_of(
+        wrapped_plan.begin(), wrapped_plan.end(),
+        [](const std::string& line) {
+            return line.find("Sort") != std::string::npos;
+        }));
+    const auto wrapped_rows = query_rows(ctx, wrapped_owner_sql);
+    REQUIRE(wrapped_rows == nested_rows);
+    REQUIRE(wrapped_rows.size() == 1u);
+    REQUIRE(wrapped_rows.front()[5].has_value());
+    REQUIRE(*wrapped_rows.front()[5] != "!UNEXPECTED!");
+    REQUIRE(wrapped_rows.front()[8].has_value());
+    REQUIRE(*wrapped_rows.front()[8] != "!UNEXPECTED!");
+    exec_sql(ctx,
+        "RESET enable_nestloop; "
+        "RESET enable_hashjoin; "
+        "RESET enable_mergejoin;");
+
+    /* A nonsequence helper marker from the second alias of a composite target
+     * binds through that exact alias lineage, not merely the first source Var
+     * selected for physical ownership. */
+    const auto composite_lineage = query_rows(ctx, fmt::format(
+        "SELECT bioseq.query_len(b.pk), bioseq.target_len(b.pk), "
+        "       bioseq.cigar(b.pk) "
+        "FROM ({} AS a INNER JOIN {} AS b ON a.pk=b.pk) "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch("
+        " a.seq0 OPERATOR(bioseq.||) b.seq0, q.seq)",
+        target_table, secondary_table));
+    REQUIRE(composite_lineage.size() == 1u);
+    REQUIRE(composite_lineage.front()[0]
+        == std::optional<std::string>{"128"});
+    REQUIRE(composite_lineage.front()[1]
+        == std::optional<std::string>{"320"});
+    REQUIRE(composite_lineage.front()[2].has_value());
+    REQUIRE(*composite_lineage.front()[2] != "!UNEXPECTED!");
+
+    /* Both owners now inhabit the same finalization scope and descend from
+     * the same SQL-visible t.seq0 lineage.  A nonexact row marker therefore
+     * cannot select one MatchResult. */
+    const std::string ambiguous_shared_lineage_sql = fmt::format(
+        "SELECT bioseq.cigar(t.pk) "
+        "FROM ({} AS t "
+        " INNER JOIN doc0377_match_binding_queries AS q1 "
+        " ON q1.id=1 AND mmsearch(t.seq0,q1.seq)) "
+        "INNER JOIN doc0377_match_binding_queries AS q2 "
+        " ON q2.id=2 AND mmsearch(t.seq0[128:224],q2.seq)",
+        target_table);
+    const auto ambiguous = sql_error(ctx, ambiguous_shared_lineage_sql);
+    REQUIRE(ambiguous.sqlstate == "42702");
+    REQUIRE(ambiguous.contains(
+        "bioseq match-result helper binding is ambiguous"));
+    REQUIRE(ambiguous.contains("candidate_match_owners=2"));
+    REQUIRE(ambiguous.contains("exact transformed target recipe"));
+
+    const auto stacked = sql_error(ctx, fmt::format(
+        "SELECT bioseq.cigar(t.seq0[0:128]) FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON mmsearch(t.seq0[0:128],q.seq) "
+        "AND mmsearch(t.seq0[128:224],q.seq)",
+        target_table));
+    REQUIRE(stacked.sqlstate == "0A000");
+    REQUIRE(stacked.contains("stacked mmsearch"));
 }
 
 TEST_CASE("DOC0377 COALESCE short circuits without inspecting lazy arms",
@@ -702,6 +1152,17 @@ TEST_CASE("DOC0377 unbound concat adopts only an explicit physical alphabet",
     REQUIRE(row[2] == "ACGT");
     REQUIRE(row[3] == "ACGT");
     REQUIRE(row[4] == "GTAC");
+
+    const auto transformed_adoption = query_one(
+        ctx,
+        "SELECT (bioseq.reverse("
+        "          'AC'::bioseq.seq || 'GT'::bioseq.seq) || "
+        "        'AA'::bioseq.seq('dna4',8))::text, "
+        "       ('AA'::bioseq.seq('dna4',8) || "
+        "        bioseq.reverse("
+        "          'AC'::bioseq.seq || 'GT'::bioseq.seq))::text;");
+    REQUIRE(transformed_adoption[0] == "TGCAAA");
+    REQUIRE(transformed_adoption[1] == "AATGCA");
 
     const auto unbound_values = query_one(
         ctx,

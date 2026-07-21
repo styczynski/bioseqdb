@@ -1454,6 +1454,171 @@ export [[nodiscard]] inline bool rearm_slice_async_owner_for_rescan_noexcept(
   return true;
 }
 
+namespace {
+
+struct slice_async_lifecycle_test_publications {
+  std::uint32_t complete{};
+  std::uint32_t incomplete{};
+};
+
+inline void publish_slice_async_test_complete(void *argument) noexcept {
+  ++static_cast<slice_async_lifecycle_test_publications *>(argument)->complete;
+}
+
+inline void publish_slice_async_test_incomplete(void *argument) noexcept {
+  ++static_cast<slice_async_lifecycle_test_publications *>(argument)->incomplete;
+}
+
+[[nodiscard]] inline bool reject_slice_async_test_publication(
+    void *, bioseq::parallelism::tracked_job_handle) noexcept {
+  return false;
+}
+
+inline void run_slice_async_test_noop(void *) {}
+
+struct slice_async_contention_test_task {
+  std::atomic<std::uint32_t> *started;
+  std::atomic<std::uint32_t> *cancel_observed;
+  bioseq::parallelism::tracked_task_submission *submission;
+};
+
+inline void run_slice_async_contention_test(void *argument) {
+  auto *task = static_cast<slice_async_contention_test_task *>(argument);
+  task->started->fetch_add(1u, std::memory_order_release);
+  task->started->notify_all();
+  auto cancelled = std::atomic_ref<std::uint8_t>{
+      task->submission->cancel_requested};
+  while (cancelled.load(std::memory_order_acquire) == 0u) {
+    /* The production cancel callback owns this byte.  An atomic poll keeps the
+     * worker observably live until backend-thread Shutdown invokes that exact
+     * callback; no test-only release can let it escape before quiesce. */
+    std::atomic_signal_fence(std::memory_order_seq_cst);
+  }
+  task->cancel_observed->fetch_add(1u, std::memory_order_release);
+  task->cancel_observed->notify_all();
+}
+
+[[nodiscard]] inline bool
+run_slice_async_shutdown_end_reset_contention_test_noexcept() noexcept {
+  const slice_materialization_boundary boundary{
+      .boundary_id = 901u,
+      .producer_value_id = 902u,
+      .counter_index = 0u,
+      .mechanism = materialization_mechanism::packed_full,
+      .reason = materialization_reason::executor_copy,
+      .reserved = {},
+  };
+  slice_dsm_counter cumulative{};
+  slice_materialization_runtime runtime{};
+  if (!initialize_slice_materialization_runtime_noexcept(
+          std::addressof(runtime), std::addressof(boundary), 1u,
+          std::addressof(cumulative), 1u, true, false)) {
+    return false;
+  }
+  auto *attachment = make_slice_trace_attachment(std::addressof(runtime));
+  slice_async_owner_guard guard{};
+  slice_async_job_slot jobs[slice_async_max_live_jobs]{};
+  slice_dsm_counter job_counters[slice_async_max_live_jobs]{};
+  if (!initialize_slice_async_owner_noexcept(
+          std::addressof(guard), std::addressof(runtime), attachment, jobs,
+          slice_async_max_live_jobs, job_counters, 1u)) {
+    invalidate_slice_trace_attachment_noexcept(attachment);
+    release_slice_trace_attachment(attachment);
+    return false;
+  }
+
+  slice_async_lifecycle_test_publications publications{};
+  guard.publish_complete = {
+      std::addressof(publications), &publish_slice_async_test_complete};
+  guard.publish_incomplete = {
+      std::addressof(publications), &publish_slice_async_test_incomplete};
+
+  std::array<std::atomic<std::uint32_t>, slice_async_max_live_jobs> started{};
+  std::array<std::atomic<std::uint32_t>, slice_async_max_live_jobs>
+      cancel_observed{};
+  for (auto &value : started) {
+    value.store(0u, std::memory_order_relaxed);
+  }
+  for (auto &value : cancel_observed) {
+    value.store(0u, std::memory_order_relaxed);
+  }
+  std::array<slice_async_contention_test_task, slice_async_max_live_jobs>
+      tasks{};
+  std::array<bioseq::parallelism::tracked_task_submission,
+             slice_async_max_live_jobs>
+      submissions{};
+  std::array<bioseq::parallelism::tracked_submit_status,
+             slice_async_max_live_jobs>
+      statuses{};
+  const auto observer =
+      make_slice_async_pool_observer_noexcept(std::addressof(guard));
+  auto &pool = bioseq::parallelism::GlobalPool::instance();
+  tasks[0] = {std::addressof(started[0]),
+              std::addressof(cancel_observed[0]),
+              std::addressof(submissions[0])};
+  statuses[0] = pool.submit_tracked_task_noexcept(
+      std::addressof(submissions[0]),
+      {std::addressof(tasks[0]), &run_slice_async_contention_test}, observer);
+  const bool first_submitted = statuses[0]
+      == bioseq::parallelism::tracked_submit_status::submitted;
+  if (first_submitted) {
+    std::uint32_t observed = started[0].load(std::memory_order_acquire);
+    while (observed == 0u) {
+      started[0].wait(0u, std::memory_order_acquire);
+      observed = started[0].load(std::memory_order_acquire);
+    }
+  }
+
+  tasks[1] = {std::addressof(started[1]),
+              std::addressof(cancel_observed[1]),
+              std::addressof(submissions[1])};
+  statuses[1] = pool.submit_tracked_task_noexcept(
+      std::addressof(submissions[1]),
+      {std::addressof(tasks[1]), &run_slice_async_contention_test}, observer);
+  const bool submitted = first_submitted && statuses[1]
+      == bioseq::parallelism::tracked_submit_status::submitted;
+
+  /* These are the exact executor lifecycle calls: Shutdown quiesces under
+   * live/queued worker contention, End makes ownership terminal, and the
+   * query-context callback is then harmlessly repeated. */
+  quiesce_slice_async_owner_noexcept(
+      std::addressof(guard), slice_shutdown_disposition::complete);
+  const bool shutdown_valid = submitted
+      && guard.phase == slice_async_owner_phase::quiesced
+      && guard.enrolled_jobs == 0u && guard.local_state_published
+      && publications.complete == 0u && publications.incomplete == 1u
+      && cumulative.calls == 0u && cumulative.bytes == 0u
+      && attachment->refcount == 1u
+      && started[0].load(std::memory_order_acquire) == 1u
+      && cancel_observed[0].load(std::memory_order_acquire) == 1u
+      && std::all_of(
+          submissions.begin(), submissions.end(),
+          [](bioseq::parallelism::tracked_task_submission const &submission) {
+            return submission.completion_published == 1u
+                && submission.backing_released == 1u;
+          })
+      && std::all_of(
+          std::begin(jobs), std::end(jobs),
+          [](slice_async_job_slot const &job) {
+            return job.state == slice_async_job_state::unused
+                && job.generation == 1u && job.attachment == nullptr;
+          });
+
+  finish_slice_async_owner_noexcept(
+      std::addressof(guard), slice_shutdown_disposition::complete);
+  const bool end_valid = guard.phase == slice_async_owner_phase::terminal
+      && guard.enrolled_jobs == 0u && guard.attachment == nullptr
+      && guard.runtime == nullptr && publications.complete == 0u
+      && publications.incomplete == 1u && runtime.boundaries == nullptr
+      && runtime.cumulative_sink.entries == nullptr;
+  slice_async_owner_reset(std::addressof(guard));
+  const bool reset_valid = guard.phase == slice_async_owner_phase::terminal
+      && publications.complete == 0u && publications.incomplete == 1u;
+  return shutdown_valid && end_valid && reset_valid;
+}
+
+} // namespace
+
 /* Integration seam for the pure fixed-record/state-machine invariants.  It
  * uses only stack-owned POD and never installs query-visible trace state. */
 export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
@@ -1827,6 +1992,15 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
     valid = valid &&
             drain_slice_async_job_noexcept(std::addressof(guard), handle) &&
             guard.enrolled_jobs == 0u;
+    if ((use + 1u) % 32u == 0u) {
+      quiesce_slice_async_owner_noexcept(
+          std::addressof(guard), slice_shutdown_disposition::complete);
+      valid = valid && guard.phase == slice_async_owner_phase::quiesced
+          && guard.enrolled_jobs == 0u
+          && rearm_slice_async_owner_for_rescan_noexcept(
+              std::addressof(guard))
+          && guard.phase == slice_async_owner_phase::accepting;
+    }
   }
   valid = valid && cumulative.calls == 128u && attachment.refcount == 32u &&
           !mark_slice_async_job_scheduled_noexcept(std::addressof(guard),
@@ -1881,6 +2055,131 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
           failed_outcome.sqlstate == 123u && guard.enrolled_jobs == 0u &&
           attachment.refcount == 32u && cumulative.calls == 128u &&
           cumulative.bytes == 1024u;
+
+  /* The scheduler has accepted/enqueued this task, but publication of the
+   * scheduled transition is injected to fail.  Drain must treat the enrolled
+   * record as incomplete, release all retained state, and make its generation
+   * stale without merging any tentative counter prefix. */
+  auto rejecting_observer =
+      make_slice_async_pool_observer_noexcept(std::addressof(guard));
+  rejecting_observer.mark_scheduled =
+      &reject_slice_async_test_publication;
+  bioseq::parallelism::tracked_task_submission publication_submission{};
+  const auto publication_status =
+      pool.submit_tracked_task_noexcept(
+          std::addressof(publication_submission),
+          {nullptr, &run_slice_async_test_noop}, rejecting_observer);
+  const auto stale_publication_handle = slice_async_completion_handle{
+      publication_submission.handle.slot_index,
+      publication_submission.handle.generation};
+  const bool publication_slot_valid = publication_submission.enrolled != 0u
+      && stale_publication_handle.slot_index < guard.job_capacity;
+  const auto publication_outcome =
+      pool.join_and_drain_tracked_task_noexcept(
+          std::addressof(publication_submission));
+  const bool publication_generation_advanced = publication_slot_valid
+      && jobs[stale_publication_handle.slot_index].generation
+          == stale_publication_handle.generation + 1u;
+  valid = valid
+      && publication_status
+          == bioseq::parallelism::tracked_submit_status::transition_rejected
+      && publication_outcome.drained && publication_outcome.incomplete
+      && !publication_outcome.failed
+      && publication_submission.backing_released == 1u
+      && guard.enrolled_jobs == 0u && attachment.refcount == 32u
+      && cumulative.calls == 128u && cumulative.bytes == 1024u
+      && publication_generation_advanced;
+
+  /* Reuse the exact slot, then deliver both an early-generation completion
+   * and error.  Neither stale publication may mutate the current use. */
+  slice_async_completion_handle reused_handle{};
+  const bool reused_enrolled = enroll_slice_async_job_noexcept(
+      std::addressof(guard), {}, std::addressof(reused_handle));
+  const bool reused_slot_valid = reused_enrolled
+      && reused_handle.slot_index < guard.job_capacity;
+  const bool stale_finished_rejected = publication_slot_valid
+      && !mark_slice_async_job_finished_noexcept(
+          std::addressof(guard), stale_publication_handle);
+  if (publication_slot_valid) {
+    handoff_slice_async_job_error_noexcept(
+        std::addressof(guard), stale_publication_handle, 999u,
+        "stale early-generation error", true);
+  }
+  const bool stale_publications_ignored = reused_slot_valid
+      && publication_slot_valid
+      && reused_handle.slot_index == stale_publication_handle.slot_index
+      && reused_handle.generation == stale_publication_handle.generation + 1u
+      && stale_finished_rejected
+      && jobs[reused_handle.slot_index].state
+          == slice_async_job_state::enrolled
+      && jobs[reused_handle.slot_index].error.published == 0u
+      && jobs[reused_handle.slot_index].error.sqlstate == 0u;
+  if (reused_slot_valid) {
+    update_slice_dsm_counter_noexcept(
+        guard.jobs[reused_handle.slot_index].counters[0],
+        2u, 2u, 16u, false, 16u, 0u);
+  }
+  const bool reused_scheduled = reused_slot_valid
+      && mark_slice_async_job_scheduled_noexcept(
+          std::addressof(guard), reused_handle);
+  const bool reused_finished = reused_scheduled
+      && mark_slice_async_job_finished_noexcept(
+          std::addressof(guard), reused_handle);
+  const bool reused_drained = reused_finished
+      && drain_slice_async_job_noexcept(
+          std::addressof(guard), reused_handle);
+  valid = valid && stale_publications_ignored && reused_drained
+      && guard.enrolled_jobs == 0u && attachment.refcount == 32u
+      && cumulative.calls == 129u && cumulative.bytes == 1040u;
+
+  /* A slot generation must fail closed instead of wrapping to zero.  The
+   * completed delta is merged once, cleanup still releases the job, and every
+   * subsequent enrollment is rejected while the saturated identity remains
+   * distinguishable from a fresh slot. */
+  slice_async_job_slot *overflow_job = reused_slot_valid
+      ? std::addressof(jobs[reused_handle.slot_index]) : nullptr;
+  if (overflow_job != nullptr) {
+    overflow_job->generation = (std::numeric_limits<std::uint64_t>::max)();
+  }
+  slice_async_completion_handle overflow_handle{};
+  const bool overflow_enrolled = overflow_job != nullptr
+      && enroll_slice_async_job_noexcept(
+          std::addressof(guard), {}, std::addressof(overflow_handle));
+  const bool overflow_slot_valid = overflow_enrolled
+      && overflow_handle.slot_index < guard.job_capacity;
+  if (overflow_slot_valid) {
+    update_slice_dsm_counter_noexcept(
+        guard.jobs[overflow_handle.slot_index].counters[0],
+        3u, 3u, 24u, false, 24u, 0u);
+  }
+  const bool overflow_scheduled = overflow_slot_valid
+      && mark_slice_async_job_scheduled_noexcept(
+          std::addressof(guard), overflow_handle);
+  const bool overflow_finished = overflow_scheduled
+      && mark_slice_async_job_finished_noexcept(
+          std::addressof(guard), overflow_handle);
+  bool overflow_incomplete = false;
+  const bool overflow_drained = overflow_finished
+      && drain_slice_async_job_noexcept(
+          std::addressof(guard), overflow_handle,
+          std::addressof(overflow_incomplete));
+  slice_async_completion_handle rejected_after_overflow{};
+  const bool overflow_rejected = overflow_slot_valid
+      && !enroll_slice_async_job_noexcept(
+          std::addressof(guard), {},
+          std::addressof(rejected_after_overflow));
+  valid = valid && overflow_drained && overflow_incomplete
+      && overflow_rejected && guard.slot_generation_overflow
+      && guard.enrolled_jobs == 0u && attachment.refcount == 32u
+      && overflow_job != nullptr
+      && overflow_job->state == slice_async_job_state::released
+      && overflow_job->generation
+          == (std::numeric_limits<std::uint64_t>::max)()
+      && runtime.overflowed && cumulative.calls == 130u
+      && cumulative.bytes == 1064u;
+
+  valid = valid
+      && run_slice_async_shutdown_end_reset_contention_test_noexcept();
   restore_slice_materialization_scope(original_scope);
   return valid;
 }

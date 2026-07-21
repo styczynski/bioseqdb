@@ -48,6 +48,7 @@ module;
 extern "C" {
 #include "commands/extension.h"
 #include "optimizer/appendinfo.h"
+#include "optimizer/planmain.h"
 #include "storage/dsm.h"
 #include "storage/shmem.h"
 #include "utils/inval.h"
@@ -333,6 +334,8 @@ struct BioseqScanRuntime {
 	std::vector<std::uint8_t>                 lazy_source_physical_bound{};
 	int                                       locator_parent_token = 0;
 	AttrNumber                                locator_rowno_resno = InvalidAttrNumber;
+	List*                                     match_helper_sites = NIL;
+	int                                       stable_match_id = 0;
 
 	/*
 	 * Cleanup hook registered against the query MemoryContext. Set up
@@ -348,22 +351,66 @@ struct BioseqScanRuntime {
 };
 
 /* Internal planner/executor ABI for the two-child join. */
-constexpr int kBioseqBatchJoinPlanVersion = 2;
+constexpr int kBioseqBatchJoinPlanVersion = 3;
 constexpr int kBioseqLocatorPassthroughMagic = 0x424c5031; /* BLP1 */
 constexpr int kBioseqSliceSourceMagic = 0x42535331; /* BSS1 */
 constexpr int kBioseqSliceSourceVersion = 3;
 constexpr int kBioseqMmsearchOwnerMagic = 0x424d4f31; /* BMO1 */
 constexpr int kBioseqMmsearchOwnerVersion = 1;
+constexpr int kBioseqBaseMatchOwnerPlanMagic = 0x424d5031; /* BMP1 */
+constexpr int kBioseqBaseMatchOwnerPlanVersion = 2;
+constexpr int kBioseqBaseMatchOwnerPlanFields = 7;
 constexpr int kBioseqBatchJoinPathPrivateFields = 13;
-constexpr int kBioseqBatchJoinPrivateFields = 17;
+constexpr int kBioseqBatchJoinPrivateFields = 18;
 
 /* One-child owner used when either mmsearch operand is a lazy recipe.  The
  * child is a reconstructed core INNER join with the exact mmsearch
  * RestrictInfo removed, wrapped in BioseqSliceProject to compute the two
  * per-row operand Datums. */
-constexpr int kBioseqPerRowJoinPlanVersion = 3;
+constexpr int kBioseqPerRowJoinPlanVersion = 4;
 constexpr int kBioseqPerRowJoinPathPrivateFields = 13;
-constexpr int kBioseqPerRowJoinPrivateFields = 18;
+constexpr int kBioseqPerRowJoinPrivateFields = 19;
+
+constexpr int kBioseqMatchOwnerDescriptorMagic = 0x424d4231; /* BMB1 */
+constexpr int kBioseqMatchOwnerDescriptorVersion = 1;
+constexpr int kBioseqMatchOwnerDescriptorFields = 6;
+
+enum BioseqMatchOwnerDescriptorIndex : int {
+	kMatchOwnerMagic = 0,
+	kMatchOwnerVersion = 1,
+	kMatchOwnerStableId = 2,
+	kMatchOwnerTargetRecipe = 3,
+	kMatchOwnerBaseLineage = 4,
+	kMatchOwnerLegacyTargetRelid = 5,
+};
+
+enum class BioseqMatchHelperBindingKind : int {
+	unresolved = 0,
+	exact_recipe = 1,
+	unique_lineage = 2,
+};
+
+constexpr int kBioseqMatchHelperSiteFields = 8;
+enum BioseqMatchHelperSiteIndex : int {
+	kMatchSiteResno = 0,
+	kMatchSiteFuncid = 1,
+	kMatchSiteTypmod = 2,
+	kMatchSiteCollation = 3,
+	kMatchSiteBindingKind = 4,
+	kMatchSiteCanonicalArgument = 5,
+	kMatchSitePhid = 6,
+	kMatchSiteStableId = 7,
+};
+
+enum BioseqBaseMatchOwnerPlanIndex : int {
+	kBaseMatchPlanMagic = 0,
+	kBaseMatchPlanVersion = 1,
+	kBaseMatchPlanDescriptor = 2,
+	kBaseMatchPlanSites = 3,
+	kBaseMatchPlanRelationOid = 4,
+	kBaseMatchPlanExecutorDescriptor = 5,
+	kBaseMatchPlanExecutorSites = 6,
+};
 
 enum BioseqPerRowJoinPrivateIndex : int {
 	kPerRowVersion = 0,
@@ -384,6 +431,7 @@ enum BioseqPerRowJoinPrivateIndex : int {
 	kPerRowHonestStartupCost = 15,
 	kPerRowHonestTotalCost = 16,
 	kPerRowIncumbentCostFloor = 17,
+	kPerRowMatchOwnerDescriptor = 18,
 };
 
 enum BioseqBatchJoinPrivateIndex : int {
@@ -404,6 +452,7 @@ enum BioseqBatchJoinPrivateIndex : int {
 	kBatchJoinHonestStartupCost = 14,
 	kBatchJoinHonestTotalCost = 15,
 	kBatchJoinIncumbentCostFloor = 16,
+	kBatchJoinMatchOwnerDescriptor = 17,
 };
 
 struct BioseqBatchJoinPlaceholderSite {
@@ -411,6 +460,9 @@ struct BioseqBatchJoinPlaceholderSite {
 	Oid funcid = InvalidOid;
 	int32 typmod = -1;
 	Oid collation = InvalidOid;
+	BioseqMatchHelperBindingKind binding_kind =
+		BioseqMatchHelperBindingKind::unresolved;
+	int stable_match_id = 0;
 };
 
 struct BioseqBatchJoinQueryTuple {
@@ -1317,6 +1369,36 @@ storage_prunable_quals_without_mmsearch(List* quals, const BioseqStubOids& oids)
 		&& bms_is_empty(argument->varnullingrels);
 }
 
+/* A transformed target has biological identity in its complete canonical
+ * recipe, not merely in the first storage Var below that recipe.  Preserve the
+ * legacy raw-Var check above for base scans, while allowing bioseq.edit() to
+ * name the exact owned transformed expression. */
+[[nodiscard]] static bool edit_sequence_argument_matches_recipe(
+		const FuncExpr* function,
+		Node* target_expression,
+		Index target_relid,
+		AttrNumber target_sequence_attno,
+		const BioseqStubOids& oids) noexcept {
+	if (function == nullptr || function->funcid != oids.edit_oid) return true;
+	if (list_length(function->args) != 1 || target_expression == nullptr) {
+		return false;
+	}
+	Node* argument = reinterpret_cast<Node*>(linitial(function->args));
+	/* A sequence-valued helper argument is biological identity, not a legacy
+	 * row marker.  It must name the complete owned recipe; accepting the raw
+	 * storage Var of a sliced/reversed/concatenated target would silently report
+	 * the transformed match as if it belonged to the whole stored sequence. */
+	if (argument != nullptr
+		&& exprType(argument) == oids.bioseq_seq_type_oid) {
+		return equal(argument, target_expression);
+	}
+	/* Only non-sequence legacy row-marker spellings reach the historical
+	 * target-owned fallback.  The surrounding helper registration has already
+	 * proved that such a Var belongs to target_relid. */
+	return edit_sequence_argument_matches_target(
+		function, target_relid, target_sequence_attno, oids);
+}
+
 /*
  * Walk a target list for bioseq.* function calls and set the matching
  * feature-flags. We also recurse into arg subtrees so "bioseq.cigar(a) + 1"
@@ -2056,6 +2138,8 @@ struct VarInjectorCtx {
 	Relation                 current_relation;
 	Index                    match_sequence_varno;
 	AttrNumber               match_sequence_attno;
+	List*                    match_helper_sites;
+	int                      stable_match_id;
 };
 
 /* functions to cost paths in-place */
@@ -3137,6 +3221,8 @@ struct SliceProjectOutputBinding {
 	std::uint32_t producer_value_id;
 };
 
+struct SliceProjectDsmMergeAudit;
+
 struct SliceProjectRuntime {
 	std::uint64_t rows_published = 0u;
 	std::uint64_t rescans = 0u;
@@ -3173,6 +3259,7 @@ struct SliceProjectRuntime {
 	std::uint32_t dsm_test_slot_headers_read = 0u;
 	std::uint32_t dsm_test_counter_records_read = 0u;
 	std::uint32_t dsm_test_cleanup_callbacks = 0u;
+	SliceProjectDsmMergeAudit* dsm_test_reinitialize_audit = nullptr;
 #endif
 };
 
@@ -3199,6 +3286,8 @@ bioseq_slice_project_scan_methods() noexcept;
  * parent-aware binding path. This forward declaration closes that genuine
  * initialization cycle without moving either executor phase out of order. */
 static void slice_project_ensure_trace_initialized(CustomScanState* custom);
+static void SliceProjectReInitializeDSM(
+	CustomScanState* custom, ParallelContext* pcxt, void* coordinate);
 
 [[nodiscard]] static List* slice_project_header(
 		const SliceProjectIrBuilder& builder) {
@@ -3853,7 +3942,6 @@ static void slice_project_merge_dsm_cycle_noexcept(
 			}
 			continue;
 		}
-		if (state == slice_dsm_publish_state::attached_running) continue;
 		pg_read_barrier();
 		if (worker->cycle != expected_cycle || worker->overflowed > 1u
 			|| std::any_of(worker->reserved.begin(), worker->reserved.end(),
@@ -3861,6 +3949,10 @@ static void slice_project_merge_dsm_cycle_noexcept(
 			slice_project_mark_trace_invalid_noexcept(attachment);
 			return;
 		}
+		/* Running slots still belong to one exact generation.  Their tentative
+		 * counter payload remains unread, but accepting a stale slot header would
+		 * count an earlier cycle as incomplete work in this one. */
+		if (state == slice_dsm_publish_state::attached_running) continue;
 		if (state == slice_dsm_publish_state::published_incomplete) continue;
 		auto* counters = slice_project_worker_counters(worker);
 		for (std::uint32_t counter_index = 0u;
@@ -3917,7 +4009,8 @@ static void slice_project_merge_dsm_cycle_noexcept(
 static void slice_project_merge_dsm_cycle_noexcept(
 		slice_dsm_header* header, ParallelContext* pcxt,
 		slice_trace_attachment* attachment,
-		std::uint64_t expected_cycle) noexcept {
+		std::uint64_t expected_cycle,
+		SliceProjectDsmMergeAudit* audit = nullptr) noexcept {
 	if (!slice_trace_attachment_live(attachment)
 		|| header == nullptr || pcxt == nullptr || pcxt->seg == nullptr
 		|| pcxt->nworkers < 0) return;
@@ -3926,7 +4019,7 @@ static void slice_project_merge_dsm_cycle_noexcept(
 		reinterpret_cast<std::uintptr_t>(dsm_segment_address(pcxt->seg)),
 		dsm_segment_map_length(pcxt->seg),
 		static_cast<std::uint32_t>(pcxt->nworkers), attachment,
-		expected_cycle, nullptr);
+		expected_cycle, audit);
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -3955,6 +4048,33 @@ static void slice_project_initialize_test_dsm(
 	header->slot_count = slot_count;
 	header->cycle = cycle;
 	header->slot_stride = layout.slot_stride;
+}
+
+[[nodiscard]] static bool slice_project_test_dsm_payload_is_reset(
+		slice_dsm_header* header, SliceProjectDsmLayout const& layout,
+		std::uint32_t recipe_count, std::uint32_t slot_count,
+		std::uint64_t cycle) noexcept {
+	if (header == nullptr || header->magic != kBioseqSliceDsmMagic
+		|| header->codec_version != kBioseqSliceDsmVersion
+		|| header->header_bytes != layout.header_bytes
+		|| header->recipe_count != recipe_count
+		|| header->slot_count != slot_count || header->cycle != cycle
+		|| header->slot_stride != layout.slot_stride) return false;
+	for (std::uint32_t slot_index = 0u; slot_index < slot_count; ++slot_index) {
+		auto* worker = slice_project_worker_slot(header, slot_index);
+		if (worker->cycle != 0u
+			|| worker->publish_state != slice_dsm_publish_state::never_launched
+			|| worker->overflowed != 0u
+			|| std::any_of(worker->reserved.begin(), worker->reserved.end(),
+				[](std::byte byte) { return byte != std::byte{0}; })) return false;
+		auto* counters = slice_project_worker_counters(worker);
+		for (std::uint32_t index = 0u; index < recipe_count; ++index) {
+			if (counters[index].calls != 0u || counters[index].bytes != 0u
+				|| counters[index].overflowed != 0u
+				|| !slice_dsm_counter_reserved_valid(counters[index])) return false;
+		}
+	}
+	return true;
 }
 
 [[nodiscard]] static SliceProjectDsmTestCaseResult
@@ -4043,6 +4163,8 @@ struct SliceProjectAsyncTestCallbacks {
 	std::uint32_t cancelled = 0u;
 	std::uint32_t joined = 0u;
 	std::uint32_t backings_released = 0u;
+	std::uint32_t complete_published = 0u;
+	std::uint32_t incomplete_published = 0u;
 };
 
 static void slice_project_test_cancel(void* argument) noexcept {
@@ -4055,6 +4177,14 @@ static void slice_project_test_join(void* argument) noexcept {
 
 static void slice_project_test_release_backing(void* argument) noexcept {
 	++static_cast<SliceProjectAsyncTestCallbacks*>(argument)->backings_released;
+}
+
+static void slice_project_test_publish_complete(void* argument) noexcept {
+	++static_cast<SliceProjectAsyncTestCallbacks*>(argument)->complete_published;
+}
+
+static void slice_project_test_publish_incomplete(void* argument) noexcept {
+	++static_cast<SliceProjectAsyncTestCallbacks*>(argument)->incomplete_published;
 }
 
 [[nodiscard]] static bool slice_project_run_incomplete_async_test(
@@ -4085,8 +4215,11 @@ static void slice_project_test_release_backing(void* argument) noexcept {
 		.join = {&callbacks, &slice_project_test_join},
 		.backings = {&callbacks, &slice_project_test_release_backing},
 	};
+	guard.publish_complete = {
+		&callbacks, &slice_project_test_publish_complete};
+	guard.publish_incomplete = {
+		&callbacks, &slice_project_test_publish_incomplete};
 	slice_async_completion_handle handle{};
-	bool incomplete = false;
 	const bool enrolled = enroll_slice_async_job_noexcept(
 		&guard, resources, &handle);
 	const bool scheduled = enrolled
@@ -4096,27 +4229,62 @@ static void slice_project_test_release_backing(void* argument) noexcept {
 			guard.jobs[handle.slot_index].counters[0],
 			1u, 1u, 8u, false, 8u, 0u);
 	}
-	const bool drained = scheduled && drain_slice_async_job_noexcept(
-		&guard, handle, &incomplete);
+	/* Exact executor teardown order: Shutdown drains an unpublished scheduled
+	 * job, End makes the owner terminal, and a later context reset is a no-op. */
+	quiesce_slice_async_owner_noexcept(
+		&guard, slice_shutdown_disposition::complete);
 	const bool stale_rejected = !mark_slice_async_job_finished_noexcept(
 		&guard, handle);
-	const bool lifecycle_valid = drained && incomplete && stale_rejected
+	const bool lifecycle_valid = enrolled && scheduled && stale_rejected
+		&& guard.phase == slice_async_owner_phase::quiesced
 		&& guard.enrolled_jobs == 0u
 		&& jobs[handle.slot_index].state == slice_async_job_state::unused
 		&& jobs[handle.slot_index].generation == handle.generation + 1u
 		&& cumulative.calls == 0u && cumulative.bytes == 0u
 		&& callbacks.cancelled == 1u && callbacks.joined == 1u
 		&& callbacks.backings_released == 1u
+		&& callbacks.complete_published == 0u
+		&& callbacks.incomplete_published == 1u
 		&& attachment->refcount == 1u;
 	if (cleanup_callbacks != nullptr) {
 		*cleanup_callbacks = callbacks.cancelled + callbacks.joined
 			+ callbacks.backings_released;
 	}
 	finish_slice_async_owner_noexcept(
-		&guard, slice_shutdown_disposition::incomplete);
-	return lifecycle_valid
+		&guard, slice_shutdown_disposition::complete);
+	const bool end_valid = lifecycle_valid
 		&& guard.phase == slice_async_owner_phase::terminal
-		&& trace.boundaries == nullptr && trace.cumulative_sink.entries == nullptr;
+		&& trace.boundaries == nullptr && trace.cumulative_sink.entries == nullptr
+		&& callbacks.complete_published == 0u
+		&& callbacks.incomplete_published == 1u;
+	slice_async_owner_reset(&guard);
+	return end_valid && guard.phase == slice_async_owner_phase::terminal
+		&& callbacks.complete_published == 0u
+		&& callbacks.incomplete_published == 1u;
+}
+
+[[nodiscard]] static bool slice_project_reinitialize_rejects_test_cycle(
+		BioseqSliceProjectState* state, ParallelContext* pcxt,
+		slice_dsm_header* header) {
+	MemoryContext saved_context = CurrentMemoryContext;
+	bool volatile rejected = false;
+	PG_TRY();
+	{
+		SliceProjectReInitializeDSM(
+			&state->custom_scanstate, pcxt, header);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		ErrorData* error = CopyErrorData();
+		rejected = error != nullptr
+			&& error->sqlerrcode == ERRCODE_DATA_CORRUPTED;
+		FlushErrorState();
+		if (error != nullptr) FreeErrorData(error);
+	}
+	PG_END_TRY();
+	MemoryContextSwitchTo(saved_context);
+	return rejected;
 }
 
 static void slice_project_apply_dsm_test_fixture(
@@ -4126,6 +4294,10 @@ static void slice_project_apply_dsm_test_fixture(
 	if (runtime.dsm_test_fixture_applied) return;
 	runtime.dsm_test_fixture_applied = true;
 	runtime.dsm_test_fixture_mode = BioseqSliceDsmTestFixture;
+	if (runtime.boundary_count == 0u || runtime.boundaries == nullptr) {
+		runtime.dsm_test_fixture_validated = false;
+		return;
+	}
 	runtime.dsm_test_async_validated = slice_project_run_incomplete_async_test(
 		runtime, &runtime.dsm_test_cleanup_callbacks);
 	if (BioseqSliceDsmTestFixture == kSliceDsmTestMalformed) {
@@ -4155,15 +4327,27 @@ static void slice_project_apply_dsm_test_fixture(
 		return;
 	}
 
-	/* Complete, unpublished-running, published-incomplete, and never-launched
-	 * slots share one fixture.  Only the complete slot may contribute counters. */
+	/* Exercise the real leader ReInitializeDSM callback twice over a real DSM
+	 * mapping.  The first cycle contains complete, attached-running,
+	 * published-incomplete, and never-launched slots.  Only the complete delta
+	 * may merge; both incomplete lifecycle states count exactly once. */
 	constexpr std::uint32_t slot_count = 4u;
-	constexpr std::uint64_t cycle = 23u;
+	constexpr std::uint64_t first_cycle = 23u;
+	constexpr std::uint64_t second_cycle = first_cycle + 1u;
+	constexpr std::uint64_t reset_cycle = second_cycle + 1u;
 	const SliceProjectDsmLayout layout = slice_project_dsm_layout(
 		runtime.boundary_count, slot_count);
-	auto* bytes = static_cast<std::byte*>(palloc0(layout.total_bytes));
 	auto* local_counters = static_cast<slice_dsm_counter*>(palloc0(
 		mul_size(runtime.boundary_count, sizeof(slice_dsm_counter))));
+	dsm_segment* segment = dsm_create(
+		layout.total_bytes, DSM_CREATE_NULL_IF_MAXSEGMENTS);
+	if (segment == nullptr) {
+		runtime.dsm_test_fixture_validated = false;
+		pfree(local_counters);
+		return;
+	}
+	auto* bytes = static_cast<std::byte*>(dsm_segment_address(segment));
+	std::memset(bytes, 0, layout.total_bytes);
 	slice_materialization_runtime trace{
 		.boundaries = runtime.boundaries,
 		.boundary_count = runtime.boundary_count,
@@ -4178,106 +4362,248 @@ static void slice_project_apply_dsm_test_fixture(
 	slice_trace_attachment attachment{
 		.refcount = 1u, .generation = 1u, .runtime = &trace,
 		.async_owner = nullptr, .async_owner_generation = 0u, .valid = true};
+	BioseqSliceProjectState reinitialize_state{};
+	auto& reinitialize_runtime = reinitialize_state.runtime;
+	reinitialize_runtime.boundary_count = runtime.boundary_count;
+	reinitialize_runtime.trace_initialization_attempted = true;
+	reinitialize_runtime.collect_actual = true;
+	reinitialize_runtime.attachment = &attachment;
+	ParallelContext parallel_context{};
+	parallel_context.seg = segment;
+	parallel_context.nworkers = static_cast<int>(slot_count);
 	auto* header = reinterpret_cast<slice_dsm_header*>(bytes);
-	slice_project_initialize_test_dsm(
-		header, layout, runtime.boundary_count, slot_count, cycle);
-	for (std::uint32_t slot_index = 0u; slot_index < 2u; ++slot_index) {
-		auto* worker = slice_project_worker_slot(header, slot_index);
-		worker->cycle = cycle;
-		worker->publish_state = slot_index == 0u
-			? slice_dsm_publish_state::published_complete
-			: slice_dsm_publish_state::attached_running;
-		auto* counters = slice_project_worker_counters(worker);
+	const auto reset_reinitialize_case = [
+			bytes, layout, header, local_counters, &runtime, &trace,
+			&attachment, &reinitialize_runtime](std::uint64_t cycle) {
+		std::memset(bytes, 0, layout.total_bytes);
+		slice_project_initialize_test_dsm(
+			header, layout, runtime.boundary_count, slot_count, cycle);
 		for (std::uint32_t index = 0u;
 			 index < runtime.boundary_count; ++index) {
-			counters[index].calls = slot_index == 0u ? 3u : 2u;
-			counters[index].bytes = slot_index == 0u ? 30u : 20u;
+			reset_slice_dsm_counter_noexcept(local_counters[index]);
 		}
-	}
-	auto* incomplete_worker = slice_project_worker_slot(header, 2u);
-	incomplete_worker->cycle = cycle;
-	incomplete_worker->publish_state =
-		slice_dsm_publish_state::published_incomplete;
-	auto* incomplete_counters =
-		slice_project_worker_counters(incomplete_worker);
+		trace.last_merged_cycle = 0u;
+		trace.incomplete_workers = 0u;
+		trace.collection_enabled = true;
+		trace.invalid = false;
+		trace.overflowed = false;
+		attachment.runtime = &trace;
+		attachment.valid = true;
+		reinitialize_runtime.mapped_header = header;
+		reinitialize_runtime.mapped_cycle = cycle;
+		reinitialize_runtime.dsm_test_reinitialize_audit = nullptr;
+	};
+
+	/* The shared header may not nominate its own generation.  Exercise both
+	 * directions of header drift and a running slot from an earlier cycle
+	 * through the production callback before the two successful rescans. */
+	reset_reinitialize_case(first_cycle);
+	header->cycle = first_cycle - 1u;
+	const bool stale_header_rejected =
+		slice_project_reinitialize_rejects_test_cycle(
+			&reinitialize_state, &parallel_context, header);
+	reset_reinitialize_case(first_cycle);
+	header->cycle = first_cycle + 1u;
+	const bool forward_header_rejected =
+		slice_project_reinitialize_rejects_test_cycle(
+			&reinitialize_state, &parallel_context, header);
+	reset_reinitialize_case(first_cycle);
+	auto* wrong_generation_worker = slice_project_worker_slot(header, 0u);
+	wrong_generation_worker->cycle = first_cycle - 1u;
+	wrong_generation_worker->publish_state =
+		slice_dsm_publish_state::attached_running;
+	SliceProjectDsmMergeAudit wrong_generation_audit{};
+	reinitialize_runtime.dsm_test_reinitialize_audit =
+		&wrong_generation_audit;
+	const bool attached_generation_rejected =
+		slice_project_reinitialize_rejects_test_cycle(
+			&reinitialize_state, &parallel_context, header);
+	const bool rejection_valid = stale_header_rejected
+		&& forward_header_rejected && attached_generation_rejected
+		&& wrong_generation_audit.header_valid
+		&& wrong_generation_audit.mapping_valid
+		&& !wrong_generation_audit.merged
+		&& wrong_generation_audit.slot_headers_read == 1u
+		&& wrong_generation_audit.counter_records_read == 0u
+		&& local_counters[0].calls == 0u;
+
+	reset_reinitialize_case(first_cycle);
+	auto* first_complete = slice_project_worker_slot(header, 0u);
+	first_complete->cycle = first_cycle;
+	first_complete->publish_state =
+		slice_dsm_publish_state::published_complete;
+	auto* first_complete_counters =
+		slice_project_worker_counters(first_complete);
 	for (std::uint32_t index = 0u;
 		 index < runtime.boundary_count; ++index) {
-		incomplete_counters[index].calls = 4u;
-		incomplete_counters[index].bytes = 40u;
+		first_complete_counters[index].calls = 3u;
+		first_complete_counters[index].bytes = 30u;
 	}
-	SliceProjectDsmMergeAudit audit{};
-	slice_project_merge_dsm_cycle_noexcept(
-		header, reinterpret_cast<std::uintptr_t>(bytes), layout.total_bytes,
-		slot_count, &attachment, cycle, &audit);
-	SliceProjectDsmMergeAudit repeated_audit{};
-	slice_project_merge_dsm_cycle_noexcept(
-		header, reinterpret_cast<std::uintptr_t>(bytes), layout.total_bytes,
-		slot_count, &attachment, cycle, &repeated_audit);
-	bool valid = audit.header_valid && audit.mapping_valid && audit.merged
-		&& audit.merged_slots == 1u && audit.incomplete_slots == 2u
-		&& !repeated_audit.merged && repeated_audit.merged_slots == 0u
-		&& trace.last_merged_cycle == cycle
+	auto* old_cycle_attached = slice_project_worker_slot(header, 1u);
+	old_cycle_attached->cycle = first_cycle;
+	old_cycle_attached->publish_state =
+		slice_dsm_publish_state::attached_running;
+	auto* old_cycle_tentative =
+		slice_project_worker_counters(old_cycle_attached);
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		/* Poison a valid-looking tentative prefix.  Attached payloads must never
+		 * be inspected or merged, even when their bytes are malformed. */
+		old_cycle_tentative[index].calls = 99u;
+		old_cycle_tentative[index].bytes = 990u;
+		old_cycle_tentative[index].overflowed = 2u;
+		old_cycle_tentative[index].reserved[0] = std::byte{1};
+	}
+	auto* first_incomplete = slice_project_worker_slot(header, 2u);
+	first_incomplete->cycle = first_cycle;
+	first_incomplete->publish_state =
+		slice_dsm_publish_state::published_incomplete;
+	first_incomplete->overflowed = 1u;
+	auto* first_incomplete_counters =
+		slice_project_worker_counters(first_incomplete);
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		/* Published-incomplete payloads are tentative too.  Poisoning their
+		 * records distinguishes that branch from published-complete validation. */
+		first_incomplete_counters[index].calls = 101u;
+		first_incomplete_counters[index].bytes = 1010u;
+		first_incomplete_counters[index].overflowed = 2u;
+		first_incomplete_counters[index].reserved[0] = std::byte{1};
+	}
+
+	SliceProjectDsmMergeAudit first_audit{};
+	reinitialize_runtime.dsm_test_reinitialize_audit = &first_audit;
+	SliceProjectReInitializeDSM(
+		&reinitialize_state.custom_scanstate, &parallel_context, header);
+	bool valid = rejection_valid
+		&& first_audit.header_valid && first_audit.mapping_valid
+		&& first_audit.merged && first_audit.slot_headers_read == slot_count
+		&& first_audit.counter_records_read == runtime.boundary_count
+		&& first_audit.merged_slots == 1u
+		&& first_audit.incomplete_slots == 2u
+		&& trace.last_merged_cycle == first_cycle
 		&& trace.incomplete_workers == 2u && !trace.invalid
 		&& !trace.overflowed;
 	for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
 		valid = valid && local_counters[index].calls == 3u
 			&& local_counters[index].bytes == 30u;
+	}
+
+	valid = valid && reinitialize_runtime.mapped_header == header
+		&& reinitialize_runtime.mapped_cycle == second_cycle
+		&& slice_project_test_dsm_payload_is_reset(
+			header, layout, runtime.boundary_count, slot_count, second_cycle);
+
+	constexpr std::array<std::uint64_t, 2u> second_calls{5u, 7u};
+	constexpr std::array<std::uint64_t, 2u> second_bytes{50u, 70u};
+	for (std::uint32_t slot_index = 0u; slot_index < 2u; ++slot_index) {
+		auto* worker = slice_project_worker_slot(header, slot_index);
+		worker->cycle = second_cycle;
+		worker->publish_state =
+			slice_dsm_publish_state::published_complete;
+		auto* counters = slice_project_worker_counters(worker);
+		for (std::uint32_t index = 0u;
+			 index < runtime.boundary_count; ++index) {
+			counters[index].calls = second_calls[slot_index];
+			counters[index].bytes = second_bytes[slot_index];
+		}
+	}
+	SliceProjectDsmMergeAudit second_audit{};
+	reinitialize_runtime.dsm_test_reinitialize_audit = &second_audit;
+	SliceProjectReInitializeDSM(
+		&reinitialize_state.custom_scanstate, &parallel_context, header);
+	valid = valid && second_audit.header_valid && second_audit.mapping_valid
+		&& second_audit.merged && second_audit.slot_headers_read == slot_count
+		&& second_audit.counter_records_read
+			== runtime.boundary_count * 2u
+		&& second_audit.merged_slots == 2u
+		&& second_audit.incomplete_slots == 0u
+		&& trace.last_merged_cycle == second_cycle
+		&& trace.incomplete_workers == 2u && !trace.invalid
+		&& !trace.overflowed;
+	valid = valid && reinitialize_runtime.mapped_header == header
+		&& reinitialize_runtime.mapped_cycle == reset_cycle
+		&& slice_project_test_dsm_payload_is_reset(
+			header, layout, runtime.boundary_count, slot_count, reset_cycle);
+
+	/* Worker ExecReScan is a separate production transition from leader DSM
+	 * reinitialization.  Complete cumulative records survive rearm, whereas an
+	 * incomplete tentative record is cleared before its stable slot is reused. */
+	auto* complete_rearm = slice_project_worker_slot(header, 0u);
+	complete_rearm->cycle = reset_cycle;
+	complete_rearm->publish_state = slice_dsm_publish_state::published_complete;
+	auto* complete_rearm_counters =
+		slice_project_worker_counters(complete_rearm);
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		complete_rearm_counters[index].calls = 3u;
+		complete_rearm_counters[index].bytes = 30u;
+	}
+	reinitialize_runtime.mapped_worker = complete_rearm;
+	const bool complete_rearmed =
+		slice_project_rearm_worker_for_rescan_noexcept(&reinitialize_state);
+	valid = valid && complete_rearmed
+		&& complete_rearm->publish_state
+			== slice_dsm_publish_state::attached_running;
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		valid = valid && complete_rearm_counters[index].calls == 3u
+			&& complete_rearm_counters[index].bytes == 30u;
+	}
+
+	auto* incomplete_rearm = slice_project_worker_slot(header, 1u);
+	incomplete_rearm->cycle = reset_cycle;
+	incomplete_rearm->publish_state =
+		slice_dsm_publish_state::published_incomplete;
+	incomplete_rearm->overflowed = 1u;
+	auto* incomplete_rearm_counters =
+		slice_project_worker_counters(incomplete_rearm);
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		incomplete_rearm_counters[index].calls = 4u;
+		incomplete_rearm_counters[index].bytes = 40u;
+	}
+	reinitialize_runtime.mapped_worker = incomplete_rearm;
+	const bool incomplete_rearmed =
+		slice_project_rearm_worker_for_rescan_noexcept(&reinitialize_state);
+	valid = valid && incomplete_rearmed
+		&& incomplete_rearm->publish_state
+			== slice_dsm_publish_state::attached_running
+		&& incomplete_rearm->overflowed == 0u;
+	for (std::uint32_t index = 0u;
+		 index < runtime.boundary_count; ++index) {
+		valid = valid && incomplete_rearm_counters[index].calls == 0u
+			&& incomplete_rearm_counters[index].bytes == 0u
+			&& incomplete_rearm_counters[index].overflowed == 0u;
+	}
+	for (std::uint32_t index = 0u; index < runtime.boundary_count; ++index) {
+		valid = valid && local_counters[index].calls == 15u
+			&& local_counters[index].bytes == 150u;
 		if (runtime.counters != nullptr) {
 			merge_slice_dsm_counter_noexcept(
 				runtime.counters[index], local_counters[index]);
 		}
 	}
-	BioseqSliceProjectState complete_rearm_state{};
-	complete_rearm_state.runtime.boundary_count = runtime.boundary_count;
-	complete_rearm_state.runtime.mapped_worker =
-		slice_project_worker_slot(header, 0u);
-	complete_rearm_state.runtime.mapped_cycle = cycle;
-	complete_rearm_state.runtime.attachment = &attachment;
-	const bool complete_rearmed =
-		slice_project_rearm_worker_for_rescan_noexcept(
-			&complete_rearm_state);
-	auto* complete_counters = slice_project_worker_counters(
-		complete_rearm_state.runtime.mapped_worker);
-	valid = valid && complete_rearmed
-		&& complete_rearm_state.runtime.mapped_worker->publish_state
-			== slice_dsm_publish_state::attached_running;
-	for (std::uint32_t index = 0u;
-		 index < runtime.boundary_count; ++index) {
-		valid = valid && complete_counters[index].calls == 3u
-			&& complete_counters[index].bytes == 30u;
-	}
-
-	BioseqSliceProjectState incomplete_rearm_state{};
-	incomplete_rearm_state.runtime.boundary_count = runtime.boundary_count;
-	incomplete_rearm_state.runtime.mapped_worker = incomplete_worker;
-	incomplete_rearm_state.runtime.mapped_cycle = cycle;
-	incomplete_rearm_state.runtime.attachment = &attachment;
-	const bool incomplete_rearmed =
-		slice_project_rearm_worker_for_rescan_noexcept(
-			&incomplete_rearm_state);
-	valid = valid && incomplete_rearmed
-		&& incomplete_worker->publish_state
-			== slice_dsm_publish_state::attached_running
-		&& incomplete_worker->overflowed == 0u;
-	for (std::uint32_t index = 0u;
-		 index < runtime.boundary_count; ++index) {
-		valid = valid && incomplete_counters[index].calls == 0u
-			&& incomplete_counters[index].bytes == 0u;
-	}
-	if (audit.incomplete_slots
+	if (first_audit.incomplete_slots
 		> UINT32_MAX - runtime.trace_runtime.incomplete_workers) {
 		runtime.trace_runtime.incomplete_workers = UINT32_MAX;
 		runtime.trace_runtime.overflowed = true;
 	} else {
-		runtime.trace_runtime.incomplete_workers += audit.incomplete_slots;
+		runtime.trace_runtime.incomplete_workers +=
+			first_audit.incomplete_slots;
 	}
-	runtime.dsm_test_checks = 1u;
-	runtime.dsm_test_slot_headers_read = audit.slot_headers_read;
-	runtime.dsm_test_counter_records_read = audit.counter_records_read;
+	runtime.dsm_test_checks = 5u;
+	runtime.dsm_test_slot_headers_read =
+		wrong_generation_audit.slot_headers_read
+		+ first_audit.slot_headers_read + second_audit.slot_headers_read;
+	runtime.dsm_test_counter_records_read =
+		wrong_generation_audit.counter_records_read
+		+ first_audit.counter_records_read
+		+ second_audit.counter_records_read;
 	runtime.dsm_test_fixture_validated = valid
 		&& runtime.dsm_test_async_validated;
+	dsm_detach(segment);
 	pfree(local_counters);
-	pfree(bytes);
 }
 #endif
 
@@ -4720,10 +5046,40 @@ static void SliceProjectReInitializeDSM(
 			 errmsg("BioseqSliceProject DSM reinitialization is invalid")));
 	}
 	auto* header = static_cast<slice_dsm_header*>(coordinate);
-	const std::uint64_t old_cycle = header->cycle;
+	const std::uint64_t expected_cycle = runtime.mapped_cycle;
+	if (runtime.mapped_header != header || expected_cycle == 0u
+		|| header->cycle != expected_cycle
+		|| (runtime.detach_state != nullptr
+			&& (runtime.detach_state->mapped_header != header
+				|| runtime.detach_state->expected_cycle != expected_cycle))) {
+		slice_project_mark_trace_invalid_noexcept(runtime.attachment);
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqSliceProject DSM cycle identity changed"),
+			 errdetail("expected_cycle=%llu shared_cycle=%llu",
+				static_cast<unsigned long long>(expected_cycle),
+				static_cast<unsigned long long>(header->cycle))));
+	}
+	SliceProjectDsmMergeAudit* merge_audit = nullptr;
+#ifdef BIOSEQ_TEST_INDEXES
+	merge_audit = runtime.dsm_test_reinitialize_audit;
+	runtime.dsm_test_reinitialize_audit = nullptr;
+#endif
+	auto* trace_runtime = runtime.attachment == nullptr
+		? nullptr : runtime.attachment->runtime;
 	slice_project_merge_dsm_cycle_noexcept(
-		header, pcxt, runtime.attachment, old_cycle);
-	if (old_cycle == UINT64_MAX) {
+		header, pcxt, runtime.attachment, expected_cycle, merge_audit);
+	if (trace_runtime == nullptr || trace_runtime->invalid
+		|| trace_runtime->last_merged_cycle != expected_cycle) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqSliceProject DSM cycle merge was rejected"),
+			 errdetail("expected_cycle=%llu merged_cycle=%llu",
+				static_cast<unsigned long long>(expected_cycle),
+				static_cast<unsigned long long>(trace_runtime == nullptr
+					? 0u : trace_runtime->last_merged_cycle))));
+	}
+	if (expected_cycle == UINT64_MAX) {
 		ereport(ERROR,
 			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 			 errmsg("BioseqSliceProject parallel cycle exhausted")));
@@ -4740,7 +5096,7 @@ static void SliceProjectReInitializeDSM(
 	header->slot_count = slot_count;
 	header->slot_stride = layout.slot_stride;
 	pg_write_barrier();
-	header->cycle = old_cycle + 1u;
+	header->cycle = expected_cycle + 1u;
 	runtime.mapped_header = header;
 	runtime.mapped_cycle = header->cycle;
 	if (runtime.detach_state != nullptr) {
@@ -7070,6 +7426,78 @@ struct BatchJoinBioseqPathCandidate {
 		? helper : nullptr;
 }
 
+/* Decode only the catalog/arity/type contract of a match-result helper.  Its
+ * argument binding is resolved separately against the selected owner recipe
+ * after standard_planner has assigned final plan_node_id values. */
+[[nodiscard]] static FuncExpr* batch_join_well_formed_match_helper(
+		Node* expression,
+		const BioseqStubOids& oids) noexcept {
+	FuncExpr* helper = pg_node_try_as<FuncExpr>(expression);
+	if (helper == nullptr
+		|| !is_bioseq_projection_funcid(helper->funcid, oids)
+		|| helper->funcretset || OidIsValid(helper->funcvariadic)
+		|| get_func_rettype(helper->funcid) != helper->funcresulttype
+		|| list_length(helper->args) != 1) {
+		return nullptr;
+	}
+	return helper;
+}
+
+[[nodiscard]] static Node* batch_join_match_helper_argument(
+		FuncExpr* helper) noexcept {
+	return helper == nullptr || list_length(helper->args) != 1
+		? nullptr : reinterpret_cast<Node*>(linitial(helper->args));
+}
+
+[[nodiscard]] static List* canonical_match_base_lineage(
+	Node* target_recipe, const BioseqStubOids& oids);
+
+[[nodiscard]] static bool batch_join_match_helper_names_recipe(
+		FuncExpr* helper, Node* target_recipe) noexcept {
+	Node* argument = batch_join_match_helper_argument(helper);
+	return argument != nullptr && target_recipe != nullptr
+		&& equal(argument, target_recipe);
+}
+
+[[nodiscard]] static bool batch_join_match_helper_names_base_lineage(
+		FuncExpr* helper, Node* target_recipe,
+		const BioseqStubOids& oids) {
+	Var* argument = pg_node_try_as<Var>(
+		batch_join_match_helper_argument(helper));
+	if (argument == nullptr || target_recipe == nullptr
+		|| !bioseq_is_concrete_rte_varno(argument->varno)
+		|| argument->varattno <= 0 || argument->varlevelsup != 0
+		|| !bms_is_empty(argument->varnullingrels)) return false;
+	for (Var* base : PList<Var>(
+			canonical_match_base_lineage(target_recipe, oids))) {
+		if (base == nullptr) continue;
+		if (argument->vartype == oids.bioseq_seq_type_oid) {
+			if (equal(argument, base)) return true;
+		} else if (argument->varno == base->varno
+			&& argument->varlevelsup == base->varlevelsup) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Generic PHV shape used by transformed exact-recipe helpers.  Unlike the
+ * legacy helper decoder below, the PHV may cover more than one relation when
+ * the target recipe is a concat.  The final owner resolver validates the
+ * canonical argument and lineage before any executor sees the site. */
+[[nodiscard]] static FuncExpr* batch_join_match_helper_phv_function(
+		const PlaceHolderVar* placeholder,
+		const BioseqStubOids& oids) noexcept {
+	if (placeholder == nullptr || placeholder->phid == 0
+		|| placeholder->phlevelsup != 0
+		|| !bms_is_empty(placeholder->phnullingrels)
+		|| bms_is_empty(placeholder->phrels)) {
+		return nullptr;
+	}
+	return batch_join_well_formed_match_helper(
+		reinterpret_cast<Node*>(placeholder->phexpr), oids);
+}
+
 /* Exact shape emitted by try_wrap_in_placeholder() for a direct helper call.
  * Do not accept a generic PHV merely because a helper occurs somewhere below
  * it: its evaluation level/nulling semantics may belong to unrelated SQL. */
@@ -7698,6 +8126,7 @@ struct per_row_operand_source_visitor {
 struct PerRowOutputSemanticProof {
 	Index target_relid = 0;
 	Relids join_relids = nullptr;
+	Node* target_recipe = nullptr;
 	bool invalid = false;
 };
 
@@ -7717,13 +8146,19 @@ struct PerRowOutputSemanticProof {
 struct per_row_output_semantic_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor, pg_node_view node,
-			PerRowOutputSemanticProof& proof) const noexcept {
+			PerRowOutputSemanticProof& proof) const {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
 			/* The exact helper PHV is deliberately evaluated by the BatchJoin
 			 * owner after MatchResult production.  Every generic PHV retains a
 			 * planner-selected frontier which this transformation cannot move. */
-			if (!batch_join_is_exact_helper_phv(
-					placeholder, proof.target_relid)) {
+			FuncExpr* helper = batch_join_match_helper_phv_function(
+				placeholder, get_cached_stub_oids());
+			if (helper == nullptr
+				|| (!batch_join_match_helper_names_recipe(
+					helper, proof.target_recipe)
+					&& !batch_join_match_helper_names_base_lineage(
+						helper, proof.target_recipe,
+						get_cached_stub_oids()))) {
 				proof.invalid = true;
 			}
 			return proof.invalid
@@ -7753,15 +8188,16 @@ struct per_row_output_semantic_visitor {
 
 [[nodiscard]] static bool per_row_output_semantics_are_supported(
 		PathTarget* target, const Index target_relid,
-		Relids join_relids) {
+		Relids join_relids, Node* target_recipe) {
 	if (target == nullptr || !bioseq_is_concrete_rte_varno(target_relid)
-		|| join_relids == nullptr) {
+		|| join_relids == nullptr || target_recipe == nullptr) {
 		return false;
 	}
 	/* Volatile final-output expressions stay in the owner PathTarget and are
 	 * evaluated once by core ProjectionInfo for each emitted match.  This proof
 	 * governs only nodes that would otherwise lose a planner frontier. */
-	PerRowOutputSemanticProof proof{target_relid, join_relids, false};
+	PerRowOutputSemanticProof proof{
+		target_relid, join_relids, target_recipe, false};
 	per_row_output_semantic_visitor visitor;
 	for (Node* expression : PList<Node>(target->exprs)) {
 		pg_walk_expression_including_root(expression, proof, visitor);
@@ -7774,8 +8210,13 @@ struct PerRowOwnerSupportProof {
 	Index target_relid = 0;
 	Relids join_relids = nullptr;
 	const BioseqStubOids* oids = nullptr;
+	Node* target_recipe = nullptr;
 	List* passthrough_vars = NIL;
 	List* helper_identities = NIL;
+	/* Sequence-valued helpers which do not name this owner may still be exact
+	 * outputs of one versioned descendant BatchJoin.  They remain candidates
+	 * until each incumbent path proves that ownership structurally. */
+	List* foreign_exact_helper_identities = NIL;
 	List* helper_argument_vars = NIL;
 	bool invalid = false;
 };
@@ -7788,21 +8229,115 @@ static void per_row_append_unique_expression(List*& expressions, Node* node) {
 	expressions = lappend(expressions, copyObject(node));
 }
 
+[[nodiscard]] static bool per_row_expression_list_contains(
+		List* expressions, Node* node) noexcept {
+	if (node == nullptr) return false;
+	for (Node* existing : PList<Node>(expressions)) {
+		if (existing != nullptr && equal(existing, node)) return true;
+	}
+	return false;
+}
+
+[[nodiscard]] static bool per_row_authoritative_sortgrouprefs(
+	PlannerInfo* root, List* expressions, std::vector<Index>& results);
+
+/* Keep the public CustomPath target exactly at PostgreSQL's authoritative
+ * joinrel frontier.  Planner-only helper and passthrough columns are appended
+ * by PlanCustomPath after core has finished applying scan/join targets.  This
+ * avoids exposing a widened expr list to apply_scanjoin_target_to_paths(),
+ * which can otherwise install the join target's shorter sortgroupref array. */
+[[nodiscard]] static PathTarget* per_row_build_owner_target(
+		PlannerInfo* root, PathTarget* original) {
+	if (root == nullptr || original == nullptr) return nullptr;
+	std::vector<Index> sortgrouprefs;
+	if (!per_row_authoritative_sortgrouprefs(
+			root, original->exprs, sortgrouprefs)) return nullptr;
+	if (sortgrouprefs.size()
+		!= static_cast<std::size_t>(list_length(original->exprs))) return nullptr;
+	PathTarget* rebuilt = create_empty_pathtarget();
+	rebuilt->exprs = static_cast<List*>(copyObject(original->exprs));
+	const bool has_sortgroupref = std::any_of(
+		sortgrouprefs.begin(), sortgrouprefs.end(),
+		[](Index value) noexcept { return value != 0; });
+	if (has_sortgroupref) {
+		rebuilt->sortgrouprefs = static_cast<Index*>(palloc0(
+			sortgrouprefs.size() * sizeof(Index)));
+		for (std::size_t index = 0u; index < sortgrouprefs.size(); ++index) {
+			rebuilt->sortgrouprefs[index] = sortgrouprefs[index];
+		}
+	}
+	Assert(list_length(rebuilt->exprs) == list_length(original->exprs));
+	return rebuilt;
+}
+
+/* Core's upper setrefs pass can descend a plain match-helper FuncExpr before
+ * finalized MatchResult binding.  It then needs the raw Vars below the exact
+ * transformed target recipe, plus valid legacy-lineage helper arguments.
+ * These are Plan-only resjunk carriers; they must not widen the visible owner
+ * PathTarget. */
+[[nodiscard]] static bool per_row_collect_setrefs_carrier_vars(
+		Node* target_recipe, List* helper_argument_vars,
+		Relids join_relids, List*& carrier_vars) {
+	carrier_vars = NIL;
+	if (target_recipe == nullptr || join_relids == nullptr) return false;
+	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	List* recipe_vars = pull_var_clause(target_recipe, pull_flags);
+	auto append_valid = [join_relids, &carrier_vars](Node* node) -> bool {
+		Var* var = pg_node_try_as<Var>(node);
+		const bool row_identity = per_row_is_exact_row_identity_var(var);
+		if (var == nullptr || !bioseq_is_concrete_rte_varno(var->varno)
+			|| (var->varattno <= 0 && !row_identity)
+			|| var->varlevelsup != 0
+			|| !bms_is_empty(var->varnullingrels)
+			|| !bms_is_member(
+				static_cast<int>(var->varno), join_relids)) return false;
+		per_row_append_unique_expression(carrier_vars, node);
+		return true;
+	};
+	for (Node* recipe_var : PList<Node>(recipe_vars)) {
+		if (!append_valid(recipe_var)) return false;
+	}
+	for (Node* helper_argument : PList<Node>(helper_argument_vars)) {
+		if (!append_valid(helper_argument)) return false;
+	}
+	return carrier_vars != NIL;
+}
+
 /* Core can defer the SELECT/RETURNING projection until above the join and,
  * for a projection-capable CustomPath, overwrite plan.targetlist only after
  * PlanCustomPath has returned.  Collect the narrow support surface up front:
  * level-zero join Vars are passed through, while exact target-owned match
  * helpers are carried as whole descriptor identities.  Their proven single
- * target Var is collected separately only for the reconstructed scan-leaf
- * setrefs edge; it is never substituted for the final whole-helper output. */
+ * target Var is collected separately for reconstructed scan-leaf and Plan-only
+ * resjunk setrefs edges; it is never substituted for the final whole-helper
+ * output. */
 struct per_row_owner_support_visitor {
 	[[nodiscard]] pg_walk_step operator()(
 			pg_expression_walk_cursor,
 			pg_node_view node,
-			PerRowOwnerSupportProof& proof) const noexcept {
+		PerRowOwnerSupportProof& proof) const {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
-			if (FuncExpr* helper = batch_join_exact_helper_phv_function(
-					placeholder, proof.target_relid)) {
+			FuncExpr* helper = proof.oids == nullptr ? nullptr
+				: batch_join_match_helper_phv_function(
+					placeholder, *proof.oids);
+			if (helper != nullptr) {
+				const bool names_recipe =
+					batch_join_match_helper_names_recipe(
+						helper, proof.target_recipe);
+				const bool names_lineage =
+					batch_join_match_helper_names_base_lineage(
+						helper, proof.target_recipe, *proof.oids);
+				Node* argument = batch_join_match_helper_argument(helper);
+				const bool possible_foreign_exact = !names_recipe
+					&& !names_lineage && argument != nullptr
+					&& exprType(argument)
+						== proof.oids->bioseq_seq_type_oid;
+				if (!names_recipe && !names_lineage
+					&& !possible_foreign_exact) {
+					proof.invalid = true;
+					return pg_walk_step::stop;
+				}
 				/* PostgreSQL can spell the same helper site as its whole PHV in
 				 * the join reltarget and as the underlying FuncExpr in an upper
 				 * Sort/Result target.  Preserve both exact identities so setrefs
@@ -7814,13 +8349,23 @@ struct per_row_owner_support_visitor {
 				per_row_append_unique_expression(
 					proof.helper_identities,
 					reinterpret_cast<Node*>(helper));
+				if (possible_foreign_exact) {
+					per_row_append_unique_expression(
+						proof.foreign_exact_helper_identities,
+						reinterpret_cast<Node*>(placeholder));
+					per_row_append_unique_expression(
+						proof.foreign_exact_helper_identities,
+						reinterpret_cast<Node*>(helper));
+				}
 				/* Core may retain a Result directly above the target BioseqScan
 				 * while carrying the whole PHV to the final owner.  Preserve the
 				 * exact single target-owned argument at that scan edge so setrefs
 				 * can bind Result's support Var without executing the helper. */
-				per_row_append_unique_expression(
-					proof.helper_argument_vars,
-					reinterpret_cast<Node*>(linitial(helper->args)));
+				if (names_lineage) {
+					per_row_append_unique_expression(
+						proof.helper_argument_vars,
+						batch_join_match_helper_argument(helper));
+				}
 				return pg_walk_step::skip_subtree;
 			}
 			if (proof.oids != nullptr
@@ -7836,18 +8381,33 @@ struct per_row_owner_support_visitor {
 		if (FuncExpr* function = node.try_as<FuncExpr>();
 			proof.oids != nullptr && function != nullptr
 			&& is_bioseq_projection_funcid(function->funcid, *proof.oids)) {
-			if (batch_join_exact_target_helper(
-					reinterpret_cast<Node*>(function), proof.target_relid)
-					== nullptr) {
+			const bool names_recipe = batch_join_match_helper_names_recipe(
+				function, proof.target_recipe);
+			const bool legacy_lineage =
+				batch_join_match_helper_names_base_lineage(
+					function, proof.target_recipe, *proof.oids);
+			Node* argument = batch_join_match_helper_argument(function);
+			const bool possible_foreign_exact = !names_recipe
+				&& !legacy_lineage && argument != nullptr
+				&& exprType(argument) == proof.oids->bioseq_seq_type_oid;
+			if (!names_recipe && !legacy_lineage
+				&& !possible_foreign_exact) {
 				proof.invalid = true;
 				return pg_walk_step::stop;
 			}
 			per_row_append_unique_expression(
 				proof.helper_identities,
 				reinterpret_cast<Node*>(function));
-			per_row_append_unique_expression(
-				proof.helper_argument_vars,
-				reinterpret_cast<Node*>(linitial(function->args)));
+			if (possible_foreign_exact) {
+				per_row_append_unique_expression(
+					proof.foreign_exact_helper_identities,
+					reinterpret_cast<Node*>(function));
+			}
+			if (legacy_lineage) {
+				per_row_append_unique_expression(
+					proof.helper_argument_vars,
+					batch_join_match_helper_argument(function));
+			}
 			return pg_walk_step::skip_subtree;
 		}
 		if (Var* var = node.try_as<Var>()) {
@@ -7879,15 +8439,17 @@ struct per_row_owner_support_visitor {
 
 [[nodiscard]] static bool per_row_collect_owner_support(
 		PlannerInfo* root, RelOptInfo* joinrel,
-		const Index target_relid, PerRowOwnerSupportProof& proof) {
+		const Index target_relid, Node* target_recipe,
+		PerRowOwnerSupportProof& proof) {
 	if (root == nullptr || joinrel == nullptr
 		|| !bioseq_is_concrete_rte_varno(target_relid)
-		|| joinrel->relids == nullptr) {
+		|| joinrel->relids == nullptr || target_recipe == nullptr) {
 		return false;
 	}
 	proof.target_relid = target_relid;
 	proof.join_relids = joinrel->relids;
 	proof.oids = &get_cached_stub_oids();
+	proof.target_recipe = target_recipe;
 	per_row_owner_support_visitor visitor;
 	for (TargetEntry* output : PList<TargetEntry>(root->processed_tlist)) {
 		if (output == nullptr || output->expr == nullptr) continue;
@@ -8006,15 +8568,53 @@ static void per_row_audit_mmsearch_expression(
 		: destination + additional;
 }
 
+struct ExactMmsearchOwnerAudit {
+	FuncExpr* candidate = nullptr;
+	BioseqStubOids const* oids = nullptr;
+	std::size_t matches = 0u;
+};
+
+struct exact_mmsearch_owner_audit_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			ExactMmsearchOwnerAudit& audit) const {
+		FuncExpr* function = node.try_as<FuncExpr>();
+		if (function == nullptr || audit.oids == nullptr
+			|| !is_mmsearch_funcid(function->funcid, *audit.oids)) {
+			return pg_walk_step::descend;
+		}
+		if (audit.candidate != nullptr && equal(function, audit.candidate)) {
+			audit.matches = audit.matches
+				== std::numeric_limits<std::size_t>::max()
+				? audit.matches : audit.matches + 1u;
+		}
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+static void per_row_audit_exact_mmsearch_owner(
+		Node* expression, FuncExpr* candidate,
+		std::size_t& destination, BioseqStubOids const& oids) {
+	if (expression == nullptr || candidate == nullptr) return;
+	ExactMmsearchOwnerAudit audit{candidate, &oids, 0u};
+	exact_mmsearch_owner_audit_visitor visitor;
+	pg_walk_expression_including_root(expression, audit, visitor);
+	destination = audit.matches
+		> std::numeric_limits<std::size_t>::max() - destination
+		? std::numeric_limits<std::size_t>::max()
+		: destination + audit.matches;
+}
+
 /* Audit the serialized child plan that will execute below the transformed
  * owner.  `Plan::qual` is only one of PostgreSQL's executable-qual stores:
  * join/index/recheck fields and the Bioseq reader's storage/vector lists must
  * be inspected independently.  The fourth BioseqScan expression list is an
- * executor-only mmsearch owner, so finding it below this owner is a duplicate
- * descendant owner rather than an ordinary qual copy. */
+ * executor-only mmsearch owner.  A foreign owner is valid nested SQL state;
+ * only an owner equal to the candidate recipe is a duplicate of this owner. */
 static void per_row_audit_mmsearch_plan(
 		Plan* plan, PerRowMmsearchPlanAudit& audit,
-		BioseqStubOids const& oids) {
+		BioseqStubOids const& oids,
+		FuncExpr* exact_owner_candidate = nullptr) {
 	if (plan == nullptr) return;
 	per_row_audit_mmsearch_expression(
 		reinterpret_cast<Node*>(plan->qual),
@@ -8111,10 +8711,17 @@ static void per_row_audit_mmsearch_plan(
 				audit.vector_qual_copies, oids);
 			for (int index = 3;
 				 index < list_length(custom->custom_exprs); ++index) {
-				per_row_audit_mmsearch_expression(
-					reinterpret_cast<Node*>(list_nth(
-						custom->custom_exprs, index)),
-					audit.descendant_owner_copies, oids);
+				Node* owner_expression = reinterpret_cast<Node*>(list_nth(
+					custom->custom_exprs, index));
+				if (exact_owner_candidate == nullptr) {
+					per_row_audit_mmsearch_expression(
+						owner_expression,
+						audit.descendant_owner_copies, oids);
+				} else {
+					per_row_audit_exact_mmsearch_owner(
+						owner_expression, exact_owner_candidate,
+						audit.descendant_owner_copies, oids);
+				}
 			}
 		} else {
 			per_row_audit_mmsearch_expression(
@@ -8122,46 +8729,54 @@ static void per_row_audit_mmsearch_plan(
 				audit.executable_qual_copies, oids);
 		}
 		for (Plan* child : PList<Plan>(custom->custom_plans)) {
-			per_row_audit_mmsearch_plan(child, audit, oids);
+			per_row_audit_mmsearch_plan(
+				child, audit, oids, exact_owner_candidate);
 		}
 		return;
 	}
 	if (IsA(plan, Append)) {
 		for (Plan* child : PList<Plan>(
 				reinterpret_cast<Append*>(plan)->appendplans)) {
-			per_row_audit_mmsearch_plan(child, audit, oids);
+			per_row_audit_mmsearch_plan(
+				child, audit, oids, exact_owner_candidate);
 		}
 		return;
 	}
 	if (IsA(plan, MergeAppend)) {
 		for (Plan* child : PList<Plan>(
 				reinterpret_cast<MergeAppend*>(plan)->mergeplans)) {
-			per_row_audit_mmsearch_plan(child, audit, oids);
+			per_row_audit_mmsearch_plan(
+				child, audit, oids, exact_owner_candidate);
 		}
 		return;
 	}
 	if (IsA(plan, BitmapAnd)) {
 		for (Plan* child : PList<Plan>(
 				reinterpret_cast<BitmapAnd*>(plan)->bitmapplans)) {
-			per_row_audit_mmsearch_plan(child, audit, oids);
+			per_row_audit_mmsearch_plan(
+				child, audit, oids, exact_owner_candidate);
 		}
 		return;
 	}
 	if (IsA(plan, BitmapOr)) {
 		for (Plan* child : PList<Plan>(
 				reinterpret_cast<BitmapOr*>(plan)->bitmapplans)) {
-			per_row_audit_mmsearch_plan(child, audit, oids);
+			per_row_audit_mmsearch_plan(
+				child, audit, oids, exact_owner_candidate);
 		}
 		return;
 	}
 	if (IsA(plan, SubqueryScan)) {
 		per_row_audit_mmsearch_plan(
-			reinterpret_cast<SubqueryScan*>(plan)->subplan, audit, oids);
+			reinterpret_cast<SubqueryScan*>(plan)->subplan, audit, oids,
+			exact_owner_candidate);
 		return;
 	}
-	per_row_audit_mmsearch_plan(outerPlan(plan), audit, oids);
+	per_row_audit_mmsearch_plan(
+		outerPlan(plan), audit, oids, exact_owner_candidate);
 	if (innerPlan(plan) != outerPlan(plan)) {
-		per_row_audit_mmsearch_plan(innerPlan(plan), audit, oids);
+		per_row_audit_mmsearch_plan(
+			innerPlan(plan), audit, oids, exact_owner_candidate);
 	}
 }
 
@@ -8218,6 +8833,1408 @@ static void per_row_audit_mmsearch_plan(
 	set_pathtarget_cost_width(root, projected);
 	return reinterpret_cast<Path*>(create_projection_path(
 		root, child->parent, child, projected));
+}
+
+struct PerRowDescendantOwnerProof {
+	CustomPath* owner = nullptr;
+	std::size_t matches = 0u;
+	bool invalid_owner_abi = false;
+	bool unsupported_wrapper = false;
+};
+
+[[nodiscard]] static Node* per_row_known_path_owner_recipe(
+		CustomPath* custom, bool& invalid) {
+	if (custom == nullptr) return nullptr;
+	const bool raw_owner = custom->methods == &BioseqBatchJoinPathMethods;
+	const bool transformed_owner =
+		custom->methods == &BioseqPerRowJoinPathMethods;
+	if (!raw_owner && !transformed_owner) return nullptr;
+	const int expected_version = raw_owner
+		? kBioseqBatchJoinPlanVersion : kBioseqPerRowJoinPlanVersion;
+	const int expected_children = raw_owner ? 2 : 1;
+	const int expected_fields = raw_owner
+		? kBioseqBatchJoinPathPrivateFields
+		: kBioseqPerRowJoinPathPrivateFields;
+	Node* version = list_length(custom->custom_private) == expected_fields
+		? reinterpret_cast<Node*>(linitial(custom->custom_private)) : nullptr;
+	Node* recipe = list_length(custom->custom_private) == expected_fields
+		? reinterpret_cast<Node*>(list_nth(custom->custom_private, 4)) : nullptr;
+	if (version == nullptr || !IsA(version, Integer)
+		|| intVal(version) != expected_version
+		|| list_length(custom->custom_paths) != expected_children
+		|| recipe == nullptr
+		|| exprType(recipe) != get_cached_stub_oids().bioseq_seq_type_oid) {
+		invalid = true;
+		return nullptr;
+	}
+	return recipe;
+}
+
+static void per_row_prove_descendant_exact_owner(
+		Path* path, Node* helper_argument,
+		PerRowDescendantOwnerProof& proof) {
+	if (path == nullptr || helper_argument == nullptr
+		|| proof.invalid_owner_abi || proof.unsupported_wrapper) return;
+	check_stack_depth();
+	if (IsA(path, CustomPath)) {
+		auto* custom = reinterpret_cast<CustomPath*>(path);
+		const bool known_owner = custom->methods == &BioseqBatchJoinPathMethods
+			|| custom->methods == &BioseqPerRowJoinPathMethods;
+		if (known_owner) {
+			Node* recipe = per_row_known_path_owner_recipe(
+				custom, proof.invalid_owner_abi);
+			if (proof.invalid_owner_abi) return;
+			if (recipe != nullptr && equal(helper_argument, recipe)) {
+				++proof.matches;
+				proof.owner = custom;
+			}
+		} else if (custom->methods != &BioseqColumnScanPathMethods
+			&& custom->methods != &bioseq_slice_project_path_methods()) {
+			/* Unknown CustomPaths can hide an evaluation/projection frontier in
+			 * provider-private state.  Never infer helper provenance through one. */
+			proof.unsupported_wrapper = true;
+			return;
+		}
+		for (Path* child : PList<Path>(custom->custom_paths)) {
+			per_row_prove_descendant_exact_owner(
+				child, helper_argument, proof);
+		}
+		return;
+	}
+	auto descend_join = [helper_argument, &proof](JoinPath* join) {
+		if (join == nullptr) return;
+		per_row_prove_descendant_exact_owner(
+			join->outerjoinpath, helper_argument, proof);
+		per_row_prove_descendant_exact_owner(
+			join->innerjoinpath, helper_argument, proof);
+	};
+	if (IsA(path, NestPath)) {
+		descend_join(&reinterpret_cast<NestPath*>(path)->jpath);
+		return;
+	}
+	if (IsA(path, MergePath)) {
+		descend_join(&reinterpret_cast<MergePath*>(path)->jpath);
+		return;
+	}
+	if (IsA(path, HashPath)) {
+		descend_join(&reinterpret_cast<HashPath*>(path)->jpath);
+		return;
+	}
+	auto descend_one = [helper_argument, &proof](Path* child) {
+		per_row_prove_descendant_exact_owner(
+			child, helper_argument, proof);
+	};
+	if (IsA(path, ProjectionPath)) {
+		descend_one(reinterpret_cast<ProjectionPath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, ProjectSetPath)) {
+		descend_one(reinterpret_cast<ProjectSetPath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, SortPath)) {
+		descend_one(reinterpret_cast<SortPath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, IncrementalSortPath)) {
+		descend_one(reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath);
+		return;
+	}
+	if (IsA(path, MaterialPath)) {
+		descend_one(reinterpret_cast<MaterialPath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, MemoizePath)) {
+		descend_one(reinterpret_cast<MemoizePath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, UniquePath)) {
+		descend_one(reinterpret_cast<UniquePath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, GatherPath)) {
+		descend_one(reinterpret_cast<GatherPath*>(path)->subpath);
+		return;
+	}
+	if (IsA(path, GatherMergePath)) {
+		descend_one(reinterpret_cast<GatherMergePath*>(path)->subpath);
+		return;
+	}
+	auto descend_list = [helper_argument, &proof](List* paths) {
+		for (Path* child : PList<Path>(paths)) {
+			per_row_prove_descendant_exact_owner(
+				child, helper_argument, proof);
+		}
+	};
+	if (IsA(path, AppendPath)) {
+		descend_list(reinterpret_cast<AppendPath*>(path)->subpaths);
+		return;
+	}
+	if (IsA(path, MergeAppendPath)) {
+		descend_list(reinterpret_cast<MergeAppendPath*>(path)->subpaths);
+		return;
+	}
+	/* Ordinary base-relation scan paths have no child Path.  Anything else is
+	 * an unmodelled join/subquery/foreign wrapper and must fail closed. */
+	if (path->parent == nullptr
+		|| (path->parent->reloptkind != RELOPT_BASEREL
+			&& path->parent->reloptkind != RELOPT_OTHER_MEMBER_REL)) {
+		proof.unsupported_wrapper = true;
+	}
+}
+
+[[nodiscard]] static Path* per_row_clone_path_to_helper_owner(
+	PlannerInfo* root, Path* path, CustomPath* owner, Node* identity,
+	bool& applied, bool& invalid);
+
+[[nodiscard]] static PathTarget* per_row_helper_passthrough_target(
+		PlannerInfo* root, PathTarget* source, Node* identity,
+		bool& invalid) {
+	if (root == nullptr || source == nullptr || identity == nullptr) {
+		invalid = true;
+		return source;
+	}
+	std::vector<Index> sortgrouprefs;
+	if (!per_row_authoritative_sortgrouprefs(
+			root, source->exprs, sortgrouprefs)
+		|| sortgrouprefs.size()
+			!= static_cast<std::size_t>(list_length(source->exprs))) {
+		invalid = true;
+		return source;
+	}
+	List* expressions = static_cast<List*>(copyObject(source->exprs));
+	if (!per_row_expression_list_contains(expressions, identity)) {
+		expressions = lappend(expressions, copyObject(identity));
+		sortgrouprefs.push_back(0);
+	}
+	PathTarget* target = create_empty_pathtarget();
+	target->exprs = expressions;
+	const bool has_sortgroupref = std::any_of(
+		sortgrouprefs.begin(), sortgrouprefs.end(),
+		[](Index value) noexcept { return value != 0; });
+	if (has_sortgroupref) {
+		target->sortgrouprefs = static_cast<Index*>(palloc0(
+			sortgrouprefs.size() * sizeof(Index)));
+		for (std::size_t index = 0u; index < sortgrouprefs.size(); ++index) {
+			target->sortgrouprefs[index] = sortgrouprefs[index];
+		}
+	}
+	set_pathtarget_cost_width(root, target);
+	return target;
+}
+
+[[nodiscard]] static List* per_row_clone_path_list_to_helper_owner(
+		PlannerInfo* root, List* paths, CustomPath* owner, Node* identity,
+		bool& applied, bool& invalid) {
+	List* result = NIL;
+	bool changed = false;
+	for (Path* child : PList<Path>(paths)) {
+		Path* replacement = applied || invalid ? child
+			: per_row_clone_path_to_helper_owner(
+				root, child, owner, identity, applied, invalid);
+		changed = changed || replacement != child;
+		result = lappend(result, replacement);
+	}
+	return changed ? result : paths;
+}
+
+[[nodiscard]] static Path* per_row_clone_path_to_helper_owner(
+		PlannerInfo* root, Path* path, CustomPath* owner, Node* identity,
+		bool& applied, bool& invalid) {
+	if (path == nullptr || owner == nullptr || identity == nullptr
+		|| applied || invalid) {
+		return path;
+	}
+	if (path == reinterpret_cast<Path*>(owner)) {
+		auto* clone = makeNode(CustomPath);
+		*clone = *owner;
+		clone->path.pathtarget = per_row_helper_passthrough_target(
+			root, path->pathtarget, identity, invalid);
+		if (invalid) return path;
+		applied = true;
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, CustomPath)) {
+		auto* source = reinterpret_cast<CustomPath*>(path);
+		List* children = per_row_clone_path_list_to_helper_owner(
+			root, source->custom_paths, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		auto* clone = makeNode(CustomPath);
+		*clone = *source;
+		clone->custom_paths = children;
+		clone->path.pathtarget = per_row_helper_passthrough_target(
+			root, source->path.pathtarget, identity, invalid);
+		if (invalid) return path;
+		return reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, NestPath)) {
+		auto* source = reinterpret_cast<NestPath*>(path);
+		auto* clone = makeNode(NestPath);
+		*clone = *source;
+		clone->jpath.outerjoinpath = per_row_clone_path_to_helper_owner(
+			root, source->jpath.outerjoinpath, owner, identity, applied, invalid);
+		clone->jpath.innerjoinpath = per_row_clone_path_to_helper_owner(
+			root, source->jpath.innerjoinpath, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		clone->jpath.path.pathtarget = per_row_helper_passthrough_target(
+			root, source->jpath.path.pathtarget, identity, invalid);
+		return invalid ? path : reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, MergePath)) {
+		auto* source = reinterpret_cast<MergePath*>(path);
+		auto* clone = makeNode(MergePath);
+		*clone = *source;
+		clone->jpath.outerjoinpath = per_row_clone_path_to_helper_owner(
+			root, source->jpath.outerjoinpath, owner, identity, applied, invalid);
+		clone->jpath.innerjoinpath = per_row_clone_path_to_helper_owner(
+			root, source->jpath.innerjoinpath, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		clone->jpath.path.pathtarget = per_row_helper_passthrough_target(
+			root, source->jpath.path.pathtarget, identity, invalid);
+		return invalid ? path : reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, HashPath)) {
+		auto* source = reinterpret_cast<HashPath*>(path);
+		auto* clone = makeNode(HashPath);
+		*clone = *source;
+		clone->jpath.outerjoinpath = per_row_clone_path_to_helper_owner(
+			root, source->jpath.outerjoinpath, owner, identity, applied, invalid);
+		clone->jpath.innerjoinpath = per_row_clone_path_to_helper_owner(
+			root, source->jpath.innerjoinpath, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		clone->jpath.path.pathtarget = per_row_helper_passthrough_target(
+			root, source->jpath.path.pathtarget, identity, invalid);
+		return invalid ? path : reinterpret_cast<Path*>(clone);
+	}
+#define BIOSEQ_CLONE_HELPER_UNARY_PATH(PathType, ChildMember)                 \
+	if (IsA(path, PathType)) {                                                  \
+		auto* source = reinterpret_cast<PathType*>(path);                         \
+		Path* child = per_row_clone_path_to_helper_owner(                         \
+			root, source->ChildMember, owner, identity, applied, invalid);         \
+		if (!applied || invalid) return path;                                     \
+		auto* clone = makeNode(PathType);                                         \
+		*clone = *source;                                                        \
+		clone->ChildMember = child;                                               \
+		reinterpret_cast<Path*>(clone)->pathtarget =                              \
+			per_row_helper_passthrough_target(                                     \
+				root, path->pathtarget, identity, invalid);                         \
+		return invalid ? path : reinterpret_cast<Path*>(clone);                  \
+	}
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(ProjectionPath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(ProjectSetPath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(SortPath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(MaterialPath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(MemoizePath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(UniquePath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(GatherPath, subpath)
+	BIOSEQ_CLONE_HELPER_UNARY_PATH(GatherMergePath, subpath)
+#undef BIOSEQ_CLONE_HELPER_UNARY_PATH
+	if (IsA(path, IncrementalSortPath)) {
+		auto* source = reinterpret_cast<IncrementalSortPath*>(path);
+		Path* child = per_row_clone_path_to_helper_owner(
+			root, source->spath.subpath, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		auto* clone = makeNode(IncrementalSortPath);
+		*clone = *source;
+		clone->spath.subpath = child;
+		clone->spath.path.pathtarget = per_row_helper_passthrough_target(
+			root, source->spath.path.pathtarget, identity, invalid);
+		return invalid ? path : reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, AppendPath)) {
+		auto* source = reinterpret_cast<AppendPath*>(path);
+		List* children = per_row_clone_path_list_to_helper_owner(
+			root, source->subpaths, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		auto* clone = makeNode(AppendPath);
+		*clone = *source;
+		clone->subpaths = children;
+		clone->path.pathtarget = per_row_helper_passthrough_target(
+			root, source->path.pathtarget, identity, invalid);
+		return invalid ? path : reinterpret_cast<Path*>(clone);
+	}
+	if (IsA(path, MergeAppendPath)) {
+		auto* source = reinterpret_cast<MergeAppendPath*>(path);
+		List* children = per_row_clone_path_list_to_helper_owner(
+			root, source->subpaths, owner, identity, applied, invalid);
+		if (!applied || invalid) return path;
+		auto* clone = makeNode(MergeAppendPath);
+		*clone = *source;
+		clone->subpaths = children;
+		clone->path.pathtarget = per_row_helper_passthrough_target(
+			root, source->path.pathtarget, identity, invalid);
+		return invalid ? path : reinterpret_cast<Path*>(clone);
+	}
+	return path;
+}
+
+/* A reconstructed transformed owner is deliberately narrower than the
+ * incumbent join relation: helpers owned by the new PerRow node must not leak
+ * into a descendant BioseqScan or an older BatchJoin.  PostgreSQL Path nodes
+ * are shared, so normalize only after slice_project_clone_mutable_path_spine()
+ * has made every supported container private.  Availability is scoped to the
+ * current subtree: a descendant-owned helper is retained at its owner and
+ * above it, but is removed from every child below that owner. */
+struct PerRowBaseHelperOwnerProof {
+	std::size_t matches = 0u;
+	bool invalid_owner_abi = false;
+	bool unsupported_wrapper = false;
+};
+
+[[nodiscard]] static FuncExpr* per_row_helper_identity_function(
+		Node* identity, BioseqStubOids const& oids) noexcept {
+	if (PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity)) {
+		return batch_join_match_helper_phv_function(placeholder, oids);
+	}
+	return batch_join_well_formed_match_helper(identity, oids);
+}
+
+[[nodiscard]] static Node* per_row_base_scan_owner_recipe(
+		CustomPath* custom, bool& invalid) {
+	if (custom == nullptr || custom->methods != &BioseqColumnScanPathMethods) {
+		return nullptr;
+	}
+	Node* recipe = nullptr;
+	for (Node* private_node : PList<Node>(custom->custom_private)) {
+		if (private_node == nullptr || !IsA(private_node, List)) continue;
+		List* tag = reinterpret_cast<List*>(private_node);
+		Node* magic = list_length(tag) >= 1
+			? reinterpret_cast<Node*>(linitial(tag)) : nullptr;
+		if (magic == nullptr || !IsA(magic, Integer)
+			|| intVal(magic) != kBioseqMmsearchOwnerMagic) continue;
+		Node* version = list_length(tag) == 3
+			? reinterpret_cast<Node*>(list_nth(tag, 1)) : nullptr;
+		FuncExpr* mmsearch = list_length(tag) == 3
+			? pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(list_nth(tag, 2))) : nullptr;
+		if (recipe != nullptr || version == nullptr || !IsA(version, Integer)
+			|| intVal(version) != kBioseqMmsearchOwnerVersion
+			|| mmsearch == nullptr
+			|| !is_mmsearch_funcid(mmsearch->funcid, get_cached_stub_oids())
+			|| (list_length(mmsearch->args) != 2
+				&& list_length(mmsearch->args) != 3)
+			|| list_length(custom->custom_restrictinfo) != 1) {
+			invalid = true;
+			return nullptr;
+		}
+		recipe = reinterpret_cast<Node*>(linitial(mmsearch->args));
+		if (recipe == nullptr
+			|| exprType(recipe)
+				!= get_cached_stub_oids().bioseq_seq_type_oid) {
+			invalid = true;
+			return nullptr;
+		}
+	}
+	return recipe;
+}
+
+static void per_row_prove_descendant_base_helper_owner(
+		Path* path, FuncExpr* helper,
+		PerRowBaseHelperOwnerProof& proof) {
+	if (path == nullptr || helper == nullptr || proof.invalid_owner_abi
+		|| proof.unsupported_wrapper) return;
+	check_stack_depth();
+	if (IsA(path, CustomPath)) {
+		auto* custom = reinterpret_cast<CustomPath*>(path);
+		if (custom->methods == &BioseqColumnScanPathMethods) {
+			Node* recipe = per_row_base_scan_owner_recipe(
+				custom, proof.invalid_owner_abi);
+			if (proof.invalid_owner_abi) return;
+			if (recipe != nullptr
+				&& (batch_join_match_helper_names_recipe(helper, recipe)
+					|| batch_join_match_helper_names_base_lineage(
+						helper, recipe, get_cached_stub_oids()))) {
+				++proof.matches;
+			}
+		} else if (custom->methods != &BioseqBatchJoinPathMethods
+			&& custom->methods != &BioseqPerRowJoinPathMethods
+			&& custom->methods != &bioseq_slice_project_path_methods()) {
+			proof.unsupported_wrapper = true;
+			return;
+		}
+		for (Path* child : PList<Path>(custom->custom_paths)) {
+			per_row_prove_descendant_base_helper_owner(child, helper, proof);
+		}
+		return;
+	}
+	auto descend_join = [helper, &proof](JoinPath* join) {
+		if (join == nullptr) return;
+		per_row_prove_descendant_base_helper_owner(
+			join->outerjoinpath, helper, proof);
+		per_row_prove_descendant_base_helper_owner(
+			join->innerjoinpath, helper, proof);
+	};
+	if (IsA(path, NestPath)) {
+		descend_join(&reinterpret_cast<NestPath*>(path)->jpath);
+		return;
+	}
+	if (IsA(path, MergePath)) {
+		descend_join(&reinterpret_cast<MergePath*>(path)->jpath);
+		return;
+	}
+	if (IsA(path, HashPath)) {
+		descend_join(&reinterpret_cast<HashPath*>(path)->jpath);
+		return;
+	}
+	Path* unary = nullptr;
+	if (IsA(path, ProjectionPath)) {
+		unary = reinterpret_cast<ProjectionPath*>(path)->subpath;
+	} else if (IsA(path, ProjectSetPath)) {
+		unary = reinterpret_cast<ProjectSetPath*>(path)->subpath;
+	} else if (IsA(path, SortPath)) {
+		unary = reinterpret_cast<SortPath*>(path)->subpath;
+	} else if (IsA(path, IncrementalSortPath)) {
+		unary = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
+	} else if (IsA(path, MaterialPath)) {
+		unary = reinterpret_cast<MaterialPath*>(path)->subpath;
+	} else if (IsA(path, MemoizePath)) {
+		unary = reinterpret_cast<MemoizePath*>(path)->subpath;
+	} else if (IsA(path, UniquePath)) {
+		unary = reinterpret_cast<UniquePath*>(path)->subpath;
+	} else if (IsA(path, GatherPath)) {
+		unary = reinterpret_cast<GatherPath*>(path)->subpath;
+	} else if (IsA(path, GatherMergePath)) {
+		unary = reinterpret_cast<GatherMergePath*>(path)->subpath;
+	}
+	if (unary != nullptr) {
+		per_row_prove_descendant_base_helper_owner(unary, helper, proof);
+		return;
+	}
+	List* children = NIL;
+	if (IsA(path, AppendPath)) {
+		children = reinterpret_cast<AppendPath*>(path)->subpaths;
+	} else if (IsA(path, MergeAppendPath)) {
+		children = reinterpret_cast<MergeAppendPath*>(path)->subpaths;
+	}
+	if (children != NIL) {
+		for (Path* child : PList<Path>(children)) {
+			per_row_prove_descendant_base_helper_owner(child, helper, proof);
+		}
+		return;
+	}
+	if (path->parent == nullptr
+		|| (path->parent->reloptkind != RELOPT_BASEREL
+			&& path->parent->reloptkind != RELOPT_OTHER_MEMBER_REL)) {
+		proof.unsupported_wrapper = true;
+	}
+}
+
+[[nodiscard]] static bool per_row_collect_available_path_helpers(
+		Path* path, List* candidate_helpers, List* proven_inherited_helpers,
+		List*& available) {
+	available = NIL;
+	if (path == nullptr) return false;
+	BioseqStubOids const& oids = get_cached_stub_oids();
+	for (Node* identity : PList<Node>(candidate_helpers)) {
+		FuncExpr* helper = per_row_helper_identity_function(identity, oids);
+		Node* argument = batch_join_match_helper_argument(helper);
+		if (helper == nullptr || argument == nullptr) return false;
+		bool supplied = false;
+		if (per_row_expression_list_contains(
+				proven_inherited_helpers, identity)) {
+			PerRowDescendantOwnerProof proof{};
+			per_row_prove_descendant_exact_owner(path, argument, proof);
+			if (proof.invalid_owner_abi || proof.unsupported_wrapper
+				|| proof.matches > 1u) return false;
+			if (proof.matches == 1u) {
+				if (proof.owner == nullptr
+					|| proof.owner->path.pathtarget == nullptr
+					|| !path_target_contains_expression(
+						proof.owner->path.pathtarget,
+						reinterpret_cast<Expr*>(identity))) return false;
+				supplied = true;
+			}
+		}
+		PerRowBaseHelperOwnerProof base_proof{};
+		per_row_prove_descendant_base_helper_owner(path, helper, base_proof);
+		if (base_proof.invalid_owner_abi || base_proof.unsupported_wrapper) {
+			return false;
+		}
+		supplied = supplied || base_proof.matches > 0u;
+		if (supplied) available = lappend(available, identity);
+	}
+	return true;
+}
+
+struct PerRowPathHelperAudit {
+	BioseqStubOids const* oids = nullptr;
+	List* available = NIL;
+	bool saw_helper = false;
+	bool unavailable = false;
+};
+
+struct per_row_path_helper_audit_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			PerRowPathHelperAudit& audit) const {
+		if (audit.oids == nullptr) {
+			audit.unavailable = true;
+			return pg_walk_step::stop;
+		}
+		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
+			if (!batch_join_expression_has_match_helper(
+					reinterpret_cast<Node*>(placeholder->phexpr),
+					*audit.oids)) return pg_walk_step::descend;
+			audit.saw_helper = true;
+			if (!per_row_expression_list_contains(
+					audit.available,
+					reinterpret_cast<Node*>(placeholder))) {
+				audit.unavailable = true;
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::skip_subtree;
+		}
+		FuncExpr* function = node.try_as<FuncExpr>();
+		if (function == nullptr
+			|| !is_bioseq_projection_funcid(
+				function->funcid, *audit.oids)) {
+			return pg_walk_step::descend;
+		}
+		audit.saw_helper = true;
+		if (!per_row_expression_list_contains(
+				audit.available, reinterpret_cast<Node*>(function))) {
+			audit.unavailable = true;
+			return pg_walk_step::stop;
+		}
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+[[nodiscard]] static bool per_row_expression_uses_available_helpers(
+		Node* expression, List* available, bool& saw_helper) {
+	PerRowPathHelperAudit audit{
+		&get_cached_stub_oids(), available, false, false};
+	per_row_path_helper_audit_visitor visitor;
+	pg_walk_expression_including_root(expression, audit, visitor);
+	saw_helper = audit.saw_helper;
+	return !audit.unavailable;
+}
+
+[[nodiscard]] static bool per_row_pathkeys_use_available_helpers(
+		Path* scope, List* pathkeys, List* available) {
+	if (pathkeys == NIL) return true;
+	if (scope == nullptr || scope->parent == nullptr) return false;
+	for (PathKey* pathkey : PList<PathKey>(pathkeys)) {
+		if (pathkey == nullptr || pathkey->pk_eclass == nullptr) return false;
+		for (EquivalenceMember* member : PList<EquivalenceMember>(
+				pathkey->pk_eclass->ec_members)) {
+			if (member == nullptr || member->em_expr == nullptr) return false;
+			if (!bms_is_empty(member->em_relids)
+				&& !bms_is_subset(
+					member->em_relids, scope->parent->relids)) continue;
+			bool saw_helper = false;
+			if (!per_row_expression_uses_available_helpers(
+					reinterpret_cast<Node*>(member->em_expr),
+					available, saw_helper)) return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] static bool per_row_path_metadata_has_no_helper(Node* metadata);
+
+[[nodiscard]] static bool per_row_path_metadata_node_is_walkable(
+		const NodeTag tag) noexcept {
+	switch (tag) {
+		case T_Var:
+		case T_Const:
+		case T_Param:
+		case T_CaseTestExpr:
+		case T_SQLValueFunction:
+		case T_CoerceToDomainValue:
+		case T_SetToDefault:
+		case T_CurrentOfExpr:
+		case T_NextValueExpr:
+		case T_RangeTblRef:
+		case T_SortGroupClause:
+		case T_CTESearchClause:
+		case T_MergeSupportFunc:
+		case T_WithCheckOption:
+		case T_Aggref:
+		case T_GroupingFunc:
+		case T_WindowFunc:
+		case T_WindowFuncRunCondition:
+		case T_SubscriptingRef:
+		case T_FuncExpr:
+		case T_NamedArgExpr:
+		case T_OpExpr:
+		case T_DistinctExpr:
+		case T_NullIfExpr:
+		case T_ScalarArrayOpExpr:
+		case T_BoolExpr:
+		case T_SubLink:
+		case T_SubPlan:
+		case T_AlternativeSubPlan:
+		case T_FieldSelect:
+		case T_FieldStore:
+		case T_RelabelType:
+		case T_CoerceViaIO:
+		case T_ArrayCoerceExpr:
+		case T_ConvertRowtypeExpr:
+		case T_CollateExpr:
+		case T_CaseExpr:
+		case T_ArrayExpr:
+		case T_RowExpr:
+		case T_RowCompareExpr:
+		case T_CoalesceExpr:
+		case T_MinMaxExpr:
+		case T_XmlExpr:
+		case T_JsonValueExpr:
+		case T_JsonConstructorExpr:
+		case T_JsonIsPredicate:
+		case T_JsonExpr:
+		case T_JsonBehavior:
+		case T_NullTest:
+		case T_BooleanTest:
+		case T_CoerceToDomain:
+		case T_TargetEntry:
+		case T_Query:
+		case T_WindowClause:
+		case T_CTECycleClause:
+		case T_CommonTableExpr:
+		case T_JsonKeyValue:
+		case T_JsonObjectConstructor:
+		case T_JsonArrayConstructor:
+		case T_JsonArrayQueryConstructor:
+		case T_JsonAggConstructor:
+		case T_JsonObjectAgg:
+		case T_JsonArrayAgg:
+		case T_PartitionBoundSpec:
+		case T_PartitionRangeDatum:
+		case T_FromExpr:
+		case T_OnConflictExpr:
+		case T_MergeAction:
+		case T_PartitionPruneStepOp:
+		case T_PartitionPruneStepCombine:
+		case T_JoinExpr:
+		case T_SetOperationStmt:
+		case T_IndexClause:
+		case T_PlaceHolderVar:
+		case T_InferenceElem:
+		case T_AppendRelInfo:
+		case T_PlaceHolderInfo:
+		case T_RangeTblFunction:
+		case T_TableSampleClause:
+		case T_TableFunc:
+			return true;
+		default:
+			return false;
+	}
+}
+
+[[nodiscard]] static bool per_row_path_metadata_node_is_scalar(
+		const NodeTag tag) noexcept {
+	return tag == T_Integer || tag == T_Float || tag == T_Boolean
+		|| tag == T_String || tag == T_BitString || tag == T_IntList
+		|| tag == T_OidList || tag == T_XidList;
+}
+
+struct PerRowPathMetadataAudit {
+	const BioseqStubOids* oids = nullptr;
+	bool invalid = false;
+};
+
+struct per_row_path_metadata_audit_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			PerRowPathMetadataAudit& audit) const {
+		if (node.tag() == T_List) {
+			if (!per_row_path_metadata_has_no_helper(node.raw())) {
+				audit.invalid = true;
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::skip_subtree;
+		}
+		if (RestrictInfo* restriction = node.try_as<RestrictInfo>()) {
+			if (restriction->clause == nullptr
+				|| !per_row_path_metadata_has_no_helper(
+					reinterpret_cast<Node*>(restriction->clause))
+				|| !per_row_path_metadata_has_no_helper(
+					reinterpret_cast<Node*>(restriction->orclause))) {
+				audit.invalid = true;
+				return pg_walk_step::stop;
+			}
+			return pg_walk_step::skip_subtree;
+		}
+		if (per_row_path_metadata_node_is_scalar(node.tag())) {
+			return pg_walk_step::skip_subtree;
+		}
+		if (!per_row_path_metadata_node_is_walkable(node.tag())) {
+			audit.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (FuncExpr* function = node.try_as<FuncExpr>();
+			function != nullptr
+			&& is_bioseq_projection_funcid(function->funcid, *audit.oids)) {
+			audit.invalid = true;
+			return pg_walk_step::stop;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+[[nodiscard]] static bool per_row_path_metadata_has_no_helper(
+		Node* metadata) {
+	if (metadata == nullptr) return true;
+	check_stack_depth();
+	if (nodeTag(metadata) == T_List) {
+		for (Node* item : PList<Node>(reinterpret_cast<List*>(metadata))) {
+			if (!per_row_path_metadata_has_no_helper(item)) return false;
+		}
+		return true;
+	}
+	if (RestrictInfo* restriction = pg_node_try_as<RestrictInfo>(metadata)) {
+		return restriction->clause != nullptr
+			&& per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(restriction->clause))
+			&& per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(restriction->orclause));
+	}
+	if (per_row_path_metadata_node_is_scalar(nodeTag(metadata))) return true;
+	if (!per_row_path_metadata_node_is_walkable(nodeTag(metadata))) return false;
+	PerRowPathMetadataAudit audit{&get_cached_stub_oids(), false};
+	per_row_path_metadata_audit_visitor visitor;
+	pg_walk_expression_including_root(metadata, audit, visitor);
+	return !audit.invalid;
+}
+
+[[nodiscard]] static bool per_row_restrictinfo_list_has_no_helper(
+		List* restrictions) {
+	for (Node* item : PList<Node>(restrictions)) {
+		RestrictInfo* restriction = pg_node_try_as<RestrictInfo>(item);
+		if (restriction == nullptr || restriction->clause == nullptr
+			|| !per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(restriction->clause))
+			|| !per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(restriction->orclause))) return false;
+	}
+	return true;
+}
+
+/* PathTarget does not record the allocated length of sortgrouprefs.  The
+ * processed targetlist is the authoritative representation whose TLEs carry
+ * their refs inline, so never index a possibly extended/shared PathTarget
+ * array while rebuilding descendant targets.  Support-only expressions that
+ * are absent from the processed targetlist correctly receive ref zero. */
+[[nodiscard]] static bool per_row_authoritative_sortgrouprefs(
+		PlannerInfo* root, List* expressions,
+		std::vector<Index>& results) {
+	results.clear();
+	if (root == nullptr) return false;
+	results.reserve(static_cast<std::size_t>(list_length(expressions)));
+	List* consumed = NIL;
+	for (Node* expression : PList<Node>(expressions)) {
+		if (expression == nullptr) return false;
+		TargetEntry* selected = nullptr;
+		for (TargetEntry* entry : PList<TargetEntry>(root->processed_tlist)) {
+			if (entry == nullptr || entry->expr == nullptr
+				|| list_member_ptr(consumed, entry)
+				|| !equal(entry->expr, expression)) continue;
+			selected = entry;
+			break;
+		}
+		results.push_back(selected == nullptr
+			? 0 : selected->ressortgroupref);
+		if (selected != nullptr) consumed = lappend(consumed, selected);
+	}
+	/* If this PathTarget names an expression group, it must contain enough
+	 * stable occurrences to carry every authoritative nonzero ref in that
+	 * group.  Otherwise choosing which duplicate owns the ref is ambiguous. */
+	for (TargetEntry* entry : PList<TargetEntry>(root->processed_tlist)) {
+		if (entry == nullptr || entry->expr == nullptr
+			|| entry->ressortgroupref == 0
+			|| list_member_ptr(consumed, entry)) continue;
+		if (per_row_expression_list_contains(
+				expressions, reinterpret_cast<Node*>(entry->expr))) return false;
+	}
+	return results.size()
+		== static_cast<std::size_t>(list_length(expressions));
+}
+
+[[nodiscard]] static PathTarget* per_row_normalized_path_target(
+		PlannerInfo* root, Path* path, List* available,
+		List* candidate_helpers, List* required_vars,
+		bool& changed, bool& invalid) {
+	changed = false;
+	if (root == nullptr || path == nullptr || path->parent == nullptr
+		|| path->parent->relids == nullptr || path->pathtarget == nullptr) {
+		invalid = true;
+		return nullptr;
+	}
+	List* expressions = NIL;
+	std::vector<Index> sortgrouprefs;
+	sortgrouprefs.reserve(static_cast<std::size_t>(
+		list_length(path->pathtarget->exprs) + list_length(required_vars)));
+	std::vector<Index> source_sortgrouprefs;
+	if (!per_row_authoritative_sortgrouprefs(
+			root, path->pathtarget->exprs, source_sortgrouprefs)) {
+		invalid = true;
+		return nullptr;
+	}
+	std::size_t source_index = 0u;
+	for (Node* expression : PList<Node>(path->pathtarget->exprs)) {
+		bool saw_helper = false;
+		const bool supported = per_row_expression_uses_available_helpers(
+			expression, available, saw_helper);
+		const Index sortgroupref = source_sortgrouprefs[source_index++];
+		if (!supported) {
+			/* Pathkeys were audited against the actually available helpers
+			 * before target normalization.  A current-owner helper may therefore
+			 * be removed from this private child even when its public TLE carries
+			 * a sortgroupref; the exact outer owner target retains that ref. */
+			bool saw_candidate_helper = false;
+			const bool covered_by_current_owner =
+				per_row_expression_uses_available_helpers(
+					expression, candidate_helpers, saw_candidate_helper);
+			if (!saw_helper || !saw_candidate_helper
+				|| !covered_by_current_owner) {
+				invalid = true;
+				return nullptr;
+			}
+			changed = true;
+			continue;
+		}
+		expressions = lappend(expressions, copyObject(expression));
+		sortgrouprefs.push_back(sortgroupref);
+	}
+	for (Node* expression : PList<Node>(required_vars)) {
+		Var* var = pg_node_try_as<Var>(expression);
+		const bool row_identity = per_row_is_exact_row_identity_var(var);
+		if (var == nullptr || !bioseq_is_concrete_rte_varno(var->varno)
+			|| (var->varattno <= 0 && !row_identity)
+			|| var->varlevelsup != 0
+			|| !bms_is_empty(var->varnullingrels)) {
+			invalid = true;
+			return nullptr;
+		}
+		if (!bms_is_member(
+				static_cast<int>(var->varno), path->parent->relids)
+			|| per_row_expression_list_contains(expressions, expression)) {
+			continue;
+		}
+		expressions = lappend(expressions, copyObject(expression));
+		sortgrouprefs.push_back(0);
+		changed = true;
+	}
+	if (sortgrouprefs.size()
+		!= static_cast<std::size_t>(list_length(expressions))) {
+		invalid = true;
+		return nullptr;
+	}
+	PathTarget* target = create_empty_pathtarget();
+	target->exprs = expressions;
+	const bool has_sortgroupref = std::any_of(
+		sortgrouprefs.begin(), sortgrouprefs.end(),
+		[](Index value) noexcept { return value != 0; });
+	if (has_sortgroupref) {
+		target->sortgrouprefs = static_cast<Index*>(palloc0(
+			sortgrouprefs.size() * sizeof(Index)));
+		for (std::size_t index = 0u; index < sortgrouprefs.size(); ++index) {
+			target->sortgrouprefs[index] = sortgrouprefs[index];
+		}
+	}
+	set_pathtarget_cost_width(root, target);
+	for (Node* expression : PList<Node>(target->exprs)) {
+		bool saw_helper = false;
+		if (!per_row_expression_uses_available_helpers(
+				expression, available, saw_helper)) {
+			invalid = true;
+			return nullptr;
+		}
+	}
+	return target;
+}
+
+[[nodiscard]] static bool per_row_append_targets_are_ordinally_compatible(
+		PathTarget* parent, List* children) {
+	if (parent == nullptr || children == NIL) return false;
+	const int columns = list_length(parent->exprs);
+	for (Path* child : PList<Path>(children)) {
+		if (child == nullptr || child->pathtarget == nullptr
+			|| list_length(child->pathtarget->exprs) != columns) return false;
+		for (int index = 0; index < columns; ++index) {
+			Node* parent_expression = reinterpret_cast<Node*>(list_nth(
+				parent->exprs, index));
+			Node* child_expression = reinterpret_cast<Node*>(list_nth(
+				child->pathtarget->exprs, index));
+			if (parent_expression == nullptr || child_expression == nullptr
+				|| exprType(parent_expression) != exprType(child_expression)
+				|| exprTypmod(parent_expression) != exprTypmod(child_expression)
+				|| exprCollation(parent_expression)
+					!= exprCollation(child_expression)) return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] static bool per_row_authoritative_targets_match(
+		PlannerInfo* root, PathTarget* left, PathTarget* right) {
+	if (root == nullptr || left == nullptr || right == nullptr
+		|| list_length(left->exprs) != list_length(right->exprs)
+		|| !equal(left->exprs, right->exprs)) return false;
+	std::vector<Index> left_sortgrouprefs;
+	std::vector<Index> right_sortgrouprefs;
+	return per_row_authoritative_sortgrouprefs(
+			root, left->exprs, left_sortgrouprefs)
+		&& per_row_authoritative_sortgrouprefs(
+			root, right->exprs, right_sortgrouprefs)
+		&& left_sortgrouprefs == right_sortgrouprefs;
+}
+
+[[nodiscard]] static bool per_row_normalize_private_path_spine(
+		PlannerInfo* root, Path* path, List* candidate_helpers,
+		List* proven_inherited_helpers, List* required_vars) {
+	if (root == nullptr || path == nullptr) return false;
+	check_stack_depth();
+	List* available = NIL;
+	if (!per_row_collect_available_path_helpers(
+			path, candidate_helpers, proven_inherited_helpers, available)
+		|| !per_row_pathkeys_use_available_helpers(
+			path, path->pathkeys, available)
+		|| (path->param_info != nullptr
+			&& !per_row_restrictinfo_list_has_no_helper(
+				path->param_info->ppi_clauses))) {
+		return false;
+	}
+	bool target_changed = false;
+	bool target_invalid = false;
+	PathTarget* normalized_target = per_row_normalized_path_target(
+		root, path, available, candidate_helpers, required_vars,
+		target_changed, target_invalid);
+	if (target_invalid || normalized_target == nullptr) return false;
+
+	if (IsA(path, CustomPath)) {
+		auto* custom = reinterpret_cast<CustomPath*>(path);
+		if (custom->methods != &BioseqColumnScanPathMethods
+			&& custom->methods != &BioseqBatchJoinPathMethods
+			&& custom->methods != &BioseqPerRowJoinPathMethods
+			&& custom->methods != &bioseq_slice_project_path_methods()) {
+			return false;
+		}
+		if (!per_row_restrictinfo_list_has_no_helper(
+				custom->custom_restrictinfo)
+			|| !per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(custom->custom_private))) return false;
+		path->pathtarget = normalized_target;
+		for (Path* child : PList<Path>(custom->custom_paths)) {
+			if (!per_row_normalize_private_path_spine(
+					root, child, candidate_helpers,
+					proven_inherited_helpers, required_vars)) return false;
+		}
+		return true;
+	}
+
+	JoinPath* join = nullptr;
+	if (IsA(path, NestPath)) {
+		join = &reinterpret_cast<NestPath*>(path)->jpath;
+	} else if (IsA(path, MergePath)) {
+		join = &reinterpret_cast<MergePath*>(path)->jpath;
+	} else if (IsA(path, HashPath)) {
+		join = &reinterpret_cast<HashPath*>(path)->jpath;
+	}
+	if (join != nullptr) {
+		if (!per_row_restrictinfo_list_has_no_helper(
+				join->joinrestrictinfo)) return false;
+		if (IsA(path, MergePath)) {
+			auto* merge = reinterpret_cast<MergePath*>(path);
+			List* outer_available = NIL;
+			List* inner_available = NIL;
+			if (!per_row_restrictinfo_list_has_no_helper(
+					merge->path_mergeclauses)
+				|| !per_row_collect_available_path_helpers(
+					join->outerjoinpath, candidate_helpers,
+					proven_inherited_helpers, outer_available)
+				|| !per_row_collect_available_path_helpers(
+					join->innerjoinpath, candidate_helpers,
+					proven_inherited_helpers, inner_available)
+				|| !per_row_pathkeys_use_available_helpers(
+					join->outerjoinpath, merge->outersortkeys,
+					outer_available)
+				|| !per_row_pathkeys_use_available_helpers(
+					join->innerjoinpath, merge->innersortkeys,
+					inner_available)) return false;
+		} else if (IsA(path, HashPath)
+			&& !per_row_restrictinfo_list_has_no_helper(
+				reinterpret_cast<HashPath*>(path)->path_hashclauses)) {
+			return false;
+		}
+		path->pathtarget = normalized_target;
+		return per_row_normalize_private_path_spine(
+				root, join->outerjoinpath, candidate_helpers,
+				proven_inherited_helpers, required_vars)
+			&& per_row_normalize_private_path_spine(
+				root, join->innerjoinpath, candidate_helpers,
+				proven_inherited_helpers, required_vars);
+	}
+
+	Path* unary = nullptr;
+	bool target_preserving = false;
+	if (IsA(path, ProjectionPath)) {
+		auto* projection = reinterpret_cast<ProjectionPath*>(path);
+		unary = projection->subpath;
+		if (target_changed) projection->dummypp = false;
+	} else if (IsA(path, ProjectSetPath)) {
+		unary = reinterpret_cast<ProjectSetPath*>(path)->subpath;
+	} else if (IsA(path, SortPath)) {
+		unary = reinterpret_cast<SortPath*>(path)->subpath;
+		target_preserving = true;
+	} else if (IsA(path, IncrementalSortPath)) {
+		unary = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
+		target_preserving = true;
+	} else if (IsA(path, MaterialPath)) {
+		unary = reinterpret_cast<MaterialPath*>(path)->subpath;
+		target_preserving = true;
+	} else if (IsA(path, MemoizePath)) {
+		auto* memoize = reinterpret_cast<MemoizePath*>(path);
+		if (!per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(memoize->param_exprs))) return false;
+		unary = memoize->subpath;
+		target_preserving = true;
+	} else if (IsA(path, UniquePath)) {
+		auto* unique = reinterpret_cast<UniquePath*>(path);
+		if (!per_row_path_metadata_has_no_helper(
+				reinterpret_cast<Node*>(unique->uniq_exprs))) return false;
+		unary = unique->subpath;
+		target_preserving = true;
+	} else if (IsA(path, GatherPath)) {
+		unary = reinterpret_cast<GatherPath*>(path)->subpath;
+		target_preserving = true;
+	} else if (IsA(path, GatherMergePath)) {
+		unary = reinterpret_cast<GatherMergePath*>(path)->subpath;
+		target_preserving = true;
+	}
+	if (unary != nullptr) {
+		path->pathtarget = normalized_target;
+		if (!per_row_normalize_private_path_spine(
+				root, unary, candidate_helpers,
+				proven_inherited_helpers, required_vars)) return false;
+		return !target_preserving
+			|| per_row_authoritative_targets_match(
+				root, path->pathtarget, unary->pathtarget);
+	}
+
+	List* children = NIL;
+	if (IsA(path, AppendPath)) {
+		children = reinterpret_cast<AppendPath*>(path)->subpaths;
+	} else if (IsA(path, MergeAppendPath)) {
+		children = reinterpret_cast<MergeAppendPath*>(path)->subpaths;
+	}
+	if (children != NIL) {
+		path->pathtarget = normalized_target;
+		for (Path* child : PList<Path>(children)) {
+			if (!per_row_normalize_private_path_spine(
+					root, child, candidate_helpers,
+					proven_inherited_helpers, required_vars)) return false;
+		}
+		return per_row_append_targets_are_ordinally_compatible(
+			path->pathtarget, children);
+	}
+
+	/* Ordinary base scan paths are immutable leaves in the existing COW
+	 * cloner.  They may be shared only when normalization is a no-op; direct
+	 * BioseqScan leaves were handled above and are private CustomPaths. */
+	if (path->parent != nullptr
+		&& (path->parent->reloptkind == RELOPT_BASEREL
+			|| path->parent->reloptkind == RELOPT_OTHER_MEMBER_REL)) {
+		return !target_changed;
+	}
+	return false;
+}
+
+/* SQL cannot deterministically retain each of these core wrapper Path types:
+ * PostgreSQL commonly folds ProjectionPath, chooses Material/Memoize by cost,
+ * and represents SELECT DISTINCT with an upper path rather than UniquePath.
+ * This revoked integration seam constructs their real node types and invokes
+ * the same exact-owner proof and copy-on-write propagation used by transformed
+ * mmsearch planning.  A genuine nested sliced-mmsearch execution in the
+ * acceptance suite separately proves final setrefs/executor helper binding. */
+[[nodiscard]] static CustomPathMethods const&
+match_helper_wrapper_probe_unknown_path_methods() noexcept {
+	static const CustomPathMethods methods{
+		.CustomName = "BioseqMatchHelperWrapperProbeUnknown",
+		.PlanCustomPath = nullptr,
+		.ReparameterizeCustomPathByChild = nullptr,
+	};
+	return methods;
+}
+
+static void match_helper_wrapper_probe_init_path(
+		Path* path, NodeTag plan_tag, RelOptInfo* parent,
+		PathTarget* target) noexcept {
+	Assert(path != nullptr);
+	path->pathtype = plan_tag;
+	path->parent = parent;
+	path->pathtarget = target;
+	path->param_info = nullptr;
+	path->parallel_aware = false;
+	path->parallel_safe = false;
+	path->parallel_workers = 0;
+	path->rows = 1.0;
+	path->startup_cost = 1.0;
+	path->total_cost = 2.0;
+	path->pathkeys = NIL;
+}
+
+[[nodiscard]] static RelOptInfo* match_helper_wrapper_probe_rel(
+		RelOptKind kind, Index relid, Relids relids) {
+	auto* rel = makeNode(RelOptInfo);
+	rel->reloptkind = kind;
+	rel->relid = relid;
+	rel->relids = relids;
+	rel->rows = 1.0;
+	rel->reltarget = create_empty_pathtarget();
+	return rel;
+}
+
+POSTGRES_FN(bioseq_internal_match_helper_wrapper_propagation_probe)
+{
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq match-helper wrapper propagation probe requires a composite result")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	auto* planner_root = makeNode(PlannerInfo);
+	planner_root->parse = makeNode(Query);
+	planner_root->glob = makeNode(PlannerGlobal);
+	planner_root->query_level = 1;
+
+	auto* left_rel = match_helper_wrapper_probe_rel(
+		RELOPT_BASEREL, 1, bms_make_singleton(1));
+	auto* right_rel = match_helper_wrapper_probe_rel(
+		RELOPT_BASEREL, 2, bms_make_singleton(2));
+	auto* sibling_rel = match_helper_wrapper_probe_rel(
+		RELOPT_BASEREL, 3, bms_make_singleton(3));
+	auto* join_rel = match_helper_wrapper_probe_rel(
+		RELOPT_JOINREL, 0,
+		bms_union(bms_make_singleton(1), bms_make_singleton(2)));
+
+	/* Use an actual registered match-result helper as the propagated identity.
+	 * The NULL sequence recipe keeps the standalone cost probe independent of
+	 * a synthetic range table while retaining the exact bioseq.seq type/equality
+	 * contract checked by per_row_known_path_owner_recipe(). */
+	Node* recipe = reinterpret_cast<Node*>(makeNullConst(
+		oids.bioseq_seq_type_oid, -1, InvalidOid));
+	auto* helper = makeFuncExpr(
+		oids.query_len_oid,
+		get_func_rettype(oids.query_len_oid),
+		list_make1(copyObject(recipe)),
+		InvalidOid,
+		InvalidOid,
+		COERCE_EXPLICIT_CALL);
+	Node* helper_identity = reinterpret_cast<Node*>(helper);
+
+	auto* left = makeNode(Path);
+	match_helper_wrapper_probe_init_path(
+		left, T_SeqScan, left_rel, create_empty_pathtarget());
+	auto* right = makeNode(Path);
+	match_helper_wrapper_probe_init_path(
+		right, T_SeqScan, right_rel, create_empty_pathtarget());
+
+	auto* owner = makeNode(CustomPath);
+	match_helper_wrapper_probe_init_path(
+		&owner->path, T_CustomScan, join_rel, create_empty_pathtarget());
+	owner->custom_paths = list_make2(left, right);
+	owner->custom_restrictinfo = NIL;
+	owner->custom_private = list_make5(
+		makeInteger(kBioseqBatchJoinPlanVersion),
+		makeInteger(1),
+		makeInteger(InvalidOid),
+		makeInteger(1),
+		copyObject(recipe));
+	while (list_length(owner->custom_private)
+			< kBioseqBatchJoinPathPrivateFields) {
+		owner->custom_private = lappend(
+			owner->custom_private, makeInteger(0));
+	}
+	owner->methods = &BioseqBatchJoinPathMethods;
+
+	auto* projection = makeNode(ProjectionPath);
+	match_helper_wrapper_probe_init_path(
+		&projection->path, T_Result, join_rel, create_empty_pathtarget());
+	projection->subpath = &owner->path;
+	projection->dummypp = false;
+
+	auto* material = makeNode(MaterialPath);
+	match_helper_wrapper_probe_init_path(
+		&material->path, T_Material, join_rel, create_empty_pathtarget());
+	material->subpath = &projection->path;
+
+	auto* memoize = makeNode(MemoizePath);
+	match_helper_wrapper_probe_init_path(
+		&memoize->path, T_Memoize, join_rel, create_empty_pathtarget());
+	memoize->subpath = &material->path;
+	memoize->hash_operators = NIL;
+	memoize->param_exprs = NIL;
+	memoize->singlerow = false;
+	memoize->binary_mode = false;
+	memoize->calls = 2.0;
+	memoize->est_entries = 1;
+
+	auto* unique = makeNode(UniquePath);
+	match_helper_wrapper_probe_init_path(
+		&unique->path, T_Unique, join_rel, create_empty_pathtarget());
+	unique->subpath = &memoize->path;
+	unique->umethod = UNIQUE_PATH_SORT;
+	unique->in_operators = NIL;
+	unique->uniq_exprs = NIL;
+
+	auto* sibling = makeNode(Path);
+	match_helper_wrapper_probe_init_path(
+		sibling, T_SeqScan, sibling_rel, create_empty_pathtarget());
+	PathTarget* const sibling_target = sibling->pathtarget;
+
+	auto* append = makeNode(AppendPath);
+	match_helper_wrapper_probe_init_path(
+		&append->path, T_Append, join_rel, create_empty_pathtarget());
+	append->subpaths = list_make2(unique, sibling);
+	append->first_partial_path = 2;
+	append->limit_tuples = -1.0;
+
+	PerRowDescendantOwnerProof proof{};
+	per_row_prove_descendant_exact_owner(
+		&append->path, recipe, proof);
+	const bool exact_owner_found = proof.matches == 1u
+		&& proof.owner == owner && !proof.invalid_owner_abi
+		&& !proof.unsupported_wrapper;
+
+	bool applied = false;
+	bool invalid = false;
+	Path* cloned_path = per_row_clone_path_to_helper_owner(
+		planner_root, &append->path, owner, helper_identity, applied, invalid);
+	auto* cloned_append = IsA(cloned_path, AppendPath)
+		? reinterpret_cast<AppendPath*>(cloned_path) : nullptr;
+	Path* cloned_unique_path = cloned_append != nullptr
+		&& list_length(cloned_append->subpaths) == 2
+		? reinterpret_cast<Path*>(linitial(cloned_append->subpaths)) : nullptr;
+	auto* cloned_unique = cloned_unique_path != nullptr
+		&& IsA(cloned_unique_path, UniquePath)
+		? reinterpret_cast<UniquePath*>(cloned_unique_path) : nullptr;
+	auto* cloned_memoize = cloned_unique != nullptr
+		&& IsA(cloned_unique->subpath, MemoizePath)
+		? reinterpret_cast<MemoizePath*>(cloned_unique->subpath) : nullptr;
+	auto* cloned_material = cloned_memoize != nullptr
+		&& IsA(cloned_memoize->subpath, MaterialPath)
+		? reinterpret_cast<MaterialPath*>(cloned_memoize->subpath) : nullptr;
+	auto* cloned_projection = cloned_material != nullptr
+		&& IsA(cloned_material->subpath, ProjectionPath)
+		? reinterpret_cast<ProjectionPath*>(cloned_material->subpath) : nullptr;
+	auto* cloned_owner = cloned_projection != nullptr
+		&& IsA(cloned_projection->subpath, CustomPath)
+		? reinterpret_cast<CustomPath*>(cloned_projection->subpath) : nullptr;
+
+	auto helper_available = [helper_identity](const Path* path) {
+		return path != nullptr && path_target_contains_expression(
+			path->pathtarget, reinterpret_cast<Expr*>(helper_identity));
+	};
+	auto cow_clone = [](const Path* clone, const Path* source) {
+		return clone != nullptr && source != nullptr && clone != source
+			&& clone->pathtarget != source->pathtarget;
+	};
+	const bool clone_applied = applied && !invalid
+		&& cloned_append != nullptr;
+	const bool owner_cloned = cow_clone(
+		cloned_owner == nullptr ? nullptr : &cloned_owner->path,
+		&owner->path);
+	const bool projection_cloned = cow_clone(
+		cloned_projection == nullptr ? nullptr : &cloned_projection->path,
+		&projection->path);
+	const bool material_cloned = cow_clone(
+		cloned_material == nullptr ? nullptr : &cloned_material->path,
+		&material->path);
+	const bool memoize_cloned = cow_clone(
+		cloned_memoize == nullptr ? nullptr : &cloned_memoize->path,
+		&memoize->path);
+	const bool unique_cloned = cow_clone(
+		cloned_unique == nullptr ? nullptr : &cloned_unique->path,
+		&unique->path);
+	const bool append_cloned = cow_clone(
+		cloned_append == nullptr ? nullptr : &cloned_append->path,
+		&append->path);
+	const bool helper_on_owner = helper_available(
+		cloned_owner == nullptr ? nullptr : &cloned_owner->path);
+	const bool helper_on_projection = helper_available(
+		cloned_projection == nullptr ? nullptr : &cloned_projection->path);
+	const bool helper_on_material = helper_available(
+		cloned_material == nullptr ? nullptr : &cloned_material->path);
+	const bool helper_on_memoize = helper_available(
+		cloned_memoize == nullptr ? nullptr : &cloned_memoize->path);
+	const bool helper_on_unique = helper_available(
+		cloned_unique == nullptr ? nullptr : &cloned_unique->path);
+	const bool helper_on_append = helper_available(
+		cloned_append == nullptr ? nullptr : &cloned_append->path);
+	const bool originals_unchanged = !helper_available(&owner->path)
+		&& !helper_available(&projection->path)
+		&& !helper_available(&material->path)
+		&& !helper_available(&memoize->path)
+		&& !helper_available(&unique->path)
+		&& !helper_available(&append->path);
+	Path* cloned_sibling = cloned_append != nullptr
+		&& list_length(cloned_append->subpaths) == 2
+		? reinterpret_cast<Path*>(lsecond(cloned_append->subpaths)) : nullptr;
+	const bool sibling_unchanged = cloned_sibling == sibling
+		&& cloned_sibling->pathtarget == sibling_target
+		&& !helper_available(cloned_sibling);
+
+	/* Equal recipes owned by two distinct nodes are ambiguous; an unknown
+	 * CustomPath is an opaque evaluation frontier.  Both must fail closed. */
+	auto* second_owner = makeNode(CustomPath);
+	*second_owner = *owner;
+	second_owner->path.pathtarget = create_empty_pathtarget();
+	second_owner->custom_private = static_cast<List*>(
+		copyObject(owner->custom_private));
+	auto* duplicate_append = makeNode(AppendPath);
+	match_helper_wrapper_probe_init_path(
+		&duplicate_append->path, T_Append, join_rel,
+		create_empty_pathtarget());
+	duplicate_append->subpaths = list_make2(owner, second_owner);
+	duplicate_append->first_partial_path = 2;
+	duplicate_append->limit_tuples = -1.0;
+	PerRowDescendantOwnerProof duplicate_proof{};
+	per_row_prove_descendant_exact_owner(
+		&duplicate_append->path, recipe, duplicate_proof);
+	const bool duplicate_owner_rejected = duplicate_proof.matches == 2u
+		&& !duplicate_proof.invalid_owner_abi
+		&& !duplicate_proof.unsupported_wrapper;
+
+	auto* unknown = makeNode(CustomPath);
+	match_helper_wrapper_probe_init_path(
+		&unknown->path, T_CustomScan, join_rel, create_empty_pathtarget());
+	unknown->custom_paths = list_make1(owner);
+	unknown->methods = &match_helper_wrapper_probe_unknown_path_methods();
+	PerRowDescendantOwnerProof unknown_proof{};
+	per_row_prove_descendant_exact_owner(
+		&unknown->path, recipe, unknown_proof);
+	const bool unknown_wrapper_rejected = unknown_proof.matches == 0u
+		&& unknown_proof.unsupported_wrapper
+		&& !unknown_proof.invalid_owner_abi;
+
+	Datum values[18] = {
+		BoolGetDatum(exact_owner_found),
+		BoolGetDatum(clone_applied),
+		BoolGetDatum(owner_cloned),
+		BoolGetDatum(projection_cloned),
+		BoolGetDatum(material_cloned),
+		BoolGetDatum(memoize_cloned),
+		BoolGetDatum(unique_cloned),
+		BoolGetDatum(append_cloned),
+		BoolGetDatum(helper_on_owner),
+		BoolGetDatum(helper_on_projection),
+		BoolGetDatum(helper_on_material),
+		BoolGetDatum(helper_on_memoize),
+		BoolGetDatum(helper_on_unique),
+		BoolGetDatum(helper_on_append),
+		BoolGetDatum(originals_unchanged),
+		BoolGetDatum(sibling_unchanged),
+		BoolGetDatum(duplicate_owner_rejected),
+		BoolGetDatum(unknown_wrapper_rejected),
+	};
+	bool nulls[18]{};
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
 
 struct PerRowReconstructionRejects {
@@ -8468,13 +10485,7 @@ static void per_row_record_path_identity(
 
 [[nodiscard]] static bool per_row_decline_transformed_path(
 		const char* stage) {
-#ifdef BIOSEQ_TEST_INDEXES
-	ereport(NOTICE,
-		(errmsg_internal("DOC0377 transformed owner admission declined"),
-		 errdetail_internal("stage=%s", stage)));
-#else
 	(void)stage;
-#endif
 	return false;
 }
 
@@ -8553,7 +10564,7 @@ static void per_row_record_path_identity(
 	}
 	if (!per_row_output_semantics_are_supported(
 			joinrel->reltarget, target_source->varno,
-			joinrel->relids)) {
+			joinrel->relids, target_expression)) {
 		return per_row_decline_transformed_path("output_semantics");
 	}
 	for (Var* source : PList<Var>(query_sources.sequence_vars)) {
@@ -8570,14 +10581,20 @@ static void per_row_record_path_identity(
 	}
 	PerRowOwnerSupportProof owner_support{};
 	if (!per_row_collect_owner_support(
-			root, joinrel, target_source->varno, owner_support)) {
+			root, joinrel, target_source->varno,
+			target_expression, owner_support)) {
 		return per_row_decline_transformed_path("owner_support");
 	}
-
 	PathTarget* required_target = create_empty_pathtarget();
 	List* required_vars = NIL;
 	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
 		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	List* owner_setrefs_carrier_vars = NIL;
+	if (!per_row_collect_setrefs_carrier_vars(
+			target_expression, owner_support.helper_argument_vars,
+			joinrel->relids, owner_setrefs_carrier_vars)) {
+		return per_row_decline_transformed_path("setrefs_carrier_vars");
+	}
 	for (Node* expression : PList<Node>(joinrel->reltarget->exprs)) {
 		required_vars = list_concat(required_vars,
 			pull_var_clause(expression, pull_flags));
@@ -8588,8 +10605,8 @@ static void per_row_record_path_identity(
 			pull_var_clause(
 				reinterpret_cast<Node*>(residual->clause), pull_flags));
 	}
-	required_vars = list_concat(required_vars,
-		pull_var_clause(target_expression, pull_flags));
+	required_vars = list_concat(
+		required_vars, list_copy(owner_setrefs_carrier_vars));
 	required_vars = list_concat(required_vars,
 		pull_var_clause(query_expression, pull_flags));
 	required_vars = list_concat(
@@ -8608,16 +10625,15 @@ static void per_row_record_path_identity(
 	}
 	add_new_columns_to_pathtarget(required_target, required_vars);
 	set_pathtarget_cost_width(root, required_target);
-	PathTarget* owner_target = copy_pathtarget(joinrel->reltarget);
-	add_new_columns_to_pathtarget(
-		owner_target, owner_support.passthrough_vars);
-	for (Node* helper : PList<Node>(owner_support.helper_identities)) {
-		if (!path_target_contains_expression(
-				owner_target, reinterpret_cast<Expr*>(helper))) {
-			add_column_to_pathtarget(
-				owner_target,
-				reinterpret_cast<Expr*>(copyObject(helper)), 0);
-		}
+	PathTarget* owner_target = per_row_build_owner_target(
+		root, joinrel->reltarget);
+	if (owner_target == nullptr) {
+		return per_row_decline_transformed_path("owner_target_authority");
+	}
+	if (!equal(owner_target->exprs, joinrel->reltarget->exprs)
+		|| list_length(owner_target->exprs)
+			!= list_length(joinrel->reltarget->exprs)) {
+		return per_row_decline_transformed_path("owner_target_widened");
 	}
 	set_pathtarget_cost_width(root, owner_target);
 
@@ -8674,9 +10690,63 @@ static void per_row_record_path_identity(
 		}
 	}
 	for (Path* incumbent : PList<Path>(incumbent_paths)) {
+		Path* helper_ready_incumbent = incumbent;
+		PathTarget* incumbent_required_target = copy_pathtarget(required_target);
+		List* proven_inherited_helpers = NIL;
+		bool helper_provenance_invalid = false;
+		for (Node* identity : PList<Node>(owner_support.helper_identities)) {
+			FuncExpr* helper = nullptr;
+			if (PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(
+					identity)) {
+				helper = batch_join_match_helper_phv_function(
+					placeholder, oids);
+			} else {
+				helper = batch_join_well_formed_match_helper(identity, oids);
+			}
+			Node* argument = batch_join_match_helper_argument(helper);
+			if (helper == nullptr || argument == nullptr) {
+				helper_provenance_invalid = true;
+				break;
+			}
+			PerRowDescendantOwnerProof proof{};
+			per_row_prove_descendant_exact_owner(
+				helper_ready_incumbent, argument, proof);
+			const bool foreign_exact = per_row_expression_list_contains(
+				owner_support.foreign_exact_helper_identities, identity);
+			if (proof.invalid_owner_abi || proof.unsupported_wrapper
+				|| proof.matches > 1u
+				|| (foreign_exact && proof.matches != 1u)) {
+				helper_provenance_invalid = true;
+				break;
+			}
+			if (proof.matches == 0u) continue;
+			bool applied = false;
+			bool propagation_invalid = false;
+			helper_ready_incumbent = per_row_clone_path_to_helper_owner(
+				root, helper_ready_incumbent, proof.owner, identity,
+				applied, propagation_invalid);
+			if (!applied || propagation_invalid) {
+				helper_provenance_invalid = true;
+				break;
+			}
+			if (!path_target_contains_expression(
+					incumbent_required_target,
+					reinterpret_cast<Expr*>(identity))) {
+				add_column_to_pathtarget(
+					incumbent_required_target,
+					reinterpret_cast<Expr*>(copyObject(identity)), 0);
+			}
+			per_row_append_unique_expression(
+				proven_inherited_helpers, identity);
+		}
+		if (helper_provenance_invalid) {
+			++reconstruction_rejects.projection_or_leak;
+			continue;
+		}
+		set_pathtarget_cost_width(root, incumbent_required_target);
 		Path* reconstructed = per_row_reconstruct_inner_join_path(
-			root, joinrel, incumbent, restriction, *extra,
-			required_target, required_vars, target_source->varno,
+			root, joinrel, helper_ready_incumbent, restriction, *extra,
+			incumbent_required_target, required_vars, target_source->varno,
 			reconstruction_rejects);
 		if (reconstructed == nullptr) continue;
 		/* Re-run the exact pointer audit on the finished reconstructed path,
@@ -8686,11 +10756,39 @@ static void per_row_record_path_identity(
 				reconstructed, restriction)) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("BioseqPerRowMmsearch reconstructed path retained its owned RestrictInfo")));
+					 errmsg("BioseqPerRowMmsearch reconstructed path retained its owned RestrictInfo")));
+		}
+		for (Node* identity : PList<Node>(proven_inherited_helpers)) {
+			FuncExpr* helper = pg_node_try_as<PlaceHolderVar>(identity) != nullptr
+				? batch_join_match_helper_phv_function(
+					pg_node_try_as<PlaceHolderVar>(identity), oids)
+				: batch_join_well_formed_match_helper(identity, oids);
+			PerRowDescendantOwnerProof proof{};
+			per_row_prove_descendant_exact_owner(
+				reconstructed, batch_join_match_helper_argument(helper), proof);
+			if (proof.invalid_owner_abi || proof.unsupported_wrapper
+				|| proof.matches != 1u || proof.owner == nullptr
+				|| proof.owner->path.pathtarget == nullptr
+				|| !path_target_contains_expression(
+					proof.owner->path.pathtarget,
+					reinterpret_cast<Expr*>(identity))) {
+				helper_provenance_invalid = true;
+				break;
+			}
+		}
+		if (helper_provenance_invalid) {
+			++reconstruction_rejects.projection_or_leak;
+			continue;
 		}
 		Path* private_join = slice_project_clone_mutable_path_spine(reconstructed);
 		++reconstruction_rejects.cloned;
-		private_join->pathtarget = copy_pathtarget(required_target);
+		if (!per_row_normalize_private_path_spine(
+				root, private_join, owner_support.helper_identities,
+				proven_inherited_helpers, required_vars)) {
+			++reconstruction_rejects.projection_or_leak;
+			continue;
+		}
+		private_join->pathtarget = copy_pathtarget(incumbent_required_target);
 		bool tagged_source = false;
 		private_join = slice_project_tag_owned_path_tree(
 			private_join, builder, tagged_source);
@@ -8699,23 +10797,34 @@ static void per_row_record_path_identity(
 			continue;
 		}
 		Path* source_path = reinterpret_cast<Path*>(create_projection_path(
-			root, joinrel, private_join, required_target));
+			root, joinrel, private_join, incumbent_required_target));
 		if (source_path == nullptr) {
 			++reconstruction_rejects.source_projection_missing;
 			continue;
 		}
 
+		PathTarget* incumbent_recipe_target = copy_pathtarget(recipe_target);
+		for (Node* identity : PList<Node>(proven_inherited_helpers)) {
+			if (!path_target_contains_expression(
+					incumbent_recipe_target,
+					reinterpret_cast<Expr*>(identity))) {
+				add_column_to_pathtarget(
+					incumbent_recipe_target,
+					reinterpret_cast<Expr*>(copyObject(identity)), 0);
+			}
+		}
+		set_pathtarget_cost_width(root, incumbent_recipe_target);
 		auto* recipe_path = makeNode(CustomPath);
 		recipe_path->path.pathtype = T_CustomScan;
 		recipe_path->path.parent = joinrel;
-		recipe_path->path.pathtarget = copy_pathtarget(recipe_target);
+		recipe_path->path.pathtarget = incumbent_recipe_target;
 		recipe_path->path.param_info = source_path->param_info;
 		recipe_path->path.parallel_aware = false;
 		recipe_path->path.parallel_safe = false;
 		recipe_path->path.parallel_workers = 0;
 		recipe_path->path.rows = source_path->rows;
 		QualCost recipe_cost{};
-		cost_qual_eval(&recipe_cost, recipe_target->exprs, root);
+		cost_qual_eval(&recipe_cost, incumbent_recipe_target->exprs, root);
 		recipe_path->path.startup_cost = source_path->startup_cost
 			+ recipe_cost.startup;
 		recipe_path->path.total_cost = source_path->total_cost
@@ -8810,33 +10919,6 @@ static void per_row_record_path_identity(
 		++reconstruction_rejects.owners_created;
 	}
 	if (owners.empty()) {
-#ifdef BIOSEQ_TEST_INDEXES
-		ereport(NOTICE,
-			(errmsg_internal(
-				"DOC0377 transformed owner reconstruction declined"),
-			 errdetail_internal(
-				"incumbents=%zu unsupported_path=%zu invalid_join=%zu missing_owned_identity=%zu replacement_missing=%zu projection_or_leak=%zu new_external_parameter=%zu unusable_algorithm_clause=%zu reconstructed=%zu cloned=%zu tag_missing=%zu source_projection_missing=%zu nonfinite_cost=%zu owners_created=%zu incumbent_tag=%d incumbent_custom=%s outer_tag=%d outer_custom=%s inner_tag=%d inner_custom=%s",
-				reconstruction_rejects.incumbents,
-				reconstruction_rejects.unsupported_path,
-				reconstruction_rejects.invalid_join,
-				reconstruction_rejects.missing_owned_identity,
-				reconstruction_rejects.replacement_missing,
-				reconstruction_rejects.projection_or_leak,
-				reconstruction_rejects.new_external_parameter,
-				reconstruction_rejects.unusable_algorithm_clause,
-				reconstruction_rejects.reconstructed,
-				reconstruction_rejects.cloned,
-				reconstruction_rejects.tag_missing,
-				reconstruction_rejects.source_projection_missing,
-				reconstruction_rejects.nonfinite_cost,
-				reconstruction_rejects.owners_created,
-				reconstruction_rejects.last_incumbent_tag,
-				reconstruction_rejects.last_incumbent_custom_name,
-				reconstruction_rejects.last_outer_tag,
-				reconstruction_rejects.last_outer_custom_name,
-				reconstruction_rejects.last_inner_tag,
-				reconstruction_rejects.last_inner_custom_name)));
-#endif
 		return false;
 	}
 	PList<Path> retained;
@@ -8865,11 +10947,7 @@ BioseqBatchJoinSetJoinPathlistHook(
 			root, joinrel, outerrel, innerrel, jointype, extra);
 	}
 	if (root == nullptr || joinrel == nullptr || outerrel == nullptr
-		|| innerrel == nullptr || extra == nullptr || jointype != JOIN_INNER
-		|| (outerrel->reloptkind != RELOPT_BASEREL
-			&& outerrel->reloptkind != RELOPT_OTHER_MEMBER_REL)
-		|| (innerrel->reloptkind != RELOPT_BASEREL
-			&& innerrel->reloptkind != RELOPT_OTHER_MEMBER_REL)) {
+		|| innerrel == nullptr || extra == nullptr || jointype != JOIN_INNER) {
 		return;
 	}
 	// shared_preload_libraries installs this hook cluster-wide. Databases that
@@ -8955,12 +11033,39 @@ BioseqBatchJoinSetJoinPathlistHook(
 	const bool transformed_operands =
 		bioseq_expr_uses_lazy_sequence_projection(arguments.first())
 		|| bioseq_expr_uses_lazy_sequence_projection(arguments.second());
+	auto is_base_input = [](RelOptInfo const* input) noexcept {
+		return input != nullptr
+			&& (input->reloptkind == RELOPT_BASEREL
+				|| input->reloptkind == RELOPT_OTHER_MEMBER_REL);
+	};
+	auto is_join_input = [](RelOptInfo const* input) noexcept {
+		return input != nullptr && input->reloptkind == RELOPT_JOINREL;
+	};
+	const bool two_base_inputs =
+		is_base_input(outerrel) && is_base_input(innerrel);
+	const bool one_join_one_base =
+		(is_join_input(outerrel) && is_base_input(innerrel))
+		|| (is_base_input(outerrel) && is_join_input(innerrel));
 	if (transformed_operands) {
+		/* A transformed owner may sit above one already-owned join frontier.
+		 * This is the bounded same-PlannerInfo form used when two matches share
+		 * one SQL-visible base.  Raw BatchJoin remains strictly two-baserel
+		 * below.  Reject wider/partition-derived join kinds and prove that this
+		 * hook invocation describes exactly the output relids before reconstructing
+		 * an incumbent path. */
+		if (!two_base_inputs && !one_join_one_base) return;
+		Relids input_relids = bms_union(
+			outerrel->relids, innerrel->relids);
+		const bool exact_frontier =
+			bms_equal(input_relids, joinrel->relids);
+		bms_free(input_relids);
+		if (!exact_frontier) return;
 		(void)per_row_add_transformed_mmsearch_paths(
 			root, joinrel, extra, restriction, mmsearch,
 			batch_mmsearch, planned_requirement, oids);
 		return;
 	}
+	if (!two_base_inputs) return;
 	if (target_var == nullptr || query_var == nullptr
 		|| !bioseq_is_concrete_rte_varno(target_var->varno)
 		|| !bioseq_is_concrete_rte_varno(query_var->varno)
@@ -10363,7 +12468,7 @@ AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 		{
 			bioseq_log_pg(DEBUG1, "bioseq.min_parallel_proceses is set higher than max_parallel_workers.");
 			bioseq_log_pg(DEBUG1, "Using max_parallel_workers instead for parallel columnar scan.");
-			bioseq_min_parallel_process_running = 
+			bioseq_min_parallel_process_running =
 				std::min(max_parallel_workers, bioseq_min_parallel_processes);
 		}
 
@@ -10386,14 +12491,14 @@ AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 			bioseq_min_parallel_process_running = bioseq_min_parallel_processes;
 		}
 
-		if (force_parallel || (rel->consider_parallel && rel->lateral_relids == NULL && 
+		if (force_parallel || (rel->consider_parallel && rel->lateral_relids == NULL &&
 			bioseq_min_parallel_process_running > 0))
 		{
 			bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPathsRec() add_partial_path for parallel scan");
 			/*
 			 * Passing NULL for JOIN quals in parallel execution.
 			 */
-			Path *parallelBioseqColumnScanPath = 
+			Path *parallelBioseqColumnScanPath =
 				AddBioseqColumnScanPath(root, rel, rte, NULL);
 
 			if (parallelBioseqColumnScanPath->parallel_safe) {
@@ -10832,7 +12937,7 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
  * number of parallel workers (based on postgres code).
  */
 static void
-AdjustBioseqColumnParallelScanCost(Path *path) 
+AdjustBioseqColumnParallelScanCost(Path *path)
 {
 	/* Adjust costing for parallelism, if used. */
 	if (path->parallel_workers > 0)
@@ -10951,6 +13056,118 @@ BioseqColumnTableStripeCount(Oid relationId)
 	RelationClose(relation);
 
 	return stripeCount;
+}
+
+struct BaseMatchHelperRegistration {
+	const BioseqStubOids* oids = nullptr;
+	Var* target_recipe = nullptr;
+	AttrNumber current_resno = InvalidAttrNumber;
+	List* sites = NIL;
+	bool invalid = false;
+};
+
+[[nodiscard]] static bool base_match_helper_site_already_registered(
+		List* sites, FuncExpr* helper) noexcept {
+	if (helper == nullptr) return false;
+	Node* argument = batch_join_match_helper_argument(helper);
+	for (List* encoded : PList<List>(sites)) {
+		if (encoded == nullptr || !IsA(encoded, List)
+			|| list_length(encoded) != kBioseqMatchHelperSiteFields) continue;
+		Node* funcid_node = reinterpret_cast<Node*>(list_nth(
+			encoded, kMatchSiteFuncid));
+		Node* encoded_argument = reinterpret_cast<Node*>(list_nth(
+			encoded, kMatchSiteCanonicalArgument));
+		if (funcid_node != nullptr && IsA(funcid_node, Integer)
+			&& static_cast<Oid>(intVal(funcid_node)) == helper->funcid
+			&& encoded_argument != nullptr && argument != nullptr
+			&& equal(encoded_argument, argument)) return true;
+	}
+	return false;
+}
+
+struct base_match_helper_registration_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			BaseMatchHelperRegistration& registration) const {
+		FuncExpr* function = node.try_as<FuncExpr>();
+		if (function == nullptr || registration.oids == nullptr
+			|| !is_bioseq_projection_funcid(
+				function->funcid, *registration.oids)) {
+			return pg_walk_step::descend;
+		}
+		FuncExpr* helper = batch_join_well_formed_match_helper(
+			reinterpret_cast<Node*>(function), *registration.oids);
+		if (helper == nullptr || registration.target_recipe == nullptr) {
+			registration.invalid = true;
+			return pg_walk_step::stop;
+		}
+		const bool names_recipe = batch_join_match_helper_names_recipe(
+			helper, reinterpret_cast<Node*>(registration.target_recipe));
+		const bool names_lineage = batch_join_match_helper_names_base_lineage(
+			helper, reinterpret_cast<Node*>(registration.target_recipe),
+			*registration.oids);
+		/* A base owner may claim only its exact sequence column or a legacy
+		 * row marker from the same query-local alias.  A transformed expression
+		 * or another sequence column must remain executable so its actual owner
+		 * can bind it, or the scalar stub can fail closed. */
+		if (!names_recipe && !names_lineage) {
+			return pg_walk_step::skip_subtree;
+		}
+		if (!edit_sequence_argument_matches_target(
+				helper, registration.target_recipe->varno,
+				registration.target_recipe->varattno,
+				*registration.oids)) {
+			registration.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (base_match_helper_site_already_registered(
+				registration.sites, helper)) {
+			return pg_walk_step::skip_subtree;
+		}
+		const Oid result_type = exprType(reinterpret_cast<Node*>(helper));
+		if (!OidIsValid(result_type)
+			|| result_type != helper->funcresulttype
+			|| result_type != get_func_rettype(helper->funcid)
+			|| registration.current_resno <= 0) {
+			registration.invalid = true;
+			return pg_walk_step::stop;
+		}
+		List* encoded = list_make5(
+			makeInteger(registration.current_resno),
+			makeInteger(static_cast<int>(helper->funcid)),
+			makeInteger(exprTypmod(reinterpret_cast<Node*>(helper))),
+			makeInteger(static_cast<int>(
+				exprCollation(reinterpret_cast<Node*>(helper)))),
+			makeInteger(static_cast<int>(
+				BioseqMatchHelperBindingKind::unresolved)));
+		encoded = lappend(encoded, copyObject(
+			batch_join_match_helper_argument(helper)));
+		encoded = lappend(encoded, makeInteger(0));
+		encoded = lappend(encoded, makeInteger(0));
+		registration.sites = lappend(registration.sites, encoded);
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+[[nodiscard]] static List* collect_base_match_helper_sites(
+		List* targetlist, Var* target_recipe,
+		const BioseqStubOids& oids) {
+	BaseMatchHelperRegistration registration{
+		&oids, target_recipe, InvalidAttrNumber, NIL, false};
+	base_match_helper_registration_visitor visitor;
+	for (TargetEntry* entry : PList<TargetEntry>(targetlist)) {
+		if (entry == nullptr || entry->expr == nullptr) continue;
+		registration.current_resno = entry->resno;
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(entry->expr), registration, visitor);
+		if (registration.invalid) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+				 errmsg("BioseqScan match helper identity is invalid"),
+				 errhint("Use the exact mmsearch target sequence column or a row marker from the same table alias.")));
+		}
+	}
+	return registration.sites;
 }
 
 
@@ -11117,6 +13334,55 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
+	if (owned_mmsearch_expr != nullptr) {
+		Node* target_node = list_length(owned_mmsearch_expr->args) >= 1
+			? reinterpret_cast<Node*>(linitial(owned_mmsearch_expr->args))
+			: nullptr;
+		Var* target_recipe = pg_node_try_as<Var>(target_node);
+		RangeTblEntry* owner_rte = root != nullptr && root->parse != nullptr
+			&& bioseq_is_concrete_rte_varno(cscan->scan.scanrelid)
+			&& cscan->scan.scanrelid <= static_cast<Index>(
+				list_length(root->parse->rtable))
+			? rt_fetch(cscan->scan.scanrelid, root->parse->rtable)
+			: nullptr;
+		const BioseqStubOids& owner_oids = get_cached_stub_oids();
+		if (target_recipe == nullptr
+			|| target_recipe->varno != cscan->scan.scanrelid
+			|| target_recipe->varattno <= 0
+			|| target_recipe->varlevelsup != 0
+			|| !bms_is_empty(target_recipe->varnullingrels)
+			|| target_recipe->vartype != owner_oids.bioseq_seq_type_oid
+			|| owner_rte == nullptr || owner_rte->rtekind != RTE_RELATION
+			|| !OidIsValid(owner_rte->relid)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqScan match owner target identity is invalid")));
+		}
+		List* descriptor = list_make5(
+			makeInteger(kBioseqMatchOwnerDescriptorMagic),
+			makeInteger(kBioseqMatchOwnerDescriptorVersion),
+			makeInteger(0),
+			copyObject(target_recipe),
+			list_make1(copyObject(target_recipe)));
+		descriptor = lappend(descriptor,
+			makeInteger(static_cast<int>(target_recipe->varno)));
+		List* sites = collect_base_match_helper_sites(
+			cscan->scan.plan.targetlist, target_recipe, owner_oids);
+		List* owner_tag = list_make5(
+			makeInteger(kBioseqBaseMatchOwnerPlanMagic),
+			makeInteger(kBioseqBaseMatchOwnerPlanVersion),
+			descriptor,
+			sites,
+			makeInteger(static_cast<int>(owner_rte->relid)));
+		/* The planner-scope descriptor/sites above deliberately retain their
+		 * query-local pre-setrefs Vars for ambiguity resolution.  The finalizer
+		 * fills these two executor-only fields from post-setrefs custom_exprs and
+		 * scan targetlist identities once Plan.plan_node_id is stable. */
+		owner_tag = lappend(owner_tag, NIL);
+		owner_tag = lappend(owner_tag, NIL);
+		Assert(list_length(owner_tag) == kBioseqBaseMatchOwnerPlanFields);
+		cscan->custom_private = lappend(cscan->custom_private, owner_tag);
+	}
 	for (Node* tag_node : PList<Node>(best_path->custom_private)) {
 		if (tag_node != nullptr && IsA(tag_node, List)) {
 			List* source_tag = reinterpret_cast<List*>(tag_node);
@@ -11153,7 +13419,7 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	}
 
 	/*
-	 * Vectorized QUAL execution. Split QUAL list into vectorized list 
+	 * Vectorized QUAL execution. Split QUAL list into vectorized list
 	 * stored in third position of custom_exprs list and rest of
 	 * qual list (which can't be vectorized) in scan.plan.qual.
 	 */
@@ -11193,14 +13459,90 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	return reinterpret_cast<Plan *>(cscan);
 }
 
+struct MatchLineageVarKey {
+	Index varno = 0;
+	AttrNumber attno = InvalidAttrNumber;
+	Index level = 0;
+	int32 typmod = -1;
+	Oid collation = InvalidOid;
+	Var* value = nullptr;
+};
+
+[[nodiscard]] static List* canonical_match_base_lineage(
+		Node* target_recipe, const BioseqStubOids& oids) {
+	if (target_recipe == nullptr) return NIL;
+	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	List* variables = pull_var_clause(target_recipe, pull_flags);
+	std::vector<MatchLineageVarKey> lineage;
+	for (Var* variable : PList<Var>(variables)) {
+		if (variable == nullptr
+			|| variable->vartype != oids.bioseq_seq_type_oid
+			|| !bioseq_is_concrete_rte_varno(variable->varno)
+			|| variable->varattno <= 0 || variable->varlevelsup != 0
+			|| !bms_is_empty(variable->varnullingrels)) continue;
+		bool duplicate = false;
+		for (const MatchLineageVarKey& existing : lineage) {
+			if (equal(existing.value, variable)) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (!duplicate) {
+			lineage.push_back(MatchLineageVarKey{
+				variable->varno, variable->varattno,
+				variable->varlevelsup, variable->vartypmod,
+				variable->varcollid, variable});
+		}
+	}
+	std::sort(lineage.begin(), lineage.end(),
+		[](const MatchLineageVarKey& left,
+				const MatchLineageVarKey& right) noexcept {
+			if (left.varno != right.varno) return left.varno < right.varno;
+			if (left.attno != right.attno) return left.attno < right.attno;
+			if (left.level != right.level) return left.level < right.level;
+			if (left.typmod != right.typmod) return left.typmod < right.typmod;
+			return left.collation < right.collation;
+		});
+	List* result = NIL;
+	for (const MatchLineageVarKey& entry : lineage) {
+		result = lappend(result, copyObject(entry.value));
+	}
+	return result;
+}
+
+[[nodiscard]] static List* make_match_owner_descriptor(
+		Node* target_recipe, const Index legacy_target_relid,
+		const BioseqStubOids& oids) {
+	if (target_recipe == nullptr
+		|| !bioseq_is_concrete_rte_varno(legacy_target_relid)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq match owner descriptor input is invalid")));
+	}
+	List* descriptor = list_make5(
+		makeInteger(kBioseqMatchOwnerDescriptorMagic),
+		makeInteger(kBioseqMatchOwnerDescriptorVersion),
+		makeInteger(0),
+		copyObject(target_recipe),
+		canonical_match_base_lineage(target_recipe, oids));
+	return lappend(
+		descriptor, makeInteger(static_cast<int>(legacy_target_relid)));
+}
+
 struct BatchJoinPlaceholderRegistration {
 	const BioseqStubOids* oids = nullptr;
 	Index target_relid = 0;
 	AttrNumber target_sequence_attno = InvalidAttrNumber;
+	Node* target_recipe = nullptr;
 	List** combined_tlist = nullptr;
 	List** encoded_sites = nullptr;
 	bool invalid = false;
 	bool edit_sequence_mismatch = false;
+	/* Helper identities already supplied as MatchResult columns by a proven
+	 * descendant BioseqBatchJoin.  An outer owner may pass these through, but
+	 * must neither execute their SQL stubs nor relabel them as its own sites. */
+	List* inherited_helper_identities = NIL;
 };
 
 [[nodiscard]] static bool batch_join_expression_has_match_helper(
@@ -11215,9 +13557,83 @@ struct BatchJoinPlaceholderRegistration {
 	return detector.flags.any_match_projection;
 }
 
+/* Multiple output expressions can contain the same current-owner helper, and
+ * PlanCustomPath may append the same whole identity as a resjunk carrier.
+ * One exact identity/phid pair is one MatchResult slot.  Reuse that slot while
+ * keeping PHV and bare FuncExpr identities distinct. */
+[[nodiscard]] static AttrNumber batch_join_find_same_owner_placeholder_site(
+		Node* identity, FuncExpr* function, const Index phid,
+		BatchJoinPlaceholderRegistration& registration) {
+	if (identity == nullptr || function == nullptr
+		|| registration.combined_tlist == nullptr
+		|| registration.encoded_sites == nullptr) {
+		registration.invalid = true;
+		return InvalidAttrNumber;
+	}
+	AttrNumber result = InvalidAttrNumber;
+	for (Node* encoded_node : PList<Node>(*registration.encoded_sites)) {
+		if (encoded_node == nullptr || !IsA(encoded_node, List)) {
+			registration.invalid = true;
+			return InvalidAttrNumber;
+		}
+		List* encoded = reinterpret_cast<List*>(encoded_node);
+		if (list_length(encoded) != kBioseqMatchHelperSiteFields) {
+			registration.invalid = true;
+			return InvalidAttrNumber;
+		}
+		auto integer_field = [encoded](const int index) -> Integer* {
+			Node* node = reinterpret_cast<Node*>(list_nth(encoded, index));
+			return node != nullptr && IsA(node, Integer)
+				? reinterpret_cast<Integer*>(node) : nullptr;
+		};
+		Integer* resno_node = integer_field(kMatchSiteResno);
+		Integer* funcid_node = integer_field(kMatchSiteFuncid);
+		Integer* typmod_node = integer_field(kMatchSiteTypmod);
+		Integer* collation_node = integer_field(kMatchSiteCollation);
+		Integer* binding_node = integer_field(kMatchSiteBindingKind);
+		Integer* phid_node = integer_field(kMatchSitePhid);
+		Integer* stable_id_node = integer_field(kMatchSiteStableId);
+		Node* argument = reinterpret_cast<Node*>(list_nth(
+			encoded, kMatchSiteCanonicalArgument));
+		if (resno_node == nullptr || funcid_node == nullptr
+			|| typmod_node == nullptr || collation_node == nullptr
+			|| binding_node == nullptr || phid_node == nullptr
+			|| stable_id_node == nullptr || argument == nullptr) {
+			registration.invalid = true;
+			return InvalidAttrNumber;
+		}
+		const int encoded_resno = intVal(resno_node);
+		TargetEntry* supplied = encoded_resno <= 0
+			|| encoded_resno > list_length(*registration.combined_tlist)
+			? nullptr : reinterpret_cast<TargetEntry*>(list_nth(
+				*registration.combined_tlist, encoded_resno - 1));
+		if (supplied == nullptr || supplied->resno != encoded_resno) {
+			registration.invalid = true;
+			return InvalidAttrNumber;
+		}
+		if (!equal(supplied->expr, identity)
+			|| static_cast<Index>(intVal(phid_node)) != phid) continue;
+		if (result != InvalidAttrNumber
+			|| static_cast<Oid>(intVal(funcid_node)) != function->funcid
+			|| intVal(typmod_node) != exprTypmod(identity)
+			|| static_cast<Oid>(intVal(collation_node))
+				!= exprCollation(identity)
+			|| intVal(binding_node) != static_cast<int>(
+				BioseqMatchHelperBindingKind::unresolved)
+			|| !equal(argument, batch_join_match_helper_argument(function))
+			|| intVal(stable_id_node) != 0) {
+			registration.invalid = true;
+			return InvalidAttrNumber;
+		}
+		result = static_cast<AttrNumber>(encoded_resno);
+	}
+	return result;
+}
+
 static void batch_join_register_placeholder_site(
 		Node* identity,
 		FuncExpr* function,
+		const Index phid,
 		BatchJoinPlaceholderRegistration& registration) {
 	if (identity == nullptr || function == nullptr
 		|| registration.combined_tlist == nullptr
@@ -11234,6 +13650,9 @@ static void batch_join_register_placeholder_site(
 		registration.invalid = true;
 		return;
 	}
+	const AttrNumber existing = batch_join_find_same_owner_placeholder_site(
+		identity, function, phid, registration);
+	if (registration.invalid || existing != InvalidAttrNumber) return;
 	const AttrNumber resno = static_cast<AttrNumber>(
 		list_length(*registration.combined_tlist) + 1);
 	/* PostgreSQL fixes a parent Result/Projection before recursing into this
@@ -11251,13 +13670,165 @@ static void batch_join_register_placeholder_site(
 		false);
 	*registration.combined_tlist = lappend(
 		*registration.combined_tlist, scan_entry);
+	List* encoded = list_make5(
+		makeInteger(resno),
+		makeInteger(static_cast<int>(function->funcid)),
+		makeInteger(typmod),
+		makeInteger(static_cast<int>(collation)),
+		makeInteger(static_cast<int>(
+			BioseqMatchHelperBindingKind::unresolved)));
+	encoded = lappend(encoded, copyObject(
+		batch_join_match_helper_argument(function)));
+	encoded = lappend(encoded, makeInteger(static_cast<int>(phid)));
+	encoded = lappend(encoded, makeInteger(0));
 	*registration.encoded_sites = lappend(
-		*registration.encoded_sites,
-		list_make4(
-			makeInteger(resno),
-			makeInteger(static_cast<int>(function->funcid)),
-			makeInteger(typmod),
-			makeInteger(static_cast<int>(collation))));
+		*registration.encoded_sites, encoded);
+}
+
+[[nodiscard]] static bool batch_join_identity_list_contains(
+		List* identities, Node* identity) noexcept {
+	if (identity == nullptr) return false;
+	for (Node* inherited : PList<Node>(identities)) {
+		if (inherited != nullptr && equal(inherited, identity)) return true;
+	}
+	return false;
+}
+
+[[nodiscard]] static bool batch_join_identity_is_inherited(
+		BatchJoinPlaceholderRegistration const& registration,
+		Node* identity) noexcept {
+	return batch_join_identity_list_contains(
+		registration.inherited_helper_identities, identity);
+}
+
+[[nodiscard]] static List* find_base_match_owner_plan_tag(
+	CustomScan* scan);
+
+/* Decode only finalized-plan-independent placeholder ownership.  The stable
+ * id is deliberately still zero here: this proof runs in PlanCustomPath,
+ * before the top-level planner hook assigns final plan_node_id bindings. */
+[[nodiscard]] static bool batch_join_scan_owns_helper_identity(
+		CustomScan* scan, Node* identity) noexcept {
+	if (scan == nullptr || identity == nullptr || scan->methods == nullptr) {
+		return false;
+	}
+	Node* sites_node = nullptr;
+	List* supplied_tlist = NIL;
+	if (scan->methods->CustomName != nullptr
+		&& strcmp(scan->methods->CustomName, "BioseqBatchJoin") == 0
+		&& scan->custom_private != NIL) {
+		Node* version_node = reinterpret_cast<Node*>(
+			linitial(scan->custom_private));
+		if (version_node == nullptr || !IsA(version_node, Integer)) return false;
+		const int version = intVal(version_node);
+		const int sites_index = version == kBioseqBatchJoinPlanVersion
+			? kBatchJoinPlaceholderSites
+			: (version == kBioseqPerRowJoinPlanVersion
+				? kPerRowPlaceholderSites : -1);
+		if (sites_index < 0
+			|| sites_index >= list_length(scan->custom_private)) return false;
+		sites_node = reinterpret_cast<Node*>(list_nth(
+			scan->custom_private, sites_index));
+		supplied_tlist = scan->custom_scan_tlist;
+	} else if (scan->methods == &BioseqColumnScanScanMethods) {
+		List* owner_tag = find_base_match_owner_plan_tag(scan);
+		if (owner_tag == NIL) return false;
+		sites_node = reinterpret_cast<Node*>(list_nth(
+			owner_tag, kBaseMatchPlanSites));
+		supplied_tlist = scan->scan.plan.targetlist;
+	} else {
+		return false;
+	}
+	if (sites_node == nullptr) return false;
+	if (!IsA(sites_node, List)) return false;
+	for (List* encoded : PList<List>(reinterpret_cast<List*>(sites_node))) {
+		if (encoded == nullptr || !IsA(encoded, List)
+			|| list_length(encoded) != kBioseqMatchHelperSiteFields) continue;
+		Node* resno_node = reinterpret_cast<Node*>(list_nth(
+			encoded, kMatchSiteResno));
+		if (resno_node == nullptr || !IsA(resno_node, Integer)) continue;
+		const int resno = intVal(resno_node);
+		TargetEntry* supplied = resno <= 0
+			|| resno > list_length(supplied_tlist)
+			? nullptr : reinterpret_cast<TargetEntry*>(list_nth(
+				supplied_tlist, resno - 1));
+		if (supplied != nullptr && supplied->resno == resno
+			&& equal(supplied->expr, identity)) return true;
+	}
+	return false;
+}
+
+[[nodiscard]] static bool batch_join_descendant_owns_helper_identity(
+		Plan* plan, Node* identity) {
+	if (plan == nullptr || identity == nullptr) return false;
+	check_stack_depth();
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		if (batch_join_scan_owns_helper_identity(custom, identity)) return true;
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			if (batch_join_descendant_owns_helper_identity(child, identity)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	auto search_plan_list = [identity](List* plans) {
+		for (Plan* child : PList<Plan>(plans)) {
+			if (batch_join_descendant_owns_helper_identity(child, identity)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	if (IsA(plan, Append)) {
+		return search_plan_list(
+			reinterpret_cast<Append*>(plan)->appendplans);
+	}
+	if (IsA(plan, MergeAppend)) {
+		return search_plan_list(
+			reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+	}
+	if (IsA(plan, BitmapAnd)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, BitmapOr)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, SubqueryScan)) {
+		/* A SubqueryScan starts a distinct helper-binding scope.  Equal local
+		 * expression spelling below it is not provenance for this owner. */
+		return false;
+	}
+	return batch_join_descendant_owns_helper_identity(
+			outerPlan(plan), identity)
+		|| (innerPlan(plan) != outerPlan(plan)
+			&& batch_join_descendant_owns_helper_identity(
+				innerPlan(plan), identity));
+}
+
+[[nodiscard]] static List* batch_join_proven_inherited_helper_identities(
+		Plan* child_plan, const BioseqStubOids& oids) {
+	List* result = NIL;
+	if (child_plan == nullptr) return result;
+	for (TargetEntry* entry : PList<TargetEntry>(child_plan->targetlist)) {
+		Node* identity = entry == nullptr
+			? nullptr : reinterpret_cast<Node*>(entry->expr);
+		if (identity == nullptr
+			|| !batch_join_expression_has_match_helper(identity, oids)
+			|| !batch_join_descendant_owns_helper_identity(
+				child_plan, identity)) continue;
+		bool duplicate = false;
+		for (Node* existing : PList<Node>(result)) {
+			if (equal(existing, identity)) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (!duplicate) result = lappend(result, copyObject(identity));
+	}
+	return result;
 }
 
 struct batch_join_placeholder_registration_visitor {
@@ -11266,11 +13837,29 @@ struct batch_join_placeholder_registration_visitor {
 		pg_node_view node,
 		BatchJoinPlaceholderRegistration& registration) const {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
-			FuncExpr* helper = batch_join_exact_helper_phv_function(
-				placeholder, registration.target_relid);
+			FuncExpr* helper = registration.oids == nullptr ? nullptr
+				: batch_join_match_helper_phv_function(
+					placeholder, *registration.oids);
 			if (helper != nullptr) {
-				if (!edit_sequence_argument_matches_target(
+				if (batch_join_identity_is_inherited(
+						registration,
+						reinterpret_cast<Node*>(placeholder))) {
+					return pg_walk_step::skip_subtree;
+				}
+				const bool names_recipe =
+					batch_join_match_helper_names_recipe(
+						helper, registration.target_recipe);
+				const bool legacy_lineage =
+					batch_join_match_helper_names_base_lineage(
+						helper, registration.target_recipe,
+						*registration.oids);
+				if (!names_recipe && !legacy_lineage) {
+					registration.invalid = true;
+					return pg_walk_step::stop;
+				}
+				if (!edit_sequence_argument_matches_recipe(
 						helper,
+						registration.target_recipe,
 						registration.target_relid,
 						registration.target_sequence_attno,
 						*registration.oids)) {
@@ -11279,22 +13868,10 @@ struct batch_join_placeholder_registration_visitor {
 					return pg_walk_step::stop;
 				}
 				batch_join_register_placeholder_site(
-					reinterpret_cast<Node*>(placeholder), helper, registration);
+					reinterpret_cast<Node*>(placeholder), helper,
+					placeholder->phid, registration);
 				return registration.invalid
 					? pg_walk_step::stop : pg_walk_step::skip_subtree;
-			}
-			FuncExpr* wrapped_helper = pg_node_try_as<FuncExpr>(
-				reinterpret_cast<Node*>(placeholder->phexpr));
-			if (registration.oids != nullptr
-				&& wrapped_helper != nullptr
-				&& !edit_sequence_argument_matches_target(
-					wrapped_helper,
-					registration.target_relid,
-					registration.target_sequence_attno,
-					*registration.oids)) {
-				registration.invalid = true;
-				registration.edit_sequence_mismatch = true;
-				return pg_walk_step::stop;
 			}
 			/* A generic PHV containing a helper has evaluation/nulling semantics
 			 * that this join cannot reproduce.  Do not descend and accidentally
@@ -11312,8 +13889,25 @@ struct batch_join_placeholder_registration_visitor {
 			if (registration.oids != nullptr
 				&& is_bioseq_projection_funcid(
 					function->funcid, *registration.oids)) {
-				if (!edit_sequence_argument_matches_target(
+				if (batch_join_identity_is_inherited(
+						registration,
+						reinterpret_cast<Node*>(function))) {
+					return pg_walk_step::skip_subtree;
+				}
+				const bool names_recipe =
+					batch_join_match_helper_names_recipe(
+						function, registration.target_recipe);
+				const bool legacy_lineage =
+					batch_join_match_helper_names_base_lineage(
+						function, registration.target_recipe,
+						*registration.oids);
+				if (!names_recipe && !legacy_lineage) {
+					registration.invalid = true;
+					return pg_walk_step::stop;
+				}
+				if (!edit_sequence_argument_matches_recipe(
 						function,
+						registration.target_recipe,
 						registration.target_relid,
 						registration.target_sequence_attno,
 						*registration.oids)) {
@@ -11321,14 +13915,9 @@ struct batch_join_placeholder_registration_visitor {
 					registration.edit_sequence_mismatch = true;
 					return pg_walk_step::stop;
 				}
-				FuncExpr* exact = batch_join_exact_target_helper(
-					reinterpret_cast<Node*>(function), registration.target_relid);
-				if (exact == nullptr) {
-					registration.invalid = true;
-					return pg_walk_step::stop;
-				}
 				batch_join_register_placeholder_site(
-					reinterpret_cast<Node*>(function), exact, registration);
+					reinterpret_cast<Node*>(function), function,
+					0, registration);
 				return registration.invalid
 					? pg_walk_step::stop : pg_walk_step::skip_subtree;
 			}
@@ -11340,14 +13929,25 @@ struct batch_join_placeholder_registration_visitor {
 struct BatchJoinOutputSetrefsRewrite {
 	List* scan_tlist = NIL;
 	const BioseqStubOids* oids = nullptr;
+	AttrNumber current_site_first_resno = 1;
+	List* inherited_helper_identities = NIL;
 	bool invalid = false;
 };
 
 [[nodiscard]] static TargetEntry* batch_join_find_exact_scan_entry(
-		List* scan_tlist, const Node* expression) noexcept {
+		List* scan_tlist, const Node* expression,
+		const AttrNumber minimum_resno = 1,
+		const AttrNumber maximum_resno = MaxAttrNumber) noexcept {
 	if (expression == nullptr) return nullptr;
-	for (TargetEntry* entry : PList<TargetEntry>(scan_tlist)) {
-		if (entry != nullptr && equal(entry->expr, expression)) return entry;
+	/* New sites are appended after inherited child columns.  Search backwards
+	 * within the caller's proven range so an outer owner binds the site it just
+	 * registered, never the first equal identity inherited from a descendant. */
+	for (int index = list_length(scan_tlist) - 1; index >= 0; --index) {
+		TargetEntry* entry = reinterpret_cast<TargetEntry*>(
+			list_nth(scan_tlist, index));
+		if (entry != nullptr && entry->resno >= minimum_resno
+			&& entry->resno <= maximum_resno
+			&& equal(entry->expr, expression)) return entry;
 	}
 	return nullptr;
 }
@@ -11417,8 +14017,16 @@ struct batch_join_output_setrefs_rewrite_mutator {
 		}
 		if (!helper_identity) return pg_node_mutation::descend();
 
-		TargetEntry* entry = batch_join_find_exact_scan_entry(
-			rewrite.scan_tlist, node.raw());
+		const bool inherited = batch_join_identity_list_contains(
+			rewrite.inherited_helper_identities, node.raw());
+		TargetEntry* entry = inherited
+			? batch_join_find_exact_scan_entry(
+				rewrite.scan_tlist, node.raw(), 1,
+				static_cast<AttrNumber>(
+					rewrite.current_site_first_resno - 1))
+			: batch_join_find_exact_scan_entry(
+				rewrite.scan_tlist, node.raw(),
+				rewrite.current_site_first_resno);
 		if (entry == nullptr || entry->resno <= 0) {
 			rewrite.invalid = true;
 			return pg_node_mutation::with(
@@ -11431,8 +14039,12 @@ struct batch_join_output_setrefs_rewrite_mutator {
 
 [[nodiscard]] static Expr* batch_join_rewrite_output_for_setrefs(
 		Expr* expression, List* scan_tlist,
-		const BioseqStubOids& oids) {
-	BatchJoinOutputSetrefsRewrite rewrite{scan_tlist, &oids, false};
+		const BioseqStubOids& oids,
+		const AttrNumber current_site_first_resno,
+		List* inherited_helper_identities) {
+	BatchJoinOutputSetrefsRewrite rewrite{
+		scan_tlist, &oids, current_site_first_resno,
+		inherited_helper_identities, false};
 	batch_join_output_setrefs_rewrite_mutator mutator;
 	Expr* result = reinterpret_cast<Expr*>(pg_mutate_expression(
 		reinterpret_cast<Node*>(expression), rewrite, mutator));
@@ -11747,6 +14359,8 @@ BioseqBatchJoin_PlanCustomPath(
 	}
 	const int query_column_count =
 		list_length(combined_tlist) - target_column_count;
+	const AttrNumber current_site_first_resno = static_cast<AttrNumber>(
+		list_length(combined_tlist) + 1);
 
 	List* placeholder_sites = NIL;
 	List* output_tlist = NIL;
@@ -11759,10 +14373,12 @@ BioseqBatchJoin_PlanCustomPath(
 			&oids,
 			target_var->varno,
 			target_storage_seq_attno,
+			reinterpret_cast<Node*>(target_var),
 			&combined_tlist,
 			&placeholder_sites,
 			false,
-			false};
+			false,
+			NIL};
 		batch_join_placeholder_registration_visitor visitor;
 		pg_walk_expression_including_root(
 			reinterpret_cast<Node*>(copied->expr), registration, visitor);
@@ -11779,7 +14395,8 @@ BioseqBatchJoin_PlanCustomPath(
 					"only exact target-owned FuncExpr or PlaceHolderVar helper sites are supported")));
 		}
 		copied->expr = batch_join_rewrite_output_for_setrefs(
-			copied->expr, combined_tlist, oids);
+			copied->expr, combined_tlist, oids,
+			current_site_first_resno, NIL);
 		output_tlist = lappend(output_tlist, copied);
 	}
 	validate_batch_join_setrefs_coverage(
@@ -11885,6 +14502,10 @@ BioseqBatchJoin_PlanCustomPath(
 	cscan->custom_private = lappend(
 		cscan->custom_private,
 		make_batch_join_cost_const(incumbent_cost_floor));
+	cscan->custom_private = lappend(
+		cscan->custom_private,
+		make_match_owner_descriptor(
+			reinterpret_cast<Node*>(target_var), target_var->varno, oids));
 	Assert(list_length(cscan->custom_private) == kBioseqBatchJoinPrivateFields);
 	return reinterpret_cast<Plan*>(cscan);
 }
@@ -11976,7 +14597,7 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 	}
 	PerRowMmsearchPlanAudit child_audit{};
 	per_row_audit_mmsearch_plan(
-		child_plan, child_audit, get_cached_stub_oids());
+		child_plan, child_audit, get_cached_stub_oids(), mmsearch);
 	if (!child_audit.clean()) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
@@ -11987,6 +14608,22 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 				child_audit.vector_qual_copies,
 				child_audit.storage_qual_copies,
 				child_audit.descendant_owner_copies)));
+	}
+	PerRowOwnerSupportProof plan_owner_support{};
+	if (!per_row_collect_owner_support(
+			root, rel, target_varno, target_expression,
+			plan_owner_support)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch plan owner support is invalid")));
+	}
+	List* setrefs_carrier_vars = NIL;
+	if (!per_row_collect_setrefs_carrier_vars(
+			target_expression, plan_owner_support.helper_argument_vars,
+			rel->relids, setrefs_carrier_vars)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch setrefs carriers are invalid")));
 	}
 	const AttrNumber target_resno = find_plan_tlist_expression_resno(
 		child_plan->targetlist, target_expression);
@@ -12000,6 +14637,140 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 				static_cast<int>(target_resno),
 				static_cast<int>(query_resno))));
 	}
+	/* required_target promised each raw carrier below SliceProject.  Validate
+	 * that contract before taking the child scan-tuple snapshot, then add only
+	 * missing owner outputs as resjunk.  The public owner target remains at its
+	 * construction-time join shape: helper identities and deferred passthrough
+	 * Vars are plan-only support, added after core can no longer replace the
+	 * path's sortgroupref storage. */
+	/* build_path_tlist replaces lateral Vars with PARAM_EXEC nodes.  The exact
+	 * no-widening proof belongs to path construction; here validate only the
+	 * callback target's ordinal and SQL type shape. */
+	bool callback_target_consistent = best_path->path.pathtarget != nullptr
+		&& list_length(tlist)
+			== list_length(best_path->path.pathtarget->exprs);
+	int callback_target_index = 0;
+	for (TargetEntry* entry : PList<TargetEntry>(tlist)) {
+		Node* actual = entry == nullptr
+			? nullptr : reinterpret_cast<Node*>(entry->expr);
+		Node* expected = !callback_target_consistent
+			? nullptr : reinterpret_cast<Node*>(list_nth(
+				best_path->path.pathtarget->exprs, callback_target_index));
+		if (actual == nullptr || expected == nullptr
+			|| entry->resno != callback_target_index + 1
+			|| exprType(actual) != exprType(expected)
+			|| exprTypmod(actual) != exprTypmod(expected)
+			|| exprCollation(actual) != exprCollation(expected)) {
+			callback_target_consistent = false;
+			break;
+		}
+		++callback_target_index;
+	}
+	if (!callback_target_consistent) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqPerRowMmsearch callback target is inconsistent")));
+	}
+	List* requested_tlist = list_copy(tlist);
+	List* plan_only_passthrough_support = NIL;
+	List* plan_only_helper_support = NIL;
+	struct PerRowPlanOnlyHelperBinding {
+		AttrNumber output_resno = InvalidAttrNumber;
+		AttrNumber site_resno = InvalidAttrNumber;
+		Node* identity = nullptr;
+	};
+	std::vector<PerRowPlanOnlyHelperBinding> plan_only_helper_bindings;
+	List* inherited_helper_identities =
+		batch_join_proven_inherited_helper_identities(child_plan, oids);
+	for (Node* identity : PList<Node>(plan_owner_support.helper_identities)) {
+		if (!batch_join_descendant_owns_helper_identity(
+				child_plan, identity)) continue;
+		const bool exposed_by_child = find_plan_tlist_expression_resno(
+			child_plan->targetlist, identity) > 0;
+		const bool classified_inherited = batch_join_identity_list_contains(
+			inherited_helper_identities, identity);
+		FuncExpr* helper = per_row_helper_identity_function(identity, oids);
+		const bool names_recipe = helper != nullptr
+			&& batch_join_match_helper_names_recipe(
+				helper, target_expression);
+		const bool legacy_lineage = helper != nullptr
+			&& batch_join_match_helper_names_base_lineage(
+				helper, target_expression, oids);
+		/* A helper that names only the shared base lineage deliberately belongs
+		 * to both this transformed owner and the proven descendant base owner.
+		 * Register the current site and let finalized semantic binding reject the
+		 * two candidates with 42702.  Exact-recipe carrier loss is corruption. */
+		const bool deliberate_lineage_ambiguity = legacy_lineage
+			&& !names_recipe;
+		if ((!exposed_by_child || !classified_inherited)
+			&& !deliberate_lineage_ambiguity) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqPerRowMmsearch descendant helper carrier was dropped"),
+				 errdetail("node_type=%d exposed=%s inherited=%s exact_recipe=%s legacy_lineage=%s",
+					static_cast<int>(nodeTag(identity)),
+					exposed_by_child ? "true" : "false",
+					classified_inherited ? "true" : "false",
+					names_recipe ? "true" : "false",
+					legacy_lineage ? "true" : "false")));
+		}
+	}
+	for (Node* support : PList<Node>(plan_owner_support.passthrough_vars)) {
+		if (find_plan_tlist_expression_resno(
+				requested_tlist, support) > 0) continue;
+		requested_tlist = lappend(requested_tlist, makeTargetEntry(
+			reinterpret_cast<Expr*>(copyObject(support)),
+			static_cast<AttrNumber>(list_length(requested_tlist) + 1),
+			nullptr, /*resjunk=*/true));
+		per_row_append_unique_expression(
+			plan_only_passthrough_support, support);
+	}
+	for (Node* support : PList<Node>(plan_owner_support.helper_identities)) {
+		if (batch_join_identity_list_contains(
+				inherited_helper_identities, support)) continue;
+		if (find_plan_tlist_expression_resno(
+				requested_tlist, support) > 0) continue;
+		requested_tlist = lappend(requested_tlist, makeTargetEntry(
+			reinterpret_cast<Expr*>(copyObject(support)),
+			static_cast<AttrNumber>(list_length(requested_tlist) + 1),
+			nullptr, /*resjunk=*/true));
+		per_row_append_unique_expression(plan_only_helper_support, support);
+	}
+	for (Node* identity : PList<Node>(plan_owner_support.helper_identities)) {
+		if (batch_join_identity_list_contains(
+				inherited_helper_identities, identity)) continue;
+		if (find_plan_tlist_expression_resno(
+				requested_tlist, identity) <= 0) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqPerRowMmsearch plan-only helper was lost")));
+		}
+	}
+	List* hidden_setrefs_carriers = NIL;
+	for (Node* carrier : PList<Node>(setrefs_carrier_vars)) {
+		if (find_plan_tlist_expression_resno(
+				child_plan->targetlist, carrier) <= 0) {
+			Var* var = pg_node_try_as<Var>(carrier);
+			if (var == nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqPerRowMmsearch setrefs carrier is not a Var")));
+			}
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch child setrefs carrier is missing"),
+				 errdetail("varno=%u attno=%d", var->varno, var->varattno)));
+		}
+		if (find_plan_tlist_expression_resno(requested_tlist, carrier) > 0) {
+			continue;
+		}
+		requested_tlist = lappend(requested_tlist, makeTargetEntry(
+			reinterpret_cast<Expr*>(copyObject(carrier)),
+			static_cast<AttrNumber>(list_length(requested_tlist) + 1),
+			nullptr, /*resjunk=*/true));
+		per_row_append_unique_expression(
+			hidden_setrefs_carriers, carrier);
+	}
 	List* combined_tlist = NIL;
 	for (TargetEntry* source : PList<TargetEntry>(child_plan->targetlist)) {
 		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(source));
@@ -12007,14 +14778,25 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		combined_tlist = lappend(combined_tlist, copied);
 	}
 	const int child_column_count = list_length(combined_tlist);
+	const AttrNumber current_site_first_resno = static_cast<AttrNumber>(
+		child_column_count + 1);
 	List* placeholder_sites = NIL;
 	List* output_tlist = NIL;
-	for (TargetEntry* output : PList<TargetEntry>(tlist)) {
+	for (TargetEntry* output : PList<TargetEntry>(requested_tlist)) {
 		if (output == nullptr) continue;
 		TargetEntry* copied = static_cast<TargetEntry*>(copyObject(output));
+		Node* plan_only_helper_identity = nullptr;
+		for (Node* identity : PList<Node>(plan_only_helper_support)) {
+			if (equal(copied->expr, identity)) {
+				plan_only_helper_identity = identity;
+				break;
+			}
+		}
+		const int site_count_before = list_length(placeholder_sites);
 		BatchJoinPlaceholderRegistration registration{
-			&oids, target_varno, target_storage_attno,
-			&combined_tlist, &placeholder_sites, false, false};
+			&oids, target_varno, target_storage_attno, target_expression,
+			&combined_tlist, &placeholder_sites, false, false,
+			inherited_helper_identities};
 		batch_join_placeholder_registration_visitor visitor;
 		pg_walk_expression_including_root(
 			reinterpret_cast<Node*>(copied->expr), registration, visitor);
@@ -12028,9 +14810,108 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqPerRowMmsearch match helper identity is invalid")));
 		}
+		if (plan_only_helper_identity != nullptr) {
+			FuncExpr* helper = per_row_helper_identity_function(
+				plan_only_helper_identity, oids);
+			PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(
+				plan_only_helper_identity);
+			const Index phid = placeholder == nullptr ? 0 : placeholder->phid;
+			const int site_count_after = list_length(placeholder_sites);
+			const AttrNumber site_resno = helper == nullptr
+				? InvalidAttrNumber
+				: batch_join_find_same_owner_placeholder_site(
+					plan_only_helper_identity, helper, phid, registration);
+			TargetEntry* site_entry = site_resno < current_site_first_resno
+				|| site_resno > list_length(combined_tlist)
+				? nullptr : reinterpret_cast<TargetEntry*>(list_nth(
+					combined_tlist, site_resno - 1));
+			if (registration.invalid || site_count_after < site_count_before
+				|| site_count_after > site_count_before + 1
+				|| site_resno == InvalidAttrNumber
+				|| site_entry == nullptr || site_entry->resno != site_resno
+				|| !equal(site_entry->expr, plan_only_helper_identity)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqPerRowMmsearch plan-only helper site identity is invalid"),
+					 errdetail("sites_before=%d sites_after=%d",
+						site_count_before, site_count_after)));
+			}
+			plan_only_helper_bindings.push_back({
+				copied->resno, site_resno, plan_only_helper_identity});
+		}
 		copied->expr = batch_join_rewrite_output_for_setrefs(
-			copied->expr, combined_tlist, oids);
+			copied->expr, combined_tlist, oids,
+			current_site_first_resno,
+			inherited_helper_identities);
 		output_tlist = lappend(output_tlist, copied);
+	}
+	for (Node* carrier : PList<Node>(hidden_setrefs_carriers)) {
+		bool found_resjunk = false;
+		for (TargetEntry* output : PList<TargetEntry>(output_tlist)) {
+			if (output != nullptr && output->resjunk
+				&& equal(output->expr, carrier)) {
+				found_resjunk = true;
+				break;
+			}
+		}
+		if (!found_resjunk) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqPerRowMmsearch hidden setrefs carrier was lost")));
+		}
+	}
+	for (Node* support : PList<Node>(plan_only_passthrough_support)) {
+		bool found_resjunk = false;
+		for (TargetEntry* output : PList<TargetEntry>(output_tlist)) {
+			if (output != nullptr && output->resjunk
+				&& equal(output->expr, support)) {
+				found_resjunk = true;
+				break;
+			}
+		}
+		if (!found_resjunk) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqPerRowMmsearch plan-only passthrough was lost")));
+		}
+	}
+	for (const PerRowPlanOnlyHelperBinding& binding
+			: plan_only_helper_bindings) {
+		TargetEntry* output_entry = nullptr;
+		for (TargetEntry* candidate : PList<TargetEntry>(output_tlist)) {
+			if (candidate != nullptr
+				&& candidate->resno == binding.output_resno) {
+				output_entry = candidate;
+				break;
+			}
+		}
+		TargetEntry* site_entry = binding.site_resno <= 0
+			|| binding.site_resno > list_length(combined_tlist)
+			? nullptr : reinterpret_cast<TargetEntry*>(list_nth(
+				combined_tlist, binding.site_resno - 1));
+		Var* output_slot = output_entry == nullptr
+			? nullptr : pg_node_try_as<Var>(
+				reinterpret_cast<Node*>(output_entry->expr));
+		const bool output_binds_site = output_entry != nullptr
+			&& (equal(output_entry->expr, binding.identity)
+				|| (output_slot != nullptr
+					&& output_slot->varno == INDEX_VAR
+					&& output_slot->varattno == binding.site_resno));
+		if (output_entry == nullptr || !output_entry->resjunk
+			|| site_entry == nullptr
+			|| site_entry->resno != binding.site_resno
+			|| !equal(site_entry->expr, binding.identity)
+			|| !output_binds_site) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqPerRowMmsearch plan-only helper binding was lost")));
+		}
+	}
+	if (plan_only_helper_bindings.size()
+		!= static_cast<std::size_t>(list_length(plan_only_helper_support))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqPerRowMmsearch plan-only helper binding count is invalid")));
 	}
 	validate_batch_join_setrefs_coverage(output_tlist, combined_tlist);
 	/* custom_restrictinfo is planner-lifetime join metadata, primarily used by
@@ -12085,9 +14966,2086 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		make_batch_join_cost_const(honest_total_cost));
 	cscan->custom_private = lappend(cscan->custom_private,
 		make_batch_join_cost_const(incumbent_cost_floor));
+	cscan->custom_private = lappend(
+		cscan->custom_private,
+		make_match_owner_descriptor(
+			target_expression, target_varno, oids));
 	Assert(list_length(cscan->custom_private)
 		== kBioseqPerRowJoinPrivateFields);
 	return reinterpret_cast<Plan*>(cscan);
+}
+
+struct MatchOwnerFinalization {
+	CustomScan* scan = nullptr;
+	List* descriptor = NIL;
+	List* sites = NIL;
+	Node* target_recipe = nullptr;
+	List* base_lineage = NIL;
+	Index legacy_target_relid = 0;
+	Oid target_relation_oid = InvalidOid;
+	int stable_match_id = 0;
+	/* custom_private is deliberately opaque to core setrefs, so Vars stored in
+	 * recipes retain query-local varnos.  This finalization-only scope identity
+	 * prevents equal local spellings in unrelated subqueries/initplans from
+	 * becoming lineage candidates for one another.  It is never serialized: the
+	 * final executor ABI remains the stable Plan.plan_node_id. */
+	std::uint64_t query_scope_id = 0u;
+	/* Non-NIL only for a base BioseqScan owner.  Its pre-setrefs descriptor and
+	 * sites remain above for query-scope resolution; these tag cells receive a
+	 * distinct post-setrefs executor image after resolution succeeds. */
+	List* base_owner_tag = NIL;
+};
+
+enum class MatchSiteResolutionStatus : std::uint8_t {
+	bound,
+	ambiguous,
+	invalid,
+};
+
+struct MatchSiteResolution {
+	MatchSiteResolutionStatus status = MatchSiteResolutionStatus::invalid;
+	BioseqMatchHelperBindingKind kind =
+		BioseqMatchHelperBindingKind::unresolved;
+	MatchOwnerFinalization* owner = nullptr;
+	std::size_t candidate_count = 0u;
+};
+
+[[nodiscard]] static Integer* match_binding_integer(
+		List* values, const int index, const char* field) {
+	Node* node = values == nullptr || index < 0
+		|| index >= list_length(values)
+		? nullptr : reinterpret_cast<Node*>(list_nth(values, index));
+	if (node == nullptr || !IsA(node, Integer)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq match binding integer ABI is invalid"),
+			 errdetail("field=%s index=%d", field, index)));
+	}
+	return reinterpret_cast<Integer*>(node);
+}
+
+[[nodiscard]] static bool match_owner_lineage_contains(
+		const MatchOwnerFinalization& site_owner,
+		const MatchOwnerFinalization& owner, Node* argument,
+		const BioseqStubOids& oids) noexcept {
+	if (site_owner.query_scope_id == 0u
+		|| owner.query_scope_id != site_owner.query_scope_id) return false;
+	Var* variable = pg_node_try_as<Var>(argument);
+	if (variable == nullptr
+		|| !bioseq_is_concrete_rte_varno(variable->varno)
+		|| variable->varattno <= 0 || variable->varlevelsup != 0
+		|| !bms_is_empty(variable->varnullingrels)) return false;
+	if (variable->vartype == oids.bioseq_seq_type_oid) {
+		for (Var* base : PList<Var>(owner.base_lineage)) {
+			if (base != nullptr && equal(base, variable)) return true;
+		}
+		return false;
+	}
+	/* Query-local Var identity is the alias boundary.  Relation OIDs are not:
+	 * inheritance, partitions, and composite recipes may legitimately expose
+	 * distinct physical relations while retaining one SQL-visible lineage,
+	 * whereas two aliases of one relation must never be conflated. */
+	if (variable->varno == owner.legacy_target_relid) return true;
+	for (Var* base : PList<Var>(owner.base_lineage)) {
+		if (base != nullptr && base->varno == variable->varno
+			&& base->varlevelsup == variable->varlevelsup) return true;
+	}
+	return false;
+}
+
+[[nodiscard]] static MatchSiteResolution resolve_match_helper_site(
+		MatchOwnerFinalization& site_owner, Node* canonical_argument,
+		std::vector<MatchOwnerFinalization>& owners,
+		const BioseqStubOids& oids) noexcept {
+	MatchSiteResolution result{};
+	/* Resolve exact recipes across the complete query-local owner set before
+	 * honoring the registering site.  Two equal recipes owned by distinct plan
+	 * nodes are not distinguishable from SQL and must fail closed instead of
+	 * letting traversal/registration order choose one. */
+	for (MatchOwnerFinalization& candidate : owners) {
+		if (candidate.query_scope_id != site_owner.query_scope_id) continue;
+		if (canonical_argument != nullptr
+			&& candidate.target_recipe != nullptr
+			&& equal(canonical_argument, candidate.target_recipe)) {
+			++result.candidate_count;
+			result.owner = &candidate;
+		}
+	}
+	if (result.candidate_count != 0u) {
+		if (result.candidate_count > 1u) {
+			result.status = MatchSiteResolutionStatus::ambiguous;
+			return result;
+		}
+		if (result.owner != &site_owner) {
+			result.status = MatchSiteResolutionStatus::invalid;
+			return result;
+		}
+		result.status = MatchSiteResolutionStatus::bound;
+		result.kind = BioseqMatchHelperBindingKind::exact_recipe;
+		return result;
+	}
+
+	result.owner = nullptr;
+	result.candidate_count = 0u;
+	for (MatchOwnerFinalization& candidate : owners) {
+		if (!match_owner_lineage_contains(
+				site_owner, candidate, canonical_argument, oids)) continue;
+		++result.candidate_count;
+		result.owner = &candidate;
+	}
+	if (result.candidate_count > 1u) {
+		result.status = MatchSiteResolutionStatus::ambiguous;
+		return result;
+	}
+	if (result.candidate_count != 1u || result.owner != &site_owner) {
+		result.status = MatchSiteResolutionStatus::invalid;
+		return result;
+	}
+	result.status = MatchSiteResolutionStatus::bound;
+	result.kind = BioseqMatchHelperBindingKind::unique_lineage;
+	return result;
+}
+
+/* BIOSEQ_TEST_INDEXES has no SQL-visible helper for this invariant on purpose:
+ * exposing one would create another executable match-helper surface.  The
+ * first real owner finalization in a test backend runs this resolver seam.  It
+ * proves both halves of the scope contract with the exact pre-setrefs collision
+ * that nested PlannerInfos can produce: an equal local Var in another scope is
+ * ignored, while two owners in one scope remain ambiguous for a legacy key
+ * Var even when their physical relation OIDs differ.  A second alias of the
+ * same physical relation remains distinct by Var identity.  Duplicate exact
+ * recipes fail closed rather than selecting by traversal order. */
+#ifdef BIOSEQ_TEST_INDEXES
+static void verify_match_owner_scope_resolution(
+		const BioseqStubOids& oids) {
+	static bool verified = false;
+	if (verified) return;
+
+	Var* source = makeVar(
+		/*varno=*/1, /*varattno=*/1, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
+	Var* legacy_key = makeVar(
+		/*varno=*/1, /*varattno=*/2, INT4OID,
+		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
+	constexpr Oid fixture_relation_oid = 4242;
+
+	std::vector<MatchOwnerFinalization> fixture;
+	fixture.reserve(4u);
+	MatchOwnerFinalization first{};
+	first.target_recipe = reinterpret_cast<Node*>(copyObject(source));
+	first.base_lineage = list_make1(copyObject(source));
+	first.legacy_target_relid = 1;
+	first.target_relation_oid = fixture_relation_oid;
+	first.stable_match_id = 101;
+	first.query_scope_id = 11u;
+	fixture.push_back(first);
+
+	MatchOwnerFinalization unrelated_scope{};
+	unrelated_scope.target_recipe = reinterpret_cast<Node*>(copyObject(source));
+	unrelated_scope.base_lineage = list_make1(copyObject(source));
+	unrelated_scope.legacy_target_relid = 1;
+	unrelated_scope.target_relation_oid = fixture_relation_oid;
+	unrelated_scope.stable_match_id = 102;
+	unrelated_scope.query_scope_id = 12u;
+	fixture.push_back(unrelated_scope);
+
+	const MatchSiteResolution scoped = resolve_match_helper_site(
+		fixture[0], reinterpret_cast<Node*>(legacy_key), fixture, oids);
+	if (scoped.status != MatchSiteResolutionStatus::bound
+		|| scoped.kind != BioseqMatchHelperBindingKind::unique_lineage
+		|| scoped.owner != &fixture[0] || scoped.candidate_count != 1u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq match binding query-scope self-test failed"),
+			 errdetail("unrelated subplan scope was not isolated")));
+	}
+
+	MatchOwnerFinalization same_scope{};
+	same_scope.target_recipe = reinterpret_cast<Node*>(copyObject(source));
+	same_scope.base_lineage = list_make1(copyObject(source));
+	same_scope.legacy_target_relid = 1;
+	same_scope.target_relation_oid = fixture_relation_oid + 1;
+	same_scope.stable_match_id = 103;
+	same_scope.query_scope_id = 11u;
+	fixture.push_back(same_scope);
+
+	Var* alias_source = makeVar(
+		/*varno=*/2, /*varattno=*/1, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
+	MatchOwnerFinalization same_relation_alias{};
+	same_relation_alias.target_recipe =
+		reinterpret_cast<Node*>(copyObject(alias_source));
+	same_relation_alias.base_lineage = list_make1(copyObject(alias_source));
+	same_relation_alias.legacy_target_relid = 2;
+	same_relation_alias.target_relation_oid = fixture_relation_oid;
+	same_relation_alias.stable_match_id = 104;
+	same_relation_alias.query_scope_id = 11u;
+	fixture.push_back(same_relation_alias);
+
+	const MatchSiteResolution ambiguous = resolve_match_helper_site(
+		fixture[0], reinterpret_cast<Node*>(legacy_key), fixture, oids);
+	const MatchSiteResolution duplicate_exact = resolve_match_helper_site(
+		fixture[0], fixture[0].target_recipe, fixture, oids);
+	if (ambiguous.status != MatchSiteResolutionStatus::ambiguous
+		|| ambiguous.candidate_count != 2u
+		|| duplicate_exact.status != MatchSiteResolutionStatus::ambiguous
+		|| duplicate_exact.candidate_count != 2u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq match binding query-scope self-test failed"),
+			 errdetail("same-scope lineage, alias, or duplicate-exact binding changed")));
+	}
+
+	Var* secondary_key = makeVar(
+		/*varno=*/2, /*varattno=*/2, INT4OID,
+		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
+	std::vector<MatchOwnerFinalization> composite_fixture;
+	MatchOwnerFinalization composite{};
+	composite.target_recipe = reinterpret_cast<Node*>(copyObject(source));
+	composite.base_lineage = list_make2(
+		copyObject(source), copyObject(alias_source));
+	composite.legacy_target_relid = 1;
+	composite.stable_match_id = 201;
+	composite.query_scope_id = 21u;
+	composite_fixture.push_back(composite);
+	MatchOwnerFinalization secondary{};
+	secondary.target_recipe = reinterpret_cast<Node*>(copyObject(alias_source));
+	secondary.base_lineage = list_make1(copyObject(alias_source));
+	secondary.legacy_target_relid = 2;
+	secondary.stable_match_id = 202;
+	secondary.query_scope_id = 21u;
+	composite_fixture.push_back(secondary);
+	const MatchSiteResolution secondary_ambiguous = resolve_match_helper_site(
+		composite_fixture[0], reinterpret_cast<Node*>(secondary_key),
+		composite_fixture, oids);
+	if (secondary_ambiguous.status
+			!= MatchSiteResolutionStatus::ambiguous
+		|| secondary_ambiguous.candidate_count != 2u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq match binding composite-lineage self-test failed"),
+			 errdetail("secondary base lineage did not remain ambiguous")));
+	}
+	verified = true;
+}
+#endif
+
+[[nodiscard]] static std::uint64_t allocate_match_owner_scope(
+		std::uint64_t& next_scope_id) {
+	if (next_scope_id == 0u
+		|| next_scope_id == (std::numeric_limits<std::uint64_t>::max)()) {
+		ereport(ERROR,
+			(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+			 errmsg("Bioseq match owner query-scope limit exceeded")));
+	}
+	return next_scope_id++;
+}
+
+[[nodiscard]] static List* find_base_match_owner_plan_tag(
+		CustomScan* scan) {
+	if (scan == nullptr || scan->methods != &BioseqColumnScanScanMethods) {
+		return NIL;
+	}
+	List* result = NIL;
+	for (Node* private_node : PList<Node>(scan->custom_private)) {
+		if (private_node == nullptr || !IsA(private_node, List)) continue;
+		List* tag = reinterpret_cast<List*>(private_node);
+		Node* magic_node = tag == NIL ? nullptr
+			: reinterpret_cast<Node*>(linitial(tag));
+		if (magic_node == nullptr || !IsA(magic_node, Integer)
+			|| intVal(magic_node) != kBioseqBaseMatchOwnerPlanMagic) continue;
+		Node* version_node = list_length(tag) > kBaseMatchPlanVersion
+			? reinterpret_cast<Node*>(list_nth(
+				tag, kBaseMatchPlanVersion)) : nullptr;
+		Node* descriptor_node = list_length(tag) > kBaseMatchPlanDescriptor
+			? reinterpret_cast<Node*>(list_nth(
+				tag, kBaseMatchPlanDescriptor)) : nullptr;
+		Node* sites_node = list_length(tag) > kBaseMatchPlanSites
+			? reinterpret_cast<Node*>(list_nth(
+				tag, kBaseMatchPlanSites)) : nullptr;
+		Node* relation_node = list_length(tag) > kBaseMatchPlanRelationOid
+			? reinterpret_cast<Node*>(list_nth(
+				tag, kBaseMatchPlanRelationOid)) : nullptr;
+		Node* executor_descriptor_node =
+			list_length(tag) > kBaseMatchPlanExecutorDescriptor
+			? reinterpret_cast<Node*>(list_nth(
+				tag, kBaseMatchPlanExecutorDescriptor)) : nullptr;
+		Node* executor_sites_node =
+			list_length(tag) > kBaseMatchPlanExecutorSites
+			? reinterpret_cast<Node*>(list_nth(
+				tag, kBaseMatchPlanExecutorSites)) : nullptr;
+		if (result != NIL
+			|| list_length(tag) != kBioseqBaseMatchOwnerPlanFields
+			|| version_node == nullptr || !IsA(version_node, Integer)
+			|| intVal(version_node) != kBioseqBaseMatchOwnerPlanVersion
+			|| descriptor_node == nullptr || !IsA(descriptor_node, List)
+			|| (sites_node != nullptr && !IsA(sites_node, List))
+			|| relation_node == nullptr || !IsA(relation_node, Integer)
+			|| !OidIsValid(static_cast<Oid>(intVal(relation_node)))
+			|| (executor_descriptor_node != nullptr
+				&& !IsA(executor_descriptor_node, List))
+			|| (executor_sites_node != nullptr
+				&& !IsA(executor_sites_node, List))) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqScan match owner plan tag is invalid")));
+		}
+		result = tag;
+	}
+	return result;
+}
+
+static void collect_match_owner_plan(
+		Plan* plan, std::vector<MatchOwnerFinalization>& owners,
+		const std::uint64_t query_scope_id,
+		std::uint64_t& next_scope_id) {
+	if (plan == nullptr) return;
+	if (query_scope_id == 0u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq match owner query scope is invalid")));
+	}
+	check_stack_depth();
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		const char* name = custom->methods == nullptr
+			? nullptr : custom->methods->CustomName;
+		if (name != nullptr && strcmp(name, "BioseqBatchJoin") == 0
+			&& custom->custom_private != NIL) {
+			Node* version_node = reinterpret_cast<Node*>(
+				linitial(custom->custom_private));
+			if (version_node != nullptr && IsA(version_node, Integer)) {
+				const int version = intVal(version_node);
+				const int descriptor_index = version
+					== kBioseqBatchJoinPlanVersion
+					? kBatchJoinMatchOwnerDescriptor
+					: (version == kBioseqPerRowJoinPlanVersion
+						? kPerRowMatchOwnerDescriptor : -1);
+				const int sites_index = version
+					== kBioseqBatchJoinPlanVersion
+					? kBatchJoinPlaceholderSites
+					: (version == kBioseqPerRowJoinPlanVersion
+						? kPerRowPlaceholderSites : -1);
+				const int relation_oid_index = version
+					== kBioseqBatchJoinPlanVersion
+					? kBatchJoinTargetRelationOid
+					: (version == kBioseqPerRowJoinPlanVersion
+						? kPerRowTargetRelationOid : -1);
+				if (descriptor_index >= 0
+					&& descriptor_index < list_length(custom->custom_private)
+					&& sites_index >= 0
+					&& relation_oid_index >= 0
+					&& sites_index < list_length(custom->custom_private)) {
+					Node* descriptor_node = reinterpret_cast<Node*>(list_nth(
+						custom->custom_private, descriptor_index));
+					Node* sites_node = reinterpret_cast<Node*>(list_nth(
+						custom->custom_private, sites_index));
+					if (descriptor_node == nullptr || !IsA(descriptor_node, List)
+						|| (sites_node != nullptr && !IsA(sites_node, List))) {
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("Bioseq match owner finalization ABI is invalid")));
+					}
+					List* descriptor = reinterpret_cast<List*>(descriptor_node);
+					if (list_length(descriptor)
+							!= kBioseqMatchOwnerDescriptorFields
+						|| intVal(match_binding_integer(descriptor,
+							kMatchOwnerMagic, "owner.magic"))
+							!= kBioseqMatchOwnerDescriptorMagic
+						|| intVal(match_binding_integer(descriptor,
+							kMatchOwnerVersion, "owner.version"))
+							!= kBioseqMatchOwnerDescriptorVersion) {
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("Bioseq match owner descriptor is invalid")));
+					}
+					Node* lineage_node = reinterpret_cast<Node*>(list_nth(
+						descriptor, kMatchOwnerBaseLineage));
+					if (lineage_node != nullptr && !IsA(lineage_node, List)) {
+						ereport(ERROR,
+							(errcode(ERRCODE_INTERNAL_ERROR),
+							 errmsg("Bioseq match owner lineage is invalid")));
+					}
+					owners.push_back(MatchOwnerFinalization{
+						custom,
+						descriptor,
+						sites_node == nullptr ? NIL
+							: reinterpret_cast<List*>(sites_node),
+						reinterpret_cast<Node*>(list_nth(
+							descriptor, kMatchOwnerTargetRecipe)),
+						lineage_node == nullptr ? NIL
+							: reinterpret_cast<List*>(lineage_node),
+						static_cast<Index>(intVal(match_binding_integer(
+							descriptor, kMatchOwnerLegacyTargetRelid,
+							"owner.legacy_target_relid"))),
+						static_cast<Oid>(intVal(match_binding_integer(
+							custom->custom_private, relation_oid_index,
+							"owner.target_relation_oid"))),
+						plan->plan_node_id,
+						query_scope_id,
+						NIL});
+				}
+			}
+		}
+		List* base_owner_tag = find_base_match_owner_plan_tag(custom);
+		if (base_owner_tag != NIL) {
+			Node* descriptor_node = reinterpret_cast<Node*>(list_nth(
+				base_owner_tag, kBaseMatchPlanDescriptor));
+			Node* sites_node = reinterpret_cast<Node*>(list_nth(
+				base_owner_tag, kBaseMatchPlanSites));
+			List* descriptor = reinterpret_cast<List*>(descriptor_node);
+			if (list_length(descriptor)
+					!= kBioseqMatchOwnerDescriptorFields
+				|| intVal(match_binding_integer(descriptor,
+					kMatchOwnerMagic, "owner.magic"))
+					!= kBioseqMatchOwnerDescriptorMagic
+				|| intVal(match_binding_integer(descriptor,
+					kMatchOwnerVersion, "owner.version"))
+					!= kBioseqMatchOwnerDescriptorVersion) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqScan match owner descriptor is invalid")));
+			}
+			Node* lineage_node = reinterpret_cast<Node*>(list_nth(
+				descriptor, kMatchOwnerBaseLineage));
+			if (lineage_node != nullptr && !IsA(lineage_node, List)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("BioseqScan match owner lineage is invalid")));
+			}
+			owners.push_back(MatchOwnerFinalization{
+				custom,
+				descriptor,
+				sites_node == nullptr ? NIL
+					: reinterpret_cast<List*>(sites_node),
+				reinterpret_cast<Node*>(list_nth(
+					descriptor, kMatchOwnerTargetRecipe)),
+				lineage_node == nullptr ? NIL
+					: reinterpret_cast<List*>(lineage_node),
+				static_cast<Index>(intVal(match_binding_integer(
+					descriptor, kMatchOwnerLegacyTargetRelid,
+					"owner.legacy_target_relid"))),
+				static_cast<Oid>(intVal(match_binding_integer(
+					base_owner_tag, kBaseMatchPlanRelationOid,
+					"owner.target_relation_oid"))),
+				plan->plan_node_id,
+				query_scope_id,
+				base_owner_tag});
+		}
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			collect_match_owner_plan(
+				child, owners, query_scope_id, next_scope_id);
+		}
+		return;
+	}
+	if (IsA(plan, Append)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<Append*>(plan)->appendplans)) {
+			collect_match_owner_plan(
+				child, owners, query_scope_id, next_scope_id);
+		}
+		return;
+	}
+	if (IsA(plan, MergeAppend)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<MergeAppend*>(plan)->mergeplans)) {
+			collect_match_owner_plan(
+				child, owners, query_scope_id, next_scope_id);
+		}
+		return;
+	}
+	if (IsA(plan, BitmapAnd)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<BitmapAnd*>(plan)->bitmapplans)) {
+			collect_match_owner_plan(
+				child, owners, query_scope_id, next_scope_id);
+		}
+		return;
+	}
+	if (IsA(plan, BitmapOr)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<BitmapOr*>(plan)->bitmapplans)) {
+			collect_match_owner_plan(
+				child, owners, query_scope_id, next_scope_id);
+		}
+		return;
+	}
+	if (IsA(plan, SubqueryScan)) {
+		const std::uint64_t subquery_scope =
+			allocate_match_owner_scope(next_scope_id);
+		collect_match_owner_plan(
+			reinterpret_cast<SubqueryScan*>(plan)->subplan, owners,
+			subquery_scope, next_scope_id);
+		return;
+	}
+	collect_match_owner_plan(
+		outerPlan(plan), owners, query_scope_id, next_scope_id);
+	if (innerPlan(plan) != outerPlan(plan)) {
+		collect_match_owner_plan(
+			innerPlan(plan), owners, query_scope_id, next_scope_id);
+	}
+}
+
+[[nodiscard]] static bool base_match_target_var_translation_agrees(
+		const Var* planner_target, const Var* executor_target,
+		const Index executor_scanrelid,
+		const BioseqStubOids& oids) noexcept {
+	return planner_target != nullptr && executor_target != nullptr
+		&& bioseq_is_concrete_rte_varno(planner_target->varno)
+		&& planner_target->varattno > 0
+		&& planner_target->varlevelsup == 0
+		&& bms_is_empty(planner_target->varnullingrels)
+		&& planner_target->vartype == oids.bioseq_seq_type_oid
+		&& bioseq_is_concrete_rte_varno(executor_scanrelid)
+		&& executor_target->varno == executor_scanrelid
+		&& executor_target->varattno > 0
+		&& executor_target->varlevelsup == 0
+		&& bms_is_empty(executor_target->varnullingrels)
+		&& executor_target->vartype == oids.bioseq_seq_type_oid
+		&& planner_target->varattno == executor_target->varattno
+		&& planner_target->vartype == executor_target->vartype
+		&& planner_target->vartypmod == executor_target->vartypmod
+		&& planner_target->varcollid == executor_target->varcollid;
+}
+
+[[nodiscard]] static bool base_match_site_var_translation_agrees(
+		const Var* planner_argument, const Var* executor_argument,
+		const Var* planner_target, const Var* executor_target,
+		const BioseqMatchHelperBindingKind binding_kind,
+		const BioseqStubOids& oids) noexcept {
+	if (planner_argument == nullptr || executor_argument == nullptr
+		|| planner_target == nullptr || executor_target == nullptr
+		|| planner_argument->varlevelsup != 0
+		|| executor_argument->varlevelsup != 0
+		|| !bms_is_empty(planner_argument->varnullingrels)
+		|| !bms_is_empty(executor_argument->varnullingrels)) return false;
+	if (binding_kind == BioseqMatchHelperBindingKind::exact_recipe) {
+		return planner_argument->vartype == oids.bioseq_seq_type_oid
+			&& executor_argument->vartype == oids.bioseq_seq_type_oid
+			&& equal(planner_argument, planner_target)
+			&& equal(executor_argument, executor_target);
+	}
+	if (binding_kind != BioseqMatchHelperBindingKind::unique_lineage
+		|| planner_argument->vartype == oids.bioseq_seq_type_oid
+		|| executor_argument->vartype == oids.bioseq_seq_type_oid
+		|| planner_argument->varno != planner_target->varno
+		|| executor_argument->varno != executor_target->varno) return false;
+	/* setrefs may offset the query-local RTE index, but it cannot change which
+	 * physical attribute, type, typmod, or collation the row marker names. */
+	return planner_argument->varattno == executor_argument->varattno
+		&& planner_argument->vartype == executor_argument->vartype
+		&& planner_argument->vartypmod == executor_argument->vartypmod
+		&& planner_argument->varcollid == executor_argument->varcollid;
+}
+
+/* Revoked integration seam for the fail-closed half of the split BMP ABI.
+ * Real SQL below exercises the complete post-setrefs executor image; this
+ * small predicate probe pins the disagreement branches which core setrefs
+ * cannot be asked to manufacture in a valid PlannedStmt. */
+POSTGRES_FN(bioseq_internal_base_match_executor_translation_probe)
+{
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq base match executor translation probe requires a composite result")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	constexpr Index planner_varno = 1;
+	constexpr Index executor_varno = 9;
+	Var* planner_target = makeVar(
+		planner_varno, 1, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/17, InvalidOid, 0);
+	Var* executor_target = makeVar(
+		executor_varno, 1, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/17, InvalidOid, 0);
+	Var* wrong_target_attno = makeVar(
+		executor_varno, 2, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/17, InvalidOid, 0);
+	Var* planner_marker = makeVar(
+		planner_varno, 2, INT4OID, -1, InvalidOid, 0);
+	Var* executor_marker = makeVar(
+		executor_varno, 2, INT4OID, -1, InvalidOid, 0);
+	Var* wrong_alias_marker = makeVar(
+		executor_varno + 1, 2, INT4OID, -1, InvalidOid, 0);
+	const bool target_offset_accepted =
+		base_match_target_var_translation_agrees(
+			planner_target, executor_target, executor_varno, oids);
+	const bool target_attno_disagreement_rejected =
+		!base_match_target_var_translation_agrees(
+			planner_target, wrong_target_attno, executor_varno, oids);
+	const bool exact_site_offset_accepted =
+		base_match_site_var_translation_agrees(
+			planner_target, executor_target,
+			planner_target, executor_target,
+			BioseqMatchHelperBindingKind::exact_recipe, oids);
+	const bool lineage_alias_disagreement_rejected =
+		base_match_site_var_translation_agrees(
+			planner_marker, executor_marker,
+			planner_target, executor_target,
+			BioseqMatchHelperBindingKind::unique_lineage, oids)
+		&& !base_match_site_var_translation_agrees(
+			planner_marker, wrong_alias_marker,
+			planner_target, executor_target,
+			BioseqMatchHelperBindingKind::unique_lineage, oids);
+	Datum values[4] = {
+		BoolGetDatum(target_offset_accepted),
+		BoolGetDatum(target_attno_disagreement_rejected),
+		BoolGetDatum(exact_site_offset_accepted),
+		BoolGetDatum(lineage_alias_disagreement_rejected),
+	};
+	bool nulls[4]{};
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+static void finalize_base_match_owner_executor_image(
+		MatchOwnerFinalization& owner, const BioseqStubOids& oids) {
+	if (owner.base_owner_tag == NIL) return;
+	CustomScan* scan = owner.scan;
+	Node* existing_descriptor = reinterpret_cast<Node*>(list_nth(
+		owner.base_owner_tag, kBaseMatchPlanExecutorDescriptor));
+	Node* existing_sites = reinterpret_cast<Node*>(list_nth(
+		owner.base_owner_tag, kBaseMatchPlanExecutorSites));
+	Node* owned_quals_node = scan == nullptr
+		|| list_length(scan->custom_exprs) <= 3
+		? nullptr : reinterpret_cast<Node*>(list_nth(scan->custom_exprs, 3));
+	List* owned_quals = owned_quals_node != nullptr
+		&& IsA(owned_quals_node, List)
+		? reinterpret_cast<List*>(owned_quals_node) : NIL;
+	FuncExpr* mmsearch = list_length(owned_quals) == 1
+		? pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(linitial(owned_quals)))
+		: nullptr;
+	Var* executor_target = mmsearch != nullptr
+		&& is_mmsearch_funcid(mmsearch->funcid, oids)
+		&& list_length(mmsearch->args) >= 1
+		? pg_node_try_as<Var>(reinterpret_cast<Node*>(linitial(mmsearch->args)))
+		: nullptr;
+	Var* planner_target = pg_node_try_as<Var>(owner.target_recipe);
+	if (scan == nullptr || existing_descriptor != nullptr
+		|| existing_sites != nullptr || planner_target == nullptr
+		|| executor_target == nullptr
+		|| planner_target->varno != owner.legacy_target_relid
+		|| !base_match_target_var_translation_agrees(
+			planner_target, executor_target, scan->scan.scanrelid, oids)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqScan post-setrefs match owner identity disagrees with its planner descriptor")));
+	}
+
+	List* executor_descriptor = make_match_owner_descriptor(
+		reinterpret_cast<Node*>(executor_target), executor_target->varno, oids);
+	match_binding_integer(executor_descriptor,
+		kMatchOwnerStableId, "executor_owner.stable_id")->ival =
+		owner.stable_match_id;
+	List* executor_sites = collect_base_match_helper_sites(
+		scan->scan.plan.targetlist, executor_target, oids);
+	if (list_length(executor_sites) != list_length(owner.sites)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqScan post-setrefs match helper sites disagree with planner sites"),
+			 errdetail("planner_sites=%d executor_sites=%d",
+				list_length(owner.sites), list_length(executor_sites))));
+	}
+	for (int index = 0; index < list_length(owner.sites); ++index) {
+		List* planner_site = reinterpret_cast<List*>(list_nth(
+			owner.sites, index));
+		List* executor_site = reinterpret_cast<List*>(list_nth(
+			executor_sites, index));
+		if (planner_site == nullptr || executor_site == nullptr
+			|| !IsA(planner_site, List) || !IsA(executor_site, List)
+			|| list_length(planner_site) != kBioseqMatchHelperSiteFields
+			|| list_length(executor_site) != kBioseqMatchHelperSiteFields) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan post-setrefs match helper site codec is invalid")));
+		}
+		for (const int integer_index : {
+				kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+				kMatchSiteCollation, kMatchSiteBindingKind,
+				kMatchSitePhid, kMatchSiteStableId}) {
+			(void)match_binding_integer(
+				planner_site, integer_index, "planner_helper.site_integer");
+			(void)match_binding_integer(
+				executor_site, integer_index, "executor_helper.site_integer");
+		}
+		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+			intVal(list_nth(planner_site, kMatchSiteBindingKind)));
+		Var* planner_argument = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+			list_nth(planner_site, kMatchSiteCanonicalArgument)));
+		Var* executor_argument = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+			list_nth(executor_site, kMatchSiteCanonicalArgument)));
+		const bool integer_identity_agrees =
+			intVal(list_nth(planner_site, kMatchSiteResno))
+				== intVal(list_nth(executor_site, kMatchSiteResno))
+			&& intVal(list_nth(planner_site, kMatchSiteFuncid))
+				== intVal(list_nth(executor_site, kMatchSiteFuncid))
+			&& intVal(list_nth(planner_site, kMatchSiteTypmod))
+				== intVal(list_nth(executor_site, kMatchSiteTypmod))
+			&& intVal(list_nth(planner_site, kMatchSiteCollation))
+				== intVal(list_nth(executor_site, kMatchSiteCollation))
+			&& intVal(list_nth(planner_site, kMatchSitePhid))
+				== intVal(list_nth(executor_site, kMatchSitePhid));
+		if (!integer_identity_agrees
+			|| intVal(list_nth(planner_site, kMatchSiteStableId))
+				!= owner.stable_match_id
+			|| !base_match_site_var_translation_agrees(
+				planner_argument, executor_argument,
+				planner_target, executor_target, binding_kind, oids)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan post-setrefs match helper identity disagrees with its planner site"),
+				 errdetail("site_index=%d", index)));
+		}
+		match_binding_integer(executor_site,
+			kMatchSiteBindingKind, "executor_helper.binding_kind")->ival =
+			static_cast<int>(binding_kind);
+		match_binding_integer(executor_site,
+			kMatchSiteStableId, "executor_helper.stable_id")->ival =
+			owner.stable_match_id;
+	}
+
+	lfirst(list_nth_cell(owner.base_owner_tag,
+		kBaseMatchPlanExecutorDescriptor)) = executor_descriptor;
+	lfirst(list_nth_cell(owner.base_owner_tag,
+		kBaseMatchPlanExecutorSites)) = executor_sites;
+}
+
+static void finalize_match_owner_bindings(
+		std::vector<MatchOwnerFinalization>& owners) {
+	const BioseqStubOids& oids = get_cached_stub_oids();
+#ifdef BIOSEQ_TEST_INDEXES
+	verify_match_owner_scope_resolution(oids);
+#endif
+	Bitmapset* stable_ids = nullptr;
+	std::size_t owner_index = 0u;
+	for (MatchOwnerFinalization& owner : owners) {
+		/* set_plan_references() may assign zero to the root Plan.  The stable
+		 * owner ABI is the exact plan_node_id, so only negative ids are invalid
+		 * and zero must participate in duplicate detection like every other id. */
+		const bool duplicate_stable_id = owner.stable_match_id >= 0
+			&& bms_is_member(owner.stable_match_id, stable_ids);
+		if (owner.scan == nullptr || owner.descriptor == NIL
+			|| owner.target_recipe == nullptr
+			|| !bioseq_is_concrete_rte_varno(owner.legacy_target_relid)
+			|| owner.stable_match_id < 0
+			|| owner.query_scope_id == 0u
+			|| duplicate_stable_id) {
+			const char* custom_name = owner.scan == nullptr
+				|| owner.scan->methods == nullptr
+				? "<none>" : owner.scan->methods->CustomName;
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Bioseq final match owner identity is invalid"),
+				 errdetail("owner_index=%zu custom_name=%s scan_present=%s descriptor_present=%s target_recipe_present=%s legacy_target_relid=%u stable_match_id=%d query_scope_id=" UINT64_FORMAT " duplicate_stable_id=%s",
+					owner_index,
+					custom_name == nullptr ? "<none>" : custom_name,
+					owner.scan == nullptr ? "false" : "true",
+					owner.descriptor == NIL ? "false" : "true",
+					owner.target_recipe == nullptr ? "false" : "true",
+					static_cast<unsigned int>(owner.legacy_target_relid),
+					owner.stable_match_id,
+					static_cast<uint64>(owner.query_scope_id),
+					duplicate_stable_id ? "true" : "false")));
+		}
+		stable_ids = bms_add_member(stable_ids, owner.stable_match_id);
+		match_binding_integer(owner.descriptor,
+			kMatchOwnerStableId, "owner.stable_id")->ival =
+			owner.stable_match_id;
+		++owner_index;
+	}
+	if (stable_ids != nullptr) bms_free(stable_ids);
+
+	for (MatchOwnerFinalization& site_owner : owners) {
+		for (List* site : PList<List>(site_owner.sites)) {
+			if (site == nullptr || !IsA(site, List)
+				|| list_length(site) != kBioseqMatchHelperSiteFields) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Bioseq match helper site codec is invalid")));
+			}
+			for (const int integer_index : {
+					kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+					kMatchSiteCollation, kMatchSiteBindingKind,
+					kMatchSitePhid, kMatchSiteStableId}) {
+				(void)match_binding_integer(
+					site, integer_index, "helper.site_integer");
+			}
+			Node* argument = reinterpret_cast<Node*>(list_nth(
+				site, kMatchSiteCanonicalArgument));
+			const MatchSiteResolution resolution =
+				resolve_match_helper_site(
+					site_owner, argument, owners, oids);
+			if (resolution.status == MatchSiteResolutionStatus::ambiguous) {
+				const Oid funcid = static_cast<Oid>(intVal(
+					match_binding_integer(
+						site, kMatchSiteFuncid, "helper.funcid")));
+				const char* function_name = get_func_name(funcid);
+				ereport(ERROR,
+					(errcode(ERRCODE_AMBIGUOUS_COLUMN),
+					 errmsg("bioseq match-result helper binding is ambiguous"),
+					 errdetail("helper=%s candidate_match_owners=%zu",
+						function_name == nullptr ? "<unknown>" : function_name,
+						resolution.candidate_count),
+					 errhint("Pass the exact transformed target recipe to each helper when more than one mmsearch owner shares a base lineage.")));
+			}
+			if (resolution.status != MatchSiteResolutionStatus::bound
+				|| resolution.owner != &site_owner) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
+					 errmsg("bioseq match-result helper does not identify its mmsearch owner"),
+					 errhint("Use the exact mmsearch target recipe or its unique base source lineage.")));
+			}
+			match_binding_integer(site,
+				kMatchSiteBindingKind, "helper.binding_kind")->ival =
+				static_cast<int>(resolution.kind);
+			match_binding_integer(site,
+				kMatchSiteStableId, "helper.stable_id")->ival =
+				site_owner.stable_match_id;
+		}
+	}
+	for (MatchOwnerFinalization& owner : owners) {
+		finalize_base_match_owner_executor_image(owner, oids);
+	}
+}
+
+static void neutralize_ancestor_owned_dummy_match_helpers(
+	PlannedStmt* statement,
+	std::vector<MatchOwnerFinalization>& owners);
+
+export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
+	if (statement == nullptr || statement->planTree == nullptr
+		|| !OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
+		return;
+	}
+	std::vector<MatchOwnerFinalization> owners;
+	std::uint64_t next_scope_id = 1u;
+	const std::uint64_t statement_scope =
+		allocate_match_owner_scope(next_scope_id);
+	collect_match_owner_plan(
+		statement->planTree, owners, statement_scope, next_scope_id);
+	for (Plan* subplan : PList<Plan>(statement->subplans)) {
+		const std::uint64_t subplan_scope =
+			allocate_match_owner_scope(next_scope_id);
+		collect_match_owner_plan(
+			subplan, owners, subplan_scope, next_scope_id);
+	}
+	if (!owners.empty()) {
+		finalize_match_owner_bindings(owners);
+		neutralize_ancestor_owned_dummy_match_helpers(statement, owners);
+	}
+}
+
+[[nodiscard]] static int validate_finalized_match_owner_descriptor_value(
+		CustomScan* scan, List* descriptor) {
+	if (scan == nullptr || descriptor == NIL) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq finalized match owner descriptor is missing")));
+	}
+	const int stable_id = intVal(match_binding_integer(
+		descriptor, kMatchOwnerStableId, "owner.stable_id"));
+	Node* recipe = list_length(descriptor) == kBioseqMatchOwnerDescriptorFields
+		? reinterpret_cast<Node*>(list_nth(
+			descriptor, kMatchOwnerTargetRecipe)) : nullptr;
+	Node* lineage = list_length(descriptor) == kBioseqMatchOwnerDescriptorFields
+		? reinterpret_cast<Node*>(list_nth(
+			descriptor, kMatchOwnerBaseLineage)) : nullptr;
+	if (list_length(descriptor) != kBioseqMatchOwnerDescriptorFields
+		|| intVal(match_binding_integer(
+			descriptor, kMatchOwnerMagic, "owner.magic"))
+			!= kBioseqMatchOwnerDescriptorMagic
+		|| intVal(match_binding_integer(
+			descriptor, kMatchOwnerVersion, "owner.version"))
+			!= kBioseqMatchOwnerDescriptorVersion
+		|| stable_id < 0 || stable_id != scan->scan.plan.plan_node_id
+		|| recipe == nullptr || (lineage != nullptr && !IsA(lineage, List))
+		|| !bioseq_is_concrete_rte_varno(static_cast<Index>(intVal(
+			match_binding_integer(descriptor,
+				kMatchOwnerLegacyTargetRelid,
+				"owner.legacy_target_relid"))))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("Bioseq finalized match owner descriptor is invalid")));
+	}
+	return stable_id;
+}
+
+[[nodiscard]] static int validate_finalized_match_owner_descriptor(
+		CustomScan* scan, const int descriptor_index) {
+	Node* descriptor_node = scan == nullptr || descriptor_index < 0
+		|| descriptor_index >= list_length(scan->custom_private)
+		? nullptr : reinterpret_cast<Node*>(list_nth(
+			scan->custom_private, descriptor_index));
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("Bioseq finalized match owner descriptor is missing")));
+	}
+	return validate_finalized_match_owner_descriptor_value(
+		scan, reinterpret_cast<List*>(descriptor_node));
+}
+
+[[nodiscard]] static Var* initialize_base_match_owner_runtime(
+		CustomScan* scan, Relation relation, BioseqScanRuntime& runtime) {
+	List* owner_tag = find_base_match_owner_plan_tag(scan);
+	if (owner_tag == NIL) return nullptr;
+	if (relation == nullptr
+		|| RelationGetRelid(relation) != static_cast<Oid>(intVal(
+			match_binding_integer(owner_tag, kBaseMatchPlanRelationOid,
+				"owner.target_relation_oid")))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan match owner relation identity is invalid")));
+	}
+	Node* descriptor_node = reinterpret_cast<Node*>(list_nth(
+		owner_tag, kBaseMatchPlanExecutorDescriptor));
+	Node* sites_node = reinterpret_cast<Node*>(list_nth(
+		owner_tag, kBaseMatchPlanExecutorSites));
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)
+		|| (sites_node != nullptr && !IsA(sites_node, List))) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan finalized executor match owner image is missing")));
+	}
+	List* descriptor = reinterpret_cast<List*>(descriptor_node);
+	runtime.stable_match_id =
+		validate_finalized_match_owner_descriptor_value(scan, descriptor);
+	Var* target_recipe = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+		list_nth(descriptor, kMatchOwnerTargetRecipe)));
+	TupleDesc relation_descriptor = RelationGetDescr(relation);
+	Form_pg_attribute target_attribute = target_recipe != nullptr
+		&& target_recipe->varattno > 0
+		&& target_recipe->varattno <= relation_descriptor->natts
+		? TupleDescAttr(relation_descriptor, target_recipe->varattno - 1)
+		: nullptr;
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	if (target_recipe == nullptr
+		|| target_recipe->varno != scan->scan.scanrelid
+		|| target_recipe->varattno <= 0
+		|| target_recipe->varlevelsup != 0
+		|| !bms_is_empty(target_recipe->varnullingrels)
+		|| target_recipe->vartype != oids.bioseq_seq_type_oid
+		|| target_attribute == nullptr || target_attribute->attisdropped
+		|| target_attribute->atttypid != target_recipe->vartype
+		|| target_attribute->atttypmod != target_recipe->vartypmod
+		|| target_attribute->attcollation != target_recipe->varcollid) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan match owner target recipe is invalid")));
+	}
+	runtime.match_helper_sites = sites_node == nullptr
+		? NIL : reinterpret_cast<List*>(sites_node);
+	for (List* site : PList<List>(runtime.match_helper_sites)) {
+		if (site == nullptr || !IsA(site, List)
+			|| list_length(site) != kBioseqMatchHelperSiteFields) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqScan match helper site ABI is invalid")));
+		}
+		for (const int integer_index : {
+				kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+				kMatchSiteCollation, kMatchSiteBindingKind,
+				kMatchSitePhid, kMatchSiteStableId}) {
+			(void)match_binding_integer(
+				site, integer_index, "helper.site_integer");
+		}
+		const int resno = intVal(list_nth(site, kMatchSiteResno));
+		const Oid funcid = static_cast<Oid>(intVal(list_nth(
+			site, kMatchSiteFuncid)));
+		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+			intVal(list_nth(site, kMatchSiteBindingKind)));
+		Var* argument = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+			list_nth(site, kMatchSiteCanonicalArgument)));
+		const bool exact_sequence_argument = argument != nullptr
+			&& argument->vartype == oids.bioseq_seq_type_oid
+			&& equal(argument, target_recipe)
+			&& binding_kind == BioseqMatchHelperBindingKind::exact_recipe;
+		const bool legacy_lineage_argument = argument != nullptr
+			&& argument->vartype != oids.bioseq_seq_type_oid
+			&& argument->varno == target_recipe->varno
+			&& argument->varattno > 0 && argument->varlevelsup == 0
+			&& bms_is_empty(argument->varnullingrels)
+			&& binding_kind == BioseqMatchHelperBindingKind::unique_lineage;
+		if (resno <= 0 || resno > list_length(scan->scan.plan.targetlist)
+			|| !is_bioseq_projection_funcid(funcid, oids)
+			|| get_func_rettype(funcid) == InvalidOid
+			|| (!exact_sequence_argument && !legacy_lineage_argument)
+			|| intVal(list_nth(site, kMatchSitePhid)) != 0
+			|| intVal(list_nth(site, kMatchSiteStableId))
+				!= runtime.stable_match_id) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqScan finalized match helper site is invalid")));
+		}
+	}
+	return target_recipe;
+}
+
+[[nodiscard]] static std::size_t
+finalized_batch_owner_matching_site_count(
+		CustomScan* scan, Node* identity,
+		const BioseqStubOids& oids) {
+	if (scan == nullptr || identity == nullptr
+		|| scan->methods == nullptr || scan->methods->CustomName == nullptr
+		|| strcmp(scan->methods->CustomName, "BioseqBatchJoin") != 0
+		|| scan->custom_private == NIL) return 0u;
+	Node* version_node = reinterpret_cast<Node*>(
+		linitial(scan->custom_private));
+	if (version_node == nullptr || !IsA(version_node, Integer)) return 0u;
+	const int version = intVal(version_node);
+	const int expected_fields = version == kBioseqBatchJoinPlanVersion
+		? kBioseqBatchJoinPrivateFields
+		: (version == kBioseqPerRowJoinPlanVersion
+			? kBioseqPerRowJoinPrivateFields : -1);
+	const int descriptor_index = version == kBioseqBatchJoinPlanVersion
+		? kBatchJoinMatchOwnerDescriptor
+		: (version == kBioseqPerRowJoinPlanVersion
+			? kPerRowMatchOwnerDescriptor : -1);
+	const int sites_index = version == kBioseqBatchJoinPlanVersion
+		? kBatchJoinPlaceholderSites
+		: (version == kBioseqPerRowJoinPlanVersion
+			? kPerRowPlaceholderSites : -1);
+	if (expected_fields < 0
+		|| list_length(scan->custom_private) != expected_fields
+		|| descriptor_index < 0 || sites_index < 0) return 0u;
+	Node* descriptor_node = reinterpret_cast<Node*>(list_nth(
+		scan->custom_private, descriptor_index));
+	Node* sites_node = reinterpret_cast<Node*>(list_nth(
+		scan->custom_private, sites_index));
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)
+		|| sites_node == nullptr || !IsA(sites_node, List)) return 0u;
+	const int stable_match_id = validate_finalized_match_owner_descriptor_value(
+		scan, reinterpret_cast<List*>(descriptor_node));
+	PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
+	FuncExpr* helper = placeholder == nullptr
+		? batch_join_well_formed_match_helper(identity, oids)
+		: batch_join_match_helper_phv_function(placeholder, oids);
+	if (helper == nullptr
+		|| exprType(identity) != helper->funcresulttype
+		|| helper->funcresulttype != get_func_rettype(helper->funcid)) return 0u;
+	Node* helper_argument = batch_join_match_helper_argument(helper);
+	const int expected_phid = placeholder == nullptr
+		? 0 : static_cast<int>(placeholder->phid);
+	std::size_t matches = 0u;
+	for (Node* raw_site : PList<Node>(reinterpret_cast<List*>(sites_node))) {
+		List* site = raw_site != nullptr && IsA(raw_site, List)
+			? reinterpret_cast<List*>(raw_site) : NIL;
+		if (list_length(site) != kBioseqMatchHelperSiteFields) return 2u;
+		bool integers_valid = true;
+		for (const int index : {
+				kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+				kMatchSiteCollation, kMatchSiteBindingKind,
+				kMatchSitePhid, kMatchSiteStableId}) {
+			Node* value = reinterpret_cast<Node*>(list_nth(site, index));
+			integers_valid = integers_valid
+				&& value != nullptr && IsA(value, Integer);
+		}
+		Node* canonical_argument = reinterpret_cast<Node*>(list_nth(
+			site, kMatchSiteCanonicalArgument));
+		if (!integers_valid || canonical_argument == nullptr
+			|| helper_argument == nullptr) return 2u;
+		const int resno = intVal(list_nth(site, kMatchSiteResno));
+		Node* raw_supplied = resno <= 0
+			|| resno > list_length(scan->custom_scan_tlist)
+			? nullptr : reinterpret_cast<Node*>(list_nth(
+				scan->custom_scan_tlist, resno - 1));
+		TargetEntry* supplied = raw_supplied != nullptr
+			&& IsA(raw_supplied, TargetEntry)
+			? reinterpret_cast<TargetEntry*>(raw_supplied) : nullptr;
+		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+			intVal(list_nth(site, kMatchSiteBindingKind)));
+		/* custom_private retains planner coordinates while custom_scan_tlist and
+		 * the carrier identity are post-setrefs.  Stable site ownership plus the
+		 * exact supplied expression is the cross-domain proof; comparing their
+		 * argument Vars directly would reject valid rtable-offset plans. */
+		if (supplied != nullptr && supplied->resno == resno
+			&& equal(supplied->expr, identity)
+			&& static_cast<Oid>(intVal(list_nth(
+				site, kMatchSiteFuncid))) == helper->funcid
+			&& intVal(list_nth(site, kMatchSiteTypmod)) == exprTypmod(identity)
+			&& static_cast<Oid>(intVal(list_nth(
+				site, kMatchSiteCollation))) == exprCollation(identity)
+			&& (binding_kind == BioseqMatchHelperBindingKind::exact_recipe
+				|| binding_kind
+					== BioseqMatchHelperBindingKind::unique_lineage)
+			&& intVal(list_nth(site, kMatchSitePhid)) == expected_phid
+			&& intVal(list_nth(site, kMatchSiteStableId))
+				== stable_match_id) {
+			++matches;
+		}
+	}
+	return matches;
+}
+
+struct FinalizedBaseOwnerSiteContext {
+	List* sites = NIL;
+	Var* target_recipe = nullptr;
+	int stable_match_id = 0;
+};
+
+[[nodiscard]] static std::optional<FinalizedBaseOwnerSiteContext>
+finalized_base_owner_site_context(
+		CustomScan* scan, const BioseqStubOids& oids) {
+	if (scan == nullptr || scan->methods != &BioseqColumnScanScanMethods) {
+		return std::nullopt;
+	}
+	List* owner_tag = find_base_match_owner_plan_tag(scan);
+	Node* descriptor_node = owner_tag == NIL ? nullptr
+		: reinterpret_cast<Node*>(list_nth(
+			owner_tag, kBaseMatchPlanExecutorDescriptor));
+	Node* sites_node = owner_tag == NIL ? nullptr
+		: reinterpret_cast<Node*>(list_nth(
+			owner_tag, kBaseMatchPlanExecutorSites));
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)
+		|| sites_node == nullptr || !IsA(sites_node, List)) {
+		return std::nullopt;
+	}
+	List* descriptor = reinterpret_cast<List*>(descriptor_node);
+	const int stable_match_id =
+		validate_finalized_match_owner_descriptor_value(scan, descriptor);
+	Var* target_recipe = pg_node_try_as<Var>(reinterpret_cast<Node*>(
+		list_nth(descriptor, kMatchOwnerTargetRecipe)));
+	if (target_recipe == nullptr || target_recipe->varno != scan->scan.scanrelid
+		|| target_recipe->varattno <= 0 || target_recipe->varlevelsup != 0
+		|| !bms_is_empty(target_recipe->varnullingrels)
+		|| target_recipe->vartype != oids.bioseq_seq_type_oid) {
+		return std::nullopt;
+	}
+	return FinalizedBaseOwnerSiteContext{
+		reinterpret_cast<List*>(sites_node), target_recipe, stable_match_id};
+}
+
+[[nodiscard]] static bool finalized_base_owner_site_matches(
+		List* site, FuncExpr* helper, AttrNumber resno,
+		const FinalizedBaseOwnerSiteContext& context,
+		const BioseqStubOids& oids, bool& malformed) noexcept {
+	if (site == nullptr || helper == nullptr
+		|| list_length(site) != kBioseqMatchHelperSiteFields) {
+		malformed = true;
+		return false;
+	}
+	for (const int index : {
+			kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+			kMatchSiteCollation, kMatchSiteBindingKind,
+			kMatchSitePhid, kMatchSiteStableId}) {
+		Node* value = reinterpret_cast<Node*>(list_nth(site, index));
+		if (value == nullptr || !IsA(value, Integer)) {
+			malformed = true;
+			return false;
+		}
+	}
+	Node* canonical_argument = reinterpret_cast<Node*>(list_nth(
+		site, kMatchSiteCanonicalArgument));
+	Node* helper_argument = batch_join_match_helper_argument(helper);
+	Var* argument = pg_node_try_as<Var>(canonical_argument);
+	const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+		intVal(list_nth(site, kMatchSiteBindingKind)));
+	const bool exact_sequence_argument = argument != nullptr
+		&& argument->vartype == oids.bioseq_seq_type_oid
+		&& equal(argument, context.target_recipe)
+		&& binding_kind == BioseqMatchHelperBindingKind::exact_recipe;
+	const bool legacy_lineage_argument = argument != nullptr
+		&& argument->vartype != oids.bioseq_seq_type_oid
+		&& argument->varno == context.target_recipe->varno
+		&& argument->varattno > 0 && argument->varlevelsup == 0
+		&& bms_is_empty(argument->varnullingrels)
+		&& binding_kind == BioseqMatchHelperBindingKind::unique_lineage;
+	return helper_argument != nullptr && canonical_argument != nullptr
+		&& equal(canonical_argument, helper_argument)
+		&& intVal(list_nth(site, kMatchSiteResno)) == resno
+		&& static_cast<Oid>(intVal(list_nth(
+			site, kMatchSiteFuncid))) == helper->funcid
+		&& intVal(list_nth(site, kMatchSiteTypmod))
+			== exprTypmod(reinterpret_cast<Node*>(helper))
+		&& static_cast<Oid>(intVal(list_nth(
+			site, kMatchSiteCollation)))
+			== exprCollation(reinterpret_cast<Node*>(helper))
+		&& intVal(list_nth(site, kMatchSitePhid)) == 0
+		&& intVal(list_nth(site, kMatchSiteStableId))
+			== context.stable_match_id
+		&& (exact_sequence_argument || legacy_lineage_argument);
+}
+
+struct FinalizedBaseTargetlistAudit {
+	FinalizedBaseOwnerSiteContext context{};
+	const BioseqStubOids* oids = nullptr;
+	AttrNumber resno = InvalidAttrNumber;
+	std::vector<bool>* matched_sites = nullptr;
+	bool invalid = false;
+};
+
+struct finalized_base_targetlist_audit_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			FinalizedBaseTargetlistAudit& audit) const {
+		FuncExpr* function = node.try_as<FuncExpr>();
+		if (function == nullptr || audit.oids == nullptr
+			|| !is_bioseq_projection_funcid(
+				function->funcid, *audit.oids)) {
+			return pg_walk_step::descend;
+		}
+		FuncExpr* helper = batch_join_well_formed_match_helper(
+			reinterpret_cast<Node*>(function), *audit.oids);
+		if (helper == nullptr || audit.matched_sites == nullptr) {
+			audit.invalid = true;
+			return pg_walk_step::stop;
+		}
+		std::size_t matches = 0u;
+		std::size_t matched_index = 0u;
+		for (int index = 0; index < list_length(audit.context.sites); ++index) {
+			Node* raw_site = reinterpret_cast<Node*>(list_nth(
+				audit.context.sites, index));
+			List* site = raw_site != nullptr && IsA(raw_site, List)
+				? reinterpret_cast<List*>(raw_site) : NIL;
+			bool malformed = false;
+			if (finalized_base_owner_site_matches(
+					site, helper, audit.resno, audit.context,
+					*audit.oids, malformed)) {
+				++matches;
+				matched_index = static_cast<std::size_t>(index);
+			}
+			if (malformed) {
+				audit.invalid = true;
+				return pg_walk_step::stop;
+			}
+		}
+		if (matches != 1u) {
+			audit.invalid = true;
+			return pg_walk_step::stop;
+		}
+		(*audit.matched_sites)[matched_index] = true;
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+[[nodiscard]] static bool
+base_scan_targetlist_has_only_finalized_match_helpers(
+		CustomScan* scan, const BioseqStubOids& oids) {
+	const auto context = finalized_base_owner_site_context(scan, oids);
+	if (!context.has_value() || context->sites == NIL) return false;
+	std::vector<bool> matched_sites(
+		static_cast<std::size_t>(list_length(context->sites)), false);
+	FinalizedBaseTargetlistAudit audit{
+		*context, &oids, InvalidAttrNumber, &matched_sites, false};
+	finalized_base_targetlist_audit_visitor visitor;
+	for (TargetEntry* entry : PList<TargetEntry>(scan->scan.plan.targetlist)) {
+		if (entry == nullptr || entry->expr == nullptr) continue;
+		audit.resno = entry->resno;
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(entry->expr), audit, visitor);
+		if (audit.invalid) return false;
+	}
+	return std::all_of(
+		matched_sites.begin(), matched_sites.end(),
+		[](const bool matched) noexcept { return matched; });
+}
+
+[[nodiscard]] static std::size_t finalized_base_owner_matching_site_count(
+		CustomScan* scan, Node* identity, const BioseqStubOids& oids) {
+	const auto context = finalized_base_owner_site_context(scan, oids);
+	if (!context.has_value() || identity == nullptr) return 0u;
+	PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
+	FuncExpr* helper = placeholder == nullptr
+		? batch_join_well_formed_match_helper(identity, oids)
+		: batch_join_match_helper_phv_function(placeholder, oids);
+	if (helper == nullptr) return 0u;
+	std::size_t matches = 0u;
+	for (Node* raw_site : PList<Node>(context->sites)) {
+		List* site = raw_site != nullptr && IsA(raw_site, List)
+			? reinterpret_cast<List*>(raw_site) : NIL;
+		if (list_length(site) != kBioseqMatchHelperSiteFields) return 2u;
+		const int resno = site != NIL
+			&& IsA(reinterpret_cast<Node*>(list_nth(
+				site, kMatchSiteResno)), Integer)
+			? intVal(list_nth(site, kMatchSiteResno)) : -1;
+		Node* raw_supplied = resno <= 0
+			|| resno > list_length(scan->scan.plan.targetlist)
+			? nullptr : reinterpret_cast<Node*>(list_nth(
+				scan->scan.plan.targetlist, resno - 1));
+		TargetEntry* supplied = raw_supplied != nullptr
+			&& IsA(raw_supplied, TargetEntry)
+			? reinterpret_cast<TargetEntry*>(raw_supplied) : nullptr;
+		bool malformed = false;
+		if (supplied != nullptr && supplied->resno == resno
+			&& equal(supplied->expr, identity)
+			&& finalized_base_owner_site_matches(
+				site, helper, static_cast<AttrNumber>(resno),
+				*context, oids, malformed)) {
+			++matches;
+		}
+		if (malformed) return 2u;
+	}
+	return matches;
+}
+
+[[nodiscard]] static std::size_t
+finalized_descendant_match_owner_site_count(
+		Plan* plan, Node* identity, const BioseqStubOids& oids) {
+	if (plan == nullptr || identity == nullptr) return 0u;
+	check_stack_depth();
+	auto add = [](std::size_t left, std::size_t right) noexcept {
+		return left > 1u || right > 1u || left + right > 1u
+			? std::size_t{2u} : left + right;
+	};
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		std::size_t count = finalized_batch_owner_matching_site_count(
+			custom, identity, oids);
+		count = add(count, finalized_base_owner_matching_site_count(
+			custom, identity, oids));
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			count = add(count, finalized_descendant_match_owner_site_count(
+				child, identity, oids));
+		}
+		return count;
+	}
+	auto search_plan_list = [identity, &oids, &add](List* plans) {
+		std::size_t count = 0u;
+		for (Plan* child : PList<Plan>(plans)) {
+			count = add(count, finalized_descendant_match_owner_site_count(
+				child, identity, oids));
+		}
+		return count;
+	};
+	if (IsA(plan, Append)) {
+		return search_plan_list(reinterpret_cast<Append*>(plan)->appendplans);
+	}
+	if (IsA(plan, MergeAppend)) {
+		return search_plan_list(
+			reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+	}
+	if (IsA(plan, BitmapAnd)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, BitmapOr)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, SubqueryScan)) {
+		/* A SubqueryScan starts a distinct finalized helper-binding scope. */
+		return 0u;
+	}
+	std::size_t count = finalized_descendant_match_owner_site_count(
+		outerPlan(plan), identity, oids);
+	if (innerPlan(plan) != outerPlan(plan)) {
+		count = add(count, finalized_descendant_match_owner_site_count(
+			innerPlan(plan), identity, oids));
+	}
+	return count;
+}
+
+/* Diagnostic-only counterpart to finalized_descendant_match_owner_site_count.
+ * Keep Batch and Base ownership separate so a rejected finalized carrier can
+ * explain which owner class, if either, still proves the raw helper identity.
+ * Counts saturate at two because the audit only distinguishes zero, unique,
+ * and ambiguous ownership. */
+[[nodiscard]] static std::size_t
+finalized_descendant_match_owner_site_count_by_kind(
+		Plan* plan, Node* identity, const BioseqStubOids& oids,
+		bool batch_owner) {
+	if (plan == nullptr || identity == nullptr) return 0u;
+	check_stack_depth();
+	auto add = [](std::size_t left, std::size_t right) noexcept {
+		return left > 1u || right > 1u || left + right > 1u
+			? std::size_t{2u} : left + right;
+	};
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		std::size_t count = batch_owner
+			? finalized_batch_owner_matching_site_count(
+				custom, identity, oids)
+			: finalized_base_owner_matching_site_count(
+				custom, identity, oids);
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			count = add(count,
+				finalized_descendant_match_owner_site_count_by_kind(
+					child, identity, oids, batch_owner));
+		}
+		return count;
+	}
+	auto search_plan_list = [identity, &oids, batch_owner, &add](List* plans) {
+		std::size_t count = 0u;
+		for (Plan* child : PList<Plan>(plans)) {
+			count = add(count,
+				finalized_descendant_match_owner_site_count_by_kind(
+					child, identity, oids, batch_owner));
+		}
+		return count;
+	};
+	if (IsA(plan, Append)) {
+		return search_plan_list(reinterpret_cast<Append*>(plan)->appendplans);
+	}
+	if (IsA(plan, MergeAppend)) {
+		return search_plan_list(
+			reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+	}
+	if (IsA(plan, BitmapAnd)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, BitmapOr)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, SubqueryScan)) {
+		/* Match the finalized helper-binding scope fence used by the verdict. */
+		return 0u;
+	}
+	std::size_t count =
+		finalized_descendant_match_owner_site_count_by_kind(
+			outerPlan(plan), identity, oids, batch_owner);
+	if (innerPlan(plan) != outerPlan(plan)) {
+		count = add(count,
+			finalized_descendant_match_owner_site_count_by_kind(
+				innerPlan(plan), identity, oids, batch_owner));
+	}
+	return count;
+}
+
+struct FinalizedMatchOwnerSiteCounts {
+	std::size_t batch = 0u;
+	std::size_t base = 0u;
+};
+
+[[nodiscard]] static FinalizedMatchOwnerSiteCounts
+finalized_child_match_owner_site_counts(
+		Plan* plan, Node* identity, const BioseqStubOids& oids) {
+	FinalizedMatchOwnerSiteCounts counts{};
+	if (plan == nullptr || identity == nullptr) return counts;
+	auto add = [](std::size_t left, std::size_t right) noexcept {
+		return left > 1u || right > 1u || left + right > 1u
+			? std::size_t{2u} : left + right;
+	};
+	auto count_child = [&](Plan* child) {
+		counts.batch = add(counts.batch,
+			finalized_descendant_match_owner_site_count_by_kind(
+				child, identity, oids, true));
+		counts.base = add(counts.base,
+			finalized_descendant_match_owner_site_count_by_kind(
+				child, identity, oids, false));
+	};
+	if (IsA(plan, Append)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<Append*>(plan)->appendplans)) {
+			count_child(child);
+		}
+	} else if (IsA(plan, MergeAppend)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<MergeAppend*>(plan)->mergeplans)) {
+			count_child(child);
+		}
+	} else if (IsA(plan, CustomScan)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<CustomScan*>(plan)->custom_plans)) {
+			count_child(child);
+		}
+	} else if (IsA(plan, BitmapAnd)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<BitmapAnd*>(plan)->bitmapplans)) {
+			count_child(child);
+		}
+	} else if (IsA(plan, BitmapOr)) {
+		for (Plan* child : PList<Plan>(
+				reinterpret_cast<BitmapOr*>(plan)->bitmapplans)) {
+			count_child(child);
+		}
+	} else if (!IsA(plan, SubqueryScan)) {
+		count_child(outerPlan(plan));
+		if (innerPlan(plan) != outerPlan(plan)) count_child(innerPlan(plan));
+	}
+	return counts;
+}
+
+[[nodiscard]] constexpr std::size_t saturated_match_owner_site_count_add(
+		std::size_t left, std::size_t right) noexcept {
+	return left > 1u || right > 1u || left + right > 1u
+		? std::size_t{2u} : left + right;
+}
+
+[[nodiscard]] constexpr bool dummy_match_helper_has_unique_finalized_owner(
+		std::size_t descendant_matches,
+		std::size_t current_parent_matches) noexcept {
+	return saturated_match_owner_site_count_add(
+		descendant_matches, current_parent_matches) == 1u;
+}
+
+static_assert(dummy_match_helper_has_unique_finalized_owner(0u, 1u));
+static_assert(!dummy_match_helper_has_unique_finalized_owner(1u, 1u));
+static_assert(!dummy_match_helper_has_unique_finalized_owner(0u, 0u));
+static_assert(!dummy_match_helper_has_unique_finalized_owner(2u, 0u));
+
+[[nodiscard]] constexpr bool
+dummy_match_helper_is_unique_ancestor_carrier(
+		std::size_t local_base_matches,
+		std::size_t ancestor_matches) noexcept {
+	return local_base_matches == 0u && ancestor_matches == 1u;
+}
+
+static_assert(dummy_match_helper_is_unique_ancestor_carrier(0u, 1u));
+static_assert(!dummy_match_helper_is_unique_ancestor_carrier(1u, 0u));
+static_assert(!dummy_match_helper_is_unique_ancestor_carrier(0u, 2u));
+
+[[nodiscard]] static MatchOwnerFinalization*
+finalized_batch_owner_for_ancestor_stack(
+		CustomScan* scan,
+		std::vector<MatchOwnerFinalization>& owners) {
+	MatchOwnerFinalization* result = nullptr;
+	for (MatchOwnerFinalization& owner : owners) {
+		if (owner.scan != scan || owner.base_owner_tag != NIL) continue;
+		if (result != nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Bioseq finalized ancestor match owner is duplicated"),
+				 errdetail("plan_node_id=%d", scan->scan.plan.plan_node_id)));
+		}
+		result = &owner;
+	}
+	if (result == nullptr) return nullptr;
+
+	Node* version_node = scan->custom_private == NIL ? nullptr
+		: reinterpret_cast<Node*>(linitial(scan->custom_private));
+	const int version = version_node != nullptr && IsA(version_node, Integer)
+		? intVal(version_node) : -1;
+	const int expected_fields = version == kBioseqBatchJoinPlanVersion
+		? kBioseqBatchJoinPrivateFields
+		: (version == kBioseqPerRowJoinPlanVersion
+			? kBioseqPerRowJoinPrivateFields : -1);
+	const int descriptor_index = version == kBioseqBatchJoinPlanVersion
+		? kBatchJoinMatchOwnerDescriptor
+		: (version == kBioseqPerRowJoinPlanVersion
+			? kPerRowMatchOwnerDescriptor : -1);
+	const int sites_index = version == kBioseqBatchJoinPlanVersion
+		? kBatchJoinPlaceholderSites
+		: (version == kBioseqPerRowJoinPlanVersion
+			? kPerRowPlaceholderSites : -1);
+	Node* descriptor_node = descriptor_index >= 0
+		&& descriptor_index < list_length(scan->custom_private)
+		? reinterpret_cast<Node*>(list_nth(
+			scan->custom_private, descriptor_index)) : nullptr;
+	Node* sites_node = sites_index >= 0
+		&& sites_index < list_length(scan->custom_private)
+		? reinterpret_cast<Node*>(list_nth(
+			scan->custom_private, sites_index)) : nullptr;
+	const bool sites_agree = result->sites == NIL
+		? sites_node == nullptr
+		: sites_node == reinterpret_cast<Node*>(result->sites);
+	if (scan->methods != &BioseqBatchJoinScanMethods
+		|| expected_fields < 0
+		|| list_length(scan->custom_private) != expected_fields
+		|| descriptor_node == nullptr || !IsA(descriptor_node, List)
+		|| descriptor_node != reinterpret_cast<Node*>(result->descriptor)
+		|| !sites_agree || result->stable_match_id < 0
+		|| result->stable_match_id != scan->scan.plan.plan_node_id
+		|| result->query_scope_id == 0u) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("Bioseq finalized ancestor match owner is invalid"),
+			 errdetail("plan_node_id=%d version=%d query_scope_id=" UINT64_FORMAT,
+				scan->scan.plan.plan_node_id, version,
+				static_cast<uint64>(result->query_scope_id))));
+	}
+	const int descriptor_stable_id =
+		validate_finalized_match_owner_descriptor_value(
+			scan, reinterpret_cast<List*>(descriptor_node));
+	if (descriptor_stable_id != result->stable_match_id) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("Bioseq finalized ancestor match identity disagrees with its descriptor"),
+			 errdetail("plan_node_id=%d descriptor_stable_id=%d owner_stable_id=%d",
+				scan->scan.plan.plan_node_id, descriptor_stable_id,
+				result->stable_match_id)));
+	}
+	return result;
+}
+
+static void neutralize_bioseq_scan_ancestor_helper_carriers(
+		CustomScan* scan,
+		const std::vector<MatchOwnerFinalization*>& ancestor_stack,
+		const BioseqStubOids& oids) {
+	if (scan == nullptr || scan->methods != &BioseqColumnScanScanMethods
+		|| ancestor_stack.empty()) return;
+	if (batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(scan->scan.plan.qual), oids)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqScan inherited match helper remains executable after setrefs"),
+			 errdetail("store=Plan.qual plan_node_id=%d",
+				scan->scan.plan.plan_node_id)));
+	}
+	if (batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(scan->custom_exprs), oids)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqScan inherited match helper remains executable after setrefs"),
+			 errdetail("store=CustomScan.custom_exprs plan_node_id=%d",
+				scan->scan.plan.plan_node_id)));
+	}
+
+	for (TargetEntry* entry : PList<TargetEntry>(
+			scan->scan.plan.targetlist)) {
+		Node* identity = entry == nullptr ? nullptr
+			: reinterpret_cast<Node*>(entry->expr);
+		if (!batch_join_expression_has_match_helper(identity, oids)) continue;
+		PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
+		FuncExpr* helper = placeholder == nullptr
+			? batch_join_well_formed_match_helper(identity, oids)
+			: batch_join_match_helper_phv_function(placeholder, oids);
+		if (entry == nullptr || helper == nullptr
+			|| is_projection_capable_plan(
+				reinterpret_cast<Plan*>(scan))) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan inherited match helper carrier is not a whole dummy target"),
+				 errdetail("plan_node_id=%d resno=%d",
+					scan->scan.plan.plan_node_id,
+					entry == nullptr ? 0 : entry->resno)));
+		}
+
+		const std::size_t local_base_matches =
+			finalized_base_owner_matching_site_count(scan, identity, oids);
+		std::size_t ancestor_matches = 0u;
+		for (MatchOwnerFinalization* ancestor : ancestor_stack) {
+			if (ancestor == nullptr || ancestor->scan == nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("Bioseq finalized ancestor stack is invalid")));
+			}
+			ancestor_matches = saturated_match_owner_site_count_add(
+				ancestor_matches,
+				finalized_batch_owner_matching_site_count(
+					ancestor->scan, identity, oids));
+		}
+		if (local_base_matches > 1u || ancestor_matches > 1u
+			|| (local_base_matches == 1u && ancestor_matches != 0u)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan match helper carrier ownership is ambiguous"),
+				 errdetail("plan_node_id=%d resno=%d local_base_matches=%zu ancestor_matches=%zu",
+					scan->scan.plan.plan_node_id, entry->resno,
+					local_base_matches, ancestor_matches)));
+		}
+		/* A finalized base owner executes this helper at the leaf.  Only raw
+		 * carriers owned exclusively by an enclosing Batch/PerRow node are
+		 * non-executable dummy target columns. */
+		if (local_base_matches == 1u) continue;
+		if (!dummy_match_helper_is_unique_ancestor_carrier(
+				local_base_matches, ancestor_matches)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan inherited match helper carrier has no unique finalized ancestor"),
+				 errdetail("plan_node_id=%d resno=%d local_base_matches=%zu ancestor_matches=%zu",
+					scan->scan.plan.plan_node_id, entry->resno,
+					local_base_matches, ancestor_matches)));
+		}
+
+		const Oid type_oid = exprType(identity);
+		const int32 typmod = exprTypmod(identity);
+		const Oid collation = exprCollation(identity);
+		if (!OidIsValid(type_oid) || type_oid != helper->funcresulttype
+			|| type_oid != get_func_rettype(helper->funcid)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan inherited match helper carrier type is invalid"),
+				 errdetail("plan_node_id=%d resno=%d type_oid=%u helper_type_oid=%u",
+					scan->scan.plan.plan_node_id, entry->resno,
+					type_oid, helper->funcresulttype)));
+		}
+
+		const AttrNumber original_resno = entry->resno;
+		char* const original_resname = entry->resname;
+		const Index original_sortgroupref = entry->ressortgroupref;
+		const Oid original_table_oid = entry->resorigtbl;
+		const AttrNumber original_column = entry->resorigcol;
+		const bool original_resjunk = entry->resjunk;
+		Const* replacement = makeNullConst(type_oid, typmod, collation);
+		entry->expr = reinterpret_cast<Expr*>(replacement);
+		if (replacement == nullptr || !replacement->constisnull
+			|| exprType(reinterpret_cast<Node*>(entry->expr)) != type_oid
+			|| exprTypmod(reinterpret_cast<Node*>(entry->expr)) != typmod
+			|| exprCollation(reinterpret_cast<Node*>(entry->expr)) != collation
+			|| entry->resno != original_resno
+			|| entry->resname != original_resname
+			|| entry->ressortgroupref != original_sortgroupref
+			|| entry->resorigtbl != original_table_oid
+			|| entry->resorigcol != original_column
+			|| entry->resjunk != original_resjunk) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan inherited match helper carrier neutralization changed its slot contract"),
+				 errdetail("plan_node_id=%d resno=%d",
+					scan->scan.plan.plan_node_id, original_resno)));
+		}
+	}
+}
+
+static void neutralize_ancestor_owned_dummy_match_helpers_plan(
+		Plan* plan, std::vector<MatchOwnerFinalization>& owners,
+		std::vector<MatchOwnerFinalization*>& ancestor_stack,
+		const BioseqStubOids& oids) {
+	if (plan == nullptr) return;
+	check_stack_depth();
+	if (IsA(plan, SubqueryScan)) {
+		/* A SubqueryScan is a hard query-scope boundary.  An owner above it can
+		 * never justify neutralizing an equal local helper spelling below it. */
+		std::vector<MatchOwnerFinalization*> subquery_ancestors;
+		neutralize_ancestor_owned_dummy_match_helpers_plan(
+			reinterpret_cast<SubqueryScan*>(plan)->subplan, owners,
+			subquery_ancestors, oids);
+		return;
+	}
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		if (custom->methods == &BioseqColumnScanScanMethods) {
+			neutralize_bioseq_scan_ancestor_helper_carriers(
+				custom, ancestor_stack, oids);
+		}
+		MatchOwnerFinalization* owner =
+			finalized_batch_owner_for_ancestor_stack(custom, owners);
+		if (owner != nullptr && !ancestor_stack.empty()
+			&& ancestor_stack.back()->query_scope_id
+				!= owner->query_scope_id) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("Bioseq finalized ancestor stack crosses query scopes"),
+				 errdetail("parent_scope_id=" UINT64_FORMAT " child_scope_id=" UINT64_FORMAT,
+					static_cast<uint64>(
+						ancestor_stack.back()->query_scope_id),
+					static_cast<uint64>(owner->query_scope_id))));
+		}
+		if (owner != nullptr) ancestor_stack.push_back(owner);
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			neutralize_ancestor_owned_dummy_match_helpers_plan(
+				child, owners, ancestor_stack, oids);
+		}
+		if (owner != nullptr) ancestor_stack.pop_back();
+		return;
+	}
+	auto visit_plan_list = [&owners, &ancestor_stack, &oids](List* plans) {
+		for (Plan* child : PList<Plan>(plans)) {
+			neutralize_ancestor_owned_dummy_match_helpers_plan(
+				child, owners, ancestor_stack, oids);
+		}
+	};
+	if (IsA(plan, Append)) {
+		visit_plan_list(reinterpret_cast<Append*>(plan)->appendplans);
+		return;
+	}
+	if (IsA(plan, MergeAppend)) {
+		visit_plan_list(reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+		return;
+	}
+	if (IsA(plan, BitmapAnd)) {
+		visit_plan_list(reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+		return;
+	}
+	if (IsA(plan, BitmapOr)) {
+		visit_plan_list(reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+		return;
+	}
+	neutralize_ancestor_owned_dummy_match_helpers_plan(
+		outerPlan(plan), owners, ancestor_stack, oids);
+	if (innerPlan(plan) != outerPlan(plan)) {
+		neutralize_ancestor_owned_dummy_match_helpers_plan(
+			innerPlan(plan), owners, ancestor_stack, oids);
+	}
+}
+
+static void neutralize_ancestor_owned_dummy_match_helpers(
+		PlannedStmt* statement,
+		std::vector<MatchOwnerFinalization>& owners) {
+	if (statement == nullptr || statement->planTree == nullptr) return;
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	std::vector<MatchOwnerFinalization*> ancestor_stack;
+	neutralize_ancestor_owned_dummy_match_helpers_plan(
+		statement->planTree, owners, ancestor_stack, oids);
+	for (Plan* subplan : PList<Plan>(statement->subplans)) {
+		ancestor_stack.clear();
+		neutralize_ancestor_owned_dummy_match_helpers_plan(
+			subplan, owners, ancestor_stack, oids);
+	}
+}
+
+[[nodiscard]] static bool
+dummy_targetlist_has_only_unique_finalized_owner_helpers(
+		Plan* plan, const BioseqStubOids& oids,
+		CustomScan* current_parent) {
+	if (plan == nullptr || is_projection_capable_plan(plan)) return false;
+	for (TargetEntry* entry : PList<TargetEntry>(plan->targetlist)) {
+		Node* identity = entry == nullptr
+			? nullptr : reinterpret_cast<Node*>(entry->expr);
+		if (!batch_join_expression_has_match_helper(identity, oids)) continue;
+		PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
+		FuncExpr* helper = placeholder == nullptr
+			? batch_join_well_formed_match_helper(identity, oids)
+			: batch_join_match_helper_phv_function(placeholder, oids);
+		if (helper == nullptr) return false;
+		const std::size_t current_parent_matches = current_parent == nullptr
+			|| IsA(plan, SubqueryScan)
+			? 0u : finalized_batch_owner_matching_site_count(
+				current_parent, identity, oids);
+		std::size_t descendant_matches = 0u;
+		auto count_child = [&](Plan* child) {
+			const std::size_t additional =
+				finalized_descendant_match_owner_site_count(
+					child, identity, oids);
+			descendant_matches = saturated_match_owner_site_count_add(
+				descendant_matches, additional);
+		};
+		if (IsA(plan, Append)) {
+			for (Plan* child : PList<Plan>(
+					reinterpret_cast<Append*>(plan)->appendplans)) {
+				count_child(child);
+			}
+		} else if (IsA(plan, MergeAppend)) {
+			for (Plan* child : PList<Plan>(
+					reinterpret_cast<MergeAppend*>(plan)->mergeplans)) {
+				count_child(child);
+			}
+		} else if (IsA(plan, CustomScan)) {
+			for (Plan* child : PList<Plan>(
+					reinterpret_cast<CustomScan*>(plan)->custom_plans)) {
+				count_child(child);
+			}
+		} else if (IsA(plan, BitmapAnd)) {
+			for (Plan* child : PList<Plan>(
+					reinterpret_cast<BitmapAnd*>(plan)->bitmapplans)) {
+				count_child(child);
+			}
+		} else if (IsA(plan, BitmapOr)) {
+			for (Plan* child : PList<Plan>(
+					reinterpret_cast<BitmapOr*>(plan)->bitmapplans)) {
+				count_child(child);
+			}
+		} else if (IsA(plan, SubqueryScan)) {
+			/* Do not prove a parent helper from a separate query scope. */
+		} else {
+			count_child(outerPlan(plan));
+			if (innerPlan(plan) != outerPlan(plan)) count_child(innerPlan(plan));
+		}
+		if (!dummy_match_helper_has_unique_finalized_owner(
+				descendant_matches, current_parent_matches)) return false;
+	}
+	return true;
+}
+
+struct BatchJoinPlanHelperAuditFirstFailure {
+	const char* reason = "none";
+	const char* store = "none";
+	const char* custom_name = "none";
+	const char* boundary_encountered = "none";
+	int plan_node_tag = -1;
+	bool projection_capable = false;
+	int first_helper_resno = 0;
+	bool whole_helper_valid = false;
+	std::size_t finalized_batch_descendant_matches = 0u;
+	std::size_t finalized_base_descendant_matches = 0u;
+	std::size_t current_parent_matches = 0u;
+	bool recorded = false;
+};
+
+static void record_batch_join_plan_helper_audit_failure(
+		BatchJoinPlanHelperAuditFirstFailure& failure, Plan* plan,
+		CustomScan* current_parent, const BioseqStubOids& oids,
+		const char* reason, const char* store,
+		const char* boundary_encountered, bool inspect_targetlist) {
+	if (failure.recorded) return;
+	failure.recorded = true;
+	failure.reason = reason;
+	failure.store = store;
+	failure.boundary_encountered = boundary_encountered;
+	failure.plan_node_tag = plan == nullptr
+		? -1 : static_cast<int>(nodeTag(plan));
+	failure.projection_capable = plan != nullptr
+		&& is_projection_capable_plan(plan);
+	if (plan != nullptr && IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		if (custom->methods != nullptr
+			&& custom->methods->CustomName != nullptr) {
+			failure.custom_name = custom->methods->CustomName;
+		}
+	}
+	if (!inspect_targetlist || plan == nullptr) return;
+
+	TargetEntry* first_helper_entry = nullptr;
+	bool first_helper_whole = false;
+	FinalizedMatchOwnerSiteCounts first_helper_counts{};
+	std::size_t first_helper_parent_matches = 0u;
+	for (TargetEntry* entry : PList<TargetEntry>(plan->targetlist)) {
+		Node* identity = entry == nullptr
+			? nullptr : reinterpret_cast<Node*>(entry->expr);
+		if (!batch_join_expression_has_match_helper(identity, oids)) continue;
+		PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
+		FuncExpr* helper = placeholder == nullptr
+			? batch_join_well_formed_match_helper(identity, oids)
+			: batch_join_match_helper_phv_function(placeholder, oids);
+		const bool whole_helper = helper != nullptr;
+		const FinalizedMatchOwnerSiteCounts counts =
+			finalized_child_match_owner_site_counts(plan, identity, oids);
+		const std::size_t parent_matches = current_parent == nullptr
+			? 0u : finalized_batch_owner_matching_site_count(
+				current_parent, identity, oids);
+		if (first_helper_entry == nullptr) {
+			first_helper_entry = entry;
+			first_helper_whole = whole_helper;
+			first_helper_counts = counts;
+			first_helper_parent_matches = parent_matches;
+		}
+		const std::size_t descendant_matches =
+			saturated_match_owner_site_count_add(counts.batch, counts.base);
+		if (failure.projection_capable || !whole_helper
+			|| !dummy_match_helper_has_unique_finalized_owner(
+					descendant_matches, parent_matches)) {
+			first_helper_entry = entry;
+			first_helper_whole = whole_helper;
+			first_helper_counts = counts;
+			first_helper_parent_matches = parent_matches;
+			break;
+		}
+	}
+	if (first_helper_entry == nullptr) return;
+	failure.first_helper_resno = first_helper_entry->resno;
+	failure.whole_helper_valid = first_helper_whole;
+	failure.finalized_batch_descendant_matches = first_helper_counts.batch;
+	failure.finalized_base_descendant_matches = first_helper_counts.base;
+	failure.current_parent_matches = first_helper_parent_matches;
+}
+
+/* Final setrefs must replace every propagated helper identity in an
+ * executable Plan expression with the descendant owner's scan-slot Var.
+ * A non-projecting node may retain the whole identity in its dummy targetlist,
+ * but only when exactly one finalized descendant or current PerRow owner site
+ * supplies that column.  Mixed parent/descendant ownership remains ambiguous.
+ * Descriptor-only custom_scan_tlist/custom_private fields remain excluded. */
+[[nodiscard]] static bool batch_join_plan_has_unowned_executable_match_helper(
+		Plan* plan, const BioseqStubOids& oids, CustomScan* current_parent,
+		BatchJoinPlanHelperAuditFirstFailure& first_failure,
+		const char* boundary_encountered) {
+	if (plan == nullptr) return false;
+	check_stack_depth();
+	const bool targetlist_has_helper = batch_join_expression_has_match_helper(
+		reinterpret_cast<Node*>(plan->targetlist), oids);
+	if (targetlist_has_helper
+		&& (!IsA(plan, CustomScan)
+			|| !base_scan_targetlist_has_only_finalized_match_helpers(
+				reinterpret_cast<CustomScan*>(plan), oids))
+		&& !dummy_targetlist_has_only_unique_finalized_owner_helpers(
+			plan, oids, current_parent)) {
+		record_batch_join_plan_helper_audit_failure(
+			first_failure, plan, current_parent, oids,
+			is_projection_capable_plan(plan)
+				? "projection-capable targetlist"
+				: "dummy targetlist ownership proof failed",
+			"Plan.targetlist", boundary_encountered, true);
+		return true;
+	}
+	if (batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(plan->qual), oids)) {
+		record_batch_join_plan_helper_audit_failure(
+			first_failure, plan, current_parent, oids,
+			"executable expression", "Plan.qual",
+			boundary_encountered, false);
+		return true;
+	}
+	if ((IsA(plan, NestLoop) || IsA(plan, MergeJoin) || IsA(plan, HashJoin))
+		&& batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<Join*>(plan)->joinqual), oids)) {
+		record_batch_join_plan_helper_audit_failure(
+			first_failure, plan, current_parent, oids,
+			"executable expression", "Join.joinqual",
+			boundary_encountered, false);
+		return true;
+	}
+	if (IsA(plan, MergeJoin)
+		&& batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<MergeJoin*>(plan)->mergeclauses), oids)) {
+		record_batch_join_plan_helper_audit_failure(
+			first_failure, plan, current_parent, oids,
+			"executable expression", "MergeJoin.mergeclauses",
+			boundary_encountered, false);
+		return true;
+	}
+	if (IsA(plan, HashJoin)
+		&& batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<HashJoin*>(plan)->hashclauses), oids)) {
+		record_batch_join_plan_helper_audit_failure(
+			first_failure, plan, current_parent, oids,
+			"executable expression", "HashJoin.hashclauses",
+			boundary_encountered, false);
+		return true;
+	}
+	if (IsA(plan, Result)
+		&& batch_join_expression_has_match_helper(
+			reinterpret_cast<Node*>(
+				reinterpret_cast<Result*>(plan)->resconstantqual), oids)) {
+		record_batch_join_plan_helper_audit_failure(
+			first_failure, plan, current_parent, oids,
+			"executable expression", "Result.resconstantqual",
+			boundary_encountered, false);
+		return true;
+	}
+	if (IsA(plan, CustomScan)) {
+		auto* custom = reinterpret_cast<CustomScan*>(plan);
+		if (batch_join_expression_has_match_helper(
+				reinterpret_cast<Node*>(custom->custom_exprs), oids)) {
+			record_batch_join_plan_helper_audit_failure(
+				first_failure, plan, current_parent, oids,
+				"executable expression", "CustomScan.custom_exprs",
+				boundary_encountered, false);
+			return true;
+		}
+		for (Plan* child : PList<Plan>(custom->custom_plans)) {
+			if (batch_join_plan_has_unowned_executable_match_helper(
+					child, oids, current_parent, first_failure,
+					boundary_encountered)) {
+				return true;
+			}
+		}
+		return false;
+	}
+	auto search_plan_list = [&oids, current_parent, &first_failure,
+			boundary_encountered](List* plans) {
+		for (Plan* child : PList<Plan>(plans)) {
+			if (batch_join_plan_has_unowned_executable_match_helper(
+					child, oids, current_parent, first_failure,
+					boundary_encountered)) {
+				return true;
+			}
+		}
+		return false;
+	};
+	if (IsA(plan, Append)) {
+		return search_plan_list(reinterpret_cast<Append*>(plan)->appendplans);
+	}
+	if (IsA(plan, MergeAppend)) {
+		return search_plan_list(
+			reinterpret_cast<MergeAppend*>(plan)->mergeplans);
+	}
+	if (IsA(plan, BitmapAnd)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapAnd*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, BitmapOr)) {
+		return search_plan_list(
+			reinterpret_cast<BitmapOr*>(plan)->bitmapplans);
+	}
+	if (IsA(plan, SubqueryScan)) {
+		return batch_join_plan_has_unowned_executable_match_helper(
+			reinterpret_cast<SubqueryScan*>(plan)->subplan, oids,
+			nullptr, first_failure, "SubqueryScan");
+	}
+	return batch_join_plan_has_unowned_executable_match_helper(
+			outerPlan(plan), oids, current_parent, first_failure,
+			boundary_encountered)
+		|| (innerPlan(plan) != outerPlan(plan)
+			&& batch_join_plan_has_unowned_executable_match_helper(
+				innerPlan(plan), oids, current_parent, first_failure,
+				boundary_encountered));
 }
 
 
@@ -12542,7 +17500,11 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	runtime.edit_sequence_attno = InvalidAttrNumber;
 	runtime.match_sequence_varno = 0;
 	runtime.match_sequence_attno = InvalidAttrNumber;
+	runtime.match_helper_sites = NIL;
+	runtime.stable_match_id = 0;
 	runtime.mmsearch_null_input = false;
+	Var* base_match_target_recipe = initialize_base_match_owner_runtime(
+		cscan, cscanstate->ss.ss_currentRelation, runtime);
 	for (Node* private_node : PList<Node>(cscan->custom_private)) {
 		if (private_node == nullptr || !IsA(private_node, List)) continue;
 		List* tag = reinterpret_cast<List*>(private_node);
@@ -12682,6 +17644,12 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("Bioseq scan plan owns more than one mmsearch qualifier")));
+	}
+	if ((base_match_target_recipe != nullptr)
+		!= (list_length(owned_mmsearch_quals) == 1)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan match owner expression identity is incomplete")));
 	}
 	List *storagePlainClauses = storage_prunable_quals_without_mmsearch(
 		plainClauses, get_cached_stub_oids());
@@ -13277,6 +18245,20 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				static_cast<unsigned long long>(top_level_mmsearch_qual_count)),
 				 errhint("Use a bioseq.seq column as the first argument and a non-null Const, PARAM_EXEC, PARAM_EXTERN, or same-relation bioseq.seq Var as the second argument.")));
 	}
+	Var* configured_match_target = primary_mmsearch_fe == nullptr
+		|| list_length(primary_mmsearch_fe->args) < 1
+		? nullptr : pg_node_try_as<Var>(reinterpret_cast<Node*>(
+			linitial(primary_mmsearch_fe->args)));
+	if (base_match_target_recipe != nullptr
+		&& (configured_match_target == nullptr
+			|| !equal(configured_match_target, base_match_target_recipe)
+			|| runtime.match_sequence_varno != base_match_target_recipe->varno
+			|| runtime.match_sequence_attno
+				!= base_match_target_recipe->varattno)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqScan configured match target disagrees with its finalized owner")));
+	}
 	if (runtime.edit_predicate_active
 		&& (primary_seq_attno == InvalidAttrNumber
 			|| runtime.edit_sequence_attno != primary_seq_attno)) {
@@ -13705,6 +18687,47 @@ lookup_bioseq_placeholder_const(Oid funcid, const VarInjectorCtx* ctx)
 	return nullptr;
 }
 
+[[nodiscard]] static bool base_match_helper_is_finalized_for_scan(
+		FuncExpr* function, const VarInjectorCtx& context) {
+	if (function == nullptr || context.oids == nullptr
+		|| context.stable_match_id < 0
+		|| context.match_helper_sites == NIL
+		|| batch_join_well_formed_match_helper(
+			reinterpret_cast<Node*>(function), *context.oids) == nullptr) {
+		return false;
+	}
+	Var* argument = pg_node_try_as<Var>(
+		batch_join_match_helper_argument(function));
+	if (argument == nullptr
+		|| !bioseq_is_concrete_rte_varno(argument->varno)
+		|| argument->varattno <= 0 || argument->varlevelsup != 0
+		|| !bms_is_empty(argument->varnullingrels)) return false;
+	BioseqMatchHelperBindingKind required_kind{};
+	if (argument->vartype == context.oids->bioseq_seq_type_oid) {
+		if (argument->varno != context.match_sequence_varno
+			|| argument->varattno != context.match_sequence_attno) return false;
+		required_kind = BioseqMatchHelperBindingKind::exact_recipe;
+	} else {
+		if (argument->varno != context.match_sequence_varno) return false;
+		required_kind = BioseqMatchHelperBindingKind::unique_lineage;
+	}
+	for (List* site : PList<List>(context.match_helper_sites)) {
+		if (site == nullptr || !IsA(site, List)
+			|| list_length(site) != kBioseqMatchHelperSiteFields) continue;
+		Node* canonical_argument = reinterpret_cast<Node*>(list_nth(
+			site, kMatchSiteCanonicalArgument));
+		if (static_cast<Oid>(intVal(list_nth(site, kMatchSiteFuncid)))
+				== function->funcid
+			&& static_cast<BioseqMatchHelperBindingKind>(intVal(list_nth(
+				site, kMatchSiteBindingKind))) == required_kind
+			&& intVal(list_nth(site, kMatchSiteStableId))
+				== context.stable_match_id
+			&& canonical_argument != nullptr
+			&& equal(canonical_argument, argument)) return true;
+	}
+	return false;
+}
+
 /*
  * Rewrite a single `bioseq.symbol_count(Var, 'L')` call site into a
  * placeholder Const that the executor populates per-row from meta_sidecar.
@@ -13828,7 +18851,11 @@ struct var_injector_mutator {
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("bioseq.edit projection must reference the mmsearch target column")));
 			}
-			Const* replacement = lookup_bioseq_placeholder_const(funcExpr->funcid, &injector_context);
+			Const* replacement = base_match_helper_is_finalized_for_scan(
+				funcExpr, injector_context)
+				? lookup_bioseq_placeholder_const(
+					funcExpr->funcid, &injector_context)
+				: nullptr;
 			if (replacement != nullptr) {
 				bioseq_log<DBG>("[bioseq] pg: var_injector_mutator() replacing bioseq funcid={} with placeholder Const",
 						funcExpr->funcid);
@@ -14641,6 +19668,9 @@ static void BioseqBatchJoin_BeginCustomScan(
 		};
 		const int version = private_integer(kBatchJoinVersion);
 		const int token = private_integer(kBatchJoinToken);
+		const int stable_match_id =
+			validate_finalized_match_owner_descriptor(
+				cscan, kBatchJoinMatchOwnerDescriptor);
 		runtime->target_relation_oid = static_cast<Oid>(
 			private_integer(kBatchJoinTargetRelationOid));
 		runtime->target_storage_seq_attno = static_cast<AttrNumber>(
@@ -14767,12 +19797,15 @@ static void BioseqBatchJoin_BeginCustomScan(
 		for (List* encoded : PList<List>(sites)) {
 			Node* encoded_node = reinterpret_cast<Node*>(encoded);
 			if (encoded_node == nullptr || !IsA(encoded_node, List)
-				|| list_length(encoded) != 4) {
+				|| list_length(encoded) != kBioseqMatchHelperSiteFields) {
 				ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
 					 errmsg("BioseqBatchJoin placeholder ABI is invalid")));
 			}
-			for (int index = 0; index < 4; ++index) {
+			for (const int index : {
+					kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+					kMatchSiteCollation, kMatchSiteBindingKind,
+					kMatchSitePhid, kMatchSiteStableId}) {
 				Node* value = reinterpret_cast<Node*>(list_nth(encoded, index));
 				if (value == nullptr || !IsA(value, Integer)) {
 					ereport(ERROR,
@@ -14780,7 +19813,8 @@ static void BioseqBatchJoin_BeginCustomScan(
 						 errmsg("BioseqBatchJoin placeholder scalar ABI is invalid")));
 				}
 			}
-			const int raw_resno = intVal(list_nth(encoded, 0));
+			const int raw_resno = intVal(list_nth(
+				encoded, kMatchSiteResno));
 			const bool duplicate_resno = raw_resno > 0
 				&& bms_is_member(raw_resno, placeholder_resnos);
 			if (raw_resno <= child_column_count
@@ -14800,9 +19834,15 @@ static void BioseqBatchJoin_BeginCustomScan(
 				placeholder_resnos, raw_resno);
 			const BioseqBatchJoinPlaceholderSite site{
 				.resno = static_cast<AttrNumber>(raw_resno),
-				.funcid = static_cast<Oid>(intVal(list_nth(encoded, 1))),
-				.typmod = intVal(list_nth(encoded, 2)),
-				.collation = static_cast<Oid>(intVal(list_nth(encoded, 3))),
+				.funcid = static_cast<Oid>(intVal(list_nth(
+					encoded, kMatchSiteFuncid))),
+				.typmod = intVal(list_nth(encoded, kMatchSiteTypmod)),
+				.collation = static_cast<Oid>(intVal(list_nth(
+					encoded, kMatchSiteCollation))),
+				.binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+					intVal(list_nth(encoded, kMatchSiteBindingKind))),
+				.stable_match_id = intVal(list_nth(
+					encoded, kMatchSiteStableId)),
 			};
 			Form_pg_attribute attribute = scan_desc == nullptr
 				|| site.resno <= 0 || site.resno > scan_desc->natts
@@ -14812,7 +19852,12 @@ static void BioseqBatchJoin_BeginCustomScan(
 					site.funcid, get_cached_stub_oids())
 				|| attribute->atttypid != get_func_rettype(site.funcid)
 				|| attribute->atttypmod != site.typmod
-				|| attribute->attcollation != site.collation) {
+				|| attribute->attcollation != site.collation
+				|| (site.binding_kind
+						!= BioseqMatchHelperBindingKind::exact_recipe
+					&& site.binding_kind
+						!= BioseqMatchHelperBindingKind::unique_lineage)
+				|| site.stable_match_id != stable_match_id) {
 				ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("BioseqBatchJoin placeholder type/resno ABI is invalid")));
@@ -15624,6 +20669,8 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		return intVal(value);
 	};
 	const int version = private_integer(kPerRowVersion);
+	const int stable_match_id = validate_finalized_match_owner_descriptor(
+		cscan, kPerRowMatchOwnerDescriptor);
 	const Oid target_relation_oid = static_cast<Oid>(
 		private_integer(kPerRowTargetRelationOid));
 	const AttrNumber target_storage_attno = static_cast<AttrNumber>(
@@ -15733,12 +20780,15 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 	Bitmapset* placeholder_resnos = nullptr;
 	for (List* encoded : PList<List>(sites)) {
 		if (encoded == nullptr || !IsA(encoded, List)
-			|| list_length(encoded) != 4) {
+			|| list_length(encoded) != kBioseqMatchHelperSiteFields) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqPerRowMmsearch placeholder ABI is invalid")));
 		}
-		for (int index = 0; index < 4; ++index) {
+		for (const int index : {
+				kMatchSiteResno, kMatchSiteFuncid, kMatchSiteTypmod,
+				kMatchSiteCollation, kMatchSiteBindingKind,
+				kMatchSitePhid, kMatchSiteStableId}) {
 			Node* value = reinterpret_cast<Node*>(list_nth(encoded, index));
 			if (value == nullptr || !IsA(value, Integer)) {
 				ereport(ERROR,
@@ -15746,7 +20796,8 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 					 errmsg("BioseqPerRowMmsearch placeholder scalar is invalid")));
 			}
 		}
-		const int raw_resno = intVal(linitial(encoded));
+		const int raw_resno = intVal(list_nth(
+			encoded, kMatchSiteResno));
 		if (raw_resno <= runtime->child_column_count
 			|| raw_resno > scan_desc->natts
 			|| bms_is_member(raw_resno, placeholder_resnos)) {
@@ -15757,9 +20808,15 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 		placeholder_resnos = bms_add_member(placeholder_resnos, raw_resno);
 		const BioseqBatchJoinPlaceholderSite site{
 			.resno = static_cast<AttrNumber>(raw_resno),
-			.funcid = static_cast<Oid>(intVal(lsecond(encoded))),
-			.typmod = intVal(lthird(encoded)),
-			.collation = static_cast<Oid>(intVal(lfourth(encoded))),
+			.funcid = static_cast<Oid>(intVal(list_nth(
+				encoded, kMatchSiteFuncid))),
+			.typmod = intVal(list_nth(encoded, kMatchSiteTypmod)),
+			.collation = static_cast<Oid>(intVal(list_nth(
+				encoded, kMatchSiteCollation))),
+			.binding_kind = static_cast<BioseqMatchHelperBindingKind>(
+				intVal(list_nth(encoded, kMatchSiteBindingKind))),
+			.stable_match_id = intVal(list_nth(
+				encoded, kMatchSiteStableId)),
 		};
 		Form_pg_attribute attribute = TupleDescAttr(
 			scan_desc, site.resno - 1);
@@ -15767,7 +20824,12 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 				site.funcid, get_cached_stub_oids())
 			|| attribute->atttypid != get_func_rettype(site.funcid)
 			|| attribute->atttypmod != site.typmod
-			|| attribute->attcollation != site.collation) {
+			|| attribute->attcollation != site.collation
+			|| (site.binding_kind
+					!= BioseqMatchHelperBindingKind::exact_recipe
+				&& site.binding_kind
+					!= BioseqMatchHelperBindingKind::unique_lineage)
+			|| site.stable_match_id != stable_match_id) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("BioseqBatchJoin post-join recipe placeholder type is invalid")));
@@ -15807,6 +20869,26 @@ static void BioseqPerRowJoin_BeginCustomScanImpl(
 			|| site.funcid == placeholder_oids.mapq_oid;
 	}
 	Plan* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
+	BatchJoinPlanHelperAuditFirstFailure helper_audit_failure{};
+	if (batch_join_plan_has_unowned_executable_match_helper(
+			child_plan, get_cached_stub_oids(), cscan,
+			helper_audit_failure, "none")) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqPerRowMmsearch child retained an executable match helper"),
+			 errdetail("reason=%s; store=%s; plan_node_tag=%d; custom_name=%s; projection_capable=%s; first_helper_resno=%d; whole_helper_valid=%s; finalized_batch_descendant_matches=%zu; finalized_base_descendant_matches=%zu; current_parent_matches=%zu; boundary_encountered=%s; setrefs did not preserve the descendant-owner helper route; no child was initialized",
+				helper_audit_failure.reason,
+				helper_audit_failure.store,
+				helper_audit_failure.plan_node_tag,
+				helper_audit_failure.custom_name,
+				helper_audit_failure.projection_capable ? "true" : "false",
+				helper_audit_failure.first_helper_resno,
+				helper_audit_failure.whole_helper_valid ? "true" : "false",
+				helper_audit_failure.finalized_batch_descendant_matches,
+				helper_audit_failure.finalized_base_descendant_matches,
+				helper_audit_failure.current_parent_matches,
+				helper_audit_failure.boundary_encountered)));
+	}
 	runtime->child = ExecInitNode(child_plan, estate, eflags);
 	runtime->child_initialized = true;
 	node->custom_ps = list_make1(runtime->child);
@@ -16175,10 +21257,14 @@ static void BioseqPerRowJoin_ExplainCustomScan(
 	ExplainPropertyText("Bioseq Reconstructed Join", "child plan", es);
 	PerRowMmsearchPlanAudit child_audit{};
 	auto* cscan = reinterpret_cast<CustomScan*>(node->ss.ps.plan);
+	FuncExpr* owned_mmsearch = cscan != nullptr
+		&& list_length(cscan->custom_private) == kBioseqPerRowJoinPrivateFields
+		? pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(list_nth(
+			cscan->custom_private, kPerRowMmsearchExpr))) : nullptr;
 	if (cscan != nullptr && list_length(cscan->custom_plans) == 1) {
 		per_row_audit_mmsearch_plan(
 			reinterpret_cast<Plan*>(linitial(cscan->custom_plans)),
-			child_audit, get_cached_stub_oids());
+			child_audit, get_cached_stub_oids(), owned_mmsearch);
 	}
 	/* A nonzero path count cannot reach plan creation: the exact pointer gate
 	 * above runs on the reconstructed Path before copyObject.  The remaining
@@ -17136,6 +22222,8 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 		injector_ctx.current_relation = bioseqScanState->custom_scanstate.ss.ss_currentRelation;
 		injector_ctx.match_sequence_varno = runtime.match_sequence_varno;
 		injector_ctx.match_sequence_attno = runtime.match_sequence_attno;
+		injector_ctx.match_helper_sites = runtime.match_helper_sites;
+		injector_ctx.stable_match_id = runtime.stable_match_id;
 
 		runtime.newtargetlist = reinterpret_cast<List *>(var_injector(
 			reinterpret_cast<Node *>(targetlist),

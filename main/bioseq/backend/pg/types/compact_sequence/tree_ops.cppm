@@ -24,6 +24,17 @@ import :tree_types;
 import bioseq.sequences.rank_pack;
 import bioseq.storage.coordinates;
 
+/* Exported inline tree factories may be emitted from any importing TU at
+ * optimization level zero.  Keep the fault-injection seam in one out-of-line
+ * module-owned object so the self-test and the selected factory body cannot
+ * arm and observe different anonymous-namespace copies. */
+export [[nodiscard, gnu::noinline]] std::array<std::uint8_t, 2u>&
+piece_tree_failure_storage_noexcept() noexcept
+{
+    static thread_local std::array<std::uint8_t, 2u> storage{};
+    return storage;
+}
+
 namespace {
 
 std::uint64_t next_piece_tree_generation = 1u;
@@ -43,21 +54,54 @@ enum class piece_tree_injected_failure_point : std::uint8_t {
     source_dependency_registration,
     source_leaf_factory,
     literal_binding_factory,
+    join_left_operand_retain,
+    join_right_operand_retain,
+    join_node_allocation,
+    join_node_metadata,
+    join_factory_transition,
+    join_edge_identity_transition,
+    join_recursive_intermediate,
+    join_retired_root_record,
+    join_retired_root_overflow_allocation,
 };
 
-piece_tree_injected_failure_point armed_piece_tree_failure =
-    piece_tree_injected_failure_point::none;
-piece_tree_injected_failure_point observed_piece_tree_failure =
-    piece_tree_injected_failure_point::none;
+inline void arm_piece_tree_failure_noexcept(
+    piece_tree_injected_failure_point point) noexcept
+{
+    piece_tree_failure_storage_noexcept()[0] =
+        static_cast<std::uint8_t>(point);
+}
+
+[[nodiscard]] inline piece_tree_injected_failure_point
+armed_piece_tree_failure_noexcept() noexcept
+{
+    return static_cast<piece_tree_injected_failure_point>(
+        piece_tree_failure_storage_noexcept()[0]);
+}
+
+inline void observe_piece_tree_failure_noexcept(
+    piece_tree_injected_failure_point point) noexcept
+{
+    piece_tree_failure_storage_noexcept()[1] =
+        static_cast<std::uint8_t>(point);
+}
+
+[[nodiscard]] inline piece_tree_injected_failure_point
+observed_piece_tree_failure_noexcept() noexcept
+{
+    return static_cast<piece_tree_injected_failure_point>(
+        piece_tree_failure_storage_noexcept()[1]);
+}
 
 inline void inject_piece_tree_failure(
     piece_tree_injected_failure_point point)
 {
-    if (armed_piece_tree_failure != point) {
+    if (armed_piece_tree_failure_noexcept() != point) {
         return;
     }
-    armed_piece_tree_failure = piece_tree_injected_failure_point::none;
-    observed_piece_tree_failure = point;
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    observe_piece_tree_failure_noexcept(point);
     ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
              errmsg("injected bioseq piece-tree factory failure"),
@@ -92,6 +136,70 @@ same_locator(bioseq::storage::seq_locator const &left,
              bioseq::storage::seq_locator const &right) noexcept {
   return std::memcmp(std::addressof(left), std::addressof(right),
                      sizeof(left)) == 0;
+}
+
+} // namespace
+
+/* Deterministic complexity evidence for the production persistent-join path.
+ * The storage accessor is out of line so exported inline tree operations from
+ * different importers all report into one backend-thread instance. */
+export struct piece_tree_join_work_snapshot {
+    std::uint64_t join_steps;
+    std::uint64_t bounded_validation_steps;
+    std::uint64_t cleanup_ledger_steps;
+    std::uint64_t retired_root_steps;
+};
+
+export [[nodiscard, gnu::noinline]] piece_tree_join_work_snapshot&
+piece_tree_join_work_storage_noexcept() noexcept
+{
+    static thread_local piece_tree_join_work_snapshot storage{};
+    return storage;
+}
+
+export inline void reset_piece_tree_join_work_noexcept() noexcept
+{
+    piece_tree_join_work_storage_noexcept() = {};
+}
+
+export [[nodiscard]] inline piece_tree_join_work_snapshot
+read_piece_tree_join_work_noexcept() noexcept
+{
+    return piece_tree_join_work_storage_noexcept();
+}
+
+namespace {
+
+inline void note_piece_tree_join_step_noexcept() noexcept
+{
+#ifdef BIOSEQ_TEST_INDEXES
+    auto& value = piece_tree_join_work_storage_noexcept().join_steps;
+    if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+#endif
+}
+
+inline void note_piece_tree_bounded_validation_step_noexcept() noexcept
+{
+#ifdef BIOSEQ_TEST_INDEXES
+    auto& value = piece_tree_join_work_storage_noexcept().bounded_validation_steps;
+    if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+#endif
+}
+
+inline void note_piece_tree_cleanup_ledger_step_noexcept() noexcept
+{
+#ifdef BIOSEQ_TEST_INDEXES
+    auto& value = piece_tree_join_work_storage_noexcept().cleanup_ledger_steps;
+    if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+#endif
+}
+
+inline void note_piece_tree_retired_root_step_noexcept() noexcept
+{
+#ifdef BIOSEQ_TEST_INDEXES
+    auto& value = piece_tree_join_work_storage_noexcept().retired_root_steps;
+    if (value != (std::numeric_limits<std::uint64_t>::max)()) ++value;
+#endif
 }
 
 } // namespace
@@ -208,6 +316,268 @@ export inline void release_edge(piece_edge edge) noexcept
     }
 }
 
+export [[nodiscard]] inline bool piece_edge_cleanup_ledger_empty_noexcept(
+    piece_edge_cleanup_ledger const& ledger) noexcept
+{
+    note_piece_tree_cleanup_ledger_step_noexcept();
+    if ((ledger.token_count == 0u && ledger.initialized
+            && ledger.active_head != invalid_piece_edge_cleanup_slot)
+        || (ledger.token_count != 0u
+            && (!ledger.initialized
+                || ledger.active_head == invalid_piece_edge_cleanup_slot))) {
+        arena_release_invariant_panic(
+            "concat construction active-token summary is corrupt");
+    }
+    return ledger.token_count == 0u;
+}
+
+namespace {
+
+[[nodiscard]] inline bool same_owned_edge_token(
+    piece_edge left, piece_edge right) noexcept
+{
+    return left.arena == right.arena && left.node == right.node
+        && left.transform == right.transform;
+}
+
+[[nodiscard]] inline bool piece_edge_cleanup_handle_valid_noexcept(
+    piece_edge_cleanup_handle handle) noexcept
+{
+    return handle.slot != invalid_piece_edge_cleanup_slot
+        && handle.generation != 0u;
+}
+
+inline void initialize_piece_edge_cleanup_ledger_noexcept(
+    piece_edge_cleanup_ledger& ledger) noexcept
+{
+    if (ledger.initialized) return;
+    if (ledger.token_count != 0u || ledger.next_unused != 0u) {
+        arena_release_invariant_panic(
+            "concat construction token ledger was not zero-initialized");
+    }
+    ledger.active_head = invalid_piece_edge_cleanup_slot;
+    ledger.free_head = invalid_piece_edge_cleanup_slot;
+    ledger.initialized = true;
+    note_piece_tree_cleanup_ledger_step_noexcept();
+}
+
+inline void ensure_piece_edge_cleanup_capacity(
+    piece_edge_cleanup_ledger& ledger, std::uint16_t additional)
+{
+    initialize_piece_edge_cleanup_ledger_noexcept(ledger);
+    note_piece_tree_cleanup_ledger_step_noexcept();
+    if (additional > ledger.slots.size()
+        || ledger.token_count > ledger.slots.size() - additional) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq concat construction token bound was exceeded")));
+    }
+}
+
+[[nodiscard]] inline piece_edge_cleanup_handle
+adopt_piece_edge_cleanup_token_noexcept(
+    piece_edge_cleanup_ledger& ledger, piece_edge token) noexcept
+{
+    if (!token) return {};
+    initialize_piece_edge_cleanup_ledger_noexcept(ledger);
+    if (ledger.token_count >= ledger.slots.size()) {
+        arena_release_invariant_panic(
+            "concat construction token ledger overflow");
+    }
+    std::uint16_t index = invalid_piece_edge_cleanup_slot;
+    if (ledger.free_head != invalid_piece_edge_cleanup_slot) {
+        index = ledger.free_head;
+        ledger.free_head = ledger.slots[index].next_free;
+    } else {
+        if (ledger.next_unused >= ledger.slots.size()) {
+            arena_release_invariant_panic(
+                "concat construction token slots were exhausted");
+        }
+        index = ledger.next_unused++;
+    }
+    auto& slot = ledger.slots[index];
+    if (slot.active || slot.generation == UINT32_MAX) {
+        arena_release_invariant_panic(
+            "concat construction token slot state is invalid");
+    }
+    ++slot.generation;
+    slot.token = token;
+    slot.previous_active = invalid_piece_edge_cleanup_slot;
+    slot.next_active = ledger.active_head;
+    slot.next_free = invalid_piece_edge_cleanup_slot;
+    slot.active = true;
+    if (ledger.active_head != invalid_piece_edge_cleanup_slot) {
+        ledger.slots[ledger.active_head].previous_active = index;
+    }
+    ledger.active_head = index;
+    ++ledger.token_count;
+    note_piece_tree_cleanup_ledger_step_noexcept();
+    return {.slot = index, .generation = slot.generation};
+}
+
+[[nodiscard]] inline piece_edge detach_piece_edge_cleanup_token_noexcept(
+    piece_edge_cleanup_ledger& ledger,
+    piece_edge_cleanup_handle handle,
+    piece_edge expected) noexcept
+{
+    if (!piece_edge_cleanup_handle_valid_noexcept(handle)
+        || handle.slot >= ledger.slots.size()) {
+        arena_release_invariant_panic(
+            "concat construction token handle is invalid");
+    }
+    auto& slot = ledger.slots[handle.slot];
+    if (!ledger.initialized || !slot.active
+        || slot.generation != handle.generation
+        || !same_owned_edge_token(slot.token, expected)) {
+        arena_release_invariant_panic(
+            "concat construction token handle is stale or mismatched");
+    }
+    if (slot.previous_active == invalid_piece_edge_cleanup_slot) {
+        if (ledger.active_head != handle.slot) {
+            arena_release_invariant_panic(
+                "concat construction active-token head is corrupt");
+        }
+        ledger.active_head = slot.next_active;
+    } else {
+        ledger.slots[slot.previous_active].next_active = slot.next_active;
+    }
+    if (slot.next_active != invalid_piece_edge_cleanup_slot) {
+        ledger.slots[slot.next_active].previous_active =
+            slot.previous_active;
+    }
+    const piece_edge token = slot.token;
+    slot.token = {};
+    slot.next_active = invalid_piece_edge_cleanup_slot;
+    slot.previous_active = invalid_piece_edge_cleanup_slot;
+    slot.next_free = ledger.free_head;
+    slot.active = false;
+    ledger.free_head = handle.slot;
+    if (ledger.token_count == 0u) {
+        arena_release_invariant_panic(
+            "concat construction token count underflow");
+    }
+    --ledger.token_count;
+    note_piece_tree_cleanup_ledger_step_noexcept();
+    return token;
+}
+
+[[nodiscard]] inline tracked_piece_edge retain_tracked_edge(
+    piece_edge_cleanup_ledger* ledger, piece_edge edge)
+{
+    if (ledger == nullptr) return {.edge = retain_edge(edge)};
+    if (!edge) return {};
+    ensure_piece_edge_cleanup_capacity(*ledger, 1u);
+    const piece_edge owned = retain_edge(edge);
+    return {
+        .edge = owned,
+        .cleanup = adopt_piece_edge_cleanup_token_noexcept(*ledger, owned),
+    };
+}
+
+inline void release_tracked_edge(
+    piece_edge_cleanup_ledger* ledger, tracked_piece_edge edge) noexcept
+{
+    if (ledger != nullptr && edge) {
+        (void)detach_piece_edge_cleanup_token_noexcept(
+            *ledger, edge.cleanup, edge.edge);
+    }
+    release_edge(edge.edge);
+}
+
+[[nodiscard]] inline tracked_piece_edge
+transition_consumed_edges_to_result_noexcept(
+    piece_edge_cleanup_ledger* ledger,
+    tracked_piece_edge first,
+    tracked_piece_edge second,
+    piece_edge result) noexcept
+{
+    if (ledger == nullptr) return {.edge = result};
+    if (first) {
+        (void)detach_piece_edge_cleanup_token_noexcept(
+            *ledger, first.cleanup, first.edge);
+    }
+    if (second) {
+        (void)detach_piece_edge_cleanup_token_noexcept(
+            *ledger, second.cleanup, second.edge);
+    }
+    return {
+        .edge = result,
+        .cleanup = adopt_piece_edge_cleanup_token_noexcept(*ledger, result),
+    };
+}
+
+inline void transition_piece_edge_cleanup_identity_noexcept(
+    piece_edge_cleanup_ledger* ledger,
+    tracked_piece_edge before,
+    tracked_piece_edge after) noexcept
+{
+    if (ledger == nullptr) return;
+    if (!before || !after || before.edge.arena != after.edge.arena
+        || before.edge.node != after.edge.node
+        || before.cleanup.slot != after.cleanup.slot
+        || before.cleanup.generation != after.cleanup.generation
+        || before.cleanup.slot >= ledger->slots.size()) {
+        arena_release_invariant_panic(
+            "concat construction changed an owning edge target");
+    }
+    auto& slot = ledger->slots[before.cleanup.slot];
+    if (!slot.active || slot.generation != before.cleanup.generation
+        || !same_owned_edge_token(slot.token, before.edge)) {
+        arena_release_invariant_panic(
+            "concat construction changed an untracked edge identity");
+    }
+    slot.token = after.edge;
+    note_piece_tree_cleanup_ledger_step_noexcept();
+}
+
+} // namespace
+
+export inline void release_piece_edge_cleanup_ledger_noexcept(
+    piece_edge_cleanup_ledger& ledger) noexcept
+{
+    if (!ledger.initialized) {
+        if (ledger.token_count != 0u) {
+            arena_release_invariant_panic(
+                "uninitialized concat token ledger is nonempty");
+        }
+        return;
+    }
+    while (ledger.token_count != 0u) {
+        if (ledger.active_head == invalid_piece_edge_cleanup_slot) {
+            arena_release_invariant_panic(
+                "concat construction active-token list ended early");
+        }
+        const auto& slot = ledger.slots[ledger.active_head];
+        const piece_edge_cleanup_handle handle{
+            .slot = ledger.active_head,
+            .generation = slot.generation,
+        };
+        const piece_edge token = detach_piece_edge_cleanup_token_noexcept(
+            ledger, handle, slot.token);
+        release_edge(token);
+    }
+    if (ledger.active_head != invalid_piece_edge_cleanup_slot) {
+        arena_release_invariant_panic(
+            "concat construction active-token list was not drained");
+    }
+}
+
+export inline void transfer_piece_edge_cleanup_root_noexcept(
+    piece_edge_cleanup_ledger& ledger,
+    piece_edge_cleanup_handle handle,
+    piece_edge root) noexcept
+{
+    if (!root) {
+        if (piece_edge_cleanup_handle_valid_noexcept(handle)) {
+            arena_release_invariant_panic(
+                "empty concat root retained a cleanup handle");
+        }
+        return;
+    }
+    (void)detach_piece_edge_cleanup_token_noexcept(
+        ledger, handle, root);
+}
+
 export [[nodiscard]] inline std::uint64_t
 piece_tree_live_arena_count_noexcept() noexcept
 {
@@ -221,6 +591,7 @@ enum class arena_allocation_kind : std::uint8_t {
     arena_dependency,
     source_dependency,
     literal_storage,
+    retired_join_root_metadata,
 };
 
 [[nodiscard]] inline Size checked_arena_allocation_size(Size requested)
@@ -299,6 +670,16 @@ inline void reserve_arena_allocation(
         case arena_allocation_kind::literal_storage:
             destination.literal_storage_bytes += aligned;
             break;
+        case arena_allocation_kind::retired_join_root_metadata:
+            destination.retired_join_root_metadata_bytes += aligned;
+            if (destination.retired_join_root_overflow_block_count
+                == UINT32_MAX) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                         errmsg("bioseq retired join-root block count overflow")));
+            }
+            ++destination.retired_join_root_overflow_block_count;
+            break;
     }
 }
 
@@ -372,9 +753,12 @@ inline void register_source_dependency(
 {
     reserve_arena_allocation(
         destination, sizeof(piece_node), arena_allocation_kind::node);
-    return static_cast<piece_node*>(
+    auto* node = static_cast<piece_node*>(
         MemoryContextAllocZero(destination.payload_context,
                                sizeof(piece_node)));
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::join_node_allocation);
+    return node;
 }
 
 [[nodiscard]] inline std::uint64_t checked_tree_length_add(
@@ -419,8 +803,11 @@ export [[nodiscard]] inline std::byte* allocate_piece_literal_storage(
         static_cast<Size>(byte_count), 1u);
     reserve_arena_allocation(
         destination, allocation, arena_allocation_kind::literal_storage);
-    return static_cast<std::byte*>(
+    auto* storage = static_cast<std::byte*>(
         MemoryContextAllocZero(destination.payload_context, allocation));
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::literal_storage_factory);
+    return storage;
 }
 
 export [[nodiscard]] inline piece_edge make_branch_node(
@@ -446,13 +833,18 @@ export [[nodiscard]] inline piece_edge make_branch_node(
         1u + std::max(edge_height(left), edge_height(right)));
     ::new (static_cast<void*>(std::addressof(node->payload.branch)))
         branch_piece{left, right};
-    release_edge(left);
-    release_edge(right);
-    return retain_edge(piece_edge{
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::join_node_metadata);
+    /* Acquire the returned token before consuming either input.  If retain
+     * itself fails, an ERROR cleanup ledger still owns both inputs. */
+    const piece_edge result = retain_edge(piece_edge{
         .arena = std::addressof(destination),
         .node = node,
         .transform = bioseq::storage::sequence_transform::identity,
     });
+    release_edge(left);
+    release_edge(right);
+    return result;
 }
 
 export [[nodiscard]] inline piece_edge make_source_node(
@@ -475,6 +867,8 @@ export [[nodiscard]] inline piece_edge make_source_node(
     node->height = 1u;
     ::new (static_cast<void*>(std::addressof(node->payload.source)))
         source_piece{piece};
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::join_node_metadata);
     return retain_edge(piece_edge{
         .arena = std::addressof(destination),
         .node = node,
@@ -502,6 +896,8 @@ export [[nodiscard]] inline piece_edge make_literal_node(
     node->height = 1u;
     ::new (static_cast<void*>(std::addressof(node->payload.literal)))
         literal_piece{piece};
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::join_node_metadata);
     return retain_edge(piece_edge{
         .arena = std::addressof(destination),
         .node = node,
@@ -759,6 +1155,125 @@ export [[nodiscard]] inline piece_edge coalesce_boundary(
 
 namespace {
 
+enum class retired_join_root_policy : std::uint8_t {
+    fixed_trusted_join,
+    proportional_binding,
+};
+
+inline void record_retired_join_root(
+    piece_tree_arena& destination,
+    piece_edge edge,
+    retired_join_root_policy policy);
+
+[[nodiscard]] inline tracked_piece_edge make_branch_tracked(
+    piece_tree_arena& destination,
+    piece_edge_cleanup_ledger* ledger,
+    tracked_piece_edge left,
+    tracked_piece_edge right)
+{
+    if (!left) return right;
+    if (!right) return left;
+    const piece_edge result = make_branch_node(
+        destination, left.edge, right.edge);
+    tracked_piece_edge tracked_result =
+        transition_consumed_edges_to_result_noexcept(
+        ledger, left, right, result);
+    if (ledger != nullptr) {
+        inject_piece_tree_failure(
+            piece_tree_injected_failure_point::join_factory_transition);
+    }
+    return tracked_result;
+}
+
+[[nodiscard]] inline tracked_piece_edge coalesce_boundary_tracked(
+    piece_tree_arena& destination,
+    piece_edge_cleanup_ledger* ledger,
+    tracked_piece_edge left,
+    tracked_piece_edge right)
+{
+    if (piece_edge merged = try_coalesce_contiguous(
+            destination, left.edge, right.edge); merged) {
+        release_edge(left.edge);
+        release_edge(right.edge);
+        tracked_piece_edge tracked_result =
+            transition_consumed_edges_to_result_noexcept(
+            ledger, left, right, merged);
+        if (ledger != nullptr) {
+            inject_piece_tree_failure(
+                piece_tree_injected_failure_point::join_factory_transition);
+        }
+        return tracked_result;
+    }
+    return make_branch_tracked(destination, ledger, left, right);
+}
+
+inline void record_retired_join_root(
+    piece_tree_arena& destination,
+    piece_edge edge,
+    retired_join_root_policy policy)
+{
+    if (!edge || edge.arena != std::addressof(destination)
+        || edge.node->node_kind != piece_node::kind::branch) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq join attempted to retire an invalid local root")));
+    }
+    if (destination.retired_join_root_count == UINT32_MAX) {
+        ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq join retirement count overflow")));
+    }
+
+    const std::uint32_t index = destination.retired_join_root_count;
+    if (index < destination.retired_join_roots.size()) {
+        destination.retired_join_roots[index] = edge;
+    } else {
+        if (policy != retired_join_root_policy::proportional_binding) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("bioseq trusted join retirement bound was exceeded")));
+        }
+        const std::uint32_t overflow_index = index
+            - static_cast<std::uint32_t>(
+                destination.retired_join_roots.size());
+        if (overflow_index % max_retired_join_roots == 0u) {
+            reserve_arena_allocation(
+                destination, sizeof(retired_join_root_block),
+                arena_allocation_kind::retired_join_root_metadata);
+            auto* block = static_cast<retired_join_root_block*>(
+                MemoryContextAllocZero(
+                    destination.payload_context,
+                    sizeof(retired_join_root_block)));
+            if (destination.retired_join_root_overflow_tail == nullptr) {
+                if (destination.retired_join_root_overflow != nullptr) {
+                    arena_release_invariant_panic(
+                        "retired join-root overflow head has no tail");
+                }
+                destination.retired_join_root_overflow = block;
+            } else {
+                destination.retired_join_root_overflow_tail->next = block;
+            }
+            destination.retired_join_root_overflow_tail = block;
+            inject_piece_tree_failure(
+                piece_tree_injected_failure_point::
+                    join_retired_root_overflow_allocation);
+        }
+        auto* block = destination.retired_join_root_overflow_tail;
+        if (block == nullptr || block->count >= block->roots.size()) {
+            arena_release_invariant_panic(
+                "retired join-root overflow block is unavailable");
+        }
+        block->roots[block->count++] = edge;
+    }
+    ++destination.retired_join_root_count;
+    if (destination.retired_join_rotation_count == UINT32_MAX) {
+        arena_release_invariant_panic(
+            "retired join rotation count overflow");
+    }
+    ++destination.retired_join_rotation_count;
+    note_piece_tree_retired_root_step_noexcept();
+}
+
 /**
  * Rebuild two adjacent subtrees after one height-guided join descent.
  *
@@ -767,72 +1282,100 @@ namespace {
  * performs the one AVL single or double rotation that may be required.  Both
  * input edges are owning tokens and are consumed on every return path.
  */
-[[nodiscard]] inline piece_edge rebalance_joined_edges(
+[[nodiscard]] inline tracked_piece_edge rebalance_joined_edges(
     piece_tree_arena& destination,
-    piece_edge left,
-    piece_edge right)
+    piece_edge_cleanup_ledger* ledger,
+    tracked_piece_edge left,
+    tracked_piece_edge right,
+    retired_join_root_policy retirement_policy)
 {
-    const std::uint16_t left_height = edge_height(left);
-    const std::uint16_t right_height = edge_height(right);
+    const std::uint16_t left_height = edge_height(left.edge);
+    const std::uint16_t right_height = edge_height(right.edge);
     if (left_height <= right_height + 1u
         && right_height <= left_height + 1u) {
-        return make_branch_node(destination, left, right);
+        return make_branch_tracked(destination, ledger, left, right);
     }
 
     if (left_height == right_height + 2u) {
-        const logical_children_result children = logical_children(left);
+        const logical_children_result children = logical_children(left.edge);
         const std::uint16_t first_height = edge_height(children.first);
         const std::uint16_t second_height = edge_height(children.second);
-        piece_edge result{};
+        tracked_piece_edge result{};
         if (first_height >= second_height) {
-            piece_edge rotated_right = make_branch_node(
-                destination, retain_edge(children.second), right);
-            result = make_branch_node(
-                destination, retain_edge(children.first), rotated_right);
+            tracked_piece_edge rotated_right = make_branch_tracked(
+                destination, ledger,
+                retain_tracked_edge(ledger, children.second), right);
+            result = make_branch_tracked(
+                destination, ledger,
+                retain_tracked_edge(ledger, children.first), rotated_right);
         } else {
             const logical_children_result pivot =
                 logical_children(children.second);
-            piece_edge rotated_left = make_branch_node(
+            tracked_piece_edge rotated_left = make_branch_tracked(
                 destination,
-                retain_edge(children.first),
-                retain_edge(pivot.first));
-            piece_edge rotated_right = make_branch_node(
-                destination, retain_edge(pivot.second), right);
-            result = make_branch_node(
-                destination, rotated_left, rotated_right);
+                ledger,
+                retain_tracked_edge(ledger, children.first),
+                retain_tracked_edge(ledger, pivot.first));
+            tracked_piece_edge rotated_right = make_branch_tracked(
+                destination, ledger,
+                retain_tracked_edge(ledger, pivot.second), right);
+            result = make_branch_tracked(
+                destination, ledger, rotated_left, rotated_right);
         }
-        release_edge(left);
+        if (left.edge.arena == std::addressof(destination)) {
+            record_retired_join_root(
+                destination, left.edge, retirement_policy);
+            if (ledger != nullptr) {
+                inject_piece_tree_failure(
+                    piece_tree_injected_failure_point::
+                        join_retired_root_record);
+            }
+        }
+        release_tracked_edge(ledger, left);
         return result;
     }
 
     if (right_height == left_height + 2u) {
-        const logical_children_result children = logical_children(right);
+        const logical_children_result children = logical_children(right.edge);
         const std::uint16_t first_height = edge_height(children.first);
         const std::uint16_t second_height = edge_height(children.second);
-        piece_edge result{};
+        tracked_piece_edge result{};
         if (second_height >= first_height) {
-            piece_edge rotated_left = make_branch_node(
-                destination, left, retain_edge(children.first));
-            result = make_branch_node(
-                destination, rotated_left, retain_edge(children.second));
+            tracked_piece_edge rotated_left = make_branch_tracked(
+                destination, ledger, left,
+                retain_tracked_edge(ledger, children.first));
+            result = make_branch_tracked(
+                destination, ledger, rotated_left,
+                retain_tracked_edge(ledger, children.second));
         } else {
             const logical_children_result pivot =
                 logical_children(children.first);
-            piece_edge rotated_left = make_branch_node(
-                destination, left, retain_edge(pivot.first));
-            piece_edge rotated_right = make_branch_node(
+            tracked_piece_edge rotated_left = make_branch_tracked(
+                destination, ledger, left,
+                retain_tracked_edge(ledger, pivot.first));
+            tracked_piece_edge rotated_right = make_branch_tracked(
                 destination,
-                retain_edge(pivot.second),
-                retain_edge(children.second));
-            result = make_branch_node(
-                destination, rotated_left, rotated_right);
+                ledger,
+                retain_tracked_edge(ledger, pivot.second),
+                retain_tracked_edge(ledger, children.second));
+            result = make_branch_tracked(
+                destination, ledger, rotated_left, rotated_right);
         }
-        release_edge(right);
+        if (right.edge.arena == std::addressof(destination)) {
+            record_retired_join_root(
+                destination, right.edge, retirement_policy);
+            if (ledger != nullptr) {
+                inject_piece_tree_failure(
+                    piece_tree_injected_failure_point::
+                        join_retired_root_record);
+            }
+        }
+        release_tracked_edge(ledger, right);
         return result;
     }
 
-    release_edge(left);
-    release_edge(right);
+    release_tracked_edge(ledger, left);
+    release_tracked_edge(ledger, right);
     ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("bioseq join encountered a non-AVL subtree"),
@@ -844,17 +1387,22 @@ namespace {
 
 } // namespace
 
-export [[nodiscard]] inline piece_edge join_edges(
+namespace {
+
+[[nodiscard]] inline tracked_piece_edge join_edges_impl(
     piece_tree_arena& destination,
-    piece_edge left,
-    piece_edge right)
+    tracked_piece_edge left,
+    tracked_piece_edge right,
+    piece_edge_cleanup_ledger* ledger,
+    retired_join_root_policy retirement_policy)
 {
-    if (left && left.node->bp_length == 0u) {
-        release_edge(left);
+    note_piece_tree_join_step_noexcept();
+    if (left && left.edge.node->bp_length == 0u) {
+        release_tracked_edge(ledger, left);
         return right;
     }
-    if (right && right.node->bp_length == 0u) {
-        release_edge(right);
+    if (right && right.edge.node->bp_length == 0u) {
+        release_tracked_edge(ledger, right);
         return left;
     }
     if (!left) {
@@ -863,28 +1411,93 @@ export [[nodiscard]] inline piece_edge join_edges(
     if (!right) {
         return left;
     }
-    const auto left_height = edge_height(left);
-    const auto right_height = edge_height(right);
+    const auto left_height = edge_height(left.edge);
+    const auto right_height = edge_height(right.edge);
     if (left_height <= right_height + 1u
         && right_height <= left_height + 1u) {
-        return coalesce_boundary(destination, left, right);
+        return coalesce_boundary_tracked(
+            destination, ledger, left, right);
     }
     if (left_height > right_height + 1u) {
-        const auto children = logical_children(left);
-        piece_edge joined = join_edges(
-            destination, retain_edge(children.second), right);
-        piece_edge result = rebalance_joined_edges(
-            destination, retain_edge(children.first), joined);
-        release_edge(left);
+        const auto children = logical_children(left.edge);
+        tracked_piece_edge joined = join_edges_impl(
+            destination,
+            retain_tracked_edge(ledger, children.second), right, ledger,
+            retirement_policy);
+        if (ledger != nullptr) {
+            inject_piece_tree_failure(
+                piece_tree_injected_failure_point::
+                    join_recursive_intermediate);
+        }
+        tracked_piece_edge result = rebalance_joined_edges(
+            destination, ledger,
+            retain_tracked_edge(ledger, children.first), joined,
+            retirement_policy);
+        release_tracked_edge(ledger, left);
         return result;
     }
-    const auto children = logical_children(right);
-    piece_edge joined = join_edges(
-        destination, left, retain_edge(children.first));
-    piece_edge result = rebalance_joined_edges(
-        destination, joined, retain_edge(children.second));
-    release_edge(right);
+    const auto children = logical_children(right.edge);
+    tracked_piece_edge joined = join_edges_impl(
+        destination, left,
+        retain_tracked_edge(ledger, children.first), ledger,
+        retirement_policy);
+    if (ledger != nullptr) {
+        inject_piece_tree_failure(
+            piece_tree_injected_failure_point::
+                join_recursive_intermediate);
+    }
+    tracked_piece_edge result = rebalance_joined_edges(
+        destination, ledger, joined,
+        retain_tracked_edge(ledger, children.second), retirement_policy);
+    release_tracked_edge(ledger, right);
     return result;
+}
+
+} // namespace
+
+export [[nodiscard]] inline piece_edge join_edges(
+    piece_tree_arena& destination,
+    piece_edge left,
+    piece_edge right)
+{
+    return join_edges_impl(
+        destination, {.edge = left}, {.edge = right}, nullptr,
+        retired_join_root_policy::fixed_trusted_join).edge;
+}
+
+export [[nodiscard]] inline tracked_piece_edge
+join_tracked_edges_error_atomic(
+    piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
+    tracked_piece_edge left,
+    tracked_piece_edge right)
+{
+    return join_edges_impl(
+        destination, left, right, &ledger,
+        retired_join_root_policy::proportional_binding);
+}
+
+export [[nodiscard]] inline tracked_piece_edge join_edges_error_atomic(
+    piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
+    piece_edge borrowed_left,
+    piece_edge borrowed_right)
+{
+    tracked_piece_edge left = retain_tracked_edge(&ledger, borrowed_left);
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::join_left_operand_retain);
+    tracked_piece_edge right = retain_tracked_edge(&ledger, borrowed_right);
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::join_right_operand_retain);
+    return join_edges_impl(
+        destination, left, right, &ledger,
+        retired_join_root_policy::fixed_trusted_join);
+}
+
+export [[nodiscard]] inline tracked_piece_edge retain_piece_edge_error_atomic(
+    piece_edge_cleanup_ledger& ledger, piece_edge borrowed)
+{
+    return retain_tracked_edge(&ledger, borrowed);
 }
 
 export [[nodiscard]] inline split_result split_leaf(
@@ -987,10 +1600,13 @@ export [[nodiscard]] inline piece_edge slice_tree(
     return at_start.right;
 }
 
-export [[nodiscard]] inline piece_edge bind_literals_copy(
+namespace {
+
+[[nodiscard]] inline tracked_piece_edge bind_literals_copy_impl(
     piece_tree_arena& destination,
     piece_edge edge,
-    compact_sequence_stdc_type_params result_type)
+    compact_sequence_stdc_type_params result_type,
+    piece_edge_cleanup_ledger* ledger)
 {
     if (!edge) {
         return {};
@@ -1002,17 +1618,27 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
                      errmsg("cannot bind bioseq source across alphabets")));
         }
-        return retain_edge(edge);
+        return retain_tracked_edge(ledger, edge);
     }
     if (edge.node->node_kind == piece_node::kind::branch) {
         const branch_piece& branch = edge.node->payload.branch;
-        piece_edge left = bind_literals_copy(
-            destination, branch.left, result_type);
-        piece_edge right = bind_literals_copy(
-            destination, branch.right, result_type);
-        piece_edge joined = join_edges(destination, left, right);
-        joined.transform = bioseq::storage::compose(
-            edge.transform, joined.transform);
+        tracked_piece_edge left = bind_literals_copy_impl(
+            destination, branch.left, result_type, ledger);
+        tracked_piece_edge right = bind_literals_copy_impl(
+            destination, branch.right, result_type, ledger);
+        tracked_piece_edge joined = join_edges_impl(
+            destination, left, right, ledger,
+            retired_join_root_policy::proportional_binding);
+        const tracked_piece_edge before_transform = joined;
+        joined.edge.transform = bioseq::storage::compose(
+            edge.transform, joined.edge.transform);
+        transition_piece_edge_cleanup_identity_noexcept(
+            ledger, before_transform, joined);
+        if (ledger != nullptr) {
+            inject_piece_tree_failure(
+                piece_tree_injected_failure_point::
+                    join_edge_identity_transition);
+        }
         return joined;
     }
     const literal_piece& literal = edge.node->payload.literal;
@@ -1023,7 +1649,7 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
                     (errcode(ERRCODE_DATATYPE_MISMATCH),
                      errmsg("cannot concatenate bioseq values with different alphabets")));
         }
-        return retain_edge(edge);
+        return retain_tracked_edge(ledger, edge);
     }
 
     const auto length = literal.symbol_to - literal.symbol_from;
@@ -1034,12 +1660,15 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq literal is too long to bind")));
     }
-    piece_edge bound_edge{};
+    if (ledger != nullptr) {
+        ensure_piece_edge_cleanup_capacity(*ledger, 1u);
+    }
+    tracked_piece_edge bound_edge{};
     pgseq_t::dispatch_instance(
         result_type.alphabet_code,
         result_type.storage_unit_byte_width,
         [&destination, &bound_edge, result_type,
-         length, ascii, edge]<class Instance>() {
+         length, ascii, edge, ledger]<class Instance>() {
             using traits = typename compact_sequence_range<Instance>::traits;
             using unit = typename traits::storage_unit;
             const std::uint64_t unit_count = length == 0u ? 0u
@@ -1095,7 +1724,7 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
             if (!packed) {
                 literal_pack_failure(packed.status);
             }
-            bound_edge = make_literal_node(
+            const piece_edge built = make_literal_node(
                 destination,
                 literal_piece{
                     .storage_arena = std::addressof(destination),
@@ -1107,6 +1736,18 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
                     .validation = literal_validation::alphabet_validated,
                 },
                 edge.transform);
+            if (ledger != nullptr) {
+                bound_edge = {
+                    .edge = built,
+                    .cleanup = adopt_piece_edge_cleanup_token_noexcept(
+                        *ledger, built),
+                };
+                inject_piece_tree_failure(
+                    piece_tree_injected_failure_point::
+                        join_factory_transition);
+            } else {
+                bound_edge = {.edge = built};
+            }
         });
     if (!bound_edge) {
         ereport(ERROR,
@@ -1114,6 +1755,28 @@ export [[nodiscard]] inline piece_edge bind_literals_copy(
                  errmsg("bioseq literal alphabet dispatch produced no result")));
     }
     return bound_edge;
+}
+
+} // namespace
+
+export [[nodiscard]] inline piece_edge bind_literals_copy(
+    piece_tree_arena& destination,
+    piece_edge edge,
+    compact_sequence_stdc_type_params result_type)
+{
+    return bind_literals_copy_impl(
+        destination, edge, result_type, nullptr).edge;
+}
+
+export [[nodiscard]] inline tracked_piece_edge
+bind_literals_copy_error_atomic(
+    piece_tree_arena& destination,
+    piece_edge edge,
+    compact_sequence_stdc_type_params result_type,
+    piece_edge_cleanup_ledger& ledger)
+{
+    return bind_literals_copy_impl(
+        destination, edge, result_type, &ledger);
 }
 
 namespace {
@@ -1137,11 +1800,16 @@ inline void validate_arena_accounting(piece_tree_arena const& arena)
     const std::uint64_t expected_source_dependencies =
         static_cast<std::uint64_t>(arena.source_dependency_count)
         * source_dependency_unit;
+    const std::uint64_t expected_retirement_metadata =
+        static_cast<std::uint64_t>(
+            arena.retired_join_root_overflow_block_count)
+        * MAXALIGN(sizeof(retired_join_root_block));
     const std::uint64_t component_total =
         static_cast<std::uint64_t>(arena.node_metadata_bytes)
         + arena.arena_dependency_metadata_bytes
         + arena.source_dependency_metadata_bytes
-        + arena.literal_storage_bytes;
+        + arena.literal_storage_bytes
+        + arena.retired_join_root_metadata_bytes;
     if (arena.payload_context == nullptr || arena.generation == 0u
         || arena.refcount == 0u || arena.refcount == UINT32_MAX
         || arena.accounted_bytes > MaxAllocSize
@@ -1150,19 +1818,118 @@ inline void validate_arena_accounting(piece_tree_arena const& arena)
             != expected_arena_dependencies
         || arena.source_dependency_metadata_bytes
             != expected_source_dependencies
+        || arena.retired_join_root_metadata_bytes
+            != expected_retirement_metadata
         || component_total != arena.accounted_bytes) {
         ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq piece arena accounting is corrupt"),
                  errdetail("generation=%llu refcount=%u accounted_bytes=%zu "
                            "node_count=%u arena_dependencies=%u "
-                           "source_dependencies=%u",
+                           "source_dependencies=%u retired_blocks=%u",
                            static_cast<unsigned long long>(arena.generation),
                            arena.refcount,
                            static_cast<std::size_t>(arena.accounted_bytes),
                            arena.node_count,
                            arena.arena_dependency_count,
-                           arena.source_dependency_count)));
+                           arena.source_dependency_count,
+                           arena.retired_join_root_overflow_block_count)));
+    }
+}
+
+inline void validate_retired_join_root_storage(
+    piece_tree_arena const& arena)
+{
+    const std::uint32_t inline_capacity = static_cast<std::uint32_t>(
+        arena.retired_join_roots.size());
+    const std::uint32_t inline_count = std::min(
+        arena.retired_join_root_count, inline_capacity);
+    std::uint32_t rotations = 0u;
+    const auto validate_record = [&arena, &rotations](
+            piece_edge record) {
+        if (!record || record.arena != std::addressof(arena)
+            || record.node->node_kind != piece_node::kind::branch) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq retired join-root record is invalid")));
+        }
+        if (rotations == UINT32_MAX) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq retired rotation count overflow")));
+        }
+        ++rotations;
+    };
+    for (std::uint32_t index = 0u; index < inline_count; ++index) {
+        validate_record(arena.retired_join_roots[index]);
+    }
+    for (std::uint32_t index = inline_count;
+         index < inline_capacity; ++index) {
+        if (arena.retired_join_roots[index]) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq unused inline retired-root slot is nonempty")));
+        }
+    }
+
+    const std::uint32_t overflow_count = arena.retired_join_root_count
+        - inline_count;
+    const std::uint32_t expected_blocks = overflow_count == 0u ? 0u
+        : (overflow_count - 1u)
+                / static_cast<std::uint32_t>(max_retired_join_roots)
+            + 1u;
+    if (arena.retired_join_root_overflow_block_count != expected_blocks
+        || (expected_blocks == 0u
+            && (arena.retired_join_root_overflow != nullptr
+                || arena.retired_join_root_overflow_tail != nullptr))
+        || (expected_blocks != 0u
+            && (arena.retired_join_root_overflow == nullptr
+                || arena.retired_join_root_overflow_tail == nullptr))) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq retired join-root overflow summary is corrupt")));
+    }
+
+    std::uint32_t remaining = overflow_count;
+    std::uint32_t blocks = 0u;
+    auto const* block = arena.retired_join_root_overflow;
+    while (block != nullptr) {
+        if (++blocks > expected_blocks) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq retired join-root overflow list is cyclic")));
+        }
+        const std::uint16_t expected_count = static_cast<std::uint16_t>(
+            std::min<std::uint32_t>(
+                remaining,
+                static_cast<std::uint32_t>(block->roots.size())));
+        if (block->count != expected_count
+            || (block == arena.retired_join_root_overflow_tail)
+                != (block->next == nullptr)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq retired join-root overflow block is corrupt")));
+        }
+        for (std::uint16_t index = 0u; index < block->count; ++index) {
+            validate_record(block->roots[index]);
+        }
+        for (std::size_t index = block->count;
+             index < block->roots.size(); ++index) {
+            if (block->roots[index]) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq unused retired-root overflow slot is nonempty")));
+            }
+        }
+        remaining -= block->count;
+        block = block->next;
+    }
+    if (blocks != expected_blocks || remaining != 0u
+        || rotations != arena.retired_join_rotation_count
+        || rotations != arena.retired_join_root_count) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq retired join-root accounting is corrupt")));
     }
 }
 
@@ -1274,10 +2041,670 @@ export inline void validate_tree_and_limits(
                     errmsg("bioseq logical length exceeds bigint")));
   }
   const auto fields = validate_tree_node(edge, result_type, alphabet_bound);
+  if (edge) {
+    validate_retired_join_root_storage(*edge.arena);
+  }
   if (fields.length != expected_length || fields.pieces > max_piece_count) {
     ereport(ERROR, (errcode(ERRCODE_DATA_CORRUPTED),
                     errmsg("bioseq piece-tree cached length/count mismatch")));
   }
+}
+
+export struct bounded_join_validation_audit {
+    std::uint32_t new_nodes_visited;
+    std::uint32_t external_edges_checked;
+    std::uint32_t arena_dependencies_checked;
+    std::uint32_t source_dependencies_checked;
+};
+
+namespace {
+
+inline constexpr std::size_t bounded_join_node_capacity = 193u;
+inline constexpr std::size_t bounded_join_arena_dependency_capacity =
+    bounded_join_node_capacity * 2u;
+inline constexpr std::size_t bounded_join_source_dependency_capacity =
+    bounded_join_node_capacity;
+inline constexpr std::size_t bounded_join_node_set_capacity = 256u;
+inline constexpr std::size_t bounded_join_arena_multiset_capacity = 512u;
+inline constexpr std::size_t bounded_join_source_multiset_capacity = 256u;
+
+static_assert((bounded_join_arena_multiset_capacity
+               & (bounded_join_arena_multiset_capacity - 1u)) == 0u);
+static_assert((bounded_join_node_set_capacity
+               & (bounded_join_node_set_capacity - 1u)) == 0u);
+static_assert((bounded_join_source_multiset_capacity
+               & (bounded_join_source_multiset_capacity - 1u)) == 0u);
+
+[[nodiscard]] inline std::size_t bounded_join_pointer_hash(
+    void const* pointer) noexcept
+{
+    std::uintptr_t value = reinterpret_cast<std::uintptr_t>(pointer);
+    value ^= value >> 17u;
+    value *= static_cast<std::uintptr_t>(0xed5ad4bbu);
+    value ^= value >> 11u;
+    value *= static_cast<std::uintptr_t>(0xac4c1b51u);
+    value ^= value >> 15u;
+    return static_cast<std::size_t>(value);
+}
+
+struct bounded_join_arena_multiset_slot {
+    piece_tree_arena* key{};
+    std::uint32_t required{};
+    std::uint32_t matched{};
+};
+
+struct bounded_join_source_multiset_slot {
+    void* state{};
+    pg_sequence_source_backend_ops const* ops{};
+    std::uint32_t required{};
+    std::uint32_t matched{};
+};
+
+[[nodiscard]] inline bool bounded_edge_height_possible(
+    std::uint32_t pieces, std::uint16_t height) noexcept
+{
+    if (pieces == 0u || height == 0u || height > 64u) return false;
+    if (height == 1u) return pieces >= 1u;
+    std::uint64_t lower = 1u;
+    std::uint64_t upper = 2u;
+    for (std::uint16_t current = 2u; current < height; ++current) {
+        const std::uint64_t next = lower + upper;
+        lower = upper;
+        upper = next;
+    }
+    return static_cast<std::uint64_t>(pieces) >= upper;
+}
+
+inline void validate_bounded_edge_summary(
+    piece_edge edge, bounded_join_validation_audit& audit,
+    bool count_external)
+{
+    note_piece_tree_bounded_validation_step_noexcept();
+    if (!edge || edge.arena == nullptr || edge.node == nullptr
+        || edge.arena->generation == 0u || edge.arena->refcount == 0u
+        || edge.arena->refcount == UINT32_MAX
+        || std::to_underlying(edge.transform)
+            > std::to_underlying(
+                bioseq::storage::sequence_transform::reverse_complement)
+        || edge.node->bp_length > static_cast<std::uint64_t>(INT64_MAX)
+        || edge.node->piece_count == 0u
+        || edge.node->piece_count > max_piece_count
+        || !bounded_edge_height_possible(
+            edge.node->piece_count, edge.node->height)
+        || std::to_underlying(edge.node->node_kind)
+            > std::to_underlying(piece_node::kind::literal)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join edge summary is corrupt")));
+    }
+    if ((edge.node->node_kind == piece_node::kind::branch
+            && (edge.node->piece_count < 2u || edge.node->height < 2u))
+        || (edge.node->node_kind != piece_node::kind::branch
+            && (edge.node->piece_count != 1u
+                || edge.node->height != 1u))) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join node shape is corrupt")));
+    }
+    if (count_external && audit.external_edges_checked != UINT32_MAX) {
+        ++audit.external_edges_checked;
+    }
+}
+
+inline void validate_bounded_join_leaf(
+    piece_edge edge, compact_sequence_stdc_type_params result_type,
+    bool alphabet_bound)
+{
+    const piece_node& node = *edge.node;
+    if (node.node_kind == piece_node::kind::source) {
+        const auto& source = node.payload.source;
+        if (!alphabet_bound || !pg_sequence_source_handle_valid(source.source)
+            || source.from > source.to
+            || source.to > source.locator.total_bp_size
+            || source.to - source.from != node.bp_length
+            || source.stored_type_params.alphabet_code
+                != result_type.alphabet_code) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("bioseq trusted join source leaf is invalid")));
+        }
+        return;
+    }
+    if (node.node_kind != piece_node::kind::literal) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join leaf kind is invalid")));
+    }
+    const auto& literal = node.payload.literal;
+    if (literal.storage_arena == nullptr || literal.bytes == nullptr
+        || literal.storage_arena->generation == 0u
+        || literal.storage_arena->refcount == 0u
+        || literal.storage_arena->refcount == UINT32_MAX
+        || literal.symbol_from > literal.symbol_to
+        || literal.symbol_to - literal.symbol_from != node.bp_length
+        || (literal.storage_arena != edge.arena
+            && literal.storage_arena->generation >= edge.arena->generation)
+        || (alphabet_bound
+            && (literal.encoding != literal_encoding::packed
+                || literal.validation
+                    != literal_validation::alphabet_validated
+                || literal.stored_type_params.alphabet_code
+                    != result_type.alphabet_code))
+        || (!alphabet_bound
+            && literal.encoding != literal_encoding::unbound_ascii)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("bioseq trusted join literal leaf is invalid")));
+    }
+}
+
+} // namespace
+
+/* Fast-path validation for concatenating two already-validated immutable
+ * roots.  Existing subtrees are checked through their cached summaries; every
+ * node and dependency allocated by the new arena is visited exactly once.
+ * The work is therefore bounded by the height-guided join path rather than by
+ * the total number of logical pieces. */
+export [[nodiscard]] inline bounded_join_validation_audit
+validate_trusted_join_and_limits(
+    piece_tree_arena const& destination, piece_edge result,
+    piece_edge trusted_left, std::uint64_t left_length,
+    piece_edge trusted_right, std::uint64_t right_length,
+    compact_sequence_stdc_type_params result_type,
+    std::uint64_t expected_length, bool alphabet_bound)
+{
+    bounded_join_validation_audit audit{};
+    if (left_length > static_cast<std::uint64_t>(INT64_MAX)
+        || right_length > static_cast<std::uint64_t>(INT64_MAX)
+        || right_length
+            > static_cast<std::uint64_t>(INT64_MAX) - left_length
+        || left_length + right_length != expected_length
+        || expected_length > static_cast<std::uint64_t>(INT64_MAX)
+        || destination.dependencies_released
+        || destination.release_next != nullptr
+        || destination.retired_join_root_count
+            > destination.retired_join_roots.size()
+        || destination.retired_join_root_overflow != nullptr
+        || destination.retired_join_root_overflow_tail != nullptr
+        || destination.retired_join_root_overflow_block_count != 0u
+        || destination.retired_join_root_metadata_bytes != 0u
+        || destination.retired_join_rotation_count
+            != destination.retired_join_root_count) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join length or arena state is invalid")));
+    }
+    if (alphabet_bound) {
+        if (result_type.alphabet_code == pgseq_unbound_alphabet_code
+            || result_type.storage_unit_byte_width == pgseq_unbound_width_tag
+            || !pgseq_supported_storage_unit_byte_widths::contains_runtime(
+                result_type.storage_unit_byte_width)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATATYPE_MISMATCH),
+                     errmsg("bioseq trusted join result type is invalid")));
+        }
+    } else if (result_type.alphabet_code != pgseq_unbound_alphabet_code
+               || result_type.storage_unit_byte_width
+                   != pgseq_unbound_width_tag) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("bioseq unbound trusted join acquired a physical type")));
+    }
+
+    const auto validate_trusted_root = [&audit](
+            piece_edge edge, std::uint64_t expected) {
+        if (!edge) {
+            if (expected != 0u) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq trusted join root is missing")));
+            }
+            return;
+        }
+        validate_bounded_edge_summary(edge, audit, true);
+        if (edge.node->bp_length != expected) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join root length changed")));
+        }
+    };
+    validate_trusted_root(trusted_left, left_length);
+    validate_trusted_root(trusted_right, right_length);
+    validate_trusted_root(result, expected_length);
+    validate_arena_accounting(destination);
+    validate_retired_join_root_storage(destination);
+
+    const std::uint16_t result_height = result ? result.node->height : 0u;
+    const std::uint32_t node_budget =
+        3u * static_cast<std::uint32_t>(result_height) + 1u;
+    if (destination.node_count > node_budget
+        || node_budget > bounded_join_node_capacity
+        || destination.arena_dependency_count
+            > bounded_join_arena_dependency_capacity
+        || destination.source_dependency_count
+            > bounded_join_source_dependency_capacity) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join exceeded its path allocation bound"),
+                 errdetail("new_nodes=%u bound=%u result_height=%u "
+                           "arena_dependencies=%u source_dependencies=%u",
+                           destination.node_count, node_budget,
+                           static_cast<unsigned>(result_height),
+                           destination.arena_dependency_count,
+                           destination.source_dependency_count)));
+    }
+
+    std::array<piece_edge, bounded_join_node_capacity> pending{};
+    std::array<piece_node const*, bounded_join_node_set_capacity> visited{};
+    std::array<piece_node const*, bounded_join_node_set_capacity>
+        retired_visited{};
+    std::array<bounded_join_arena_multiset_slot,
+               bounded_join_arena_multiset_capacity> required_arenas{};
+    std::array<bounded_join_source_multiset_slot,
+               bounded_join_source_multiset_capacity> required_sources{};
+    std::size_t pending_count = 0u;
+    std::size_t visited_count = 0u;
+    std::size_t retired_visited_count = 0u;
+    std::uint32_t required_arena_count = 0u;
+    std::uint32_t required_source_count = 0u;
+
+    const auto require_arena_dependency = [
+        &required_arenas, &required_arena_count](piece_tree_arena* child) {
+        if (child == nullptr
+            || required_arena_count
+                >= bounded_join_arena_dependency_capacity) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join arena dependency bound was exceeded")));
+        }
+        std::size_t slot_index = bounded_join_pointer_hash(child)
+            & (required_arenas.size() - 1u);
+        for (std::size_t probe = 0u; probe < required_arenas.size(); ++probe) {
+            auto& slot = required_arenas[slot_index];
+            if (slot.key == nullptr) slot.key = child;
+            if (slot.key == child) {
+                if (slot.required == UINT32_MAX) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq trusted join arena dependency multiplicity overflow")));
+                }
+                ++slot.required;
+                ++required_arena_count;
+                note_piece_tree_bounded_validation_step_noexcept();
+                return;
+            }
+            slot_index = (slot_index + 1u) & (required_arenas.size() - 1u);
+        }
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join arena dependency table overflow")));
+    };
+    const auto require_source_dependency = [
+        &required_sources, &required_source_count](
+            pg_sequence_source_handle source) {
+        if (!pg_sequence_source_handle_valid(source)
+            || required_source_count
+                >= bounded_join_source_dependency_capacity) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join source dependency bound was exceeded")));
+        }
+        std::size_t slot_index = (
+            bounded_join_pointer_hash(source.state)
+            ^ (bounded_join_pointer_hash(source.ops) << 1u))
+            & (required_sources.size() - 1u);
+        for (std::size_t probe = 0u; probe < required_sources.size(); ++probe) {
+            auto& slot = required_sources[slot_index];
+            if (slot.state == nullptr) {
+                slot.state = source.state;
+                slot.ops = source.ops;
+            }
+            if (slot.state == source.state && slot.ops == source.ops) {
+                if (slot.required == UINT32_MAX) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq trusted join source dependency multiplicity overflow")));
+                }
+                ++slot.required;
+                ++required_source_count;
+                note_piece_tree_bounded_validation_step_noexcept();
+                return;
+            }
+            slot_index = (slot_index + 1u) & (required_sources.size() - 1u);
+        }
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join source dependency table overflow")));
+    };
+    if (result && result.arena == std::addressof(destination)) {
+        pending[pending_count++] = result;
+    }
+    while (pending_count != 0u) {
+        const piece_edge current = pending[--pending_count];
+        if (current.arena != std::addressof(destination)) {
+            validate_bounded_edge_summary(current, audit, true);
+            continue;
+        }
+        if (visited_count >= bounded_join_node_capacity) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join contains a cycle or shared new node")));
+        }
+        std::size_t visited_slot = bounded_join_pointer_hash(current.node)
+            & (visited.size() - 1u);
+        bool inserted = false;
+        for (std::size_t probe = 0u; probe < visited.size(); ++probe) {
+            if (visited[visited_slot] == current.node) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq trusted join contains a cycle or shared new node")));
+            }
+            if (visited[visited_slot] == nullptr) {
+                visited[visited_slot] = current.node;
+                inserted = true;
+                break;
+            }
+            visited_slot = (visited_slot + 1u) & (visited.size() - 1u);
+        }
+        if (!inserted) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join visited-node table overflow")));
+        }
+        ++visited_count;
+        audit.new_nodes_visited = static_cast<std::uint32_t>(visited_count);
+        validate_bounded_edge_summary(current, audit, false);
+        const piece_node& node = *current.node;
+        if (node.node_kind != piece_node::kind::branch) {
+            validate_bounded_join_leaf(
+                current, result_type, alphabet_bound);
+            if (node.node_kind == piece_node::kind::source) {
+                require_source_dependency(node.payload.source.source);
+            } else if (node.payload.literal.storage_arena
+                       != std::addressof(destination)) {
+                require_arena_dependency(
+                    node.payload.literal.storage_arena);
+            }
+            continue;
+        }
+        const auto& branch = node.payload.branch;
+        validate_bounded_edge_summary(branch.left, audit,
+            branch.left.arena != std::addressof(destination));
+        validate_bounded_edge_summary(branch.right, audit,
+            branch.right.arena != std::addressof(destination));
+        if ((branch.left.arena != std::addressof(destination)
+                && branch.left.arena->generation >= destination.generation)
+            || (branch.right.arena != std::addressof(destination)
+                && branch.right.arena->generation >= destination.generation)
+            || branch.right.node->bp_length
+                > static_cast<std::uint64_t>(INT64_MAX)
+                    - branch.left.node->bp_length
+            || branch.left.node->bp_length + branch.right.node->bp_length
+                != node.bp_length
+            || static_cast<std::uint64_t>(branch.left.node->piece_count)
+                    + branch.right.node->piece_count
+                != node.piece_count
+            || 1u + std::max(branch.left.node->height,
+                             branch.right.node->height)
+                != node.height
+            || branch.left.node->height > branch.right.node->height + 1u
+            || branch.right.node->height > branch.left.node->height + 1u) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join path invariant is invalid")));
+        }
+        const std::array children{branch.left, branch.right};
+        for (piece_edge child : children) {
+            if (child.arena != std::addressof(destination)) {
+                require_arena_dependency(child.arena);
+                continue;
+            }
+            if (pending_count >= pending.size()) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq trusted join validation stack overflow")));
+            }
+            pending[pending_count++] = child;
+        }
+    }
+
+    const auto node_is_in_table = [](auto const& table,
+                                     piece_node const* node) noexcept {
+        std::size_t slot = bounded_join_pointer_hash(node)
+            & (table.size() - 1u);
+        for (std::size_t probe = 0u; probe < table.size(); ++probe) {
+            if (table[slot] == node) return true;
+            if (table[slot] == nullptr) return false;
+            slot = (slot + 1u) & (table.size() - 1u);
+        }
+        return false;
+    };
+    const auto insert_retired_node = [&retired_visited](
+            piece_node const* node) {
+        std::size_t slot = bounded_join_pointer_hash(node)
+            & (retired_visited.size() - 1u);
+        for (std::size_t probe = 0u; probe < retired_visited.size(); ++probe) {
+            if (retired_visited[slot] == node) {
+                return false;
+            }
+            if (retired_visited[slot] == nullptr) {
+                retired_visited[slot] = node;
+                return true;
+            }
+            slot = (slot + 1u) & (retired_visited.size() - 1u);
+        }
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join retired-node table overflow")));
+        pg_unreachable();
+    };
+
+    /* A rotation may discard a destination-local branch after reusing its
+     * children in the final tree.  Walk those explicitly recorded roots as a
+     * second allocation closure.  Final-tree nodes may be shared by that
+     * historical closure; cached height descent proves that the bounded
+     * immutable allocation graph is acyclic even when old roots overlap. */
+    for (std::uint32_t retired_index = 0u;
+         retired_index < destination.retired_join_root_count;
+         ++retired_index) {
+        note_piece_tree_retired_root_step_noexcept();
+        const piece_edge retired_root =
+            destination.retired_join_roots[retired_index];
+        if (!retired_root
+            || retired_root.arena != std::addressof(destination)
+            || retired_root.node->node_kind != piece_node::kind::branch
+            || node_is_in_table(visited, retired_root.node)
+            || node_is_in_table(retired_visited, retired_root.node)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join retired-root record is invalid")));
+        }
+        if (pending_count >= pending.size()) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join retired-root stack overflow")));
+        }
+        pending[pending_count++] = retired_root;
+        while (pending_count != 0u) {
+            const piece_edge current = pending[--pending_count];
+            if (current.arena != std::addressof(destination)) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq trusted join retired graph escaped its arena")));
+            }
+            if (node_is_in_table(visited, current.node)) continue;
+            if (visited_count + retired_visited_count
+                >= bounded_join_node_capacity) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq trusted join retired graph exceeded its node bound")));
+            }
+            if (!insert_retired_node(current.node)) continue;
+            ++retired_visited_count;
+            audit.new_nodes_visited = static_cast<std::uint32_t>(
+                visited_count + retired_visited_count);
+
+            validate_bounded_edge_summary(current, audit, false);
+            const piece_node& node = *current.node;
+            if (node.node_kind != piece_node::kind::branch) {
+                validate_bounded_join_leaf(
+                    current, result_type, alphabet_bound);
+                if (node.node_kind == piece_node::kind::source) {
+                    require_source_dependency(node.payload.source.source);
+                } else if (node.payload.literal.storage_arena
+                           != std::addressof(destination)) {
+                    require_arena_dependency(
+                        node.payload.literal.storage_arena);
+                }
+                continue;
+            }
+
+            const auto& branch = node.payload.branch;
+            validate_bounded_edge_summary(branch.left, audit,
+                branch.left.arena != std::addressof(destination));
+            validate_bounded_edge_summary(branch.right, audit,
+                branch.right.arena != std::addressof(destination));
+            if ((branch.left.arena != std::addressof(destination)
+                    && branch.left.arena->generation
+                        >= destination.generation)
+                || (branch.right.arena != std::addressof(destination)
+                    && branch.right.arena->generation
+                        >= destination.generation)
+                || branch.right.node->bp_length
+                    > static_cast<std::uint64_t>(INT64_MAX)
+                        - branch.left.node->bp_length
+                || branch.left.node->bp_length
+                        + branch.right.node->bp_length
+                    != node.bp_length
+                || static_cast<std::uint64_t>(
+                        branch.left.node->piece_count)
+                        + branch.right.node->piece_count
+                    != node.piece_count
+                || 1u + std::max(branch.left.node->height,
+                                 branch.right.node->height)
+                    != node.height
+                || branch.left.node->height
+                    > branch.right.node->height + 1u
+                || branch.right.node->height
+                    > branch.left.node->height + 1u) {
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq trusted join retired path invariant is invalid")));
+            }
+            const std::array children{branch.left, branch.right};
+            for (piece_edge child : children) {
+                if (child.arena != std::addressof(destination)) {
+                    require_arena_dependency(child.arena);
+                    continue;
+                }
+                if (pending_count >= pending.size()) {
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq trusted join retired validation stack overflow")));
+                }
+                pending[pending_count++] = child;
+            }
+        }
+    }
+    if (audit.new_nodes_visited != destination.node_count) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join arena contains unreachable nodes"),
+                 errdetail("reachable=%u allocated=%u",
+                           audit.new_nodes_visited, destination.node_count)));
+    }
+
+    if (required_arena_count != destination.arena_dependency_count
+        || required_source_count != destination.source_dependency_count) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join dependency multiplicity changed"),
+                 errdetail("required_arena=%u registered_arena=%u "
+                           "required_source=%u registered_source=%u",
+                           required_arena_count,
+                           destination.arena_dependency_count,
+                           required_source_count,
+                           destination.source_dependency_count)));
+    }
+
+    for (auto* dependency = destination.arena_dependencies;
+         dependency != nullptr; dependency = dependency->next) {
+        note_piece_tree_bounded_validation_step_noexcept();
+        if (audit.arena_dependencies_checked
+                >= destination.arena_dependency_count
+            || dependency->child == nullptr
+            || dependency->child->generation == 0u
+            || dependency->child->generation >= destination.generation
+            || dependency->child->refcount == 0u
+            || dependency->child->refcount == UINT32_MAX) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join arena dependency is invalid")));
+        }
+        std::size_t slot_index = bounded_join_pointer_hash(dependency->child)
+            & (required_arenas.size() - 1u);
+        bool matched = false;
+        for (std::size_t probe = 0u; probe < required_arenas.size(); ++probe) {
+            auto& slot = required_arenas[slot_index];
+            if (slot.key == nullptr) break;
+            if (slot.key == dependency->child) {
+                if (slot.matched >= slot.required) break;
+                ++slot.matched;
+                matched = true;
+                break;
+            }
+            slot_index = (slot_index + 1u) & (required_arenas.size() - 1u);
+        }
+        if (!matched) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join arena dependency does not match a reachable edge")));
+        }
+        ++audit.arena_dependencies_checked;
+    }
+    for (auto* dependency = destination.source_dependencies;
+         dependency != nullptr; dependency = dependency->next) {
+        note_piece_tree_bounded_validation_step_noexcept();
+        if (audit.source_dependencies_checked
+                >= destination.source_dependency_count
+            || !pg_sequence_source_handle_valid(dependency->source)) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join source dependency is invalid")));
+        }
+        std::size_t slot_index = (
+            bounded_join_pointer_hash(dependency->source.state)
+            ^ (bounded_join_pointer_hash(dependency->source.ops) << 1u))
+            & (required_sources.size() - 1u);
+        bool matched = false;
+        for (std::size_t probe = 0u; probe < required_sources.size(); ++probe) {
+            auto& slot = required_sources[slot_index];
+            if (slot.state == nullptr) break;
+            if (slot.state == dependency->source.state
+                && slot.ops == dependency->source.ops) {
+                if (slot.matched >= slot.required) break;
+                ++slot.matched;
+                matched = true;
+                break;
+            }
+            slot_index = (slot_index + 1u) & (required_sources.size() - 1u);
+        }
+        if (!matched) {
+            ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("bioseq trusted join source dependency does not match a reachable leaf")));
+        }
+        ++audit.source_dependencies_checked;
+    }
+    if (audit.arena_dependencies_checked
+            != destination.arena_dependency_count
+        || audit.source_dependencies_checked
+            != destination.source_dependency_count) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq trusted join dependency accounting changed")));
+    }
+    return audit;
 }
 
 export inline void publish_root_noexcept(pg_sequence_expanded &value,
@@ -1493,8 +2920,9 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
       ALLOCSET_SMALL_SIZES);
   const MemoryContext saved_context = CurrentMemoryContext;
   bool volatile caught = false;
-  observed_piece_tree_failure = piece_tree_injected_failure_point::none;
-  armed_piece_tree_failure = failure_point;
+  observe_piece_tree_failure_noexcept(
+      piece_tree_injected_failure_point::none);
+  arm_piece_tree_failure_noexcept(failure_point);
 
   PG_TRY();
   {
@@ -1580,13 +3008,15 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
         break;
     }
 
-    armed_piece_tree_failure = piece_tree_injected_failure_point::none;
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
     MemoryContextDelete(build_context);
   }
   PG_CATCH();
   {
     MemoryContextSwitchTo(saved_context);
-    armed_piece_tree_failure = piece_tree_injected_failure_point::none;
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
     FlushErrorState();
     MemoryContextDelete(build_context);
     caught = true;
@@ -1627,7 +3057,7 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
 
   const bool result =
       caught
-      && observed_piece_tree_failure == failure_point
+      && observed_piece_tree_failure_noexcept() == failure_point
       && observation->callback_invocations == 1u
       && observation->armed_callback_invocations == 1u
       && observation->root_tokens_released
@@ -1644,7 +3074,8 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
             (errmsg_internal(
                 "bioseq piece-tree factory failure case: point=%u caught=%d observed=%u callbacks=%u armed_callbacks=%u roots=%u expected_roots=%u arenas=%u source_retains=%u expected_source=%u source_releases=%u external_restored=%d live=%llu baseline=%llu",
                 static_cast<unsigned>(failure_point), caught ? 1 : 0,
-                static_cast<unsigned>(observed_piece_tree_failure),
+                static_cast<unsigned>(
+                    observed_piece_tree_failure_noexcept()),
                 observation->callback_invocations,
                 observation->armed_callback_invocations,
                 observation->root_tokens_released,
@@ -1687,6 +3118,541 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
     FreeErrorData(error);
   }
   return matched;
+}
+
+enum class tracked_join_failure_shape : std::uint8_t {
+  branch,
+  source_coalesce,
+  literal_coalesce,
+  rotation,
+  transformed_binding,
+};
+
+struct tracked_join_failure_fixture {
+  piece_tree_arena *arena;
+  piece_edge left;
+  piece_edge right;
+  factory_failure_source_state *source_state;
+  compact_sequence_stdc_type_params type;
+  std::uint64_t live_baseline;
+  std::uint32_t arena_refcount_baseline;
+  std::uint32_t source_retain_baseline;
+  std::uint32_t source_release_baseline;
+};
+
+[[nodiscard]] inline tracked_join_failure_fixture *
+make_tracked_join_failure_fixture(tracked_join_failure_shape shape) {
+  auto *fixture = static_cast<tracked_join_failure_fixture *>(
+      palloc0(sizeof(tracked_join_failure_fixture)));
+  fixture->live_baseline = live_piece_tree_arenas;
+  fixture->arena = make_piece_tree_arena();
+
+  if (shape == tracked_join_failure_shape::literal_coalesce
+      || shape == tracked_join_failure_shape::transformed_binding) {
+    fixture->type = shape == tracked_join_failure_shape::transformed_binding
+        ? compact_sequence_stdc_type_params{
+              .alphabet_code =
+                  pgseq_supported_alphabets::index_of<seq::dna4>(),
+              .storage_unit_byte_width = 8u,
+          }
+        : compact_sequence_stdc_type_params{
+              .alphabet_code = pgseq_unbound_alphabet_code,
+              .storage_unit_byte_width = pgseq_unbound_width_tag,
+          };
+    auto *left_storage = allocate_piece_literal_storage(*fixture->arena, 1u);
+    auto *right_storage = allocate_piece_literal_storage(*fixture->arena, 1u);
+    left_storage[0] = std::byte{0x41};
+    right_storage[0] = std::byte{0x43};
+    piece_edge left = make_literal_node(
+        *fixture->arena,
+        factory_failure_unbound_literal(
+            fixture->arena, left_storage, 0u, 1u));
+    piece_edge right = make_literal_node(
+        *fixture->arena,
+        factory_failure_unbound_literal(
+            fixture->arena, right_storage, 0u, 1u));
+    if (shape == tracked_join_failure_shape::transformed_binding) {
+      fixture->left = make_branch_node(
+          *fixture->arena, left, right);
+      fixture->left.transform =
+          bioseq::storage::sequence_transform::reversed;
+    } else {
+      fixture->left = left;
+      fixture->right = right;
+    }
+  } else {
+    fixture->source_state = static_cast<factory_failure_source_state *>(
+        palloc0(sizeof(factory_failure_source_state)));
+    fixture->source_state->rank_count = 64u;
+    fixture->type = {
+        .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+        .storage_unit_byte_width = 8u,
+    };
+    const pg_sequence_source_handle source{
+        .state = fixture->source_state,
+        .ops = std::addressof(factory_failure_source_ops),
+    };
+    const auto make_leaf = [&fixture, source](
+        std::uint64_t from, std::uint64_t to,
+        bioseq::storage::seq_locator locator) {
+      return make_source_node(
+          *fixture->arena,
+          source_piece{
+              .source = source,
+              .locator = locator,
+              .stored_type_params = fixture->type,
+              .last_padding_letters = 0u,
+              .from = from,
+              .to = to,
+          });
+    };
+
+    if (shape == tracked_join_failure_shape::source_coalesce) {
+      const bioseq::storage::seq_locator locator{
+          .num_fragments = 1u,
+          .total_bp_size = 2u,
+          .source_epoch = 1u,
+      };
+      fixture->left = make_leaf(0u, 1u, locator);
+      fixture->right = make_leaf(1u, 2u, locator);
+    } else if (shape == tracked_join_failure_shape::branch) {
+      const bioseq::storage::seq_locator locator{
+          .num_fragments = 1u,
+          .total_bp_size = 1u,
+          .source_epoch = 1u,
+      };
+      fixture->left = make_leaf(0u, 1u, locator);
+      fixture->right = make_leaf(0u, 1u, locator);
+    } else {
+      const bioseq::storage::seq_locator locator{
+          .num_fragments = 1u,
+          .total_bp_size = 1u,
+          .source_epoch = 1u,
+      };
+      std::array<piece_edge, 7u> leaves{};
+      for (piece_edge& leaf : leaves) {
+        leaf = make_leaf(0u, 1u, locator);
+      }
+      piece_edge left_pair = make_branch_node(
+          *fixture->arena, leaves[0], leaves[1]);
+      piece_edge right_left = make_branch_node(
+          *fixture->arena, leaves[2], leaves[3]);
+      piece_edge right_right = make_branch_node(
+          *fixture->arena, leaves[4], leaves[5]);
+      piece_edge right_four = make_branch_node(
+          *fixture->arena, right_left, right_right);
+      fixture->left = make_branch_node(
+          *fixture->arena, left_pair, right_four);
+      fixture->right = leaves[6];
+    }
+  }
+
+  fixture->arena_refcount_baseline = fixture->arena->refcount;
+  if (fixture->source_state != nullptr) {
+    fixture->source_retain_baseline =
+        fixture->source_state->retain_calls;
+    fixture->source_release_baseline =
+        fixture->source_state->release_calls;
+  }
+  return fixture;
+}
+
+[[nodiscard]] inline bool destroy_tracked_join_failure_fixture(
+    tracked_join_failure_fixture *fixture) {
+  auto *source_state = fixture->source_state;
+  const std::uint64_t live_baseline = fixture->live_baseline;
+  release_edge(fixture->left);
+  release_edge(fixture->right);
+  release_arena(fixture->arena);
+  const bool source_balanced = source_state == nullptr
+      || source_state->retain_calls == source_state->release_calls;
+  if (source_state != nullptr) pfree(source_state);
+  pfree(fixture);
+  return source_balanced && live_piece_tree_arenas == live_baseline;
+}
+
+struct tracked_join_failure_observation {
+  std::uint32_t callbacks;
+  std::uint32_t armed_callbacks;
+  std::uint32_t tokens_released;
+  std::uint32_t destination_tokens_released;
+  bool ledger_drained;
+};
+
+struct tracked_join_failure_guard {
+  MemoryContextCallback callback;
+  piece_tree_arena *destination_arena;
+  piece_edge_cleanup_ledger ledger;
+  tracked_join_failure_observation *observation;
+  bool armed;
+};
+
+inline void tracked_join_failure_reset(void *argument) noexcept {
+  auto *guard = static_cast<tracked_join_failure_guard *>(argument);
+  if (guard == nullptr || guard->observation == nullptr) return;
+  ++guard->observation->callbacks;
+  if (!guard->armed) return;
+  guard->armed = false;
+  ++guard->observation->armed_callbacks;
+  guard->observation->tokens_released += guard->ledger.token_count;
+  release_piece_edge_cleanup_ledger_noexcept(guard->ledger);
+  guard->observation->ledger_drained =
+      piece_edge_cleanup_ledger_empty_noexcept(guard->ledger);
+  if (guard->destination_arena != nullptr) {
+    ++guard->observation->destination_tokens_released;
+    release_arena(guard->destination_arena);
+    guard->destination_arena = nullptr;
+  }
+}
+
+[[nodiscard]] inline bool run_tracked_join_failure_case(
+    piece_tree_injected_failure_point failure_point,
+    tracked_join_failure_shape shape) {
+  auto *fixture = make_tracked_join_failure_fixture(shape);
+  const std::uint64_t fixture_live_arenas = live_piece_tree_arenas;
+  auto *observation = static_cast<tracked_join_failure_observation *>(
+      palloc0(sizeof(tracked_join_failure_observation)));
+  MemoryContext build_context = AllocSetContextCreate(
+      CurrentMemoryContext, "bioseq tracked join failure",
+      ALLOCSET_SMALL_SIZES);
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile caught = false;
+  bool volatile sqlstate_matched = false;
+  observe_piece_tree_failure_noexcept(
+      piece_tree_injected_failure_point::none);
+  arm_piece_tree_failure_noexcept(failure_point);
+
+  PG_TRY();
+  {
+    auto *guard = static_cast<tracked_join_failure_guard *>(
+        MemoryContextAllocZero(
+            build_context, sizeof(tracked_join_failure_guard)));
+    guard->callback.func = tracked_join_failure_reset;
+    guard->callback.arg = guard;
+    guard->observation = observation;
+    guard->armed = true;
+    MemoryContextRegisterResetCallback(
+        build_context, std::addressof(guard->callback));
+    guard->destination_arena = make_piece_tree_arena();
+    if (shape == tracked_join_failure_shape::transformed_binding) {
+      (void)bind_literals_copy_error_atomic(
+          *guard->destination_arena, fixture->left,
+          fixture->type, guard->ledger);
+    } else {
+      (void)join_edges_error_atomic(
+          *guard->destination_arena, guard->ledger,
+          fixture->left, fixture->right);
+    }
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    MemoryContextDelete(build_context);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    sqlstate_matched = consume_expected_error(
+        ERRCODE_INTERNAL_ERROR, saved_context);
+    MemoryContextDelete(build_context);
+    caught = true;
+  }
+  PG_END_TRY();
+
+  const bool fixture_restored =
+      fixture->arena->refcount == fixture->arena_refcount_baseline
+      && live_piece_tree_arenas == fixture_live_arenas
+      && (fixture->source_state == nullptr
+          || (fixture->source_state->retain_calls
+                  >= fixture->source_retain_baseline
+              && fixture->source_state->release_calls
+                  >= fixture->source_release_baseline
+              && fixture->source_state->retain_calls
+                      - fixture->source_retain_baseline
+                  == fixture->source_state->release_calls
+                      - fixture->source_release_baseline));
+  const bool case_passed = caught && sqlstate_matched
+      && observed_piece_tree_failure_noexcept() == failure_point
+      && observation->callbacks == 1u
+      && observation->armed_callbacks == 1u
+      && observation->tokens_released != 0u
+      && observation->destination_tokens_released == 1u
+      && observation->ledger_drained && fixture_restored;
+  if (!case_passed) {
+    ereport(WARNING,
+            (errmsg_internal(
+                "bioseq tracked-join failure case: point=%u shape=%u caught=%d sqlstate=%d observed=%u callbacks=%u armed=%u tokens=%u destinations=%u drained=%d restored=%d",
+                static_cast<unsigned>(failure_point),
+                static_cast<unsigned>(shape), caught ? 1 : 0,
+                sqlstate_matched ? 1 : 0,
+                static_cast<unsigned>(
+                    observed_piece_tree_failure_noexcept()),
+                observation->callbacks,
+                observation->armed_callbacks,
+                observation->tokens_released,
+                observation->destination_tokens_released,
+                observation->ledger_drained ? 1 : 0,
+                fixture_restored ? 1 : 0)));
+  }
+  pfree(observation);
+  const bool fixture_destroyed =
+      destroy_tracked_join_failure_fixture(fixture);
+  return case_passed && fixture_destroyed;
+}
+
+[[nodiscard]] inline bool run_tracked_join_failure_matrix() {
+  using point = piece_tree_injected_failure_point;
+  using shape = tracked_join_failure_shape;
+  constexpr std::array cases{
+      std::pair{point::join_left_operand_retain, shape::branch},
+      std::pair{point::join_right_operand_retain, shape::branch},
+      std::pair{point::arena_dependency_registration, shape::branch},
+      std::pair{point::source_dependency_registration,
+                shape::source_coalesce},
+      std::pair{point::literal_storage_factory,
+                shape::literal_coalesce},
+      std::pair{point::join_node_allocation, shape::branch},
+      std::pair{point::join_node_allocation, shape::source_coalesce},
+      std::pair{point::join_node_allocation, shape::literal_coalesce},
+      std::pair{point::join_node_metadata, shape::branch},
+      std::pair{point::join_node_metadata, shape::source_coalesce},
+      std::pair{point::join_node_metadata, shape::literal_coalesce},
+      std::pair{point::join_factory_transition, shape::branch},
+      std::pair{point::join_factory_transition, shape::source_coalesce},
+      std::pair{point::join_factory_transition, shape::literal_coalesce},
+      std::pair{point::join_edge_identity_transition,
+                shape::transformed_binding},
+      std::pair{point::join_recursive_intermediate, shape::rotation},
+      std::pair{point::join_retired_root_record, shape::rotation},
+  };
+  static_assert(cases.size() >= 16u);
+  for (auto const& [failure_point, fixture_shape] : cases) {
+    if (!run_tracked_join_failure_case(failure_point, fixture_shape)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+struct binding_retirement_fixture {
+  piece_tree_arena *arena;
+  piece_edge root;
+  std::uint64_t length;
+  std::uint32_t arena_refcount_baseline;
+  std::uint64_t live_baseline;
+};
+
+[[nodiscard]] inline binding_retirement_fixture
+make_binding_retirement_fixture() {
+  constexpr std::uint32_t leaf_count = 4'096u;
+  constexpr std::uint64_t long_length = 17'000u;
+  constexpr std::uint64_t short_length = 3'000u;
+  auto *arena = make_piece_tree_arena();
+  auto *storage = allocate_piece_literal_storage(*arena, long_length);
+  std::fill_n(storage, long_length, std::byte{0x41});
+  auto *level = static_cast<piece_edge *>(
+      palloc0(sizeof(piece_edge) * leaf_count));
+  const compact_sequence_stdc_type_params unbound_type{
+      .alphabet_code = pgseq_unbound_alphabet_code,
+      .storage_unit_byte_width = pgseq_unbound_width_tag,
+  };
+  std::uint64_t total_length = 0u;
+  for (std::uint32_t index = 0u; index < leaf_count; ++index) {
+    const std::uint64_t length = index % 5u == 0u
+        ? long_length : short_length;
+    total_length += length;
+    level[index] = make_literal_node(
+        *arena,
+        literal_piece{
+            .storage_arena = arena,
+            .bytes = storage,
+            .symbol_from = 0u,
+            .symbol_to = length,
+            .stored_type_params = unbound_type,
+            .encoding = literal_encoding::unbound_ascii,
+            .validation = literal_validation::unvalidated,
+        });
+  }
+  for (std::uint32_t width = leaf_count; width > 1u; width /= 2u) {
+    for (std::uint32_t index = 0u; index < width; index += 2u) {
+      level[index / 2u] = make_branch_node(
+          *arena, level[index], level[index + 1u]);
+    }
+  }
+  const piece_edge root = level[0];
+  pfree(level);
+  validate_tree_and_limits(root, unbound_type, total_length, false);
+  return {
+      .arena = arena,
+      .root = root,
+      .length = total_length,
+      .arena_refcount_baseline = arena->refcount,
+      .live_baseline = live_piece_tree_arenas,
+  };
+}
+
+struct binding_output_audit {
+  std::uint64_t length;
+  std::uint32_t leaves;
+  bool exact;
+};
+
+template<class Instance>
+[[nodiscard]] inline binding_output_audit
+audit_binding_output(piece_edge edge, std::uint8_t expected_rank) {
+  if (!edge) return {.exact = true};
+  if (edge.transform
+      != bioseq::storage::sequence_transform::identity) {
+    return {.exact = false};
+  }
+  if (edge.node->node_kind == piece_node::kind::branch) {
+    const auto left = audit_binding_output<Instance>(
+        edge.node->payload.branch.left, expected_rank);
+    const auto right = audit_binding_output<Instance>(
+        edge.node->payload.branch.right, expected_rank);
+    return {
+        .length = left.length + right.length,
+        .leaves = left.leaves + right.leaves,
+        .exact = left.exact && right.exact,
+    };
+  }
+  if (edge.node->node_kind != piece_node::kind::literal) {
+    return {.exact = false};
+  }
+  const auto& literal = edge.node->payload.literal;
+  bool exact = literal.encoding == literal_encoding::packed
+      && literal.validation == literal_validation::alphabet_validated;
+  for (std::uint64_t position = literal.symbol_from;
+       exact && position < literal.symbol_to; ++position) {
+    exact = packed_literal_rank_at<Instance>(literal, position)
+        == expected_rank;
+  }
+  return {
+      .length = literal.symbol_to - literal.symbol_from,
+      .leaves = 1u,
+      .exact = exact,
+  };
+}
+
+[[nodiscard]] inline bool run_binding_retirement_overflow_regression() {
+  binding_retirement_fixture fixture = make_binding_retirement_fixture();
+  const compact_sequence_stdc_type_params bound_type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 8u,
+  };
+  std::uint8_t expected_rank = UINT8_MAX;
+  const bool rank_found = pgseq_rank_for_symbol(
+      bound_type.alphabet_code, static_cast<unsigned char>('A'),
+      expected_rank);
+
+  auto *destination = make_piece_tree_arena();
+  piece_edge_cleanup_ledger ledger{};
+  tracked_piece_edge tracked = bind_literals_copy_error_atomic(
+      *destination, fixture.root, bound_type, ledger);
+  transfer_piece_edge_cleanup_root_noexcept(
+      ledger, tracked.cleanup, tracked.edge);
+  const bool ledger_empty = piece_edge_cleanup_ledger_empty_noexcept(ledger);
+  validate_tree_and_limits(
+      tracked.edge, bound_type, fixture.length, true);
+  binding_output_audit output{};
+  pgseq_t::dispatch_instance(
+      bound_type.alphabet_code, bound_type.storage_unit_byte_width,
+      [&output, tracked, expected_rank]<class Instance>() {
+        output = audit_binding_output<Instance>(tracked.edge, expected_rank);
+      });
+  const std::uint32_t inline_capacity = static_cast<std::uint32_t>(
+      destination->retired_join_roots.size());
+  const std::uint32_t overflow_roots =
+      destination->retired_join_root_count > inline_capacity
+      ? destination->retired_join_root_count - inline_capacity : 0u;
+  const std::uint32_t expected_blocks = overflow_roots == 0u ? 0u
+      : (overflow_roots - 1u)
+              / static_cast<std::uint32_t>(max_retired_join_roots)
+          + 1u;
+  const std::uint64_t component_bytes =
+      static_cast<std::uint64_t>(destination->node_metadata_bytes)
+      + destination->arena_dependency_metadata_bytes
+      + destination->source_dependency_metadata_bytes
+      + destination->literal_storage_bytes
+      + destination->retired_join_root_metadata_bytes;
+  const bool success = rank_found && ledger_empty && output.exact
+      && output.length == fixture.length
+      && output.leaves == tracked.edge.node->piece_count
+      && fixture.length == 23'768'000u
+      && destination->retired_join_rotation_count > 64u
+      && destination->retired_join_rotation_count
+          == destination->retired_join_root_count
+      && destination->retired_join_root_overflow_block_count
+          == expected_blocks
+      && destination->retired_join_root_metadata_bytes
+          == static_cast<Size>(expected_blocks)
+              * MAXALIGN(sizeof(retired_join_root_block))
+      && component_bytes == destination->accounted_bytes
+      && destination->node_metadata_bytes
+          == static_cast<Size>(destination->node_count)
+              * MAXALIGN(sizeof(piece_node))
+      && destination->arena_dependency_count == 0u
+      && destination->source_dependency_count == 0u;
+  release_edge(tracked.edge);
+  release_arena(destination);
+
+  auto *observation = static_cast<tracked_join_failure_observation *>(
+      palloc0(sizeof(tracked_join_failure_observation)));
+  MemoryContext build_context = AllocSetContextCreate(
+      CurrentMemoryContext, "bioseq binding retirement failure",
+      ALLOCSET_SMALL_SIZES);
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile caught = false;
+  bool volatile sqlstate_matched = false;
+  observe_piece_tree_failure_noexcept(
+      piece_tree_injected_failure_point::none);
+  arm_piece_tree_failure_noexcept(
+      piece_tree_injected_failure_point::
+          join_retired_root_overflow_allocation);
+  PG_TRY();
+  {
+    auto *guard = static_cast<tracked_join_failure_guard *>(
+        MemoryContextAllocZero(
+            build_context, sizeof(tracked_join_failure_guard)));
+    guard->callback.func = tracked_join_failure_reset;
+    guard->callback.arg = guard;
+    guard->observation = observation;
+    guard->armed = true;
+    MemoryContextRegisterResetCallback(
+        build_context, std::addressof(guard->callback));
+    guard->destination_arena = make_piece_tree_arena();
+    (void)bind_literals_copy_error_atomic(
+        *guard->destination_arena, fixture.root, bound_type, guard->ledger);
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    MemoryContextDelete(build_context);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    sqlstate_matched = consume_expected_error(
+        ERRCODE_INTERNAL_ERROR, saved_context);
+    MemoryContextDelete(build_context);
+    caught = true;
+  }
+  PG_END_TRY();
+  const bool unwind = caught && sqlstate_matched
+      && observed_piece_tree_failure_noexcept()
+          == piece_tree_injected_failure_point::
+              join_retired_root_overflow_allocation
+      && observation->callbacks == 1u
+      && observation->armed_callbacks == 1u
+      && observation->tokens_released != 0u
+      && observation->destination_tokens_released == 1u
+      && observation->ledger_drained
+      && fixture.arena->refcount == fixture.arena_refcount_baseline
+      && live_piece_tree_arenas == fixture.live_baseline;
+  pfree(observation);
+  release_edge(fixture.root);
+  release_arena(fixture.arena);
+  return success && unwind;
 }
 
 [[nodiscard]] inline bool tree_length_add_raises_program_limit(
@@ -1839,6 +3805,252 @@ constexpr pg_sequence_source_backend_ops factory_failure_source_ops{
 [[nodiscard]] inline bool run_corrupt_tree_length_guardrail_matrix() {
   return corrupt_tree_length_raises_data_corrupted(true)
       && corrupt_tree_length_raises_data_corrupted(false);
+}
+
+[[nodiscard]] inline bool
+trusted_join_dependency_mismatch_raises_data_corrupted() {
+  auto *backing = make_piece_tree_arena();
+  auto *wrong_backing = make_piece_tree_arena();
+  auto *destination = make_piece_tree_arena();
+  auto *storage = allocate_piece_literal_storage(*backing, 1u);
+  storage[0] = std::byte{0x41};
+  const compact_sequence_stdc_type_params unbound_type{
+      .alphabet_code = pgseq_unbound_alphabet_code,
+      .storage_unit_byte_width = pgseq_unbound_width_tag,
+  };
+  const piece_edge trusted = make_literal_node(
+      *backing, factory_failure_unbound_literal(backing, storage, 0u, 1u));
+  const piece_edge result = make_literal_node(
+      *destination,
+      factory_failure_unbound_literal(backing, storage, 0u, 1u));
+  (void)validate_trusted_join_and_limits(
+      *destination, result, trusted, 1u, {}, 0u,
+      unbound_type, 1u, false);
+
+  auto *dependency = destination->arena_dependencies;
+  if (dependency == nullptr || dependency->child != backing) {
+    release_edge(result);
+    release_edge(trusted);
+    release_arena(destination);
+    release_arena(wrong_backing);
+    release_arena(backing);
+    return false;
+  }
+  dependency->child = wrong_backing;
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)validate_trusted_join_and_limits(
+        *destination, result, trusted, 1u, {}, 0u,
+        unbound_type, 1u, false);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_DATA_CORRUPTED, saved_context);
+  }
+  PG_END_TRY();
+  /* Restore the retained child before arena teardown; the deliberately wrong
+   * pointer never owned a reference token. */
+  dependency->child = backing;
+  release_edge(result);
+  release_edge(trusted);
+  release_arena(destination);
+  release_arena(wrong_backing);
+  release_arena(backing);
+  return matched;
+}
+
+[[nodiscard]] inline bool
+trusted_join_shared_node_raises_data_corrupted() {
+  auto *arena = make_piece_tree_arena();
+  auto *storage = allocate_piece_literal_storage(*arena, 1u);
+  storage[0] = std::byte{0x43};
+  const compact_sequence_stdc_type_params unbound_type{
+      .alphabet_code = pgseq_unbound_alphabet_code,
+      .storage_unit_byte_width = pgseq_unbound_width_tag,
+  };
+  const literal_piece literal = factory_failure_unbound_literal(
+      arena, storage, 0u, 1u);
+  const piece_edge shared = make_literal_node(*arena, literal);
+  const piece_edge unreachable = make_literal_node(*arena, literal);
+  const piece_edge result = make_branch_node(
+      *arena, retain_edge(shared), retain_edge(shared));
+
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)validate_trusted_join_and_limits(
+        *arena, result, shared, 1u, shared, 1u,
+        unbound_type, 2u, false);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_DATA_CORRUPTED, saved_context);
+  }
+  PG_END_TRY();
+  release_edge(result);
+  release_edge(shared);
+  release_edge(unreachable);
+  release_arena(arena);
+  return matched;
+}
+
+[[nodiscard]] inline bool
+trusted_join_forged_retirement_raises_data_corrupted() {
+  auto *arena = make_piece_tree_arena();
+  auto *storage = allocate_piece_literal_storage(*arena, 2u);
+  storage[0] = std::byte{0x47};
+  storage[1] = std::byte{0x54};
+  const compact_sequence_stdc_type_params unbound_type{
+      .alphabet_code = pgseq_unbound_alphabet_code,
+      .storage_unit_byte_width = pgseq_unbound_width_tag,
+  };
+  const piece_edge first = make_literal_node(
+      *arena,
+      factory_failure_unbound_literal(arena, storage, 0u, 1u));
+  const piece_edge second = make_literal_node(
+      *arena,
+      factory_failure_unbound_literal(arena, storage, 1u, 2u));
+  const piece_edge result = make_branch_node(*arena, first, second);
+
+  /* A published node cannot be used as a retirement record to conceal
+   * arbitrary allocation accounting. */
+  arena->retired_join_roots[0] = result;
+  arena->retired_join_root_count = 1u;
+  arena->retired_join_rotation_count = 1u;
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)validate_trusted_join_and_limits(
+        *arena, result, result, 2u, {}, 0u,
+        unbound_type, 2u, false);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_DATA_CORRUPTED, saved_context);
+  }
+  PG_END_TRY();
+  arena->retired_join_roots[0] = {};
+  arena->retired_join_root_count = 0u;
+  arena->retired_join_rotation_count = 0u;
+
+  const auto& published = result.node->payload.branch;
+  const piece_edge retired = make_branch_node(
+      *arena, retain_edge(published.left), retain_edge(published.right));
+  arena->retired_join_roots[0] = retired;
+  arena->retired_join_root_count = 1u;
+  arena->retired_join_rotation_count = 1u;
+  release_edge(retired);
+  const auto valid_audit = validate_trusted_join_and_limits(
+      *arena, result, result, 2u, {}, 0u,
+      unbound_type, 2u, false);
+  const bool valid_retirement = valid_audit.new_nodes_visited
+      == arena->node_count;
+
+  arena->retired_join_roots[1] = arena->retired_join_roots[0];
+  arena->retired_join_root_count = 2u;
+  arena->retired_join_rotation_count = 2u;
+  bool volatile duplicate_matched = false;
+  PG_TRY();
+  {
+    (void)validate_trusted_join_and_limits(
+        *arena, result, result, 2u, {}, 0u,
+        unbound_type, 2u, false);
+  }
+  PG_CATCH();
+  {
+    duplicate_matched = consume_expected_error(
+        ERRCODE_DATA_CORRUPTED, saved_context);
+  }
+  PG_END_TRY();
+  arena->retired_join_roots[0] = {};
+  arena->retired_join_roots[1] = {};
+  arena->retired_join_root_count = 0u;
+  arena->retired_join_rotation_count = 0u;
+  release_edge(result);
+  release_arena(arena);
+  return matched && valid_retirement && duplicate_matched;
+}
+
+[[nodiscard]] inline bool
+trusted_join_source_mismatch_raises_data_corrupted() {
+  factory_failure_source_state source_state{};
+  factory_failure_source_state wrong_source_state{};
+  const pg_sequence_source_handle source{
+      .state = std::addressof(source_state),
+      .ops = std::addressof(factory_failure_source_ops),
+  };
+  const pg_sequence_source_handle wrong_source{
+      .state = std::addressof(wrong_source_state),
+      .ops = std::addressof(factory_failure_source_ops),
+  };
+  const compact_sequence_stdc_type_params bound_type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 8u,
+  };
+  const bioseq::storage::seq_locator locator{
+      .num_fragments = 1u,
+      .total_bp_size = 1u,
+      .source_epoch = 1u,
+  };
+  auto *arena = make_piece_tree_arena();
+  const piece_edge result = make_source_node(
+      *arena,
+      source_piece{
+          .source = source,
+          .locator = locator,
+          .stored_type_params = bound_type,
+          .last_padding_letters = 0u,
+          .from = 0u,
+          .to = 1u,
+      });
+  (void)validate_trusted_join_and_limits(
+      *arena, result, result, 1u, {}, 0u,
+      bound_type, 1u, true);
+
+  auto *dependency = arena->source_dependencies;
+  if (dependency == nullptr
+      || dependency->source.state != source.state
+      || dependency->source.ops != source.ops) {
+    release_edge(result);
+    release_arena(arena);
+    return false;
+  }
+  dependency->source = wrong_source;
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile matched = false;
+  PG_TRY();
+  {
+    (void)validate_trusted_join_and_limits(
+        *arena, result, result, 1u, {}, 0u,
+        bound_type, 1u, true);
+  }
+  PG_CATCH();
+  {
+    matched = consume_expected_error(
+        ERRCODE_DATA_CORRUPTED, saved_context);
+  }
+  PG_END_TRY();
+  dependency->source = source;
+  release_edge(result);
+  release_arena(arena);
+  return matched && source_state.retain_calls == 1u
+      && source_state.release_calls == 1u
+      && wrong_source_state.retain_calls == 0u
+      && wrong_source_state.release_calls == 0u;
+}
+
+[[nodiscard]] inline bool run_trusted_join_corruption_guardrail_matrix() {
+  return trusted_join_dependency_mismatch_raises_data_corrupted()
+      && trusted_join_shared_node_raises_data_corrupted()
+      && trusted_join_forged_retirement_raises_data_corrupted()
+      && trusted_join_source_mismatch_raises_data_corrupted();
 }
 
 enum class transformed_join_rotation_shape : std::uint8_t {
@@ -2060,13 +4272,18 @@ emit_rotation_regression_edge(piece_edge edge) {
             emit_rotation_regression_edge(heavy));
 
   auto *destination_arena = make_piece_tree_arena();
-  piece_edge joined = left_heavy
+  tracked_piece_edge tracked_joined = left_heavy
       ? rebalance_joined_edges(
-            *destination_arena, take_rotation_edge(heavy),
-            take_rotation_edge(light))
+            *destination_arena, nullptr,
+            {.edge = take_rotation_edge(heavy)},
+            {.edge = take_rotation_edge(light)},
+            retired_join_root_policy::fixed_trusted_join)
       : rebalance_joined_edges(
-            *destination_arena, take_rotation_edge(light),
-            take_rotation_edge(heavy));
+            *destination_arena, nullptr,
+            {.edge = take_rotation_edge(light)},
+            {.edge = take_rotation_edge(heavy)},
+            retired_join_root_policy::fixed_trusted_join);
+  piece_edge joined = tracked_joined.edge;
   validate_tree_and_limits(joined, bound_type, expected.size, true);
   const rotation_regression_emission actual =
       emit_rotation_regression_edge(joined);
@@ -2166,12 +4383,18 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   const std::uint64_t arena_baseline = live_piece_tree_arenas;
   const bool factory_failure_matrix =
       run_piece_tree_factory_failure_matrix();
+  const bool tracked_join_failure_matrix =
+      run_tracked_join_failure_matrix();
+  const bool binding_retirement_overflow =
+      run_binding_retirement_overflow_regression();
   const bool tree_length_guardrail_matrix =
       run_tree_length_add_guardrail_matrix();
   const bool arena_alignment_guardrail_matrix =
       run_arena_alignment_guardrail_matrix();
   const bool corrupt_tree_length_guardrail_matrix =
       run_corrupt_tree_length_guardrail_matrix();
+  const bool trusted_join_corruption_guardrail_matrix =
+      run_trusted_join_corruption_guardrail_matrix();
   const bool transformed_join_rotation =
       run_transformed_join_rotation_regression();
 
@@ -2343,23 +4566,29 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
 
   const bool all_checks_passed =
       saturation_caught && budget_caught && generation_caught &&
-      factory_failure_matrix && tree_length_guardrail_matrix &&
+      factory_failure_matrix && tracked_join_failure_matrix &&
+      binding_retirement_overflow &&
+      tree_length_guardrail_matrix &&
       arena_alignment_guardrail_matrix &&
       corrupt_tree_length_guardrail_matrix &&
+      trusted_join_corruption_guardrail_matrix &&
       transformed_join_rotation &&
       million_piece_balanced && deep_release_iterative &&
       live_piece_tree_arenas == arena_baseline;
   if (!all_checks_passed) {
     ereport(WARNING,
             (errmsg_internal(
-                "bioseq piece-tree self-test flags: saturation=%d budget=%d generation=%d factory=%d length=%d alignment=%d corrupt=%d transformed_join=%d million=%d deep=%d arena_balance=%d",
+                "bioseq piece-tree self-test flags: saturation=%d budget=%d generation=%d factory=%d tracked_join=%d binding_retirement=%d length=%d alignment=%d corrupt=%d trusted=%d transformed_join=%d million=%d deep=%d arena_balance=%d",
                 saturation_caught ? 1 : 0,
                 budget_caught ? 1 : 0,
                 generation_caught ? 1 : 0,
                 factory_failure_matrix ? 1 : 0,
+                tracked_join_failure_matrix ? 1 : 0,
+                binding_retirement_overflow ? 1 : 0,
                 tree_length_guardrail_matrix ? 1 : 0,
                 arena_alignment_guardrail_matrix ? 1 : 0,
                 corrupt_tree_length_guardrail_matrix ? 1 : 0,
+                trusted_join_corruption_guardrail_matrix ? 1 : 0,
                 transformed_join_rotation ? 1 : 0,
                 million_piece_balanced ? 1 : 0,
                 deep_release_iterative ? 1 : 0,

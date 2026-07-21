@@ -1,6 +1,7 @@
 /* Immutable arena-qualified piece-tree and expanded-object POD types. */
 module;
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -35,6 +36,58 @@ export struct piece_edge {
 };
 
 export using piece_tree_ref = piece_edge;
+
+/* PostgreSQL ERROR bypasses C++ destructors.  Persistent concat therefore
+ * keeps every not-yet-published owning edge token in a fixed construction
+ * ledger whose MemoryContext callback can drain it after a longjmp.  The
+ * height-bounded AVL join needs fewer than two tokens per level; 256 keeps the
+ * guard independent of corrupt input metadata while remaining fixed-size. */
+export inline constexpr std::size_t max_pending_piece_edge_tokens = 256u;
+static_assert(max_pending_piece_edge_tokens < UINT16_MAX);
+
+export inline constexpr std::uint16_t invalid_piece_edge_cleanup_slot =
+    UINT16_MAX;
+
+export struct piece_edge_cleanup_handle {
+    std::uint16_t slot{invalid_piece_edge_cleanup_slot};
+    std::uint32_t generation{};
+};
+
+export struct piece_edge_cleanup_slot {
+    piece_edge token;
+    std::uint16_t next_active;
+    std::uint16_t previous_active;
+    std::uint16_t next_free;
+    std::uint32_t generation;
+    bool active;
+};
+
+export struct piece_edge_cleanup_ledger {
+    std::array<piece_edge_cleanup_slot, max_pending_piece_edge_tokens> slots;
+    std::uint16_t token_count;
+    std::uint16_t next_unused;
+    std::uint16_t active_head;
+    std::uint16_t free_head;
+    bool initialized;
+};
+
+export struct tracked_piece_edge {
+    piece_edge edge;
+    piece_edge_cleanup_handle cleanup;
+
+    [[nodiscard]] explicit operator bool() const noexcept
+    {
+        return static_cast<bool>(edge);
+    }
+
+    [[nodiscard]] operator piece_edge() const noexcept
+    {
+        return edge;
+    }
+};
+
+static_assert(std::is_trivially_destructible_v<piece_edge_cleanup_ledger>);
+static_assert(std::is_trivially_destructible_v<tracked_piece_edge>);
 
 export enum class literal_encoding : std::uint8_t {
     packed,
@@ -94,6 +147,21 @@ export struct source_dependency {
     source_dependency* next;
 };
 
+/* One trusted concat allocates only along a height-bounded AVL join path, so
+ * its retirement ledger stays entirely in this fixed inline block.  Alphabet
+ * binding rebuilds the complete tree and may retire O(piece_count) local nodes;
+ * binding alone may extend the ledger with arena-accounted blocks of the same
+ * size without changing the trusted-concat hot path. */
+export inline constexpr std::size_t max_retired_join_roots = 64u;
+
+export struct retired_join_root_block {
+    std::array<piece_edge, max_retired_join_roots> roots;
+    retired_join_root_block* next;
+    std::uint16_t count;
+};
+
+static_assert(std::is_trivially_destructible_v<retired_join_root_block>);
+
 export struct piece_tree_arena {
     MemoryContext payload_context;
     std::uint32_t refcount;
@@ -106,11 +174,20 @@ export struct piece_tree_arena {
     Size arena_dependency_metadata_bytes;
     Size source_dependency_metadata_bytes;
     Size literal_storage_bytes;
+    Size retired_join_root_metadata_bytes;
     std::uint32_t node_count;
     std::uint32_t arena_dependency_count;
     std::uint32_t source_dependency_count;
+    std::array<piece_edge, max_retired_join_roots> retired_join_roots;
+    retired_join_root_block* retired_join_root_overflow;
+    retired_join_root_block* retired_join_root_overflow_tail;
+    std::uint32_t retired_join_root_count;
+    std::uint32_t retired_join_root_overflow_block_count;
+    std::uint32_t retired_join_rotation_count;
     bool dependencies_released;
 };
+
+static_assert(std::is_trivially_destructible_v<piece_tree_arena>);
 
 export inline constexpr std::size_t small_literal_coalesce_bytes = 4u * 1024u;
 static_assert(small_literal_coalesce_bytes <= MaxAllocSize);

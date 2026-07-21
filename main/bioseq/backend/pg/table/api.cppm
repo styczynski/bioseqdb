@@ -18,6 +18,7 @@ export void bioseq_tableam_init(void);
 export const CustomScanMethods* bioseq_customscan_methods(void);
 export bool bioseq_expr_uses_bioseq_projection(Node* node);
 export void bioseq_customscan_init(void);
+export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement);
 
 export CustomScan* bioseq_create_indexscan_node(void);
 export void bioseq_register_indexscan_node(void);

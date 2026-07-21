@@ -1456,7 +1456,7 @@ TEST_CASE("BioseqBatchJoin plans one physical target and rewrites compound helpe
     const auto plan = explain_text<false>(ctx, sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Bioseq Residual Mmsearch Qual: absent"));
-	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
+	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
 	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 5"));
     REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
 
@@ -1538,7 +1538,7 @@ TEST_CASE("BioseqBatchJoin headline evidence is one target crossed with 16 queri
 	REQUIRE(plan_contains(
 		zero_placeholder_plan, "Custom Scan (BioseqBatchJoin)"));
 	REQUIRE(plan_contains(
-		zero_placeholder_plan, "Bioseq Batch ABI Version: 2"));
+		zero_placeholder_plan, "Bioseq Batch ABI Version: 3"));
 	/* count(*) has no match-result helper. NIL is the canonical encoded empty
 	 * placeholder list. This is a plan-ABI check, not an all-SIMD execution
 	 * claim: executing it would intentionally elide base alignment. */
@@ -1549,7 +1549,7 @@ TEST_CASE("BioseqBatchJoin headline evidence is one target crossed with 16 queri
 		1, "q.id, bioseq.has_cigar(t.pk) AS has_cigar");
 	const auto plan = explain_text<false>(ctx, sql);
 	REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
-	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
+	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
 	REQUIRE(plan_contains(plan, "Bioseq Match Placeholder Sites: 1"));
 	/* Ownership is structural; all exposed cost evidence remains finite and
 	 * nonnegative. */
@@ -3048,7 +3048,7 @@ TEST_CASE("BatchJoin validates the slot returned by a pass-through query child",
 		kBatchJoinQueries);
 	const auto plan = explain_text<false>(ctx, sql);
 	REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
-	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
+	REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
 	REQUIRE(plan_contains(plan, "Bioseq Query Planner Rows"));
 	/* OFFSET 0 retains a pass-through provider contract, but PostgreSQL may
 	 * omit or rename its physical node in text EXPLAIN. The successful rows
@@ -3508,6 +3508,19 @@ TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",
                         plan, "Custom Scan (BioseqBatchJoin)"));
                     REQUIRE(plan_contains(
                         plan, "Bioseq Mmsearch Ownership: per-row recipe"));
+                    REQUIRE(std::count_if(
+                        plan.begin(), plan.end(),
+                        [](const std::string& line) {
+                            return line.find(
+                                "Bioseq Mmsearch Ownership: per-row recipe")
+                                != std::string::npos;
+                        }) == 1);
+                    /* Pin the finalized parent-only carrier shape: the
+                     * non-projecting BioseqScan may retain whole helper
+                     * identities in its dummy targetlist while the single
+                     * PerRow owner above it supplies the executed values. */
+                    REQUIRE(plan_contains(
+                        plan, "Custom Scan (BioseqScan)"));
                     REQUIRE(plan_contains(
                         plan, "Custom Scan (BioseqSliceProject)"));
                     REQUIRE_FALSE(plan_contains(plan, "Join Filter: mmsearch"));
@@ -3583,6 +3596,7 @@ TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",
                             REQUIRE(row[column].has_value());
                         }
                         REQUIRE(is_valid_cigar(*row[6]));
+                        REQUIRE(*row[6] != "!UNEXPECTED!");
                         REQUIRE(*row[7] == "t");
                         const bool exact_coordinates =
                             std::stoull(*row[1]) == 0u

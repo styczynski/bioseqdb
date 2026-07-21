@@ -433,6 +433,14 @@ BioseqColumnPlannerHook(Query* parse,
 	}
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() upstream planner returned");
 
+	/* standard_planner has now assigned final Plan.plan_node_id values across
+	 * the main tree and every subplan.  Resolve match-result helper sites before
+	 * any fast return or optional vector/index rewrite so prepared plans,
+	 * rescans, LATERAL owners, and copied custom nodes retain one stable owner
+	 * identity.  Ambiguity is a semantic planning error and must not enter the
+	 * vectorization fallback catch below. */
+	bioseq_finalize_match_helper_bindings(stmt);
+
 	/*
 	 * In the case of a CREATE TABLE AS query, we are not able to successfully
 	 * drop out of a parallel insert situation. Disable parallelism for those.

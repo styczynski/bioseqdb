@@ -1546,7 +1546,7 @@ TEST_CASE("DOC0377 BatchJoin EPQ preserves final effect order exactly once",
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqBatchJoin)"));
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE(plan_contains(plan, "Subquery Scan on matched"));
-    REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 2"));
+    REQUIRE(plan_contains(plan, "Bioseq Batch ABI Version: 3"));
     REQUIRE(plan_contains(
         plan, "Bioseq Residual Mmsearch Qual: absent"));
     REQUIRE_FALSE(plan_contains(

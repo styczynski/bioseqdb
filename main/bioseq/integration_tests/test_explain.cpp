@@ -760,14 +760,92 @@ TEST_CASE("DOC0377 lazy-only slice concat reverse has no allocation boundary",
 }
 
 #ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 unsliced EXPLAIN is a zero-payload A/B/A control",
+          "[explain][slice][materialization][accounting][regression]") {
+    constexpr std::string_view positive_table = "test_explain_aba_dst";
+    auto ctx = fresh_context({kTable, positive_table});
+    seed_small_bioseq_column(ctx, kTable);
+    exec_sql(ctx, fmt::format(
+        "SET max_parallel_workers_per_gather=0; "
+        "SET bioseq.update_index_on_insert=off; "
+        "TRUNCATE {}; "
+        "INSERT INTO {} VALUES "
+        "(1, repeat('ACGT',262144)::bioseq.seq('dna4',32)), "
+        "(2, repeat('TGCA',262144)::bioseq.seq('dna4',32)), "
+        "(3, repeat('AAAA',262144)::bioseq.seq('dna4',32)); "
+        "CREATE TABLE {} "
+        "(pk int, seq0 bioseq.seq('dna4',32)) USING bioseq;",
+        kTable, kTable, positive_table));
+
+    const auto reset_allocation_probe = [&ctx] {
+        exec_sql(ctx,
+            "SELECT bioseq_internal.slice_payload_allocation_probe(0);");
+    };
+    /* packed_full, executor_copy, publication_packed_full,
+     * publication_executor_copy */
+    const auto allocation_signature = [&ctx] {
+        return query_scalar(ctx,
+            "SELECT concat_ws(',', "
+            "       bioseq_internal.slice_payload_allocation_probe(1), "
+            "       bioseq_internal.slice_payload_allocation_probe(2), "
+            "       bioseq_internal.slice_payload_allocation_probe(3), "
+            "       bioseq_internal.slice_payload_allocation_probe(4));");
+    };
+    const auto unsliced_sql = fmt::format(
+        "SELECT seq0 FROM {};", kTable);
+    const auto run_unsliced_control = [
+        &ctx, &reset_allocation_probe, &allocation_signature,
+        &unsliced_sql] {
+        reset_allocation_probe();
+        const auto plan = explain_with_options(
+            ctx, "ANALYZE, TIMING OFF, COSTS OFF", unsliced_sql);
+        REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+        REQUIRE_FALSE(plan_contains(
+            plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE_FALSE(plan_contains(plan, "Slice Materialization:"));
+        REQUIRE(allocation_signature() == "0,0,0,0");
+    };
+
+    /* Bracket one explicit sliced heap boundary with the same unsliced plan.
+     * len(slice/concat/reverse) is intentionally metadata-only and no longer
+     * allocates payload, so it cannot be the positive arm.  INSERT gives the
+     * sliced value a planned, executed packed-full boundary.  Assert that one
+     * relevant allocation per row, without coupling this control to unrelated
+     * executor-copy or SliceProject-publication counters. */
+    run_unsliced_control();
+
+    const auto expression = fmt::format(
+        "bioseq.reverse(seq0[0:4]) OPERATOR(bioseq.||) seq0[4:8]");
+    reset_allocation_probe();
+    const auto sliced_plan = explain_with_options(
+        ctx, "ANALYZE, TIMING OFF, COSTS OFF",
+        fmt::format(
+            "INSERT INTO {} SELECT pk, {} FROM {};",
+            positive_table, expression, kTable));
+    REQUIRE(plan_contains(
+        sliced_plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(sliced_plan, "Slice Materialization:"));
+    REQUIRE(plan_contains(sliced_plan, "Mechanism: packed full"));
+    REQUIRE(plan_contains(sliced_plan, "Reason: heap tuple"));
+    REQUIRE(boundary_actual_calls(
+        sliced_plan, "packed full", "heap tuple") == 3u);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(1);") == 3);
+    REQUIRE(query_int_column(ctx, fmt::format(
+        "SELECT bioseq.len(seq0) FROM {} ORDER BY pk;", positive_table))
+        == std::vector<long long>{8, 8, 8});
+
+    run_unsliced_control();
+}
+
 TEST_CASE("DOC0377 SliceProject shallow publication allocates no payload",
           "[explain][slice][materialization][accounting]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
-    /* Two flat slice intermediates per row require legitimate backing adoption
-     * before reverse/concat can form their piece tree.  Keep those six global
-     * executor-copy events visible, and measure SliceProject's memcpy + RO
-     * publication seam independently with its wrapper-local deltas. */
+    /* Source-backed slice intermediates can now remain lazy through reverse
+     * and concat.  Their global allocation totals are not a contract of this
+     * test; measure only SliceProject's memcpy + RO publication seam with the
+     * wrapper-local deltas. */
     exec_sql(ctx, fmt::format(
         "SET max_parallel_workers_per_gather=0; "
         "SET bioseq.update_index_on_insert=off; "
@@ -790,15 +868,11 @@ TEST_CASE("DOC0377 SliceProject shallow publication allocates no payload",
         "SELECT bool_and(bioseq.len({}) = 8) FROM {};",
         expression, kTable)) == "t");
     const auto counters = query_one(ctx,
-        "SELECT bioseq_internal.slice_payload_allocation_probe(1), "
-        "       bioseq_internal.slice_payload_allocation_probe(2), "
-        "       bioseq_internal.slice_payload_allocation_probe(3), "
+        "SELECT bioseq_internal.slice_payload_allocation_probe(3), "
         "       bioseq_internal.slice_payload_allocation_probe(4);");
-    REQUIRE(counters.size() == 4u);
+    REQUIRE(counters.size() == 2u);
     REQUIRE(counters[0].value_or("") == "0");
-    REQUIRE(counters[1].value_or("") == "6");
-    REQUIRE(counters[2].value_or("") == "0");
-    REQUIRE(counters[3].value_or("") == "0");
+    REQUIRE(counters[1].value_or("") == "0");
 }
 #endif
 
@@ -1065,10 +1139,11 @@ TEST_CASE("DOC0377 malformed DSM fixtures reject before counter dereference",
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
-TEST_CASE("DOC0377 incomplete DSM work is reported but never counted",
-          "[explain][slice][dsm][incomplete]") {
+TEST_CASE("DOC0377 two-cycle DSM rescan counts incomplete work exactly once",
+          "[explain][slice][dsm][incomplete][rescan]") {
     auto ctx = fresh_context({kTable});
     seed_small_bioseq_column(ctx, kTable);
+    exec_sql(ctx, "SET max_parallel_workers_per_gather=0;");
     guc_scope fixture(ctx, "bioseq.test_slice_dsm_fixture", "incomplete");
     const auto sql = fmt::format(
         "SELECT seq0[0:4] FROM {} WHERE pk = 1;", kTable);
@@ -1092,11 +1167,11 @@ TEST_CASE("DOC0377 incomplete DSM work is reported but never counted",
         require_dsm_fixture_property(
             plan, format, "DSM Async Lifecycle Validated", "true");
         require_dsm_fixture_property(
-            plan, format, "DSM Fixture Checks", "1");
+            plan, format, "DSM Fixture Checks", "5");
         require_dsm_fixture_property(
-            plan, format, "DSM Fixture Slot Headers Read", "4");
+            plan, format, "DSM Fixture Slot Headers Read", "9");
         require_dsm_fixture_property(
-            plan, format, "DSM Fixture Counter Records Read", "2");
+            plan, format, "DSM Fixture Counter Records Read", "6");
         require_dsm_fixture_property(
             plan, format, "DSM Async Cleanup Callbacks", "3");
         require_dsm_fixture_property(
@@ -1104,18 +1179,18 @@ TEST_CASE("DOC0377 incomplete DSM work is reported but never counted",
         require_dsm_fixture_property(
             plan, format, "Counter Overflow", "false");
         require_dsm_fixture_property(
-            plan, format, "Actual Calls", "3");
+            plan, format, "Actual Calls", "15");
         require_dsm_fixture_property(
-            plan, format, "Actual Bytes", "30");
+            plan, format, "Actual Bytes", "150");
         if (format == dsm_explain_format::text) {
             REQUIRE(boundary_actual_calls(
-                plan, "text", "client output") == 3u);
+                plan, "text", "client output") == 15u);
             REQUIRE(boundary_actual_bytes(
-                plan, "text", "client output") == 30u);
+                plan, "text", "client output") == 150u);
             REQUIRE(boundary_actual_calls(
-                plan, "binary", "client output") == 3u);
+                plan, "binary", "client output") == 15u);
             REQUIRE(boundary_actual_bytes(
-                plan, "binary", "client output") == 30u);
+                plan, "binary", "client output") == 150u);
         }
     }
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);

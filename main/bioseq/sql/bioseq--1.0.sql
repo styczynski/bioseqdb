@@ -3298,6 +3298,58 @@ REVOKE ALL ON FUNCTION
 COMMENT ON FUNCTION
     bioseq_internal.batch_join_projection_guard_probe() IS
     'Integration-only direct proof of the production BatchJoin base ProjectionPath guard and wrapper cost ownership.';
+
+-- A revoked integration seam for core wrapper types which ordinary SQL cannot
+-- retain deterministically. It invokes the production exact-owner proof and
+-- copy-on-write helper propagation used by transformed mmsearch planning.
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.match_helper_wrapper_propagation_probe(
+    OUT exact_owner_found boolean,
+    OUT clone_applied boolean,
+    OUT owner_cloned boolean,
+    OUT projection_cloned boolean,
+    OUT material_cloned boolean,
+    OUT memoize_cloned boolean,
+    OUT unique_cloned boolean,
+    OUT append_cloned boolean,
+    OUT helper_on_owner boolean,
+    OUT helper_on_projection boolean,
+    OUT helper_on_material boolean,
+    OUT helper_on_memoize boolean,
+    OUT helper_on_unique boolean,
+    OUT helper_on_append boolean,
+    OUT originals_unchanged boolean,
+    OUT sibling_unchanged boolean,
+    OUT duplicate_owner_rejected boolean,
+    OUT unknown_wrapper_rejected boolean)
+RETURNS record
+AS 'MODULE_PATHNAME',
+    'bioseq_internal_match_helper_wrapper_propagation_probe'
+LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.match_helper_wrapper_propagation_probe() FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.match_helper_wrapper_propagation_probe() IS
+    'Integration-only proof of production match-helper ownership and copy-on-write propagation through Projection, Material, Memoize, Unique, and Append paths.';
+
+-- A revoked predicate seam for the split base-BioseqScan planner/executor
+-- match-owner ABI. Valid plans exercise the accepted post-setrefs translation;
+-- this pins the fail-closed attribute/alias disagreement branches directly.
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.base_match_executor_translation_probe(
+    OUT target_offset_accepted boolean,
+    OUT target_attno_disagreement_rejected boolean,
+    OUT exact_site_offset_accepted boolean,
+    OUT lineage_alias_disagreement_rejected boolean)
+RETURNS record
+AS 'MODULE_PATHNAME',
+    'bioseq_internal_base_match_executor_translation_probe'
+LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.base_match_executor_translation_probe() FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.base_match_executor_translation_probe() IS
+    'Integration-only proof that base match-owner executor translation accepts an RTE offset and rejects attribute or alias disagreement.';
 CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name text, query_key bigint) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION bioseq.column_row_number(rel regclass, ctid tid) RETURNS bigint

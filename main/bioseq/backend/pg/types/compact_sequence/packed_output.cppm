@@ -411,6 +411,12 @@ export inline void pg_sequence_flatten_into(
     Size allocated_size)
 {
     auto& value = *reinterpret_cast<pg_sequence_expanded*>(header);
+    /* Persistent concat validates only its newly allocated AVL path.  A flat
+     * payload is already O(total symbols), so retain the independent full-tree
+     * audit at this external materialization boundary. */
+    validate_tree_and_limits(
+        value.root, value.type_params, value.bp_length,
+        value.alphabet_bound);
     const Size expected = expanded_flat_size(value);
     if (allocated_size != expected) {
         ereport(ERROR,
@@ -589,7 +595,9 @@ pg_sequence_trace_attachment_for_datum(Datum input)
 export struct pending_root_cleanup {
     MemoryContextCallback callback;
     piece_tree_arena* destination_arena;
+    piece_edge_cleanup_ledger build_edges;
     piece_edge root;
+    piece_edge_cleanup_handle root_cleanup;
     bool armed;
 };
 
@@ -600,10 +608,63 @@ export inline void pending_root_reset(void* argument) noexcept
         return;
     }
     guard->armed = false;
+    release_piece_edge_cleanup_ledger_noexcept(guard->build_edges);
     release_edge(guard->root);
     guard->root = {};
     release_arena(guard->destination_arena);
     guard->destination_arena = nullptr;
+}
+
+struct piece_root_build_result {
+    piece_edge root;
+    piece_edge_cleanup_handle cleanup;
+};
+
+[[nodiscard]] inline piece_root_build_result normalize_piece_root_build(
+    piece_edge root) noexcept
+{
+    return {.root = root};
+}
+
+[[nodiscard]] inline piece_root_build_result normalize_piece_root_build(
+    tracked_piece_edge root) noexcept
+{
+    return {.root = root.edge, .cleanup = root.cleanup};
+}
+
+template<class Build>
+[[nodiscard]] inline piece_root_build_result invoke_piece_root_build(
+    Build&& build,
+    piece_tree_arena& arena,
+    piece_edge_cleanup_ledger& ledger)
+{
+    if constexpr (requires {
+        std::forward<Build>(build)(arena, ledger);
+    }) {
+        return normalize_piece_root_build(
+            std::forward<Build>(build)(arena, ledger));
+    } else {
+        return normalize_piece_root_build(
+            std::forward<Build>(build)(arena));
+    }
+}
+
+inline void transfer_built_root_from_ledger(
+    pending_root_cleanup& guard)
+{
+    if (guard.root_cleanup.generation != 0u) {
+        transfer_piece_edge_cleanup_root_noexcept(
+            guard.build_edges, guard.root_cleanup, guard.root);
+        guard.root_cleanup = {};
+    }
+    if (!piece_edge_cleanup_ledger_empty_noexcept(guard.build_edges)) {
+        ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq concat construction left unowned edge tokens"),
+                 errdetail("token_count=%u",
+                           static_cast<unsigned>(
+                               guard.build_edges.token_count))));
+    }
 }
 
 export template<class Build>
@@ -632,10 +693,77 @@ inline void replace_root_error_safe(
         /* Arena storage is independent of both caller and EOH contexts so a
          * second EOH can retain/share it after this EOH is reset. */
         guard->destination_arena = make_piece_tree_arena();
-        guard->root = std::forward<Build>(build)(
-            *guard->destination_arena);
+        const piece_root_build_result built = invoke_piece_root_build(
+            std::forward<Build>(build), *guard->destination_arena,
+            guard->build_edges);
+        guard->root = built.root;
+        guard->root_cleanup = built.cleanup;
+        transfer_built_root_from_ledger(*guard);
         validate_tree_and_limits(
             guard->root, type, length, alphabet_bound);
+
+        piece_edge old = value.root;
+        publish_root_noexcept(
+            value, guard->root, type, length, alphabet_bound);
+        guard->root = {};
+        release_arena(guard->destination_arena);
+        guard->destination_arena = nullptr;
+        guard->armed = false;
+        MemoryContextDelete(build_context);
+        release_edge(old);
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        MemoryContextDelete(build_context);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+}
+
+/* Error-safe publication for the one operation whose existing inputs are
+ * immutable, previously validated roots.  The destination arena contains only
+ * the height-guided concat path, so validation remains O(log pieces) while
+ * preserving the same publish-after-validation and unwind ownership contract
+ * as replace_root_error_safe. */
+template<class Build>
+inline void replace_root_trusted_join_error_safe(
+    pg_sequence_expanded& value,
+    compact_sequence_stdc_type_params type,
+    std::uint64_t length,
+    bool alphabet_bound,
+    piece_edge trusted_left,
+    std::uint64_t left_length,
+    piece_edge trusted_right,
+    std::uint64_t right_length,
+    Build&& build)
+{
+    MemoryContext build_context = AllocSetContextCreate(
+        CurrentMemoryContext, "bioseq trusted join build", ALLOCSET_SMALL_SIZES);
+    MemoryContext saved_context = CurrentMemoryContext;
+    PG_TRY();
+    {
+        MemoryContextSwitchTo(build_context);
+        auto* guard = static_cast<pending_root_cleanup*>(
+            palloc0(sizeof(pending_root_cleanup)));
+        guard->callback.func = pending_root_reset;
+        guard->callback.arg = guard;
+        guard->armed = true;
+        MemoryContextRegisterResetCallback(
+            build_context, &guard->callback);
+        MemoryContextSwitchTo(saved_context);
+
+        guard->destination_arena = make_piece_tree_arena();
+        const piece_root_build_result built = invoke_piece_root_build(
+            std::forward<Build>(build), *guard->destination_arena,
+            guard->build_edges);
+        guard->root = built.root;
+        guard->root_cleanup = built.cleanup;
+        transfer_built_root_from_ledger(*guard);
+        (void)validate_trusted_join_and_limits(
+            *guard->destination_arena, guard->root,
+            trusted_left, left_length, trusted_right, right_length,
+            type, length, alphabet_bound);
 
         piece_edge old = value.root;
         publish_root_noexcept(
@@ -937,17 +1065,48 @@ export [[nodiscard]] Datum concat_pg_sequences(
     const bool bound = left.value->alphabet_bound || right.alphabet_bound;
     const auto result_length = checked_add_bp_lengths(
         left.value->bp_length, right.bp_length());
-    replace_root_error_safe(
-        *left.value, result_type, result_length, bound,
-        [bound, result_type, &left, &right](piece_tree_arena& arena) {
-            piece_edge bound_left = bound
-                ? bind_literals_copy(arena, left.value->root, result_type)
-                : retain_edge(left.value->root);
-            piece_edge bound_right = bound
-                ? bind_literals_copy(arena, right.root(), result_type)
-                : retain_edge(right.root());
-            return join_edges(arena, bound_left, bound_right);
-        });
+    const bool bind_left = bound && !left.value->alphabet_bound;
+    const bool bind_right = bound && !right.alphabet_bound;
+    const piece_edge left_root = left.value->root;
+    const piece_edge right_root = right.root();
+    const std::uint64_t left_length = left.value->bp_length;
+    const std::uint64_t right_length = right.bp_length();
+    if (bind_left || bind_right) {
+        /* Alphabet adoption necessarily visits the unbound literal side and
+         * retains the full validator for that type-changing operation. */
+        replace_root_error_safe(
+            *left.value, result_type, result_length, bound,
+            [bind_left, bind_right, result_type,
+             left_root, right_root](
+                piece_tree_arena& arena,
+                piece_edge_cleanup_ledger& ledger) {
+                tracked_piece_edge bound_left = bind_left
+                    ? bind_literals_copy_error_atomic(
+                        arena, left_root, result_type, ledger)
+                    : retain_piece_edge_error_atomic(
+                        ledger, left_root);
+                tracked_piece_edge bound_right = bind_right
+                    ? bind_literals_copy_error_atomic(
+                        arena, right_root, result_type, ledger)
+                    : retain_piece_edge_error_atomic(
+                        ledger, right_root);
+                return join_tracked_edges_error_atomic(
+                    arena, ledger, bound_left, bound_right);
+            });
+    } else {
+        replace_root_trusted_join_error_safe(
+            *left.value, result_type, result_length, bound,
+            left_root, left_length, right_root, right_length,
+            [left_root, right_root](
+                piece_tree_arena& arena,
+                piece_edge_cleanup_ledger& ledger) {
+                /* Existing subtrees remain immutable.  The tracked join
+                 * retains both borrowed operands and every local intermediate
+                 * before any operation capable of PostgreSQL ERROR. */
+                return join_edges_error_atomic(
+                    arena, ledger, left_root, right_root);
+            });
+    }
     reconcile_concat_trace_provenance_noexcept(
         *left.value, *right.backing);
     return pg_sequence_rw_datum(left.value);
@@ -1122,6 +1281,337 @@ synthetic_lazy_source_handle() noexcept {
   };
 }
 
+/* Exercise the public SQL concat implementation in two complementary shapes.
+ * A 4,096-step append chain proves deterministic per-generation O(log n)
+ * construction *and validation* work.  A second public-path construction uses
+ * immutable power-of-two roots to reach exactly one million logical pieces in
+ * O(log n) calls, then runs the independent full validator once at that
+ * explicit probe boundary.  The separate :tree_ops test still supplies one
+ * million distinct physical nodes and the hard metadata ceiling.
+ *
+ * No wall clock participates in the verdict: join, cleanup-ledger,
+ * retirement, and bounded-validator step counters plus exact arena accounting
+ * make super-logarithmic construction work fail deterministically. */
+[[nodiscard]] inline bool run_public_concat_path_copy_probe() {
+  constexpr std::uint32_t piece_count = 4'096u;
+  constexpr std::uint64_t piece_length = 4'097u;
+  constexpr std::uint16_t final_height = 13u;
+  constexpr Size node_unit = MAXALIGN(sizeof(piece_node));
+  constexpr Size arena_dependency_unit = MAXALIGN(sizeof(arena_dependency));
+  constexpr compact_sequence_stdc_type_params type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 8u,
+  };
+  constexpr bioseq::storage::seq_locator locator{
+      .version = bioseq::storage::kLocatorVersion,
+      .bucket_idx = 0u,
+      ._pad_2 = 0u,
+      .shard_idx = 0u,
+      .num_fragments = 1u,
+      ._pad_4 = 0u,
+      .total_bp_size = piece_length,
+      .first_sub_row_no = 0u,
+      .source_epoch = 1u,
+  };
+
+  MemoryContext saved = CurrentMemoryContext;
+  MemoryContext volatile probe_context = nullptr;
+  bool volatile valid = false;
+  const std::uint64_t arena_baseline = piece_tree_live_arena_count_noexcept();
+  PG_TRY();
+  {
+    probe_context = AllocSetContextCreate(
+        saved, "bioseq public concat path-copy probe", ALLOCSET_SMALL_SIZES);
+    MemoryContextSwitchTo(const_cast<MemoryContext>(probe_context));
+    const Datum left = make_source_backed_pg_sequence(
+        synthetic_lazy_source_handle(), locator, type, 0u);
+    const Datum right = make_source_backed_pg_sequence(
+        synthetic_lazy_source_handle(), locator, type, 0u);
+    auto const *left_value = get_pg_sequence_expanded_ro(left);
+    auto const *right_value = get_pg_sequence_expanded_ro(right);
+    bool local_valid = left_value != nullptr && right_value != nullptr
+        && left_value->root && right_value->root
+        && left_value->root.node->piece_count == 1u
+        && right_value->root.node->piece_count == 1u
+        && left_value->root.node->height == 1u
+        && right_value->root.node->height == 1u;
+    piece_node const *const left_root = left_value == nullptr
+        ? nullptr : left_value->root.node;
+    piece_node const *const right_root = right_value == nullptr
+        ? nullptr : right_value->root.node;
+    std::uint64_t total_new_nodes = 0u;
+    std::uint64_t cumulative_node_budget = 0u;
+    std::uint32_t maximum_generation_nodes = 0u;
+    std::uint16_t power_height = 1u;
+    bool saw_rotation_retirement = false;
+    pg_sequence_expanded *result_wrapper = nullptr;
+    Datum result = left;
+    reset_piece_tree_join_work_noexcept();
+
+    for (std::uint32_t current_count = 2u;
+         current_count <= piece_count; ++current_count) {
+      const auto work_before = read_piece_tree_join_work_noexcept();
+      result = concat_pg_sequences(result, right);
+      const auto work_after = read_piece_tree_join_work_noexcept();
+      auto *current = get_pg_sequence_expanded_rw(result);
+      local_valid = local_valid && current != nullptr && current->root
+          && current->root.node->piece_count == current_count
+          && current->root.node->bp_length
+              == static_cast<std::uint64_t>(current_count) * piece_length;
+      if (current == nullptr || !current->root) {
+        break;
+      }
+      if (result_wrapper == nullptr) {
+        result_wrapper = current;
+      } else {
+        local_valid = local_valid && current == result_wrapper;
+      }
+
+      auto const &arena = *current->root.arena;
+      const Size exact_node_bytes =
+          static_cast<Size>(arena.node_count) * node_unit;
+      const Size exact_dependency_bytes =
+          static_cast<Size>(arena.arena_dependency_count)
+          * arena_dependency_unit;
+      const auto generation_node_budget = static_cast<std::uint32_t>(
+          3u * current->root.node->height + 1u);
+      saw_rotation_retirement = saw_rotation_retirement
+          || arena.retired_join_root_count != 0u;
+#ifdef BIOSEQ_TEST_INDEXES
+      const bool work_monotonic =
+          work_after.join_steps >= work_before.join_steps
+          && work_after.bounded_validation_steps
+              >= work_before.bounded_validation_steps
+          && work_after.cleanup_ledger_steps
+              >= work_before.cleanup_ledger_steps
+          && work_after.retired_root_steps
+              >= work_before.retired_root_steps;
+      const std::uint64_t join_steps = work_monotonic
+          ? work_after.join_steps - work_before.join_steps : UINT64_MAX;
+      const std::uint64_t validation_steps = work_monotonic
+          ? work_after.bounded_validation_steps
+              - work_before.bounded_validation_steps
+          : UINT64_MAX;
+      const std::uint64_t ledger_steps = work_monotonic
+          ? work_after.cleanup_ledger_steps
+              - work_before.cleanup_ledger_steps
+          : UINT64_MAX;
+      const std::uint64_t retirement_steps = work_monotonic
+          ? work_after.retired_root_steps
+              - work_before.retired_root_steps
+          : UINT64_MAX;
+#else
+      const bool work_monotonic = true;
+      const std::uint64_t join_steps = 1u;
+      const std::uint64_t validation_steps = 1u;
+      const std::uint64_t ledger_steps = 1u;
+      const std::uint64_t retirement_steps = 0u;
+#endif
+      const std::uint64_t total_construction_steps = join_steps
+          + validation_steps + ledger_steps + retirement_steps;
+      local_valid = local_valid && arena.node_count != 0u
+          && arena.node_metadata_bytes == exact_node_bytes
+          && arena.arena_dependency_metadata_bytes
+              == exact_dependency_bytes
+          && arena.source_dependency_count == 0u
+          && arena.source_dependency_metadata_bytes == 0u
+          && arena.literal_storage_bytes == 0u
+          && arena.accounted_bytes
+              == exact_node_bytes + exact_dependency_bytes
+          && arena.arena_dependency_count <= arena.node_count * 2u
+          && arena.retired_join_root_count
+              <= current->root.node->height
+          && arena.node_count <= generation_node_budget
+          && work_monotonic && join_steps != 0u
+          && join_steps <= current->root.node->height + 1u
+          && validation_steps != 0u
+          && validation_steps
+              <= static_cast<std::uint64_t>(arena.node_count) * 8u + 16u
+          && ledger_steps != 0u
+          && ledger_steps
+              <= static_cast<std::uint64_t>(
+                     current->root.node->height) * 24u + 24u
+          && retirement_steps
+              <= static_cast<std::uint64_t>(
+                     current->root.node->height) * 2u
+          && total_construction_steps
+              <= static_cast<std::uint64_t>(
+                     current->root.node->height) * 64u + 64u
+          && piece_tree_live_arena_count_noexcept()
+              <= arena_baseline + 2u + (current_count - 1u);
+      total_new_nodes += arena.node_count;
+      cumulative_node_budget += generation_node_budget;
+      maximum_generation_nodes = std::max(
+          maximum_generation_nodes, arena.node_count);
+
+      if ((current_count & (current_count - 1u)) == 0u) {
+        ++power_height;
+        local_valid = local_valid
+            && current->root.node->height == power_height;
+      }
+    }
+
+    auto *final_value = get_pg_sequence_expanded_rw(result);
+    local_valid = local_valid && final_value != nullptr && final_value->root
+        && power_height == final_height
+        && final_value->root.node->piece_count == piece_count
+        && final_value->root.node->height == final_height
+        && final_value->root.node->bp_length
+            == static_cast<std::uint64_t>(piece_count) * piece_length
+        && maximum_generation_nodes
+            <= static_cast<std::uint32_t>(3u * final_height + 1u)
+        && total_new_nodes <= cumulative_node_budget
+        && saw_rotation_retirement
+        && total_new_nodes
+            < static_cast<std::uint64_t>(piece_count) * piece_count / 8u
+        && piece_tree_live_arena_count_noexcept()
+            <= arena_baseline + 2u + (piece_count - 1u)
+        && left_root != nullptr && left_root->bp_length == piece_length
+        && left_root->piece_count == 1u && left_root->height == 1u
+        && right_root != nullptr && right_root->bp_length == piece_length
+        && right_root->piece_count == 1u && right_root->height == 1u;
+    if (final_value != nullptr && final_value->root) {
+      validate_tree_and_limits(
+          final_value->root, type,
+          static_cast<std::uint64_t>(piece_count) * piece_length, true);
+    }
+
+    constexpr std::uint32_t million_piece_count = 1'000'000u;
+    constexpr std::size_t million_power_count = 20u;
+    const auto checked_public_concat = [
+        &local_valid, type, piece_length](
+            Datum lhs, Datum rhs, std::uint32_t expected_pieces) {
+      const auto before = read_piece_tree_join_work_noexcept();
+      const Datum joined = concat_pg_sequences(lhs, rhs);
+      const auto after = read_piece_tree_join_work_noexcept();
+      auto *value = get_pg_sequence_expanded_rw(joined);
+      local_valid = local_valid && value != nullptr && value->root
+          && value->alphabet_bound && value->type_params == type
+          && value->root.node->piece_count == expected_pieces
+          && value->root.node->bp_length
+              == static_cast<std::uint64_t>(expected_pieces) * piece_length;
+      if (value == nullptr || !value->root) return joined;
+      auto const &arena = *value->root.arena;
+#ifdef BIOSEQ_TEST_INDEXES
+      const bool monotonic = after.join_steps >= before.join_steps
+          && after.bounded_validation_steps
+              >= before.bounded_validation_steps
+          && after.cleanup_ledger_steps >= before.cleanup_ledger_steps
+          && after.retired_root_steps >= before.retired_root_steps;
+      const std::uint64_t join_steps = monotonic
+          ? after.join_steps - before.join_steps : UINT64_MAX;
+      const std::uint64_t validation_steps = monotonic
+          ? after.bounded_validation_steps
+              - before.bounded_validation_steps
+          : UINT64_MAX;
+      const std::uint64_t ledger_steps = monotonic
+          ? after.cleanup_ledger_steps - before.cleanup_ledger_steps
+          : UINT64_MAX;
+      const std::uint64_t retirement_steps = monotonic
+          ? after.retired_root_steps - before.retired_root_steps
+          : UINT64_MAX;
+#else
+      const bool monotonic = true;
+      const std::uint64_t join_steps = 1u;
+      const std::uint64_t validation_steps = 1u;
+      const std::uint64_t ledger_steps = 1u;
+      const std::uint64_t retirement_steps = 0u;
+#endif
+      const std::uint64_t total_construction_steps = join_steps
+          + validation_steps + ledger_steps + retirement_steps;
+      local_valid = local_valid && monotonic && arena.node_count != 0u
+          && arena.node_count
+              <= static_cast<std::uint32_t>(
+                  3u * value->root.node->height + 1u)
+          && join_steps != 0u
+          && join_steps <= value->root.node->height + 1u
+          && validation_steps != 0u
+          && validation_steps
+              <= static_cast<std::uint64_t>(arena.node_count) * 8u + 16u
+          && ledger_steps != 0u
+          && ledger_steps
+              <= static_cast<std::uint64_t>(
+                     value->root.node->height) * 24u + 24u
+          && retirement_steps
+              <= static_cast<std::uint64_t>(
+                     value->root.node->height) * 2u
+          && total_construction_steps
+              <= static_cast<std::uint64_t>(
+                     value->root.node->height) * 64u + 64u;
+      return joined;
+    };
+
+    /* Power roots are read-only snapshots, so concatenating a root with itself
+     * exercises the real EOH copy/publish path without mutating the saved
+     * operand.  Binary decomposition then reaches exactly 1,000,000 pieces. */
+    std::array<Datum, million_power_count> powers{};
+    powers[0] = MakeExpandedObjectReadOnly(right, false, -1);
+    for (std::size_t power = 1u; power < powers.size(); ++power) {
+      const std::uint32_t expected = std::uint32_t{1u} << power;
+      const Datum doubled = checked_public_concat(
+          powers[power - 1u], powers[power - 1u], expected);
+      auto *doubled_value = get_pg_sequence_expanded_rw(doubled);
+      local_valid = local_valid && doubled_value != nullptr
+          && doubled_value->root.node->height == power + 1u;
+      powers[power] = MakeExpandedObjectReadOnly(doubled, false, -1);
+    }
+    Datum million{};
+    std::uint32_t assembled_pieces = 0u;
+    bool assembled = false;
+    for (int power = static_cast<int>(million_power_count) - 1;
+         power >= 0; --power) {
+      const std::uint32_t contribution = std::uint32_t{1u} << power;
+      if ((million_piece_count & contribution) == 0u) continue;
+      if (!assembled) {
+        million = powers[static_cast<std::size_t>(power)];
+        assembled_pieces = contribution;
+        assembled = true;
+        continue;
+      }
+      assembled_pieces += contribution;
+      million = checked_public_concat(
+          million, powers[static_cast<std::size_t>(power)],
+          assembled_pieces);
+    }
+    auto const *million_value = get_pg_sequence_expanded_ro(million);
+    local_valid = local_valid && assembled
+        && assembled_pieces == million_piece_count
+        && million_value != nullptr && million_value->root
+        && million_value->root.node->piece_count == million_piece_count
+        && million_value->root.node->bp_length
+            == static_cast<std::uint64_t>(million_piece_count) * piece_length
+        && million_value->root.node->height >= 20u
+        && million_value->root.node->height <= 21u
+        && piece_tree_live_arena_count_noexcept()
+            <= arena_baseline + 2u + (piece_count - 1u) + 64u;
+    if (million_value != nullptr && million_value->root) {
+      validate_tree_and_limits(
+          million_value->root, type,
+          static_cast<std::uint64_t>(million_piece_count) * piece_length,
+          true);
+    }
+
+    MemoryContextSwitchTo(saved);
+    MemoryContextDelete(const_cast<MemoryContext>(probe_context));
+    probe_context = nullptr;
+    valid = local_valid
+        && piece_tree_live_arena_count_noexcept() == arena_baseline;
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved);
+    if (probe_context != nullptr) {
+      MemoryContextDelete(const_cast<MemoryContext>(probe_context));
+      probe_context = nullptr;
+    }
+    FlushErrorState();
+    valid = false;
+  }
+  PG_END_TRY();
+  MemoryContextSwitchTo(saved);
+  return valid && piece_tree_live_arena_count_noexcept() == arena_baseline;
+}
+
 } // namespace
 
 /* Internal acceptance seam for logical-length guardrails. Its immutable
@@ -1178,6 +1668,8 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
   const std::uint64_t arena_baseline = piece_tree_live_arena_count_noexcept();
   const bool concat_length_guardrail_matrix =
       run_concat_length_guardrail_matrix();
+  const bool public_concat_path_copy =
+      run_public_concat_path_copy_probe();
 #ifdef BIOSEQ_TEST_INDEXES
   const bool read_session_parent_reset =
       pg_sequence_read_session_parent_reset_self_test();
@@ -1266,7 +1758,8 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
         copied_flat->storage_unit_byte_width == pgseq_unbound_width_tag &&
         copied_flat->bp_size == transferred_text.size() &&
         std::memcmp(copied_flat->data, "TGA", transferred_text.size()) == 0;
-    valid = concat_length_guardrail_matrix && read_session_parent_reset
+    valid = concat_length_guardrail_matrix && public_concat_path_copy
+        && read_session_parent_reset
         && reparented && transfer_survived && copy_survived;
 
     MemoryContextDelete(const_cast<MemoryContext>(copy_input));
