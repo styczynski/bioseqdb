@@ -1640,17 +1640,28 @@ struct pg_sequence_source_provider {
     bool open = false;
 };
 
-/** Fixed two-registry routing used by binary/join upper wrappers.
+/** One exact source-provider route retained by an upper executor owner. */
+struct pg_sequence_source_route {
+    Oid relation_oid = InvalidOid;
+    pg_sequence_source_registry_lease lease{};
+};
+
+static_assert(std::is_trivially_copyable_v<pg_sequence_source_route>);
+
+/** Query-lifetime routing for joins, appends and nested upper wrappers.
  *
- * A PostgreSQL self join has two scan bindings even when both bindings name
- * the same physical relation.  Each scan owns an independent registry and
- * snapshot lifetime, so relation_oids is provenance rather than a unique
- * route key.  The provider generation in each lease is the exact route key.
+ * A PostgreSQL self join has independent registries even when every binding
+ * names the same physical relation.  The provider generation is therefore the
+ * exact route key and relation_oid is provenance only.  Two routes stay inline
+ * for the common binary-join case; larger legal plans grow in the executor's
+ * query MemoryContext, before any new lease is retained.
  */
 struct pg_sequence_source_route_set {
-    std::array<Oid, 2u> relation_oids{InvalidOid, InvalidOid};
-    std::array<pg_sequence_source_registry_lease, 2u> leases{};
-    std::uint8_t count = 0u;
+    std::array<pg_sequence_source_route, 2u> inline_routes{};
+    pg_sequence_source_route* dynamic_routes = nullptr;
+    std::size_t dynamic_capacity = 0u;
+    std::size_t count = 0u;
+    MemoryContext allocation_context = nullptr;
 };
 
 #ifdef BIOSEQ_TEST_INDEXES
@@ -3534,10 +3545,94 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
     }
 }
 
+inline void initialize_pg_sequence_source_routes(
+        pg_sequence_source_route_set& routes,
+        MemoryContext allocation_context) {
+    if (routes.count != 0u || routes.dynamic_routes != nullptr
+        || allocation_context == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq source route storage cannot be initialized")));
+    }
+    routes.allocation_context = allocation_context;
+}
+
+[[nodiscard]] inline std::size_t pg_sequence_source_route_capacity(
+        const pg_sequence_source_route_set& routes) noexcept {
+    return routes.dynamic_routes == nullptr
+        ? routes.inline_routes.size() : routes.dynamic_capacity;
+}
+
+[[nodiscard]] inline pg_sequence_source_route* pg_sequence_source_routes_data(
+        pg_sequence_source_route_set& routes) noexcept {
+    return routes.dynamic_routes == nullptr
+        ? routes.inline_routes.data() : routes.dynamic_routes;
+}
+
+[[nodiscard]] inline const pg_sequence_source_route*
+pg_sequence_source_routes_data(
+        const pg_sequence_source_route_set& routes) noexcept {
+    return routes.dynamic_routes == nullptr
+        ? routes.inline_routes.data() : routes.dynamic_routes;
+}
+
+[[nodiscard]] inline pg_sequence_source_registry_lease&
+pg_sequence_source_route_lease(
+        pg_sequence_source_route_set& routes,
+        std::size_t index) noexcept {
+    return pg_sequence_source_routes_data(routes)[index].lease;
+}
+
+[[nodiscard]] inline const pg_sequence_source_registry_lease&
+pg_sequence_source_route_lease(
+        const pg_sequence_source_route_set& routes,
+        std::size_t index) noexcept {
+    return pg_sequence_source_routes_data(routes)[index].lease;
+}
+
+inline void ensure_pg_sequence_source_route_capacity(
+        pg_sequence_source_route_set& routes,
+        std::size_t required) {
+    const std::size_t current = pg_sequence_source_route_capacity(routes);
+    if (routes.count > current) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq source route count is corrupt")));
+    }
+    if (required <= current) return;
+
+    constexpr std::size_t entry_bytes = sizeof(pg_sequence_source_route);
+    const std::size_t maximum = static_cast<std::size_t>(MaxAllocSize)
+        / entry_bytes;
+    if (required > maximum) {
+        ereport(ERROR,
+            (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+             errmsg("bioseq source route set is too large")));
+    }
+    std::size_t capacity = current;
+    while (capacity < required) {
+        capacity = capacity > maximum / 2u ? maximum : capacity * 2u;
+    }
+    MemoryContext context = routes.allocation_context;
+    if (context == nullptr) {
+        ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq source route allocation context is unavailable")));
+    }
+    auto* grown = static_cast<pg_sequence_source_route*>(
+        MemoryContextAllocZero(context, capacity * entry_bytes));
+    std::memcpy(grown, pg_sequence_source_routes_data(routes),
+        routes.count * entry_bytes);
+    auto* old_dynamic = routes.dynamic_routes;
+    routes.dynamic_routes = grown;
+    routes.dynamic_capacity = capacity;
+    if (old_dynamic != nullptr) pfree(old_dynamic);
+}
+
 [[nodiscard]] inline bool add_pg_sequence_source_route(
         pg_sequence_source_route_set& routes,
         const pg_sequence_source_registry_lease& parent) {
-    if (routes.count > routes.leases.size()) {
+    if (routes.count > pg_sequence_source_route_capacity(routes)) {
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("bioseq source route count is corrupt")));
@@ -3546,19 +3641,24 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
         return false;
     }
     const Oid relation_oid = parent.registry->user_relid;
-    for (std::uint8_t index = 0u; index < routes.count; ++index) {
-        if (routes.leases[index].registry == parent.registry) {
+    auto* entries = pg_sequence_source_routes_data(routes);
+    for (std::size_t index = 0u; index < routes.count; ++index) {
+        if (entries[index].lease.registry == parent.registry) {
             return true;
         }
     }
-    if (routes.count >= routes.leases.size()) {
+    if (routes.count == (std::numeric_limits<std::size_t>::max)()) {
         ereport(ERROR,
             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-             errmsg("bioseq source route set supports at most two providers")));
+             errmsg("bioseq source route count overflow")));
     }
+    ensure_pg_sequence_source_route_capacity(routes, routes.count + 1u);
+    entries = pg_sequence_source_routes_data(routes);
     auto lease = acquire_pg_sequence_source_registry_lease(parent);
-    routes.relation_oids[routes.count] = relation_oid;
-    routes.leases[routes.count] = lease;
+    entries[routes.count] = pg_sequence_source_route{
+        .relation_oid = relation_oid,
+        .lease = lease,
+    };
     ++routes.count;
     return true;
 }
@@ -3570,38 +3670,57 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
         && add_pg_sequence_source_route(routes, provider->lease);
 }
 
+inline void rollback_pg_sequence_source_routes_noexcept(
+        pg_sequence_source_route_set& routes,
+        std::size_t original_count) noexcept {
+    const std::size_t capacity = pg_sequence_source_route_capacity(routes);
+    if (original_count > routes.count || routes.count > capacity) return;
+    auto* entries = pg_sequence_source_routes_data(routes);
+    while (routes.count > original_count) {
+        const std::size_t index = routes.count - 1u;
+        release_pg_sequence_source_registry_lease_noexcept(
+            entries[index].lease,
+            pg_sequence_source_sweep_boundary::upper_lease_end);
+        entries[index] = {};
+        routes.count = index;
+    }
+}
+
 /** Acquire an independent upper-owner copy of every opaque child route. */
 [[nodiscard]] inline bool merge_pg_sequence_source_routes(
         pg_sequence_source_route_set& destination,
         const pg_sequence_source_route_set& source) {
     using namespace sequence_source_detail;
-    if (destination.count > destination.leases.size()
-        || source.count > source.leases.size()) {
+    if (destination.count > pg_sequence_source_route_capacity(destination)
+        || source.count > pg_sequence_source_route_capacity(source)) {
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("bioseq source route count is corrupt")));
     }
     std::size_t distinct_new_routes = 0u;
-    for (std::uint8_t source_index = 0u;
+    const auto* source_entries = pg_sequence_source_routes_data(source);
+    const auto* destination_entries = pg_sequence_source_routes_data(destination);
+    for (std::size_t source_index = 0u;
          source_index < source.count; ++source_index) {
-        const auto& source_lease = source.leases[source_index];
+        const auto& source_route = source_entries[source_index];
+        const auto& source_lease = source_route.lease;
         if (!registry_lease_is_live(source_lease)
-            || source.relation_oids[source_index]
+            || source_route.relation_oid
                 != source_lease.registry->user_relid) {
             return false;
         }
         bool already_present = false;
-        for (std::uint8_t destination_index = 0u;
+        for (std::size_t destination_index = 0u;
              destination_index < destination.count; ++destination_index) {
-            if (destination.leases[destination_index].registry
+            if (destination_entries[destination_index].lease.registry
                 == source_lease.registry) {
                 already_present = true;
                 break;
             }
         }
         if (!already_present) {
-            for (std::uint8_t prior = 0u; prior < source_index; ++prior) {
-                if (source.leases[prior].registry
+            for (std::size_t prior = 0u; prior < source_index; ++prior) {
+                if (source_entries[prior].lease.registry
                     == source_lease.registry) {
                     already_present = true;
                     break;
@@ -3612,20 +3731,39 @@ inline void sweep_reclaimable_pg_sequence_source_domains(
             ++distinct_new_routes;
         }
     }
-    if (static_cast<std::size_t>(destination.count)
-            + distinct_new_routes > destination.leases.size()) {
+    if (distinct_new_routes
+        > (std::numeric_limits<std::size_t>::max)() - destination.count) {
         ereport(ERROR,
             (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-             errmsg("bioseq source route set supports at most two providers")));
+             errmsg("bioseq source route count overflow")));
     }
-    for (std::uint8_t source_index = 0u;
-         source_index < source.count; ++source_index) {
-        if (!add_pg_sequence_source_route(
-                destination, source.leases[source_index])) {
-            return false;
+    ensure_pg_sequence_source_route_capacity(
+        destination, destination.count + distinct_new_routes);
+    const std::size_t original_count = destination.count;
+    volatile bool merge_ok = true;
+    PG_TRY();
+    {
+        for (std::size_t source_index = 0u;
+             source_index < source.count; ++source_index) {
+            if (!add_pg_sequence_source_route(
+                    destination, source_entries[source_index].lease)) {
+                merge_ok = false;
+                break;
+            }
         }
     }
-    return true;
+    PG_CATCH();
+    {
+        rollback_pg_sequence_source_routes_noexcept(
+            destination, original_count);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    if (!merge_ok) {
+        rollback_pg_sequence_source_routes_noexcept(
+            destination, original_count);
+    }
+    return merge_ok;
 }
 
 [[nodiscard]] inline const pg_sequence_source_registry_lease*
@@ -3633,18 +3771,20 @@ find_pg_sequence_source_route(
         const pg_sequence_source_route_set& routes,
         Oid relation_oid,
         std::uint64_t provider_generation) noexcept {
-    if (routes.count > routes.leases.size()
+    if (routes.count > pg_sequence_source_route_capacity(routes)
         || !OidIsValid(relation_oid) || provider_generation == 0u) {
         return nullptr;
     }
+    const auto* entries = pg_sequence_source_routes_data(routes);
     const pg_sequence_source_registry_lease* match = nullptr;
-    for (std::uint8_t index = 0u; index < routes.count; ++index) {
-        const auto& lease = routes.leases[index];
+    for (std::size_t index = 0u; index < routes.count; ++index) {
+        const auto& route = entries[index];
+        const auto& lease = route.lease;
         if (!sequence_source_detail::registry_lease_is_live(lease)
-            || routes.relation_oids[index] != lease.registry->user_relid) {
+            || route.relation_oid != lease.registry->user_relid) {
             return nullptr;
         }
-        if (routes.relation_oids[index] != relation_oid
+        if (route.relation_oid != relation_oid
             || lease.provider_generation != provider_generation) {
             continue;
         }
@@ -3663,17 +3803,20 @@ find_pg_sequence_source_route(
 find_pg_sequence_source_route(
         const pg_sequence_source_route_set& routes,
         Oid relation_oid) noexcept {
-    if (routes.count > routes.leases.size() || !OidIsValid(relation_oid)) {
+    if (routes.count > pg_sequence_source_route_capacity(routes)
+        || !OidIsValid(relation_oid)) {
         return nullptr;
     }
+    const auto* entries = pg_sequence_source_routes_data(routes);
     const pg_sequence_source_registry_lease* match = nullptr;
-    for (std::uint8_t index = 0u; index < routes.count; ++index) {
-        const auto& lease = routes.leases[index];
+    for (std::size_t index = 0u; index < routes.count; ++index) {
+        const auto& route = entries[index];
+        const auto& lease = route.lease;
         if (!sequence_source_detail::registry_lease_is_live(lease)
-            || routes.relation_oids[index] != lease.registry->user_relid) {
+            || route.relation_oid != lease.registry->user_relid) {
             return nullptr;
         }
-        if (routes.relation_oids[index] != relation_oid) {
+        if (route.relation_oid != relation_oid) {
             continue;
         }
         if (match != nullptr && match->registry != lease.registry) {
@@ -3687,34 +3830,36 @@ find_pg_sequence_source_route(
 inline void release_pg_sequence_source_routes(
         pg_sequence_source_route_set& routes,
         bool is_commit) {
-    if (routes.count > routes.leases.size()) {
+    if (routes.count > pg_sequence_source_route_capacity(routes)) {
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("bioseq source route count is corrupt")));
     }
-    for (std::uint8_t index = 0u; index < routes.count; ++index) {
+    auto* entries = pg_sequence_source_routes_data(routes);
+    for (std::size_t index = 0u; index < routes.count; ++index) {
         if (!release_pg_sequence_source_registry_lease(
-                routes.leases[index],
+                entries[index].lease,
                 pg_sequence_source_sweep_boundary::upper_lease_end,
                 is_commit)) {
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
                  errmsg("bioseq source route lease accounting is corrupt")));
         }
-        routes.relation_oids[index] = InvalidOid;
+        entries[index].relation_oid = InvalidOid;
     }
     routes.count = 0u;
 }
 
 inline void release_pg_sequence_source_routes_noexcept(
         pg_sequence_source_route_set& routes) noexcept {
-    const std::uint8_t safe_count = static_cast<std::uint8_t>(
-        std::min<std::size_t>(routes.count, routes.leases.size()));
-    for (std::uint8_t index = 0u; index < safe_count; ++index) {
+    const std::size_t safe_count = std::min<std::size_t>(
+        routes.count, pg_sequence_source_route_capacity(routes));
+    auto* entries = pg_sequence_source_routes_data(routes);
+    for (std::size_t index = 0u; index < safe_count; ++index) {
         release_pg_sequence_source_registry_lease_noexcept(
-            routes.leases[index],
+            entries[index].lease,
             pg_sequence_source_sweep_boundary::upper_lease_end);
-        routes.relation_oids[index] = InvalidOid;
+        entries[index].relation_oid = InvalidOid;
     }
     routes.count = 0u;
 }
@@ -3929,7 +4074,7 @@ inline void release_pg_sequence_source_routes_noexcept(
     return rejected;
 }
 
-/** Exercise the fail-closed retain/lease corruption branches without PG. */
+/** Exercise fail-closed retain accounting and merge rollback. */
 [[nodiscard]] inline bool pg_sequence_source_fault_contract_probe() noexcept {
     sequence_source_detail::pg_sequence_source_domain domain{};
     domain.lifecycle = sequence_source_detail::domain_lifecycle::live;
@@ -3937,20 +4082,77 @@ inline void release_pg_sequence_source_routes_noexcept(
     domain.registry_token_owned = true;
     sequence_source_detail::retain_domain(&domain);
 
-    pg_sequence_source_registry registry{};
-    registry.backend_thread = pg_sequence_backend_thread_token::capture();
-    registry.generation = 1u;
-    registry.active_leases = 0u;
-    pg_sequence_source_registry_lease lease{
-        .registry = &registry,
-        .provider_generation = registry.generation,
-        .owned = true,
+    pg_sequence_source_registry retained{};
+    retained.backend_thread = pg_sequence_backend_thread_token::capture();
+    retained.user_relid = static_cast<Oid>(1u);
+    retained.generation = 1u;
+    retained.active_leases = 1u;
+    retained.accepting_lookups = true;
+    pg_sequence_source_registry added{};
+    added.backend_thread = pg_sequence_backend_thread_token::capture();
+    added.user_relid = static_cast<Oid>(2u);
+    added.generation = 2u;
+    added.active_leases = 1u;
+    added.accepting_lookups = true;
+    pg_sequence_source_registry overflow{};
+    overflow.backend_thread = pg_sequence_backend_thread_token::capture();
+    overflow.user_relid = static_cast<Oid>(3u);
+    overflow.generation = 3u;
+    overflow.active_leases = std::numeric_limits<std::uint32_t>::max();
+    overflow.accepting_lookups = true;
+
+    pg_sequence_source_route_set destination{};
+    initialize_pg_sequence_source_routes(destination, CurrentMemoryContext);
+    destination.inline_routes[0] = pg_sequence_source_route{
+        .relation_oid = retained.user_relid,
+        .lease = pg_sequence_source_registry_lease{
+            .registry = &retained,
+            .provider_generation = retained.generation,
+            .owned = true,
+        },
     };
-    const bool lease_rejected =
-        !sequence_source_detail::release_lease_token_noexcept(lease);
+    destination.count = 1u;
+    pg_sequence_source_route_set source{};
+    source.inline_routes[0] = pg_sequence_source_route{
+        .relation_oid = added.user_relid,
+        .lease = pg_sequence_source_registry_lease{
+            .registry = &added,
+            .provider_generation = added.generation,
+            .owned = true,
+        },
+    };
+    source.inline_routes[1] = pg_sequence_source_route{
+        .relation_oid = overflow.user_relid,
+        .lease = pg_sequence_source_registry_lease{
+            .registry = &overflow,
+            .provider_generation = overflow.generation,
+            .owned = true,
+        },
+    };
+    source.count = 2u;
+
+    volatile bool merge_rejected = false;
+    PG_TRY();
+    {
+        (void)merge_pg_sequence_source_routes(destination, source);
+    }
+    PG_CATCH();
+    {
+        FlushErrorState();
+        merge_rejected = true;
+    }
+    PG_END_TRY();
+    const auto* destination_entries =
+        pg_sequence_source_routes_data(destination);
     return domain.refcount_fault
         && domain.lifecycle == sequence_source_detail::domain_lifecycle::faulted
-        && lease_rejected && registry.lease_fault && !lease.owned;
+        && merge_rejected && overflow.lease_fault
+        && !overflow.accepting_lookups
+        && destination.count == 1u
+        && destination_entries[0].lease.registry == &retained
+        && destination_entries[0].lease.owned
+        && retained.active_leases == 1u
+        && added.active_leases == 1u;
 }
 
 /** Prove that self-join aliases retain independent exact routes while the
@@ -3971,27 +4173,31 @@ inline void release_pg_sequence_source_routes_noexcept(
     second.accepting_lookups = true;
 
     pg_sequence_source_route_set routes{};
-    routes.relation_oids[0] = relation_oid;
-    routes.relation_oids[1] = relation_oid;
-    routes.leases[0] = pg_sequence_source_registry_lease{
-        .registry = &first,
-        .provider_generation = first.generation,
-        .owned = true,
+    routes.inline_routes[0] = pg_sequence_source_route{
+        .relation_oid = relation_oid,
+        .lease = pg_sequence_source_registry_lease{
+            .registry = &first,
+            .provider_generation = first.generation,
+            .owned = true,
+        },
     };
-    routes.leases[1] = pg_sequence_source_registry_lease{
-        .registry = &second,
-        .provider_generation = second.generation,
-        .owned = true,
+    routes.inline_routes[1] = pg_sequence_source_route{
+        .relation_oid = relation_oid,
+        .lease = pg_sequence_source_registry_lease{
+            .registry = &second,
+            .provider_generation = second.generation,
+            .owned = true,
+        },
     };
     routes.count = 2u;
 
     return find_pg_sequence_source_route(routes, relation_oid) == nullptr
         && find_pg_sequence_source_route(
                routes, relation_oid, first.generation)
-            == &routes.leases[0]
+            == &routes.inline_routes[0].lease
         && find_pg_sequence_source_route(
                routes, relation_oid, second.generation)
-            == &routes.leases[1]
+            == &routes.inline_routes[1].lease
         && find_pg_sequence_source_route(
                routes, relation_oid, 43u) == nullptr;
 }

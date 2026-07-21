@@ -527,6 +527,8 @@ BioseqBatchSort_BeginCustomScanImpl(CustomScanState* node, EState* estate, int e
     route_cb->arg = node;
     MemoryContextRegisterResetCallback(estate->es_query_cxt, route_cb);
     rt->route_callback_registered = true;
+    bioseq::storage::initialize_pg_sequence_source_routes(
+        rt->source_routes, estate->es_query_cxt);
 
     auto private_integer = [cscan](int index) {
         Node* encoded = reinterpret_cast<Node*>(
@@ -863,15 +865,18 @@ BioseqBatchSort_ReScanCustomScan(CustomScanState* node)
     if (PlanState* child = outerPlanState(node)) {
         ExecReScan(child);
     }
-    if (rt->source_routes.count > rt->source_routes.leases.size()) {
+    if (rt->source_routes.count
+        > bioseq::storage::pg_sequence_source_route_capacity(
+            rt->source_routes)) {
         ereport(ERROR,
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("BioseqBatchSort source route count is corrupt")));
     }
-    for (std::uint8_t index = 0u;
+    for (std::size_t index = 0u;
          index < rt->source_routes.count; ++index) {
         bioseq::storage::sweep_reclaimable_pg_sequence_source_domains(
-            rt->source_routes.leases[index],
+            bioseq::storage::pg_sequence_source_route_lease(
+                rt->source_routes, index),
             bioseq::storage::pg_sequence_source_sweep_boundary::rescan,
             true);
     }

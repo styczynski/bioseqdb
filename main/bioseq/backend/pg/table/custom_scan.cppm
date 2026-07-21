@@ -4737,11 +4737,12 @@ static void slice_project_source_routes_reset(void* argument) noexcept {
 	auto* state = static_cast<BioseqSliceProjectState*>(argument);
 	if (state == nullptr) return;
 	auto& runtime = state->runtime;
-	if (runtime.source_routes_acquired) {
-		bioseq::storage::release_pg_sequence_source_routes_noexcept(
-			runtime.source_routes);
-		runtime.source_routes_acquired = false;
-	}
+	/* Attachment can ERROR after retaining an early route but before publishing
+	 * source_routes_acquired.  The container count is the unwind authority; an
+	 * empty or already-released set is intentionally a no-op. */
+	bioseq::storage::release_pg_sequence_source_routes_noexcept(
+		runtime.source_routes);
+	runtime.source_routes_acquired = false;
 }
 
 static void slice_project_dsm_on_detach(
@@ -5346,6 +5347,8 @@ static void SliceProjectBegin(
 	state->runtime.source_routes_callback.func =
 		slice_project_source_routes_reset;
 	state->runtime.source_routes_callback.arg = state;
+	bioseq::storage::initialize_pg_sequence_source_routes(
+		state->runtime.source_routes, estate->es_query_cxt);
 	MemoryContextRegisterResetCallback(
 		estate->es_query_cxt,
 		&state->runtime.source_routes_callback);
@@ -5467,10 +5470,11 @@ static void SliceProjectReScan(CustomScanState* custom) {
 		ExecReScan(child);
 	}
 	if (state->runtime.source_routes_acquired) {
-		for (std::uint8_t index = 0u;
+		for (std::size_t index = 0u;
 			 index < state->runtime.source_routes.count; ++index) {
 			bioseq::storage::sweep_reclaimable_pg_sequence_source_domains(
-				state->runtime.source_routes.leases[index],
+				bioseq::storage::pg_sequence_source_route_lease(
+					state->runtime.source_routes, index),
 				bioseq::storage::pg_sequence_source_sweep_boundary::rescan,
 				/*is_commit=*/true);
 		}

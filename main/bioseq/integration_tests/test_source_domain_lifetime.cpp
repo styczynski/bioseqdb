@@ -559,6 +559,75 @@ TEST_CASE("DOC0377 nested two-provider projection preserves upper leases",
     REQUIRE(source_counter(ctx, "live_leases") == 0);
 }
 
+TEST_CASE("DOC0377 three-source concat retains arbitrary upper routes",
+          "[seq][slice][concat][join][source-domain][route][error]") {
+    auto ctx = fresh_context({
+        "doc0377_source_three_left",
+        "doc0377_source_three_middle",
+        "doc0377_source_three_right",
+    });
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_source_three_left "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "CREATE TABLE doc0377_source_three_middle "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "CREATE TABLE doc0377_source_three_right "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO doc0377_source_three_left VALUES "
+        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));"
+        "INSERT INTO doc0377_source_three_middle VALUES "
+        " (1, repeat('TGCA',2048)::bioseq.seq('dna4',32));"
+        "INSERT INTO doc0377_source_three_right VALUES "
+        " (1, repeat('GATC',2048)::bioseq.seq('dna4',32));");
+
+    constexpr const char* three_source_expression =
+        "((l.s[0:16] OPERATOR(bioseq.||) m.s[0:16]) "
+        " OPERATOR(bioseq.||) r.s[0:16])";
+    const auto plan = explain_text<false>(ctx, fmt::format(
+        "SELECT {} FROM doc0377_source_three_left AS l "
+        "JOIN doc0377_source_three_middle AS m USING (id) "
+        "JOIN doc0377_source_three_right AS r USING (id);",
+        three_source_expression));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_line_count(plan, "Custom Scan (BioseqScan)") == 3u);
+
+    reset_source_counters(ctx);
+    REQUIRE(query_scalar(ctx, fmt::format(
+        "SELECT bioseq.to_text({}) "
+        "FROM doc0377_source_three_left AS l "
+        "JOIN doc0377_source_three_middle AS m USING (id) "
+        "JOIN doc0377_source_three_right AS r USING (id);",
+        three_source_expression))
+        == "ACGTACGTACGTACGTTGCATGCATGCATGCAGATCGATCGATCGATC");
+    REQUIRE(source_counter(ctx, "registries_created") == 3);
+    REQUIRE(source_counter(ctx, "scan_providers_created") == 3);
+    REQUIRE(source_counter(ctx, "domains_created") == 3);
+    REQUIRE(source_counter(ctx, "leases_acquired") >= 6);
+    REQUIRE(source_counter(ctx, "provider_closed_with_upper_leases") >= 3);
+    REQUIRE(source_counter(ctx, "last_upper_lease_after_provider_end") >= 3);
+    require_source_resources_balanced(ctx);
+
+    reset_source_counters(ctx);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.arm_sequence_source_failure("
+        " 'read_before_scanner');");
+    const auto injected = sql_error(ctx, fmt::format(
+        "SELECT bioseq.to_text({}) "
+        "FROM doc0377_source_three_left AS l "
+        "JOIN doc0377_source_three_middle AS m USING (id) "
+        "JOIN doc0377_source_three_right AS r USING (id);",
+        three_source_expression));
+    REQUIRE(injected.sqlstate == "XX000");
+    REQUIRE(injected.contains(
+        "injected PostgreSQL sequence source-domain failure"));
+    exec_sql(ctx,
+        "SELECT bioseq_internal.disarm_sequence_source_failure();");
+    REQUIRE(source_counter(ctx, "fault_injections") == 1);
+    REQUIRE(source_counter(ctx, "read_fault_injections") == 1);
+    REQUIRE(source_counter(ctx, "scan_providers_created") == 3);
+    require_source_resources_balanced(ctx);
+}
+
 TEST_CASE("DOC0377 expression index build uses one standalone source owner",
           "[seq][slice][source-domain][index]") {
     auto ctx = fresh_context({"doc0377_source_index"});

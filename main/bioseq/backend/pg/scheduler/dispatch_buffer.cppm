@@ -998,7 +998,7 @@ private:
     std::vector<pgseq_t*>          hydrated_query_payloads{};
     // Setjmp-stable owner of Vulkan-only flat/rewidth images for the active
     // wave.  The child arena is reclaimed before its admission permit is
-    // released; a PG error leaves the arena to its query-context parent.
+    // released on both success and bridged PG/C++ error paths.
     MemoryContext active_wave_payload_ctx = nullptr;
     // Member storage is intentional: PG_TRY/PG_CATCH uses setjmp/longjmp, so
     // a modified automatic optional would have an indeterminate catch value.
@@ -3581,12 +3581,21 @@ public:
                 hydrated_target_payloads.clear();
                 hydrated_query_payloads.clear();
             };
-        const auto abandon_active_wave_noexcept = [&]() noexcept {
+        const auto release_active_wave_after_error_noexcept = [&]() noexcept {
             clear_active_wave_member_handles_noexcept();
-            /* A PG/C++ error owns the control flow from here.  Do not issue a
-             * second PostgreSQL cleanup operation that could replace it; the
-             * query-context parent reclaims the child arena. */
-            active_wave_payload_ctx = nullptr;
+            target_hdrs.fill(nullptr);
+            per_row_query_hdrs.fill(nullptr);
+            /* This dedicated AllocSet has no reset callbacks.  Delete its
+             * charged payload before releasing the global admission permit;
+             * merely abandoning it to the query parent would undercount live
+             * memory until statement cleanup.  MemoryContextDelete performs
+             * no allocation here, so it cannot replace the preserved PG/C++
+             * error that selected this path. */
+            MemoryContext wave_payload_ctx =
+                std::exchange(active_wave_payload_ctx, nullptr);
+            if (wave_payload_ctx != nullptr) {
+                MemoryContextDelete(wave_payload_ctx);
+            }
             active_wave_permit.reset();
         };
         const auto release_active_wave_checked = [&]() {
@@ -3604,7 +3613,7 @@ public:
             active_wave_permit.reset();
         };
         const auto abandon_scanner_cache_noexcept = [&]() noexcept {
-            abandon_active_wave_noexcept();
+            release_active_wave_after_error_noexcept();
             if (scanner_pg_cache == nullptr) {
                 return;
             }

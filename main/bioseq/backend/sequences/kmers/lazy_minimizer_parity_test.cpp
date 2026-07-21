@@ -38,6 +38,7 @@ import bioseq.sequences.kmers.two_stacks;
 import bioseq.sequences.kmers.vulkan;
 import bioseq.sequences.pipe;
 import bioseq.gpu.vulkan.runtime;
+import bioseq.parallelism.memory_admission;
 import bioseq.storage.scanner;
 import bioseq.storage.lazy;
 import bioseq.storage.batch_processor;
@@ -428,10 +429,13 @@ TEST_CASE("DOC0377 — ExactSimd and Paper SIMD admit only a sliced composite so
 }
 
 TEST_CASE("DOC0377 — Vulkan staging dispatches a sliced composite source range only",
-          "[lazy-view][slice][concat][reverse][source-backed][vulkan][minimizer-parity]") {
+          "[lazy-view][slice][concat][reverse][source-backed][vulkan][minimizer-parity][memory-admission]") {
     auto fixture = make_composite_fixture();
     const auto source_view = make_composite_source_view(fixture.source);
     if (!vk::hardware_device_available(vk::Runtime::instance())) {
+        auto& admission =
+            bioseq::parallelism::MemoryAdmissionController::instance();
+        const std::uint64_t baseline = admission.reserved_bytes();
         vk::VulkanSketchDecline decline{};
         reset_source_observation(fixture.source);
         const auto rejected =
@@ -440,13 +444,19 @@ TEST_CASE("DOC0377 — Vulkan staging dispatches a sliced composite source range
                 fixture.selected_from,
                 fixture.selected_to,
                 10u,
-                40u,
+                15u,
                 {},
                 &decline);
         REQUIRE_FALSE(rejected.has_value());
         REQUIRE(decline.reason
-                == vk::VulkanSketchDeclineReason::kmer_size_unsupported);
-        REQUIRE(fixture.source.callback_count == 0u);
+                == vk::VulkanSketchDeclineReason::hardware_device_unavailable);
+        REQUIRE(decline.bp_size
+                == fixture.selected_to - fixture.selected_from);
+        REQUIRE(fixture.source.requested_bp
+                == fixture.selected_to - fixture.selected_from);
+        require_partial_source_read(
+            fixture.source, fixture.selected_to - fixture.selected_from);
+        REQUIRE(admission.reserved_bytes() == baseline);
         return;
     }
 

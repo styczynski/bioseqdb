@@ -3195,7 +3195,7 @@ TEST_CASE("nested SPI BatchJoin attaches once to its executor root",
 }
 
 TEST_CASE("GPU target outcomes count logical rows with identical sequence content",
-          "[mmsearch][columnar][pipeline-stats][vulkan][logical-row]") {
+          "[mmsearch][columnar][pipeline-stats][vulkan][logical-row][memory-admission][fault]") {
     auto ctx = fresh_context({kDuplicateTargets});
     const std::string identical_target =
         hoe_seed_rows().front().sequences.front();
@@ -3226,9 +3226,17 @@ TEST_CASE("GPU target outcomes count logical rows with identical sequence conten
         kDuplicateTargets,
         hoe_probe_literal());
     if (selected_vulkan_runtime_untrusted(ctx)) {
+        const long long reserved_before = query_scalar_int(
+            ctx,
+            "SELECT index_memory_reserved_bytes "
+            "FROM bioseq.scheduler_stats();");
         const auto err = sql_error(ctx, sql);
         REQUIRE(err.sqlstate == "XX000");
         REQUIRE(err.contains("Vulkan aligner execution failed"));
+        REQUIRE(query_scalar_int(
+            ctx,
+            "SELECT index_memory_reserved_bytes "
+            "FROM bioseq.scheduler_stats();") == reserved_before);
         return;
     }
 
