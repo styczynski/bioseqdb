@@ -18,6 +18,7 @@ module;
 #include <type_traits>
 #include <utility>
 
+#include "headers/pg_build_config.h"
 #include "headers/pg_compat.h"
 extern "C" {
 #include "utils/expandeddatum.h"
@@ -735,6 +736,35 @@ struct facade_adapter {
         .worker_shareable = &facade_worker_shareable,
     };
 };
+
+template<class Alphabet, std::size_t StorageUnitByteWidth>
+consteval bool facade_adapter_profile_contract()
+{
+    using adapter = facade_adapter<Alphabet>;
+    using view = bioseq::storage::basic_lazy_sequence_view<Alphabet>;
+    return pgseq_supported_storage_unit_byte_widths::
+               contains<StorageUnitByteWidth>
+        && std::is_same_v<typename adapter::view, view>
+        && std::is_same_v<
+               decltype(adapter::ops),
+               std::add_const_t<typename view::backend_ops>>;
+}
+
+// DOC0377 genericity gate: the piece-tree/flat PostgreSQL callback adapter is
+// specialized only by alphabet. Repeating the enabled physical-width matrix
+// must resolve to that same view type rather than creating a width dimension.
+static_assert(facade_adapter_profile_contract<seq::dna4, 8u>());
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
+static_assert(facade_adapter_profile_contract<seq::dna5, 8u>());
+#endif
+#if BIOSEQ_OPTTIMIZATION_LEVEL >= 2
+static_assert(facade_adapter_profile_contract<seq::dna4, 1u>());
+static_assert(facade_adapter_profile_contract<seq::dna4, 2u>());
+static_assert(facade_adapter_profile_contract<seq::dna4, 4u>());
+static_assert(facade_adapter_profile_contract<seq::dna5, 1u>());
+static_assert(facade_adapter_profile_contract<seq::dna5, 2u>());
+static_assert(facade_adapter_profile_contract<seq::dna5, 4u>());
+#endif
 
 template<class Alphabet>
 inline void release_facade_owner(void* opaque) noexcept

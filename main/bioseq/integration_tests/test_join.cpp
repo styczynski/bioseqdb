@@ -671,11 +671,11 @@ TEST_CASE("Repeated EXECUTE of a prepared mmsearch JOIN reuses runtime cleanly",
 	REQUIRE(bad_typmod.contains("Valid alphabets: 'dna4'"));
 #else
 	REQUIRE(bad_typmod.sqlstate == "42804");
-	REQUIRE(
+	REQUIRE((
 		bad_typmod.contains(
 			"bioseq mmsearch requires operands with the same bound alphabet")
 		|| bad_typmod.contains(
-			"cannot cast bound bioseq.seq across alphabets"));
+			"cannot cast bound bioseq.seq across alphabets")));
 #endif
 	/* A generic PREPARE Param loses its declared typmod in the plan, so the
 	 * pgseq payload is checked at runtime when dna5 is enabled. The level-0

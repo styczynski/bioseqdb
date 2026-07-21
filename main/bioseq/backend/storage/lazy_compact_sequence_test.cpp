@@ -84,6 +84,46 @@ using existing_fragmented_t = lazy_compact_sequence<dna4_u64, chunked2>;
 using existing_flat_t = lazy_compact_sequence<
     dna4_u64, sequence_scanner_none<std::uint64_t>>;
 
+template <class Alphabet, class Unit>
+consteval bool canonical_adapter_profile_contract() {
+    using instance_t = sequence_custom_alphabet<Alphabet, Unit>;
+    using range_type = compact_sequence_range<instance_t>;
+    using flat_owner = lazy_compact_sequence<
+        instance_t, sequence_scanner_none<Unit>>;
+    using fragmented_owner = lazy_compact_sequence<
+        instance_t, sequence_scanner_test_chunked<Unit, 2u>>;
+    using view_type = basic_lazy_sequence_view<Alphabet>;
+
+    return bioseq::storage::supports_lazy_compact_sequence<flat_owner>
+        && bioseq::storage::supports_lazy_compact_sequence<fragmented_owner>
+        && bioseq::storage::supports_lazy_sequence_view<flat_owner>
+        && bioseq::storage::supports_lazy_sequence_view<fragmented_owner>
+        && std::is_same_v<
+            decltype(as_lazy_sequence_view(
+                std::declval<const range_type&>())),
+            view_type>
+        && std::is_same_v<
+            decltype(as_lazy_sequence_view(
+                std::declval<const flat_owner&>())),
+            view_type>
+        && std::is_same_v<
+            decltype(as_lazy_sequence_view(
+                std::declval<const fragmented_owner&>())),
+            view_type>;
+}
+
+// DOC0377 genericity gate: every supported alphabet/physical-width profile
+// must erase direct-flat, existing flat-lazy, and fragmented-lazy storage to
+// exactly one alphabet-specialized facade type.
+static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint8_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint16_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint32_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna4, std::uint64_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna5, std::uint8_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna5, std::uint16_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna5, std::uint32_t>());
+static_assert(canonical_adapter_profile_contract<seq::dna5, std::uint64_t>());
+
 static_assert(bioseq::storage::supports_lazy_compact_sequence<
               existing_fragmented_t>);
 static_assert(bioseq::storage::supports_lazy_sequence_view<

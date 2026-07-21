@@ -83,6 +83,27 @@
         }
       },
       {
+        "name": "test-opt-level2",
+        "inherits": "test-opt",
+        "displayName": "Optimised level-2 qualification config",
+        "description": "Isolated unit/integration qualification tree with the full dna4/dna5 and 1/2/4/8-byte PostgreSQL profile. The checked-in everyday optimization level remains zero.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "2"
+        }
+      },
+      {
+        "name": "test-opt-level2-trace",
+        "inherits": "test-opt-level2",
+        "displayName": "Optimised level-2 compiler-trace qualification config",
+        "description": "Isolated DOC0377 compiler-instantiation evidence tree. Emits complete Clang time-trace events without changing the everyday test-opt or level-2 qualification trees.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TIME_TRACE": "ON",
+          "BIOSEQ_TIME_TRACE_GRANULARITY": "0"
+        }
+      },
+      {
         "name": "bench-opt-debug",
         "displayName": "Benchmark-tuned optimisation config (with debug symbols and per-TU temps)",
          "description": "Same -O3 + NDEBUG as `bench-opt`, plus `-save-temps=obj` (keeps per-TU .s/.ii/.bc artifacts beside each .o so the inspect MCP tool can extract assembly and IR for any function) and `-g` (preserves DWARF symbols for source-line cross-references in objdump output). Lives under build/bench-opt-debug/ so it does not invalidate the default bench-opt ninja graph. ~2x slower to compile and ~2-3x peak RSS per TU than `bench-opt`; only use when the inspect tool is needed.",

@@ -22,16 +22,45 @@ if(NOT _bioseq_opttimization_level_line_count EQUAL 1)
 endif()
 string(REGEX REPLACE
   "^#define BIOSEQ_OPTTIMIZATION_LEVEL ([0-5])$" "\\1"
-  BIOSEQ_OPTTIMIZATION_LEVEL
+  BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL
   "${_bioseq_opttimization_level_line}")
-if(NOT BIOSEQ_OPTTIMIZATION_LEVEL MATCHES "^[0-5]$")
+if(NOT BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL MATCHES "^[0-5]$")
   message(FATAL_ERROR
-    "BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range 0..5; got "
-    "'${BIOSEQ_OPTTIMIZATION_LEVEL}'")
+    "default BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range "
+    "0..5; got '${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL}'")
+endif()
+
+# Keep the checked-in header literal as the everyday source of truth while
+# allowing isolated qualification presets to compile the complete profile in
+# a separate build tree.  The override is deliberately a distinct cache key:
+# passing -DBIOSEQ_OPTTIMIZATION_LEVEL directly would make the CMake source
+# graph and the preprocessor disagree.
+set(BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE "" CACHE STRING
+  "Qualification-only BIOSEQ_OPTTIMIZATION_LEVEL override (empty or 0..5)")
+set_property(CACHE BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE PROPERTY
+  STRINGS "" 0 1 2 3 4 5)
+if(NOT "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL ""
+   AND NOT BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE MATCHES "^[0-5]$")
+  message(FATAL_ERROR
+    "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE must be empty or an integer in "
+    "the range 0..5; got '${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}'")
+endif()
+
+if("${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}" STREQUAL "")
+  set(BIOSEQ_OPTTIMIZATION_LEVEL
+    "${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL}")
+  set(_bioseq_opttimization_level_source "pg_build_config.h default")
+else()
+  set(BIOSEQ_OPTTIMIZATION_LEVEL
+    "${BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE}")
+  set(_bioseq_opttimization_level_source "qualification preset override")
+  add_compile_definitions(
+    BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL})
 endif()
 message(STATUS
   "bioseq: BIOSEQ_OPTTIMIZATION_LEVEL=${BIOSEQ_OPTTIMIZATION_LEVEL} "
-  "(from pg_build_config.h)")
+  "(${_bioseq_opttimization_level_source}; checked-in default="
+  "${BIOSEQ_DEFAULT_OPTTIMIZATION_LEVEL})")
 
 message(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_LIST_DIR}")
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/backend/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.c ${CMAKE_CURRENT_LIST_DIR}/backend/*.cpp ${CMAKE_CURRENT_LIST_DIR}/backend/**/*.cpp)
