@@ -758,7 +758,7 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
             materialization_mechanism::binary,
             materialization_reason::client_output,
             descriptor.bp_length, descriptor.bp_length,
-            static_cast<std::uint64_t>(VARSIZE(result)), false,
+            static_cast<std::uint64_t>(VARSIZE_ANY_EXHDR(result)), false,
             static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
         PG_RETURN_BYTEA_P(result);
     }
@@ -810,7 +810,7 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
         materialization_mechanism::binary,
         materialization_reason::client_output,
         descriptor.bp_length, descriptor.bp_length,
-        static_cast<std::uint64_t>(VARSIZE(result)), false,
+        static_cast<std::uint64_t>(VARSIZE_ANY_EXHDR(result)), false,
         static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
     PG_RETURN_BYTEA_P(result);
 }

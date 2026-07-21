@@ -1728,6 +1728,11 @@ struct ScalarPipelineExecutionProof {
     ScalarMinimizerExecutionProof target_minimizers{};
     std::uint64_t seed_lookup_calls = 0;
     std::uint64_t seed_query_minimizers = 0;
+    // A stage-level receipt written only after the selected scalar chaining
+    // kernel returns successfully.  It is distinct from score/backtrack work:
+    // a valid negative call can complete with zero anchors and execute neither.
+    std::uint64_t chain_stage_completion_calls = 0;
+    std::uint64_t chain_stage_completed_anchor_inputs = 0;
     std::uint64_t chain_score_calls = 0;
     std::uint64_t chain_backtrack_calls = 0;
     std::uint64_t chain_anchor_inputs = 0;
@@ -1758,6 +1763,12 @@ struct ScalarPipelineExecutionProof {
         add(chain_score_calls, 1u, saturated);
         add(chain_backtrack_calls, 1u, saturated);
         add(chain_anchor_inputs, anchor_count, saturated);
+    }
+
+    constexpr void record_scalar_chain_stage_completion(
+            const std::uint64_t anchor_count) noexcept {
+        add(chain_stage_completion_calls, 1u, saturated);
+        add(chain_stage_completed_anchor_inputs, anchor_count, saturated);
     }
 
     constexpr void record_ksw2_call(
@@ -1797,6 +1808,10 @@ struct ScalarPipelineExecutionProof {
             || target_minimizers.saturated;
         add(seed_lookup_calls, other.seed_lookup_calls, overflow);
         add(seed_query_minimizers, other.seed_query_minimizers, overflow);
+        add(chain_stage_completion_calls,
+            other.chain_stage_completion_calls, overflow);
+        add(chain_stage_completed_anchor_inputs,
+            other.chain_stage_completed_anchor_inputs, overflow);
         add(chain_score_calls, other.chain_score_calls, overflow);
         add(chain_backtrack_calls, other.chain_backtrack_calls, overflow);
         add(chain_anchor_inputs, other.chain_anchor_inputs, overflow);
@@ -1820,14 +1835,24 @@ struct ScalarPipelineExecutionProof {
                  || ksw2_gap_calls != 0
                  || ksw2_right_calls != 0)
                 && ksw2_input_cell_area > 0);
+        const bool empty_chain_completed =
+            chain_stage_completed_anchor_inputs == 0
+            && chain_anchor_inputs == 0
+            && chain_score_calls == 0
+            && chain_backtrack_calls == 0;
+        const bool nonempty_chain_completed =
+            chain_stage_completed_anchor_inputs > 0
+            && chain_anchor_inputs == chain_stage_completed_anchor_inputs
+            && chain_score_calls > 0
+            && chain_score_calls == chain_backtrack_calls
+            && chain_score_calls <= chain_stage_completion_calls;
         return !saturated
             && query_minimizers.accepted()
             && target_valid
             && seed_lookup_calls > 0
             && seed_query_minimizers > 0
-            && chain_score_calls > 0
-            && chain_backtrack_calls > 0
-            && chain_anchor_inputs > 0
+            && chain_stage_completion_calls > 0
+            && (empty_chain_completed || nonempty_chain_completed)
             && alignment_valid;
     }
 
@@ -4664,6 +4689,8 @@ struct MatchResultCollection {
             && scalar.seed_lookup_calls > 0u
             && (!require_nonempty_vector_work
                 || scalar.seed_query_minimizers > 0u)
+            && scalar.chain_stage_completion_calls == 0u
+            && scalar.chain_stage_completed_anchor_inputs == 0u
             && scalar.chain_score_calls == 0u
             && scalar.chain_backtrack_calls == 0u
             && scalar.chain_anchor_inputs == 0u

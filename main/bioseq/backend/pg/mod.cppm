@@ -5560,6 +5560,29 @@ PGDLLEXPORT Datum bioseq_internal_sequence_source_route_alias_probe(
 		&bioseq_internal_sequence_source_route_alias_probe_impl, fcinfo);
 }
 
+static Datum bioseq_internal_sequence_facade_orientation_probe_impl(
+		FunctionCallInfo fcinfo) {
+#ifdef BIOSEQ_TEST_INDEXES
+	if (PG_ARGISNULL(0)) {
+		PG_RETURN_NULL();
+	}
+	PG_RETURN_BOOL(pg_sequence_facade_orientation_contract_probe(
+		PG_GETARG_DATUM(0)));
+#else
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("bioseq sequence facade diagnostics require a test build")));
+	PG_RETURN_BOOL(false);
+#endif
+}
+
+CXX_PG_FUNCTION_INFO_V1(bioseq_internal_sequence_facade_orientation_probe);
+PGDLLEXPORT Datum bioseq_internal_sequence_facade_orientation_probe(
+		PG_FUNCTION_ARGS) {
+	return bioseq_invoke_pg_sequence_fmgr_boundary(
+		&bioseq_internal_sequence_facade_orientation_probe_impl, fcinfo);
+}
+
 static Datum bioseq_internal_sequence_source_pre_prepare_probe_impl(
 		FunctionCallInfo) {
 #ifdef BIOSEQ_TEST_INDEXES

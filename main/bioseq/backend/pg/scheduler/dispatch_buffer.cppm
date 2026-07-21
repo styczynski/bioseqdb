@@ -59,8 +59,9 @@ extern "C" {
 // The `bioseq.test_force_chunked_scanner` GUC routes row sequences through a
 // synthetic chunked scanner end-to-end (DOC0263 parity tests). The
 // `bioseq.test_force_inmemory_scanner` GUC forces the materialise-then-
-// in_memory baseline. Without either GUC the production path runs through
-// `with_lazy_postgres<S>` (DOC0264 §9.1).
+// in_memory baseline. Without either GUC the production path promotes locator
+// values through the statement-owned source provider and runs from its
+// canonical lazy facade.
 export module bioseq.scheduler.dispatch_buffer;
 
 import bioseq.common.mlogging;
@@ -80,6 +81,7 @@ import bioseq.types.pg_compact_sequence;
 import bioseq.instr;
 import bioseq.storage.manager;                  // DOC0260 §9
 import bioseq.storage.scanner;          // DOC0263 §11.3.2 — chunked test scanner — seq_locator, fetch_payload_bulk, seq_caches
+import bioseq.storage.scanner_pg;       // statement-owned source provider for locator targets
 import bioseq.parallelism.memory_admission;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.column.tam;               // DOC0322 §7.4 — tid_to_row_number (leaf; replaces the former extern "C++" reach into the table AM)
@@ -797,13 +799,11 @@ public:
          * DOC0260 §9.1 — Phase A deferred-hydration path. Under
          * defer_seq_hydration the custom scan returns 40-byte locator stubs
          * instead of materialised payloads, so submit_scan records the
-         * decoded locator here (leaving seq_varlena empty) and
-         * run_batch_and_build_cursors bulk-fetches the real payload grouped
-         * per bucket into batch_payload_ctx, writing the result into
-         * hydrated_seq_hdr. seq_hdr() prefers the hydrated pointer, so every
-         * downstream consumer (target_hdrs, BatchProcessor, output
-         * projection) is unchanged. The seq_varlena path is still the
-         * fallback for a non-stub value (a small inline payload).
+         * decoded locator here (leaving seq_varlena empty). Production
+         * CPU/SIMD dispatch preserves that locator until the algorithm enters
+         * the statement source-provider facade. The hydrated pointers remain
+         * only for explicit flat baselines and Vulkan's packed-upload ABI.
+         * The seq_varlena path is still the fast path for a small inline value.
          */
         std::optional<bioseq::storage::seq_locator> seq_loc;
         std::optional<bioseq::storage::seq_locator> per_row_query_loc;
@@ -976,6 +976,10 @@ private:
     // owner keeps it registered until every batch/scanner is drained; buffer
     // destruction never dereferences it and never changes its registration.
     Snapshot scan_snapshot       = nullptr;
+    // Borrowed from the BioseqScan provider. Every locator-backed scanner
+    // target must use this exact source-domain route; this buffer never owns
+    // or closes it.
+    bioseq::storage::pg_sequence_source_provider* source_provider = nullptr;
     // Borrowed from the statement-root AlignmentExecutionCollector.
     bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
         persisted_gpu_operation_evidence_sink = nullptr;
@@ -992,6 +996,10 @@ private:
     std::vector<SM::fetch_request> fetch_bulk_sort_scratch{};
     std::vector<pgseq_t*>          hydrated_target_payloads{};
     std::vector<pgseq_t*>          hydrated_query_payloads{};
+    // Setjmp-stable owner of Vulkan-only flat/rewidth images for the active
+    // wave.  The child arena is reclaimed before its admission permit is
+    // released; a PG error leaves the arena to its query-context parent.
+    MemoryContext active_wave_payload_ctx = nullptr;
     // Member storage is intentional: PG_TRY/PG_CATCH uses setjmp/longjmp, so
     // a modified automatic optional would have an indeterminate catch value.
     std::optional<bioseq::parallelism::MemoryPermit> active_wave_permit{};
@@ -1052,6 +1060,26 @@ public:
                 materialization_reason::mmsearch_query);
     }
 
+    void bind_sequence_source_provider(
+            bioseq::storage::pg_sequence_source_provider* provider) {
+        if (provider == nullptr || !provider->open
+            || provider->lease.registry == nullptr) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq dispatch source provider is not live")));
+        }
+        if (source_provider != nullptr && source_provider != provider) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq dispatch source provider changed during execution")));
+        }
+        source_provider = provider;
+    }
+
+    void clear_sequence_source_provider_binding() noexcept {
+        source_provider = nullptr;
+    }
+
     /**
      * Release a provenance binding discovered from one PerRowJoin batch.
      *
@@ -1064,6 +1092,7 @@ public:
     void release_per_row_slice_async_owner_after_drain() {
         if (join_mode || !buffered_entries.empty() || !match_map.empty()
             || !output_cursors.empty() || output_position != -1
+            || active_wave_payload_ctx != nullptr
             || active_wave_permit.has_value()) {
             ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -1161,6 +1190,12 @@ public:
     [[nodiscard]] const ::bioseq::simd::HWY_NAMESPACE::Minimap2Params& base_aligner_params() const { return base_params; }
     [[nodiscard]] const ::bioseq::pipeline_stats::PipelineExecutionStats& execution_stats() const { return last_stats; }
     [[nodiscard]] bool reads_sequence_index() const { return read_sequence_index_active; }
+    [[nodiscard]] AttrNumber target_sequence_attno() const noexcept {
+        return mmsearch_context.seq_attno;
+    }
+    [[nodiscard]] AttrNumber per_row_query_sequence_attno() const noexcept {
+        return mmsearch_context.per_row_query_attno;
+    }
 
     /* DOC0260 §9.6 — per-scan storage-bucket EXPLAIN counters. */
     [[nodiscard]] std::uint64_t explain_bucket_touched_bits() const {
@@ -2122,23 +2157,9 @@ public:
         }
     }
 
-    /*
-     * DOC0260 §9.3 — entry point for per-bucket bulk hydration. Allocates a
-     * short-lived read-side seq_caches (its open shard relations are released
-     * by close_all before destroy), runs the target column and, when present,
-     * the per-row query column. A no-op when no entry captured a locator
-     * (e.g. an inline non-stub value, or no mmsearch column).
-     *
-     * DOC0264 §9.4 — Phase C: fetch_payload now stitches per-fragment rows
-     * into one contiguous varlena, bounded by MaxAllocSize. The dispatch
-     * loop continues to use `with_lazy_in_memory` over the hydrated varlena
-     * (Phase B baseline) — see DOC0273 §3.2 for the design trade-off: the
-     * Phase C PostgreSQL facade adapter machinery
-     * is built but not wired into the single-Scanner pipeline tree, to keep
-     * dispatch_buffer.cppm under the DOC0271 template-explosion budget.
-     * Hydration here also serves output projection (write-back into the
-     * buffered slot's tts_values for `SELECT seq` resolution).
-     */
+    /* Integration-only Phase-B baselines. Production scanner dispatch must
+     * not call this routine: it would stitch every locator into a flat varlena
+     * before the source-domain facade had a chance to stream it. */
     void hydrate_locators_by_bucket(std::span<const size_t> rows) {
         const size_t batch_size = buffered_entries.size();
         bool any_locator = false;
@@ -2186,6 +2207,188 @@ public:
 
         cache->close_all(/*commit=*/false);
         bioseq::storage::destroy_seq_caches(cache);
+    }
+
+    /* Materialize a locator column only for a selected Vulkan execution, whose
+     * upload ABI requires one contiguous packed buffer. The read still enters
+     * through the statement provider and canonical expanded facade; this is an
+     * explicit algorithm requirement, not ordinary scanner hydration. */
+    struct VulkanPayloadObservation {
+        bool is_query = false;
+        std::uint64_t symbols = 0u;
+        std::uint64_t payload_bytes = 0u;
+        std::uint64_t retained_bytes = 0u;
+    };
+
+    void materialize_provider_column_for_vulkan(
+            std::span<const size_t> rows,
+            const AttrNumber column_attno,
+            const std::uint8_t column_alphabet_code,
+            const std::uint8_t column_storage_unit_byte_width,
+            MemoryContext wave_payload_ctx,
+            std::vector<pgseq_t*>& out_payloads,
+            const bool is_query,
+            std::array<VulkanPayloadObservation,
+                kDispatchBatchCapacity * 2u>& pending_observations,
+            std::size_t& pending_observation_count) {
+        if (source_provider == nullptr || !source_provider->open
+            || column_attno <= 0 || wave_payload_ctx == nullptr) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("Vulkan locator materialization has no exact source provider")));
+        }
+        std::size_t letters_per_unit = 0u;
+        pgseq_t::dispatch_instance(
+            column_alphabet_code,
+            column_storage_unit_byte_width,
+            [&letters_per_unit]<class S>() noexcept {
+                letters_per_unit = compact_sequence_range<S>::traits::
+                    letters_per_unit;
+            });
+        if (letters_per_unit == 0u) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("Vulkan locator materialization has invalid sequence geometry")));
+        }
+        out_payloads.assign(buffered_entries.size(), nullptr);
+        for (const size_t row : rows) {
+            if (row >= buffered_entries.size()) continue;
+            const auto& locator = is_query
+                ? buffered_entries[row].per_row_query_loc
+                : buffered_entries[row].seq_loc;
+            if (!locator.has_value()) continue;
+            const std::uint64_t remainder =
+                locator->total_bp_size % letters_per_unit;
+            const std::uint64_t padding = remainder == 0u
+                ? 0u : letters_per_unit - remainder;
+            if (padding > (std::numeric_limits<std::uint16_t>::max)()) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("Vulkan locator materialization padding is invalid")));
+            }
+            pgseq_t* stub = bioseq::storage::alloc_locator_stub_in(
+                wave_payload_ctx,
+                column_alphabet_code,
+                column_storage_unit_byte_width,
+                static_cast<std::uint16_t>(padding),
+                locator->total_bp_size,
+                *locator);
+            const Datum promoted = bioseq::storage::promote_pg_sequence_locator(
+                source_provider, column_attno, PointerGetDatum(stub),
+                wave_payload_ctx);
+            ExpandedObjectHeader* expanded = DatumGetEOHP(promoted);
+            const Size flat_size = EOH_get_flat_size(expanded);
+            if (flat_size > MaxAllocSize) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("selected Vulkan execution cannot materialize locator sequence"),
+                     errdetail("row=%zu column=%d bp=%llu flat_bytes=%zu",
+                        row, static_cast<int>(column_attno),
+                        static_cast<unsigned long long>(locator->total_bp_size),
+                        static_cast<std::size_t>(flat_size))));
+            }
+            auto* flat = static_cast<pgseq_t*>(MemoryContextAllocZero(
+                wave_payload_ctx, flat_size));
+            EOH_flatten_into(expanded, flat, flat_size);
+            if (flat->alphabet_code != column_alphabet_code
+                || flat->storage_unit_byte_width
+                    != column_storage_unit_byte_width
+                || static_cast<std::uint64_t>(flat->bp_size)
+                    != locator->total_bp_size) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("source-provider materialization changed sequence metadata")));
+            }
+            pgseq_t* dispatch = flat;
+            std::uint64_t retained_bytes =
+                static_cast<std::uint64_t>(flat_size);
+            if (is_query && column_storage_unit_byte_width
+                    != mmsearch_context.storage_unit_byte_width) {
+                MemoryContext previous = MemoryContextSwitchTo(
+                    wave_payload_ctx);
+                try {
+                    dispatch = ::bioseq::simd::active_target::
+                        stdc_rewidth_to_type_params(
+                            *flat,
+                            compact_sequence_stdc_type_params{
+                                mmsearch_context.alphabet_code,
+                                mmsearch_context.storage_unit_byte_width},
+                            pg_alloc);
+                } catch (...) {
+                    MemoryContextSwitchTo(previous);
+                    throw;
+                }
+                MemoryContextSwitchTo(previous);
+                if (dispatch == nullptr) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                         errmsg("Vulkan query materialization cannot rewidth sequence")));
+                }
+                /* Both images coexist during recoding and are charged to the
+                 * wave.  Only the dispatch-width image is retained after it. */
+                retained_bytes += static_cast<std::uint64_t>(VARSIZE(dispatch));
+                pfree(flat);
+            }
+            if (pending_observation_count >= pending_observations.size()) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("Vulkan payload observation capacity was exceeded")));
+            }
+            out_payloads[row] = dispatch;
+            if (is_query) {
+                buffered_entries[row].hydrated_per_row_query_hdr = dispatch;
+            } else {
+                buffered_entries[row].hydrated_seq_hdr = dispatch;
+            }
+            pending_observations[pending_observation_count++] = {
+                .is_query = is_query,
+                .symbols = locator->total_bp_size,
+                .payload_bytes = static_cast<std::uint64_t>(VARSIZE(dispatch)),
+                .retained_bytes = retained_bytes,
+            };
+        }
+    }
+
+    void materialize_provider_locators_for_vulkan(
+            std::span<const size_t> rows,
+            MemoryContext wave_payload_ctx) {
+        std::array<VulkanPayloadObservation,
+            kDispatchBatchCapacity * 2u> pending_observations{};
+        std::size_t pending_observation_count = 0u;
+        materialize_provider_column_for_vulkan(
+            rows, mmsearch_context.seq_attno,
+            mmsearch_context.alphabet_code,
+            mmsearch_context.storage_unit_byte_width,
+            wave_payload_ctx,
+            hydrated_target_payloads, /*is_query=*/false,
+            pending_observations, pending_observation_count);
+        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+            materialize_provider_column_for_vulkan(
+                rows, mmsearch_context.per_row_query_attno,
+                mmsearch_context.query_alphabet_code,
+                mmsearch_context.query_storage_unit_byte_width,
+                wave_payload_ctx,
+                hydrated_query_payloads, /*is_query=*/true,
+                pending_observations, pending_observation_count);
+        }
+        /* Publish only after every target/query image in the wave completed.
+         * A materialization ERROR therefore cannot leave a successful trace. */
+        for (std::size_t index = 0u;
+             index < pending_observation_count; ++index) {
+            const VulkanPayloadObservation& observation =
+                pending_observations[index];
+            const auto& observer = observation.is_query
+                ? mmsearch_query_payload_observer
+                : mmsearch_target_payload_observer;
+            (void)bioseq::storage::observe_sequence_payload_allocation_noexcept(
+                std::addressof(observer),
+                bioseq::storage::sequence_payload_allocation_kind::
+                    admitted_packed_region,
+                observation.symbols,
+                observation.symbols,
+                observation.payload_bytes,
+                observation.retained_bytes);
+        }
     }
 
     [[nodiscard]] bool run_join_query_batch_and_build_cursors() {
@@ -2346,6 +2549,7 @@ public:
             scanner_pg_ctx.caches = join_scanner_pg_cache;
             scanner_pg_ctx.parent_mctx = batch_payload_ctx;
             scanner_pg_ctx.snapshot = scan_snapshot;
+            scanner_pg_ctx.source_provider = source_provider;
             scanner_pg_ctx.persisted_gpu_operation_evidence_sink =
                 persisted_gpu_operation_evidence_sink;
             scanner_pg_ctx.user_relid = user_relid;
@@ -2899,6 +3103,7 @@ public:
         fetch_bulk_sort_scratch.clear();
         hydrated_target_payloads.clear();
         hydrated_query_payloads.clear();
+        active_wave_payload_ctx = nullptr;
         active_wave_permit.reset();
         batch_payload_ctx = nullptr;
     }
@@ -2965,6 +3170,7 @@ public:
             try {
                 run_batch_and_build_cursors_impl();
             } catch (...) {
+                MemoryContextSwitchTo(saved_context);
                 cpp_error = std::current_exception();
             }
         }
@@ -3025,6 +3231,25 @@ public:
          */
         std::vector<size_t> all_rows(batch_size);
         std::iota(all_rows.begin(), all_rows.end(), size_t{0});
+        const bool forced_flat_baseline =
+            bioseq_test_force_inmemory_scanner
+            || bioseq_test_force_chunked_scanner;
+        const bool vulkan_flat_requirement =
+            ::bioseq::simd::HWY_NAMESPACE::pipe::
+                vulkan_components_requested(base_params);
+        if (vulkan_flat_requirement
+            && !::bioseq::simd::HWY_NAMESPACE::pipe::
+                complete_all_gpu_tuple_selected(base_params)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("Vulkan aligner execution failed"),
+                 errdetail("Vulkan complete-tuple admission: requested Vulkan components do not form the complete supported all-GPU tuple; generic CPU/SIMD biological fallback is forbidden"),
+                 errhint("Selected Vulkan execution has no CPU fallback; fix the Vulkan runtime or select a non-Vulkan algorithm before dispatch.")));
+        }
+        const bool provider_vulkan_materialization =
+            vulkan_flat_requirement && !forced_flat_baseline;
+        const bool requires_flat_locator_payloads =
+            forced_flat_baseline || vulkan_flat_requirement;
 
         std::size_t lpu_for_hydration = 0;
         std::size_t bytes_per_unit_for_hydration = 0;
@@ -3037,25 +3262,43 @@ public:
                 bytes_per_unit_for_hydration =
                     sizeof(typename traits::storage_unit);
             });
+        std::size_t query_lpu_for_hydration = lpu_for_hydration;
+        std::size_t query_bytes_per_unit_for_hydration =
+            bytes_per_unit_for_hydration;
+        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+            pgseq_t::dispatch_instance(
+                mmsearch_context.query_alphabet_code,
+                mmsearch_context.query_storage_unit_byte_width,
+                [&query_lpu_for_hydration,
+                 &query_bytes_per_unit_for_hydration]<class S>() noexcept {
+                    using traits =
+                        typename compact_sequence_range<S>::traits;
+                    query_lpu_for_hydration = traits::letters_per_unit;
+                    query_bytes_per_unit_for_hydration =
+                        sizeof(typename traits::storage_unit);
+                });
+        }
         auto estimate_locator_hydration_bytes =
-            [lpu_for_hydration,
-             bytes_per_unit_for_hydration](const bioseq::storage::seq_locator& loc)
+            [](const bioseq::storage::seq_locator& loc,
+               const std::size_t letters_per_unit,
+               const std::size_t bytes_per_unit)
                 -> std::uint64_t {
-            if (lpu_for_hydration == 0 || bytes_per_unit_for_hydration == 0) {
+            if (letters_per_unit == 0 || bytes_per_unit == 0) {
                 return 0;
             }
             const std::uint64_t total_units =
-                (static_cast<std::uint64_t>(loc.total_bp_size)
-                    + lpu_for_hydration - 1)
-                / lpu_for_hydration;
+                static_cast<std::uint64_t>(loc.total_bp_size)
+                    / letters_per_unit
+                + static_cast<std::uint64_t>(
+                    loc.total_bp_size % letters_per_unit != 0u);
             if (total_units
                 > (std::numeric_limits<std::uint64_t>::max)()
-                    / static_cast<std::uint64_t>(bytes_per_unit_for_hydration)) {
+                    / static_cast<std::uint64_t>(bytes_per_unit)) {
                 return 0;
             }
             const std::uint64_t payload_bytes =
                 total_units
-                * static_cast<std::uint64_t>(bytes_per_unit_for_hydration);
+                * static_cast<std::uint64_t>(bytes_per_unit);
             if (payload_bytes
                 > (std::numeric_limits<std::uint64_t>::max)()
                     - static_cast<std::uint64_t>(pgseq_t::header_bytes())) {
@@ -3070,23 +3313,65 @@ public:
             return varlena_bytes;
         };
         auto estimate_hydration_bytes =
-            [this, &estimate_locator_hydration_bytes](size_t row) -> std::uint64_t {
+            [this, requires_flat_locator_payloads,
+             provider_vulkan_materialization,
+             lpu_for_hydration, bytes_per_unit_for_hydration,
+             query_lpu_for_hydration,
+             query_bytes_per_unit_for_hydration,
+             &estimate_locator_hydration_bytes](size_t row) -> std::uint64_t {
+            if (!requires_flat_locator_payloads) {
+                return 0u;
+            }
             if (row >= buffered_entries.size()) {
                 return 0;
             }
             const BufferedScanEntry& entry = buffered_entries[row];
             std::uint64_t bytes = 0;
             if (entry.seq_loc.has_value()) {
-                bytes += estimate_locator_hydration_bytes(*entry.seq_loc);
+                const std::uint64_t target_bytes =
+                    estimate_locator_hydration_bytes(
+                    *entry.seq_loc,
+                    lpu_for_hydration,
+                    bytes_per_unit_for_hydration);
+                if (provider_vulkan_materialization
+                    && target_bytes == 0u) {
+                    return (std::numeric_limits<std::uint64_t>::max)();
+                }
+                bytes = target_bytes;
             }
             if (entry.per_row_query_loc.has_value()) {
                 const std::uint64_t query_bytes =
-                    estimate_locator_hydration_bytes(*entry.per_row_query_loc);
+                    estimate_locator_hydration_bytes(
+                        *entry.per_row_query_loc,
+                        query_lpu_for_hydration,
+                        query_bytes_per_unit_for_hydration);
+                if (provider_vulkan_materialization
+                    && query_bytes == 0u) {
+                    return (std::numeric_limits<std::uint64_t>::max)();
+                }
                 if (query_bytes
                     > (std::numeric_limits<std::uint64_t>::max)() - bytes) {
                     return (std::numeric_limits<std::uint64_t>::max)();
                 }
                 bytes += query_bytes;
+                if (mmsearch_context.query_storage_unit_byte_width
+                        != mmsearch_context.storage_unit_byte_width) {
+                    const std::uint64_t rewidthed_query_bytes =
+                        estimate_locator_hydration_bytes(
+                            *entry.per_row_query_loc,
+                            lpu_for_hydration,
+                            bytes_per_unit_for_hydration);
+                    if (provider_vulkan_materialization
+                        && rewidthed_query_bytes == 0u) {
+                        return (std::numeric_limits<std::uint64_t>::max)();
+                    }
+                    if (rewidthed_query_bytes
+                        > (std::numeric_limits<std::uint64_t>::max)()
+                            - bytes) {
+                        return (std::numeric_limits<std::uint64_t>::max)();
+                    }
+                    bytes += rewidthed_query_bytes;
+                }
             }
             return bytes;
         };
@@ -3111,6 +3396,15 @@ public:
         size_t wave_begin = 0;
         for (size_t i = 0; i < batch_size; ++i) {
             const std::uint64_t row_bytes = estimate_hydration_bytes(i);
+            if (provider_vulkan_materialization
+                && row_bytes
+                    == (std::numeric_limits<std::uint64_t>::max)()) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                     errmsg("selected Vulkan execution cannot materialize locator sequence"),
+                     errdetail("row=%zu requires an invalid or oversized flat payload",
+                        i)));
+            }
             const bool split =
                 budget != (std::numeric_limits<std::uint64_t>::max)()
                 && wave_bytes != 0
@@ -3169,9 +3463,16 @@ public:
         scanner_pg_ctx.main_relfilenode   = user_main_relfilenode;
         scanner_pg_ctx.mmsearch_seq_attno =
             static_cast<std::int16_t>(mmsearch_context.seq_attno);
+        scanner_pg_ctx.mmsearch_query_attno =
+            static_cast<std::int16_t>(mmsearch_context.per_row_query_attno);
+        scanner_pg_ctx.query_alphabet_code =
+            mmsearch_context.query_alphabet_code;
+        scanner_pg_ctx.query_storage_unit_byte_width =
+            mmsearch_context.query_storage_unit_byte_width;
         scanner_pg_ctx.caches             = scanner_pg_cache;
         scanner_pg_ctx.parent_mctx        = batch_payload_ctx;
         scanner_pg_ctx.snapshot           = scan_snapshot;
+        scanner_pg_ctx.source_provider    = source_provider;
         scanner_pg_ctx.persisted_gpu_operation_evidence_sink =
             persisted_gpu_operation_evidence_sink;
         // Populate per-row locators for the target column. The production
@@ -3182,6 +3483,11 @@ public:
             const auto& seq_loc_opt = buffered_entries[i].seq_loc;
             if (seq_loc_opt.has_value()) {
                 scanner_pg_ctx.target_locators[i] = *seq_loc_opt;
+            }
+            const auto& query_loc_opt =
+                buffered_entries[i].per_row_query_loc;
+            if (query_loc_opt.has_value()) {
+                scanner_pg_ctx.query_locators[i] = *query_loc_opt;
             }
             // DOC0279 §11.3c — surface the per-row columnar rowno (the index
             // query_key) so the stored per-fragment index can be assembled.
@@ -3217,6 +3523,7 @@ public:
         auto reset_scanner_wave =
             [&scanner_pg_ctx] {
             scanner_pg_ctx.target_locators.fill(std::nullopt);
+            scanner_pg_ctx.query_locators.fill(std::nullopt);
             scanner_pg_ctx.target_rownos.fill(-1);
             scanner_pg_ctx.target_index_sources.fill(
                 ::bioseq::pipeline_stats::TargetIndexSource::none);
@@ -3230,6 +3537,11 @@ public:
                 const auto& seq_loc_opt = buffered_entries[row].seq_loc;
                 if (seq_loc_opt.has_value()) {
                     scanner_pg_ctx.target_locators[row] = *seq_loc_opt;
+                }
+                const auto& query_loc_opt =
+                    buffered_entries[row].per_row_query_loc;
+                if (query_loc_opt.has_value()) {
+                    scanner_pg_ctx.query_locators[row] = *query_loc_opt;
                 }
                 scanner_pg_ctx.target_rownos[row] = buffered_entries[row].sequence_rowno;
             }
@@ -3254,9 +3566,45 @@ public:
         match_map.clear();
         // Pointer to the context.
         auto* scanner_pg_arg = &scanner_pg_ctx;
+        if (active_wave_payload_ctx != nullptr) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("bioseq dispatch retained a stale Vulkan wave arena")));
+        }
         active_wave_permit.reset();
-        const auto abandon_scanner_cache_noexcept = [&]() noexcept {
+        const auto clear_active_wave_member_handles_noexcept =
+            [this]() noexcept {
+                for (auto& entry : buffered_entries) {
+                    entry.hydrated_seq_hdr = nullptr;
+                    entry.hydrated_per_row_query_hdr = nullptr;
+                }
+                hydrated_target_payloads.clear();
+                hydrated_query_payloads.clear();
+            };
+        const auto abandon_active_wave_noexcept = [&]() noexcept {
+            clear_active_wave_member_handles_noexcept();
+            /* A PG/C++ error owns the control flow from here.  Do not issue a
+             * second PostgreSQL cleanup operation that could replace it; the
+             * query-context parent reclaims the child arena. */
+            active_wave_payload_ctx = nullptr;
             active_wave_permit.reset();
+        };
+        const auto release_active_wave_checked = [&]() {
+            clear_active_wave_member_handles_noexcept();
+            target_hdrs.fill(nullptr);
+            per_row_query_hdrs.fill(nullptr);
+            MemoryContext wave_payload_ctx =
+                std::exchange(active_wave_payload_ctx, nullptr);
+            if (wave_payload_ctx != nullptr) {
+                bioseq::pg_utils::invoke_pg_as_cpp([wave_payload_ctx] {
+                    MemoryContextDelete(wave_payload_ctx);
+                });
+            }
+            /* Release admission only after the charged arena is gone. */
+            active_wave_permit.reset();
+        };
+        const auto abandon_scanner_cache_noexcept = [&]() noexcept {
+            abandon_active_wave_noexcept();
             if (scanner_pg_cache == nullptr) {
                 return;
             }
@@ -3294,11 +3642,34 @@ public:
                     bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer wave [{}, {}) was not admitted for {} bytes; target locators stream through scanner_pg",
                             wave.first, wave.second,
                             static_cast<unsigned long long>(estimated_wave_bytes));
+                    if (vulkan_flat_requirement) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_OUT_OF_MEMORY),
+                             errmsg("selected Vulkan locator materialization was not admitted"),
+                             errdetail("wave=[%zu,%zu) requested_bytes=%llu",
+                                wave.first, wave.second,
+                                static_cast<unsigned long long>(
+                                    estimated_wave_bytes))));
+                    }
                 }
                 reset_dispatch_arrays();
                 reset_scanner_wave();
                 if (hydrate_wave) {
-                    hydrate_locators_by_bucket(rows);
+                    if (forced_flat_baseline) {
+                        hydrate_locators_by_bucket(rows);
+                    } else if (vulkan_flat_requirement) {
+                        if (active_wave_payload_ctx != nullptr) {
+                            ereport(ERROR,
+                                (errcode(ERRCODE_INTERNAL_ERROR),
+                                 errmsg("Vulkan wave arena was not released")));
+                        }
+                        active_wave_payload_ctx = AllocSetContextCreate(
+                            batch_payload_ctx,
+                            "TupleDispatchBuffer Vulkan wave payload arena",
+                            ALLOCSET_DEFAULT_SIZES);
+                        materialize_provider_locators_for_vulkan(
+                            rows, active_wave_payload_ctx);
+                    }
                 }
                 refresh_row_arrays(rows);
                 install_scanner_wave(rows);
@@ -3381,7 +3752,7 @@ public:
                 for (auto& [entry_id, matches] : wave_match_map) {
                     match_map[entry_id] = std::move(matches);
                 }
-                active_wave_permit.reset();
+                release_active_wave_checked();
             }
 
             // DOC0274 — release scanner_pg's per-batch seq_caches now that all
@@ -3392,6 +3763,7 @@ public:
             bioseq::storage::destroy_seq_caches(scanner_pg_cache);
             scanner_pg_cache = nullptr;
           } catch (...) {
+            MemoryContextSwitchTo(saved_context);
             cpp_error = std::current_exception();
           }
         }
@@ -3596,6 +3968,11 @@ public:
         match_map.clear();
         output_cursors.clear();
         output_position = -1;
+        if (active_wave_payload_ctx != nullptr) {
+            MemoryContextDelete(active_wave_payload_ctx);
+            active_wave_payload_ctx = nullptr;
+        }
+        active_wave_permit.reset();
         /*
          * DOC0260 §9.5 — the bulk-fetched payloads (and the per-row query
          * payloads) live in batch_payload_ctx and are valid until exactly

@@ -58,6 +58,20 @@ void require_source_resources_balanced(connection_test_context& ctx) {
     require_source_quiescent(ctx);
 }
 
+[[nodiscard]] std::string source_domain_high_entropy_dna4(
+        std::size_t length) {
+    constexpr std::string_view bases = "ACGT";
+    std::string result(length, 'A');
+    std::uint64_t state = 0x6a09e667f3bcc909ull;
+    for (char& base : result) {
+        state ^= state << 13u;
+        state ^= state >> 7u;
+        state ^= state << 17u;
+        base = bases[static_cast<std::size_t>(state & 3u)];
+    }
+    return result;
+}
+
 [[nodiscard]] std::optional<unsigned long long>
 source_boundary_actual_calls(
         std::span<const std::string> plan,
@@ -223,10 +237,17 @@ TEST_CASE("DOC0377 thousands of locator rows share one binding domain",
         "SELECT g, repeat('ACGT',1024)::bioseq.seq('dna4',32) "
         "FROM generate_series(1,1500) AS g;");
 
-    reset_source_counters(ctx);
-    REQUIRE(query_scalar_int(ctx,
+    constexpr auto aggregate_sql =
         "SELECT sum(bioseq.len(s[101:133])) "
-        "FROM doc0377_source_many;") == 48000);
+        "FROM doc0377_source_many;";
+    const auto aggregate_plan = explain_text<false>(ctx, aggregate_sql);
+    REQUIRE(plan_contains(
+        aggregate_plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE_FALSE(plan_contains(
+        aggregate_plan, "Custom Scan (VectorAggNode)"));
+
+    reset_source_counters(ctx);
+    REQUIRE(query_scalar_int(ctx, aggregate_sql) == 48000);
 
     REQUIRE(source_counter(ctx, "registries_created") == 1);
     REQUIRE(source_counter(ctx, "scan_providers_created") == 1);
@@ -531,8 +552,9 @@ TEST_CASE("DOC0377 cursor-held source registries promote or abort with subxact",
         "CREATE TABLE doc0377_source_subxact "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
         "INSERT INTO doc0377_source_subxact VALUES "
-        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));"
-        "BEGIN;");
+        " (1, repeat('ACGT',2048)::bioseq.seq('dna4',32));");
+    // Commit setup writes before entering the subtransaction lifecycle under test.
+    exec_sql(ctx, "BEGIN;");
 
     reset_source_counters(ctx);
     exec_sql(ctx,
@@ -790,11 +812,25 @@ TEST_CASE("DOC0377 nested BatchJoin SliceProject shares and releases source rout
         "CREATE TABLE doc0377_source_batch_target "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
         "CREATE TABLE doc0377_source_batch_query "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+
+    const std::string target_sequence =
+        source_domain_high_entropy_dna4(16384u);
+    const std::string query_sequence = target_sequence.substr(4096u, 4096u);
+    exec_sqlf(ctx,
         "INSERT INTO doc0377_source_batch_target VALUES "
-        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32));"
+        " (1, '{}'::bioseq.seq('dna4',32));"
         "INSERT INTO doc0377_source_batch_query VALUES "
-        " (1, repeat('ACGT',1024)::bioseq.seq('dna4',32));");
+        " (1, '{}'::bioseq.seq('dna4',32));",
+        target_sequence, query_sequence);
+
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT count(*) "
+        "FROM doc0377_source_batch_target AS t "
+        "JOIN doc0377_source_batch_query AS q "
+        "ON mmsearch(t.s, q.s, "
+        " aligner_options(index_read_requirement => 1));") == 1);
+    require_source_resources_balanced(ctx);
 
     constexpr auto sql =
         "SELECT bioseq.len((t.s[0:16] OPERATOR(bioseq.||) q.s[0:16])[4:28]) "
@@ -853,13 +889,30 @@ TEST_CASE("DOC0377 materialized spill aggregate COPY generated and parallel rout
     REQUIRE(source_counter(ctx, "domains_created") == 1);
     require_source_resources_balanced(ctx);
 
-    reset_source_counters(ctx);
-    REQUIRE(query_scalar_int(ctx,
+    constexpr auto ordered_aggregate_sql =
         "SELECT sum(bioseq.len(fragment)) "
         "FROM ("
         " SELECT unnest(array_agg(s[0:128] ORDER BY id)) AS fragment "
         " FROM doc0377_source_boundaries"
-        ") AS aggregate_state;") == 12288);
+        ") AS aggregate_state;";
+    const auto ordered_aggregate_plan =
+        explain_text<false>(ctx, ordered_aggregate_sql);
+    REQUIRE(plan_line_count(ordered_aggregate_plan,
+        "Custom Scan (BioseqSliceProject)") == 1u);
+    const auto ordered_owner = plan_line_index(
+        ordered_aggregate_plan, "Custom Scan (BioseqSliceProject)");
+    const auto ordered_sort = plan_line_index(
+        ordered_aggregate_plan, "Sort");
+    REQUIRE(ordered_owner.has_value());
+    REQUIRE(ordered_sort.has_value());
+    REQUIRE(*ordered_owner < *ordered_sort);
+    REQUIRE(plan_contains(ordered_aggregate_plan,
+        "Sort Key: doc0377_source_boundaries.id"));
+    REQUIRE_FALSE(plan_contains(
+        ordered_aggregate_plan, "Custom Scan (VectorAggNode)"));
+
+    reset_source_counters(ctx);
+    REQUIRE(query_scalar_int(ctx, ordered_aggregate_sql) == 12288);
     REQUIRE(source_counter(ctx, "domains_created") == 1);
     require_source_resources_balanced(ctx);
 
@@ -1270,16 +1323,42 @@ TEST_CASE("DOC0377 production source routes never invoke PostgreSQL off backend"
         "SET bioseq.aligner.vulkan_enabled=off;"
         "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
         "CREATE TABLE doc0377_source_routes "
-        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+    const std::string route_target_sequence =
+        source_domain_high_entropy_dna4(65536u);
+    const std::string route_query_sequence =
+        route_target_sequence.substr(32768u, 128u);
+    exec_sqlf(ctx,
         "INSERT INTO doc0377_source_routes VALUES "
-        " (1, repeat('ACGT',16384)::bioseq.seq('dna4',32)),"
-        " (2, repeat('T',65536)::bioseq.seq('dna4',32));");
+        " (1, '{}'::bioseq.seq('dna4',32)),"
+        " (2, repeat('T',65536)::bioseq.seq('dna4',32));",
+        route_target_sequence);
 
     reset_source_counters(ctx);
     REQUIRE(query_scalar(ctx,
         "SELECT bioseq.to_text(s[32765:32773]) "
-        "FROM doc0377_source_routes WHERE id=1;") == "CGTACGTA");
+        "FROM doc0377_source_routes WHERE id=1;")
+        == route_target_sequence.substr(32765u, 8u));
     REQUIRE(source_counter(ctx, "scan_providers_created") == 1);
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+
+    /* Exercise all four lazy-facade cursor orientations on a non-centered,
+     * non-palindromic subrange.  The planner proof and source counters pin the
+     * diagnostic to a real provider-backed expanded value; the probe flattens
+     * only a separate compact oracle. */
+    constexpr auto orientation_sql =
+        "SELECT bioseq_internal.sequence_facade_orientation_probe("
+        "s[32749:32786]) FROM doc0377_source_routes WHERE id=1;";
+    const auto orientation_plan = explain_text<false>(ctx, orientation_sql);
+    REQUIRE(plan_contains(
+        orientation_plan, "Custom Scan (BioseqSliceProject)"));
+    reset_source_counters(ctx);
+    REQUIRE(query_scalar(ctx, orientation_sql) == "t");
+    REQUIRE(source_counter(ctx, "scan_providers_created") == 1);
+    REQUIRE(source_counter(ctx, "domains_created") >= 1);
+    REQUIRE(source_counter(ctx, "scanner_entries_created") >= 1);
+    REQUIRE(source_counter(ctx, "facade_source_stream_callbacks") > 0);
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 
@@ -1300,16 +1379,19 @@ TEST_CASE("DOC0377 production source routes never invoke PostgreSQL off backend"
         " 'minimizers_per_fragment');") == 2);
     REQUIRE(source_counter(ctx, "standalone_providers_created") >= 1);
     REQUIRE(source_counter(ctx, "domains_created") >= 1);
+    REQUIRE(source_counter(ctx, "scanner_entries_created") >= 1);
+    REQUIRE(source_counter(ctx, "facade_source_stream_callbacks") > 0);
     REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
     require_source_resources_balanced(ctx);
 
     reset_source_counters(ctx);
-    const auto matches = query_int_column(ctx,
+    const auto matches = query_int_column(ctx, fmt::format(
         "SELECT id FROM doc0377_source_routes "
         "WHERE mmsearch(s, "
-        " repeat('ACGT',32)::bioseq.seq('dna4',32), "
+        " '{}'::bioseq.seq('dna4',32), "
         " aligner_options(index_read_requirement => 1)) "
-        "ORDER BY id;");
+        "ORDER BY id;",
+        route_query_sequence));
     REQUIRE(matches == std::vector<long long>{1});
     REQUIRE(source_counter(ctx, "domains_created") >= 1);
     REQUIRE(source_counter(ctx, "scanner_entries_created") >= 1);

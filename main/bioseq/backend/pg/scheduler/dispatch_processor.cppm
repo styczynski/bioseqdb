@@ -808,12 +808,19 @@ public:
         Oid                                              tablespace_oid       = InvalidOid;
         Oid                                              main_relfilenode     = InvalidOid;
         std::int16_t                                     mmsearch_seq_attno   = 0;
+        std::int16_t                                     mmsearch_query_attno = 0;
+        std::uint8_t                                     query_alphabet_code  = 0;
+        std::uint8_t                                     query_storage_unit_byte_width = 0;
         bioseq::storage::seq_caches*                     caches               = nullptr;
         MemoryContext                                    parent_mctx          = nullptr;
         // Borrowed statement snapshot owned by the executor/admin caller.
         // The facade adapter validates registered MVCC state and never
         // changes its registration count.
         Snapshot                                         snapshot             = nullptr;
+        // Borrowed from the BioseqScan that owns this dispatch. Locator-backed
+        // targets must be promoted through this exact statement provider;
+        // ScannerPgContext never closes or retains it independently.
+        bioseq::storage::pg_sequence_source_provider*    source_provider      = nullptr;
         // Borrowed statement-root sink. It is required only by the accepted
         // persisted Shape-V5 Vulkan route and never owns through hot stats.
         ::bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
@@ -822,6 +829,10 @@ public:
         // target_hdrs[i]" — the target then uses an in-memory facade.
         std::array<std::optional<bioseq::storage::seq_locator>,
             kDispatchBatchCapacity>                       target_locators{};
+        // Same-relation per-row query locators. These use the target scan's
+        // exact provider but retain their own physical attno and storage width.
+        std::array<std::optional<bioseq::storage::seq_locator>,
+            kDispatchBatchCapacity>                       query_locators{};
         // DOC0279 §11.3c — per-row columnar rowno (== index query_key) and the
         // user relation oid, so the stored per-fragment index can be assembled.
         std::array<std::int64_t, kDispatchBatchCapacity>  target_rownos{};

@@ -637,6 +637,51 @@ inline void rebuild_one_fragmented_maybe_resident(
     idx.rebuild_one_fragmented(name, store, sequence, backend);
 }
 
+/**
+ * Adapt one source-domain-promoted Datum to the canonical lazy facade for the
+ * duration of an index-build callback.  The read session owns every facade
+ * adapter and is closed before the caller resets the row context containing
+ * the expanded Datum.
+ */
+template <sequence_alphabet Alphabet, class Fn>
+inline void with_promoted_pg_sequence_view(
+        Datum promoted_datum,
+        MemoryContext parent_context,
+        Fn&& callback) {
+    const pg_sequence_descriptor descriptor =
+        bioseq::pg_utils::invoke_pg_as_cpp([promoted_datum] {
+            return classify_and_describe_sequence(promoted_datum);
+        });
+    std::exception_ptr callback_failure;
+    pg_sequence_read_session* volatile session = nullptr;
+    PG_TRY();
+    {
+        auto* local_session = begin_pg_sequence_read_session(parent_context);
+        session = local_session;
+        try {
+            auto* owner = make_pg_sequence_call_owner<Alphabet>(
+                *local_session, promoted_datum, descriptor);
+            std::forward<Fn>(callback)(owner->view());
+            finish_pg_sequence_read_session(local_session, true);
+        } catch (...) {
+            callback_failure = std::current_exception();
+            abort_pg_sequence_read_session_noexcept(local_session);
+        }
+        session = nullptr;
+    }
+    PG_CATCH();
+    {
+        abort_pg_sequence_read_session_noexcept(
+            const_cast<pg_sequence_read_session*>(session));
+        session = nullptr;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    if (callback_failure != nullptr) {
+        std::rethrow_exception(std::move(callback_failure));
+    }
+}
+
 /// Opt-in locator-backed MPF/MPS Format-6 publication bridge.  The existing
 /// persistence GUC selects this production branch without introducing another
 /// feature flag; frozen Format-5 generations remain readable.
@@ -1107,6 +1152,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     Snapshot snap = nullptr;
     BioseqColumnReadState* rs = nullptr;
     MemoryContext inner = nullptr;
+    bioseq::storage::pg_sequence_source_provider* source_provider = nullptr;
     // CRITICAL (DOC0279 §8.6/§11.4): read each row's stored value via the BIOSEQ_COLUMN
     // reader, NOT table_scan_getnextslot. The bioseq table-AM scan ASSEMBLES the full
     // sequence into one varlena, which exceeds MaxAllocSize (~1 GiB) for a multi-Gbp
@@ -1153,6 +1199,12 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                   ur, utd, projected, NIL, work, snap,
                   /*randomAccess=*/false, nullptr);
           });
+      // BeginRead may flush pending writes and replace its snapshot with a
+      // newly registered one.  The provider and the retained Format-6 source
+      // proof must observe that same authoritative snapshot.
+      source_provider =
+          bioseq::storage::create_standalone_pg_sequence_source_provider(
+              ur, rs->snapshot);
       inner = bioseq::pg_utils::invoke_pg_as_cpp([work] {
           return AllocSetContextCreate(
               work, "bioseq_update_index_inner_seq",
@@ -1193,6 +1245,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             }
             if (is_locator_stub(hdr)) {
                 const seq_locator loc = decode_locator_from_stub(hdr);
+                const Datum promoted_datum =
+                    bioseq::storage::promote_pg_sequence_locator(
+                        source_provider, seq_attno, PointerGetDatum(hdr),
+                        inner);
                 pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
                     using SourceBinding =
                         bioseq::storage::postgres_lazy_sequence_binding<S>;
@@ -1201,12 +1257,18 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         seq_attno, loc,
                         SourceBinding::expected_last_fragment_padding(loc),
                         rs->snapshot, caches, inner};
-                    bioseq::storage::with_lazy_postgres<S>(
-                        source_binding,
-                        [layout, rel_oid, rid, seq_attno, &name, loc, rowno,
-                         caches, work, &idx, use_grouped32_generation,
-                         source_binding, backend, requested_provider,
-                         bw](auto lazy_view){
+                    bioseq::pg_utils::invoke_pg_as_cpp([
+                        promoted_datum, inner, layout, rel_oid, rid,
+                        seq_attno, &name, loc, rowno, caches, work, &idx,
+                        use_grouped32_generation, source_binding, backend,
+                        requested_provider, bw] {
+                      with_promoted_pg_sequence_view<
+                          typename SourceBinding::alphabet_type>(
+                          promoted_datum, inner,
+                          [layout, rel_oid, rid, seq_attno, &name, loc, rowno,
+                           caches, work, &idx, use_grouped32_generation,
+                           source_binding, backend, requested_provider,
+                           bw](auto lazy_view){
                             if (layout == SequenceIndexType::INLINE_PER_SEQUENCE) {
                                 auto store = open_sequence_storage(rel_oid, rid.db_oid, rid.tablespace_oid, rid.relfilenode, seq_attno, name, loc, rowno, caches, work);
                                 run_pg_index_build_with_cleanup(store, [&idx, &name, &store, lazy_view] {
@@ -1227,7 +1289,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                                         rowno, backend);
                                 });
                             }
-                        });
+                          });
+                    });
                 });
             } else {
                 if (use_grouped32_generation) {
@@ -1261,6 +1324,16 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         }
         if (any_col) ++written;
       }
+      // Release the last expanded source handle before the provider performs
+      // its checked commit sweep.  Earlier rows were released by their next
+      // per-row reset.
+      bioseq::pg_utils::invoke_pg_as_cpp(
+          [inner] { MemoryContextReset(inner); });
+      bioseq::pg_utils::invoke_pg_as_cpp([source_provider] {
+          bioseq::storage::close_pg_sequence_source_provider(
+              source_provider, /*is_commit=*/true);
+      });
+      source_provider = nullptr;
     } catch (...) {
         row_walk_failure = std::current_exception();
     }
@@ -1277,6 +1350,23 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
             }
         }
     };
+    // Expanded Datums retain their source domains.  The normal path reset the
+    // row context before its checked sweep; do the same before an abort sweep
+    // so no retained domain survives until transaction end.
+    if (inner != nullptr) {
+        MemoryContext context = std::exchange(inner, nullptr);
+        cleanup_leaf([context] {
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [context] { MemoryContextDelete(context); });
+        });
+    }
+    if (source_provider != nullptr) {
+        auto* provider = std::exchange(source_provider, nullptr);
+        cleanup_leaf([provider] {
+            bioseq::storage::close_pg_sequence_source_provider(
+                provider, /*is_commit=*/false);
+        });
+    }
     if (caches != nullptr) {
         cleanup_leaf([caches] {
             bioseq::pg_utils::invoke_pg_as_cpp(
@@ -1295,13 +1385,6 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         cleanup_leaf([snapshot] {
             bioseq::pg_utils::invoke_pg_as_cpp(
                 [snapshot] { UnregisterSnapshot(snapshot); });
-        });
-    }
-    if (inner != nullptr) {
-        MemoryContext context = std::exchange(inner, nullptr);
-        cleanup_leaf([context] {
-            bioseq::pg_utils::invoke_pg_as_cpp(
-                [context] { MemoryContextDelete(context); });
         });
     }
     if (ur != nullptr) {

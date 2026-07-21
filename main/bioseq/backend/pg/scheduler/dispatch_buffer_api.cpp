@@ -31,6 +31,7 @@ import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
 import bioseq.types.pg_compact_sequence;
+import bioseq.storage.scanner_pg;
 
 namespace bioseq::scheduler {
 
@@ -98,6 +99,17 @@ void DispatchBufferRuntime::configure_params(
 void DispatchBufferRuntime::replace_executor_snapshot(
     Snapshot executor_snapshot) {
     as_buffer(impl)->replace_executor_snapshot(executor_snapshot);
+}
+
+void DispatchBufferRuntime::bind_sequence_source_provider(
+        bioseq::storage::pg_sequence_source_provider* provider) {
+    as_buffer(impl)->bind_sequence_source_provider(provider);
+}
+
+void DispatchBufferRuntime::clear_sequence_source_provider_binding() noexcept {
+    if (impl != nullptr) {
+        as_buffer(impl)->clear_sequence_source_provider_binding();
+    }
 }
 
 void DispatchBufferRuntime::bind_persisted_gpu_operation_evidence_sink(
@@ -301,6 +313,17 @@ std::uint8_t DispatchBufferRuntime::mmsearch_alphabet_code() const {
 
 std::uint8_t DispatchBufferRuntime::mmsearch_storage_unit_byte_width() const {
     return as_buffer(impl)->mmsearch_storage_unit_byte_width();
+}
+
+AttrNumber DispatchBufferRuntime::target_sequence_attno() const noexcept {
+    return impl == nullptr
+        ? InvalidAttrNumber : as_buffer(impl)->target_sequence_attno();
+}
+
+AttrNumber DispatchBufferRuntime::per_row_query_sequence_attno() const noexcept {
+    return impl == nullptr
+        ? InvalidAttrNumber
+        : as_buffer(impl)->per_row_query_sequence_attno();
 }
 
 } // namespace bioseq::scheduler

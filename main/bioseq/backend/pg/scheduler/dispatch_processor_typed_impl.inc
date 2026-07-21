@@ -139,10 +139,8 @@ namespace hn = hwy::HWY_NAMESPACE;
 #error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION must name the concrete scanner helper"
 #endif
 [[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
-    compact_sequence_range<compact_sequence_stdc_instance<
-        pgseq_t,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>>& query_seq,
+    bioseq::storage::basic_lazy_sequence_view<
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET> query_view,
     const pgseq_t* target_hdr,
     std::size_t i,
     sequence_size_t target_bp_size,
@@ -3332,13 +3330,146 @@ inline void attach_retained_format6_query_proof(
 }
 #endif
 
+#if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
+/**
+ * Promote one decoded sequence locator through the statement's exact source
+ * provider, then expose only the canonical lazy facade to the algorithm.
+ * The provider remains scan-owned; the read session owns the facade adapter
+ * and is closed only after the callback has joined/drained all algorithm work.
+ */
+template <class Alphabet, class Fn>
+inline void with_source_provider_pg_locator(
+        BatchProcessor::ScannerPgContext& context,
+        const bioseq::storage::seq_locator& locator,
+        const AttrNumber column_attno,
+        const std::uint8_t alphabet_code,
+        const std::uint8_t storage_unit_byte_width,
+        const std::uint16_t last_padding_letters,
+        Fn&& callback) {
+    auto* provider = context.source_provider;
+    auto* registry = provider != nullptr
+        ? provider->lease.registry : nullptr;
+    const bool exact_provider = provider != nullptr
+        && provider->open
+        && provider->kind
+            == bioseq::storage::pg_sequence_source_provider_kind::scan
+        && provider->lease.owned
+        && registry != nullptr
+        && provider->lease.provider_generation == registry->generation
+        && registry->accepting_lookups
+        && !registry->provider_closed
+        && !registry->lease_fault
+        && !registry->xact_ended
+        && registry->backend_thread.is_current()
+        && registry->user_relid == context.user_relid
+        && registry->database_oid == context.db_oid
+        && registry->tablespace_oid == context.tablespace_oid
+        && registry->main_relfilenode == context.main_relfilenode
+        && registry->authoritative_snapshot == context.snapshot
+        && context.snapshot != nullptr
+        && IsMVCCSnapshot(context.snapshot)
+        && context.snapshot->regd_count > 0
+        && column_attno > 0
+        && context.parent_mctx != nullptr;
+    if (!exact_provider) {
+        raise_typed_dispatch_pg_error_as_cpp(
+            ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
+            "locator sequence has no exact statement source-provider route");
+    }
+
+    pgseq_t* locator_stub = bioseq::pg_utils::invoke_pg_as_cpp(
+        [&context, &locator, alphabet_code, storage_unit_byte_width,
+         last_padding_letters] {
+            return bioseq::storage::alloc_locator_stub_in(
+                context.parent_mctx,
+                alphabet_code,
+                storage_unit_byte_width,
+                last_padding_letters,
+                locator.total_bp_size,
+                locator);
+        });
+    const Datum promoted = bioseq::storage::promote_pg_sequence_locator(
+        provider,
+        column_attno,
+        PointerGetDatum(locator_stub),
+        context.parent_mctx);
+    const pg_sequence_descriptor descriptor =
+        bioseq::pg_utils::invoke_pg_as_cpp([promoted] {
+            return ::classify_and_describe_sequence(promoted);
+        });
+    if (!descriptor.alphabet_bound
+        || (descriptor.kind
+                != pg_sequence_datum_kind::expanded_read_only
+            && descriptor.kind
+                != pg_sequence_datum_kind::expanded_read_write)
+        || descriptor.alphabet_code != alphabet_code
+        || descriptor.storage_unit_byte_width != storage_unit_byte_width
+        || descriptor.bp_length != locator.total_bp_size) {
+        raise_typed_dispatch_pg_error_as_cpp(
+            ERRCODE_DATA_CORRUPTED,
+            "source-provider promotion returned mismatched sequence metadata");
+    }
+
+    std::exception_ptr callback_failure;
+    pg_sequence_read_session* volatile session = nullptr;
+    PG_TRY();
+    {
+        auto* local_session = ::begin_pg_sequence_read_session(
+            context.parent_mctx);
+        session = local_session;
+        try {
+            auto* owner = ::make_pg_sequence_call_owner<Alphabet>(
+                *local_session, promoted, descriptor);
+            std::forward<Fn>(callback)(owner->view());
+            ::finish_pg_sequence_read_session(local_session, true);
+        } catch (...) {
+            callback_failure = std::current_exception();
+            ::abort_pg_sequence_read_session_noexcept(local_session);
+        }
+        session = nullptr;
+    }
+    PG_CATCH();
+    {
+        ::abort_pg_sequence_read_session_noexcept(
+            const_cast<pg_sequence_read_session*>(session));
+        session = nullptr;
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+    if (callback_failure != nullptr) {
+        std::rethrow_exception(std::move(callback_failure));
+    }
+}
+
+template <class S, class Fn>
+inline void with_source_provider_pg_target(
+        BatchProcessor::ScannerPgContext& context,
+        const bioseq::storage::seq_locator& locator,
+        const std::uint8_t alphabet_code,
+        const std::uint8_t storage_unit_byte_width,
+        const std::uint16_t last_padding_letters,
+        Fn&& callback) {
+    using alphabet =
+        typename compact_sequence_range<S>::traits::alphabet_type;
+    with_source_provider_pg_locator<alphabet>(
+        context,
+        locator,
+        static_cast<AttrNumber>(context.mmsearch_seq_attno),
+        alphabet_code,
+        storage_unit_byte_width,
+        last_padding_letters,
+        std::forward<Fn>(callback));
+}
+#endif
+
 #if !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER) \
     && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_HELPER_ONLY)
 // Keep the PG-backed scanner row path as a separate function so GCC does not
 // compile the whole typed scheduler as one very large control-flow graph.
 template <class S>
 [[nodiscard]] MatchResultCollection process_scanner_pg_row_typed(
-    compact_sequence_range<S>& query_seq,
+    bioseq::storage::basic_lazy_sequence_view<
+        typename compact_sequence_range<S>::traits::alphabet_type> query_view,
     const pgseq_t* target_hdr,
     const std::size_t i,
     const sequence_size_t target_bp_size,
@@ -3387,8 +3518,8 @@ template <class S>
         row_query_minimizer_proof;
     const BatchProcessor::CpuPreparedQuerySketch*
         retained_prepared_query_sketch = nullptr;
-    const auto unobserved_query_view =
-        bioseq::storage::as_lazy_sequence_view(query_seq);
+    const sequence_size_t query_bp_size = query_view.bp_size();
+    const auto unobserved_query_view = query_view;
     const auto lazy_query_view =
         unobserved_query_view.with_payload_allocation_observer(
             std::addressof(
@@ -3434,32 +3565,22 @@ template <class S>
         // DOC0274 — compute last-fragment padding from the canonical facade
         // geometry. For
         // total_bp = N, padding = ceil(N/lpu)*lpu - N.
-        const std::uint64_t _total_units =
-            (loc_opt->total_bp_size + target_letters_per_unit - 1)
-            / target_letters_per_unit;
-        const std::size_t _padding =
-            static_cast<std::size_t>(
-                _total_units * target_letters_per_unit
-                - loc_opt->total_bp_size);
-        using TargetBinding =
-            bioseq::storage::postgres_lazy_sequence_binding<S>;
-        const TargetBinding target_binding{
-            scanner_pg_ctx->db_oid,
-            scanner_pg_ctx->tablespace_oid,
-            scanner_pg_ctx->main_relfilenode,
-            scanner_pg_ctx->mmsearch_seq_attno,
+        const std::uint64_t _remainder =
+            loc_opt->total_bp_size % target_letters_per_unit;
+        const std::size_t _padding = static_cast<std::size_t>(
+            _remainder == 0u
+                ? 0u : target_letters_per_unit - _remainder);
+        with_source_provider_pg_target<S>(
+            *scanner_pg_ctx,
             *loc_opt,
-            _padding,
-            scanner_pg_ctx->snapshot,
-            scanner_pg_ctx->caches,
-            scanner_pg_ctx->parent_mctx};
-        bioseq::storage::with_lazy_postgres<S>(
-            target_binding,
+            alphabet_code,
+            storage_unit_byte_width,
+            static_cast<std::uint16_t>(_padding),
             [scanner_pg_ctx, cpu_prepared_target, &dispatch_params, &params,
              min_bp, per_row_query_mode, persisted_required,
              &row_query_minimizers,
              &cached_query_minimizers, &row_query_minimizer_proof,
-             &cached_query_minimizer_proof, &query_seq, lazy_query_view,
+             &cached_query_minimizer_proof, query_bp_size, lazy_query_view,
              fq_pg_view, target_bp_size, alphabet_code,
              storage_unit_byte_width, i, &loc_opt, _padding, &pool,
              target_letters_per_unit,
@@ -3542,14 +3663,14 @@ template <class S>
                     : cached_query_minimizer_proof;
             auto ensure_q =
                 [&query_minimizers, &query_minimizer_proof,
-                 &query_seq, lazy_query_view, &idx_params,
+                 query_bp_size, lazy_query_view, &idx_params,
                  &row_consumed_persisted_query_sketch,
                  &query_sketch_host_wall_ns] {
                 if (!query_minimizers.has_value()) {
                     if (!minimizer_query_length_is_representable<
                             MinimapSketchData>(
                                 static_cast<sequence_size_t>(
-                                    query_seq.bp_size()))) {
+                                    query_bp_size))) {
                         raise_typed_dispatch_pg_error_as_cpp(
                             ERRCODE_PROGRAM_LIMIT_EXCEEDED,
                             "query exceeds the 28-bit minimizer position domain");
@@ -3571,7 +3692,7 @@ template <class S>
                         qc,
                         lazy_query_view,
                         0,
-                        static_cast<sequence_size_t>(query_seq.bp_size()),
+                        query_bp_size,
                         static_cast<size_t>(idx_params.window_size),
                         static_cast<size_t>(idx_params.kmer_size),
                         backend,
@@ -3739,7 +3860,7 @@ template <class S>
 										idx_params);
 								if (retained_prepared_query_sketch->query_bp_size
 										!= static_cast<std::uint64_t>(
-											query_seq.bp_size())
+											query_bp_size)
 									|| !pipe::minimizer_range_proof_matches_backend(
 										backend,
 										retained_prepared_query_sketch->proof,
@@ -3772,7 +3893,7 @@ template <class S>
 							} else if (has_shape_v5_reader) {
 							collection = run_aligner_pg_checked(
 								"fragment-native single-query anchor preparation",
-									[&alignment_query_minimizers, &query_seq,
+									[&alignment_query_minimizers, query_bp_size,
 									 &idx_params, prepared_group, fq_pg_view,
 									 ft_pg_view]() -> MatchResultCollection {
 									const std::uint64_t prepare_started_ns =
@@ -3790,11 +3911,11 @@ template <class S>
 													scratch_result.error())));
 									}
 									auto scratch = std::move(*scratch_result);
-									const bioseq::indexing::FragmentSeedQuery request{
-										.minimizers = alignment_query_minimizers,
-										.query_length = static_cast<sequence_size_t>(
-											query_seq.bp_size()),
-										.kmer_size = idx_params.kmer_size,
+					const bioseq::indexing::FragmentSeedQuery request{
+						.minimizers = alignment_query_minimizers,
+						.query_length = static_cast<sequence_size_t>(
+							query_bp_size),
+						.kmer_size = idx_params.kmer_size,
 									};
 									FragmentAnchorWaveCompletion wave_completion{
 										scratch};
@@ -3921,7 +4042,7 @@ template <class S>
 	                                };
 	                                    auto run_fragment_backed_index =
 	                                    [&ensure_q, &loc_opt, &idx_params,
-                         &query_seq, &query_minimizers,
+                         query_bp_size, &query_minimizers,
                          &collection, &assembled,
                          &make_cache_key, fq_pg_view, ft_pg_view,
 		                 target_letters_per_unit,
@@ -3935,9 +4056,8 @@ template <class S>
 	                                    const std::size_t a_lpu =
 	                                        target_letters_per_unit;
 	                                    const std::size_t frag_units =
-	                                        static_cast<std::size_t>(
-	                                            TargetBinding::fragment_bp_capacity())
-	                                        / a_lpu;
+	                                        bioseq::storage::
+	                                            SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
 	                                    const sequence_size_t frag_bp =
 	                                        static_cast<sequence_size_t>(frag_units) * a_lpu;
 	                                    const std::size_t size_u =
@@ -4078,7 +4198,7 @@ template <class S>
 	                                        std::vector<MatchResult>& merged =
 	                                            merged_collection.results;
 	                                        const sequence_size_t query_len =
-	                                            query_seq.bp_size();
+	                                            query_bp_size;
 	                                        for (auto sr : pg_segment_unit_ranges(
 	                                                 total_bp,
 	                                                 query_len,
@@ -4267,7 +4387,7 @@ template <class S>
 	                                                std::vector<MatchResult>& merged =
 	                                                    merged_collection.results;
 	                                                const sequence_size_t query_len =
-	                                                    query_seq.bp_size();
+	                                                    query_bp_size;
 	                                                for (auto sr : pg_segment_unit_ranges(
 	                                                         total_bp,
 	                                                         query_len,
@@ -4397,9 +4517,8 @@ template <class S>
                     const sequence_size_t total_bp = loc_opt->total_bp_size;
                     const std::size_t a_lpu = target_letters_per_unit;
                     const std::size_t frag_units =
-                        static_cast<std::size_t>(
-                            TargetBinding::fragment_bp_capacity())
-                        / a_lpu;
+                        bioseq::storage::
+                            SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT;
                     const sequence_size_t frag_bp =
                         static_cast<sequence_size_t>(frag_units) * a_lpu;
                     const std::size_t size_u =
@@ -4494,7 +4613,7 @@ template <class S>
                         MatchResultCollection merged_collection;
                         std::vector<MatchResult>& merged =
                             merged_collection.results;
-                        const sequence_size_t query_len = query_seq.bp_size();
+                        const sequence_size_t query_len = query_bp_size;
                         for (auto sr : pg_segment_unit_ranges(
                                  total_bp,
                                  query_len,
@@ -6920,27 +7039,18 @@ template <class S>
                 if (batch_identity_valid) {
                     const std::size_t letters_per_unit =
                         facade_letters_per_unit;
-                    const std::uint64_t total_units =
-                        (shared_target_bp_size + letters_per_unit - 1u)
-                        / letters_per_unit;
+                    const std::uint64_t target_remainder =
+                        shared_target_bp_size % letters_per_unit;
                     const std::size_t padding = static_cast<std::size_t>(
-                        total_units * letters_per_unit
-                        - shared_target_bp_size);
-                    using TargetBinding =
-                        bioseq::storage::postgres_lazy_sequence_binding<S>;
-                    const TargetBinding target_binding{
-                        scanner_pg_ctx->db_oid,
-                        scanner_pg_ctx->tablespace_oid,
-                        scanner_pg_ctx->main_relfilenode,
-                        scanner_pg_ctx->mmsearch_seq_attno,
-                        *shared_locator,
-                        padding,
-                        scanner_pg_ctx->snapshot,
-                        scanner_pg_ctx->caches,
-                        scanner_pg_ctx->parent_mctx};
+                        target_remainder == 0u
+                            ? 0u : letters_per_unit - target_remainder);
                     bool native_batch_completed = false;
-                    bioseq::storage::with_lazy_postgres<S>(
-                        target_binding,
+                    with_source_provider_pg_target<S>(
+                        *scanner_pg_ctx,
+                        *shared_locator,
+                        alphabet_code,
+                        storage_unit_byte_width,
+                        static_cast<std::uint16_t>(padding),
                         [shared_target_rowno, shared_target_bp_size,
                          native_group, batch_size, &pool,
                          &native_query_params, &retained_query_sketches,
@@ -7521,11 +7631,19 @@ template <class S>
                 }
                 const pgseq_t* row_query_hdr =
                     per_row_query_mode ? (*per_row_query_hdrs)[i] : query_hdr;
-                if (row_query_hdr == nullptr) {
+                const auto* query_locator = use_scanner_pg
+                    && per_row_query_mode
+                    && scanner_pg_ctx->query_locators[i].has_value()
+                    ? std::addressof(*scanner_pg_ctx->query_locators[i])
+                    : nullptr;
+                const bool has_query_locator_for_pg = query_locator != nullptr;
+                if (row_query_hdr == nullptr && !has_query_locator_for_pg) {
                     continue;
                 }
-                if (row_query_hdr->alphabet_code != alphabet_code
-                    || row_query_hdr->storage_unit_byte_width != storage_unit_byte_width) {
+                if (row_query_hdr != nullptr
+                    && (row_query_hdr->alphabet_code != alphabet_code
+                        || row_query_hdr->storage_unit_byte_width
+                            != storage_unit_byte_width)) {
                     bioseq_log<DBG>("[bioseq] pg: query row query_id={} has typmod ({},{}) mismatching context ({},{}); treating as WHERE FALSE",
                             static_cast<int>(query_ids[i]),
                             static_cast<unsigned>(row_query_hdr->alphabet_code),
@@ -7533,6 +7651,17 @@ template <class S>
                             static_cast<unsigned>(alphabet_code),
                             static_cast<unsigned>(storage_unit_byte_width));
                     continue;
+                }
+                if (has_query_locator_for_pg
+                    && (scanner_pg_ctx->mmsearch_query_attno <= 0
+                        || scanner_pg_ctx->query_alphabet_code != alphabet_code
+                        || !(scanner_pg_ctx->query_storage_unit_byte_width == 1u
+                            || scanner_pg_ctx->query_storage_unit_byte_width == 2u
+                            || scanner_pg_ctx->query_storage_unit_byte_width == 4u
+                            || scanner_pg_ctx->query_storage_unit_byte_width == 8u))) {
+                    raise_typed_dispatch_pg_error_as_cpp(
+                        ERRCODE_DATA_CORRUPTED,
+                        "per-row query locator metadata is invalid");
                 }
                 const pgseq_t* target_hdr = target_hdrs[i];
                 // DOC0274 — when use_scanner_pg=true AND a locator was captured
@@ -7575,8 +7704,12 @@ template <class S>
                     ? static_cast<sequence_size_t>(target_hdr->bp_size)
                     : scanner_pg_ctx->target_locators[i]->total_bp_size;
 
+                const sequence_size_t row_query_bp_size =
+                    has_query_locator_for_pg
+                        ? query_locator->total_bp_size
+                        : static_cast<sequence_size_t>(row_query_hdr->bp_size);
                 const size_t min_bp = std::min<size_t>(
-                    static_cast<size_t>(row_query_hdr->bp_size),
+                    static_cast<size_t>(row_query_bp_size),
                     static_cast<size_t>(target_bp_size));
 
                 Minimap2Params params = apply_size_heuristic(dispatch_params, min_bp);
@@ -7584,16 +7717,10 @@ template <class S>
                 bool consumed_shared_cached_query_proof = false;
                 {
                     if (use_scanner_pg) {
-                        /*
-                         * Build the query compact_sequence_range inside the
-                         * row loop so per-row mmsearch can batch-dispatch
-                         * without broadcasting one row's query to the rest of
-                         * the batch.
-                         */
-                        compact_sequence_range<S> query_seq{*row_query_hdr};
+                        auto execute_scanner = [&](auto query_lazy_view) {
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_SCANNER_HELPER)
-                        collection = BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
-                            query_seq,
+                        return BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
+                            query_lazy_view,
                             target_hdr,
                             i,
                             target_bp_size,
@@ -7609,8 +7736,8 @@ template <class S>
                             scanner_pg_ctx,
                             pool);
 #else
-                        collection = process_scanner_pg_row_typed<S>(
-                            query_seq,
+                        return process_scanner_pg_row_typed<S>(
+                            query_lazy_view,
                             target_hdr,
                             i,
                             target_bp_size,
@@ -7626,6 +7753,55 @@ template <class S>
                             scanner_pg_ctx,
                             pool);
 #endif
+                        };
+                        if (has_query_locator_for_pg) {
+                            const std::size_t query_letters_per_unit =
+                                bioseq::storage::lazy_packed_letters_per_unit(
+                                    scanner_pg_ctx->
+                                        query_storage_unit_byte_width,
+                                    static_cast<std::uint8_t>(
+                                        S::letter_bit_width));
+                            if (query_letters_per_unit == 0u) {
+                                raise_typed_dispatch_pg_error_as_cpp(
+                                    ERRCODE_DATA_CORRUPTED,
+                                    "per-row query locator has invalid packed geometry");
+                            }
+                            const std::uint64_t query_remainder =
+                                query_locator->total_bp_size
+                                    % query_letters_per_unit;
+                            const std::uint64_t query_padding =
+                                query_remainder == 0u
+                                    ? 0u
+                                    : query_letters_per_unit
+                                        - query_remainder;
+                            if (query_padding
+                                > (std::numeric_limits<std::uint16_t>::max)()) {
+                                raise_typed_dispatch_pg_error_as_cpp(
+                                    ERRCODE_DATA_CORRUPTED,
+                                    "per-row query locator padding is invalid");
+                            }
+                            using query_alphabet = typename
+                                compact_sequence_range<S>::traits::alphabet_type;
+                            with_source_provider_pg_locator<query_alphabet>(
+                                *scanner_pg_ctx,
+                                *query_locator,
+                                static_cast<AttrNumber>(
+                                    scanner_pg_ctx->mmsearch_query_attno),
+                                scanner_pg_ctx->query_alphabet_code,
+                                scanner_pg_ctx->
+                                    query_storage_unit_byte_width,
+                                static_cast<std::uint16_t>(query_padding),
+                                [&](auto query_lazy_view) {
+                                    collection = execute_scanner(
+                                        query_lazy_view);
+                                });
+                        } else {
+                            compact_sequence_range<S> query_seq{
+                                *row_query_hdr};
+                            collection = execute_scanner(
+                                bioseq::storage::as_lazy_sequence_view(
+                                    query_seq));
+                        }
                     } else if (target_hdr != nullptr) {
                         collection =
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_EXTERNAL_INMEMORY_HELPER)
@@ -7729,10 +7905,8 @@ template <class S>
 
 [[nodiscard]] MatchResultCollection
 BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
-    compact_sequence_range<compact_sequence_stdc_instance<
-        pgseq_t,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
-        BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>>& query_seq,
+    bioseq::storage::basic_lazy_sequence_view<
+        BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET> query_view,
     const pgseq_t* target_hdr,
     const std::size_t i,
     const sequence_size_t target_bp_size,
@@ -7754,7 +7928,7 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_scanner_pg_row_typed<S>(
-        query_seq,
+        query_view,
         target_hdr,
         i,
         target_bp_size,

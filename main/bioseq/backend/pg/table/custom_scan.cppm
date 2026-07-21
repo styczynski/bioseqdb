@@ -46,6 +46,7 @@ module;
 
 
 extern "C" {
+#include "catalog/pg_aggregate.h"
 #include "commands/extension.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/planmain.h"
@@ -84,7 +85,7 @@ import bioseq.types.pg_compact_sequence; // bioseq.seq varlena layout + typmod h
 import bioseq.storage.manager;                   // DOC0279 §12.5 — seq_locator, is_locator_stub, decode_locator_from_stub, seq_caches
 import bioseq.storage.bucket_math;               // bucket_index_for_size (inline-value placement)
 import bioseq.storage.lazy;              // make_lazy_in_memory (inline-value tally)
-import bioseq.storage.scanner_pg;        // with_lazy_postgres (stub-value tally recompute)
+import bioseq.storage.scanner_pg;        // statement source-provider promotion/lifetime
 import bioseq.indexing.type;             // DOC0279 §11.5 — SequenceIndexType
 import bioseq.indexing.symbol_counts;    // DOC0279 §12.5 — tally_symbol_counts, SymbolCountsIndex
 import bioseq.storage.indexing_pg.chunked_storage;       // IndexStorageSequencePg
@@ -1090,6 +1091,71 @@ static_assert(!bioseq_is_concrete_rte_varno(
  */
 [[nodiscard]] static inline bool is_mmsearch_funcid(Oid funcid, const BioseqStubOids& o) {
 	return funcid == o.mmsearch_oid || funcid == o.mmsearch_with_opts_oid;
+}
+
+struct RawMmsearchOptionsValidation {
+	const BioseqStubOids* oids = nullptr;
+};
+
+static inline bool validate_raw_mmsearch_options_node(
+	Node* node, RawMmsearchOptionsValidation* validation);
+
+static inline void validate_raw_mmsearch_options_query(
+	Query* query, RawMmsearchOptionsValidation* validation)
+{
+	if (query == nullptr) {
+		return;
+	}
+	(void)query_tree_walker(
+		query, validate_raw_mmsearch_options_node, validation,
+		QTW_EXAMINE_RTES_BEFORE);
+}
+
+static inline bool validate_raw_mmsearch_options_node(
+	Node* node, RawMmsearchOptionsValidation* validation)
+{
+	if (node == nullptr) {
+		return false;
+	}
+	if (FuncExpr* expression = pg_node_try_as<FuncExpr>(node);
+		expression != nullptr
+		&& is_mmsearch_funcid(expression->funcid, *validation->oids)
+		&& expression->funcid == validation->oids->mmsearch_with_opts_oid
+		&& list_length(expression->args) == 3) {
+		Node* options = reinterpret_cast<Node*>(
+			list_nth(expression->args, 2));
+		if (contain_volatile_functions(options)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("mmsearch qualifier is not owned by a Bioseq executor"),
+				 errdetail("Volatile aligner options cannot be reduced to a statement-stable executor-owned value."),
+				 errhint("Pass a constant bioseq_aligner_options value as the third argument.")));
+		}
+	}
+	if (IsA(node, RangeTblEntry)) {
+		/* query_tree_walker owns traversal of RTE expressions and subqueries. */
+		return false;
+	}
+	if (IsA(node, Query)) {
+		validate_raw_mmsearch_options_query(
+			castNode(Query, node), validation);
+		return false;
+	}
+	return expression_tree_walker(
+		node, validate_raw_mmsearch_options_node, validation);
+}
+
+/* Called by the top-level planner hook while the analyzed Query still retains
+ * SQL-function volatility.  standard_planner simplification may erase that
+ * provenance by replacing the wrapper with its constant body. */
+export void bioseq_validate_raw_mmsearch_options(Query* query)
+{
+	const BioseqStubOids* oids = try_get_cached_stub_oids();
+	if (query == nullptr || oids == nullptr) {
+		return;
+	}
+	RawMmsearchOptionsValidation validation{oids};
+	validate_raw_mmsearch_options_query(query, &validation);
 }
 
 struct MmsearchQualifierWalker {
@@ -5297,6 +5363,17 @@ static void SliceProjectEnd(CustomScanState* custom) {
 			slice_shutdown_disposition::complete);
 		state->runtime.attachment = nullptr;
 	}
+	/* Core frees this node's ExprContext only after EndCustomScan returns.
+	 * Drain the last projected EOH while both the child provider and our upper
+	 * route are still live; otherwise provider_end and upper_lease_end can both
+	 * sweep before that EOH drops its source-domain reference, leaving only the
+	 * registry token after a cursor CLOSE with no later statement boundary. */
+	if (custom->ss.ps.ps_ResultTupleSlot != nullptr) {
+		ExecClearTuple(custom->ss.ps.ps_ResultTupleSlot);
+	}
+	if (custom->ss.ps.ps_ExprContext != nullptr) {
+		ReScanExprContext(custom->ss.ps.ps_ExprContext);
+	}
 	if (custom->custom_ps != NIL) {
 		ExecEndNode(reinterpret_cast<PlanState*>(linitial(custom->custom_ps)));
 		custom->custom_ps = NIL;
@@ -6719,7 +6796,567 @@ static void slice_project_try_install_base_owner(
 	for (Path* owner : partial_owners) add_partial_path(rel, owner);
 }
 
-static void BioseqSliceProject_CreateUpperPaths(
+struct SliceProjectAggregateRecipePresence {
+	const BioseqStubOids* oids = nullptr;
+	bool found = false;
+};
+
+struct slice_project_aggregate_recipe_presence_visitor {
+	/* Stop at the first planner expression represented by DOC0377 IR. */
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			SliceProjectAggregateRecipePresence& proof) const noexcept {
+		if (slice_project_node_opcode(node.raw(), *proof.oids).has_value()) {
+			proof.found = true;
+			return pg_walk_step::stop;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+/* Report whether an expression tree contains a recognized DOC0377 recipe. */
+[[nodiscard]] static inline bool slice_project_aggregate_expression_has_recipe(
+		Node* expression, const BioseqStubOids* oids) {
+	if (expression == nullptr || oids == nullptr) return false;
+	SliceProjectAggregateRecipePresence proof{.oids = oids};
+	slice_project_aggregate_recipe_presence_visitor visitor;
+	pg_walk_expression_including_root(expression, proof, visitor);
+	return proof.found;
+}
+
+struct SliceProjectAggregateArgumentProof {
+	const BioseqStubOids* oids = nullptr;
+	Relids available_relids = nullptr;
+	bool saw_sequence_var = false;
+	bool invalid = false;
+};
+
+struct slice_project_aggregate_argument_visitor {
+	/* Prove that every Var belongs to the aggregate input relation. */
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			SliceProjectAggregateArgumentProof& proof) const noexcept {
+		if (node.try_as<PlaceHolderVar>() != nullptr
+			|| node.try_as<Param>() != nullptr) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (Var* var = node.try_as<Var>()) {
+			if (!bioseq_is_concrete_rte_varno(var->varno)
+				|| !bms_is_member(static_cast<int>(var->varno),
+					proof.available_relids)
+				|| var->varattno <= 0 || var->varlevelsup != 0
+				|| !bms_is_empty(var->varnullingrels)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+			if (var->vartype == proof.oids->bioseq_seq_type_oid) {
+				proof.saw_sequence_var = true;
+			}
+			return pg_walk_step::skip_subtree;
+		}
+		return pg_walk_step::descend;
+	}
+};
+
+/* Accept only parallel-safe aggregate inputs rooted in a sequence Var. */
+[[nodiscard]] static inline bool slice_project_aggregate_argument_is_safe(
+		PlannerInfo* root, Relids available_relids, Node* expression,
+		const BioseqStubOids* oids, bool require_sequence_var = true) {
+	if (root == nullptr || available_relids == nullptr
+		|| expression == nullptr || oids == nullptr
+		|| contain_agg_clause(expression)
+		|| contain_window_function(expression)
+		|| contain_subplans(expression)
+		|| expression_returns_set(expression)
+		|| contain_volatile_functions(expression)
+		|| !is_parallel_safe(root, expression)) return false;
+	SliceProjectAggregateArgumentProof proof{
+		.oids = oids, .available_relids = available_relids};
+	slice_project_aggregate_argument_visitor visitor;
+	pg_walk_expression_including_root(expression, proof, visitor);
+	return !proof.invalid
+		&& (!require_sequence_var || proof.saw_sequence_var);
+}
+
+struct SliceProjectAggregateInputProof {
+	PlannerInfo* root = nullptr;
+	const BioseqStubOids* oids = nullptr;
+	Relids available_relids = nullptr;
+	List* candidates = NIL;
+	List* input_expressions = NIL;
+	List* visited_aggregates = NIL;
+	bool saw_recipe = false;
+	bool invalid = false;
+};
+
+/* Append one structurally distinct whole aggregate-argument expression. */
+static inline void slice_project_add_unique_aggregate_candidate(
+		SliceProjectAggregateInputProof& proof, Node* expression) {
+	for (Node* candidate : PList<Node>(proof.candidates)) {
+		if (equal(candidate, expression)) return;
+	}
+	proof.candidates = lappend(proof.candidates, expression);
+}
+
+/* Retain every ordinary argument expression so raw Vars needed by resjunk
+ * ORDER BY carriers are published through the lower owner as well. */
+static inline void slice_project_add_unique_aggregate_input(
+		SliceProjectAggregateInputProof& proof, Node* expression) {
+	for (Node* input : PList<Node>(proof.input_expressions)) {
+		if (equal(input, expression)) return;
+	}
+	proof.input_expressions = lappend(
+		proof.input_expressions, expression);
+}
+
+struct slice_project_aggregate_input_visitor {
+	/* Collect movable whole arguments while enforcing aggregate barriers. */
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			SliceProjectAggregateInputProof& proof) const {
+		if (node.tag() == T_GroupingFunc
+			|| node.tag() == T_WindowFunc
+			|| node.tag() == T_SubPlan) {
+			return pg_walk_step::skip_subtree;
+		}
+		Aggref* aggregate = node.try_as<Aggref>();
+		if (aggregate == nullptr) return pg_walk_step::descend;
+		if (aggregate->agglevelsup != 0
+			|| list_member_ptr(proof.visited_aggregates, aggregate)) {
+			return pg_walk_step::skip_subtree;
+		}
+		proof.visited_aggregates = lappend(
+			proof.visited_aggregates, aggregate);
+
+		List* aggregate_candidates = NIL;
+		bool malformed_arguments = false;
+		bool other_argument_is_unsafe = false;
+		for (Node* raw_argument : PList<Node>(aggregate->args)) {
+			TargetEntry* argument = pg_node_try_as<TargetEntry>(raw_argument);
+			if (argument == nullptr || argument->expr == nullptr) {
+				malformed_arguments = true;
+				continue;
+			}
+			Node* expression = reinterpret_cast<Node*>(argument->expr);
+			other_argument_is_unsafe = other_argument_is_unsafe
+				|| contain_agg_clause(expression)
+				|| contain_window_function(expression)
+				|| contain_subplans(expression)
+				|| expression_returns_set(expression)
+				|| contain_volatile_functions(expression);
+			if (slice_project_aggregate_expression_has_recipe(
+					expression, proof.oids)) {
+				aggregate_candidates = lappend(
+					aggregate_candidates, expression);
+			}
+		}
+		bool barrier_has_recipe = false;
+		for (Node* direct : PList<Node>(aggregate->aggdirectargs)) {
+			barrier_has_recipe = barrier_has_recipe
+				|| slice_project_aggregate_expression_has_recipe(
+					direct, proof.oids);
+		}
+		if (aggregate->aggfilter != nullptr) {
+			barrier_has_recipe = barrier_has_recipe
+				|| slice_project_aggregate_expression_has_recipe(
+					reinterpret_cast<Node*>(aggregate->aggfilter), proof.oids);
+		}
+		if (aggregate_candidates == NIL && !barrier_has_recipe) {
+			return pg_walk_step::skip_subtree;
+		}
+		proof.saw_recipe = true;
+		/* FILTER controls whether ordinary arguments are evaluated.  Direct
+		 * arguments and ordered-set/hypothetical aggregates have group-level
+		 * rather than per-input-row semantics.  None may cross this Agg node. */
+		if (malformed_arguments || aggregate->aggkind != AGGKIND_NORMAL
+			|| aggregate->aggdirectargs != NIL
+			|| aggregate->aggfilter != nullptr || barrier_has_recipe
+			|| other_argument_is_unsafe) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		/* Validate every ordinary input, including resjunk ORDER BY carriers,
+		 * against the same sole source relation.  The owner copies the complete
+		 * input PathTarget, so these expressions retain their original carrier
+		 * positions and sort-group wiring. */
+		for (Node* raw_argument : PList<Node>(aggregate->args)) {
+			TargetEntry* argument = pg_node_try_as<TargetEntry>(raw_argument);
+			Node* expression = reinterpret_cast<Node*>(argument->expr);
+			if (!slice_project_aggregate_argument_is_safe(
+					proof.root, proof.available_relids, expression,
+					proof.oids, false)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+			slice_project_add_unique_aggregate_input(proof, expression);
+		}
+		for (Node* expression : PList<Node>(aggregate_candidates)) {
+			if (!slice_project_aggregate_argument_is_safe(
+					proof.root, proof.available_relids, expression,
+					proof.oids)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+			/* Publish the exact argument expression, never its TargetEntry.  The
+			 * Aggref therefore retains its resno/ressortgroupref and aggorder
+			 * wiring while setrefs maps only the argument to the owner output. */
+			slice_project_add_unique_aggregate_candidate(proof, expression);
+		}
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+/* Resolve relation identity from the sole source-owning scan rather than an
+ * upper SortPath's parent RelOptInfo (upper relations intentionally have no
+ * base relids).  Only target-preserving unary containers may be crossed: this
+ * keeps every ordered-aggregate carrier and its PathTarget sortgroupref intact. */
+[[nodiscard]] static inline Relids slice_project_aggregate_source_relids(
+		Path* path) noexcept {
+	while (path != nullptr) {
+		if (slice_project_is_bioseq_scan_path(path)) {
+			return path->parent != nullptr && path->parent->relids != nullptr
+				&& bms_num_members(path->parent->relids) == 1
+				? path->parent->relids : nullptr;
+		}
+		Path* child = nullptr;
+		if (IsA(path, ProjectionPath)) {
+			child = reinterpret_cast<ProjectionPath*>(path)->subpath;
+		} else if (IsA(path, SortPath)) {
+			child = reinterpret_cast<SortPath*>(path)->subpath;
+		} else if (IsA(path, IncrementalSortPath)) {
+			child = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
+		} else if (IsA(path, MaterialPath)) {
+			child = reinterpret_cast<MaterialPath*>(path)->subpath;
+		} else {
+			return nullptr;
+		}
+		if (child == nullptr
+			|| !slice_project_targets_match(path->pathtarget,
+				child->pathtarget)) return nullptr;
+		path = child;
+	}
+	return nullptr;
+}
+
+/* Discover every supported DOC0377 argument consumed by one AggPath. */
+[[nodiscard]] static inline SliceProjectAggregateInputProof
+slice_project_collect_aggregate_inputs(
+		PlannerInfo* root, AggPath* aggregate,
+		const BioseqStubOids* oids) {
+	SliceProjectAggregateInputProof proof{
+		.root = root,
+		.oids = oids,
+		.available_relids = aggregate != nullptr
+			? slice_project_aggregate_source_relids(aggregate->subpath)
+			: nullptr,
+	};
+	if (aggregate == nullptr || aggregate->path.pathtarget == nullptr
+		|| aggregate->path.pathtarget->exprs == NIL
+		|| proof.available_relids == nullptr) {
+		proof.invalid = true;
+		return proof;
+	}
+	slice_project_aggregate_input_visitor visitor;
+	pg_walk_expression_including_root(
+		reinterpret_cast<Node*>(aggregate->path.pathtarget->exprs),
+		proof, visitor);
+	if (!proof.invalid && aggregate->qual != NIL) {
+		pg_walk_expression_including_root(
+			reinterpret_cast<Node*>(aggregate->qual), proof, visitor);
+	}
+	return proof;
+}
+
+/* Report whether a path spine crosses a Gather or GatherMerge boundary. */
+[[nodiscard]] static inline bool slice_project_path_tree_has_exchange(
+		Path* path) noexcept {
+	if (path == nullptr) return false;
+	if (IsA(path, GatherPath) || IsA(path, GatherMergePath)) return true;
+	if (IsA(path, NestPath)) {
+		auto* join = &reinterpret_cast<NestPath*>(path)->jpath;
+		return slice_project_path_tree_has_exchange(join->outerjoinpath)
+			|| slice_project_path_tree_has_exchange(join->innerjoinpath);
+	}
+	if (IsA(path, MergePath)) {
+		auto* join = &reinterpret_cast<MergePath*>(path)->jpath;
+		return slice_project_path_tree_has_exchange(join->outerjoinpath)
+			|| slice_project_path_tree_has_exchange(join->innerjoinpath);
+	}
+	if (IsA(path, HashPath)) {
+		auto* join = &reinterpret_cast<HashPath*>(path)->jpath;
+		return slice_project_path_tree_has_exchange(join->outerjoinpath)
+			|| slice_project_path_tree_has_exchange(join->innerjoinpath);
+	}
+	if (IsA(path, CustomPath)) {
+		for (Path* child : PList<Path>(
+				reinterpret_cast<CustomPath*>(path)->custom_paths)) {
+			if (slice_project_path_tree_has_exchange(child)) return true;
+		}
+		return false;
+	}
+	Path* unary = nullptr;
+	if (IsA(path, ProjectionPath)) {
+		unary = reinterpret_cast<ProjectionPath*>(path)->subpath;
+	} else if (IsA(path, ProjectSetPath)) {
+		unary = reinterpret_cast<ProjectSetPath*>(path)->subpath;
+	} else if (IsA(path, SortPath)) {
+		unary = reinterpret_cast<SortPath*>(path)->subpath;
+	} else if (IsA(path, IncrementalSortPath)) {
+		unary = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
+	} else if (IsA(path, MaterialPath)) {
+		unary = reinterpret_cast<MaterialPath*>(path)->subpath;
+	} else if (IsA(path, MemoizePath)) {
+		unary = reinterpret_cast<MemoizePath*>(path)->subpath;
+	} else if (IsA(path, UniquePath)) {
+		unary = reinterpret_cast<UniquePath*>(path)->subpath;
+	}
+	if (unary != nullptr) return slice_project_path_tree_has_exchange(unary);
+	List* children = NIL;
+	if (IsA(path, AppendPath)) {
+		children = reinterpret_cast<AppendPath*>(path)->subpaths;
+	} else if (IsA(path, MergeAppendPath)) {
+		children = reinterpret_cast<MergeAppendPath*>(path)->subpaths;
+	}
+	for (Path* child : PList<Path>(children)) {
+		if (slice_project_path_tree_has_exchange(child)) return true;
+	}
+	return false;
+}
+
+/* Build the lower SliceProject that materializes aggregate arguments lazily. */
+[[nodiscard]] static inline Path* slice_project_build_aggregate_input_owner(
+		PlannerInfo* root, AggPath* aggregate,
+		SliceProjectAggregateInputProof const& proof) {
+	Path* source = aggregate == nullptr ? nullptr : aggregate->subpath;
+	Relids source_relids = slice_project_aggregate_source_relids(source);
+	if (root == nullptr || source == nullptr || source->parent == nullptr
+		|| source->param_info != nullptr || proof.candidates == NIL
+		|| proof.oids == nullptr
+		|| source_relids == nullptr
+		|| !bms_equal(source_relids, proof.available_relids)
+		|| !slice_project_path_tree_has_bioseq_scan(source)) return nullptr;
+
+	PathTarget* lower_target = copy_pathtarget(source->pathtarget);
+	/* Aggref arguments remain owned by the parent aggregate PathTarget.  Keep
+	 * only structural equality across the setrefs boundary: neither later
+	 * child-target processing nor the SliceProject codec may share those exact
+	 * mutable Node objects with the parent Aggref. */
+	List* owned_candidates = static_cast<List*>(copyObject(proof.candidates));
+	List* owned_inputs = static_cast<List*>(
+		copyObject(proof.input_expressions));
+	List* required = NIL;
+	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	for (Node* input : PList<Node>(owned_inputs)) {
+		required = list_concat(required,
+			pull_var_clause(input, pull_flags));
+	}
+	/* The copied source target retains ordered carriers (notably the resjunk
+	 * id Var) and all existing sortgrouprefs.  Append only any missing raw Vars
+	 * on private copies before adding the exact lazy argument expressions. */
+	add_new_columns_to_pathtarget(lower_target,
+		static_cast<List*>(copyObject(required)));
+	add_new_columns_to_pathtarget(lower_target, owned_candidates);
+	set_pathtarget_cost_width(root, lower_target);
+	SliceProjectIrBuilder builder{
+		.oids = proof.oids,
+		/* Aggregate inputs are internal executor values, not client output. */
+		.command_type = CMD_UNKNOWN,
+	};
+	if (!slice_project_discover_target(lower_target, builder)
+		|| !is_parallel_safe(
+			root, reinterpret_cast<Node*>(lower_target->exprs))) return nullptr;
+
+	PathTarget* support_target = copy_pathtarget(source->pathtarget);
+	add_new_columns_to_pathtarget(support_target,
+		static_cast<List*>(copyObject(required)));
+	set_pathtarget_cost_width(root, support_target);
+
+	Path* child = nullptr;
+	if (slice_project_is_bioseq_scan_path(source)) {
+		child = slice_project_tag_source_child(
+			source, support_target, builder);
+	} else {
+		bool tagged_source = false;
+		Path* private_child = slice_project_clone_mutable_path_spine(source);
+		private_child = slice_project_tag_owned_path_tree(
+			private_child, builder, tagged_source);
+		if (!tagged_source) return nullptr;
+		child = reinterpret_cast<Path*>(create_projection_path(
+			root, private_child->parent, private_child, support_target));
+	}
+	if (child == nullptr || child->param_info != nullptr
+		|| !pathkeys_contained_in(source->pathkeys, child->pathkeys)
+		|| !pathkeys_contained_in(child->pathkeys, source->pathkeys)) {
+		return nullptr;
+	}
+
+	const double rows = std::max(0.0, child->rows);
+	const double metadata_per_row = cpu_operator_cost * static_cast<double>(
+		std::min<std::uint64_t>(builder.piece_boundaries, UINT32_MAX));
+	const double boundary_per_row = cpu_operator_cost * static_cast<double>(
+		std::min<std::uint64_t>(builder.planned_symbols, UINT32_MAX));
+	auto* owner = makeNode(CustomPath);
+	owner->path.pathtype = T_CustomScan;
+	owner->path.parent = source->parent;
+	owner->path.pathtarget = lower_target;
+	owner->path.param_info = child->param_info;
+	owner->path.parallel_aware = child->parallel_aware;
+	owner->path.parallel_safe = child->parallel_safe;
+	owner->path.parallel_workers = child->parallel_workers;
+	owner->path.rows = child->rows;
+	/* AggPath already charges evaluation of its arguments.  This wrapper only
+	 * adds source-owner metadata overhead; charging the argument twice would
+	 * distort serial/partial aggregate selection. */
+	owner->path.startup_cost = child->startup_cost;
+	owner->path.total_cost = child->total_cost
+		+ rows * (metadata_per_row + boundary_per_row);
+	owner->path.pathkeys = child->pathkeys;
+	owner->flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	owner->custom_paths = list_make1(child);
+	owner->custom_private = list_make5(
+		slice_project_header(builder), copyObject(builder.expressions),
+		copyObject(builder.nodes), copyObject(builder.records),
+		copyObject(builder.output_bindings));
+	owner->custom_restrictinfo = NIL;
+	owner->methods = &bioseq_slice_project_path_methods();
+
+	return reinterpret_cast<Path*>(owner);
+}
+
+struct SliceProjectAggregatePathRewrite {
+	Path* path = nullptr;
+	bool changed = false;
+	bool unsafe = false;
+};
+
+/* Detect an eager semantic alternative that this AggPath rewrite cannot own. */
+[[nodiscard]] static inline bool
+slice_project_non_aggregate_path_has_recipe(
+		Path* path, const BioseqStubOids* oids) {
+	if (path == nullptr || oids == nullptr) return false;
+	if (path->pathtarget != nullptr && path->pathtarget->exprs != NIL
+		&& slice_project_aggregate_expression_has_recipe(
+			reinterpret_cast<Node*>(path->pathtarget->exprs), oids)) {
+		return true;
+	}
+	List* quals = NIL;
+	if (IsA(path, GroupPath)) {
+		quals = reinterpret_cast<GroupPath*>(path)->qual;
+	} else if (IsA(path, GroupingSetsPath)) {
+		quals = reinterpret_cast<GroupingSetsPath*>(path)->qual;
+	} else if (IsA(path, MinMaxAggPath)) {
+		quals = reinterpret_cast<MinMaxAggPath*>(path)->quals;
+	}
+	return quals != NIL
+		&& slice_project_aggregate_expression_has_recipe(
+				reinterpret_cast<Node*>(quals), oids);
+}
+
+/* Clone one supported raw-input AggPath over its new SliceProject owner. */
+[[nodiscard]] static inline SliceProjectAggregatePathRewrite
+slice_project_rewrite_aggregate_path(
+		PlannerInfo* root, UpperRelationKind stage, Path* path,
+		const BioseqStubOids* oids) {
+	if (path == nullptr) return {.path = path};
+	if (!IsA(path, AggPath)) {
+		return {
+			.path = path,
+			.unsafe = slice_project_non_aggregate_path_has_recipe(path, oids),
+		};
+	}
+	auto* aggregate = reinterpret_cast<AggPath*>(path);
+	if (aggregate->path.pathtarget == nullptr) {
+		return {.path = path, .unsafe = true};
+	}
+	if (DO_AGGSPLIT_COMBINE(aggregate->aggsplit)) return {.path = path};
+	const bool supported_split =
+		(stage == UPPERREL_PARTIAL_GROUP_AGG
+			&& aggregate->aggsplit == AGGSPLIT_INITIAL_SERIAL)
+		|| (stage == UPPERREL_GROUP_AGG
+			&& aggregate->aggsplit == AGGSPLIT_SIMPLE);
+	SliceProjectAggregateInputProof proof =
+		slice_project_collect_aggregate_inputs(root, aggregate, oids);
+	if (!proof.saw_recipe) return {.path = path};
+	if (!supported_split || proof.invalid || proof.candidates == NIL
+		|| (stage == UPPERREL_GROUP_AGG
+			&& slice_project_path_tree_has_exchange(aggregate->subpath))) {
+		return {.path = path, .unsafe = true};
+	}
+	Path* owner = slice_project_build_aggregate_input_owner(
+		root, aggregate, proof);
+	if (owner == nullptr) return {.path = path, .unsafe = true};
+
+	auto* clone = makeNode(AggPath);
+	*clone = *aggregate;
+	clone->subpath = owner;
+	const Cost startup_delta = (aggregate->aggstrategy == AGG_SORTED
+		|| aggregate->aggstrategy == AGG_MIXED)
+		? owner->startup_cost - aggregate->subpath->startup_cost
+		: owner->total_cost - aggregate->subpath->total_cost;
+	clone->path.startup_cost += startup_delta;
+	clone->path.total_cost += owner->total_cost
+		- aggregate->subpath->total_cost;
+	return {
+		.path = reinterpret_cast<Path*>(clone),
+		.changed = true,
+	};
+}
+
+struct SliceProjectAggregatePathListRewrite {
+	List* paths = NIL;
+	bool changed = false;
+	bool unsafe = false;
+};
+
+/* Copy-on-write rewrite one complete planner path list or reject it whole. */
+[[nodiscard]] static inline SliceProjectAggregatePathListRewrite
+slice_project_rewrite_aggregate_path_list(
+		PlannerInfo* root, UpperRelationKind stage, List* paths,
+		const BioseqStubOids* oids) {
+	SliceProjectAggregatePathListRewrite result;
+	for (Path* path : PList<Path>(paths)) {
+		SliceProjectAggregatePathRewrite rewritten =
+			slice_project_rewrite_aggregate_path(root, stage, path, oids);
+		if (rewritten.unsafe) {
+			result.unsafe = true;
+			return result;
+		}
+		result.paths = lappend(result.paths, rewritten.path);
+		result.changed = result.changed || rewritten.changed;
+	}
+	return result;
+}
+
+/* Atomically install safe aggregate-input owners and refresh cheapest paths. */
+static inline void slice_project_try_install_aggregate_input_owners(
+		PlannerInfo* root, UpperRelationKind stage, RelOptInfo* output_rel) {
+	const BioseqStubOids* oids = try_get_cached_stub_oids();
+	if (oids == nullptr) return;
+	SliceProjectAggregatePathListRewrite ordinary =
+		slice_project_rewrite_aggregate_path_list(
+			root, stage, output_rel->pathlist, oids);
+	SliceProjectAggregatePathListRewrite partial;
+	if (stage == UPPERREL_PARTIAL_GROUP_AGG) {
+		partial = slice_project_rewrite_aggregate_path_list(
+			root, stage, output_rel->partial_pathlist, oids);
+	}
+	if (ordinary.unsafe || partial.unsafe
+		|| (!ordinary.changed && !partial.changed)) return;
+	if (ordinary.changed) output_rel->pathlist = ordinary.paths;
+	if (partial.changed) output_rel->partial_pathlist = partial.paths;
+	if (ordinary.changed) {
+		output_rel->cheapest_startup_path = nullptr;
+		output_rel->cheapest_total_path = nullptr;
+		output_rel->cheapest_unique_path = nullptr;
+		output_rel->cheapest_parameterized_paths = NIL;
+		set_cheapest(output_rel);
+	}
+}
+
+/* Install SliceProject ownership at the relevant upper-planner stages. */
+static inline void BioseqSliceProject_CreateUpperPaths(
 		PlannerInfo* root, UpperRelationKind stage,
 		RelOptInfo* input_rel, RelOptInfo* output_rel, void*) {
 	if (!EnableBioseqColumnCustomScan || root == nullptr
@@ -6727,7 +7364,13 @@ static void BioseqSliceProject_CreateUpperPaths(
 		|| output_rel->reltarget == nullptr
 		|| root->parse == nullptr || root->parse->hasRowSecurity
 		|| root->parse->commandType != CMD_SELECT) return;
-	if (!(stage == UPPERREL_GROUP_AGG || stage == UPPERREL_WINDOW
+	if (stage == UPPERREL_PARTIAL_GROUP_AGG
+		|| stage == UPPERREL_GROUP_AGG) {
+		slice_project_try_install_aggregate_input_owners(
+			root, stage, output_rel);
+		return;
+	}
+	if (!(stage == UPPERREL_WINDOW
 		|| stage == UPPERREL_DISTINCT || stage == UPPERREL_ORDERED
 		|| stage == UPPERREL_FINAL)) return;
 	/*
@@ -17754,7 +18397,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		FlushWriteStateWithNewSnapshot(relationOid, &bioseqScanState->snapshot,
 									   &bioseqScanState->snapshotRegisteredByUs);
 	}
-	if (runtime.lazy_source_projection || runtime.locator_passthrough) {
+	const bool owns_mmsearch_source = owned_mmsearch_quals != NIL;
+	if (runtime.lazy_source_projection || runtime.locator_passthrough
+		|| owns_mmsearch_source) {
 		runtime.lazy_source_provider =
 			bioseq::storage::create_pg_sequence_source_provider(
 				cscanstate->ss.ss_currentRelation, bioseqScanState->snapshot);
@@ -17763,6 +18408,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("Bioseq source provider is unavailable")));
 		}
+		runtime.buffer.bind_sequence_source_provider(
+			runtime.lazy_source_provider);
 	}
 
 	/*
@@ -19016,6 +19663,7 @@ static void batch_join_release_executor_resources_checked(
 	bioseq::pg_utils::invoke_pg_as_cpp([&runtime] {
 		runtime.buffer.reset_join_runtime_for_rescan();
 	});
+	runtime.buffer.clear_sequence_source_provider_binding();
 	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
 		if (query.slot != nullptr) {
 			TupleTableSlot* finished = query.slot;
@@ -19068,6 +19716,7 @@ static void batch_join_abandon_executor_resources_after_error(
 		return;
 	}
 	runtime.buffer.abandon_join_runtime_after_pg_error_noexcept();
+	runtime.buffer.clear_sequence_source_provider_binding();
 	for (BioseqBatchJoinQueryTuple& query : runtime.query_tuples) {
 		query.slot = nullptr;
 		query.tuple = nullptr;
@@ -19903,6 +20552,8 @@ static void BioseqBatchJoin_BeginCustomScan(
 		}
 		BioseqScanState* target_bioseq_state =
 			BioseqScanState::from_custom_scan_state(target_custom_state);
+		BioseqScanRuntime& target_scan_runtime =
+			bioseq_runtime(target_bioseq_state);
 		Snapshot target_snapshot = target_bioseq_state->snapshot;
 		if (target_snapshot == nullptr
 			|| !IsMVCCSnapshot(target_snapshot)
@@ -20144,6 +20795,8 @@ static void BioseqBatchJoin_BeginCustomScan(
 			target_relation->rd_locator.relNumber,
 			target_relation,
 			target_snapshot);
+		runtime->buffer.bind_sequence_source_provider(
+			target_scan_runtime.lazy_source_provider);
 		runtime->buffer.configure_mmsearch_join(
 			runtime->target_relation_oid,
 			runtime->target_storage_seq_attno,
@@ -21758,6 +22411,95 @@ static void promote_slice_project_sources(
 	}
 }
 
+struct MmsearchOutputSourceRestore {
+	std::array<AttrNumber, 2u> attnos{InvalidAttrNumber, InvalidAttrNumber};
+	std::array<Datum, 2u> datums{};
+	std::size_t count = 0u;
+};
+
+static MmsearchOutputSourceRestore capture_mmsearch_output_sources(
+		BioseqScanRuntime& runtime,
+		TupleTableSlot* slot) {
+	MmsearchOutputSourceRestore restore{};
+	if (runtime.lazy_source_provider == nullptr || slot == nullptr) {
+		return restore;
+	}
+	slot_getallattrs(slot);
+	const std::array<AttrNumber, 2u> candidates{
+		runtime.buffer.target_sequence_attno(),
+		runtime.buffer.per_row_query_sequence_attno(),
+	};
+	for (const AttrNumber attno : candidates) {
+		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts) continue;
+		bool duplicate = false;
+		for (std::size_t prior = 0u; prior < restore.count; ++prior) {
+			duplicate = duplicate || restore.attnos[prior] == attno;
+		}
+		if (duplicate || slot->tts_isnull[attno - 1]) continue;
+		restore.attnos[restore.count] = attno;
+		restore.datums[restore.count] = slot->tts_values[attno - 1];
+		++restore.count;
+	}
+	return restore;
+}
+
+static void promote_mmsearch_output_sources(
+		BioseqScanRuntime& runtime,
+		TupleTableSlot* slot,
+		MemoryContext output_context,
+		const MmsearchOutputSourceRestore& restore) {
+	if (runtime.lazy_source_provider == nullptr || slot == nullptr
+		|| output_context == nullptr) {
+		return;
+	}
+	for (std::size_t index = 0u; index < restore.count; ++index) {
+		const AttrNumber attno = restore.attnos[index];
+		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts) continue;
+		const Datum source = restore.datums[index];
+		if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source))) continue;
+
+		/* ExecCopySlotMinimalTuple may short-pack this STORAGE=extended value.
+		 * Promotion and the locator ABI require the ordinary four-byte varlena
+		 * header, so detoast in the output lifetime before inspecting it. */
+		MemoryContext previous = MemoryContextSwitchTo(output_context);
+		pgseq_t* flat = nullptr;
+		try {
+			flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(source));
+			MemoryContextSwitchTo(previous);
+		} catch (...) {
+			MemoryContextSwitchTo(previous);
+			throw;
+		}
+		if (static_cast<std::size_t>(VARSIZE(flat)) < pgseq_t::header_bytes()) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("buffered bioseq output source is truncated"),
+				 errdetail("attribute=%d bytes=%zu",
+					static_cast<int>(attno),
+					static_cast<std::size_t>(VARSIZE(flat)))));
+		}
+		if (!bioseq::storage::is_locator_stub(flat)) continue;
+		slot->tts_values[attno - 1] =
+			bioseq::storage::promote_pg_sequence_locator(
+				runtime.lazy_source_provider,
+				attno,
+				PointerGetDatum(flat),
+				output_context);
+	}
+}
+
+static void restore_mmsearch_output_sources(
+		TupleTableSlot* slot,
+		const MmsearchOutputSourceRestore& restore) noexcept {
+	if (slot == nullptr) return;
+	for (std::size_t index = 0u; index < restore.count; ++index) {
+		const AttrNumber attno = restore.attnos[index];
+		if (attno > 0 && attno <= slot->tts_tupleDescriptor->natts) {
+			slot->tts_values[attno - 1] = restore.datums[index];
+		}
+	}
+}
+
 static TupleTableSlot *
 Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			   ExecScanAccessMtd accessMtd,
@@ -21845,21 +22587,67 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 											   next->sequence_rowno,
 											   bioseqScanState->snapshot);
 
-			/*
-			 * Re-install the buffered scan slot as the current scan
-			 * tuple so Var references (e.g. `a`, `c`) resolve off the
-			 * right row.
-			 */
-			econtext->ecxt_scantuple = next->scan_slot_copy;
+			/* The alignment path retains locator stubs in its buffered row. Promote
+			 * only for this output projection, then restore the stable locator so a
+			 * second match from the same row never points into a reset per-tuple
+			 * context. */
+			const MmsearchOutputSourceRestore source_restore =
+				capture_mmsearch_output_sources(
+					runtime, next->scan_slot_copy);
+			TupleTableSlot* projected = nullptr;
+			std::exception_ptr projection_error;
+			MemoryContext saved_context = CurrentMemoryContext;
+			ErrorData* volatile projection_pg_error = nullptr;
 
-			ProjectionInfo* proj = ExecBuildProjectionInfo(
-				runtime.newtargetlist,
-				econtext,
-				node->ps.ps_ResultTupleSlot,
-				&(node->ps),
-				next->scan_slot_copy->tts_tupleDescriptor);
+			/* PostgreSQL ERROR skips C++ destructors. Keep the immutable restore
+			 * snapshot outside the setjmp region and restore the locator slot on
+			 * normal return, C++ unwind, and PG longjmp alike. */
+			PG_TRY();
+			{
+				try {
+					promote_mmsearch_output_sources(
+						runtime,
+						next->scan_slot_copy,
+						econtext->ecxt_per_tuple_memory,
+						source_restore);
 
-			return ExecProject(proj);
+					/* Re-install the buffered scan slot as the current scan
+					 * tuple so Var references resolve off the right row. */
+					econtext->ecxt_scantuple = next->scan_slot_copy;
+
+					ProjectionInfo* proj = ExecBuildProjectionInfo(
+						runtime.newtargetlist,
+						econtext,
+						node->ps.ps_ResultTupleSlot,
+						&(node->ps),
+						next->scan_slot_copy->tts_tupleDescriptor);
+					projected = ExecProject(proj);
+					restore_mmsearch_output_sources(
+						next->scan_slot_copy, source_restore);
+				} catch (...) {
+					MemoryContextSwitchTo(saved_context);
+					restore_mmsearch_output_sources(
+						next->scan_slot_copy, source_restore);
+					projection_error = std::current_exception();
+				}
+			}
+			PG_CATCH();
+			{
+				MemoryContextSwitchTo(saved_context);
+				restore_mmsearch_output_sources(
+					next->scan_slot_copy, source_restore);
+				projection_pg_error = CopyErrorData();
+				FlushErrorState();
+			}
+			PG_END_TRY();
+			if (projection_pg_error != nullptr) {
+				ErrorData* exact_error = projection_pg_error;
+				throw bioseq::pg_utils::PostgresErrorAsCpp{exact_error};
+			}
+			if (projection_error != nullptr) {
+				std::rethrow_exception(projection_error);
+			}
+			return projected;
 		}
 
 		/* ---- Phase 1: writing ---- */
@@ -22389,6 +23177,17 @@ BioseqColumnScan_ExecCustomScan(CustomScanState *node)
 	try {
 		BioseqScanState* state = BioseqScanState::from_custom_scan_state(node);
 		BioseqScanRuntime& runtime = bioseq_runtime(state);
+		if (runtime.mmsearch_null_input) {
+			/* Strict mmsearch with a NULL owned query is statement-empty.  Stop
+			 * before registering an alignment node or touching the table scan;
+			 * a later non-NULL Param rescan clears this flag and registers lazily. */
+			if (runtime.alignment_registration.registered()) {
+				bioseq::pg::alignment_execution::
+					mark_alignment_pass_fully_drained(
+						runtime.alignment_registration);
+			}
+			return ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+		}
 		bioseq::pg::alignment_execution::ensure_alignment_node_registered(
 			runtime.alignment_registration);
 		result = CustomExecScan(
@@ -22467,16 +23266,6 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 	if (bioseqScanState->runtime != nullptr) {
 		BioseqScanRuntime* runtime_ptr =
 			static_cast<BioseqScanRuntime*>(bioseqScanState->runtime);
-		if (runtime_ptr->lazy_source_provider != nullptr) {
-			bioseq::storage::close_pg_sequence_source_provider(
-				runtime_ptr->lazy_source_provider, /*is_commit=*/true);
-			runtime_ptr->lazy_source_provider = nullptr;
-		}
-		if (runtime_ptr->lazy_trace_attachment != nullptr) {
-			release_slice_trace_attachment(
-				runtime_ptr->lazy_trace_attachment);
-			runtime_ptr->lazy_trace_attachment = nullptr;
-		}
 		/*
 		 * Clear MinimalTuple slots while the per-query ResourceOwner
 		 * is still alive — Postgres tuple-desc refcounts are tracked
@@ -22492,6 +23281,42 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 		 * delete safely once the context begins to tear down.
 		 */
 		runtime_ptr->buffer.clear_slots();
+
+		/* Drop every tuple-visible reference before resetting the expression
+		 * contexts that own promoted EOHs. Result and scan slots may alias in a
+		 * projection-free shape, so clear the physical slot exactly once. */
+		TupleTableSlot* result_slot = node->ss.ps.ps_ResultTupleSlot;
+		TupleTableSlot* scan_slot = node->ss.ss_ScanTupleSlot;
+		if (result_slot != nullptr) {
+			ExecClearTuple(result_slot);
+		}
+		if (scan_slot != nullptr && scan_slot != result_slot) {
+			ExecClearTuple(scan_slot);
+		}
+
+		/* Locator promotion uses the ordinary executor ExprContext. The private
+		 * runtime context can independently retain evaluated Params, so drain it
+		 * too while the exact source provider remains live. */
+		ExprContext* expression_context = node->ss.ps.ps_ExprContext;
+		if (expression_context != nullptr) {
+			ReScanExprContext(expression_context);
+		}
+		if (bioseqScanState->css_RuntimeContext != nullptr
+			&& bioseqScanState->css_RuntimeContext != expression_context) {
+			ReScanExprContext(bioseqScanState->css_RuntimeContext);
+		}
+
+		if (runtime_ptr->lazy_source_provider != nullptr) {
+			bioseq::storage::close_pg_sequence_source_provider(
+				runtime_ptr->lazy_source_provider, /*is_commit=*/true);
+			runtime_ptr->lazy_source_provider = nullptr;
+		}
+		runtime_ptr->buffer.clear_sequence_source_provider_binding();
+		if (runtime_ptr->lazy_trace_attachment != nullptr) {
+			release_slice_trace_attachment(
+				runtime_ptr->lazy_trace_attachment);
+			runtime_ptr->lazy_trace_attachment = nullptr;
+		}
 		runtime_ptr->cleanup_done = true;
 	}
 
@@ -22500,14 +23325,15 @@ BioseqColumnScan_EndCustomScan(CustomScanState *node)
 	 */
 	bioseqScanState->attrNeeded.free();
 
-	/*
-	 * clean out the tuple table
-	 */
-	if (node->ss.ps.ps_ResultTupleSlot)
-	{
-		ExecClearTuple(node->ss.ps.ps_ResultTupleSlot);
+	/* A failed/partial Begin may not have allocated runtime state. */
+	if (bioseqScanState->runtime == nullptr) {
+		TupleTableSlot* result_slot = node->ss.ps.ps_ResultTupleSlot;
+		TupleTableSlot* scan_slot = node->ss.ss_ScanTupleSlot;
+		if (result_slot != nullptr) ExecClearTuple(result_slot);
+		if (scan_slot != nullptr && scan_slot != result_slot) {
+			ExecClearTuple(scan_slot);
+		}
 	}
-	ExecClearTuple(node->ss.ss_ScanTupleSlot);
 
 	/*
 	 * close heap scan

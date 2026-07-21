@@ -53,6 +53,20 @@ struct PlanTreeMutatorContext
 	bool vectorizedAggregation;
 };
 
+/* BioseqSliceProject publishes ordinary scalar Datums.  Its CustomName is the
+ * registered CustomScanMethods identity used when planned trees are rebuilt,
+ * so require that exact name rather than treating every CustomScan as a
+ * vector-column producer. */
+[[nodiscard]] static inline bool IsBioseqSliceProjectCustomScan(
+		const Plan* plan) noexcept {
+	if (plan == nullptr || !IsA(plan, CustomScan)) return false;
+	const auto* custom_scan = reinterpret_cast<const CustomScan*>(plan);
+	return custom_scan->methods != nullptr
+		&& custom_scan->methods->CustomName != nullptr
+		&& strcmp(custom_scan->methods->CustomName,
+			"BioseqSliceProject") == 0;
+}
+
 /*
  * FlatCopyPlan clones the body of a plan node of the given concrete type.
  * Replaces the classic FLATCOPY token-pasting macro with a type-checked
@@ -252,6 +266,24 @@ struct plan_tree_mutator {
 			if (!bioseq_enable_vectorization)
 				return pg_plan_mutation::descend();
 
+			/* SliceProject owns lazy sequence expressions but deliberately
+			 * publishes the resulting arguments through PostgreSQL's scalar slot
+			 * ABI.  Rewriting this Agg would make vector transition functions cast
+			 * those scalar Datums to VectorColumn*.  Recurse through the owner with
+			 * scalar aggregation state so its BioseqScan child receives a false
+			 * vectorized-aggregate flag, then restore the caller's traversal state. */
+			if (IsBioseqSliceProjectCustomScan(agg_node->plan.lefttree)) {
+				bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg has BioseqSliceProject child -- keeping scalar aggregate");
+				const bool saved_vectorized_aggregation =
+					plan_tree_context.vectorizedAggregation;
+				plan_tree_context.vectorizedAggregation = false;
+				Plan* scalar_aggregate =
+					cursor.descend_children(&agg_node->plan);
+				plan_tree_context.vectorizedAggregation =
+					saved_vectorized_aggregation;
+				return pg_plan_mutation::with(scalar_aggregate);
+			}
+
 			if (agg_node->plan.lefttree->type == T_CustomScan)
 			{
 				bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() Agg has CustomScan child");
@@ -422,6 +454,12 @@ BioseqColumnPlannerHook(Query* parse,
 					ParamListInfo bound_params)
 {
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() entered");
+
+	/* Validate the analyzed tree before standard_planner (or another planner
+	 * hook) can inline a volatile SQL wrapper around aligner_options into an
+	 * otherwise indistinguishable Const.  Ownership is allowed only for a
+	 * statement-stable third argument. */
+	bioseq_validate_raw_mmsearch_options(parse);
 
 	PlannedStmt* stmt;
 	if (PreviousPlannerHook) {

@@ -581,7 +581,8 @@ template<class Alphabet>
 template <class Alphabet>
 [[nodiscard]] std::uint8_t const *
 facade_ptr_at(pg_sequence_facade_state const &state,
-              bioseq::storage::sequence_transform transform,
+              bool mirror_coordinates, bool reverse_output,
+              bool complement_output,
               bioseq::storage::sequence_size_t from, std::size_t count,
               std::span<std::uint8_t> output) {
   if (from > state.descriptor.bp_length ||
@@ -589,11 +590,10 @@ facade_ptr_at(pg_sequence_facade_state const &state,
     return nullptr;
   }
   const std::uint64_t to = from + count;
-  const bool reverse = bioseq::storage::has_reverse(transform);
   const std::uint64_t base_from =
-      !reverse ? from : state.descriptor.bp_length - to;
+      !mirror_coordinates ? from : state.descriptor.bp_length - to;
   const std::uint64_t base_to =
-      !reverse ? to : state.descriptor.bp_length - from;
+      !mirror_coordinates ? to : state.descriptor.bp_length - from;
   bool ok = false;
   if (state.flat != nullptr) {
 #ifdef BIOSEQ_TEST_INDEXES
@@ -611,10 +611,10 @@ facade_ptr_at(pg_sequence_facade_state const &state,
   if (!ok) {
     return nullptr;
   }
-  if (reverse) {
+  if (reverse_output) {
     std::reverse(output.begin(), output.begin() + count);
   }
-  if (bioseq::storage::has_complement(transform)) {
+  if (complement_output) {
     for (std::size_t index = 0; index < count; ++index) {
       output[index] = complement_rank<Alphabet>(output[index]);
     }
@@ -627,16 +627,22 @@ template <class Alphabet, bool IsReversed, bool WriteReversed>
 facade_ptr_at_callback(void const *opaque,
                        bioseq::storage::sequence_size_t from, std::size_t count,
                        std::span<std::uint8_t> output) {
-  constexpr auto transform =
-      IsReversed
-          ? (WriteReversed
-                 ? bioseq::storage::sequence_transform::complemented
-                 : bioseq::storage::sequence_transform::reverse_complement)
-          : (WriteReversed ? bioseq::storage::sequence_transform::reversed
-                           : bioseq::storage::sequence_transform::identity);
+  /* `IsReversed` changes the logical coordinate system, while
+   * `WriteReversed` changes only the order in which that logical interval is
+   * written.  Folding both booleans into one sequence_transform used to mirror
+   * the requested coordinate range for (false,true), and failed to mirror it
+   * for (true,true).  Canonical minimizer cursors exercise both orientations,
+   * so a source-backed target then lost its first valid seeds even though an
+   * identity text read was correct.  Keep coordinate mirroring, output order,
+   * and complementation as the three independent parts of the facade ABI. */
+  constexpr bool reverse_output =
+      (IsReversed && !WriteReversed) || (!IsReversed && WriteReversed);
   return facade_ptr_at<Alphabet>(
-      *static_cast<pg_sequence_facade_state const *>(opaque), transform, from,
-      count, output);
+      *static_cast<pg_sequence_facade_state const *>(opaque),
+      /*mirror_coordinates=*/IsReversed,
+      reverse_output,
+      /*complement_output=*/IsReversed,
+      from, count, output);
 }
 
 [[nodiscard]] inline bioseq::storage::sequence_size_t
@@ -739,6 +745,50 @@ inline void release_facade_owner(void* opaque) noexcept
 
 inline void release_facade_backing_noop(void*) noexcept {}
 
+#ifdef BIOSEQ_TEST_INDEXES
+[[nodiscard]] inline bool
+facade_probe_tree_contains_source(piece_edge edge) noexcept {
+  if (!edge) {
+    return false;
+  }
+  if (edge.node->node_kind == piece_node::kind::source) {
+    return true;
+  }
+  if (edge.node->node_kind != piece_node::kind::branch) {
+    return false;
+  }
+  return facade_probe_tree_contains_source(edge.node->payload.branch.left) ||
+      facade_probe_tree_contains_source(edge.node->payload.branch.right);
+}
+
+template <bool IsReversed, bool WriteReversed, class View>
+void record_orientation_matches(
+    View baseline, View flat_facade, View source_facade,
+    std::size_t from, std::size_t to, std::uint8_t& match_mask) {
+  constexpr std::size_t kProbeSymbols = 11u;
+  if (to - from != kProbeSymbols) {
+    return;
+  }
+  std::array<std::uint8_t, kProbeSymbols> expected{};
+  std::array<std::uint8_t, kProbeSymbols> flat_observed{};
+  std::array<std::uint8_t, kProbeSymbols> source_observed{};
+  baseline.template to_encoded_into<IsReversed, WriteReversed>(
+      expected, from, to);
+  flat_facade.template to_encoded_into<IsReversed, WriteReversed>(
+      flat_observed, from, to);
+  source_facade.template to_encoded_into<IsReversed, WriteReversed>(
+      source_observed, from, to);
+  constexpr std::uint8_t orientation =
+      (IsReversed ? 2u : 0u) | (WriteReversed ? 1u : 0u);
+  if (flat_observed == expected) {
+    match_mask |= static_cast<std::uint8_t>(1u << orientation);
+  }
+  if (source_observed == expected) {
+    match_mask |= static_cast<std::uint8_t>(1u << (4u + orientation));
+  }
+}
+#endif
+
 } // namespace
 
 export template <sequence_alphabet Alphabet>
@@ -785,6 +835,127 @@ make_pg_sequence_call_owner(
         session, result, &release_facade_owner<Alphabet>);
     return result;
 }
+
+#ifdef BIOSEQ_TEST_INDEXES
+/* Execute the exact four-orientation facade ABI against both adapter branches.
+ * The expanded argument must still contain a real provider-backed source leaf;
+ * a separately flattened copy is only the compact in-memory oracle. */
+export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
+    Datum input) {
+  constexpr std::size_t kFrom = 3u;
+  constexpr std::size_t kTo = 14u;
+  auto const* expanded = get_pg_sequence_expanded_ro(input);
+  const auto source_descriptor = classify_and_describe_sequence(input);
+  const bool expanded_kind =
+      source_descriptor.kind == pg_sequence_datum_kind::expanded_read_only ||
+      source_descriptor.kind == pg_sequence_datum_kind::expanded_read_write;
+  if (expanded == nullptr || !expanded_kind ||
+      !source_descriptor.alphabet_bound ||
+      source_descriptor.bp_length < 2u * kTo + 1u ||
+      !facade_probe_tree_contains_source(
+          expanded == nullptr ? piece_edge{} : expanded->root)) {
+    ereport(ERROR,
+            (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+             errmsg("bioseq facade orientation probe requires a lazy source-backed value"),
+             errdetail("kind=%u alphabet_bound=%s bp_length=%llu source_leaf=%s",
+                       static_cast<unsigned>(source_descriptor.kind),
+                       source_descriptor.alphabet_bound ? "true" : "false",
+                       static_cast<unsigned long long>(
+                           source_descriptor.bp_length),
+                       expanded != nullptr &&
+                               facade_probe_tree_contains_source(expanded->root)
+                           ? "true" : "false"),
+             errhint("Execute the probe over a BioseqSliceProject source slice.")));
+  }
+
+  ExpandedObjectHeader* expanded_header = DatumGetEOHP(input);
+  const Size flat_size = EOH_get_flat_size(expanded_header);
+  auto* flat = static_cast<pgseq_t*>(palloc0(flat_size));
+  EOH_flatten_into(expanded_header, flat, flat_size);
+  const Datum flat_datum = PointerGetDatum(flat);
+  const auto flat_descriptor = classify_and_describe_sequence(flat_datum);
+  if (flat_descriptor.kind != pg_sequence_datum_kind::flat_bound ||
+      !flat_descriptor.alphabet_bound ||
+      flat_descriptor.alphabet_code != source_descriptor.alphabet_code ||
+      flat_descriptor.storage_unit_byte_width !=
+          source_descriptor.storage_unit_byte_width ||
+      flat_descriptor.bp_length != source_descriptor.bp_length) {
+    pfree(flat);
+    ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq facade orientation oracle metadata mismatch")));
+  }
+
+  std::uint8_t match_mask = 0u;
+  std::exception_ptr callback_failure;
+  pg_sequence_read_session* volatile session = nullptr;
+  PG_TRY();
+  {
+    auto* local_session = begin_pg_sequence_read_session(CurrentMemoryContext);
+    session = local_session;
+    try {
+      pgseq_t::dispatch_instance(
+          source_descriptor.alphabet_code,
+          source_descriptor.storage_unit_byte_width,
+          [local_session, input, source_descriptor, flat_datum,
+           flat_descriptor, flat,
+           &match_mask]<class Instance>() {
+            using range = compact_sequence_range<Instance>;
+            using alphabet = typename range::traits::alphabet_type;
+            compact_sequence_range<Instance> baseline_range{*flat};
+            const auto baseline =
+                bioseq::storage::as_lazy_sequence_view(baseline_range);
+            auto* flat_owner = make_pg_sequence_call_owner<alphabet>(
+                *local_session, flat_datum, flat_descriptor);
+            auto* source_owner = make_pg_sequence_call_owner<alphabet>(
+                *local_session, input, source_descriptor);
+            record_orientation_matches<false, false>(
+                baseline, flat_owner->view(), source_owner->view(),
+                kFrom, kTo, match_mask);
+            record_orientation_matches<false, true>(
+                baseline, flat_owner->view(), source_owner->view(),
+                kFrom, kTo, match_mask);
+            record_orientation_matches<true, false>(
+                baseline, flat_owner->view(), source_owner->view(),
+                kFrom, kTo, match_mask);
+            record_orientation_matches<true, true>(
+                baseline, flat_owner->view(), source_owner->view(),
+                kFrom, kTo, match_mask);
+          });
+      finish_pg_sequence_read_session(local_session, true);
+    } catch (...) {
+      callback_failure = std::current_exception();
+      abort_pg_sequence_read_session_noexcept(local_session);
+    }
+    session = nullptr;
+  }
+  PG_CATCH();
+  {
+    abort_pg_sequence_read_session_noexcept(
+        const_cast<pg_sequence_read_session*>(session));
+    session = nullptr;
+    pfree(flat);
+    PG_RE_THROW();
+  }
+  PG_END_TRY();
+  pfree(flat);
+  if (callback_failure != nullptr) {
+    std::rethrow_exception(std::move(callback_failure));
+  }
+  if (match_mask != 0xffu) {
+    ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq facade orientation contract mismatch"),
+             errdetail("flat orientation mask=0x%01x, source orientation "
+                       "mask=0x%01x; bits are "
+                       "identity=1 reverse-write=2 reverse-complement=4 "
+                       "complement-write=8",
+                       static_cast<unsigned>(match_mask & 0x0fu),
+                       static_cast<unsigned>((match_mask >> 4u) & 0x0fu))));
+  }
+  return true;
+}
+#endif
 
 export template <typename T>
 inline constexpr bool is_borrowed_view_result_v =

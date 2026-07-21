@@ -7474,6 +7474,11 @@ struct ChainStage : StageBase<ChainStage<Kernel>, Chain> {
             ScalarPipelineExecutionProof proof{};
             Kernel::call(
                 anchors_span, active_cp, chains_slab, reordered_slab, &proof);
+            /* This receipt is written after the kernel returns, so a zero-hit
+             * negative is attested without claiming scalar score/backtrack
+             * work that the kernel correctly skipped. */
+            proof.record_scalar_chain_stage_completion(
+                static_cast<std::uint64_t>(anchors_span.size()));
             proof_dst->record_scalar_pipeline_execution_proof(proof);
         } else if constexpr (Kernel::emits_simd_chaining_execution_proof) {
             if (proof_dst == nullptr) {

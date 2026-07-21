@@ -3995,6 +3995,35 @@ TEST_CASE("Exact SIMD chaining metadata permits canonical nonzero skip penalty",
     REQUIRE(property->value == "false");
 }
 
+TEST_CASE("scalar chaining trait keeps an empty negative free of score work",
+          "[pipe][scalar][chaining][empty][execution-proof]") {
+    using ::bioseq::chaining::Anchor;
+    using ::bioseq::chaining::Chain;
+    using ::bioseq::chaining::ChainingParams;
+    using ::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType;
+    using ::bioseq::simd::HWY_NAMESPACE::ScalarPipelineExecutionProof;
+    using Kernel =
+        algorithm_traits<ChainingAlgorithmType::SCALAR_MM2>::kernel_type;
+
+    context::context ctx;
+    context::installed_context_scope installed{ctx};
+    auto scope = ctx.push<context::Arena::Chain>();
+    auto chains = ::bioseq::chaining::make_arena_slab<Chain>();
+    auto reordered = ::bioseq::chaining::make_arena_slab<Anchor>();
+    ScalarPipelineExecutionProof proof{};
+    Kernel::call(
+        std::span<const Anchor>{}, ChainingParams{}, chains, reordered,
+        &proof);
+
+    REQUIRE(chains.size() == 0u);
+    REQUIRE(reordered.size() == 0u);
+    REQUIRE(proof.chain_score_calls == 0u);
+    REQUIRE(proof.chain_backtrack_calls == 0u);
+    REQUIRE(proof.chain_anchor_inputs == 0u);
+    REQUIRE(proof.chain_stage_completion_calls == 0u);
+    REQUIRE(proof.chain_stage_completed_anchor_inputs == 0u);
+}
+
 TEST_CASE("DOC0372 SIMD chaining policy is exact by default and explicit in proof metadata",
           "[pipe][doc0372][simd-chaining][policy][proof][metadata]") {
     using ::bioseq::chaining::SimdChainingPolicy;
@@ -4068,6 +4097,7 @@ TEST_CASE("scalar pipeline proof is operation-local and rejects mixed routes",
     recomputed.target_minimizers = target;
     recomputed.record_seed_lookup(400u);
     recomputed.record_scalar_chain(1'200u);
+    recomputed.record_scalar_chain_stage_completion(1'200u);
     recomputed.record_ksw2_call(
         ScalarKsw2Phase::left, 100u, 120u);
     recomputed.record_ksw2_call(
@@ -4108,6 +4138,48 @@ TEST_CASE("scalar pipeline proof is operation-local and rejects mixed routes",
     REQUIRE_FALSE(no_alignment.all_scalar_execution_accepted(
         /*require_target_sketch=*/false,
         /*require_alignment=*/true));
+
+    /* A real zero-anchor scalar chain is an attested negative operation.  Its
+     * successful stage receipt is distinct from score/backtrack work, and it
+     * cannot waive a selected KSW2 alignment requirement. */
+    ScalarPipelineExecutionProof zero_anchor = recomputed;
+    zero_anchor.chain_stage_completion_calls = 0;
+    zero_anchor.chain_stage_completed_anchor_inputs = 0;
+    zero_anchor.chain_score_calls = 0;
+    zero_anchor.chain_backtrack_calls = 0;
+    zero_anchor.chain_anchor_inputs = 0;
+    zero_anchor.ksw2_left_calls = 0;
+    zero_anchor.ksw2_gap_calls = 0;
+    zero_anchor.ksw2_right_calls = 0;
+    zero_anchor.ksw2_input_cell_area = 0;
+    zero_anchor.record_scalar_chain_stage_completion(0u);
+    MatchResultCollection zero_anchor_negative;
+    zero_anchor_negative.record_scalar_pipeline_execution_proof(zero_anchor);
+    REQUIRE(zero_anchor_negative.all_scalar_execution_accepted(
+        /*require_target_sketch=*/true,
+        /*require_alignment=*/false));
+    REQUIRE_FALSE(zero_anchor_negative.all_scalar_execution_accepted(
+        /*require_target_sketch=*/true,
+        /*require_alignment=*/true));
+
+    ScalarPipelineExecutionProof impossible_empty_chain = zero_anchor;
+    impossible_empty_chain.chain_score_calls = 1;
+    impossible_empty_chain.chain_backtrack_calls = 1;
+    MatchResultCollection impossible_negative;
+    impossible_negative.record_scalar_pipeline_execution_proof(
+        impossible_empty_chain);
+    REQUIRE_FALSE(impossible_negative.all_scalar_execution_accepted(
+        /*require_target_sketch=*/true,
+        /*require_alignment=*/false));
+
+    ScalarPipelineExecutionProof missing_chain_receipt = zero_anchor;
+    missing_chain_receipt.chain_stage_completion_calls = 0;
+    MatchResultCollection incomplete_negative;
+    incomplete_negative.record_scalar_pipeline_execution_proof(
+        missing_chain_receipt);
+    REQUIRE_FALSE(incomplete_negative.all_scalar_execution_accepted(
+        /*require_target_sketch=*/true,
+        /*require_alignment=*/false));
 
     MatchResultCollection mixed = complete;
     mixed.exact_simd_query_execution_proof_present = true;

@@ -2859,7 +2859,10 @@ TEST_CASE("DOC0377 source-domain faults unwind every partial lifetime stage",
 
 TEST_CASE("DOC0377 source read ERROR crosses every sequence callback boundary",
           "[seq][source][fault][eoh][lifetime][acceptance]") {
-    auto ctx = fresh_context({"doc0377_source_read_faults"});
+    auto ctx = fresh_context({
+        "doc0377_source_read_faults",
+        "doc0377_source_read_heap",
+    });
     exec_sql(ctx,
         "CREATE TABLE doc0377_source_read_faults "
         " (id int, value bioseq.seq('dna4',32)) USING bioseq; "

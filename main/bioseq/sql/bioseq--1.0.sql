@@ -1904,6 +1904,13 @@ CREATE FUNCTION bioseq_internal.sequence_source_route_alias_probe()
 REVOKE ALL ON FUNCTION
     bioseq_internal.sequence_source_route_alias_probe() FROM PUBLIC;
 
+CREATE FUNCTION bioseq_internal.sequence_facade_orientation_probe(bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_facade_orientation_probe'
+    LANGUAGE C STABLE PARALLEL SAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_facade_orientation_probe(bioseq.seq) FROM PUBLIC;
+
 CREATE FUNCTION bioseq_internal.sequence_source_pre_prepare_probe()
     RETURNS void
     AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_pre_prepare_probe'

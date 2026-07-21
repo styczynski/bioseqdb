@@ -2,6 +2,7 @@
 module;
 
 #include <cstdint>
+#include <exception>
 
 #include "headers/pg_compat.h"
 #include "fmgr_boundary.h"
@@ -25,6 +26,7 @@ import :tree_types;
 import :view_session;
 import :packed_output;
 import :letter;
+import bioseq.pg_utils;
 import bioseq.storage.coordinates;
 
 export [[nodiscard]] inline std::uint64_t sequence_logical_length(Datum input)
@@ -143,7 +145,7 @@ bool seq_check_subscripts(
     return true;
 }
 
-void seq_fetch_subscript(ExprState*, ExprEvalStep* op, ExprContext*)
+inline void seq_fetch_subscript_impl(ExprState*, ExprEvalStep* op, ExprContext*)
 {
     auto* state = op->d.sbsref.state;
     auto* workspace = static_cast<seq_subscript_workspace*>(
@@ -179,6 +181,49 @@ void seq_fetch_subscript(ExprState*, ExprEvalStep* op, ExprContext*)
     }
     *op->resvalue = slice_pg_sequence(container, from, to);
     *op->resnull = false;
+}
+
+/* PostgreSQL invokes sbs_fetch directly from executor expression evaluation,
+ * after the fmgr subscript handler has returned its SubscriptRoutines.  Keep
+ * that actual callback as a no-escape C++ boundary: source reads deliberately
+ * surface PostgreSQL ERROR as PostgresErrorAsCpp only long enough to unwind
+ * their read-session owners.  At this seam the exact ErrorData is transferred
+ * back to PostgreSQL after the exception object and every fetch-local C++
+ * owner have been destroyed. */
+inline void seq_fetch_subscript(ExprState* expression,
+                                ExprEvalStep* op,
+                                ExprContext* context)
+{
+    ErrorData* exact_error = nullptr;
+    bool standard_error = false;
+    bool unknown_error = false;
+    char detail[512] = "std::exception without detail";
+    try {
+        seq_fetch_subscript_impl(expression, op, context);
+        return;
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        exact_error = error.release_error_data();
+    } catch (std::exception const& error) {
+        strlcpy(detail,
+                error.what() == nullptr
+                    ? "std::exception without detail"
+                    : error.what(),
+                sizeof(detail));
+        standard_error = true;
+    } catch (...) {
+        unknown_error = true;
+    }
+    if (exact_error != nullptr) {
+        ReThrowError(exact_error);
+    }
+    ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("bioseq sequence callback raised a C++ exception"),
+             errdetail("%s", unknown_error
+                     ? "unknown non-standard C++ exception"
+                     : (standard_error ? detail
+                                       : "empty C++ exception state"))));
+    pg_unreachable();
 }
 
 void seq_subscript_exec_setup(

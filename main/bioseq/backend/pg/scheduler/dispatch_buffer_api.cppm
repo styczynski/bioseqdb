@@ -28,6 +28,7 @@ import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
 import bioseq.types.pg_compact_sequence;
+import bioseq.storage.scanner_pg;
 
 export namespace bioseq::scheduler {
 
@@ -65,6 +66,13 @@ public:
         Snapshot executor_snapshot);
 
     void replace_executor_snapshot(Snapshot executor_snapshot);
+
+    /* Borrowed statement source authority. The opaque runtime forwards this
+     * exact provider identity to its concrete TupleDispatchBuffer; it never
+     * retains or closes the provider independently. */
+    void bind_sequence_source_provider(
+        bioseq::storage::pg_sequence_source_provider* provider);
+    void clear_sequence_source_provider_binding() noexcept;
 
     void bind_persisted_gpu_operation_evidence_sink(
         bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink);
@@ -130,6 +138,8 @@ public:
     [[nodiscard]] bool coalesce_active() const;
     [[nodiscard]] std::uint8_t mmsearch_alphabet_code() const;
     [[nodiscard]] std::uint8_t mmsearch_storage_unit_byte_width() const;
+    [[nodiscard]] AttrNumber target_sequence_attno() const noexcept;
+    [[nodiscard]] AttrNumber per_row_query_sequence_attno() const noexcept;
 
 private:
     void* impl = nullptr;
