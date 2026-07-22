@@ -248,7 +248,7 @@ void seq_subscript_exec_setup(
 
 } // namespace
 
-export inline Datum seq_subscript_handler_impl(FunctionCallInfo)
+extern "C" PGDLLEXPORT Datum seq_subscript_handler_impl(FunctionCallInfo)
 {
     static const SubscriptRoutines routines = {
         seq_subscript_transform,
@@ -259,11 +259,3 @@ export inline Datum seq_subscript_handler_impl(FunctionCallInfo)
     };
     PG_RETURN_POINTER(&routines);
 }
-
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(seq_subscript_handler);
-PGDLLEXPORT Datum seq_subscript_handler(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_subscript_handler_impl, fcinfo);
-}
-} // extern "C"

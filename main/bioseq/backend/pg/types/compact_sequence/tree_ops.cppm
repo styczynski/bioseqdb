@@ -4650,7 +4650,7 @@ emit_rotation_regression_edge(piece_edge edge) {
 /* Internal lifetime acceptance seam. It deliberately catches recoverable
  * construction errors; impossible release underflow remains a PANIC and is
  * therefore covered by static invariants rather than executed in-process. */
-export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
+extern "C" PGDLLEXPORT Datum piece_tree_self_test_impl(FunctionCallInfo) {
   bool volatile saturation_caught = false;
   bool volatile budget_caught = false;
   bool volatile generation_caught = false;
@@ -4878,11 +4878,3 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   }
   PG_RETURN_BOOL(all_checks_passed);
 }
-
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(piece_tree_self_test);
-PGDLLEXPORT Datum piece_tree_self_test(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&piece_tree_self_test_impl, fcinfo);
-}
-} // extern "C"

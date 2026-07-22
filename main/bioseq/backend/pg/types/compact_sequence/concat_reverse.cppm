@@ -44,13 +44,13 @@ namespace {
 
 } // namespace
 
-export Datum seq_concat_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_concat_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_DATUM(concat_pg_sequences(
         PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)));
 }
 
-export Datum seq_concat_text_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_concat_text_impl(FunctionCallInfo fcinfo)
 {
     text* value = PG_GETARG_TEXT_PP(1);
     const Datum result = concat_text_and_sequence(
@@ -59,7 +59,7 @@ export Datum seq_concat_text_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export Datum text_concat_seq_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum text_concat_seq_impl(FunctionCallInfo fcinfo)
 {
     text* value = PG_GETARG_TEXT_PP(0);
     const Datum result = concat_text_and_sequence(
@@ -68,24 +68,24 @@ export Datum text_concat_seq_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export Datum seq_concat_varchar_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_concat_varchar_impl(FunctionCallInfo fcinfo)
 {
     return seq_concat_text_impl(fcinfo);
 }
 
-export Datum varchar_concat_seq_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum varchar_concat_seq_impl(FunctionCallInfo fcinfo)
 {
     return text_concat_seq_impl(fcinfo);
 }
 
-export Datum seq_reverse_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_reverse_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_DATUM(transform_pg_sequence(
         PG_GETARG_DATUM(0),
         bioseq::storage::sequence_transform::reversed));
 }
 
-export Datum seq_reverse_complement_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_reverse_complement_impl(FunctionCallInfo fcinfo)
 {
     Datum input = PG_GETARG_DATUM(0);
     Datum dispatch = input;
@@ -113,47 +113,3 @@ export Datum seq_reverse_complement_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(transform_pg_sequence(
         input, bioseq::storage::sequence_transform::reverse_complement));
 }
-
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(seq_concat);
-PGDLLEXPORT Datum seq_concat(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_concat_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_concat_text);
-PGDLLEXPORT Datum seq_concat_text(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_concat_text_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(text_concat_seq);
-PGDLLEXPORT Datum text_concat_seq(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&text_concat_seq_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_concat_varchar);
-PGDLLEXPORT Datum seq_concat_varchar(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_concat_varchar_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(varchar_concat_seq);
-PGDLLEXPORT Datum varchar_concat_seq(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&varchar_concat_seq_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_reverse);
-PGDLLEXPORT Datum seq_reverse(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_reverse_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_reverse_complement);
-PGDLLEXPORT Datum seq_reverse_complement(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_reverse_complement_impl, fcinfo);
-}
-} // extern "C"

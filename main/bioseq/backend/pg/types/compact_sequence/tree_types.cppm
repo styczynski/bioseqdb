@@ -15,13 +15,18 @@ export module bioseq.types.pg_compact_sequence:tree_types;
 
 import :flat_abi;
 import :source_abi;
-import :trace;
 import bioseq.storage.bucket_math;
 import bioseq.storage.coordinates;
 import bioseq.storage.size;
 
 export struct piece_tree_arena;
 export struct piece_node;
+
+/* Materialization tracing is owned by :packed_output.  The expanded-object
+ * POD stores only a non-owning type identity here, so a pointer-only forward
+ * declaration keeps tree types earlier than the flattening boundary without
+ * introducing a partition cycle. */
+export struct slice_trace_attachment;
 
 export struct piece_edge {
     piece_tree_arena* arena{};

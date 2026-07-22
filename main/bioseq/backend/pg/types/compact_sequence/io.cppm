@@ -28,7 +28,6 @@ extern "C" {
 export module bioseq.types.pg_compact_sequence:io;
 
 import :flat_abi;
-import :trace;
 import :tree_types;
 import :tree_ops;
 import :view_session;
@@ -390,7 +389,7 @@ export [[nodiscard]] inline Datum make_bound_sequence_from_ascii(
     return PointerGetDatum(pack_ascii_for_target(input, length, target));
 }
 
-export inline Datum seq_typmod_in_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_typmod_in_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     if (ARR_NDIM(array) != 1) {
@@ -437,16 +436,8 @@ export inline Datum seq_typmod_in_impl(FunctionCallInfo fcinfo)
     PG_RETURN_INT32(params.encode());
 }
 
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_in);
 
-PGDLLEXPORT Datum pg_compact_sequence_typmod_in(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_typmod_in_impl, fcinfo);
-}
-} // extern "C"
-
-export inline Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
 {
     const int32_t typmod = PG_GETARG_INT32(0);
     if (typmod < 0) {
@@ -462,16 +453,8 @@ export inline Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
     PG_RETURN_CSTRING(result);
 }
 
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_typmod_out);
 
-PGDLLEXPORT Datum pg_compact_sequence_typmod_out(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_typmod_out_impl, fcinfo);
-}
-} // extern "C"
-
-export inline Datum seq_in_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_in_impl(FunctionCallInfo fcinfo)
 {
     const char* input = PG_GETARG_CSTRING(0);
     const int32_t typmod = PG_GETARG_INT32(2);
@@ -483,7 +466,7 @@ export inline Datum seq_in_impl(FunctionCallInfo fcinfo)
     PG_RETURN_POINTER(pack_ascii_for_target(input, length, target));
 }
 
-export inline Datum seq_out_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_out_impl(FunctionCallInfo fcinfo)
 {
     Datum input = PG_GETARG_DATUM(0);
     const auto provenance = trace_provenance_for(input);
@@ -599,7 +582,7 @@ export [[nodiscard]] inline text* materialize_pg_sequence_text(
     return result;
 }
 
-export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_cast_impl(FunctionCallInfo fcinfo)
 {
     Datum input = PG_GETARG_DATUM(0);
     const int32_t target_typmod = PG_GETARG_INT32(1);
@@ -652,7 +635,7 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
     PG_RETURN_POINTER(result);
 }
 
-export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_send_impl(FunctionCallInfo fcinfo)
 {
     const Datum input = PG_GETARG_DATUM(0);
     const auto provenance = trace_provenance_for(input);
@@ -819,7 +802,7 @@ export inline Datum seq_send_impl(FunctionCallInfo fcinfo)
     PG_RETURN_BYTEA_P(result);
 }
 
-export inline Datum seq_recv_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
 {
     auto* buffer = reinterpret_cast<StringInfo>(PG_GETARG_POINTER(0));
     const int32_t typmod = PG_GETARG_INT32(2);
@@ -921,7 +904,7 @@ export inline Datum seq_recv_impl(FunctionCallInfo fcinfo)
     PG_RETURN_POINTER(result);
 }
 
-export inline Datum seq_len_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_len_impl(FunctionCallInfo fcinfo)
 {
     const auto descriptor = classify_and_describe_sequence_header(
         PG_GETARG_DATUM(0));
@@ -933,7 +916,7 @@ export inline Datum seq_len_impl(FunctionCallInfo fcinfo)
     PG_RETURN_INT64(static_cast<int64_t>(descriptor.bp_length));
 }
 
-export inline Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
 {
     const auto descriptor = classify_and_describe_sequence_header(
         PG_GETARG_DATUM(0));
@@ -955,47 +938,3 @@ export inline Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
     }
     PG_RETURN_INT64(static_cast<int64_t>(units));
 }
-
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_in);
-PGDLLEXPORT Datum pg_compact_sequence_in(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_in_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_out);
-PGDLLEXPORT Datum pg_compact_sequence_out(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_out_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_recv);
-PGDLLEXPORT Datum pg_compact_sequence_recv(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_recv_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_send);
-PGDLLEXPORT Datum pg_compact_sequence_send(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_send_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cast);
-PGDLLEXPORT Datum pg_compact_sequence_cast(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_cast_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_len);
-PGDLLEXPORT Datum pg_compact_sequence_len(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_len_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_unit_len);
-PGDLLEXPORT Datum pg_compact_sequence_unit_len(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_unit_len_impl, fcinfo);
-}
-} // extern "C"

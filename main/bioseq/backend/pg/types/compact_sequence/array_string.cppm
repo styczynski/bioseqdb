@@ -23,7 +23,6 @@ extern "C" {
 export module bioseq.types.pg_compact_sequence:array_string;
 
 import :flat_abi;
-import :trace;
 import :tree_types;
 import :view_session;
 import :packed_output;
@@ -401,7 +400,7 @@ inline void validate_bridge_array_shape(
 
 } // namespace
 
-export inline Datum seq_concat_text_array_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_concat_text_array_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(1);
     const auto literal = text_array_literal(array);
@@ -411,7 +410,7 @@ export inline Datum seq_concat_text_array_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export inline Datum text_array_concat_seq_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum text_array_concat_seq_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     const auto literal = text_array_literal(array);
@@ -421,7 +420,7 @@ export inline Datum text_array_concat_seq_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export inline Datum seq_concat_letter_array_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_concat_letter_array_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(1);
     const auto literal = letter_array_literal(array);
@@ -431,7 +430,7 @@ export inline Datum seq_concat_letter_array_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export inline Datum letter_array_concat_seq_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum letter_array_concat_seq_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     const auto literal = letter_array_literal(array);
@@ -441,7 +440,7 @@ export inline Datum letter_array_concat_seq_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export inline Datum seq_array_length_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_array_length_impl(FunctionCallInfo fcinfo)
 {
     if (PG_GETARG_INT32(1) != 1) {
         PG_RETURN_NULL();
@@ -450,24 +449,24 @@ export inline Datum seq_array_length_impl(FunctionCallInfo fcinfo)
         sequence_logical_length(PG_GETARG_DATUM(0))));
 }
 
-export inline Datum seq_cardinality_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_cardinality_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_INT64(static_cast<std::int64_t>(
         sequence_logical_length(PG_GETARG_DATUM(0))));
 }
 
-export inline Datum seq_to_text_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_to_text_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_TEXT_P(materialize_pg_sequence_text(
         fcinfo, materialization_reason::sql_conversion));
 }
 
-export inline Datum seq_to_varchar_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_to_varchar_impl(FunctionCallInfo fcinfo)
 {
     return seq_to_text_impl(fcinfo);
 }
 
-export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_to_array_impl(FunctionCallInfo fcinfo)
 {
     const Datum input = PG_GETARG_DATUM(0);
     auto const* expanded = VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))
@@ -553,7 +552,7 @@ export inline Datum seq_to_array_impl(FunctionCallInfo fcinfo)
     PG_RETURN_ARRAYTYPE_P(result);
 }
 
-export inline Datum seq_from_letter_array_infer_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_from_letter_array_infer_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     const Datum result = packed_from_letter_array(
@@ -562,7 +561,7 @@ export inline Datum seq_from_letter_array_infer_impl(FunctionCallInfo fcinfo)
     PG_RETURN_DATUM(result);
 }
 
-export inline Datum seq_from_letter_array_named_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_from_letter_array_named_impl(FunctionCallInfo fcinfo)
 {
     ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     text* name_text = PG_GETARG_TEXT_PP(1);
@@ -575,71 +574,3 @@ export inline Datum seq_from_letter_array_named_impl(FunctionCallInfo fcinfo)
     PG_FREE_IF_COPY(array, 0);
     PG_RETURN_DATUM(result);
 }
-
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(seq_concat_text_array);
-PGDLLEXPORT Datum seq_concat_text_array(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_concat_text_array_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(text_array_concat_seq);
-PGDLLEXPORT Datum text_array_concat_seq(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&text_array_concat_seq_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_concat_letter_array);
-PGDLLEXPORT Datum seq_concat_letter_array(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_concat_letter_array_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(letter_array_concat_seq);
-PGDLLEXPORT Datum letter_array_concat_seq(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&letter_array_concat_seq_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_array_length);
-PGDLLEXPORT Datum seq_array_length(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_array_length_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_cardinality);
-PGDLLEXPORT Datum seq_cardinality(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_cardinality_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_to_text);
-PGDLLEXPORT Datum seq_to_text(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_to_text_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_to_varchar);
-PGDLLEXPORT Datum seq_to_varchar(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_to_varchar_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_to_array);
-PGDLLEXPORT Datum seq_to_array(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_to_array_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_from_letter_array_infer);
-PGDLLEXPORT Datum seq_from_letter_array_infer(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_from_letter_array_infer_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_from_letter_array_named);
-PGDLLEXPORT Datum seq_from_letter_array_named(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_from_letter_array_named_impl, fcinfo);
-}
-} // extern "C"

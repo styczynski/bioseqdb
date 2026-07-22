@@ -211,37 +211,37 @@ export [[nodiscard]] inline int seq_compare_internal(FunctionCallInfo fcinfo)
     return result;
 }
 
-export inline Datum seq_cmp_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_cmp_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_INT32(seq_compare_internal(fcinfo));
 }
 
-export inline Datum seq_lt_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_lt_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(seq_compare_internal(fcinfo) < 0);
 }
 
-export inline Datum seq_le_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_le_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(seq_compare_internal(fcinfo) <= 0);
 }
 
-export inline Datum seq_eq_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_eq_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(seq_compare_internal(fcinfo) == 0);
 }
 
-export inline Datum seq_ne_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_ne_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(seq_compare_internal(fcinfo) != 0);
 }
 
-export inline Datum seq_ge_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_ge_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(seq_compare_internal(fcinfo) >= 0);
 }
 
-export inline Datum seq_gt_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_gt_impl(FunctionCallInfo fcinfo)
 {
     PG_RETURN_BOOL(seq_compare_internal(fcinfo) > 0);
 }
@@ -272,72 +272,16 @@ export [[nodiscard]] inline std::uint64_t seq_hash_internal(
     return result;
 }
 
-export inline Datum seq_hash_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_hash_impl(FunctionCallInfo fcinfo)
 {
     const std::uint64_t hash = seq_hash_internal(fcinfo, 0u);
     PG_RETURN_INT32(static_cast<std::int32_t>(
         static_cast<std::uint32_t>(hash ^ (hash >> 32u))));
 }
 
-export inline Datum seq_hash_extended_impl(FunctionCallInfo fcinfo)
+extern "C" PGDLLEXPORT Datum seq_hash_extended_impl(FunctionCallInfo fcinfo)
 {
     const auto seed = static_cast<std::uint64_t>(PG_GETARG_INT64(1));
     PG_RETURN_INT64(static_cast<std::int64_t>(
         seq_hash_internal(fcinfo, seed)));
 }
-
-extern "C" {
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_cmp);
-PGDLLEXPORT Datum pg_compact_sequence_cmp(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_cmp_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_lt);
-PGDLLEXPORT Datum pg_compact_sequence_lt(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_lt_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_le);
-PGDLLEXPORT Datum pg_compact_sequence_le(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_le_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_eq);
-PGDLLEXPORT Datum pg_compact_sequence_eq(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_eq_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ne);
-PGDLLEXPORT Datum pg_compact_sequence_ne(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_ne_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_ge);
-PGDLLEXPORT Datum pg_compact_sequence_ge(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_ge_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(pg_compact_sequence_gt);
-PGDLLEXPORT Datum pg_compact_sequence_gt(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_gt_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_hash);
-PGDLLEXPORT Datum seq_hash(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_hash_impl, fcinfo);
-}
-
-CXX_PG_FUNCTION_INFO_V1(seq_hash_extended);
-PGDLLEXPORT Datum seq_hash_extended(PG_FUNCTION_ARGS)
-{
-    return bioseq_invoke_pg_sequence_fmgr_boundary(&seq_hash_extended_impl, fcinfo);
-}
-} // extern "C"
