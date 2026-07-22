@@ -147,6 +147,8 @@ constexpr std::string_view kMinimizersPerFragmentIndex =
     bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME;
 constexpr std::string_view kMinimizersPerSequenceIndex =
     bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
+constexpr std::string_view kDoc0377SlicedNoIndexAlgorithm =
+    "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced";
 
 enum class JustIndexSetupKind {
     Scalar,
@@ -226,6 +228,12 @@ struct E2eInput {
     bool truth_is_reverse = false;
     std::int64_t target_bp = 0;
 };
+
+[[nodiscard]] constexpr bool doc0377_sliced_pipeline_proof_config_valid(
+        std::string_view algorithm,
+        const bool cigar_projection) noexcept {
+    return algorithm != kDoc0377SlicedNoIndexAlgorithm || cigar_projection;
+}
 
 struct ColdNoIndexPolicyAbsenceEvidence {
     std::int64_t target_rows = -1;
@@ -7945,10 +7953,14 @@ void load_e2e_query_table(const it::connection_test_context& c,
         const std::int64_t target_coordinate_origin)
 {
     const std::int64_t concat_join = target_coordinate_origin + 16;
+    // The benchmark connection intentionally keeps the default search_path.
+    // Sequence operators live in the extension-owned bioseq schema, so use
+    // PostgreSQL's schema-qualified operator syntax just like production SQL
+    // that does not opt in to `bioseq` on its search path.
     return fmt::format(
         "SELECT q.id, t.header, {} "
         "FROM {} t JOIN e2e_queries q ON mmsearch("
-        "t.seq[{}:{}] || t.seq[{}:], "
+        "t.seq[{}:{}] OPERATOR(bioseq.||) t.seq[{}:], "
         "q.seq[0:], aligner_options(index_read_requirement => {})) "
         "ORDER BY q.id, t.header",
         projection, target_table, target_coordinate_origin, concat_join,
@@ -7989,6 +8001,22 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
 [[nodiscard]] E2eOutput e2e_run(std::string_view algo, const ParamMap& params,
                                 const E2eInput& in) {
+    // This named DOC0377 case is a full SIMD-pipeline proof, not a
+    // coordinate-only mapping check. BlockAligner runs only when a downstream
+    // result helper requests CIGAR data; without that demand, fail before the
+    // expensive cold setup instead of later reporting a truthful but opaque
+    // mixed-invalid all-stage attestation.
+    if (!doc0377_sliced_pipeline_proof_config_valid(
+            algo, in.cigar_projection)) {
+        std::fprintf(
+            stderr,
+            "[bench_e2e] DOC0377-SLICED-PROOF-CONFIG-FAIL "
+            "algo=%.*s requires data.cigar_projection=true so the "
+            "BlockAligner stage is executed and attested\n",
+            static_cast<int>(algo.size()), algo.data());
+        std::fflush(stderr);
+        std::abort();
+    }
     E2eOutput out;
     const std::string pipeline_mode = param_string(params, "pipeline_mode", "single");
     const int fair_workers = fair_scheduler_worker_count(*in.conn);
@@ -8232,7 +8260,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
 
     } else if (algo == "bioseq_no_index"
                || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index"
-               || algo == "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced") {
+               || algo == kDoc0377SlicedNoIndexAlgorithm) {
         const bool recompute_async_persist =
             param_string(params, "recompute_async_persist", "off") == "on";
         if (recompute_async_persist) {
@@ -8256,7 +8284,7 @@ void load_e2e_query_table(const it::connection_test_context& c,
         capture_cold_no_index_absence(
             *in.conn, in, out, ColdNoIndexAuditPhase::post_restart);
         const bool transformed_recipe =
-            algo == "bioseq_block_simd_dp_two_stack_nthash_no_index_sliced";
+            algo == kDoc0377SlicedNoIndexAlgorithm;
         const std::int64_t transformed_target_origin = transformed_recipe
             ? doc0377_transformed_target_origin(in) : 0;
         const std::string align_sql = transformed_recipe

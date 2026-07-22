@@ -5442,7 +5442,7 @@ PGDLLEXPORT Datum bioseq_internal_reset_sequence_source_counters(
 }
 
 static Datum bioseq_internal_sequence_source_counters_impl(
-		FunctionCallInfo) {
+		FunctionCallInfo fcinfo) {
 #ifdef BIOSEQ_TEST_INDEXES
   const auto c = bioseq::storage::pg_sequence_source_debug_counters();
   const std::string encoded = fmt::format(

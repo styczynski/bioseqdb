@@ -39,12 +39,13 @@
         "insertion_length_mean": 1.0,
         "deletion_length_mean": 1.0,
         "reverse_complement_rate": 0.5,
+        "cigar_projection": true,
         "kmer_size": 15,
         "window_size": 10,
         "minimap2_split_bp": 2000000,
         "seed": 3770377
       },
-      "description": "One selective nonidentity target-slice/concat SQL run with generated coordinate, strand, and optional CIGAR validation."
+      "description": "One selective nonidentity target-slice/concat SQL run with generated coordinate, strand, and exact CIGAR replay validation."
     }
   },
   "bench_e2e": {

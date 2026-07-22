@@ -1410,10 +1410,14 @@ TEST_CASE("DOC0377 sequence operators never resolve through string casts",
         "       ('AC'::bioseq.seq('dna4',8) "
         "        OPERATOR(bioseq.=) "
         "        'AC'::bioseq.seq('dna4',8)), "
-        "       bioseq.reverse('AC'::bioseq.seq('dna4',8))::text;");
+        "       bioseq.reverse('AC'::bioseq.seq('dna4',8))::text, "
+        "       (('ACGT'::bioseq.seq('dna4',8))[0:2] "
+        "        OPERATOR(bioseq.||) "
+        "        ('ACGT'::bioseq.seq('dna4',8))[2:])::text;");
     REQUIRE(qualified[0] == "bioseq.seq");
     REQUIRE(qualified[1] == "t");
     REQUIRE(qualified[2] == "CA");
+    REQUIRE(qualified[3] == "ACGT");
 }
 
 TEST_CASE("DOC0377 unsupported subscript shapes fail explicitly",
