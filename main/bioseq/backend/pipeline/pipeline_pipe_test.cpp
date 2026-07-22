@@ -6119,8 +6119,12 @@ void check_fragmented_paper_range_materialization() {
                 MinimizerSketchBackend::PaperNtHashSimd,
                 fragmented_proof,
                 /*require_nonempty_vector_work=*/true));
+            /* Paper consumes canonical, genuinely typed u32 storage.  A u64
+             * source is admission-materialized rather than reinterpreted, so
+             * the execution proof records the kernel input width—not the
+             * facade's original resident width. */
             REQUIRE(fragmented_proof.paper_nthash.source_storage_unit_bytes
-                    == sizeof(StorageUnit));
+                    == sizeof(std::uint32_t));
             REQUIRE(fragmented_proof.paper_nthash
                     == resident_proof.paper_nthash);
 

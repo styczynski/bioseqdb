@@ -364,115 +364,13 @@ choose_deferred_minimizer_persist_index(
     }
 
     constexpr auto minimizers = bioseq::indexing::MINIMIZER_INDICES;
-    std::array<bool, minimizers.size()> enabled{};
-    std::array<bool, minimizers.size()> update_on_insert{};
-    for (std::size_t i = 0; i < minimizers.size(); ++i) {
-        enabled[i] = true;
-        update_on_insert[i] =
-            bioseq::indexing::default_update_on_insert_contains(minimizers[i]);
-    }
-
-    const std::string sql = fmt::format(
-        "SELECT index_name, enabled, update_on_insert "
-        "FROM bioseq_internal.index_policy "
-        "WHERE user_relid={}::oid AND main_relfilenode={}::oid "
-        "AND column_attno={}",
-        static_cast<unsigned>(ctx.user_relid),
-        static_cast<unsigned>(ctx.main_relfilenode),
-        static_cast<int>(ctx.mmsearch_seq_attno));
-
-    struct SpiPolicyReadState {
-        int connect_status = 0;
-        int execute_status = 0;
-        int finish_status = 0;
-        bool table_present = false;
-        const char* semantic_error = nullptr;
-    } spi;
-
-    bioseq::pg_utils::invoke_pg_as_cpp(
-        [&spi, &sql, &minimizers, &enabled, &update_on_insert] noexcept {
-            spi.connect_status = SPI_connect();
-            if (spi.connect_status != SPI_OK_CONNECT) {
-                return;
-            }
-
-            spi.execute_status = SPI_execute(sql.c_str(), true, 0);
-            if (spi.execute_status == SPI_OK_SELECT) {
-                spi.table_present = SPI_tuptable != nullptr;
-                if (!spi.table_present) {
-                    spi.semantic_error =
-                        "deferred-persist policy result has no tuple table";
-                } else {
-                    const std::uint64_t row_count =
-                        static_cast<std::uint64_t>(SPI_processed);
-                    for (std::uint64_t row = 0; row < row_count; ++row) {
-                        char* const name_value = SPI_getvalue(
-                            SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 1);
-                        if (name_value == nullptr) {
-                            spi.semantic_error =
-                                "deferred-persist policy index_name is NULL";
-                            break;
-                        }
-
-                        bool enabled_is_null = false;
-                        const Datum enabled_value = SPI_getbinval(
-                            SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 2,
-                            &enabled_is_null);
-                        bool update_is_null = false;
-                        const Datum update_value = SPI_getbinval(
-                            SPI_tuptable->vals[row], SPI_tuptable->tupdesc, 3,
-                            &update_is_null);
-                        if (enabled_is_null || update_is_null) {
-                            spi.semantic_error =
-                                "deferred-persist policy boolean is NULL";
-                        } else {
-                            const std::string_view name{name_value};
-                            for (std::size_t i = 0; i < minimizers.size(); ++i) {
-                                if (minimizers[i] == name) {
-                                    enabled[i] = DatumGetBool(enabled_value);
-                                    update_on_insert[i] = DatumGetBool(update_value);
-                                    break;
-                                }
-                            }
-                        }
-                        pfree(name_value);
-                        if (spi.semantic_error != nullptr) {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            spi.finish_status = SPI_finish();
-        });
-
-    if (spi.connect_status != SPI_OK_CONNECT) {
-        bioseq::storage::indexing::active_read_policy_error_as_cpp(
-            "deferred-persist SPI_connect failed",
-            fmt::format("SPI rc={}", spi.connect_status));
-    }
-    if (spi.finish_status != SPI_OK_FINISH) {
-        bioseq::storage::indexing::active_read_policy_error_as_cpp(
-            "deferred-persist SPI_finish failed",
-            fmt::format("SPI rc={}", spi.finish_status));
-    }
-    if (spi.execute_status != SPI_OK_SELECT) {
-        bioseq::storage::indexing::active_read_policy_error_as_cpp(
-            "deferred-persist policy query failed",
-            fmt::format("SPI rc={}", spi.execute_status));
-    }
-    if (!spi.table_present) {
-        bioseq::storage::indexing::active_read_policy_error_as_cpp(
-            "deferred-persist policy result is invalid",
-            "deferred-persist policy result has no tuple table");
-    }
-    if (spi.semantic_error != nullptr) {
-        bioseq::storage::indexing::active_read_policy_error_as_cpp(
-            "deferred-persist policy result is invalid", spi.semantic_error);
-    }
+    const auto policy = bioseq::storage::indexing::
+        resolve_minimizer_persistence_policy(
+            ctx.user_relid, ctx.main_relfilenode,
+            ctx.mmsearch_seq_attno, ctx.snapshot);
 
     for (std::size_t i = 0; i < minimizers.size(); ++i) {
-        if (enabled[i] && update_on_insert[i]) {
+        if (policy.enabled[i] && policy.update_on_insert[i]) {
             return DeferredMinimizerPersistChoice{
                 .kind = deferred_kind_for_index(minimizers[i]),
                 .index_name = minimizers[i],

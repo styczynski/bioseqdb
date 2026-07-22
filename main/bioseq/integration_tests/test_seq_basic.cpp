@@ -346,7 +346,20 @@ TEST_CASE("non-canonical typmod casts follow the active alphabet profile",
     const auto invalid_dna4 = sql_error(
         ctx, "SELECT 'ACGTN'::bioseq.seq('dna4', 16)::text;");
     REQUIRE(invalid_dna4.sqlstate == "22P02");
-    REQUIRE(invalid_dna4.contains("invalid symbol 'N'"));
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    /* The iteration profile registers only dna4.  PostgreSQL first constructs
+     * the parser-safe unbound value, so N is rejected at that lexical boundary
+     * before the destination typmod can bind it. */
+    REQUIRE(invalid_dna4.contains(
+        "invalid symbol at byte 4 in unbound bioseq.seq"));
+    REQUIRE(invalid_dna4.contains("DETAIL: byte value=78"));
+#else
+    /* Richer profiles admit N in an unbound value through dna5, but binding
+     * that value to dna4 must still reject it instead of recoding N to A. */
+    REQUIRE(invalid_dna4.contains(
+        "invalid symbol 'N' for bioseq alphabet dna4"));
+    REQUIRE(invalid_dna4.contains("DETAIL: symbol offset=4"));
+#endif
 #if BIOSEQ_OPTTIMIZATION_LEVEL == 0
     const auto unsupported_alphabet = sql_error(
         ctx, "SELECT 'ACGTN'::bioseq.seq('dna5', 16)::text;");

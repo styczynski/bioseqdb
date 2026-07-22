@@ -360,7 +360,7 @@ constexpr int kBioseqLocatorPassthroughMagic = 0x424c5031; /* BLP1 */
 constexpr int kBioseqSliceSourceMagic = 0x42535331; /* BSS1 */
 constexpr int kBioseqSliceSourceVersion = 3;
 constexpr int kBioseqMmsearchOwnerMagic = 0x424d4f31; /* BMO1 */
-constexpr int kBioseqMmsearchOwnerVersion = 1;
+constexpr int kBioseqMmsearchOwnerVersion = 2;
 constexpr int kBioseqBaseMatchOwnerPlanMagic = 0x424d5031; /* BMP1 */
 constexpr int kBioseqBaseMatchOwnerPlanVersion = 2;
 constexpr int kBioseqBaseMatchOwnerPlanFields = 7;
@@ -1280,13 +1280,22 @@ count_mmsearch_occurrences(Node* node, const BioseqStubOids& oids)
 struct OwnedMmsearchRestriction {
 	RestrictInfo* restriction = nullptr;
 	FuncExpr* normalized_expr = nullptr;
+	List* extra_restrictions = NIL;
+	List* extra_normalized_exprs = NIL;
 };
 
+[[nodiscard]] static bool
+bounded_batch_fallback_options_are_supported(
+	FuncExpr* primary, FuncExpr* extra, const BioseqStubOids& oids);
+
 /*
- * Choose the one RestrictInfo the custom scan is allowed to execute.  The
- * decision is deliberately made against the original planner nodes: their
- * pointer identity is the proof later used to remove only this restriction
- * from executable quals and to prune competing paths that would execute it.
+ * Choose the bounded RestrictInfo set the custom scan is allowed to execute:
+ * either one semantic call, or the narrow BatchJoin-fallback shape consisting
+ * of an ordinary-relation outer Var primary plus one same-target Const base
+ * filter.  The decision is deliberately made against the original planner
+ * nodes: their pointer identities are the proof later used to remove only
+ * these restrictions from executable quals and to prune competing paths that
+ * would execute them.
  */
 [[nodiscard]] static OwnedMmsearchRestriction
 choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
@@ -1295,132 +1304,231 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 								 const BioseqStubOids& oids)
 {
 	std::size_t semantic_calls = 0;
-	RestrictInfo* semantic_restriction = nullptr;
+	List* semantic_restrictions = NIL;
 	for (RestrictInfo* rinfo : PList<RestrictInfo>(restrictions)) {
 		const std::size_t in_clause = count_mmsearch_occurrences(
 			reinterpret_cast<Node*>(rinfo->clause), oids);
 		semantic_calls += in_clause;
-		if (in_clause != 0) {
-			semantic_restriction = rinfo;
-		}
+		if (in_clause != 0) semantic_restrictions = lappend(
+			semantic_restrictions, rinfo);
 	}
-	if (semantic_calls > 1) {
+	if (semantic_calls > 2) {
 		ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("stacked mmsearch qualifiers are unsupported"),
-			 errdetail("A Bioseq scan can own exactly one semantic mmsearch call."),
+			 errdetail("A Bioseq scan can own one semantic mmsearch call; only the explicitly proven BatchJoin fallback may also own one constant base filter."),
 			 errhint("Split the alignment predicates into separate query levels.")));
 	}
-	if (semantic_calls == 0 || semantic_restriction == nullptr) {
+	if (semantic_calls == 0 || semantic_restrictions == NIL) {
 		return {};
 	}
-
-	/* Nested Boolean/CASE/NOT shapes are not equivalent to a consumed, strict
-	 * top-level predicate and therefore remain executable SQL quals. */
-	FuncExpr* original = pg_node_try_as<FuncExpr>(
-		reinterpret_cast<Node*>(semantic_restriction->clause));
-	if (original == nullptr || !is_mmsearch_funcid(original->funcid, oids)) {
-		return {};
-	}
-	const int arity = list_length(original->args);
-	if ((original->funcid == oids.mmsearch_oid && arity != 2)
-		|| (original->funcid == oids.mmsearch_with_opts_oid && arity != 3)) {
-		return {};
+	if (semantic_calls != static_cast<std::size_t>(
+			list_length(semantic_restrictions))) {
+		/* More than one occurrence inside one Boolean expression is never the
+		 * narrow Param-primary/Const-extra ownership shape below. */
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("stacked mmsearch qualifiers are unsupported"),
+			 errhint("Split the alignment predicates into separate query levels.")));
 	}
 
 	/* Fail closed under row-level security, security-barrier quals, leaky
 	 * ordering, pseudoconstants, or volatile siblings. */
 	if (root == nullptr || root->parse == nullptr || root->parse->hasRowSecurity
-		|| rte == nullptr || rte->securityQuals != NIL
-		|| semantic_restriction->pseudoconstant
-		|| semantic_restriction->security_level != 0
-		|| !restriction_is_securely_promotable(semantic_restriction, rel)) {
+		|| rte == nullptr || rte->securityQuals != NIL) {
 		return {};
 	}
 	for (RestrictInfo* sibling : PList<RestrictInfo>(restrictions)) {
-		if (sibling != semantic_restriction
+		if (!list_member_ptr(semantic_restrictions, sibling)
 			&& contain_volatile_functions(
 				reinterpret_cast<Node*>(sibling->clause))) {
 			return {};
 		}
 	}
 
-	pg_first_two_node_args args = pg_first_two_args_if_arity_between(*original, 2, 3);
-	if (!args.present()) {
-		return {};
-	}
-	Var* target = pg_node_try_as<Var>(args.first);
-	if (target == nullptr || target->varlevelsup != 0
-		|| target->varno != rel->relid || target->varattno <= 0
-		|| target->vartype != oids.bioseq_seq_type_oid
-		|| target->vartypmod < 0) {
-		return {};
+	RestrictInfo* primary_restriction = nullptr;
+	FuncExpr* primary_expr = nullptr;
+	RestrictInfo* constant_restriction = nullptr;
+	FuncExpr* constant_expr = nullptr;
+	for (RestrictInfo* semantic_restriction :
+			PList<RestrictInfo>(semantic_restrictions)) {
+		/* Nested Boolean/CASE/NOT shapes are not equivalent to a consumed,
+		 * strict top-level predicate and therefore remain executable SQL quals. */
+		FuncExpr* original = pg_node_try_as<FuncExpr>(
+			reinterpret_cast<Node*>(semantic_restriction->clause));
+		if (original == nullptr || !is_mmsearch_funcid(original->funcid, oids)
+			|| semantic_restriction->pseudoconstant
+			|| semantic_restriction->security_level != 0
+			|| !restriction_is_securely_promotable(
+				semantic_restriction, rel)) return {};
+		const int arity = list_length(original->args);
+		if ((original->funcid == oids.mmsearch_oid && arity != 2)
+			|| (original->funcid == oids.mmsearch_with_opts_oid
+				&& arity != 3)) return {};
+		pg_first_two_node_args args = pg_first_two_args_if_arity_between(
+			*original, 2, 3);
+		Var* target = args.present() ? pg_node_try_as<Var>(args.first) : nullptr;
+		if (target == nullptr || target->varlevelsup != 0
+			|| target->varno != rel->relid || target->varattno <= 0
+			|| target->vartype != oids.bioseq_seq_type_oid
+			|| target->vartypmod < 0) return {};
+
+		Node* query = args.second;
+		Const* query_constant = pg_node_try_as<Const>(query);
+		const bool constant_query = query_constant != nullptr
+			&& query_constant->consttype == oids.bioseq_seq_type_oid
+			&& query_constant->consttypmod >= 0;
+		bool parameterized_query = false;
+		if (!constant_query) {
+			if (Param* param = pg_node_try_as<Param>(query)) {
+				parameterized_query = param->paramtype
+					== oids.bioseq_seq_type_oid
+					&& (param->paramkind == PARAM_EXEC
+						|| param->paramkind == PARAM_EXTERN)
+					&& (param->paramtypmod >= 0
+						|| param->paramkind == PARAM_EXTERN);
+			} else if (Var* query_var = pg_node_try_as<Var>(query)) {
+				const bool concrete_varno = bioseq_is_concrete_rte_varno(
+					query_var->varno);
+				const bool same_relation = concrete_varno
+					&& query_var->varno == rel->relid;
+				const bool available_outer = concrete_varno
+					&& bms_is_member(static_cast<int>(query_var->varno),
+						param_relids);
+				parameterized_query = query_var->varlevelsup == 0
+					&& query_var->varattno > 0
+					&& query_var->vartype == oids.bioseq_seq_type_oid
+					&& query_var->vartypmod >= 0
+					&& (same_relation || available_outer);
+				/* A same-relation per-row query remains a valid sole owner, but
+				 * cannot be combined with a constant extra: the dispatcher has one
+				 * dynamic primary slot and the bounded stacked contract is specifically
+				 * the parameterized join case. */
+				if (same_relation && semantic_calls == 2) {
+					parameterized_query = false;
+				}
+			}
+		}
+		if (!constant_query && !parameterized_query) {
+			if (semantic_calls == 2) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("stacked mmsearch qualifiers are unsupported"),
+					 errdetail("Only one parameterized mmsearch plus one constant filter on the same target column can share a Bioseq scan.")));
+			}
+			return {};
+		}
+
+		FuncExpr* normalized = copyObject(original);
+		if (arity == 3) {
+			Node* option = reinterpret_cast<Node*>(list_nth(
+				normalized->args, 2));
+			if (contain_volatile_functions(option)) return {};
+			Node* folded = eval_const_expressions(root, option);
+			Const* option_const = pg_node_try_as<Const>(folded);
+			if (option_const == nullptr || option_const->consttype
+					!= oids.bioseq_aligner_options_type_oid) return {};
+			lfirst(list_nth_cell(normalized->args, 2)) = folded;
+		}
+		if (constant_query) {
+			if (constant_expr != nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("stacked mmsearch qualifiers are unsupported"),
+					 errdetail("Two constant mmsearch filters cannot share one MatchResult owner.")));
+			}
+			constant_restriction = semantic_restriction;
+			constant_expr = normalized;
+		} else {
+			if (primary_expr != nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("stacked mmsearch qualifiers are unsupported"),
+					 errdetail("Two dynamic mmsearch filters cannot share one MatchResult owner.")));
+			}
+			primary_restriction = semantic_restriction;
+			primary_expr = normalized;
+		}
 	}
 
-	Node* query = args.second;
-	if (Const* constant = pg_node_try_as<Const>(query)) {
-		if (constant->consttype != oids.bioseq_seq_type_oid
-			|| constant->consttypmod < 0) {
-			return {};
-		}
-	} else if (Param* param = pg_node_try_as<Param>(query)) {
-		if (param->paramtype != oids.bioseq_seq_type_oid
-			|| (param->paramkind != PARAM_EXEC
-				&& param->paramkind != PARAM_EXTERN)
-			|| (param->paramtypmod < 0 && param->paramkind != PARAM_EXTERN)) {
-			return {};
-		}
-	} else if (Var* query_var = pg_node_try_as<Var>(query)) {
-		const bool concrete_varno = bioseq_is_concrete_rte_varno(
-			query_var->varno);
-		const bool same_relation = concrete_varno
-			&& query_var->varno == rel->relid;
-		const bool available_outer = concrete_varno
-			&& bms_is_member(
-				static_cast<int>(query_var->varno), param_relids);
-		if (!concrete_varno || query_var->varlevelsup != 0
-			|| query_var->varattno <= 0
-			|| query_var->vartype != oids.bioseq_seq_type_oid
-			|| query_var->vartypmod < 0
-			|| (!same_relation && !available_outer)) {
-			return {};
-		}
-	} else {
-		return {};
+	if (semantic_calls == 1) {
+		return primary_expr != nullptr
+			? OwnedMmsearchRestriction{
+				primary_restriction, primary_expr, NIL, NIL}
+			: OwnedMmsearchRestriction{
+				constant_restriction, constant_expr, NIL, NIL};
 	}
-
-	FuncExpr* normalized = copyObject(original);
-	if (arity == 3) {
-		Node* option = reinterpret_cast<Node*>(list_nth(normalized->args, 2));
-		if (contain_volatile_functions(option)) {
-			return {};
-		}
-		Node* folded = eval_const_expressions(root, option);
-		Const* option_const = pg_node_try_as<Const>(folded);
-		if (option_const == nullptr
-			|| option_const->consttype != oids.bioseq_aligner_options_type_oid) {
-			return {};
-		}
-		lfirst(list_nth_cell(normalized->args, 2)) = folded;
+	Node* primary_target = primary_expr == nullptr ? nullptr
+		: reinterpret_cast<Node*>(linitial(primary_expr->args));
+	Node* constant_target = constant_expr == nullptr ? nullptr
+		: reinterpret_cast<Node*>(linitial(constant_expr->args));
+	Node* primary_query = primary_expr == nullptr
+		|| list_length(primary_expr->args) < 2 ? nullptr
+		: reinterpret_cast<Node*>(lsecond(primary_expr->args));
+	Node* constant_query = constant_expr == nullptr
+		|| list_length(constant_expr->args) < 2 ? nullptr
+		: reinterpret_cast<Node*>(lsecond(constant_expr->args));
+	Var* primary_query_var = pg_node_try_as<Var>(primary_query);
+	Const* constant_query_value = pg_node_try_as<Const>(constant_query);
+	RangeTblEntry* primary_query_rte = primary_query_var == nullptr
+		|| !bioseq_is_concrete_rte_varno(primary_query_var->varno)
+		|| primary_query_var->varno > static_cast<Index>(
+			list_length(root->parse->rtable))
+		? nullptr : rt_fetch(primary_query_var->varno, root->parse->rtable);
+	/* Preserve the established general stacked-qualifier rejection.  The sole
+	 * admitted exception is the BatchJoin fallback contract: an explicitly
+	 * require-absent primary over an outer Var from an ordinary relation becomes
+	 * PARAM_EXEC for a Bioseq target scan whose same target column also has one
+	 * non-NULL, default-options Const filter.  Both calls therefore share the
+	 * exact biological parameters, while require-absent is a valid execution of
+	 * the extra's default "allow" index policy.  A second Bioseq relation,
+	 * PARAM_EXTERN, same-row Var, view/subquery, security-qualified provider,
+	 * NULL extra, or independent option set remains unsupported; accepting those
+	 * would silently broaden the generic multi-owner surface beyond the one
+	 * executor shape that has an AND-stack runtime and integration contract. */
+	const bool bounded_batch_fallback = primary_query_var != nullptr
+		&& bms_is_member(static_cast<int>(primary_query_var->varno),
+			param_relids)
+		&& constant_query_value != nullptr
+		&& !constant_query_value->constisnull
+		&& primary_query_rte != nullptr
+		&& primary_query_rte->rtekind == RTE_RELATION
+		&& primary_query_rte->securityQuals == NIL
+		&& OidIsValid(primary_query_rte->relid)
+		&& !IsBioseqColumnTableAmTable(primary_query_rte->relid)
+		&& bounded_batch_fallback_options_are_supported(
+			primary_expr, constant_expr, oids);
+	if (primary_restriction == nullptr || primary_expr == nullptr
+		|| constant_restriction == nullptr || constant_expr == nullptr
+		|| !equal(primary_target, constant_target)
+		|| !bounded_batch_fallback) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("stacked mmsearch qualifiers are unsupported"),
+			 errdetail("Only one parameterized mmsearch plus one constant filter on the same target column can share a Bioseq scan."),
+			 errhint("Split the alignment predicates into separate query levels.")));
 	}
-
-	return { semantic_restriction, normalized };
+	return OwnedMmsearchRestriction{
+		primary_restriction, primary_expr,
+		list_make1(constant_restriction), list_make1(constant_expr)};
 }
 
 [[nodiscard]] static List*
-restrictions_without_owned_mmsearch(List* restrictions,
-							 RestrictInfo* owned,
-							 Expr* owned_clause,
-							 bool restrictions_are_private_copies)
+restrictions_without_owned_mmsearch(List* restrictions, List* owned,
+								 bool restrictions_are_private_copies)
 {
 	PList<RestrictInfo> result;
 	for (RestrictInfo* rinfo : PList<RestrictInfo>(restrictions)) {
-		if (owned != nullptr
-			&& (rinfo == owned
-				|| (restrictions_are_private_copies
-					&& equal(rinfo->clause, owned_clause)))) {
-			continue;
+		bool is_owned = false;
+		for (RestrictInfo* owner : PList<RestrictInfo>(owned)) {
+			if (rinfo == owner || (restrictions_are_private_copies
+				&& owner != nullptr
+				&& equal(rinfo->clause, owner->clause))) {
+				is_owned = true;
+				break;
+			}
 		}
+		if (is_owned) continue;
 		result.append(rinfo);
 	}
 	return result.release();
@@ -1924,6 +2032,72 @@ require_aligner_options_const(FuncExpr* mmsearch_fe, const BioseqStubOids& oids)
 				oids.bioseq_aligner_options_type_oid)));
 	}
 	return opt_const;
+}
+
+/* The dispatch buffer owns one Minimap2Params object for every query attached
+ * to a scan.  Consequently the bounded Param-primary/Const-extra exception can
+ * share that buffer only when the primary changes no biological option and the
+ * extra requests the default option set.  The sole permitted difference is an
+ * explicit require-absent index policy on the primary: the extra's inherited
+ * `allow` policy admits the same no-index execution, so this does not alter its
+ * Boolean result or error contract. */
+[[nodiscard]] static bool
+bounded_batch_fallback_options_are_supported(
+		FuncExpr* primary, FuncExpr* extra,
+		const BioseqStubOids& oids) {
+	if (primary == nullptr || extra == nullptr
+		|| primary->funcid != oids.mmsearch_with_opts_oid
+		|| list_length(primary->args) != 3
+		|| extra->funcid != oids.mmsearch_oid
+		|| list_length(extra->args) != 2) return false;
+	Const* options = pg_node_try_as<Const>(reinterpret_cast<Node*>(
+		list_nth(primary->args, 2)));
+	if (options == nullptr || options->constisnull
+		|| options->consttype != oids.bioseq_aligner_options_type_oid) {
+		return false;
+	}
+
+	HeapTupleHeader header = reinterpret_cast<HeapTupleHeader>(
+		PG_DETOAST_DATUM(options->constvalue));
+	auto free_detoasted_header = [&] {
+		if (reinterpret_cast<void*>(header)
+			!= reinterpret_cast<void*>(DatumGetPointer(options->constvalue))) {
+			pfree(header);
+		}
+	};
+	const Oid row_typeoid = HeapTupleHeaderGetTypeId(header);
+	if (row_typeoid != oids.bioseq_aligner_options_type_oid) {
+		free_detoasted_header();
+		return false;
+	}
+	TupleDesc tupdesc = lookup_rowtype_tupdesc(
+		row_typeoid, HeapTupleHeaderGetTypMod(header));
+	constexpr int kExpectedOptionAttrs = 36;
+	if (tupdesc->natts != kExpectedOptionAttrs) {
+		ReleaseTupleDesc(tupdesc);
+		free_detoasted_header();
+		return false;
+	}
+	HeapTupleData tuple{};
+	tuple.t_len = HeapTupleHeaderGetDatumLength(header);
+	tuple.t_data = header;
+	ItemPointerSetInvalid(&tuple.t_self);
+	tuple.t_tableOid = InvalidOid;
+	std::array<Datum, kExpectedOptionAttrs> values{};
+	std::array<bool, kExpectedOptionAttrs> nulls{};
+	heap_deform_tuple(&tuple, tupdesc, values.data(), nulls.data());
+	bool only_index_policy_is_explicit = true;
+	for (int index = 0; index < kExpectedOptionAttrs - 1; ++index) {
+		only_index_policy_is_explicit =
+			only_index_policy_is_explicit && nulls[index];
+	}
+	const bool requires_absent = !nulls[kExpectedOptionAttrs - 1]
+		&& DatumGetInt32(values[kExpectedOptionAttrs - 1])
+			== static_cast<int32>(
+				bioseq::indexing::IndexReadRequirement::require_absent);
+	ReleaseTupleDesc(tupdesc);
+	free_detoasted_header();
+	return only_index_policy_is_explicit && requires_absent;
 }
 
 /*
@@ -9956,18 +10130,36 @@ struct PerRowBaseHelperOwnerProof {
 			|| intVal(magic) != kBioseqMmsearchOwnerMagic) continue;
 		Node* version = list_length(tag) == 3
 			? reinterpret_cast<Node*>(list_nth(tag, 1)) : nullptr;
-		FuncExpr* mmsearch = list_length(tag) == 3
-			? pg_node_try_as<FuncExpr>(
-				reinterpret_cast<Node*>(list_nth(tag, 2))) : nullptr;
+		Node* expressions_node = list_length(tag) == 3
+			? reinterpret_cast<Node*>(list_nth(tag, 2)) : nullptr;
+		List* expressions = expressions_node != nullptr
+			&& IsA(expressions_node, List)
+			? reinterpret_cast<List*>(expressions_node) : NIL;
+		FuncExpr* mmsearch = expressions == NIL ? nullptr
+			: pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(linitial(expressions)));
 		if (recipe != nullptr || version == nullptr || !IsA(version, Integer)
 			|| intVal(version) != kBioseqMmsearchOwnerVersion
 			|| mmsearch == nullptr
+			|| list_length(expressions) > 2
 			|| !is_mmsearch_funcid(mmsearch->funcid, get_cached_stub_oids())
 			|| (list_length(mmsearch->args) != 2
 				&& list_length(mmsearch->args) != 3)
-			|| list_length(custom->custom_restrictinfo) != 1) {
+			|| list_length(custom->custom_restrictinfo)
+				!= list_length(expressions)) {
 			invalid = true;
 			return nullptr;
+		}
+		for (Node* expression : PList<Node>(expressions)) {
+			FuncExpr* owned = pg_node_try_as<FuncExpr>(expression);
+			if (owned == nullptr
+				|| !is_mmsearch_funcid(
+					owned->funcid, get_cached_stub_oids())
+				|| (list_length(owned->args) != 2
+					&& list_length(owned->args) != 3)) {
+				invalid = true;
+				return nullptr;
+			}
 		}
 		recipe = reinterpret_cast<Node*>(linitial(mmsearch->args));
 		if (recipe == nullptr
@@ -9978,6 +10170,1796 @@ struct PerRowBaseHelperOwnerProof {
 		}
 	}
 	return recipe;
+}
+
+struct ExactParameterizedBmoOwnerProof {
+	std::size_t matches = 0u;
+	bool invalid = false;
+	std::uint32_t rejection_mask = 0u;
+	std::size_t wrapper_owns_expected = 0u;
+	std::uint32_t wrapper_method_mask = 0u;
+	std::size_t wrapper_restriction_count = 0u;
+	std::size_t wrapper_child_count = 0u;
+	std::size_t wrapper_version = 0u;
+	std::size_t wrapper_pointer_matches = 0u;
+	std::size_t wrapper_serial_matches = 0u;
+	std::size_t wrapper_clause_matches = 0u;
+	std::size_t expected_rinfo_serial = 0u;
+	std::size_t wrapper_rinfo_serial = 0u;
+	std::size_t expected_target_varno = 0u;
+	std::size_t expected_query_varno = 0u;
+	std::size_t wrapper_private_target_varno = 0u;
+	std::size_t wrapper_private_query_varno = 0u;
+	std::size_t wrapper_private_target_equal = 0u;
+	std::size_t wrapper_private_query_equal = 0u;
+	std::size_t wrapper_owner0_target_varno = 0u;
+	std::size_t wrapper_owner0_query_varno = 0u;
+	std::size_t wrapper_owner1_target_varno = 0u;
+	std::size_t wrapper_owner1_query_varno = 0u;
+	std::uint64_t wrapper_parent_relids_low = 0u;
+	std::uint64_t wrapper_child0_relids_low = 0u;
+	std::uint64_t wrapper_child1_relids_low = 0u;
+};
+
+[[nodiscard]] static std::uint64_t exact_bmo_audit_relids_low(
+		Relids relids) noexcept {
+	std::uint64_t mask = 0u;
+	int relid = -1;
+	while ((relid = bms_next_member(relids, relid)) >= 0) {
+		if (relid < 64) mask |= std::uint64_t{1} << relid;
+	}
+	return mask;
+}
+
+/* PostgreSQL copies RestrictInfo nodes between baserel parameterization and
+ * join-path construction while preserving rinfo_serial specifically so the
+ * copies retain one planner identity.  Pointer equality alone therefore
+ * misses the BMO path that owns the same qual.  Admit only that documented
+ * clone relation plus an exact executable/security shape; equal SQL text with
+ * a different serial remains a distinct restriction. */
+[[nodiscard]] static bool same_planner_restriction_identity(
+		RestrictInfo* candidate, RestrictInfo* expected) noexcept {
+	if (candidate == expected) {
+		return candidate != nullptr && candidate->rinfo_serial > 0;
+	}
+	return candidate != nullptr && expected != nullptr
+		&& candidate->rinfo_serial > 0
+		&& expected->rinfo_serial > 0
+		&& candidate->rinfo_serial == expected->rinfo_serial
+		&& candidate->pseudoconstant == expected->pseudoconstant
+		&& candidate->security_level == expected->security_level
+		&& candidate->is_pushed_down == expected->is_pushed_down
+		&& candidate->can_join == expected->can_join
+		&& candidate->has_clone == expected->has_clone
+		&& candidate->is_clone == expected->is_clone
+		&& candidate->leakproof == expected->leakproof
+		&& candidate->has_volatile == expected->has_volatile
+		&& candidate->num_base_rels == expected->num_base_rels
+		&& bms_equal(candidate->clause_relids, expected->clause_relids)
+		&& bms_equal(candidate->required_relids, expected->required_relids)
+		&& bms_equal(
+			candidate->incompatible_relids, expected->incompatible_relids)
+		&& bms_equal(candidate->outer_relids, expected->outer_relids)
+		&& bms_equal(candidate->left_relids, expected->left_relids)
+		&& bms_equal(candidate->right_relids, expected->right_relids)
+		&& equal(candidate->orclause, expected->orclause)
+		&& equal(candidate->clause, expected->clause);
+}
+
+enum ExactParameterizedBmoOwnerRejection : std::uint32_t {
+	kExactBmoUnknownCustomPath = 1u << 0,
+	kExactBmoBaseScanHasChildren = 1u << 1,
+	kExactBmoOwnerAbi = 1u << 2,
+	kExactBmoRestrictionMultiplicity = 1u << 3,
+	kExactBmoMissingParamInfo = 1u << 4,
+	kExactBmoMissingPpiClause = 1u << 5,
+	kExactBmoNestedJoinClause = 1u << 6,
+	kExactBmoUnknownCorePath = 1u << 7,
+	kExactBmoKnownWrapperAbi = 1u << 8,
+	kExactBmoKnownWrapperOwnsClause = 1u << 9,
+};
+
+static inline void reject_exact_parameterized_bmo_owner(
+		ExactParameterizedBmoOwnerProof& proof,
+		const ExactParameterizedBmoOwnerRejection reason) noexcept {
+	proof.invalid = true;
+	proof.rejection_mask |= static_cast<std::uint32_t>(reason);
+}
+
+[[nodiscard]] static bool foreign_known_join_owner_is_valid(
+		PlannerInfo* root, CustomPath* custom) {
+	if (root == nullptr || custom == nullptr) return false;
+	const bool raw_owner = custom->methods == &BioseqBatchJoinPathMethods;
+	const bool transformed_owner =
+		custom->methods == &BioseqPerRowJoinPathMethods;
+	if (!raw_owner && !transformed_owner) return false;
+	bool invalid_owner_abi = false;
+	if (per_row_known_path_owner_recipe(custom, invalid_owner_abi) == nullptr
+		|| invalid_owner_abi || custom->path.parent == nullptr) return false;
+
+	FuncExpr* owned_expression = nullptr;
+	std::size_t semantic_calls = 0u;
+	for (RestrictInfo* owned : PList<RestrictInfo>(
+			custom->custom_restrictinfo)) {
+		const std::size_t calls = owned == nullptr ? 0u
+			: count_mmsearch_occurrences(
+				reinterpret_cast<Node*>(owned->clause),
+				get_cached_stub_oids());
+		semantic_calls += calls;
+		if (calls != 0u) {
+			if (calls != 1u || owned_expression != nullptr) return false;
+			owned_expression = pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(owned->clause));
+			if (owned_expression == nullptr) return false;
+		}
+	}
+	if (semantic_calls != 1u || owned_expression == nullptr) return false;
+	const int executable_index = raw_owner ? 8 : 6;
+	Node* private_target = reinterpret_cast<Node*>(
+		list_nth(custom->custom_private, 4));
+	Node* private_query = reinterpret_cast<Node*>(
+		list_nth(custom->custom_private, 5));
+	FuncExpr* executable_expression = list_length(custom->custom_private)
+		> executable_index
+		? pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(
+			list_nth(custom->custom_private, executable_index)))
+		: nullptr;
+	if (executable_expression == nullptr
+		|| !is_mmsearch_funcid(executable_expression->funcid,
+			get_cached_stub_oids())
+		|| count_mmsearch_occurrences(
+			private_target, get_cached_stub_oids()) != 0u
+		|| count_mmsearch_occurrences(
+			private_query, get_cached_stub_oids()) != 0u
+		|| count_mmsearch_occurrences(
+			reinterpret_cast<Node*>(executable_expression),
+			get_cached_stub_oids()) != 1u) return false;
+	FuncExpr* normalized_owned = copyObject(owned_expression);
+	if (list_length(normalized_owned->args) == 3) {
+		Node* option = reinterpret_cast<Node*>(
+			list_nth(normalized_owned->args, 2));
+		Node* folded = eval_const_expressions(
+			root, reinterpret_cast<Node*>(copyObject(option)));
+		Const* folded_const = pg_node_try_as<Const>(folded);
+		if (folded_const == nullptr || folded_const->consttype
+				!= get_cached_stub_oids().bioseq_aligner_options_type_oid) {
+			return false;
+		}
+		lfirst(list_nth_cell(normalized_owned->args, 2)) = folded;
+	}
+	if (!equal(normalized_owned, executable_expression)) return false;
+
+	List* variables = pull_var_clause(
+		reinterpret_cast<Node*>(owned_expression),
+		PVC_RECURSE_AGGREGATES | PVC_RECURSE_WINDOWFUNCS
+			| PVC_RECURSE_PLACEHOLDERS);
+	for (Node* variable : PList<Node>(variables)) {
+		Var* var = pg_node_try_as<Var>(variable);
+		if (var == nullptr || !bioseq_is_concrete_rte_varno(var->varno)
+			|| var->varlevelsup != 0 || var->varattno <= 0
+			|| !bms_is_empty(var->varnullingrels)
+			|| !bms_is_member(static_cast<int>(var->varno),
+				custom->path.parent->relids)) return false;
+	}
+
+	bool children_cover_parent = raw_owner
+		? list_length(custom->custom_paths) == 2
+		: list_length(custom->custom_paths) == 1;
+	if (children_cover_parent && raw_owner) {
+		Path* first = reinterpret_cast<Path*>(linitial(custom->custom_paths));
+		Path* second = reinterpret_cast<Path*>(lsecond(custom->custom_paths));
+		children_cover_parent = first != nullptr && second != nullptr
+			&& first->parent != nullptr && second->parent != nullptr
+			&& !bms_overlap(first->parent->relids, second->parent->relids);
+		Relids child_union = children_cover_parent
+			? bms_union(first->parent->relids, second->parent->relids) : nullptr;
+		children_cover_parent = children_cover_parent
+			&& bms_equal(child_union, custom->path.parent->relids);
+		bms_free(child_union);
+	} else if (children_cover_parent) {
+		Path* child = reinterpret_cast<Path*>(linitial(custom->custom_paths));
+		children_cover_parent = child != nullptr && child->parent != nullptr
+			&& bms_equal(child->parent->relids, custom->path.parent->relids);
+	}
+	return children_cover_parent
+		&& !custom->path.parallel_aware && !custom->path.parallel_safe
+		&& custom->path.parallel_workers == 0
+		&& std::isfinite(custom->path.rows) && custom->path.rows >= 0
+		&& std::isfinite(custom->path.startup_cost)
+		&& custom->path.startup_cost >= 0
+		&& std::isfinite(custom->path.total_cost)
+		&& custom->path.total_cost >= custom->path.startup_cost;
+}
+
+static void count_exact_parameterized_bmo_owners(
+		PlannerInfo* root, Path* path, RestrictInfo* restriction,
+		ExactParameterizedBmoOwnerProof& proof,
+		const bool admit_known_wrapper_owner = false) {
+	if (root == nullptr || path == nullptr || restriction == nullptr
+		|| proof.invalid) return;
+	check_stack_depth();
+	if (admit_known_wrapper_owner) {
+		for (Node* expression : PList<Node>(
+				path->pathtarget == nullptr ? NIL : path->pathtarget->exprs)) {
+			if (count_mmsearch_occurrences(
+					expression, get_cached_stub_oids()) != 0u) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoNestedJoinClause);
+				return;
+			}
+		}
+		for (RestrictInfo* parameter_clause : PList<RestrictInfo>(
+				path->param_info == nullptr
+					? NIL : path->param_info->ppi_clauses)) {
+			if (parameter_clause == nullptr || count_mmsearch_occurrences(
+					reinterpret_cast<Node*>(parameter_clause->clause),
+					get_cached_stub_oids()) == 0u) continue;
+			bool owned_here = false;
+			if (IsA(path, CustomPath)) {
+				for (RestrictInfo* owned : PList<RestrictInfo>(
+						reinterpret_cast<CustomPath*>(path)
+							->custom_restrictinfo)) {
+					owned_here = owned_here
+						|| same_planner_restriction_identity(
+							owned, parameter_clause);
+				}
+			}
+			if (!owned_here) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoNestedJoinClause);
+				return;
+			}
+		}
+	}
+	if (IsA(path, CustomPath)) {
+		auto* custom = reinterpret_cast<CustomPath*>(path);
+		if (custom->methods == &BioseqColumnScanPathMethods
+			&& custom->custom_paths != NIL) {
+			/* A BioseqColumnScan is a leaf.  Children would make the owner count
+			 * incomplete and therefore invalidate this internal path ABI. */
+			reject_exact_parameterized_bmo_owner(
+				proof, kExactBmoBaseScanHasChildren);
+			return;
+		}
+		bool owns_expected_restriction = false;
+		for (RestrictInfo* owned : PList<RestrictInfo>(
+				custom->custom_restrictinfo)) {
+			owns_expected_restriction = owns_expected_restriction
+				|| same_planner_restriction_identity(owned, restriction);
+		}
+		if (admit_known_wrapper_owner
+			&& custom->methods == &BioseqColumnScanPathMethods) {
+			bool invalid_owner_abi = false;
+			Node* recipe = per_row_base_scan_owner_recipe(
+				custom, invalid_owner_abi);
+			if (custom->custom_restrictinfo == NIL) {
+				if (recipe != nullptr || invalid_owner_abi) {
+					reject_exact_parameterized_bmo_owner(
+						proof, kExactBmoOwnerAbi);
+					return;
+				}
+			} else {
+				if (recipe == nullptr || invalid_owner_abi) {
+					reject_exact_parameterized_bmo_owner(
+						proof, kExactBmoOwnerAbi);
+					return;
+				}
+				for (RestrictInfo* owned : PList<RestrictInfo>(
+						custom->custom_restrictinfo)) {
+					if (owned == nullptr || count_mmsearch_occurrences(
+							reinterpret_cast<Node*>(owned->clause),
+							get_cached_stub_oids()) != 1u
+						|| pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(
+							owned->clause)) == nullptr) {
+						reject_exact_parameterized_bmo_owner(
+								proof, kExactBmoOwnerAbi);
+						return;
+					}
+				}
+				if (custom->path.parallel_aware || custom->path.parallel_safe
+					|| custom->path.parallel_workers != 0
+					|| !std::isfinite(custom->path.rows)
+					|| custom->path.rows < 0
+					|| !std::isfinite(custom->path.startup_cost)
+					|| custom->path.startup_cost < 0
+					|| !std::isfinite(custom->path.total_cost)
+					|| custom->path.total_cost < custom->path.startup_cost) {
+					reject_exact_parameterized_bmo_owner(
+						proof, kExactBmoOwnerAbi);
+					return;
+				}
+			}
+			if (list_length(custom->custom_private) < 2) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoOwnerAbi);
+				return;
+			}
+			for (int index = 0; index < 2; ++index) {
+				Node* residual_node = reinterpret_cast<Node*>(
+					list_nth(custom->custom_private, index));
+				if (residual_node != nullptr && !IsA(residual_node, List)) {
+					reject_exact_parameterized_bmo_owner(
+						proof, kExactBmoOwnerAbi);
+					return;
+				}
+				for (RestrictInfo* residual : PList<RestrictInfo>(
+						residual_node == nullptr ? NIL
+							: reinterpret_cast<List*>(residual_node))) {
+					if (residual != nullptr && count_mmsearch_occurrences(
+							reinterpret_cast<Node*>(residual->clause),
+							get_cached_stub_oids()) != 0u) {
+						reject_exact_parameterized_bmo_owner(
+								proof, kExactBmoNestedJoinClause);
+						return;
+					}
+				}
+			}
+		}
+		if (custom->methods == &BioseqColumnScanPathMethods
+			&& owns_expected_restriction) {
+			std::size_t exact_restriction_count = 0u;
+			for (RestrictInfo* owned : PList<RestrictInfo>(
+					custom->custom_restrictinfo)) {
+				if (same_planner_restriction_identity(
+						owned, restriction)) ++exact_restriction_count;
+			}
+			bool invalid_owner_abi = false;
+			Node* recipe = per_row_base_scan_owner_recipe(
+				custom, invalid_owner_abi);
+			if (invalid_owner_abi || recipe == nullptr) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoOwnerAbi);
+				return;
+			}
+			if (exact_restriction_count != 1u) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoRestrictionMultiplicity);
+				return;
+			}
+			if (custom->path.param_info == nullptr) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoMissingParamInfo);
+				return;
+			}
+			std::size_t ppi_exact_count = 0u;
+			for (RestrictInfo* parameter_clause : PList<RestrictInfo>(
+					custom->path.param_info->ppi_clauses)) {
+				if (same_planner_restriction_identity(
+						parameter_clause, restriction)) ++ppi_exact_count;
+			}
+			if (ppi_exact_count != 1u) {
+				reject_exact_parameterized_bmo_owner(
+					proof, ppi_exact_count == 0u
+						? kExactBmoMissingPpiClause
+						: kExactBmoRestrictionMultiplicity);
+				return;
+			}
+			++proof.matches;
+			return;
+		}
+		if (custom->methods == &BioseqColumnScanPathMethods) return;
+
+		const bool known_join_owner =
+			custom->methods == &BioseqBatchJoinPathMethods
+			|| custom->methods == &BioseqPerRowJoinPathMethods;
+		const bool known_slice_wrapper =
+			custom->methods == &bioseq_slice_project_path_methods();
+		if (!known_join_owner && !known_slice_wrapper) {
+			/* Unknown CustomPaths can hide restrictions or private children. */
+			reject_exact_parameterized_bmo_owner(
+				proof, kExactBmoUnknownCustomPath);
+			return;
+		}
+		if (admit_known_wrapper_owner && known_join_owner
+			&& !foreign_known_join_owner_is_valid(root, custom)) {
+			reject_exact_parameterized_bmo_owner(
+				proof, kExactBmoKnownWrapperAbi);
+			return;
+		}
+		if (owns_expected_restriction) {
+			++proof.wrapper_owns_expected;
+			proof.wrapper_method_mask |= custom->methods
+				== &BioseqBatchJoinPathMethods ? 1u
+				: (custom->methods == &BioseqPerRowJoinPathMethods
+					? 2u : (known_slice_wrapper ? 4u : 0u));
+			proof.wrapper_restriction_count += static_cast<std::size_t>(
+				list_length(custom->custom_restrictinfo));
+			proof.wrapper_child_count += static_cast<std::size_t>(
+				list_length(custom->custom_paths));
+			Node* private_version = custom->custom_private == NIL ? nullptr
+				: reinterpret_cast<Node*>(linitial(custom->custom_private));
+			proof.wrapper_version = private_version != nullptr
+				&& IsA(private_version, Integer)
+				? static_cast<std::size_t>(intVal(private_version)) : 0u;
+			proof.expected_rinfo_serial = static_cast<std::size_t>(
+				restriction->rinfo_serial);
+			proof.wrapper_parent_relids_low = exact_bmo_audit_relids_low(
+				custom->path.parent == nullptr
+					? nullptr : custom->path.parent->relids);
+			if (list_length(custom->custom_paths) >= 1) {
+				Path* child = reinterpret_cast<Path*>(
+					linitial(custom->custom_paths));
+				proof.wrapper_child0_relids_low = exact_bmo_audit_relids_low(
+					child == nullptr || child->parent == nullptr
+						? nullptr : child->parent->relids);
+			}
+			if (list_length(custom->custom_paths) >= 2) {
+				Path* child = reinterpret_cast<Path*>(
+					lsecond(custom->custom_paths));
+				proof.wrapper_child1_relids_low = exact_bmo_audit_relids_low(
+					child == nullptr || child->parent == nullptr
+						? nullptr : child->parent->relids);
+			}
+			FuncExpr* expected_mmsearch = pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(restriction->clause));
+			Node* expected_target = expected_mmsearch != nullptr
+				&& list_length(expected_mmsearch->args) >= 2
+				? reinterpret_cast<Node*>(linitial(expected_mmsearch->args))
+				: nullptr;
+			Node* expected_query = expected_mmsearch != nullptr
+				&& list_length(expected_mmsearch->args) >= 2
+				? reinterpret_cast<Node*>(lsecond(expected_mmsearch->args))
+				: nullptr;
+			Var* expected_target_var = pg_node_try_as<Var>(expected_target);
+			Var* expected_query_var = pg_node_try_as<Var>(expected_query);
+			proof.expected_target_varno = expected_target_var == nullptr
+				? 0u : static_cast<std::size_t>(expected_target_var->varno);
+			proof.expected_query_varno = expected_query_var == nullptr
+				? 0u : static_cast<std::size_t>(expected_query_var->varno);
+			Node* private_target = nullptr;
+			Node* private_query = nullptr;
+			if (known_join_owner && list_length(custom->custom_private) >= 6) {
+				private_target = reinterpret_cast<Node*>(
+					list_nth(custom->custom_private, 4));
+				private_query = reinterpret_cast<Node*>(
+					list_nth(custom->custom_private, 5));
+			}
+			Var* private_target_var = pg_node_try_as<Var>(private_target);
+			Var* private_query_var = pg_node_try_as<Var>(private_query);
+			proof.wrapper_private_target_varno = private_target_var == nullptr
+				? 0u : static_cast<std::size_t>(private_target_var->varno);
+			proof.wrapper_private_query_varno = private_query_var == nullptr
+				? 0u : static_cast<std::size_t>(private_query_var->varno);
+			proof.wrapper_private_target_equal =
+				private_target != nullptr && equal(private_target, expected_target)
+					? 1u : 0u;
+			proof.wrapper_private_query_equal =
+				private_query != nullptr && equal(private_query, expected_query)
+					? 1u : 0u;
+			std::size_t owner_index = 0u;
+			for (RestrictInfo* owned : PList<RestrictInfo>(
+					custom->custom_restrictinfo)) {
+				if (owned == restriction) ++proof.wrapper_pointer_matches;
+				if (owned != nullptr && owned->rinfo_serial > 0
+					&& owned->rinfo_serial == restriction->rinfo_serial) {
+					++proof.wrapper_serial_matches;
+				}
+				if (owned != nullptr
+					&& equal(owned->clause, restriction->clause)) {
+					++proof.wrapper_clause_matches;
+				}
+				if (same_planner_restriction_identity(owned, restriction)) {
+					proof.wrapper_rinfo_serial = static_cast<std::size_t>(
+						owned->rinfo_serial);
+				}
+				FuncExpr* owned_mmsearch = owned == nullptr ? nullptr
+					: pg_node_try_as<FuncExpr>(
+						reinterpret_cast<Node*>(owned->clause));
+				Var* owned_target = owned_mmsearch != nullptr
+					&& list_length(owned_mmsearch->args) >= 2
+					? pg_node_try_as<Var>(reinterpret_cast<Node*>(
+						linitial(owned_mmsearch->args))) : nullptr;
+				Var* owned_query = owned_mmsearch != nullptr
+					&& list_length(owned_mmsearch->args) >= 2
+					? pg_node_try_as<Var>(reinterpret_cast<Node*>(
+						lsecond(owned_mmsearch->args))) : nullptr;
+				if (owner_index == 0u) {
+					proof.wrapper_owner0_target_varno = owned_target == nullptr
+						? 0u : static_cast<std::size_t>(owned_target->varno);
+					proof.wrapper_owner0_query_varno = owned_query == nullptr
+						? 0u : static_cast<std::size_t>(owned_query->varno);
+				} else if (owner_index == 1u) {
+					proof.wrapper_owner1_target_varno = owned_target == nullptr
+						? 0u : static_cast<std::size_t>(owned_target->varno);
+					proof.wrapper_owner1_query_varno = owned_query == nullptr
+						? 0u : static_cast<std::size_t>(owned_query->varno);
+				}
+				++owner_index;
+			}
+			if (!admit_known_wrapper_owner || !known_join_owner) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoKnownWrapperOwnsClause);
+				return;
+			}
+			bool invalid_wrapper_abi = false;
+			Node* owner_recipe = per_row_known_path_owner_recipe(
+				custom, invalid_wrapper_abi);
+			std::size_t exact_owner_count = 0u;
+			std::size_t wrapper_mmsearch_count = 0u;
+			FuncExpr* owned_mmsearch = nullptr;
+			for (RestrictInfo* owned : PList<RestrictInfo>(
+					custom->custom_restrictinfo)) {
+				const std::size_t calls = owned == nullptr ? 0u
+					: count_mmsearch_occurrences(
+						reinterpret_cast<Node*>(owned->clause),
+						get_cached_stub_oids());
+				if (same_planner_restriction_identity(owned, restriction)) {
+					++exact_owner_count;
+					owned_mmsearch = calls == 1u
+						? pg_node_try_as<FuncExpr>(
+							reinterpret_cast<Node*>(owned->clause)) : nullptr;
+				}
+				wrapper_mmsearch_count += calls;
+			}
+			const int executable_index = custom->methods
+				== &BioseqBatchJoinPathMethods ? 8 : 6;
+			FuncExpr* executable_mmsearch = list_length(custom->custom_private)
+				> executable_index
+				? pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(
+					list_nth(custom->custom_private, executable_index)))
+				: nullptr;
+			PList<Node> expected_operands(expected_mmsearch == nullptr
+				? NIL : expected_mmsearch->args);
+			PList<Node> executable_operands(executable_mmsearch == nullptr
+				? NIL : executable_mmsearch->args);
+			const bool executable_shape = executable_mmsearch != nullptr
+				&& is_mmsearch_funcid(executable_mmsearch->funcid,
+					get_cached_stub_oids())
+				&& (list_length(executable_mmsearch->args) == 2
+					|| list_length(executable_mmsearch->args) == 3)
+				&& expected_operands.length() >= 2
+				&& executable_operands.length() >= 2
+				&& equal(executable_operands.first(), expected_operands.first())
+				&& equal(executable_operands.second(), expected_operands.second());
+			Var* owner_target_var = expected_operands.length() >= 2
+				? pg_node_try_as<Var>(expected_operands.first()) : nullptr;
+			Var* owner_query_var = expected_operands.length() >= 2
+				? pg_node_try_as<Var>(expected_operands.second()) : nullptr;
+			const bool owner_parent_contains_operands = custom->path.parent != nullptr
+				&& owner_target_var != nullptr && owner_query_var != nullptr
+				&& bms_is_member(static_cast<int>(owner_target_var->varno),
+					custom->path.parent->relids)
+				&& bms_is_member(static_cast<int>(owner_query_var->varno),
+					custom->path.parent->relids);
+			bool owner_children_cover_parent = custom->path.parent != nullptr
+				&& ((custom->methods == &BioseqBatchJoinPathMethods
+						&& list_length(custom->custom_paths) == 2)
+					|| (custom->methods == &BioseqPerRowJoinPathMethods
+						&& list_length(custom->custom_paths) == 1));
+			if (owner_children_cover_parent
+				&& custom->methods == &BioseqBatchJoinPathMethods) {
+				Path* first_child = reinterpret_cast<Path*>(
+					linitial(custom->custom_paths));
+				Path* second_child = reinterpret_cast<Path*>(
+					lsecond(custom->custom_paths));
+				owner_children_cover_parent = first_child != nullptr
+					&& second_child != nullptr
+					&& first_child->parent != nullptr
+					&& second_child->parent != nullptr
+					&& !bms_overlap(first_child->parent->relids,
+						second_child->parent->relids);
+				Relids child_union = owner_children_cover_parent
+					? bms_union(first_child->parent->relids,
+						second_child->parent->relids) : nullptr;
+				owner_children_cover_parent = owner_children_cover_parent
+					&& bms_equal(child_union, custom->path.parent->relids);
+				bms_free(child_union);
+			} else if (owner_children_cover_parent) {
+				Path* child = reinterpret_cast<Path*>(
+					linitial(custom->custom_paths));
+				owner_children_cover_parent = child != nullptr
+					&& child->parent != nullptr
+					&& bms_equal(child->parent->relids,
+						custom->path.parent->relids);
+			}
+			if (invalid_wrapper_abi || owner_recipe == nullptr
+				|| exact_owner_count != 1u || wrapper_mmsearch_count != 1u
+				|| owned_mmsearch == nullptr || !executable_shape
+				|| !owner_parent_contains_operands || !owner_children_cover_parent
+				|| custom->path.parallel_aware
+				|| custom->path.parallel_safe
+				|| custom->path.parallel_workers != 0
+				|| !std::isfinite(custom->path.rows)
+				|| custom->path.rows < 0
+				|| !std::isfinite(custom->path.startup_cost)
+				|| custom->path.startup_cost < 0
+				|| !std::isfinite(custom->path.total_cost)
+				|| custom->path.total_cost < custom->path.startup_cost) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoKnownWrapperAbi);
+				return;
+			}
+			++proof.matches;
+			for (Path* child : PList<Path>(custom->custom_paths)) {
+				count_exact_parameterized_bmo_owners(
+					root, child, restriction, proof,
+					admit_known_wrapper_owner);
+			}
+			return;
+		}
+		bool invalid_wrapper_abi = false;
+		if (known_join_owner
+			&& per_row_known_path_owner_recipe(
+				custom, invalid_wrapper_abi) == nullptr) {
+			reject_exact_parameterized_bmo_owner(
+				proof, kExactBmoKnownWrapperAbi);
+			return;
+		}
+		if (known_slice_wrapper && list_length(custom->custom_paths) != 1) {
+			reject_exact_parameterized_bmo_owner(
+				proof, kExactBmoKnownWrapperAbi);
+			return;
+		}
+		for (Path* child : PList<Path>(custom->custom_paths)) {
+			count_exact_parameterized_bmo_owners(
+				root, child, restriction, proof,
+				admit_known_wrapper_owner);
+		}
+		return;
+	}
+	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath)) {
+		auto* join = reinterpret_cast<JoinPath*>(path);
+		bool nested_owns_expected = false;
+		for (RestrictInfo* nested : PList<RestrictInfo>(
+				join->joinrestrictinfo)) {
+			if (admit_known_wrapper_owner && nested != nullptr
+				&& count_mmsearch_occurrences(
+					reinterpret_cast<Node*>(nested->clause),
+					get_cached_stub_oids()) != 0u) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoNestedJoinClause);
+				return;
+			}
+			nested_owns_expected = nested_owns_expected
+				|| same_planner_restriction_identity(nested, restriction);
+		}
+		List* algorithm_clauses = IsA(path, MergePath)
+			? reinterpret_cast<MergePath*>(path)->path_mergeclauses
+			: (IsA(path, HashPath)
+				? reinterpret_cast<HashPath*>(path)->path_hashclauses : NIL);
+		if (admit_known_wrapper_owner) {
+			for (RestrictInfo* algorithm_clause : PList<RestrictInfo>(
+					algorithm_clauses)) {
+				if (algorithm_clause != nullptr && count_mmsearch_occurrences(
+						reinterpret_cast<Node*>(algorithm_clause->clause),
+						get_cached_stub_oids()) != 0u) {
+					reject_exact_parameterized_bmo_owner(
+						proof, kExactBmoNestedJoinClause);
+					return;
+				}
+			}
+		}
+		if (nested_owns_expected) {
+			reject_exact_parameterized_bmo_owner(
+				proof, kExactBmoNestedJoinClause);
+			return;
+		}
+		count_exact_parameterized_bmo_owners(
+			root, join->outerjoinpath, restriction, proof,
+			admit_known_wrapper_owner);
+		count_exact_parameterized_bmo_owners(
+			root, join->innerjoinpath, restriction, proof,
+			admit_known_wrapper_owner);
+		return;
+	}
+	Path* unary = nullptr;
+	if (IsA(path, ProjectionPath)) {
+		unary = reinterpret_cast<ProjectionPath*>(path)->subpath;
+	} else if (IsA(path, ProjectSetPath)) {
+		unary = reinterpret_cast<ProjectSetPath*>(path)->subpath;
+	} else if (IsA(path, SortPath)) {
+		unary = reinterpret_cast<SortPath*>(path)->subpath;
+	} else if (IsA(path, IncrementalSortPath)) {
+		unary = reinterpret_cast<IncrementalSortPath*>(path)->spath.subpath;
+	} else if (IsA(path, MaterialPath)) {
+		unary = reinterpret_cast<MaterialPath*>(path)->subpath;
+	} else if (IsA(path, MemoizePath)) {
+		unary = reinterpret_cast<MemoizePath*>(path)->subpath;
+	} else if (IsA(path, UniquePath)) {
+		unary = reinterpret_cast<UniquePath*>(path)->subpath;
+	} else if (IsA(path, GatherPath)) {
+		unary = reinterpret_cast<GatherPath*>(path)->subpath;
+	} else if (IsA(path, GatherMergePath)) {
+		unary = reinterpret_cast<GatherMergePath*>(path)->subpath;
+	}
+	if (unary != nullptr) {
+		count_exact_parameterized_bmo_owners(
+			root, unary, restriction, proof, admit_known_wrapper_owner);
+		return;
+	}
+	if (IsA(path, AppendPath)) {
+		for (Path* child : PList<Path>(
+				reinterpret_cast<AppendPath*>(path)->subpaths)) {
+			count_exact_parameterized_bmo_owners(
+				root, child, restriction, proof,
+				admit_known_wrapper_owner);
+		}
+		return;
+	}
+	if (IsA(path, MergeAppendPath)) {
+		for (Path* child : PList<Path>(
+				reinterpret_cast<MergeAppendPath*>(path)->subpaths)) {
+			count_exact_parameterized_bmo_owners(
+				root, child, restriction, proof,
+				admit_known_wrapper_owner);
+		}
+		return;
+	}
+	/* Closed-world proof: these are the only childless core Path variants
+	 * admitted as leaves.  Any other tag may hide a child/owner layout this
+	 * narrow fallback does not understand. */
+	if (IsA(path, Path) || IsA(path, IndexPath)
+		|| IsA(path, TidPath) || IsA(path, TidRangePath)
+		|| IsA(path, GroupResultPath)) return;
+	reject_exact_parameterized_bmo_owner(
+		proof, kExactBmoUnknownCorePath);
+}
+
+enum ExactParameterizedBmoReconstructionRejection : std::uint32_t {
+	kExactBmoReconstructInvalidInput = 1u << 0,
+	kExactBmoReconstructOperandShape = 1u << 1,
+	kExactBmoReconstructTargetRel = 1u << 2,
+	kExactBmoReconstructTargetRte = 1u << 3,
+	kExactBmoReconstructRequiredOuter = 1u << 4,
+	kExactBmoReconstructBaseMmsearch = 1u << 5,
+	kExactBmoReconstructPathShape = 1u << 6,
+	kExactBmoReconstructOwnerProof = 1u << 7,
+	kExactBmoReconstructOwnerMultiplicity = 1u << 8,
+	kExactBmoReconstructPpi = 1u << 9,
+	kExactBmoReconstructOwnerAbi = 1u << 10,
+	kExactBmoReconstructResidualMmsearch = 1u << 11,
+	kExactBmoReconstructParallel = 1u << 12,
+	kExactBmoReconstructCost = 1u << 13,
+};
+
+enum ExactParameterizedBmoReconstructionAbiMismatch : std::uint32_t {
+	kExactBmoReconstructAbiInvalidTag = 1u << 0,
+	kExactBmoReconstructAbiMissingRecipe = 1u << 1,
+	kExactBmoReconstructAbiRecipeTarget = 1u << 2,
+	kExactBmoReconstructAbiTagMultiplicity = 1u << 3,
+	kExactBmoReconstructAbiExpressionMultiplicity = 1u << 4,
+	kExactBmoReconstructAbiExpressionShape = 1u << 5,
+	kExactBmoReconstructAbiExpressionTarget = 1u << 6,
+	kExactBmoReconstructAbiDynamicQuery = 1u << 7,
+	kExactBmoReconstructAbiDynamicMultiplicity = 1u << 8,
+	kExactBmoReconstructAbiConstantShape = 1u << 9,
+	kExactBmoReconstructAbiConstantMultiplicity = 1u << 10,
+	kExactBmoReconstructAbiMissingDynamic = 1u << 11,
+	kExactBmoReconstructAbiMissingConstant = 1u << 12,
+	kExactBmoReconstructAbiUnexpectedConstant = 1u << 13,
+	kExactBmoReconstructAbiIncompatibleOptions = 1u << 14,
+};
+
+struct ExactParameterizedBmoReconstructionAudit {
+	std::uint32_t rejection_mask = 0u;
+	std::uint32_t owner_abi_mismatch_mask = 0u;
+	std::size_t expected_owner_count = 0u;
+	std::size_t owner_tag_count = 0u;
+	std::size_t owner_expression_count = 0u;
+};
+
+/* Core may discard a parameterized CustomPath before the higher join frontier
+ * is formed.  Rebuild only the exact baserel recipe needed by that frontier;
+ * AddBioseqColumnScanPath performs the normal selectivity/alignment costing
+ * and does not add the result to RelOptInfo::pathlist.  The returned path is
+ * private to the constructed NestPath below. */
+[[nodiscard]] static Path* reconstruct_exact_parameterized_bmo_inner(
+		PlannerInfo* root, RelOptInfo* target_input,
+		RelOptInfo* provider_input, RestrictInfo* restriction,
+		FuncExpr* mmsearch, ExactParameterizedBmoReconstructionAudit& audit) {
+	audit = {};
+	auto reject = [&audit](
+			const ExactParameterizedBmoReconstructionRejection reason)
+				noexcept -> Path* {
+		audit.rejection_mask |= static_cast<std::uint32_t>(reason);
+		return nullptr;
+	};
+	if (root == nullptr || root->parse == nullptr || target_input == nullptr
+		|| provider_input == nullptr || restriction == nullptr
+		|| mmsearch == nullptr || list_length(mmsearch->args) < 2) {
+		return reject(kExactBmoReconstructInvalidInput);
+	}
+	PList<Node> operands(mmsearch->args);
+	Var* target_var = pg_node_try_as<Var>(operands.first());
+	Var* query_var = pg_node_try_as<Var>(operands.second());
+	const BioseqStubOids& oids = get_cached_stub_oids();
+	if (target_var == nullptr || query_var == nullptr
+		|| !bioseq_is_concrete_rte_varno(target_var->varno)
+		|| !bioseq_is_concrete_rte_varno(query_var->varno)
+		|| target_var->varlevelsup != 0 || query_var->varlevelsup != 0
+		|| target_var->varattno <= 0 || query_var->varattno <= 0
+		|| !bms_is_empty(target_var->varnullingrels)
+		|| !bms_is_empty(query_var->varnullingrels)
+		|| target_var->vartype != oids.bioseq_seq_type_oid
+		|| query_var->vartype != oids.bioseq_seq_type_oid
+		|| !mmsearch_typmods_share_alphabet(
+			target_var->vartypmod, query_var->vartypmod)
+		|| target_var->varcollid != query_var->varcollid) {
+		return reject(kExactBmoReconstructOperandShape);
+	}
+	if (target_input->reloptkind != RELOPT_BASEREL
+		|| target_input->relid != target_var->varno
+		|| bms_num_members(target_input->relids) != 1
+		|| !bms_is_member(
+			static_cast<int>(target_var->varno), target_input->relids)
+		|| !bms_is_member(
+			static_cast<int>(query_var->varno), provider_input->relids)
+		|| bms_overlap(target_input->relids, provider_input->relids)) {
+		return reject(kExactBmoReconstructTargetRel);
+	}
+	if (target_input->relid <= 0
+		|| target_input->relid >= root->simple_rel_array_size
+		|| root->simple_rel_array[target_input->relid] != target_input
+		|| target_input->relid > static_cast<Index>(
+			list_length(root->parse->rtable))) {
+		return reject(kExactBmoReconstructTargetRel);
+	}
+	RangeTblEntry* target_rte = rt_fetch(
+		target_input->relid, root->parse->rtable);
+	if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION
+		|| target_rte->securityQuals != NIL || !OidIsValid(target_rte->relid)
+		|| !IsBioseqColumnTableAmTable(target_rte->relid)) {
+		return reject(kExactBmoReconstructTargetRte);
+	}
+
+	PList<RestrictInfo> base_mmsearch_restrictions;
+	FuncExpr* base_mmsearch = nullptr;
+	for (RestrictInfo* base : PList<RestrictInfo>(
+			target_input->baserestrictinfo)) {
+		const std::size_t calls = base == nullptr ? 0u
+			: count_mmsearch_occurrences(
+				reinterpret_cast<Node*>(base->clause), oids);
+		if (calls == 0u) continue;
+		FuncExpr* expression = calls == 1u
+			? pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(base->clause)) : nullptr;
+		if (expression == nullptr || !is_mmsearch_funcid(
+				expression->funcid, oids)
+			|| (expression->funcid == oids.mmsearch_oid
+				&& list_length(expression->args) != 2)
+			|| (expression->funcid == oids.mmsearch_with_opts_oid
+				&& list_length(expression->args) != 3)
+			|| base_mmsearch != nullptr) {
+			return reject(kExactBmoReconstructBaseMmsearch);
+		}
+		PList<Node> base_operands(expression->args);
+		Const* constant_query = pg_node_try_as<Const>(base_operands.second());
+		if (!equal(base_operands.first(), target_var)
+			|| constant_query == nullptr || constant_query->constisnull
+			|| constant_query->consttype != oids.bioseq_seq_type_oid
+			|| !mmsearch_typmods_share_alphabet(
+				target_var->vartypmod, constant_query->consttypmod)) {
+			return reject(kExactBmoReconstructBaseMmsearch);
+		}
+		base_mmsearch = expression;
+		base_mmsearch_restrictions.append(base);
+	}
+	if (base_mmsearch != nullptr) {
+		if (query_var->varno > static_cast<Index>(
+				list_length(root->parse->rtable))) {
+			return reject(kExactBmoReconstructBaseMmsearch);
+		}
+		RangeTblEntry* query_rte = rt_fetch(
+			query_var->varno, root->parse->rtable);
+		FuncExpr* normalized_primary = copyObject(mmsearch);
+		if (list_length(normalized_primary->args) == 3) {
+			Node* option_expression = reinterpret_cast<Node*>(
+				list_nth(normalized_primary->args, 2));
+			Node* folded = eval_const_expressions(root,
+				reinterpret_cast<Node*>(copyObject(option_expression)));
+			lfirst(list_nth_cell(normalized_primary->args, 2)) = folded;
+		}
+		if (query_rte == nullptr || query_rte->rtekind != RTE_RELATION
+			|| query_rte->securityQuals != NIL || !OidIsValid(query_rte->relid)
+			|| IsBioseqColumnTableAmTable(query_rte->relid)
+			|| !bounded_batch_fallback_options_are_supported(
+				normalized_primary, base_mmsearch, oids)) {
+			return reject(kExactBmoReconstructBaseMmsearch);
+		}
+	}
+
+	Relids required_outer = bms_add_member(
+		bms_copy(target_input->lateral_relids),
+		static_cast<int>(query_var->varno));
+	if (required_outer == nullptr
+		|| bms_overlap(required_outer, target_input->relids)
+		|| !bms_is_subset(required_outer, provider_input->relids)) {
+		bms_free(required_outer);
+		return reject(kExactBmoReconstructRequiredOuter);
+	}
+	Path* candidate = AddBioseqColumnScanPath(
+		root, target_input, target_rte, required_outer);
+	/* get_baserel_parampathinfo may retain required_outer in the planner's PPI;
+	 * it therefore remains planner-owned after the constructor call. */
+	auto* custom = candidate != nullptr && IsA(candidate, CustomPath)
+		? reinterpret_cast<CustomPath*>(candidate) : nullptr;
+	if (custom == nullptr || custom->methods != &BioseqColumnScanPathMethods
+		|| candidate->parent != target_input
+		|| candidate->pathtype != T_CustomScan
+		|| list_length(custom->custom_private) != 3) {
+		return reject(kExactBmoReconstructPathShape);
+	}
+	ExactParameterizedBmoOwnerProof owner_proof{};
+	count_exact_parameterized_bmo_owners(
+		root, candidate, restriction, owner_proof);
+	if (owner_proof.invalid) {
+		audit.rejection_mask |= owner_proof.rejection_mask << 16;
+		return reject(kExactBmoReconstructOwnerProof);
+	}
+	if (owner_proof.matches != 1u) {
+		return reject(kExactBmoReconstructOwnerMultiplicity);
+	}
+	const std::size_t expected_owner_count = 1u
+		+ static_cast<std::size_t>(base_mmsearch_restrictions.length());
+	audit.expected_owner_count = expected_owner_count;
+	if (expected_owner_count > 2u
+		|| list_length(custom->custom_restrictinfo)
+			!= static_cast<int>(expected_owner_count)) {
+		return reject(kExactBmoReconstructOwnerMultiplicity);
+	}
+	std::size_t dynamic_owner_count = 0u;
+	std::size_t base_owner_count = 0u;
+	for (RestrictInfo* owned : PList<RestrictInfo>(
+			custom->custom_restrictinfo)) {
+		if (same_planner_restriction_identity(owned, restriction)) {
+			++dynamic_owner_count;
+		} else if (list_member_ptr(
+				base_mmsearch_restrictions.ptr(), owned)) {
+			++base_owner_count;
+		} else {
+			return reject(kExactBmoReconstructOwnerMultiplicity);
+		}
+	}
+	if (dynamic_owner_count != 1u
+		|| base_owner_count
+			!= static_cast<std::size_t>(base_mmsearch_restrictions.length())) {
+		return reject(kExactBmoReconstructOwnerMultiplicity);
+	}
+	if (candidate->param_info == nullptr
+		|| !bms_equal(PATH_REQ_OUTER(candidate), required_outer)
+		|| !bms_is_member(
+			static_cast<int>(query_var->varno), PATH_REQ_OUTER(candidate))
+		|| !bms_is_subset(
+			PATH_REQ_OUTER(candidate), provider_input->relids)) {
+		return reject(kExactBmoReconstructPpi);
+	}
+	std::size_t ppi_dynamic_count = 0u;
+	for (RestrictInfo* ppi_clause : PList<RestrictInfo>(
+			candidate->param_info->ppi_clauses)) {
+		const std::size_t calls = ppi_clause == nullptr ? 0u
+			: count_mmsearch_occurrences(
+				reinterpret_cast<Node*>(ppi_clause->clause), oids);
+		if (same_planner_restriction_identity(ppi_clause, restriction)) {
+			++ppi_dynamic_count;
+			if (calls != 1u) return reject(kExactBmoReconstructPpi);
+		} else if (calls != 0u) {
+			return reject(kExactBmoReconstructPpi);
+		}
+	}
+	if (ppi_dynamic_count != 1u) {
+		return reject(kExactBmoReconstructPpi);
+	}
+
+	bool invalid_owner_abi = false;
+	Node* owner_recipe = per_row_base_scan_owner_recipe(
+		custom, invalid_owner_abi);
+	List* owner_expressions = NIL;
+	std::size_t owner_tag_count = 0u;
+	for (Node* private_node : PList<Node>(custom->custom_private)) {
+		if (private_node == nullptr || !IsA(private_node, List)) continue;
+		List* tag = reinterpret_cast<List*>(private_node);
+		Node* magic = list_length(tag) >= 1
+			? reinterpret_cast<Node*>(linitial(tag)) : nullptr;
+		if (magic == nullptr || !IsA(magic, Integer)
+			|| intVal(magic) != kBioseqMmsearchOwnerMagic) continue;
+		++owner_tag_count;
+		Node* expressions = list_length(tag) == 3
+			? reinterpret_cast<Node*>(list_nth(tag, 2)) : nullptr;
+		if (list_length(tag) != 3
+			|| !IsA(reinterpret_cast<Node*>(list_nth(tag, 1)), Integer)
+			|| intVal(list_nth(tag, 1)) != kBioseqMmsearchOwnerVersion
+			|| expressions == nullptr || !IsA(expressions, List)) {
+			invalid_owner_abi = true;
+		} else {
+			owner_expressions = reinterpret_cast<List*>(expressions);
+		}
+	}
+	audit.owner_tag_count = owner_tag_count;
+	audit.owner_expression_count = static_cast<std::size_t>(
+		list_length(owner_expressions));
+	if (invalid_owner_abi) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiInvalidTag;
+	}
+	if (owner_recipe == nullptr) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiMissingRecipe;
+	} else if (!equal(owner_recipe, target_var)) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiRecipeTarget;
+	}
+	if (owner_tag_count != 1u) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiTagMultiplicity;
+	}
+	if (list_length(owner_expressions)
+			!= static_cast<int>(expected_owner_count)) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiExpressionMultiplicity;
+	}
+	if (audit.owner_abi_mismatch_mask != 0u) {
+		return reject(kExactBmoReconstructOwnerAbi);
+	}
+	FuncExpr* dynamic_expression = nullptr;
+	FuncExpr* constant_expression = nullptr;
+	for (int index = 0; index < static_cast<int>(expected_owner_count);
+			++index) {
+		RestrictInfo* owned = reinterpret_cast<RestrictInfo*>(
+			list_nth(custom->custom_restrictinfo, index));
+		FuncExpr* expression = pg_node_try_as<FuncExpr>(
+			reinterpret_cast<Node*>(list_nth(owner_expressions, index)));
+		if (expression == nullptr || list_length(expression->args) < 2) {
+			audit.owner_abi_mismatch_mask |=
+				kExactBmoReconstructAbiExpressionShape;
+			return reject(kExactBmoReconstructOwnerAbi);
+		}
+		if (!equal(linitial(expression->args), target_var)) {
+			audit.owner_abi_mismatch_mask |=
+				kExactBmoReconstructAbiExpressionTarget;
+			return reject(kExactBmoReconstructOwnerAbi);
+		}
+		if (same_planner_restriction_identity(owned, restriction)) {
+			if (!equal(lsecond(expression->args), query_var)) {
+				audit.owner_abi_mismatch_mask |=
+					kExactBmoReconstructAbiDynamicQuery;
+				return reject(kExactBmoReconstructOwnerAbi);
+			}
+			if (dynamic_expression != nullptr) {
+				audit.owner_abi_mismatch_mask |=
+					kExactBmoReconstructAbiDynamicMultiplicity;
+				return reject(kExactBmoReconstructOwnerAbi);
+			}
+			dynamic_expression = expression;
+		} else {
+			Const* constant = pg_node_try_as<Const>(
+				reinterpret_cast<Node*>(lsecond(expression->args)));
+			if (constant == nullptr || constant->constisnull) {
+				audit.owner_abi_mismatch_mask |=
+					kExactBmoReconstructAbiConstantShape;
+				return reject(kExactBmoReconstructOwnerAbi);
+			}
+			if (constant_expression != nullptr) {
+				audit.owner_abi_mismatch_mask |=
+					kExactBmoReconstructAbiConstantMultiplicity;
+				return reject(kExactBmoReconstructOwnerAbi);
+			}
+			constant_expression = expression;
+		}
+	}
+	if (dynamic_expression == nullptr) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiMissingDynamic;
+	}
+	if (base_mmsearch != nullptr && constant_expression == nullptr) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiMissingConstant;
+	}
+	if (base_mmsearch == nullptr && constant_expression != nullptr) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiUnexpectedConstant;
+	}
+	if (base_mmsearch != nullptr && dynamic_expression != nullptr
+		&& constant_expression != nullptr
+		&& !bounded_batch_fallback_options_are_supported(
+			dynamic_expression, constant_expression, oids)) {
+		audit.owner_abi_mismatch_mask |=
+			kExactBmoReconstructAbiIncompatibleOptions;
+	}
+	if (audit.owner_abi_mismatch_mask != 0u) {
+		return reject(kExactBmoReconstructOwnerAbi);
+	}
+	for (int index = 0; index < 2; ++index) {
+		Node* residual_node = reinterpret_cast<Node*>(
+			list_nth(custom->custom_private, index));
+		if (residual_node != nullptr && !IsA(residual_node, List)) {
+			return reject(kExactBmoReconstructOwnerAbi);
+		}
+		for (RestrictInfo* residual : PList<RestrictInfo>(
+				residual_node == nullptr ? NIL
+					: reinterpret_cast<List*>(residual_node))) {
+			if (residual != nullptr && count_mmsearch_occurrences(
+					reinterpret_cast<Node*>(residual->clause), oids) != 0u) {
+				return reject(kExactBmoReconstructResidualMmsearch);
+			}
+		}
+	}
+	if (candidate->parallel_aware || candidate->parallel_safe
+		|| candidate->parallel_workers != 0) {
+		return reject(kExactBmoReconstructParallel);
+	}
+	if (!std::isfinite(candidate->rows) || candidate->rows < 0
+		|| !std::isfinite(candidate->startup_cost)
+		|| candidate->startup_cost < 0
+		|| !std::isfinite(candidate->total_cost)
+		|| candidate->total_cost < candidate->startup_cost) {
+		return reject(kExactBmoReconstructCost);
+	}
+	return candidate;
+}
+
+struct ExactParameterizedBmoRetainerAudit {
+	std::size_t candidates = 0u;
+	std::size_t nest_paths = 0u;
+	std::size_t inner_nest_paths = 0u;
+	std::size_t root_owned_clause_paths = 0u;
+	std::size_t root_foreign_mmsearch_paths = 0u;
+	std::size_t outer_matches = 0u;
+	std::size_t inner_matches = 0u;
+	std::size_t retained_paths = 0u;
+	std::size_t available_bmo_paths = 0u;
+	std::size_t compatible_bmo_paths = 0u;
+	std::size_t available_outer_paths = 0u;
+	std::size_t constructed_paths = 0u;
+	std::size_t reconstructed_bmo_attempts = 0u;
+	std::size_t reconstructed_bmo_paths = 0u;
+	std::size_t target_var_resolved = 0u;
+	std::size_t query_var_resolved = 0u;
+	std::uint32_t target_relid_side_mask = 0u;
+	std::uint32_t target_base_side_mask = 0u;
+	std::uint32_t query_relid_side_mask = 0u;
+	std::size_t provider_has_query = 0u;
+	std::size_t target_paths = 0u;
+	std::size_t target_custom_paths = 0u;
+	std::size_t target_bioseq_paths = 0u;
+	std::size_t target_bmo_tags = 0u;
+	std::size_t target_custom_restrictions = 0u;
+	std::size_t target_custom_pointer_matches = 0u;
+	std::size_t target_custom_serial_matches = 0u;
+	std::size_t target_custom_clause_matches = 0u;
+	std::size_t target_custom_exact_matches = 0u;
+	std::size_t target_ppi_paths = 0u;
+	std::size_t target_ppi_clauses = 0u;
+	std::size_t target_ppi_serial_matches = 0u;
+	std::size_t target_ppi_clause_matches = 0u;
+	std::size_t target_ppi_exact_matches = 0u;
+	std::uint32_t outer_rejection_mask = 0u;
+	std::uint32_t inner_rejection_mask = 0u;
+	std::uint32_t target_owner_rejection_mask = 0u;
+	std::uint32_t target_abi_mismatch_mask = 0u;
+	std::uint32_t target_ppi_mismatch_mask = 0u;
+	std::uint32_t target_compatibility_mismatch_mask = 0u;
+	std::uint32_t reconstructed_bmo_rejection_mask = 0u;
+	std::uint32_t reconstructed_owner_abi_mismatch_mask = 0u;
+	std::size_t reconstructed_expected_owner_count = 0u;
+	std::size_t reconstructed_owner_tag_count = 0u;
+	std::size_t reconstructed_owner_expression_count = 0u;
+	std::uint64_t joinrel_relids_low = 0u;
+	std::uint64_t left_relids_low = 0u;
+	std::uint64_t right_relids_low = 0u;
+	std::size_t left_relid_count = 0u;
+	std::size_t right_relid_count = 0u;
+	std::uint32_t wrapper_side_mask = 0u;
+	std::size_t wrapper_owns_expected = 0u;
+	std::uint32_t wrapper_method_mask = 0u;
+	std::size_t wrapper_version = 0u;
+	std::size_t wrapper_restriction_count = 0u;
+	std::size_t wrapper_child_count = 0u;
+	std::size_t wrapper_pointer_matches = 0u;
+	std::size_t wrapper_serial_matches = 0u;
+	std::size_t wrapper_clause_matches = 0u;
+	std::size_t wrapper_expected_serial = 0u;
+	std::size_t wrapper_owned_serial = 0u;
+	std::size_t wrapper_expected_target_varno = 0u;
+	std::size_t wrapper_expected_query_varno = 0u;
+	std::size_t wrapper_private_target_varno = 0u;
+	std::size_t wrapper_private_query_varno = 0u;
+	std::size_t wrapper_private_target_equal = 0u;
+	std::size_t wrapper_private_query_equal = 0u;
+	std::size_t wrapper_owner0_target_varno = 0u;
+	std::size_t wrapper_owner0_query_varno = 0u;
+	std::size_t wrapper_owner1_target_varno = 0u;
+	std::size_t wrapper_owner1_query_varno = 0u;
+	std::uint64_t wrapper_parent_relids_low = 0u;
+	std::uint64_t wrapper_child0_relids_low = 0u;
+	std::uint64_t wrapper_child1_relids_low = 0u;
+	std::size_t current_pair_paths = 0u;
+	std::size_t foreign_decomposition_paths = 0u;
+	std::size_t safe_foreign_paths = 0u;
+	std::size_t foreign_owner_matches = 0u;
+	std::uint32_t foreign_rejection_mask = 0u;
+	std::uint32_t foreign_owner_rejection_mask = 0u;
+};
+
+enum ExactParameterizedBmoRetainerAbiMismatch : std::uint32_t {
+	kExactBmoRetainerInvalidOwnerTag = 1u << 0,
+	kExactBmoRetainerMissingCustomRestriction = 1u << 1,
+	kExactBmoRetainerMissingCustomSerial = 1u << 2,
+	kExactBmoRetainerMissingCustomClause = 1u << 3,
+	kExactBmoRetainerMissingCustomIdentity = 1u << 4,
+	kExactBmoRetainerMultipleCustomIdentities = 1u << 5,
+};
+
+enum ExactParameterizedBmoRetainerPpiMismatch : std::uint32_t {
+	kExactBmoRetainerMissingParamInfo = 1u << 0,
+	kExactBmoRetainerEmptyPpiClauses = 1u << 1,
+	kExactBmoRetainerMissingPpiSerial = 1u << 2,
+	kExactBmoRetainerMissingPpiClause = 1u << 3,
+	kExactBmoRetainerMissingPpiIdentity = 1u << 4,
+	kExactBmoRetainerMultiplePpiIdentities = 1u << 5,
+};
+
+enum ExactParameterizedBmoRetainerCompatibilityMismatch : std::uint32_t {
+	kExactBmoRetainerCandidateParent = 1u << 0,
+	kExactBmoRetainerCandidateOwnerProof = 1u << 1,
+	kExactBmoRetainerCandidateOwnerMultiplicity = 1u << 2,
+	kExactBmoRetainerCandidateUnparameterized = 1u << 3,
+	kExactBmoRetainerCandidateMissingQueryRelid = 1u << 4,
+	kExactBmoRetainerCandidateForeignRequiredOuter = 1u << 5,
+	kExactBmoRetainerCandidateParallel = 1u << 6,
+	kExactBmoRetainerCandidateNonfiniteCost = 1u << 7,
+	kExactBmoRetainerCandidateNegativeCost = 1u << 8,
+};
+
+[[nodiscard]] static bool retain_join_paths_with_custom_restriction_owner(
+		PlannerInfo* root, RelOptInfo* joinrel,
+		RelOptInfo* left_input, RelOptInfo* right_input,
+		JoinPathExtraData* extra, RestrictInfo* restriction,
+		FuncExpr* mmsearch,
+		ExactParameterizedBmoRetainerAudit* audit = nullptr) {
+	if (root == nullptr || joinrel == nullptr || left_input == nullptr
+		|| right_input == nullptr || extra == nullptr || restriction == nullptr
+		|| mmsearch == nullptr || list_length(mmsearch->args) < 2) return false;
+	ExactParameterizedBmoRetainerAudit local_audit{};
+	local_audit.joinrel_relids_low = exact_bmo_audit_relids_low(
+		joinrel->relids);
+	local_audit.left_relids_low = exact_bmo_audit_relids_low(
+		left_input->relids);
+	local_audit.right_relids_low = exact_bmo_audit_relids_low(
+		right_input->relids);
+	local_audit.left_relid_count = static_cast<std::size_t>(
+		bms_num_members(left_input->relids));
+	local_audit.right_relid_count = static_cast<std::size_t>(
+		bms_num_members(right_input->relids));
+	PList<Path> retained;
+	for (Path* path : PList<Path>(joinrel->pathlist)) {
+		++local_audit.candidates;
+		if (path == nullptr || !IsA(path, NestPath)) continue;
+		++local_audit.nest_paths;
+		auto* nest = reinterpret_cast<NestPath*>(path);
+		if (nest->jpath.jointype != JOIN_INNER) continue;
+		++local_audit.inner_nest_paths;
+		RelOptInfo* outer_parent = nest->jpath.outerjoinpath == nullptr
+			? nullptr : nest->jpath.outerjoinpath->parent;
+		RelOptInfo* inner_parent = nest->jpath.innerjoinpath == nullptr
+			? nullptr : nest->jpath.innerjoinpath->parent;
+		const bool current_direct = outer_parent != nullptr
+			&& inner_parent != nullptr
+			&& bms_equal(outer_parent->relids, left_input->relids)
+			&& bms_equal(inner_parent->relids, right_input->relids);
+		const bool current_swapped = outer_parent != nullptr
+			&& inner_parent != nullptr
+			&& bms_equal(outer_parent->relids, right_input->relids)
+			&& bms_equal(inner_parent->relids, left_input->relids);
+		const bool current_pair = current_direct || current_swapped;
+		if (current_pair) {
+			++local_audit.current_pair_paths;
+		} else {
+			++local_audit.foreign_decomposition_paths;
+		}
+
+		std::size_t exact_root_copies = 0u;
+		bool foreign_root_mmsearch = false;
+		for (RestrictInfo* root_clause : PList<RestrictInfo>(
+				nest->jpath.joinrestrictinfo)) {
+			const std::size_t calls = root_clause == nullptr ? 0u
+				: count_mmsearch_occurrences(
+					reinterpret_cast<Node*>(root_clause->clause),
+					get_cached_stub_oids());
+			if (same_planner_restriction_identity(
+					root_clause, restriction)) {
+				++exact_root_copies;
+				if (calls != 1u) foreign_root_mmsearch = true;
+			} else if (calls != 0u) {
+				/* A copied/equivalent rendezvous clause cannot be removed by the
+				 * exact pointer proof, and would remain an executable SQL stub. */
+				foreign_root_mmsearch = true;
+			}
+		}
+		if (exact_root_copies > 1u || foreign_root_mmsearch) {
+			++local_audit.root_foreign_mmsearch_paths;
+			continue;
+		}
+		if (exact_root_copies == 1u) {
+			++local_audit.root_owned_clause_paths;
+		}
+		if (!current_pair) {
+			bool exact_foreign_partition = path->parent == joinrel
+				&& outer_parent != nullptr && inner_parent != nullptr
+				&& !bms_overlap(outer_parent->relids, inner_parent->relids);
+			Relids foreign_union = exact_foreign_partition
+				? bms_union(outer_parent->relids, inner_parent->relids) : nullptr;
+			exact_foreign_partition = exact_foreign_partition
+				&& bms_equal(foreign_union, joinrel->relids);
+			bms_free(foreign_union);
+			if (!exact_foreign_partition) {
+				local_audit.foreign_rejection_mask |= 1u << 0;
+				continue;
+			}
+			if (exact_root_copies != 0u || foreign_root_mmsearch) {
+				local_audit.foreign_rejection_mask |= 1u << 1;
+				continue;
+			}
+			if (batch_join_path_contains_parallel_execution(path)
+				|| !std::isfinite(path->startup_cost)
+				|| !std::isfinite(path->total_cost)
+				|| path->startup_cost < 0 || path->total_cost < path->startup_cost) {
+				local_audit.foreign_rejection_mask |= 1u << 2;
+				continue;
+			}
+			ExactParameterizedBmoOwnerProof foreign_owner{};
+			count_exact_parameterized_bmo_owners(
+				root, path, restriction, foreign_owner,
+				/*admit_known_wrapper_owner=*/true);
+			local_audit.foreign_owner_matches += foreign_owner.matches;
+			local_audit.foreign_owner_rejection_mask |=
+				foreign_owner.rejection_mask;
+			if (foreign_owner.invalid) {
+				local_audit.foreign_rejection_mask |= 1u << 3;
+				continue;
+			}
+			if (foreign_owner.matches != 1u) {
+				local_audit.foreign_rejection_mask |= 1u << 4;
+				continue;
+			}
+			retained.append(path);
+			++local_audit.safe_foreign_paths;
+			continue;
+		}
+
+		ExactParameterizedBmoOwnerProof outer{};
+		ExactParameterizedBmoOwnerProof inner{};
+		count_exact_parameterized_bmo_owners(
+			root, nest->jpath.outerjoinpath, restriction, outer);
+		count_exact_parameterized_bmo_owners(
+			root, nest->jpath.innerjoinpath, restriction, inner);
+		local_audit.outer_matches += outer.matches;
+		local_audit.inner_matches += inner.matches;
+		local_audit.outer_rejection_mask |= outer.rejection_mask;
+		local_audit.inner_rejection_mask |= inner.rejection_mask;
+		auto capture_wrapper_audit = [&local_audit](
+				ExactParameterizedBmoOwnerProof const& proof,
+				const std::uint32_t side) {
+			if (proof.wrapper_owns_expected == 0u) return;
+			local_audit.wrapper_side_mask |= side;
+			local_audit.wrapper_owns_expected += proof.wrapper_owns_expected;
+			local_audit.wrapper_method_mask |= proof.wrapper_method_mask;
+			if (local_audit.wrapper_expected_serial == 0u) {
+				local_audit.wrapper_version = proof.wrapper_version;
+				local_audit.wrapper_restriction_count =
+					proof.wrapper_restriction_count;
+				local_audit.wrapper_child_count = proof.wrapper_child_count;
+				local_audit.wrapper_pointer_matches =
+					proof.wrapper_pointer_matches;
+				local_audit.wrapper_serial_matches =
+					proof.wrapper_serial_matches;
+				local_audit.wrapper_clause_matches =
+					proof.wrapper_clause_matches;
+				local_audit.wrapper_expected_serial =
+					proof.expected_rinfo_serial;
+				local_audit.wrapper_owned_serial = proof.wrapper_rinfo_serial;
+				local_audit.wrapper_expected_target_varno =
+					proof.expected_target_varno;
+				local_audit.wrapper_expected_query_varno =
+					proof.expected_query_varno;
+				local_audit.wrapper_private_target_varno =
+					proof.wrapper_private_target_varno;
+				local_audit.wrapper_private_query_varno =
+					proof.wrapper_private_query_varno;
+				local_audit.wrapper_private_target_equal =
+					proof.wrapper_private_target_equal;
+				local_audit.wrapper_private_query_equal =
+					proof.wrapper_private_query_equal;
+				local_audit.wrapper_owner0_target_varno =
+					proof.wrapper_owner0_target_varno;
+				local_audit.wrapper_owner0_query_varno =
+					proof.wrapper_owner0_query_varno;
+				local_audit.wrapper_owner1_target_varno =
+					proof.wrapper_owner1_target_varno;
+				local_audit.wrapper_owner1_query_varno =
+					proof.wrapper_owner1_query_varno;
+				local_audit.wrapper_parent_relids_low =
+					proof.wrapper_parent_relids_low;
+				local_audit.wrapper_child0_relids_low =
+					proof.wrapper_child0_relids_low;
+				local_audit.wrapper_child1_relids_low =
+					proof.wrapper_child1_relids_low;
+			}
+		};
+		capture_wrapper_audit(outer, 1u);
+		capture_wrapper_audit(inner, 2u);
+		if (outer.invalid || inner.invalid
+			|| outer.matches != 0u || inner.matches != 1u) continue;
+
+		if (exact_root_copies == 0u) {
+			retained.append(path);
+		} else {
+			/* Core retains the parameter clause in JoinPath::joinrestrictinfo even
+			 * when the parameterized BMO inner path owns it.  Clone only the root
+			 * NestPath and remove that exact pointer so create_nestloop_plan cannot
+			 * emit the rendezvous SQL function as a Join Filter.  Costs stay
+			 * conservative because the original qual charge is retained. */
+			auto* clone = makeNode(NestPath);
+			*clone = *nest;
+			PList<RestrictInfo> residual;
+			for (RestrictInfo* root_clause : PList<RestrictInfo>(
+					nest->jpath.joinrestrictinfo)) {
+				if (!same_planner_restriction_identity(
+						root_clause, restriction)) residual.append(root_clause);
+			}
+			clone->jpath.joinrestrictinfo = residual.release();
+			retained.append(reinterpret_cast<Path*>(clone));
+		}
+	}
+	/* Core does not necessarily form a NestPath from a custom parameterized
+	 * baserel path.  If no incumbent proves ownership, construct that exact
+	 * normal-cost shape from the target input's BMO path and the other input's
+	 * cheapest compatible path. */
+	if (retained.empty()) {
+		PList<Node> operands(mmsearch->args);
+		Var* target_var = pg_node_try_as<Var>(operands.first());
+		Var* query_var = pg_node_try_as<Var>(operands.second());
+		local_audit.target_var_resolved = target_var == nullptr ? 0u : 1u;
+		local_audit.query_var_resolved = query_var == nullptr ? 0u : 1u;
+		auto relid_side_mask = [left_input, right_input](Var* var) noexcept {
+			std::uint32_t mask = 0u;
+			if (var == nullptr || !bioseq_is_concrete_rte_varno(var->varno)) {
+				return mask;
+			}
+			if (bms_is_member(static_cast<int>(var->varno), left_input->relids)) {
+				mask |= 1u;
+			}
+			if (bms_is_member(static_cast<int>(var->varno), right_input->relids)) {
+				mask |= 2u;
+			}
+			return mask;
+		};
+		local_audit.target_relid_side_mask = relid_side_mask(target_var);
+		local_audit.query_relid_side_mask = relid_side_mask(query_var);
+		RelOptInfo* target_input = nullptr;
+		RelOptInfo* provider_input = nullptr;
+		auto input_is_target_base = [target_var](RelOptInfo* input) noexcept {
+			return input != nullptr && target_var != nullptr
+				&& (input->reloptkind == RELOPT_BASEREL
+					|| input->reloptkind == RELOPT_OTHER_MEMBER_REL)
+				&& input->relid == target_var->varno;
+		};
+		if (input_is_target_base(left_input)) {
+			local_audit.target_base_side_mask |= 1u;
+			target_input = left_input;
+			provider_input = right_input;
+		} else if (input_is_target_base(right_input)) {
+			local_audit.target_base_side_mask |= 2u;
+			target_input = right_input;
+			provider_input = left_input;
+		}
+		const bool provider_has_query = provider_input != nullptr
+			&& query_var != nullptr
+			&& bioseq_is_concrete_rte_varno(query_var->varno)
+			&& bms_is_member(
+				static_cast<int>(query_var->varno), provider_input->relids);
+		local_audit.provider_has_query = provider_has_query ? 1u : 0u;
+		Path* best_bmo = nullptr;
+		if (target_input != nullptr) {
+			for (Path* candidate : PList<Path>(target_input->pathlist)) {
+				++local_audit.target_paths;
+				auto* custom = candidate != nullptr && IsA(candidate, CustomPath)
+					? reinterpret_cast<CustomPath*>(candidate) : nullptr;
+				if (custom != nullptr) ++local_audit.target_custom_paths;
+				const bool bioseq_path = custom != nullptr
+					&& custom->methods == &BioseqColumnScanPathMethods;
+				if (bioseq_path) ++local_audit.target_bioseq_paths;
+				std::size_t candidate_bmo_tags = 0u;
+				if (bioseq_path) {
+					for (Node* private_node : PList<Node>(custom->custom_private)) {
+						if (private_node == nullptr || !IsA(private_node, List)) {
+							continue;
+						}
+						List* tag = reinterpret_cast<List*>(private_node);
+						Node* magic = list_length(tag) >= 1
+							? reinterpret_cast<Node*>(linitial(tag)) : nullptr;
+						if (magic != nullptr && IsA(magic, Integer)
+							&& intVal(magic) == kBioseqMmsearchOwnerMagic) {
+							++candidate_bmo_tags;
+							++local_audit.target_bmo_tags;
+						}
+					}
+				}
+				if (candidate_bmo_tags != 0u) {
+					bool invalid_owner_abi = false;
+					Node* recipe = per_row_base_scan_owner_recipe(
+						custom, invalid_owner_abi);
+					if (candidate_bmo_tags != 1u || invalid_owner_abi
+						|| recipe == nullptr) {
+						local_audit.target_abi_mismatch_mask |=
+							kExactBmoRetainerInvalidOwnerTag;
+					}
+					std::size_t candidate_pointer_matches = 0u;
+					std::size_t candidate_serial_matches = 0u;
+					std::size_t candidate_clause_matches = 0u;
+					std::size_t candidate_exact_matches = 0u;
+					for (RestrictInfo* owned : PList<RestrictInfo>(
+							custom->custom_restrictinfo)) {
+						++local_audit.target_custom_restrictions;
+						if (owned == restriction) {
+							++candidate_pointer_matches;
+							++local_audit.target_custom_pointer_matches;
+						}
+						if (owned != nullptr && restriction != nullptr
+							&& owned->rinfo_serial > 0
+							&& owned->rinfo_serial == restriction->rinfo_serial) {
+							++candidate_serial_matches;
+							++local_audit.target_custom_serial_matches;
+						}
+						if (owned != nullptr && restriction != nullptr
+							&& equal(owned->clause, restriction->clause)) {
+							++candidate_clause_matches;
+							++local_audit.target_custom_clause_matches;
+						}
+						if (same_planner_restriction_identity(
+								owned, restriction)) {
+							++candidate_exact_matches;
+							++local_audit.target_custom_exact_matches;
+						}
+					}
+					if (custom->custom_restrictinfo == NIL) {
+						local_audit.target_abi_mismatch_mask |=
+							kExactBmoRetainerMissingCustomRestriction;
+					}
+					if (candidate_serial_matches == 0u) {
+						local_audit.target_abi_mismatch_mask |=
+							kExactBmoRetainerMissingCustomSerial;
+					}
+					if (candidate_clause_matches == 0u) {
+						local_audit.target_abi_mismatch_mask |=
+							kExactBmoRetainerMissingCustomClause;
+					}
+					if (candidate_exact_matches == 0u) {
+						local_audit.target_abi_mismatch_mask |=
+							kExactBmoRetainerMissingCustomIdentity;
+					} else if (candidate_exact_matches > 1u) {
+						local_audit.target_abi_mismatch_mask |=
+							kExactBmoRetainerMultipleCustomIdentities;
+					}
+					if (candidate->param_info == nullptr) {
+						local_audit.target_ppi_mismatch_mask |=
+							kExactBmoRetainerMissingParamInfo;
+					} else {
+						++local_audit.target_ppi_paths;
+						std::size_t candidate_ppi_serial_matches = 0u;
+						std::size_t candidate_ppi_clause_matches = 0u;
+						std::size_t candidate_ppi_exact_matches = 0u;
+						for (RestrictInfo* parameter_clause :
+								PList<RestrictInfo>(
+									candidate->param_info->ppi_clauses)) {
+							++local_audit.target_ppi_clauses;
+							if (parameter_clause != nullptr && restriction != nullptr
+								&& parameter_clause->rinfo_serial > 0
+								&& parameter_clause->rinfo_serial
+									== restriction->rinfo_serial) {
+								++candidate_ppi_serial_matches;
+								++local_audit.target_ppi_serial_matches;
+							}
+							if (parameter_clause != nullptr && restriction != nullptr
+								&& equal(parameter_clause->clause,
+									restriction->clause)) {
+								++candidate_ppi_clause_matches;
+								++local_audit.target_ppi_clause_matches;
+							}
+							if (same_planner_restriction_identity(
+									parameter_clause, restriction)) {
+								++candidate_ppi_exact_matches;
+								++local_audit.target_ppi_exact_matches;
+							}
+						}
+						if (candidate->param_info->ppi_clauses == NIL) {
+							local_audit.target_ppi_mismatch_mask |=
+								kExactBmoRetainerEmptyPpiClauses;
+						}
+						if (candidate_ppi_serial_matches == 0u) {
+							local_audit.target_ppi_mismatch_mask |=
+								kExactBmoRetainerMissingPpiSerial;
+						}
+						if (candidate_ppi_clause_matches == 0u) {
+							local_audit.target_ppi_mismatch_mask |=
+								kExactBmoRetainerMissingPpiClause;
+						}
+						if (candidate_ppi_exact_matches == 0u) {
+							local_audit.target_ppi_mismatch_mask |=
+								kExactBmoRetainerMissingPpiIdentity;
+						} else if (candidate_ppi_exact_matches > 1u) {
+							local_audit.target_ppi_mismatch_mask |=
+								kExactBmoRetainerMultiplePpiIdentities;
+						}
+					}
+					(void)candidate_pointer_matches;
+				}
+				ExactParameterizedBmoOwnerProof candidate_proof{};
+				count_exact_parameterized_bmo_owners(
+					root, candidate, restriction, candidate_proof);
+				local_audit.target_owner_rejection_mask |=
+					candidate_proof.rejection_mask;
+				if (provider_has_query && candidate_proof.matches != 0u) {
+					++local_audit.available_bmo_paths;
+				}
+				Relids required = candidate == nullptr
+					? nullptr : PATH_REQ_OUTER(candidate);
+				if (candidate_bmo_tags != 0u
+					|| candidate_proof.matches != 0u) {
+					if (candidate == nullptr || candidate->parent != target_input) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateParent;
+					}
+					if (candidate_proof.invalid) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateOwnerProof;
+					}
+					if (candidate_proof.matches != 1u) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateOwnerMultiplicity;
+					}
+					if (required == nullptr) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateUnparameterized;
+					} else if (provider_has_query) {
+						if (!bms_is_member(
+								static_cast<int>(query_var->varno), required)) {
+							local_audit.target_compatibility_mismatch_mask |=
+								kExactBmoRetainerCandidateMissingQueryRelid;
+						}
+						if (!bms_is_subset(required, provider_input->relids)) {
+							local_audit.target_compatibility_mismatch_mask |=
+								kExactBmoRetainerCandidateForeignRequiredOuter;
+						}
+					}
+					if (candidate != nullptr && (candidate->parallel_aware
+						|| candidate->parallel_workers != 0)) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateParallel;
+					}
+					if (candidate != nullptr
+						&& !std::isfinite(candidate->total_cost)) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateNonfiniteCost;
+					}
+					if (candidate != nullptr && candidate->total_cost < 0) {
+						local_audit.target_compatibility_mismatch_mask |=
+							kExactBmoRetainerCandidateNegativeCost;
+					}
+				}
+				if (!provider_has_query
+					|| candidate == nullptr || candidate->parent != target_input
+					|| candidate_proof.invalid
+					|| candidate_proof.matches != 1u
+					|| required == nullptr
+					|| !bms_is_member(
+						static_cast<int>(query_var->varno), required)
+					|| !bms_is_subset(required, provider_input->relids)
+					|| candidate->parallel_aware || candidate->parallel_workers != 0
+					|| !std::isfinite(candidate->total_cost)
+					|| candidate->total_cost < 0) continue;
+				++local_audit.compatible_bmo_paths;
+				if (best_bmo == nullptr
+					|| candidate->total_cost < best_bmo->total_cost) {
+					best_bmo = candidate;
+				}
+			}
+			if (best_bmo == nullptr && provider_has_query) {
+				++local_audit.reconstructed_bmo_attempts;
+				ExactParameterizedBmoReconstructionAudit
+					reconstruction_audit{};
+				best_bmo = reconstruct_exact_parameterized_bmo_inner(
+					root, target_input, provider_input, restriction,
+					mmsearch, reconstruction_audit);
+				local_audit.reconstructed_bmo_rejection_mask |=
+					reconstruction_audit.rejection_mask;
+				local_audit.reconstructed_owner_abi_mismatch_mask |=
+					reconstruction_audit.owner_abi_mismatch_mask;
+				local_audit.reconstructed_expected_owner_count =
+					reconstruction_audit.expected_owner_count;
+				local_audit.reconstructed_owner_tag_count =
+					reconstruction_audit.owner_tag_count;
+				local_audit.reconstructed_owner_expression_count =
+					reconstruction_audit.owner_expression_count;
+				if (best_bmo != nullptr) {
+					++local_audit.reconstructed_bmo_paths;
+					++local_audit.available_bmo_paths;
+					++local_audit.compatible_bmo_paths;
+				}
+			}
+		}
+
+		Path* best_outer = nullptr;
+		if (provider_input != nullptr && best_bmo != nullptr) {
+			for (Path* candidate : PList<Path>(provider_input->pathlist)) {
+				if (candidate == nullptr || candidate->parent != provider_input
+					|| candidate->parallel_aware
+					|| candidate->parallel_workers != 0
+					|| bms_overlap(PATH_REQ_OUTER(candidate), target_input->relids)
+					|| !std::isfinite(candidate->total_cost)
+					|| candidate->total_cost < 0) continue;
+				++local_audit.available_outer_paths;
+				if (best_outer == nullptr
+					|| candidate->total_cost < best_outer->total_cost) {
+					best_outer = candidate;
+				}
+			}
+		}
+		if (best_outer != nullptr && best_bmo != nullptr) {
+			Relids available_to_inner = bms_union(
+				provider_input->relids, PATH_REQ_OUTER(best_outer));
+			const bool inner_requirements_available = bms_is_subset(
+				PATH_REQ_OUTER(best_bmo), available_to_inner);
+			bms_free(available_to_inner);
+			PList<RestrictInfo> residual_join_clauses;
+			bool residual_mmsearch = false;
+			for (RestrictInfo* clause : PList<RestrictInfo>(
+					extra->restrictlist)) {
+				if (same_planner_restriction_identity(
+						clause, restriction)) continue;
+				if (clause != nullptr && count_mmsearch_occurrences(
+						reinterpret_cast<Node*>(clause->clause),
+						get_cached_stub_oids()) != 0u) {
+					residual_mmsearch = true;
+					break;
+				}
+				residual_join_clauses.append(clause);
+			}
+			if (inner_requirements_available && !residual_mmsearch) {
+				Relids required_outer = calc_nestloop_required_outer(
+					provider_input->relids, PATH_REQ_OUTER(best_outer),
+					target_input->relids, PATH_REQ_OUTER(best_bmo));
+				if (bms_overlap(required_outer, joinrel->relids)) {
+					bms_free(required_outer);
+				} else {
+					JoinCostWorkspace workspace{};
+					initial_cost_nestloop(
+						root, &workspace, JOIN_INNER,
+						best_outer, best_bmo, extra);
+					NestPath* constructed = create_nestloop_path(
+						root, joinrel, JOIN_INNER, &workspace, extra,
+						best_outer, best_bmo,
+						residual_join_clauses.ptr(),
+						build_join_pathkeys(
+							root, joinrel, JOIN_INNER,
+							best_outer->pathkeys),
+						required_outer);
+					bool constructed_has_mmsearch = false;
+					for (RestrictInfo* clause : PList<RestrictInfo>(
+							constructed == nullptr ? NIL
+								: constructed->jpath.joinrestrictinfo)) {
+						if (clause != nullptr && count_mmsearch_occurrences(
+								reinterpret_cast<Node*>(clause->clause),
+								get_cached_stub_oids()) != 0u) {
+							constructed_has_mmsearch = true;
+							break;
+						}
+					}
+					if (constructed != nullptr && !constructed_has_mmsearch) {
+						retained.append(reinterpret_cast<Path*>(constructed));
+						++local_audit.constructed_paths;
+					} else if (constructed == nullptr) {
+						bms_free(required_outer);
+					}
+				}
+			}
+		}
+	}
+	local_audit.retained_paths = static_cast<std::size_t>(retained.length());
+	if (audit != nullptr) *audit = local_audit;
+	if (retained.empty()) return false;
+	joinrel->pathlist = retained.release();
+	joinrel->partial_pathlist = NIL;
+	return true;
 }
 
 static void per_row_prove_descendant_base_helper_owner(
@@ -11253,11 +13235,6 @@ static void per_row_record_path_identity(
 	PList<Node> operands(mmsearch->args);
 	Node* target_expression = operands.first();
 	Node* query_expression = operands.second();
-	const bool transformed_target =
-		bioseq_expr_uses_lazy_sequence_projection(target_expression);
-	const bool transformed_query =
-		bioseq_expr_uses_lazy_sequence_projection(query_expression);
-	if (!transformed_target && !transformed_query) return false;
 	const auto target_typmod_proof = per_row_sequence_typmod_proof(
 		target_expression, oids);
 	const auto query_typmod_proof = per_row_sequence_typmod_proof(
@@ -11798,6 +13775,103 @@ BioseqBatchJoinSetJoinPathlistHook(
 	const bool one_join_one_base =
 		(is_join_input(outerrel) && is_base_input(innerrel))
 		|| (is_base_input(outerrel) && is_join_input(innerrel));
+	/* Raw nested joins retain the established parameterized BioseqScan owner.
+	 * Core also offers join paths that leave the same rendezvous RestrictInfo as
+	 * an executable Join Filter; costs cannot choose between semantic ownership
+	 * and the forbidden SQL stub, so discard those paths structurally. */
+	if (one_join_one_base && !transformed_operands) {
+		ExactParameterizedBmoRetainerAudit owner_audit{};
+		if (retain_join_paths_with_custom_restriction_owner(
+				root, joinrel, outerrel, innerrel, extra,
+				restriction, mmsearch, &owner_audit)) return;
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("mmsearch join qualifier is not owned by a parameterized BioseqScan"),
+			 errdetail("The raw nested join cannot retain exactly one inner BMO owner: candidates=%zu nest=%zu inner_nest=%zu root_owned_clause=%zu root_foreign_mmsearch=%zu outer_matches=%zu inner_matches=%zu available_bmo=%zu compatible_bmo=%zu available_outer=%zu constructed=%zu reconstruct_attempts=%zu reconstructed_bmo=%zu reconstruct_reject_mask=0x%x reconstruct_abi_mask=0x%x reconstruct_expected=%zu reconstruct_tags=%zu reconstruct_exprs=%zu outer_reject_mask=0x%x inner_reject_mask=0x%x target_var=%zu query_var=%zu target_relid_sides=0x%x target_base_side=0x%x query_relid_sides=0x%x provider_has_query=%zu target_paths=%zu target_custom=%zu target_bioseq=%zu target_bmo_tags=%zu custom_restrictions=%zu custom_pointer=%zu custom_serial=%zu custom_clause=%zu custom_exact=%zu ppi_paths=%zu ppi_clauses=%zu ppi_serial=%zu ppi_clause=%zu ppi_exact=%zu target_owner_reject_mask=0x%x target_abi_mismatch_mask=0x%x target_ppi_mismatch_mask=0x%x target_compat_mismatch_mask=0x%x join_relids=0x%llx left_relids=0x%llx/%zu right_relids=0x%llx/%zu wrapper_side=0x%x wrapper_method=0x%x wrapper_version=%zu wrapper_owns=%zu wrapper_restrictions=%zu wrapper_children=%zu wrapper_pointer=%zu wrapper_serial=%zu wrapper_clause=%zu current_serial=%zu owned_serial=%zu current_vars=%zu/%zu private_vars=%zu/%zu private_equal=%zu/%zu owner0_vars=%zu/%zu owner1_vars=%zu/%zu wrapper_parent=0x%llx wrapper_child0=0x%llx wrapper_child1=0x%llx current_pair=%zu foreign=%zu safe_foreign=%zu foreign_matches=%zu foreign_reject=0x%x foreign_owner_reject=0x%x.",
+				owner_audit.candidates, owner_audit.nest_paths,
+				owner_audit.inner_nest_paths,
+				owner_audit.root_owned_clause_paths,
+				owner_audit.root_foreign_mmsearch_paths,
+				owner_audit.outer_matches, owner_audit.inner_matches,
+				owner_audit.available_bmo_paths,
+				owner_audit.compatible_bmo_paths,
+				owner_audit.available_outer_paths,
+				owner_audit.constructed_paths,
+				owner_audit.reconstructed_bmo_attempts,
+				owner_audit.reconstructed_bmo_paths,
+				owner_audit.reconstructed_bmo_rejection_mask,
+				owner_audit.reconstructed_owner_abi_mismatch_mask,
+				owner_audit.reconstructed_expected_owner_count,
+				owner_audit.reconstructed_owner_tag_count,
+				owner_audit.reconstructed_owner_expression_count,
+				owner_audit.outer_rejection_mask,
+				owner_audit.inner_rejection_mask,
+				owner_audit.target_var_resolved,
+				owner_audit.query_var_resolved,
+				owner_audit.target_relid_side_mask,
+				owner_audit.target_base_side_mask,
+				owner_audit.query_relid_side_mask,
+				owner_audit.provider_has_query,
+				owner_audit.target_paths,
+				owner_audit.target_custom_paths,
+				owner_audit.target_bioseq_paths,
+				owner_audit.target_bmo_tags,
+				owner_audit.target_custom_restrictions,
+				owner_audit.target_custom_pointer_matches,
+				owner_audit.target_custom_serial_matches,
+				owner_audit.target_custom_clause_matches,
+				owner_audit.target_custom_exact_matches,
+				owner_audit.target_ppi_paths,
+				owner_audit.target_ppi_clauses,
+				owner_audit.target_ppi_serial_matches,
+				owner_audit.target_ppi_clause_matches,
+				owner_audit.target_ppi_exact_matches,
+				owner_audit.target_owner_rejection_mask,
+				owner_audit.target_abi_mismatch_mask,
+				owner_audit.target_ppi_mismatch_mask,
+				owner_audit.target_compatibility_mismatch_mask,
+				static_cast<unsigned long long>(
+					owner_audit.joinrel_relids_low),
+				static_cast<unsigned long long>(
+					owner_audit.left_relids_low),
+				owner_audit.left_relid_count,
+				static_cast<unsigned long long>(
+					owner_audit.right_relids_low),
+				owner_audit.right_relid_count,
+				owner_audit.wrapper_side_mask,
+				owner_audit.wrapper_method_mask,
+				owner_audit.wrapper_version,
+				owner_audit.wrapper_owns_expected,
+				owner_audit.wrapper_restriction_count,
+				owner_audit.wrapper_child_count,
+				owner_audit.wrapper_pointer_matches,
+				owner_audit.wrapper_serial_matches,
+				owner_audit.wrapper_clause_matches,
+				owner_audit.wrapper_expected_serial,
+				owner_audit.wrapper_owned_serial,
+				owner_audit.wrapper_expected_target_varno,
+				owner_audit.wrapper_expected_query_varno,
+				owner_audit.wrapper_private_target_varno,
+				owner_audit.wrapper_private_query_varno,
+				owner_audit.wrapper_private_target_equal,
+				owner_audit.wrapper_private_query_equal,
+				owner_audit.wrapper_owner0_target_varno,
+				owner_audit.wrapper_owner0_query_varno,
+				owner_audit.wrapper_owner1_target_varno,
+				owner_audit.wrapper_owner1_query_varno,
+				static_cast<unsigned long long>(
+					owner_audit.wrapper_parent_relids_low),
+				static_cast<unsigned long long>(
+					owner_audit.wrapper_child0_relids_low),
+				static_cast<unsigned long long>(
+					owner_audit.wrapper_child1_relids_low),
+				owner_audit.current_pair_paths,
+				owner_audit.foreign_decomposition_paths,
+				owner_audit.safe_foreign_paths,
+				owner_audit.foreign_owner_matches,
+				owner_audit.foreign_rejection_mask,
+				owner_audit.foreign_owner_rejection_mask)));
+	}
 	if (transformed_operands) {
 		/* A transformed owner may sit above one already-owned join frontier.
 		 * This is the bounded same-PlannerInfo form used when two matches share
@@ -11894,8 +13968,16 @@ BioseqBatchJoinSetJoinPathlistHook(
 	if (unsupported_residual_var) return;
 	RangeTblEntry* target_rte = rt_fetch(target_var->varno, root->parse->rtable);
 	RangeTblEntry* query_rte = rt_fetch(query_var->varno, root->parse->rtable);
+	const bool plain_query_relation = query_rte != nullptr
+		&& query_rte->rtekind == RTE_RELATION;
+	const bool plain_query_subquery = query_rte != nullptr
+		&& query_rte->rtekind == RTE_SUBQUERY
+		&& query_rte->subquery != nullptr
+		&& !query_rte->security_barrier
+		&& !query_rte->subquery->hasRowSecurity;
 	if (target_rte == nullptr || target_rte->rtekind != RTE_RELATION
-		|| query_rte == nullptr || query_rte->rtekind != RTE_RELATION
+		|| query_rte == nullptr
+		|| (!plain_query_relation && !plain_query_subquery)
 		|| target_rte->securityQuals != NIL || query_rte->securityQuals != NIL
 		|| !OidIsValid(target_rte->relid)
 		|| !IsBioseqColumnTableAmTable(target_rte->relid)
@@ -11918,10 +14000,106 @@ BioseqBatchJoinSetJoinPathlistHook(
 	 * its base qual.  Query-side base mmsearch remains child-owned. */
 	if (!target_qual_features.has_value()
 		|| !query_qual_features.has_value()
-		|| target_qual_features->has_mmsearch
 		|| target_qual_features->any_match_projection
 		|| query_qual_features->any_match_projection) {
 		return;
+	}
+	if (target_qual_features->has_mmsearch) {
+		/* The locator path is ineligible, but a narrowly admitted ordinary
+		 * relation/require-absent fallback has a parameterized BioseqScan that
+		 * owns both calls.  Retain only join paths reaching that real owner;
+		 * leaving an ordinary Join Filter would execute the SQL rendezvous stub. */
+		ExactParameterizedBmoRetainerAudit owner_audit{};
+		if (retain_join_paths_with_custom_restriction_owner(
+				root, joinrel, outerrel, innerrel, extra,
+				restriction, mmsearch, &owner_audit)) return;
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("stacked mmsearch qualifiers are unsupported"),
+			 errdetail("No parameterized BioseqScan owns the bounded BatchJoin fallback: candidates=%zu nest=%zu inner_nest=%zu root_owned_clause=%zu root_foreign_mmsearch=%zu outer_matches=%zu inner_matches=%zu available_bmo=%zu compatible_bmo=%zu available_outer=%zu constructed=%zu reconstruct_attempts=%zu reconstructed_bmo=%zu reconstruct_reject_mask=0x%x reconstruct_abi_mask=0x%x reconstruct_expected=%zu reconstruct_tags=%zu reconstruct_exprs=%zu outer_reject_mask=0x%x inner_reject_mask=0x%x target_var=%zu query_var=%zu target_relid_sides=0x%x target_base_side=0x%x query_relid_sides=0x%x provider_has_query=%zu target_paths=%zu target_custom=%zu target_bioseq=%zu target_bmo_tags=%zu custom_restrictions=%zu custom_pointer=%zu custom_serial=%zu custom_clause=%zu custom_exact=%zu ppi_paths=%zu ppi_clauses=%zu ppi_serial=%zu ppi_clause=%zu ppi_exact=%zu target_owner_reject_mask=0x%x target_abi_mismatch_mask=0x%x target_ppi_mismatch_mask=0x%x target_compat_mismatch_mask=0x%x join_relids=0x%llx left_relids=0x%llx/%zu right_relids=0x%llx/%zu wrapper_side=0x%x wrapper_method=0x%x wrapper_version=%zu wrapper_owns=%zu wrapper_restrictions=%zu wrapper_children=%zu wrapper_pointer=%zu wrapper_serial=%zu wrapper_clause=%zu current_serial=%zu owned_serial=%zu current_vars=%zu/%zu private_vars=%zu/%zu private_equal=%zu/%zu owner0_vars=%zu/%zu owner1_vars=%zu/%zu wrapper_parent=0x%llx wrapper_child0=0x%llx wrapper_child1=0x%llx current_pair=%zu foreign=%zu safe_foreign=%zu foreign_matches=%zu foreign_reject=0x%x foreign_owner_reject=0x%x.",
+				owner_audit.candidates, owner_audit.nest_paths,
+				owner_audit.inner_nest_paths,
+				owner_audit.root_owned_clause_paths,
+				owner_audit.root_foreign_mmsearch_paths,
+				owner_audit.outer_matches, owner_audit.inner_matches,
+				owner_audit.available_bmo_paths,
+				owner_audit.compatible_bmo_paths,
+				owner_audit.available_outer_paths,
+				owner_audit.constructed_paths,
+				owner_audit.reconstructed_bmo_attempts,
+				owner_audit.reconstructed_bmo_paths,
+				owner_audit.reconstructed_bmo_rejection_mask,
+				owner_audit.reconstructed_owner_abi_mismatch_mask,
+				owner_audit.reconstructed_expected_owner_count,
+				owner_audit.reconstructed_owner_tag_count,
+				owner_audit.reconstructed_owner_expression_count,
+				owner_audit.outer_rejection_mask,
+				owner_audit.inner_rejection_mask,
+				owner_audit.target_var_resolved,
+				owner_audit.query_var_resolved,
+				owner_audit.target_relid_side_mask,
+				owner_audit.target_base_side_mask,
+				owner_audit.query_relid_side_mask,
+				owner_audit.provider_has_query,
+				owner_audit.target_paths,
+				owner_audit.target_custom_paths,
+				owner_audit.target_bioseq_paths,
+				owner_audit.target_bmo_tags,
+				owner_audit.target_custom_restrictions,
+				owner_audit.target_custom_pointer_matches,
+				owner_audit.target_custom_serial_matches,
+				owner_audit.target_custom_clause_matches,
+				owner_audit.target_custom_exact_matches,
+				owner_audit.target_ppi_paths,
+				owner_audit.target_ppi_clauses,
+				owner_audit.target_ppi_serial_matches,
+				owner_audit.target_ppi_clause_matches,
+				owner_audit.target_ppi_exact_matches,
+				owner_audit.target_owner_rejection_mask,
+				owner_audit.target_abi_mismatch_mask,
+				owner_audit.target_ppi_mismatch_mask,
+				owner_audit.target_compatibility_mismatch_mask,
+				static_cast<unsigned long long>(
+					owner_audit.joinrel_relids_low),
+				static_cast<unsigned long long>(
+					owner_audit.left_relids_low),
+				owner_audit.left_relid_count,
+				static_cast<unsigned long long>(
+					owner_audit.right_relids_low),
+				owner_audit.right_relid_count,
+				owner_audit.wrapper_side_mask,
+				owner_audit.wrapper_method_mask,
+				owner_audit.wrapper_version,
+				owner_audit.wrapper_owns_expected,
+				owner_audit.wrapper_restriction_count,
+				owner_audit.wrapper_child_count,
+				owner_audit.wrapper_pointer_matches,
+				owner_audit.wrapper_serial_matches,
+				owner_audit.wrapper_clause_matches,
+				owner_audit.wrapper_expected_serial,
+				owner_audit.wrapper_owned_serial,
+				owner_audit.wrapper_expected_target_varno,
+				owner_audit.wrapper_expected_query_varno,
+				owner_audit.wrapper_private_target_varno,
+				owner_audit.wrapper_private_query_varno,
+				owner_audit.wrapper_private_target_equal,
+				owner_audit.wrapper_private_query_equal,
+				owner_audit.wrapper_owner0_target_varno,
+				owner_audit.wrapper_owner0_query_varno,
+				owner_audit.wrapper_owner1_target_varno,
+				owner_audit.wrapper_owner1_query_varno,
+				static_cast<unsigned long long>(
+					owner_audit.wrapper_parent_relids_low),
+				static_cast<unsigned long long>(
+					owner_audit.wrapper_child0_relids_low),
+				static_cast<unsigned long long>(
+					owner_audit.wrapper_child1_relids_low),
+				owner_audit.current_pair_paths,
+				owner_audit.foreign_decomposition_paths,
+				owner_audit.safe_foreign_paths,
+				owner_audit.foreign_owner_matches,
+				owner_audit.foreign_rejection_mask,
+				owner_audit.foreign_owner_rejection_mask)));
 	}
 	const BatchJoinBioseqPathCandidate target_candidate =
 		find_unparameterized_bioseq_custom_path(
@@ -12008,6 +14186,60 @@ BioseqBatchJoinSetJoinPathlistHook(
 		locator_path->path.pathtarget,
 		reinterpret_cast<Expr*>(hidden_rowno), 0);
 	set_pathtarget_cost_width(root, locator_path->path.pathtarget);
+	/* A lower BatchJoin may publish an otherwise-unused target sequence as the
+	 * PARAM_EXEC query of an upper BatchJoin.  The locator child must therefore
+	 * carry BSS3's exact projected-resno -> physical-varattno route for every
+	 * sequence it can publish.  Do not infer a physical column for an expression
+	 * recipe (or silently keep an older, differently-shaped source tag). */
+	for (Node* private_node : PList<Node>(locator_path->custom_private)) {
+		if (private_node == nullptr || !IsA(private_node, List)) continue;
+		List* tag = reinterpret_cast<List*>(private_node);
+		if (tag != NIL
+			&& IsA(reinterpret_cast<Node*>(linitial(tag)), Integer)
+			&& intVal(linitial(tag)) == kBioseqSliceSourceMagic) {
+			return;
+		}
+	}
+	List* locator_source_bindings = NIL;
+	Bitmapset* locator_source_attnos = nullptr;
+	bool locator_target_source_bound = false;
+	bool locator_source_bindings_valid = true;
+	int locator_resno = 1;
+	for (Node* expression : PList<Node>(
+			locator_path->path.pathtarget->exprs)) {
+		if (exprType(expression) == oids.bioseq_seq_type_oid) {
+			Var* source = pg_node_try_as<Var>(expression);
+			if (source == nullptr || source->varno != target_var->varno
+				|| source->varattno <= 0 || source->varlevelsup != 0
+				|| !bms_is_empty(source->varnullingrels)
+				|| bms_is_member(
+					static_cast<int>(source->varattno),
+					locator_source_attnos)) {
+				locator_source_bindings_valid = false;
+				break;
+			}
+			locator_source_bindings = lappend(
+				locator_source_bindings,
+				list_make3(
+					makeInteger(locator_resno),
+					makeInteger(0),
+					makeInteger(static_cast<int>(source->varattno))));
+			locator_source_attnos = bms_add_member(
+				locator_source_attnos,
+				static_cast<int>(source->varattno));
+			locator_target_source_bound =
+				locator_target_source_bound || equal(source, target_var);
+		}
+		++locator_resno;
+	}
+	if (locator_source_attnos != nullptr) bms_free(locator_source_attnos);
+	if (!locator_source_bindings_valid || !locator_target_source_bound) return;
+	locator_path->custom_private = lappend(
+		locator_path->custom_private,
+		list_make3(
+			makeInteger(kBioseqSliceSourceMagic),
+			makeInteger(kBioseqSliceSourceVersion),
+			locator_source_bindings));
 	if (next_batch_join_plan_token <= 0
 		|| next_batch_join_plan_token == (std::numeric_limits<int>::max)()) {
 		next_batch_join_plan_token = 1;
@@ -13182,10 +15414,8 @@ AddBioseqColumnScanPathsRec(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *r
 	Path *bioseqColumnScanPath = AddBioseqColumnScanPath(root, rel, rte, paramRelids);
 	CustomPath* owner_path = IsA(bioseqColumnScanPath, CustomPath)
 		? reinterpret_cast<CustomPath*>(bioseqColumnScanPath) : nullptr;
-	if (owner_path != nullptr
-		&& list_length(owner_path->custom_restrictinfo) == 1) {
-		RestrictInfo* owner = reinterpret_cast<RestrictInfo*>(
-			linitial(owner_path->custom_restrictinfo));
+	if (owner_path != nullptr) for (RestrictInfo* owner :
+			PList<RestrictInfo>(owner_path->custom_restrictinfo)) {
 		auto prune_competing_owner_execution = [rel, owner](List* paths) {
 			PList<Path> survivors;
 			for (Path* candidate : PList<Path>(paths)) {
@@ -13523,10 +15753,17 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 
 	PList<RestrictInfo> allClauses(FilterPushdownClauses(
 		root, rel, list_copy(clauseReferences.ptr())));
+	List* owned_mmsearch_restrictions = owned_mmsearch.restriction == nullptr
+		? NIL : list_concat(
+			list_make1(owned_mmsearch.restriction),
+			list_copy(owned_mmsearch.extra_restrictions));
+	List* owned_mmsearch_exprs = owned_mmsearch.normalized_expr == nullptr
+		? NIL : list_concat(
+			list_make1(owned_mmsearch.normalized_expr),
+			list_copy(owned_mmsearch.extra_normalized_exprs));
 	if (owned_mmsearch.restriction != nullptr) {
 		allClauses = restrictions_without_owned_mmsearch(
-			allClauses.release(), owned_mmsearch.restriction,
-			owned_mmsearch.restriction->clause,
+			allClauses.release(), owned_mmsearch_restrictions,
 			/*restrictions_are_private_copies=*/true);
 		/*
 		 * DOC0371 \u00a75.2: the POC publishes backend-local proof and has no
@@ -13571,11 +15808,11 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		cpath->custom_private = list_make2(NIL, NIL);
 	}
 	if (owned_mmsearch.restriction != nullptr) {
-		cpath->custom_restrictinfo = list_make1(owned_mmsearch.restriction);
+		cpath->custom_restrictinfo = list_copy(owned_mmsearch_restrictions);
 		cpath->custom_private = lappend(cpath->custom_private,
 			list_make3(makeInteger(kBioseqMmsearchOwnerMagic),
 				makeInteger(kBioseqMmsearchOwnerVersion),
-				copyObject(owned_mmsearch.normalized_expr)));
+				copyObject(owned_mmsearch_exprs)));
 	} else {
 		cpath->custom_restrictinfo = NIL;
 	}
@@ -13624,12 +15861,12 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 	CostBioseqColumnScan(root, rel, rte->relid, cpath, numberOfColumnsRead,
 					 numberOfClausesPushed);
 
-	if (owned_mmsearch.normalized_expr != nullptr) {
+	for (FuncExpr* owned_expr : PList<FuncExpr>(owned_mmsearch_exprs)) {
 		QualCost operand_cost{};
 		List* operand_expressions = mmsearch_operand_cost_exprs(
-			owned_mmsearch.normalized_expr, stub_oids);
+			owned_expr, stub_oids);
 		cost_qual_eval(&operand_cost, operand_expressions, root);
-		PList<Node> operands(owned_mmsearch.normalized_expr->args);
+		PList<Node> operands(owned_expr->args);
 		const std::uint64_t target_symbols =
 			estimate_mmsearch_operand_symbols(operands.first(), stub_oids);
 		const std::uint64_t query_symbols =
@@ -13642,7 +15879,7 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		bioseq::indexing::IndexReadRequirement planned_requirement =
 			bioseq::indexing::IndexReadRequirement::allow;
 		(void)apply_aligner_options_override(
-			owned_mmsearch.normalized_expr, planned_params,
+			owned_expr, planned_params,
 			planned_requirement, stub_oids);
 		const owned_mmsearch_cost alignment = estimate_owned_mmsearch_cost(
 			target_symbols, query_symbols, path->rows,
@@ -13944,7 +16181,7 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	cscan->custom_private = NIL;
 	bool locator_passthrough_requested = false;
 	bool lazy_source_projection_requested = false;
-	FuncExpr* owned_mmsearch_expr = nullptr;
+	List* owned_mmsearch_exprs = NIL;
 	for (Node* possible_tag : PList<Node>(best_path->custom_private)) {
 		if (possible_tag == nullptr || !IsA(possible_tag, List)) continue;
 		List* tag = reinterpret_cast<List*>(possible_tag);
@@ -13960,23 +16197,40 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 		}
 		if (list_length(tag) == 3
 			&& intVal(list_nth(tag, 0)) == kBioseqMmsearchOwnerMagic) {
+			Node* expressions_node = reinterpret_cast<Node*>(
+				list_nth(tag, 2));
 			if (intVal(list_nth(tag, 1)) != kBioseqMmsearchOwnerVersion
-				|| owned_mmsearch_expr != nullptr
-				|| (owned_mmsearch_expr = pg_node_try_as<FuncExpr>(
-					reinterpret_cast<Node*>(list_nth(tag, 2)))) == nullptr) {
+				|| owned_mmsearch_exprs != NIL
+				|| expressions_node == nullptr
+				|| !IsA(expressions_node, List)
+				|| (owned_mmsearch_exprs = reinterpret_cast<List*>(
+					expressions_node)) == NIL) {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Bioseq mmsearch owner path tag is invalid")));
+			}
+			if (list_length(owned_mmsearch_exprs) > 2) {
 				ereport(ERROR,
 					(errcode(ERRCODE_DATA_CORRUPTED),
-					 errmsg("Bioseq mmsearch owner path tag is invalid")));
+					 errmsg("Bioseq mmsearch owner path has too many expressions")));
+			}
+			for (Node* expression : PList<Node>(owned_mmsearch_exprs)) {
+				FuncExpr* mmsearch = pg_node_try_as<FuncExpr>(expression);
+				if (mmsearch == nullptr
+					|| !is_mmsearch_funcid(
+						mmsearch->funcid, get_cached_stub_oids())) {
+					ereport(ERROR,
+						(errcode(ERRCODE_DATA_CORRUPTED),
+						 errmsg("Bioseq mmsearch owner path expression is invalid")));
+				}
 			}
 		}
 	}
-	RestrictInfo* owned_mmsearch_restriction =
-		list_length(best_path->custom_restrictinfo) == 1
-			? reinterpret_cast<RestrictInfo*>(
-				linitial(best_path->custom_restrictinfo))
-			: nullptr;
-	if ((owned_mmsearch_expr == nullptr)
-		!= (owned_mmsearch_restriction == nullptr)) {
+	List* owned_mmsearch_restrictions = best_path->custom_restrictinfo;
+	if ((owned_mmsearch_exprs == NIL)
+		!= (owned_mmsearch_restrictions == NIL)
+		|| list_length(owned_mmsearch_exprs)
+			!= list_length(owned_mmsearch_restrictions)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("Bioseq mmsearch ownership metadata is inconsistent")));
@@ -14013,13 +16267,11 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	}
 
 	List* executable_clauses = restrictions_without_owned_mmsearch(
-		clauses, owned_mmsearch_restriction,
-		owned_mmsearch_restriction != nullptr
-			? owned_mmsearch_restriction->clause : nullptr,
+		clauses, owned_mmsearch_restrictions,
 		/*restrictions_are_private_copies=*/false);
 	cscan->scan.plan.qual = extract_actual_clauses(
 		executable_clauses, false /* no pseudoconstants */);
-	if (owned_mmsearch_expr != nullptr) {
+	if (owned_mmsearch_exprs != NIL) {
 		for (Node* qual : PList<Node>(cscan->scan.plan.qual)) {
 			if (contains_mmsearch_qualifier(qual, get_cached_stub_oids())) {
 				ereport(ERROR,
@@ -14072,10 +16324,36 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	}
 
 			const BioseqStubOids& plan_stub_oids = get_cached_stub_oids();
+			const Index scan_relid = best_path->path.parent->relid;
 			if (!locator_passthrough_requested) for(auto n : PList<TargetEntry>(root->processed_tlist)) {
 			if (FuncExpr* fe = pg_node_try_as<FuncExpr>(pg_as_node(n->expr))) {
-				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)
-					|| fe->funcid == plan_stub_oids.symbol_count_oid) {
+				bool belongs_to_scan = false;
+				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)) {
+					FuncExpr* helper = batch_join_well_formed_match_helper(
+						reinterpret_cast<Node*>(fe), plan_stub_oids);
+					Var* argument = helper == nullptr ? nullptr
+						: pg_node_try_as<Var>(
+							batch_join_match_helper_argument(helper));
+					belongs_to_scan = argument != nullptr
+						&& argument->varno == scan_relid
+						&& argument->varattno > 0
+						&& argument->varlevelsup == 0
+						&& bms_is_empty(argument->varnullingrels);
+				} else if (fe->funcid == plan_stub_oids.symbol_count_oid) {
+					constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+						| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+					List* variables = pull_var_clause(
+						reinterpret_cast<Node*>(fe), pull_flags);
+					belongs_to_scan = variables != NIL;
+					for (Var* variable : PList<Var>(variables)) {
+						if (variable == nullptr || variable->varno != scan_relid
+							|| variable->varlevelsup != 0) {
+							belongs_to_scan = false;
+							break;
+						}
+					}
+				}
+				if (belongs_to_scan) {
 					TargetEntry* projected = copyObject(n);
 					projected->resno = static_cast<AttrNumber>(list_length(tlist) + 1);
 					tlist = lappend(tlist, projected);
@@ -14086,7 +16364,9 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 
 	cscan->scan.plan.targetlist = list_copy(tlist);
 	cscan->scan.scanrelid = best_path->path.parent->relid;
-	if (owned_mmsearch_expr != nullptr) {
+	if (owned_mmsearch_exprs != NIL) {
+		FuncExpr* owned_mmsearch_expr = reinterpret_cast<FuncExpr*>(
+			linitial(owned_mmsearch_exprs));
 		Node* target_node = list_length(owned_mmsearch_expr->args) >= 1
 			? reinterpret_cast<Node*>(linitial(owned_mmsearch_expr->args))
 			: nullptr;
@@ -14204,8 +16484,8 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	 * in custom_exprs lets PostgreSQL replace outer Vars with PARAM_EXEC while
 	 * ensuring ExecInitQual never sees the rendezvous function. */
 	cscan->custom_exprs = lappend(cscan->custom_exprs,
-		owned_mmsearch_expr != nullptr
-			? list_make1(copyObject(owned_mmsearch_expr)) : NIL);
+		owned_mmsearch_exprs != NIL
+			? copyObject(owned_mmsearch_exprs) : NIL);
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnScanPath_PlanCustomPath() returning");
 	return reinterpret_cast<Plan *>(cscan);
@@ -14437,6 +16717,70 @@ static void batch_join_register_placeholder_site(
 		*registration.encoded_sites, encoded);
 }
 
+/* A raw BatchJoin's locator child can already expose a whole helper as a
+ * plan-only dummy target even when the callback tlist defers that helper to an
+ * upper Result.  Make the existing target-child ordinal the MatchResult site;
+ * adding a second scan column would leave the dummy leaf carrier unowned and
+ * would give setrefs two spellings for one semantic result. */
+static void batch_join_register_existing_placeholder_site(
+		Node* identity,
+		FuncExpr* function,
+		const Index phid,
+		const AttrNumber existing_resno,
+		BatchJoinPlaceholderRegistration& registration) {
+	if (identity == nullptr || function == nullptr || existing_resno <= 0
+		|| registration.combined_tlist == nullptr
+		|| registration.encoded_sites == nullptr
+		|| existing_resno > list_length(*registration.combined_tlist)) {
+		registration.invalid = true;
+		return;
+	}
+	TargetEntry* supplied = reinterpret_cast<TargetEntry*>(list_nth(
+		*registration.combined_tlist, existing_resno - 1));
+	const Oid type_oid = exprType(identity);
+	const int32 typmod = exprTypmod(identity);
+	const Oid collation = exprCollation(identity);
+	if (supplied == nullptr || supplied->resno != existing_resno
+		|| !equal(supplied->expr, identity) || !OidIsValid(type_oid)
+		|| type_oid != function->funcresulttype
+		|| type_oid != get_func_rettype(function->funcid)) {
+		registration.invalid = true;
+		return;
+	}
+	const AttrNumber same_identity =
+		batch_join_find_same_owner_placeholder_site(
+			identity, function, phid, registration);
+	if (registration.invalid || same_identity != InvalidAttrNumber) return;
+	for (List* encoded : PList<List>(*registration.encoded_sites)) {
+		Node* resno_node = encoded == nullptr
+			|| !IsA(encoded, List)
+			|| list_length(encoded) != kBioseqMatchHelperSiteFields
+			? nullptr : reinterpret_cast<Node*>(list_nth(
+				encoded, kMatchSiteResno));
+		if (resno_node == nullptr || !IsA(resno_node, Integer)) {
+			registration.invalid = true;
+			return;
+		}
+		if (intVal(resno_node) == existing_resno) {
+			registration.invalid = true;
+			return;
+		}
+	}
+	List* encoded = list_make5(
+		makeInteger(existing_resno),
+		makeInteger(static_cast<int>(function->funcid)),
+		makeInteger(typmod),
+		makeInteger(static_cast<int>(collation)),
+		makeInteger(static_cast<int>(
+			BioseqMatchHelperBindingKind::unresolved)));
+	encoded = lappend(encoded, copyObject(
+		batch_join_match_helper_argument(function)));
+	encoded = lappend(encoded, makeInteger(static_cast<int>(phid)));
+	encoded = lappend(encoded, makeInteger(0));
+	*registration.encoded_sites = lappend(
+		*registration.encoded_sites, encoded);
+}
+
 [[nodiscard]] static bool batch_join_identity_list_contains(
 		List* identities, Node* identity) noexcept {
 	if (identity == nullptr) return false;
@@ -14598,6 +16942,16 @@ struct batch_join_placeholder_registration_visitor {
 						reinterpret_cast<Node*>(placeholder))) {
 					return pg_walk_step::skip_subtree;
 				}
+				if (!edit_sequence_argument_matches_recipe(
+						helper,
+						registration.target_recipe,
+						registration.target_relid,
+						registration.target_sequence_attno,
+						*registration.oids)) {
+					registration.invalid = true;
+					registration.edit_sequence_mismatch = true;
+					return pg_walk_step::stop;
+				}
 				const bool names_recipe =
 					batch_join_match_helper_names_recipe(
 						helper, registration.target_recipe);
@@ -14607,16 +16961,6 @@ struct batch_join_placeholder_registration_visitor {
 						*registration.oids);
 				if (!names_recipe && !legacy_lineage) {
 					registration.invalid = true;
-					return pg_walk_step::stop;
-				}
-				if (!edit_sequence_argument_matches_recipe(
-						helper,
-						registration.target_recipe,
-						registration.target_relid,
-						registration.target_sequence_attno,
-						*registration.oids)) {
-					registration.invalid = true;
-					registration.edit_sequence_mismatch = true;
 					return pg_walk_step::stop;
 				}
 				batch_join_register_placeholder_site(
@@ -14646,6 +16990,16 @@ struct batch_join_placeholder_registration_visitor {
 						reinterpret_cast<Node*>(function))) {
 					return pg_walk_step::skip_subtree;
 				}
+				if (!edit_sequence_argument_matches_recipe(
+						function,
+						registration.target_recipe,
+						registration.target_relid,
+						registration.target_sequence_attno,
+						*registration.oids)) {
+					registration.invalid = true;
+					registration.edit_sequence_mismatch = true;
+					return pg_walk_step::stop;
+				}
 				const bool names_recipe =
 					batch_join_match_helper_names_recipe(
 						function, registration.target_recipe);
@@ -14655,16 +17009,6 @@ struct batch_join_placeholder_registration_visitor {
 						*registration.oids);
 				if (!names_recipe && !legacy_lineage) {
 					registration.invalid = true;
-					return pg_walk_step::stop;
-				}
-				if (!edit_sequence_argument_matches_recipe(
-						function,
-						registration.target_recipe,
-						registration.target_relid,
-						registration.target_sequence_attno,
-						*registration.oids)) {
-					registration.invalid = true;
-					registration.edit_sequence_mismatch = true;
 					return pg_walk_step::stop;
 				}
 				batch_join_register_placeholder_site(
@@ -14702,6 +17046,38 @@ struct BatchJoinOutputSetrefsRewrite {
 			&& equal(entry->expr, expression)) return entry;
 	}
 	return nullptr;
+}
+
+[[nodiscard]] static TargetEntry*
+batch_join_find_unique_semantic_helper_entry(
+		List* scan_tlist, Node* identity, const BioseqStubOids& oids,
+		const AttrNumber minimum_resno, const AttrNumber maximum_resno,
+		bool& ambiguous) noexcept {
+	ambiguous = false;
+	FuncExpr* expected = per_row_helper_identity_function(identity, oids);
+	if (expected == nullptr) return nullptr;
+	TargetEntry* result = nullptr;
+	for (TargetEntry* entry : PList<TargetEntry>(scan_tlist)) {
+		if (entry == nullptr || entry->expr == nullptr
+			|| entry->resno < minimum_resno || entry->resno > maximum_resno) {
+			continue;
+		}
+		Node* supplied_identity = reinterpret_cast<Node*>(entry->expr);
+		FuncExpr* supplied = per_row_helper_identity_function(
+			supplied_identity, oids);
+		if (supplied == nullptr || !equal(supplied, expected)
+			|| exprType(supplied_identity) != exprType(identity)
+			|| exprTypmod(supplied_identity) != exprTypmod(identity)
+			|| exprCollation(supplied_identity) != exprCollation(identity)) {
+			continue;
+		}
+		if (result != nullptr) {
+			ambiguous = true;
+			return nullptr;
+		}
+		result = entry;
+	}
+	return result;
 }
 
 [[nodiscard]] static TargetEntry* batch_join_find_compatible_var_entry(
@@ -14779,6 +17155,14 @@ struct batch_join_output_setrefs_rewrite_mutator {
 			: batch_join_find_exact_scan_entry(
 				rewrite.scan_tlist, node.raw(),
 				rewrite.current_site_first_resno);
+		if (entry == nullptr && inherited && rewrite.oids != nullptr) {
+			bool ambiguous = false;
+			entry = batch_join_find_unique_semantic_helper_entry(
+				rewrite.scan_tlist, node.raw(), *rewrite.oids, 1,
+				static_cast<AttrNumber>(
+					rewrite.current_site_first_resno - 1), ambiguous);
+			if (ambiguous) rewrite.invalid = true;
+		}
 		if (entry == nullptr || entry->resno <= 0) {
 			rewrite.invalid = true;
 			return pg_node_mutation::with(
@@ -14924,6 +17308,43 @@ static void validate_batch_join_setrefs_coverage(
 					list_length(scan_tlist))));
 		}
 	}
+}
+
+/* The same helper is commonly represented by a positive-id PHV in the
+ * processed target and by its stripped FuncExpr in a non-projecting locator
+ * child.  Preserve the authoritative PHV id in the site codec when present;
+ * finalized binding then accepts only that exact PHV-to-bare transition. */
+[[nodiscard]] static bool batch_join_plan_only_helper_phid(
+		List* authoritative_identities, Node* carrier_identity,
+		FuncExpr* carrier_helper, const BioseqStubOids& oids,
+		Index& phid) noexcept {
+	if (carrier_identity == nullptr || carrier_helper == nullptr) return false;
+	bool matched = false;
+	Index positive_phid = 0;
+	for (Node* identity : PList<Node>(authoritative_identities)) {
+		FuncExpr* helper = per_row_helper_identity_function(identity, oids);
+		if (helper == nullptr || !equal(helper, carrier_helper)) continue;
+		matched = true;
+		PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
+		if (placeholder == nullptr) continue;
+		if (placeholder->phid == 0
+			|| (positive_phid != 0 && positive_phid != placeholder->phid)) {
+			return false;
+		}
+		positive_phid = placeholder->phid;
+	}
+	PlaceHolderVar* carrier = pg_node_try_as<PlaceHolderVar>(carrier_identity);
+	if (positive_phid != 0) {
+		phid = positive_phid;
+		return true;
+	}
+	if (carrier != nullptr) {
+		if (carrier->phid == 0) return false;
+		phid = carrier->phid;
+		return true;
+	}
+	phid = 0;
+	return matched || equal(carrier_identity, carrier_helper);
 }
 
 static Plan*
@@ -15115,8 +17536,178 @@ BioseqBatchJoin_PlanCustomPath(
 		list_length(combined_tlist) + 1);
 
 	List* placeholder_sites = NIL;
+	List* existing_helper_identities = NIL;
+	List* existing_helper_functions = NIL;
+	PerRowOwnerSupportProof plan_only_owner_support{};
+	if (!per_row_collect_owner_support(
+			root, rel, target_var->varno,
+			reinterpret_cast<Node*>(target_var),
+			plan_only_owner_support)) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqBatchJoin plan-only helper support is invalid")));
+	}
+	for (int index = 0; index < target_column_count; ++index) {
+		TargetEntry* carrier_entry = reinterpret_cast<TargetEntry*>(list_nth(
+			combined_tlist, index));
+		Node* carrier_identity = carrier_entry == nullptr ? nullptr
+			: reinterpret_cast<Node*>(carrier_entry->expr);
+		PlaceHolderVar* carrier_placeholder =
+			pg_node_try_as<PlaceHolderVar>(carrier_identity);
+		FuncExpr* carrier_helper = carrier_placeholder == nullptr
+			? batch_join_well_formed_match_helper(carrier_identity, oids)
+			: batch_join_match_helper_phv_function(
+				carrier_placeholder, oids);
+		if (carrier_helper == nullptr) {
+			if (batch_join_expression_has_match_helper(carrier_identity, oids)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqBatchJoin locator helper carrier is not a whole identity"),
+					 errdetail("target_resno=%d", index + 1)));
+			}
+			continue;
+		}
+		const bool names_recipe = batch_join_match_helper_names_recipe(
+			carrier_helper, reinterpret_cast<Node*>(target_var));
+		const bool names_lineage =
+			batch_join_match_helper_names_base_lineage(
+				carrier_helper, reinterpret_cast<Node*>(target_var), oids);
+		if (!names_recipe && !names_lineage) continue;
+		if (carrier_entry->resno == target_slot_seq_resno
+			|| carrier_entry->resno == target_slot_rowno_resno) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin helper reuses an operand carrier"),
+				 errdetail("target_resno=%d", carrier_entry->resno)));
+		}
+		for (FuncExpr* existing_helper : PList<FuncExpr>(
+				existing_helper_functions)) {
+			if (existing_helper != nullptr
+				&& equal(existing_helper, carrier_helper)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqBatchJoin locator has duplicate helper carriers"),
+					 errdetail("target_resno=%d", carrier_entry->resno)));
+			}
+		}
+		existing_helper_functions = lappend(
+			existing_helper_functions, copyObject(carrier_helper));
+		if (!edit_sequence_argument_matches_recipe(
+				carrier_helper, reinterpret_cast<Node*>(target_var),
+				target_var->varno, target_storage_seq_attno, oids)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("bioseq.edit projection must reference the mmsearch target column")));
+		}
+		if (find_base_match_owner_plan_tag(target_custom) != NIL
+			|| batch_join_scan_owns_helper_identity(
+				target_custom, carrier_identity)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin locator retained leaf helper ownership"),
+				 errdetail("target_resno=%d", carrier_entry->resno)));
+		}
+		Index phid = 0;
+		if (!batch_join_plan_only_helper_phid(
+				plan_only_owner_support.helper_identities,
+				carrier_identity, carrier_helper, oids, phid)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin plan-only helper identity is ambiguous"),
+				 errdetail("target_resno=%d", carrier_entry->resno)));
+		}
+		per_row_append_unique_expression(
+			existing_helper_identities, carrier_identity);
+		for (Node* authoritative : PList<Node>(
+				plan_only_owner_support.helper_identities)) {
+			FuncExpr* authoritative_helper =
+				per_row_helper_identity_function(authoritative, oids);
+			if (authoritative_helper != nullptr
+				&& equal(authoritative_helper, carrier_helper)) {
+				per_row_append_unique_expression(
+					existing_helper_identities, authoritative);
+			}
+		}
+		BatchJoinPlaceholderRegistration registration{
+			&oids, target_var->varno, target_storage_seq_attno,
+			reinterpret_cast<Node*>(target_var), &combined_tlist,
+			&placeholder_sites, false, false, NIL};
+		const int site_count_before = list_length(placeholder_sites);
+		batch_join_register_existing_placeholder_site(
+			carrier_identity, carrier_helper, phid,
+			carrier_entry->resno, registration);
+		const AttrNumber registered =
+			batch_join_find_same_owner_placeholder_site(
+				carrier_identity, carrier_helper, phid, registration);
+		if (registration.invalid || registered != carrier_entry->resno
+			|| list_length(placeholder_sites) != site_count_before + 1) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin existing helper site registration failed"),
+				 errdetail("target_resno=%d registered_resno=%d",
+					carrier_entry->resno, registered)));
+		}
+	}
+	List* requested_tlist = list_copy(tlist);
+	for (Node* identity : PList<Node>(
+			plan_only_owner_support.helper_identities)) {
+		FuncExpr* helper = per_row_helper_identity_function(identity, oids);
+		if (helper == nullptr) continue;
+		const bool names_recipe = batch_join_match_helper_names_recipe(
+			helper, reinterpret_cast<Node*>(target_var));
+		const bool names_lineage = batch_join_match_helper_names_base_lineage(
+			helper, reinterpret_cast<Node*>(target_var), oids);
+		if (!names_recipe && !names_lineage) continue;
+		if (!edit_sequence_argument_matches_recipe(
+				helper, reinterpret_cast<Node*>(target_var),
+				target_var->varno, target_storage_seq_attno, oids)) {
+			ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("bioseq.edit projection must reference the mmsearch target column")));
+		}
+		if (find_plan_tlist_expression_resno(requested_tlist, identity) > 0) {
+			continue;
+		}
+		/* The callback tlist already carries whole helper dependencies for an
+		 * upper compound Result, while processed_tlist may retain the same helper
+		 * inside its authoritative PHV.  Wrapper inequality alone must not append
+		 * a second executor site: unwrap both identities and reuse only one unique,
+		 * exact function/argument/type match whose authoritative PHV group has one
+		 * non-conflicting provenance id.  No match, an ambiguous match, or conflicting
+		 * positive phids keeps the authoritative identity as its own resjunk carrier. */
+		bool semantic_match_ambiguous = false;
+		TargetEntry* semantic_match =
+			batch_join_find_unique_semantic_helper_entry(
+				requested_tlist, identity, oids,
+				/*minimum_resno=*/1,
+				/*maximum_resno=*/MaxAttrNumber,
+				semantic_match_ambiguous);
+		FuncExpr* semantic_match_helper = semantic_match == nullptr
+			? nullptr : per_row_helper_identity_function(
+				reinterpret_cast<Node*>(semantic_match->expr), oids);
+		Index authoritative_phid = 0;
+		const bool authoritative_group_unambiguous =
+			semantic_match_helper != nullptr
+			&& batch_join_plan_only_helper_phid(
+				plan_only_owner_support.helper_identities,
+				reinterpret_cast<Node*>(semantic_match->expr),
+				semantic_match_helper, oids, authoritative_phid);
+		PlaceHolderVar* semantic_match_phv = semantic_match == nullptr
+			? nullptr : pg_node_try_as<PlaceHolderVar>(
+				reinterpret_cast<Node*>(semantic_match->expr));
+		const bool carrier_phid_agrees = semantic_match_phv == nullptr
+			|| semantic_match_phv->phid == authoritative_phid;
+		if (semantic_match != nullptr && !semantic_match_ambiguous
+			&& authoritative_group_unambiguous && carrier_phid_agrees) {
+			continue;
+		}
+		requested_tlist = lappend(requested_tlist, makeTargetEntry(
+			reinterpret_cast<Expr*>(copyObject(identity)),
+			static_cast<AttrNumber>(list_length(requested_tlist) + 1),
+			nullptr, /*resjunk=*/true));
+	}
 	List* output_tlist = NIL;
-	for (TargetEntry* output : PList<TargetEntry>(tlist)) {
+	for (TargetEntry* output : PList<TargetEntry>(requested_tlist)) {
 		if (output == nullptr) {
 			continue;
 		}
@@ -15130,7 +17721,7 @@ BioseqBatchJoin_PlanCustomPath(
 			&placeholder_sites,
 			false,
 			false,
-			NIL};
+			existing_helper_identities};
 		batch_join_placeholder_registration_visitor visitor;
 		pg_walk_expression_including_root(
 			reinterpret_cast<Node*>(copied->expr), registration, visitor);
@@ -15148,7 +17739,7 @@ BioseqBatchJoin_PlanCustomPath(
 		}
 		copied->expr = batch_join_rewrite_output_for_setrefs(
 			copied->expr, combined_tlist, oids,
-			current_site_first_resno, NIL);
+			current_site_first_resno, existing_helper_identities);
 		output_tlist = lappend(output_tlist, copied);
 	}
 	validate_batch_join_setrefs_coverage(
@@ -16366,7 +18957,7 @@ static void finalize_base_match_owner_executor_image(
 	List* owned_quals = owned_quals_node != nullptr
 		&& IsA(owned_quals_node, List)
 		? reinterpret_cast<List*>(owned_quals_node) : NIL;
-	FuncExpr* mmsearch = list_length(owned_quals) == 1
+	FuncExpr* mmsearch = list_length(owned_quals) >= 1
 		? pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(linitial(owned_quals)))
 		: nullptr;
 	Var* executor_target = mmsearch != nullptr
@@ -16735,17 +19326,155 @@ export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
 	return target_recipe;
 }
 
+[[nodiscard]] static bool finalized_match_helper_argument_translation_agrees(
+		Node* translated, Node* canonical) noexcept {
+	if (translated == nullptr || canonical == nullptr) return false;
+	if (equal(translated, canonical)) return true;
+	Var* translated_var = pg_node_try_as<Var>(translated);
+	Var* canonical_var = pg_node_try_as<Var>(canonical);
+	if (translated_var == nullptr || canonical_var == nullptr
+		|| translated_var->varattno <= 0 || canonical_var->varattno <= 0
+		|| translated_var->varlevelsup != canonical_var->varlevelsup
+		|| !bms_is_empty(translated_var->varnullingrels)
+		|| !bms_is_empty(canonical_var->varnullingrels)
+		|| translated_var->vartype != canonical_var->vartype
+		|| translated_var->vartypmod != canonical_var->vartypmod
+		|| translated_var->varcollid != canonical_var->varcollid) return false;
+	const bool translated_slot = translated_var->varno == OUTER_VAR
+		|| translated_var->varno == INNER_VAR
+		|| translated_var->varno == INDEX_VAR;
+	/* A special Var names the child scan-tuple column selected by setrefs, so
+	 * its attno need not equal the physical canonical attribute.  A concrete
+	 * Var can only differ by the statement rtable offset and must retain attno. */
+	return translated_slot
+		|| (bioseq_is_concrete_rte_varno(translated_var->varno)
+			&& bioseq_is_concrete_rte_varno(canonical_var->varno)
+			&& translated_var->varattno == canonical_var->varattno);
+}
+
+[[nodiscard]] constexpr bool finalized_match_helper_carrier_shape_supported(
+		const int site_phid, const bool supplied_is_phv,
+		const int supplied_phid, const bool supplied_is_nulling_phv,
+		const bool carrier_is_phv, const bool identities_equal) noexcept {
+	if (site_phid < 0 || carrier_is_phv) return false;
+	if (site_phid == 0) return !supplied_is_phv && identities_equal;
+	if (!supplied_is_phv) return true; /* setrefs stripped the encoded PHV */
+	return !supplied_is_nulling_phv && supplied_phid == site_phid;
+}
+
+static_assert(finalized_match_helper_carrier_shape_supported(
+	0, false, 0, false, false, true));
+static_assert(!finalized_match_helper_carrier_shape_supported(
+	0, false, 0, false, false, false));
+static_assert(finalized_match_helper_carrier_shape_supported(
+	7, true, 7, false, false, false));
+static_assert(!finalized_match_helper_carrier_shape_supported(
+	7, true, 8, false, false, false));
+static_assert(!finalized_match_helper_carrier_shape_supported(
+	7, true, 7, true, false, false));
+static_assert(finalized_match_helper_carrier_shape_supported(
+	7, false, 0, false, false, false));
+static_assert(!finalized_match_helper_carrier_shape_supported(
+	7, false, 0, false, true, true));
+
+/* custom_scan_tlist, custom_private, and a descendant dummy targetlist cross
+ * different setrefs coordinate domains.  A phid-zero site accepts only the
+ * exact bare identity.  A positive phid accepts either its live non-nulling
+ * owner PHV or the bare descriptor produced when setrefs strips that PHV;
+ * both require the leaf carrier's exact canonical argument and full function
+ * ABI.  A carrier-side PHV is never a dummy leaf carrier. */
+[[nodiscard]] static bool finalized_match_helper_carrier_equivalent(
+		Node* supplied_identity, Node* carrier_identity,
+		Node* canonical_argument, const int site_phid,
+		const BioseqStubOids& oids) noexcept {
+	if (supplied_identity == nullptr || carrier_identity == nullptr
+		|| canonical_argument == nullptr) return false;
+	PlaceHolderVar* supplied_phv = pg_node_try_as<PlaceHolderVar>(
+		supplied_identity);
+	PlaceHolderVar* carrier_phv = pg_node_try_as<PlaceHolderVar>(
+		carrier_identity);
+	const bool identities_equal = equal(supplied_identity, carrier_identity);
+	if (!finalized_match_helper_carrier_shape_supported(
+			site_phid, supplied_phv != nullptr,
+			supplied_phv == nullptr ? 0 : static_cast<int>(supplied_phv->phid),
+			supplied_phv != nullptr
+				&& !bms_is_empty(supplied_phv->phnullingrels),
+			carrier_phv != nullptr, identities_equal)) return false;
+	FuncExpr* supplied = supplied_phv == nullptr
+		? batch_join_well_formed_match_helper(supplied_identity, oids)
+		: batch_join_match_helper_phv_function(supplied_phv, oids);
+	FuncExpr* carrier = carrier_phv == nullptr
+		? batch_join_well_formed_match_helper(carrier_identity, oids)
+		: batch_join_match_helper_phv_function(carrier_phv, oids);
+	if (supplied == nullptr || carrier == nullptr) return false;
+	Node* supplied_argument = batch_join_match_helper_argument(supplied);
+	Node* carrier_argument = batch_join_match_helper_argument(carrier);
+	if (supplied_argument == nullptr || carrier_argument == nullptr) return false;
+	const bool metadata_agrees = supplied->funcid == carrier->funcid
+		&& supplied->funcresulttype == carrier->funcresulttype
+		&& supplied->funcretset == carrier->funcretset
+		&& supplied->funcvariadic == carrier->funcvariadic
+		&& supplied->funcformat == carrier->funcformat
+		&& supplied->funccollid == carrier->funccollid
+		&& supplied->inputcollid == carrier->inputcollid
+		&& exprTypmod(supplied_identity) == exprTypmod(carrier_identity)
+		&& exprCollation(supplied_identity)
+			== exprCollation(carrier_identity);
+	if (!metadata_agrees) return false;
+	if (site_phid == 0) return identities_equal;
+	return equal(carrier_argument, canonical_argument)
+		&& finalized_match_helper_argument_translation_agrees(
+			supplied_argument, canonical_argument);
+}
+
+struct FinalizedMatchHelperCarrierAudit {
+	bool inspected = false;
+	int early_reject = 0;
+	int version = -1;
+	int private_fields = -1;
+	int expected_fields = -1;
+	int descriptor_tag = -1;
+	int sites_tag = -1;
+	int site_count = -1;
+	int supplied_tag = -1;
+	int carrier_tag = -1;
+	int supplied_argument_tag = -1;
+	int carrier_argument_tag = -1;
+	int canonical_argument_tag = -1;
+	int site_resno = -1;
+	int site_phid = -1;
+	int supplied_phid = 0;
+	int carrier_phid = 0;
+	bool identity_equal = false;
+	bool supplied_argument_canonical = false;
+	bool carrier_argument_canonical = false;
+	bool equivalent = false;
+};
+
 [[nodiscard]] static std::size_t
 finalized_batch_owner_matching_site_count(
 		CustomScan* scan, Node* identity,
-		const BioseqStubOids& oids) {
+		const BioseqStubOids& oids,
+		FinalizedMatchHelperCarrierAudit* audit = nullptr) {
+	if (audit != nullptr) {
+		audit->private_fields = scan == nullptr
+			? -1 : list_length(scan->custom_private);
+		audit->carrier_tag = identity == nullptr
+			? -1 : static_cast<int>(nodeTag(identity));
+	}
 	if (scan == nullptr || identity == nullptr
 		|| scan->methods == nullptr || scan->methods->CustomName == nullptr
 		|| strcmp(scan->methods->CustomName, "BioseqBatchJoin") != 0
-		|| scan->custom_private == NIL) return 0u;
+		|| scan->custom_private == NIL) {
+		if (audit != nullptr) audit->early_reject = 1;
+		return 0u;
+	}
 	Node* version_node = reinterpret_cast<Node*>(
 		linitial(scan->custom_private));
-	if (version_node == nullptr || !IsA(version_node, Integer)) return 0u;
+	if (version_node == nullptr || !IsA(version_node, Integer)) {
+		if (audit != nullptr) audit->early_reject = 2;
+		return 0u;
+	}
 	const int version = intVal(version_node);
 	const int expected_fields = version == kBioseqBatchJoinPlanVersion
 		? kBioseqBatchJoinPrivateFields
@@ -16759,15 +19488,37 @@ finalized_batch_owner_matching_site_count(
 		? kBatchJoinPlaceholderSites
 		: (version == kBioseqPerRowJoinPlanVersion
 			? kPerRowPlaceholderSites : -1);
+	if (audit != nullptr) {
+		audit->version = version;
+		audit->expected_fields = expected_fields;
+	}
 	if (expected_fields < 0
 		|| list_length(scan->custom_private) != expected_fields
-		|| descriptor_index < 0 || sites_index < 0) return 0u;
+		|| descriptor_index < 0 || sites_index < 0) {
+		if (audit != nullptr) audit->early_reject = 3;
+		return 0u;
+	}
 	Node* descriptor_node = reinterpret_cast<Node*>(list_nth(
 		scan->custom_private, descriptor_index));
 	Node* sites_node = reinterpret_cast<Node*>(list_nth(
 		scan->custom_private, sites_index));
-	if (descriptor_node == nullptr || !IsA(descriptor_node, List)
-		|| sites_node == nullptr || !IsA(sites_node, List)) return 0u;
+	if (audit != nullptr) {
+		audit->descriptor_tag = descriptor_node == nullptr
+			? -1 : static_cast<int>(nodeTag(descriptor_node));
+		audit->sites_tag = sites_node == nullptr
+			? -1 : static_cast<int>(nodeTag(sites_node));
+	}
+	if (descriptor_node == nullptr || !IsA(descriptor_node, List)) {
+		if (audit != nullptr) audit->early_reject = 4;
+		return 0u;
+	}
+	if (sites_node == nullptr || !IsA(sites_node, List)) {
+		if (audit != nullptr) audit->early_reject = 5;
+		return 0u;
+	}
+	if (audit != nullptr) {
+		audit->site_count = list_length(reinterpret_cast<List*>(sites_node));
+	}
 	const int stable_match_id = validate_finalized_match_owner_descriptor_value(
 		scan, reinterpret_cast<List*>(descriptor_node));
 	PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
@@ -16776,10 +19527,11 @@ finalized_batch_owner_matching_site_count(
 		: batch_join_match_helper_phv_function(placeholder, oids);
 	if (helper == nullptr
 		|| exprType(identity) != helper->funcresulttype
-		|| helper->funcresulttype != get_func_rettype(helper->funcid)) return 0u;
+		|| helper->funcresulttype != get_func_rettype(helper->funcid)) {
+		if (audit != nullptr) audit->early_reject = 6;
+		return 0u;
+	}
 	Node* helper_argument = batch_join_match_helper_argument(helper);
-	const int expected_phid = placeholder == nullptr
-		? 0 : static_cast<int>(placeholder->phid);
 	std::size_t matches = 0u;
 	for (Node* raw_site : PList<Node>(reinterpret_cast<List*>(sites_node))) {
 		List* site = raw_site != nullptr && IsA(raw_site, List)
@@ -16806,14 +19558,59 @@ finalized_batch_owner_matching_site_count(
 		TargetEntry* supplied = raw_supplied != nullptr
 			&& IsA(raw_supplied, TargetEntry)
 			? reinterpret_cast<TargetEntry*>(raw_supplied) : nullptr;
+		PlaceHolderVar* supplied_placeholder = supplied == nullptr
+			? nullptr : pg_node_try_as<PlaceHolderVar>(
+				reinterpret_cast<Node*>(supplied->expr));
+		PlaceHolderVar* carrier_placeholder =
+			pg_node_try_as<PlaceHolderVar>(identity);
+		const int supplied_phid = supplied_placeholder == nullptr
+			? 0 : static_cast<int>(supplied_placeholder->phid);
+		const int carrier_phid = carrier_placeholder == nullptr
+			? 0 : static_cast<int>(carrier_placeholder->phid);
+		const int site_phid = intVal(list_nth(site, kMatchSitePhid));
 		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
 			intVal(list_nth(site, kMatchSiteBindingKind)));
+		FuncExpr* supplied_helper = supplied == nullptr ? nullptr
+			: (supplied_placeholder == nullptr
+				? batch_join_well_formed_match_helper(
+					reinterpret_cast<Node*>(supplied->expr), oids)
+				: batch_join_match_helper_phv_function(
+					supplied_placeholder, oids));
+		Node* supplied_argument =
+			batch_join_match_helper_argument(supplied_helper);
+		const bool equivalent = supplied != nullptr
+			&& finalized_match_helper_carrier_equivalent(
+				reinterpret_cast<Node*>(supplied->expr), identity,
+				canonical_argument, site_phid, oids);
+		if (audit != nullptr && !audit->inspected) {
+			audit->inspected = true;
+			audit->supplied_tag = supplied == nullptr || supplied->expr == nullptr
+				? -1 : static_cast<int>(nodeTag(supplied->expr));
+			audit->carrier_tag = static_cast<int>(nodeTag(identity));
+			audit->supplied_argument_tag = supplied_argument == nullptr
+				? -1 : static_cast<int>(nodeTag(supplied_argument));
+			audit->carrier_argument_tag = helper_argument == nullptr
+				? -1 : static_cast<int>(nodeTag(helper_argument));
+			audit->canonical_argument_tag =
+				static_cast<int>(nodeTag(canonical_argument));
+			audit->site_resno = resno;
+			audit->site_phid = site_phid;
+			audit->supplied_phid = supplied_phid;
+			audit->carrier_phid = carrier_phid;
+			audit->identity_equal = supplied != nullptr
+				&& equal(supplied->expr, identity);
+			audit->supplied_argument_canonical = supplied_argument != nullptr
+				&& equal(supplied_argument, canonical_argument);
+			audit->carrier_argument_canonical =
+				equal(helper_argument, canonical_argument);
+			audit->equivalent = equivalent;
+		}
 		/* custom_private retains planner coordinates while custom_scan_tlist and
 		 * the carrier identity are post-setrefs.  Stable site ownership plus the
 		 * exact supplied expression is the cross-domain proof; comparing their
 		 * argument Vars directly would reject valid rtable-offset plans. */
 		if (supplied != nullptr && supplied->resno == resno
-			&& equal(supplied->expr, identity)
+			&& equivalent
 			&& static_cast<Oid>(intVal(list_nth(
 				site, kMatchSiteFuncid))) == helper->funcid
 			&& intVal(list_nth(site, kMatchSiteTypmod)) == exprTypmod(identity)
@@ -16822,10 +19619,10 @@ finalized_batch_owner_matching_site_count(
 			&& (binding_kind == BioseqMatchHelperBindingKind::exact_recipe
 				|| binding_kind
 					== BioseqMatchHelperBindingKind::unique_lineage)
-			&& intVal(list_nth(site, kMatchSitePhid)) == expected_phid
+			&& site_phid >= 0
 			&& intVal(list_nth(site, kMatchSiteStableId))
 				== stable_match_id) {
-			++matches;
+			matches = std::min<std::size_t>(2u, matches + 1u);
 		}
 	}
 	return matches;
@@ -17359,6 +20156,7 @@ static void neutralize_bioseq_scan_ancestor_helper_carriers(
 		const std::size_t local_base_matches =
 			finalized_base_owner_matching_site_count(scan, identity, oids);
 		std::size_t ancestor_matches = 0u;
+		FinalizedMatchHelperCarrierAudit carrier_audit{};
 		for (MatchOwnerFinalization* ancestor : ancestor_stack) {
 			if (ancestor == nullptr || ancestor->scan == nullptr) {
 				ereport(ERROR,
@@ -17368,7 +20166,7 @@ static void neutralize_bioseq_scan_ancestor_helper_carriers(
 			ancestor_matches = saturated_match_owner_site_count_add(
 				ancestor_matches,
 				finalized_batch_owner_matching_site_count(
-					ancestor->scan, identity, oids));
+					ancestor->scan, identity, oids, &carrier_audit));
 		}
 		if (local_base_matches > 1u || ancestor_matches > 1u
 			|| (local_base_matches == 1u && ancestor_matches != 0u)) {
@@ -17388,9 +20186,26 @@ static void neutralize_bioseq_scan_ancestor_helper_carriers(
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqScan inherited match helper carrier has no unique finalized ancestor"),
-				 errdetail("plan_node_id=%d resno=%d local_base_matches=%zu ancestor_matches=%zu",
+				 errdetail("plan_node_id=%d resno=%d local_base_matches=%zu ancestor_matches=%zu inspected=%s early_reject=%d version=%d private_fields=%d expected_fields=%d descriptor_tag=%d sites_tag=%d site_count=%d supplied_tag=%d carrier_tag=%d supplied_arg_tag=%d carrier_arg_tag=%d canonical_arg_tag=%d site_resno=%d site_phid=%d supplied_phid=%d carrier_phid=%d identity_equal=%s supplied_arg_canonical=%s carrier_arg_canonical=%s equivalent=%s",
 					scan->scan.plan.plan_node_id, entry->resno,
-					local_base_matches, ancestor_matches)));
+					local_base_matches, ancestor_matches,
+					carrier_audit.inspected ? "true" : "false",
+					carrier_audit.early_reject, carrier_audit.version,
+					carrier_audit.private_fields,
+					carrier_audit.expected_fields,
+					carrier_audit.descriptor_tag,
+					carrier_audit.sites_tag,
+					carrier_audit.site_count,
+					carrier_audit.supplied_tag, carrier_audit.carrier_tag,
+					carrier_audit.supplied_argument_tag,
+					carrier_audit.carrier_argument_tag,
+					carrier_audit.canonical_argument_tag,
+					carrier_audit.site_resno, carrier_audit.site_phid,
+					carrier_audit.supplied_phid, carrier_audit.carrier_phid,
+					carrier_audit.identity_equal ? "true" : "false",
+					carrier_audit.supplied_argument_canonical ? "true" : "false",
+					carrier_audit.carrier_argument_canonical ? "true" : "false",
+					carrier_audit.equivalent ? "true" : "false")));
 		}
 
 		const Oid type_oid = exprType(identity);
@@ -18102,6 +20917,14 @@ enum class MmsearchParamResolution : std::uint8_t {
 			compact_sequence_stdc_type_params::decode(
 				runtime.param_rebind.param_typmod);
 		if (query_type_params != declared_type_params) {
+			const unsigned declared_alphabet =
+				declared_type_params.alphabet_code;
+			const unsigned declared_width =
+				declared_type_params.storage_unit_byte_width;
+			const unsigned actual_alphabet =
+				query_type_params.alphabet_code;
+			const unsigned actual_width =
+				query_type_params.storage_unit_byte_width;
 			if (reinterpret_cast<void*>(query_hdr)
 				!= reinterpret_cast<void*>(
 					DatumGetPointer(query_const->constvalue))) {
@@ -18110,10 +20933,23 @@ enum class MmsearchParamResolution : std::uint8_t {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATATYPE_MISMATCH),
 				 errmsg("bioseq mmsearch Param payload disagrees with its declared typmod"),
-				 errdetail("phase=%s paramid=%d paramkind=%d",
+				 errdetail(
+					"phase=%s paramid=%d paramkind=%d paramtypmod=%d "
+					"declared_alphabet=%u declared_width=%u "
+					"actual_alphabet=%u actual_width=%u "
+					"target_alphabet=%u target_width=%u",
 					phase,
 					runtime.param_rebind.paramid,
-					runtime.param_rebind.paramkind)));
+					runtime.param_rebind.paramkind,
+					runtime.param_rebind.param_typmod,
+					declared_alphabet,
+					declared_width,
+					actual_alphabet,
+					actual_width,
+					static_cast<unsigned>(
+						runtime.param_rebind.alphabet_code),
+					static_cast<unsigned>(runtime.param_rebind.
+						storage_unit_byte_width))));
 		}
 	}
 	const compact_sequence_stdc_type_params target_type_params{
@@ -18392,13 +21228,13 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	List* owned_mmsearch_quals = list_length(cscan->custom_exprs) >= 4
 		? reinterpret_cast<List*>(list_nth(cscan->custom_exprs, 3))
 		: NIL;
-	if (list_length(owned_mmsearch_quals) > 1) {
+	if (list_length(owned_mmsearch_quals) > 2) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
-			 errmsg("Bioseq scan plan owns more than one mmsearch qualifier")));
+			 errmsg("Bioseq scan plan owns too many mmsearch expressions")));
 	}
 	if ((base_match_target_recipe != nullptr)
-		!= (list_length(owned_mmsearch_quals) == 1)) {
+		!= (list_length(owned_mmsearch_quals) >= 1)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqScan match owner expression identity is incomplete")));
@@ -18533,6 +21369,15 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	const BioseqStubOids& scan_stub_oids = get_cached_stub_oids();
 	for (Node* executable_qual : PList<Node>(cscan->scan.plan.qual)) {
 		if (contains_mmsearch_qualifier(executable_qual, scan_stub_oids)) {
+			FuncExpr* top_level = pg_node_try_as<FuncExpr>(executable_qual);
+			if (top_level == nullptr
+				|| !is_mmsearch_funcid(top_level->funcid, scan_stub_oids)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("nested mmsearch qualifier shape is unsupported"),
+					 errdetail("mmsearch must be consumed by the alignment runtime; executing its SQL stub without alignment is forbidden"),
+					 errhint("Place mmsearch(...) directly in a top-level AND conjunct.")));
+			}
 			ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("mmsearch qualifier is not owned by a Bioseq executor"),
@@ -18572,7 +21417,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	register_runtime_cleanup_callback(bioseqScanState, estate);
 
 	/*
-	 * Decode the one planner-owned expression from custom_exprs and configure
+	 * Decode the planner-owned expression set from custom_exprs and configure
 	 * the dispatch buffer. The executable qual list is intentionally ignored.
 	 */
 	/* Begin is the only place that should drop extras as part of the
@@ -18587,9 +21432,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 
 	/*
 	 * State retained by the legacy classifier/configuration branches. Planner
-	 * ownership guarantees this loop contains at most one expression.
+	 * ownership guarantees this loop contains one primary expression and, only
+	 * for the parameterized join shape, at most one same-target Const extra.
 	 *
-	 * `primary_configured` flips once the sole owned expression is installed
+	 * `primary_configured` flips once the primary owned expression is installed
 	 * through the Const, Param-rebind, or same-relation Var path.
 	 */
 	bool primary_configured = false;
@@ -18597,9 +21443,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	FuncExpr* primary_mmsearch_fe = nullptr;
 
 	/*
-	 * Process only the private expression selected by the planner. Executable
-	 * quals never participate in alignment ownership, and stacked calls are
-	 * rejected before a CustomPath is built.
+	 * Process only the private expressions selected by the planner. Executable
+	 * quals never participate in alignment ownership. General stacked calls are
+	 * rejected before a CustomPath is built; the bounded Param-primary/Const-
+	 * extra shape is sorted and configured here.
 	 *
 	 * Solution: classify quals first, then pick the primary by
 	 * priority:
@@ -18831,9 +21678,62 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 
 		if (primary_configured)
 		{
-			ereport(ERROR,
-				(errcode(ERRCODE_DATA_CORRUPTED),
-				 errmsg("Bioseq scan reached a second owned mmsearch expression")));
+			if (!arg1_is_const || col_var->varattno != primary_seq_attno) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("stacked mmsearch qualifiers are unsupported"),
+					 errdetail("Only a constant same-target filter can accompany a parameterized primary mmsearch.")));
+			}
+			Const* query_const = reinterpret_cast<Const*>(arg1);
+			if (query_const->constisnull
+				|| !bounded_batch_fallback_options_are_supported(
+					primary_mmsearch_fe, fe, scan_stub_oids)) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("Bioseq scan bounded mmsearch stack is invalid"),
+					 errdetail("The constant extra must be non-NULL, use default biological options, and accompany an explicitly require-absent primary.")));
+			} else {
+				pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
+					PG_DETOAST_DATUM(query_const->constvalue));
+				const auto physical_query_type = query_hdr->get_type_params();
+				if (physical_query_type.alphabet_code
+						!= unpacked_typmod.alphabet_code) {
+					const auto mismatch = physical_query_type;
+					if (reinterpret_cast<void*>(query_hdr)
+						!= reinterpret_cast<void*>(DatumGetPointer(
+							query_const->constvalue))) pfree(query_hdr);
+					raise_mmsearch_alphabet_mismatch(
+						unpacked_typmod, mismatch, "constant extra binding");
+				}
+				pgseq_t* normalized_query = query_hdr;
+				if (physical_query_type != unpacked_typmod) {
+					normalized_query = ::bioseq::simd::active_target::
+						stdc_rewidth_to_type_params(
+							*query_hdr, unpacked_typmod, pg_alloc);
+					if (normalized_query == nullptr) {
+						if (reinterpret_cast<void*>(query_hdr)
+							!= reinterpret_cast<void*>(DatumGetPointer(
+								query_const->constvalue))) pfree(query_hdr);
+						ereport(ERROR,
+							(errcode(ERRCODE_DATATYPE_MISMATCH),
+							 errmsg("bioseq mmsearch constant extra rewidth rejected an incompatible alphabet")));
+					}
+				}
+				const size_t query_total_bytes = static_cast<size_t>(
+					VARSIZE(normalized_query));
+				std::vector<char> query_varlena_bytes(query_total_bytes);
+				std::memcpy(query_varlena_bytes.data(), normalized_query,
+					query_total_bytes);
+				if (normalized_query != query_hdr) pfree(normalized_query);
+				if (reinterpret_cast<void*>(query_hdr)
+					!= reinterpret_cast<void*>(DatumGetPointer(
+						query_const->constvalue))) pfree(query_hdr);
+				runtime.buffer.add_extra_const_query(
+					std::move(query_varlena_bytes));
+			}
+			++consumed_mmsearch_qual_count;
+			pfree(attname_cstr);
+			continue;
 		}
 
 		if (arg1_is_const)
@@ -20593,6 +23493,112 @@ static void batch_join_set_placeholder_value(
 	slot->tts_isnull[site.resno - 1] = is_null;
 }
 
+struct BatchJoinTargetSourceDatum {
+	AttrNumber resno = InvalidAttrNumber;
+	Datum datum = Datum{0};
+};
+
+struct BatchJoinTargetSourceRestore {
+	BatchJoinTargetSourceDatum* sources = nullptr;
+	std::size_t count = 0u;
+};
+
+[[nodiscard]] static BatchJoinTargetSourceRestore
+capture_batch_join_target_sources(
+		BioseqScanRuntime& target_runtime,
+		TupleTableSlot* slot,
+		MemoryContext output_context) {
+	BatchJoinTargetSourceRestore restore{};
+	if (!target_runtime.lazy_source_projection || slot == nullptr) {
+		return restore;
+	}
+	if (output_context == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("BioseqBatchJoin target output context is unavailable")));
+	}
+	slot_getallattrs(slot);
+	const std::size_t required_bindings = static_cast<std::size_t>(
+		slot->tts_tupleDescriptor->natts + 1);
+	if (target_runtime.lazy_source_projected_bindings.size()
+			!= required_bindings) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqBatchJoin target source binding layout changed")));
+	}
+	for (int index = 0; index < slot->tts_tupleDescriptor->natts; ++index) {
+		const AttrNumber resno = static_cast<AttrNumber>(index + 1);
+		if (target_runtime.lazy_source_projected_bindings[resno].
+				physical_attno == InvalidAttrNumber
+			|| slot->tts_isnull[index]) {
+			continue;
+		}
+		++restore.count;
+	}
+	if (restore.count == 0u) return restore;
+	restore.sources = static_cast<BatchJoinTargetSourceDatum*>(
+		MemoryContextAlloc(
+			output_context,
+			restore.count * sizeof(BatchJoinTargetSourceDatum)));
+	std::size_t destination = 0u;
+	for (int index = 0; index < slot->tts_tupleDescriptor->natts; ++index) {
+		const AttrNumber resno = static_cast<AttrNumber>(index + 1);
+		if (target_runtime.lazy_source_projected_bindings[resno].
+				physical_attno == InvalidAttrNumber
+			|| slot->tts_isnull[index]) {
+			continue;
+		}
+		restore.sources[destination++] = BatchJoinTargetSourceDatum{
+			.resno = resno,
+			.datum = slot->tts_values[index],
+		};
+	}
+	Assert(destination == restore.count);
+	return restore;
+}
+
+static void restore_batch_join_target_sources(
+		TupleTableSlot* slot,
+		const BatchJoinTargetSourceRestore& restore) noexcept {
+	if (slot == nullptr) return;
+	for (std::size_t index = 0u; index < restore.count; ++index) {
+		const AttrNumber resno = restore.sources[index].resno;
+		if (resno > 0 && resno <= slot->tts_tupleDescriptor->natts) {
+			slot->tts_values[resno - 1] = restore.sources[index].datum;
+		}
+	}
+}
+
+static void normalize_batch_join_target_sources(
+		TupleTableSlot* slot,
+		const BatchJoinTargetSourceRestore& restore,
+		MemoryContext output_context) {
+	for (std::size_t index = 0u; index < restore.count; ++index) {
+		const BatchJoinTargetSourceDatum& source = restore.sources[index];
+		if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source.datum))) {
+			continue;
+		}
+		/* The dispatch buffer owns a MinimalTuple copy, which may short-pack an
+		 * extended sequence Datum.  BSS3's locator decoder requires the ordinary
+		 * four-byte varlena header, so normalize in the output lifetime before it
+		 * examines pgseq_t fields. */
+		MemoryContext previous = MemoryContextSwitchTo(output_context);
+		pgseq_t* flat = reinterpret_cast<pgseq_t*>(
+			PG_DETOAST_DATUM(source.datum));
+		MemoryContextSwitchTo(previous);
+		if (static_cast<std::size_t>(VARSIZE(flat))
+				< pgseq_t::header_bytes()) {
+			ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg("BioseqBatchJoin target source is truncated"),
+				 errdetail("attribute=%d bytes=%zu",
+					static_cast<int>(source.resno),
+					static_cast<std::size_t>(VARSIZE(flat)))));
+		}
+		slot->tts_values[source.resno - 1] = PointerGetDatum(flat);
+	}
+}
+
 static TupleTableSlot* batch_join_project_output(
 		CustomScanState* node,
 		BioseqBatchJoinRuntime& runtime,
@@ -20618,29 +23624,6 @@ static TupleTableSlot* batch_join_project_output(
 	ExecClearTuple(combined);
 	slot_getallattrs(output.scan_slot_copy);
 	slot_getallattrs(query_slot);
-	/* A locator target remains deferred while BatchJoin aligns it.  Once the
-	 * match has been produced, an enclosing SliceProject may consume that same
-	 * target through a source-backed recipe; promote the output copy only now,
-	 * into this output's per-tuple context. */
-	if (runtime.target_child != nullptr
-		&& IsA(runtime.target_child, CustomScanState)) {
-		auto* target_custom =
-			reinterpret_cast<CustomScanState*>(runtime.target_child);
-		if (target_custom->methods == &BioseqColumnScanExecuteMethods) {
-			auto* target_state =
-				BioseqScanState::from_custom_scan_state(target_custom);
-			BioseqScanRuntime& target_runtime = bioseq_runtime(target_state);
-			if (target_runtime.lazy_source_projection) {
-				promote_slice_project_sources(
-					target_state, output.scan_slot_copy,
-					expression_context->ecxt_per_tuple_memory,
-					/*allow_locator_passthrough=*/true,
-					SliceProjectSourceSlotLayout::projected_child,
-					ExecGetResultType(reinterpret_cast<PlanState*>(target_custom)));
-				slot_getallattrs(output.scan_slot_copy);
-			}
-		}
-	}
 	if (runtime.target_column_count
 		> output.scan_slot_copy->tts_tupleDescriptor->natts
 		|| runtime.query_column_count
@@ -20651,9 +23634,85 @@ static TupleTableSlot* batch_join_project_output(
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqBatchJoin combined tuple layout is invalid")));
 	}
-	for (int i = 0; i < runtime.target_column_count; ++i) {
-		combined->tts_values[i] = output.scan_slot_copy->tts_values[i];
-		combined->tts_isnull[i] = output.scan_slot_copy->tts_isnull[i];
+	/* A locator target remains deferred while BatchJoin aligns it.  Once the
+	 * match has been produced, an enclosing SliceProject may consume that same
+	 * target through a source-backed recipe, and an upper BatchJoin may bind a
+	 * sibling sequence as PARAM_EXEC. Promote the output copy only now, into
+	 * this output's per-tuple context, copy the promoted Datums, then restore
+	 * the retained locator tuple before another match can reuse it. */
+	BioseqScanRuntime* target_runtime = nullptr;
+	if (runtime.target_child != nullptr
+		&& IsA(runtime.target_child, CustomScanState)) {
+		auto* target_custom =
+			reinterpret_cast<CustomScanState*>(runtime.target_child);
+		if (target_custom->methods == &BioseqColumnScanExecuteMethods) {
+			auto* target_state =
+				BioseqScanState::from_custom_scan_state(target_custom);
+			target_runtime = &bioseq_runtime(target_state);
+			if (!target_runtime->lazy_source_projection) {
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("BioseqBatchJoin target source route is unavailable")));
+			}
+		}
+	}
+	if (target_runtime == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			 errmsg("BioseqBatchJoin target source provider is unavailable")));
+	}
+	const BatchJoinTargetSourceRestore target_source_restore =
+		capture_batch_join_target_sources(
+			*target_runtime, output.scan_slot_copy,
+			expression_context->ecxt_per_tuple_memory);
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* volatile promotion_pg_error = nullptr;
+	std::exception_ptr promotion_cpp_error;
+	PG_TRY();
+	{
+		try {
+			auto* target_custom = reinterpret_cast<CustomScanState*>(
+				runtime.target_child);
+			auto* target_state =
+				BioseqScanState::from_custom_scan_state(target_custom);
+			normalize_batch_join_target_sources(
+				output.scan_slot_copy, target_source_restore,
+				expression_context->ecxt_per_tuple_memory);
+			promote_slice_project_sources(
+				target_state, output.scan_slot_copy,
+				expression_context->ecxt_per_tuple_memory,
+				/*allow_locator_passthrough=*/true,
+				SliceProjectSourceSlotLayout::projected_child,
+				ExecGetResultType(reinterpret_cast<PlanState*>(target_custom)));
+			slot_getallattrs(output.scan_slot_copy);
+			for (int i = 0; i < runtime.target_column_count; ++i) {
+				combined->tts_values[i] = output.scan_slot_copy->tts_values[i];
+				combined->tts_isnull[i] = output.scan_slot_copy->tts_isnull[i];
+			}
+			restore_batch_join_target_sources(
+				output.scan_slot_copy, target_source_restore);
+		} catch (...) {
+			MemoryContextSwitchTo(saved_context);
+			restore_batch_join_target_sources(
+				output.scan_slot_copy, target_source_restore);
+			promotion_cpp_error = std::current_exception();
+		}
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(saved_context);
+		restore_batch_join_target_sources(
+			output.scan_slot_copy, target_source_restore);
+		promotion_pg_error = CopyErrorData();
+		FlushErrorState();
+	}
+	PG_END_TRY();
+	if (promotion_pg_error != nullptr) {
+		ErrorData* exact_error = promotion_pg_error;
+		ReThrowError(exact_error);
+	}
+	if (promotion_cpp_error != nullptr) {
+		std::rethrow_exception(promotion_cpp_error);
 	}
 	for (int i = 0; i < runtime.query_column_count; ++i) {
 		const int destination = runtime.target_column_count + i;
@@ -20894,9 +23953,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 			static_cast<std::int64_t>(runtime->target_column_count)
 			+ static_cast<std::int64_t>(runtime->query_column_count);
 		if (scan_desc == nullptr || child_column_count <= 0
-			|| child_column_count > scan_desc->natts
-			|| list_length(sites)
-				!= scan_desc->natts - child_column_count) {
+			|| child_column_count > scan_desc->natts) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqBatchJoin scan tuple/private layout is invalid"),
@@ -20908,6 +23965,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 					list_length(sites))));
 		}
 		Bitmapset* placeholder_resnos = nullptr;
+		int appended_placeholder_count = 0;
 		for (List* encoded : PList<List>(sites)) {
 			Node* encoded_node = reinterpret_cast<Node*>(encoded);
 			if (encoded_node == nullptr || !IsA(encoded_node, List)
@@ -20931,7 +23989,11 @@ static void BioseqBatchJoin_BeginCustomScan(
 				encoded, kMatchSiteResno));
 			const bool duplicate_resno = raw_resno > 0
 				&& bms_is_member(raw_resno, placeholder_resnos);
-			if (raw_resno <= child_column_count
+			const bool existing_target_resno = raw_resno > 0
+				&& raw_resno <= runtime->target_column_count;
+			const bool appended_resno = raw_resno > child_column_count
+				&& raw_resno <= scan_desc->natts;
+			if ((!existing_target_resno && !appended_resno)
 				|| raw_resno > scan_desc->natts
 				|| duplicate_resno) {
 				ereport(ERROR,
@@ -20944,6 +24006,7 @@ static void BioseqBatchJoin_BeginCustomScan(
 						scan_desc->natts,
 						duplicate_resno ? "true" : "false")));
 			}
+			if (appended_resno) ++appended_placeholder_count;
 			placeholder_resnos = bms_add_member(
 				placeholder_resnos, raw_resno);
 			const BioseqBatchJoinPlaceholderSite site{
@@ -20977,6 +24040,17 @@ static void BioseqBatchJoin_BeginCustomScan(
 					 errmsg("BioseqBatchJoin placeholder type/resno ABI is invalid")));
 			}
 			runtime->placeholder_sites.push_back(site);
+		}
+		if (appended_placeholder_count
+				!= scan_desc->natts - child_column_count) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqBatchJoin appended placeholder layout is invalid"),
+				 errdetail(
+					"child_columns=%lld scan_columns=%d appended_sites=%d total_sites=%d",
+					static_cast<long long>(child_column_count),
+					scan_desc->natts, appended_placeholder_count,
+					list_length(sites))));
 		}
 		bms_free(placeholder_resnos);
 
@@ -23917,8 +26991,8 @@ BioseqColumnScan_ReScanCustomScan(CustomScanState *node)
 	{
 		/* The stashed FuncExpr identifies the exact primary Param even when
 		 * planner qual ordering puts a Const extra first.  NULL clears only
-		 * the primary context; the strict plan qual rejects every row while
-		 * registered Const extras survive for a later non-NULL rescan. */
+		 * the primary context; BMO v2 rejects NULL Const extras during planning,
+		 * while registered non-NULL extras survive for a later non-NULL rescan. */
 		(void)resolve_mmsearch_param_query(
 			runtime, node->ss.ps.ps_ExprContext,
 			"ReScanCustomScan");

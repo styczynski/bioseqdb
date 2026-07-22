@@ -4034,7 +4034,12 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table));
-    REQUIRE(error.contains("catalog"));
+    // The immutable-source guard owns this failure before the replacement
+    // publisher can enter a generation-catalog operation.
+    REQUIRE(error.sqlstate == "55000");
+    REQUIRE(error.contains(
+        "bioseq locator no longer matches its immutable source"));
+    REQUIRE(error.contains("source epoch"));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(capture_generation_rows() == generation_rows_before);
     REQUIRE(capture_schema_identity() == schema_identity_before);
