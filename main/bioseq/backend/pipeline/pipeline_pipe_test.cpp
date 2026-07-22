@@ -5670,6 +5670,68 @@ TEST_CASE("PrefilterStage composes reverse, unequal, aggregate, and stable route
     }
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("reference SIMD pipe runtime and constexpr dispatch execute native vector work",
+          "[pipe][reference-simd][runtime][constexpr][route][proof]") {
+    using namespace ::bioseq::simd::HWY_NAMESPACE;
+    using sequence_type =
+        sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+    using range_type = compact_sequence_range<sequence_type>;
+    using collector_type = sketch_collector_t<MinimapSketchData>;
+    using pipe::MinKernelKind;
+
+    auto data = doc0307_e2e::make_dna4(4096u, 0x51AD51ADu);
+    range_type resident(data);
+    auto lazy = bioseq::storage::make_lazy_in_memory(resident);
+    const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+
+    reset_reference_simd_minimizer_test_receipt();
+    collector_type runtime_collector;
+    (void)pipe::minimizer_dispatch<
+        MinKernelKind::Simd, MinimapSketchData>(
+            runtime_collector, view, 10u, 15u);
+    const auto runtime_receipt =
+        reference_simd_minimizer_test_receipt_snapshot();
+    REQUIRE(runtime_receipt.kernel_calls == 1u);
+    REQUIRE(runtime_receipt.vector_callback_batches > 0u);
+    REQUIRE(runtime_receipt.vector_lane_visits > 0u);
+    REQUIRE(runtime_receipt.last_storage_unit_bytes
+        == sizeof(std::uint64_t));
+
+    reset_reference_simd_minimizer_test_receipt();
+    collector_type constexpr_collector;
+    (void)pipe::minimizer_dispatch_constexpr<
+        MinKernelKind::Simd, 10u, 15u, MinimapSketchData>(
+            constexpr_collector, view, 10u, 15u);
+    const auto constexpr_receipt =
+        reference_simd_minimizer_test_receipt_snapshot();
+    REQUIRE(constexpr_receipt.kernel_calls == 1u);
+    REQUIRE(constexpr_receipt.vector_callback_batches > 0u);
+    REQUIRE(constexpr_receipt.vector_lane_visits > 0u);
+    REQUIRE(constexpr_receipt.last_storage_unit_bytes
+        == sizeof(std::uint64_t));
+
+    const auto& runtime = runtime_collector.extract_sketches_data();
+    const auto& specialized = constexpr_collector.extract_sketches_data();
+    REQUIRE(runtime.size() == specialized.size());
+    for (std::size_t index = 0u; index < runtime.size(); ++index) {
+        CAPTURE(index);
+        REQUIRE(runtime[index].raw_value() == specialized[index].raw_value());
+    }
+
+    reset_reference_simd_minimizer_test_receipt();
+    collector_type scalar_collector;
+    (void)pipe::minimizer_dispatch<
+        MinKernelKind::Scalar, MinimapSketchData>(
+            scalar_collector, view, 10u, 15u);
+    const auto scalar_receipt =
+        reference_simd_minimizer_test_receipt_snapshot();
+    REQUIRE(scalar_receipt.kernel_calls == 0u);
+    REQUIRE(scalar_receipt.vector_callback_batches == 0u);
+    REQUIRE(scalar_receipt.vector_lane_visits == 0u);
+}
+#endif
+
 TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32 ranges",
           "[pipe][exact-simd][resident][vector_stream][route][proof]") {
     using sequence_type =
@@ -5816,8 +5878,9 @@ TEST_CASE("ExactSimd pipe selects resident dual vector_stream only for whole u32
             .k15_w10_b8_u32_hash_kernel_calls > 0u));
 }
 
-TEST_CASE("Indexed dna4 u64 queries use zero-copy u32 B8 continuation with scalar-identical records",
-          "[pipe][exact-simd][indexed-query][u64-u32][b8][parity][proof]") {
+TEST_CASE("Indexed dna4 u64 queries use admitted typed u32 B8 continuation with scalar-identical records",
+          "[pipe][exact-simd][indexed-query][u64-u32][b8][parity][proof]"
+          "[memory-admission][alias-safe]") {
     using namespace ::bioseq::simd::HWY_NAMESPACE;
     using query_sequence = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
     using query_range = compact_sequence_range<query_sequence>;
@@ -5840,8 +5903,48 @@ TEST_CASE("Indexed dna4 u64 queries use zero-copy u32 B8 continuation with scala
         auto lazy_query = bioseq::storage::make_lazy_in_memory(resident);
         const auto query_view =
             bioseq::storage::as_lazy_sequence_view(lazy_query);
+        const auto native = query_view.try_resident_packed(
+            0u, query_view.bp_size(), sizeof(std::uint64_t));
+        REQUIRE(native.has_value());
+        const auto access = bioseq::storage::plan_sequence_access(
+            query_view,
+            bioseq::storage::sequence_access_requirement::
+                contiguous_resident,
+            0u,
+            query_view.bp_size(),
+            sizeof(std::uint32_t));
+        REQUIRE(access.route
+            == bioseq::storage::sequence_access_route::materialize_admitted);
+        REQUIRE(access.resident_borrow_kind
+            == bioseq::storage::sequence_resident_borrow_kind::none);
+        REQUIRE_FALSE(access.resident.has_value());
+        REQUIRE(access.admission_bytes
+            == bioseq::storage::packed_region_admission_bytes<seq::dna4>(
+                data.size(), sizeof(std::uint32_t)));
+        auto& admission =
+            bioseq::parallelism::MemoryAdmissionController::instance();
+        const std::uint64_t admission_baseline = admission.reserved_bytes();
+        {
+            auto permit = admission.try_reserve(access.admission_bytes);
+            REQUIRE(permit.has_value());
+            auto typed_owner = bioseq::storage::materialize_packed_region(
+                query_view,
+                0u,
+                query_view.bp_size(),
+                sizeof(std::uint32_t),
+                std::move(*permit));
+            REQUIRE(admission.reserved_bytes()
+                == admission_baseline + access.admission_bytes);
+            REQUIRE(typed_owner.descriptor().storage_unit_byte_width
+                == sizeof(std::uint32_t));
+            REQUIRE(typed_owner.descriptor().unit_count
+                == (data.size() + 15u) / 16u);
+            REQUIRE(typed_owner.descriptor().units != native->units);
+        }
+        REQUIRE(admission.reserved_bytes() == admission_baseline);
         auto fast = sketch_query_for_index_selection<MinimapSketchData>(
             query_view, params, 10u, 15u);
+        REQUIRE(admission.reserved_bytes() == admission_baseline);
 
         sketch_collector_t<MinimapSketchData> scalar_collector;
         collect_minimizers_view<minimap_int_hasher, MinimapSketchData>(

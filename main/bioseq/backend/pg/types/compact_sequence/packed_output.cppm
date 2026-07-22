@@ -615,38 +615,17 @@ export inline void pending_root_reset(void* argument) noexcept
     guard->destination_arena = nullptr;
 }
 
-struct piece_root_build_result {
-    piece_edge root;
-    piece_edge_cleanup_handle cleanup;
-};
-
-[[nodiscard]] inline piece_root_build_result normalize_piece_root_build(
-    piece_edge root) noexcept
-{
-    return {.root = root};
-}
-
-[[nodiscard]] inline piece_root_build_result normalize_piece_root_build(
-    tracked_piece_edge root) noexcept
-{
-    return {.root = root.edge, .cleanup = root.cleanup};
-}
-
 template<class Build>
-[[nodiscard]] inline piece_root_build_result invoke_piece_root_build(
+[[nodiscard]] inline tracked_piece_edge invoke_piece_root_build(
     Build&& build,
     piece_tree_arena& arena,
     piece_edge_cleanup_ledger& ledger)
 {
-    if constexpr (requires {
-        std::forward<Build>(build)(arena, ledger);
-    }) {
-        return normalize_piece_root_build(
-            std::forward<Build>(build)(arena, ledger));
-    } else {
-        return normalize_piece_root_build(
-            std::forward<Build>(build)(arena));
-    }
+    /* A root builder must publish every returned owning edge to the reset
+     * callback's ledger before it may perform another PostgreSQL operation.
+     * Requiring the tracked return type makes that contract structural. */
+    tracked_piece_edge built = std::forward<Build>(build)(arena, ledger);
+    return built;
 }
 
 inline void transfer_built_root_from_ledger(
@@ -693,10 +672,10 @@ inline void replace_root_error_safe(
         /* Arena storage is independent of both caller and EOH contexts so a
          * second EOH can retain/share it after this EOH is reset. */
         guard->destination_arena = make_piece_tree_arena();
-        const piece_root_build_result built = invoke_piece_root_build(
+        const tracked_piece_edge built = invoke_piece_root_build(
             std::forward<Build>(build), *guard->destination_arena,
             guard->build_edges);
-        guard->root = built.root;
+        guard->root = built.edge;
         guard->root_cleanup = built.cleanup;
         transfer_built_root_from_ledger(*guard);
         validate_tree_and_limits(
@@ -754,10 +733,10 @@ inline void replace_root_trusted_join_error_safe(
         MemoryContextSwitchTo(saved_context);
 
         guard->destination_arena = make_piece_tree_arena();
-        const piece_root_build_result built = invoke_piece_root_build(
+        const tracked_piece_edge built = invoke_piece_root_build(
             std::forward<Build>(build), *guard->destination_arena,
             guard->build_edges);
-        guard->root = built.root;
+        guard->root = built.edge;
         guard->root_cleanup = built.cleanup;
         transfer_built_root_from_ledger(*guard);
         (void)validate_trusted_join_and_limits(
@@ -927,9 +906,12 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
     retain_slice_trace_attachment(result->trace);
     replace_root_error_safe(
         *result, type, descriptor.bp_length, descriptor.alphabet_bound,
-        [flat, descriptor, result](piece_tree_arena& arena) {
-            return make_literal_node(
-                arena, copy_flat_literal(
+        [flat, descriptor, result](
+            piece_tree_arena& arena,
+            piece_edge_cleanup_ledger& ledger) {
+            return make_literal_node_error_atomic(
+                arena, ledger,
+                copy_flat_literal(
                     arena, *flat, descriptor,
                     result->trace, result->producer_value_id));
         });
@@ -1126,8 +1108,11 @@ export [[nodiscard]] Datum slice_pg_sequence(
     replace_root_error_safe(
         *acquired.value, acquired.value->type_params, to - from,
         acquired.value->alphabet_bound,
-        [&acquired, from, to](piece_tree_arena& arena) {
-            return slice_tree(arena, acquired.value->root, from, to);
+        [&acquired, from, to](
+            piece_tree_arena& arena,
+            piece_edge_cleanup_ledger& ledger) {
+            return slice_tree(
+                arena, ledger, acquired.value->root, from, to);
         });
     return pg_sequence_rw_datum(acquired.value);
 }
@@ -1147,11 +1132,11 @@ export [[nodiscard]] Datum transform_pg_sequence(
     replace_root_error_safe(
         *acquired.value, acquired.value->type_params,
         acquired.value->bp_length, acquired.value->alphabet_bound,
-        [&acquired, transform](piece_tree_arena&) {
-            piece_edge next = retain_edge(acquired.value->root);
-            next.transform = bioseq::storage::compose(
-                transform, next.transform);
-            return next;
+        [&acquired, transform](
+            piece_tree_arena&,
+            piece_edge_cleanup_ledger& ledger) {
+            return transform_piece_edge_error_atomic(
+                ledger, acquired.value->root, transform);
         });
     return pg_sequence_rw_datum(acquired.value);
 }
@@ -1207,9 +1192,11 @@ export [[nodiscard]] inline Datum make_source_backed_pg_sequence(
     replace_root_error_safe(
         *result, stored_type, locator.total_bp_size, true,
         [source, locator, stored_type,
-         last_padding_letters](piece_tree_arena& arena) {
-            return make_source_node(
-                arena,
+         last_padding_letters](
+            piece_tree_arena& arena,
+            piece_edge_cleanup_ledger& ledger) {
+            return make_source_node_error_atomic(
+                arena, ledger,
                 source_piece{
                     .source = source,
                     .locator = locator,
@@ -1696,11 +1683,12 @@ export inline Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
       auto *value = make_pg_sequence_expanded(unbound_type, false);
       replace_root_error_safe(
           *value, unbound_type, bytes.size(), false,
-          [bytes](piece_tree_arena &arena) {
+          [bytes](piece_tree_arena &arena,
+                  piece_edge_cleanup_ledger &ledger) {
             auto *storage = allocate_piece_literal_storage(arena, bytes.size());
             std::memcpy(storage, bytes.data(), bytes.size());
-            return make_literal_node(
-                arena,
+            return make_literal_node_error_atomic(
+                arena, ledger,
                 literal_piece{
                     .storage_arena = std::addressof(arena),
                     .bytes = storage,

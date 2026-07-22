@@ -2151,21 +2151,42 @@ ba_try_packed_global_gap_certificate(
             return attempt;
         }
 
+        // Borrow the complete logical facade descriptors.  Region-only probes
+        // lose the logical totals required by reverse orientation and expose
+        // nonzero leading offsets for ordinary unaligned slices.  The packed
+        // loader already handles arbitrary symbol coordinates, so retain each
+        // descriptor's physical leading offset explicitly.
         const auto query_region = query_seq.try_resident_packed(
-            query_start, query_end, 8u);
+            0u, query_seq.bp_size(), 8u);
         const auto target_region = target_seq.try_resident_packed(
-            target_start, target_end, 8u);
+            0u, target_seq.bp_size(), 8u);
         if (!query_region.has_value() || !target_region.has_value()
-            || query_region->leading_symbol_offset != 0u
-            || target_region->leading_symbol_offset != 0u) {
+            || query_seq.bp_size()
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<size_t>::max)())
+            || target_seq.bp_size()
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<size_t>::max)())) {
             return attempt;
         }
         const auto* query_units =
             static_cast<const std::uint64_t*>(query_region->units);
         const auto* target_units =
             static_cast<const std::uint64_t*>(target_region->units);
-        const size_t query_total = query_len;
-        const size_t target_total = target_len;
+        const size_t query_logical_total =
+            static_cast<size_t>(query_seq.bp_size());
+        const size_t target_logical_total =
+            static_cast<size_t>(target_seq.bp_size());
+        const size_t query_leading = query_region->leading_symbol_offset;
+        const size_t target_leading = target_region->leading_symbol_offset;
+        if (query_logical_total
+                > (std::numeric_limits<size_t>::max)() - query_leading
+            || target_logical_total
+                > (std::numeric_limits<size_t>::max)() - target_leading) {
+            return attempt;
+        }
+        const size_t query_physical_total =
+            query_leading + query_logical_total;
 
         // Extraction handles arbitrary base offsets one word at a time.  The
         // staging arrays are completely initialized before each masked load;
@@ -2187,12 +2208,19 @@ ba_try_packed_global_gap_certificate(
                 const size_t symbol_offset = (first_word + lane) * 32u;
                 const size_t symbol_count = std::min(
                     size_t{32}, query_len - symbol_offset);
+                const size_t query_logical_start =
+                    query_start + symbol_offset;
                 query_words[lane] = ba_load_oriented_dna4_window<is_reversed>(
-                    query_units, query_total,
-                    symbol_offset, symbol_count);
+                    query_units,
+                    query_physical_total,
+                    is_reversed
+                        ? query_logical_start
+                        : query_leading + query_logical_start,
+                    symbol_count);
                 target_words[lane] = ba_load_oriented_dna4_window<false>(
-                    target_units, target_total,
-                    symbol_offset, symbol_count);
+                    target_units, target_leading + target_logical_total,
+                    target_leading + target_start + symbol_offset,
+                    symbol_count);
             }
             const auto active = hn::FirstN(d64, active_lanes);
             const auto query_packed = hn::MaskedLoad(

@@ -2635,6 +2635,35 @@ TEST_CASE("DOC0377 uint64 bigint and MaxAlloc alignment guards are exact",
         ctx, "SELECT bioseq_internal.expanded_ownership_self_test();") == "t");
 }
 
+TEST_CASE("DOC0377 slice and cast builders release pre-error intermediates",
+          "[seq][slice][cast][rope][lifetime][error-atomic][acceptance]") {
+    auto ctx = fresh_context();
+    exec_sql(ctx,
+        "CREATE FUNCTION pg_temp.doc0377_runtime_text(value text) "
+        "RETURNS text LANGUAGE plpgsql VOLATILE STRICT AS $$ "
+        "BEGIN RETURN value; END $$; "
+        "DO $doc0377$ "
+        "DECLARE iteration integer; "
+        "BEGIN "
+        "  FOR iteration IN 1..32 LOOP "
+        "    BEGIN "
+        "      PERFORM ("
+        "        pg_temp.doc0377_runtime_text(repeat('A',4097))::bioseq.seq "
+        "        OPERATOR(bioseq.||) "
+        "        pg_temp.doc0377_runtime_text('X')::bioseq.seq"
+        "      )::bioseq.seq('dna4',32); "
+        "      RAISE EXCEPTION 'expected invalid DNA4 literal'; "
+        "    EXCEPTION WHEN invalid_text_representation THEN "
+        "      NULL; "
+        "    END; "
+        "  END LOOP; "
+        "END $doc0377$;");
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT bioseq_internal.piece_tree_self_test();")
+        == "t");
+}
+
 TEST_CASE("DOC0377 literal coalescing and arena guards are exact",
           "[seq][concat][rope][lifetime][acceptance]") {
     auto ctx = fresh_context();

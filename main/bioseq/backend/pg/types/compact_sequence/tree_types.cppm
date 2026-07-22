@@ -262,6 +262,6 @@ export struct sequence_letter_value {
 };
 
 export struct split_result {
-    piece_edge left;
-    piece_edge right;
+    tracked_piece_edge left;
+    tracked_piece_edge right;
 };

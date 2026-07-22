@@ -630,10 +630,14 @@ export inline Datum seq_cast_impl(FunctionCallInfo fcinfo)
         auto acquired = acquire_writable_pg_sequence(input);
         replace_root_error_safe(
             *acquired.value, target, acquired.value->bp_length, true,
-            [&acquired, target](piece_tree_arena& arena) {
+            [&acquired, target](
+                piece_tree_arena& arena,
+                piece_edge_cleanup_ledger& ledger) {
                 return acquired.value->alphabet_bound
-                    ? retain_edge(acquired.value->root)
-                    : bind_literals_copy(arena, acquired.value->root, target);
+                    ? retain_piece_edge_error_atomic(
+                        ledger, acquired.value->root)
+                    : bind_literals_copy_error_atomic(
+                        arena, acquired.value->root, target, ledger);
             });
         PG_RETURN_DATUM(pg_sequence_rw_datum(acquired.value));
     }

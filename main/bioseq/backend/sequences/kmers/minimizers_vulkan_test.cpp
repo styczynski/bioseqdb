@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -24,6 +25,7 @@
 #include <string>
 #include <tuple>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -2224,7 +2226,167 @@ TEST_CASE("vulkan minimizer: fragmented facade admission preserves exact index w
 
 #ifdef BIOSEQ_TEST_INDEXES
 TEST_CASE(
-    "DOC0377 Vulkan delayed fence retains admitted source ownership on faults",
+    "DOC0377 Vulkan canonical u32 preparation borrows stable resident storage",
+    "[vulkan][phase-c][admission][ownership][resident][zero-copy]") {
+  constexpr std::size_t source_size = 1'000'003u;
+  std::vector<seq::dna4> letters(source_size);
+  for (std::size_t index = 0u; index < letters.size(); ++index) {
+    letters[index].assign_rank(
+        static_cast<std::uint8_t>((index * 11u + index / 19u) & 3u));
+  }
+  using config = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+  compact_sequence_range<config> range{letters};
+  auto lazy = bioseq::storage::make_lazy_in_memory(range);
+  const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+  const auto resident = view.try_resident_packed(
+      0u, view.bp_size(), sizeof(std::uint32_t));
+  REQUIRE(resident.has_value());
+  REQUIRE(resident->leading_symbol_offset == 0u);
+
+  auto &admission = bioseq::parallelism::MemoryAdmissionController::instance();
+  const std::uint64_t baseline = admission.reserved_bytes();
+  vk::arm_vulkan_admitted_window_test_seam();
+  struct ResetWindowSeam {
+    ~ResetWindowSeam() { vk::reset_vulkan_admitted_window_test_seam(); }
+  } reset;
+  vk::VulkanSketchDecline decline{};
+  auto window = vk::admitted_sequence_detail::prepare_canonical_u32_window(
+      view, 0u, view.bp_size(), &decline);
+  REQUIRE(window.has_value());
+  REQUIRE_FALSE(window->owner.has_value());
+  REQUIRE(window->borrow_kind
+      == bioseq::storage::sequence_resident_borrow_kind::
+          native_typed_storage);
+  REQUIRE(window->descriptor.units == resident->units);
+  REQUIRE(window->descriptor.unit_count == resident->unit_count);
+  REQUIRE(window->descriptor.bp_length == view.bp_size());
+  const auto snapshot = vk::vulkan_admitted_window_test_snapshot();
+  REQUIRE(snapshot.admitted_materializations == 0u);
+  REQUIRE(snapshot.live_admitted_windows == 0u);
+  REQUIRE(snapshot.live_admitted_permit_bytes == 0u);
+  REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE(
+    "DOC0377 Vulkan byte upload borrows u64 storage without claiming typed u32",
+    "[vulkan][phase-c][admission][ownership][resident][zero-copy]"
+    "[u64-u32][alias-safe][byte-upload]") {
+  constexpr std::size_t source_size = 65'551u;
+  std::vector<seq::dna4> letters(source_size);
+  for (std::size_t index = 0u; index < letters.size(); ++index) {
+    letters[index].assign_rank(
+        static_cast<std::uint8_t>((index * 29u + index / 7u) & 3u));
+  }
+
+  using source_config = sequence_custom_alphabet<seq::dna4, std::uint64_t>;
+  compact_sequence_range<source_config> source_range{letters};
+  auto lazy = bioseq::storage::make_lazy_in_memory(source_range);
+  const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+  const auto native = view.try_resident_packed(
+      0u, view.bp_size(), sizeof(std::uint64_t));
+  REQUIRE(native.has_value());
+
+  const auto typed_plan = bioseq::storage::plan_sequence_access(
+      view,
+      bioseq::storage::sequence_access_requirement::contiguous_resident,
+      0u,
+      view.bp_size(),
+      sizeof(std::uint32_t));
+  REQUIRE(typed_plan.route
+      == bioseq::storage::sequence_access_route::materialize_admitted);
+  REQUIRE_FALSE(typed_plan.resident.has_value());
+  REQUIRE(typed_plan.resident_borrow_kind
+      == bioseq::storage::sequence_resident_borrow_kind::none);
+
+  const auto upload_plan = bioseq::storage::plan_sequence_access(
+      view,
+      bioseq::storage::sequence_access_requirement::contiguous_resident,
+      0u,
+      view.bp_size(),
+      sizeof(std::uint32_t),
+      bioseq::storage::sequence_resident_borrow_policy::
+          byte_upload_compatible);
+  REQUIRE(upload_plan.route
+      == bioseq::storage::sequence_access_route::borrow_resident);
+  REQUIRE(upload_plan.resident.has_value());
+  REQUIRE(upload_plan.resident_borrow_kind
+      == bioseq::storage::sequence_resident_borrow_kind::
+          reinterpreted_bytes);
+  REQUIRE(upload_plan.resident->units == native->units);
+  REQUIRE(upload_plan.resident->unit_count
+      == (letters.size() + 15u) / 16u);
+
+  using control_config = sequence_custom_alphabet<seq::dna4, std::uint32_t>;
+  compact_sequence_range<control_config> control_range{letters};
+  auto control_lazy = bioseq::storage::make_lazy_in_memory(control_range);
+  const auto control_view = bioseq::storage::as_lazy_sequence_view(control_lazy);
+  const auto control = control_view.try_resident_packed(
+      0u, control_view.bp_size(), sizeof(std::uint32_t));
+  REQUIRE(control.has_value());
+  REQUIRE(control->unit_count == upload_plan.resident->unit_count);
+  REQUIRE(std::memcmp(
+      upload_plan.resident->units,
+      control->units,
+      control->unit_count * sizeof(std::uint32_t)) == 0);
+
+  auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
+  const std::uint64_t baseline = admission.reserved_bytes();
+  vk::arm_vulkan_admitted_window_test_seam();
+  struct ResetWindowSeam {
+    ~ResetWindowSeam() { vk::reset_vulkan_admitted_window_test_seam(); }
+  } reset;
+  vk::VulkanSketchDecline decline{};
+  auto window = vk::admitted_sequence_detail::prepare_canonical_u32_window(
+      view, 0u, view.bp_size(), &decline);
+  REQUIRE(window.has_value());
+  REQUIRE_FALSE(window->owner.has_value());
+  REQUIRE(window->borrow_kind
+      == bioseq::storage::sequence_resident_borrow_kind::
+          reinterpreted_bytes);
+  REQUIRE(window->descriptor.units == native->units);
+
+  bool visited_byte_segment = false;
+  vk::admitted_sequence_detail::with_canonical_u32_upload_source<seq::dna4>(
+      *window,
+      [&](auto& upload_source) {
+        using source_type = std::remove_cvref_t<decltype(upload_source)>;
+        if constexpr (requires {
+                        source_type::is_byte_addressed_upload_only;
+                      }) {
+          visited_byte_segment = true;
+          const vk::SegmentUploadDescriptor segment =
+              vk::compute_segment_descriptor(upload_source, 1u, 5u);
+          auto begin = upload_source.cbegin();
+          begin += segment.lo_unit;
+          const auto* base = upload_source.read_cptr(begin);
+          STATIC_REQUIRE(std::same_as<decltype(base), const std::byte*>);
+          const vk::SequenceUploadView upload =
+              vk::make_upload_view_from_window(
+                  upload_source, base, segment);
+          const auto* native_bytes =
+              static_cast<const std::byte*>(native->units);
+          const auto* control_bytes =
+              static_cast<const std::byte*>(control->units);
+          REQUIRE(upload.bytes == native_bytes + sizeof(std::uint32_t));
+          REQUIRE(upload.byte_size == 4u * sizeof(std::uint32_t));
+          REQUIRE(upload.unit_bits == 32u);
+          REQUIRE(upload.bp_size == 64u);
+          REQUIRE(std::memcmp(
+              upload.bytes,
+              control_bytes + sizeof(std::uint32_t),
+              static_cast<std::size_t>(upload.byte_size)) == 0);
+        }
+      });
+  REQUIRE(visited_byte_segment);
+  const auto snapshot = vk::vulkan_admitted_window_test_snapshot();
+  REQUIRE(snapshot.admitted_materializations == 0u);
+  REQUIRE(snapshot.live_admitted_windows == 0u);
+  REQUIRE(snapshot.live_admitted_permit_bytes == 0u);
+  REQUIRE(admission.reserved_bytes() == baseline);
+}
+
+TEST_CASE(
+    "DOC0377 Vulkan delayed fence retains admitted or stable borrowed source on faults",
     "[vulkan][phase-c][admission][ownership][fault][cancellation]") {
   if (!vulkan_ready()) {
     SUCCEED("no hardware Vulkan device; delayed-fence fixture skipped");
@@ -2302,6 +2464,7 @@ TEST_CASE(
 
     std::thread observer{
         [&admission, baseline, weak_source, &destructions, &observed,
+         expose_resident,
          &call_finished, source = std::move(source)]() mutable {
           const auto submit_deadline =
               std::chrono::steady_clock::now() + std::chrono::seconds{5};
@@ -2330,18 +2493,24 @@ TEST_CASE(
               admitted.live_admitted_buffer_address;
           const std::uint64_t reserved_before_wait =
               admission.reserved_bytes();
-          observed.permit_charged_before_wait =
-              admitted.live_admitted_permit_bytes > 0u &&
-              admitted.live_admitted_buffer_address != 0u &&
-              reserved_before_wait >= baseline &&
-              reserved_before_wait - baseline >=
-                  admitted.live_admitted_permit_bytes;
-          observed.one_admitted_window_live =
-              admitted.admitted_materializations == 1u &&
-              admitted.live_admitted_windows == 1u;
-          observed.backend_materialized =
-              admitted.backend_thread_materializations == 1u &&
-              admitted.off_backend_materializations == 0u;
+          observed.permit_charged_before_wait = expose_resident
+              ? admitted.live_admitted_permit_bytes == 0u &&
+                    admitted.live_admitted_buffer_address == 0u
+              : admitted.live_admitted_permit_bytes > 0u &&
+                    admitted.live_admitted_buffer_address != 0u &&
+                    reserved_before_wait >= baseline &&
+                    reserved_before_wait - baseline >=
+                        admitted.live_admitted_permit_bytes;
+          observed.one_admitted_window_live = expose_resident
+              ? admitted.admitted_materializations == 0u &&
+                    admitted.live_admitted_windows == 0u
+              : admitted.admitted_materializations == 1u &&
+                    admitted.live_admitted_windows == 1u;
+          observed.backend_materialized = expose_resident
+              ? admitted.backend_thread_materializations == 0u &&
+                    admitted.off_backend_materializations == 0u
+              : admitted.backend_thread_materializations == 1u &&
+                    admitted.off_backend_materializations == 0u;
 
           observed.source_reads =
               source->read_calls.load(std::memory_order_relaxed);
@@ -2371,20 +2540,26 @@ TEST_CASE(
           if (observed.reached_post_drain_gate) {
             const auto admitted_after_wait =
                 vk::vulkan_admitted_window_test_snapshot();
-            observed.same_admitted_owner_after_wait =
-                admitted_after_wait.live_admitted_windows == 1u &&
-                admitted_after_wait.live_admitted_permit_bytes ==
-                    observed.admitted_permit_bytes &&
-                admitted_after_wait.live_admitted_buffer_address ==
-                    observed.admitted_buffer_address &&
-                weak_source.expired() &&
-                destructions.load(std::memory_order_relaxed) == 1u;
+            observed.same_admitted_owner_after_wait = expose_resident
+                ? admitted_after_wait.live_admitted_windows == 0u &&
+                    admitted_after_wait.live_admitted_permit_bytes == 0u &&
+                    admitted_after_wait.live_admitted_buffer_address == 0u &&
+                    weak_source.expired() &&
+                    destructions.load(std::memory_order_relaxed) == 1u
+                : admitted_after_wait.live_admitted_windows == 1u &&
+                    admitted_after_wait.live_admitted_permit_bytes ==
+                        observed.admitted_permit_bytes &&
+                    admitted_after_wait.live_admitted_buffer_address ==
+                        observed.admitted_buffer_address &&
+                    weak_source.expired() &&
+                    destructions.load(std::memory_order_relaxed) == 1u;
             const std::uint64_t reserved_after_wait =
                 admission.reserved_bytes();
-            observed.permit_charged_after_wait =
-                reserved_after_wait >= baseline &&
-                reserved_after_wait - baseline >=
-                    observed.admitted_permit_bytes;
+            observed.permit_charged_after_wait = expose_resident
+                ? admitted_after_wait.live_admitted_permit_bytes == 0u
+                : reserved_after_wait >= baseline &&
+                    reserved_after_wait - baseline >=
+                        observed.admitted_permit_bytes;
           }
           vk::release_vulkan_submission_test_delivery();
         }};
@@ -2423,8 +2598,8 @@ TEST_CASE(
     REQUIRE(observed.reached_post_drain_gate);
     REQUIRE(observed.same_admitted_owner_after_wait);
     REQUIRE(observed.permit_charged_after_wait);
-    REQUIRE(observed.admitted_permit_bytes > 0u);
-    REQUIRE(observed.admitted_buffer_address != 0u);
+    REQUIRE((observed.admitted_permit_bytes > 0u) != expose_resident);
+    REQUIRE((observed.admitted_buffer_address != 0u) != expose_resident);
     REQUIRE(submission.upload_latches >= 1u);
     REQUIRE(submission.submissions == 1u);
     REQUIRE(submission.fence_drains == 1u);
@@ -2436,15 +2611,19 @@ TEST_CASE(
         submission.upload_failure_latched ==
         (fault == vk::VulkanSubmissionTestFault::upload_failure_after_submit));
     REQUIRE(failure.find(expected_error) != std::string::npos);
-    REQUIRE(admitted.admitted_materializations == 1u);
+    REQUIRE(admitted.admitted_materializations
+        == (expose_resident ? 0u : 1u));
     REQUIRE(admitted.live_admitted_windows == 0u);
     REQUIRE(admitted.live_admitted_permit_bytes == 0u);
     REQUIRE(admitted.live_admitted_buffer_address == 0u);
-    REQUIRE(admitted.backend_thread_materializations == 1u);
+    REQUIRE(admitted.backend_thread_materializations
+        == (expose_resident ? 0u : 1u));
     REQUIRE(admitted.off_backend_materializations == 0u);
-    REQUIRE(observed.resident_probes == 1u);
+    REQUIRE(observed.resident_probes == (expose_resident ? 1u : 2u));
     REQUIRE(observed.resident_borrows == (expose_resident ? 1u : 0u));
-    REQUIRE(observed.source_reads > 0u);
+    REQUIRE((expose_resident
+        ? observed.source_reads == 0u
+        : observed.source_reads > 0u));
     REQUIRE_FALSE(observed.wrong_thread);
     REQUIRE(weak_source.expired());
     REQUIRE(destructions.load(std::memory_order_relaxed) == 1u);

@@ -439,6 +439,28 @@ bioseq_guc_init()
 		NULL,
 		NULL);
 
+#ifdef BIOSEQ_TEST_INDEXES
+	static const struct config_enum_entry
+	forced_paper_index_failure_options[] = {
+		{ "none", 0, false },
+		{ "unsupported_vector_shape", 1, false },
+		{ NULL, 0, false }
+	};
+	DefineCustomEnumVariable(
+		"bioseq.test_force_paper_index_failure",
+		"Test-only: force one checked Paper index adapter rejection after the "
+		"grouped publisher has begun its writer/build state.",
+		NULL,
+		&bioseq_test_force_paper_index_failure,
+		0,
+		forced_paper_index_failure_options,
+		PGC_SUSET,
+		GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+		NULL,
+		NULL,
+		NULL);
+#endif
+
 	// DOC0383 P5 — one high-level, user-selected persistence provider.  The
 	// stable numeric values are carried through synchronous/async job receipts;
 	// the GUC spelling is only the configuration surface at job creation.

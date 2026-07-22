@@ -1064,6 +1064,30 @@ inline void collect_minimizers(
 		collector, seq, seq_begin, seq_end, w, k);
 }
 
+#ifdef BIOSEQ_TEST_INDEXES
+/// Algorithm-local receipt for the legacy reference-SIMD minimizer kernel.
+/// Dispatcher tests reset/snapshot this thread-local seam around one call; a
+/// scalar substitution cannot fabricate callback batches or active lane work.
+struct ReferenceSimdMinimizerTestReceipt {
+    std::uint64_t kernel_calls = 0u;
+    std::uint64_t vector_callback_batches = 0u;
+    std::uint64_t vector_lane_visits = 0u;
+    std::uint64_t last_storage_unit_bytes = 0u;
+};
+
+inline thread_local ReferenceSimdMinimizerTestReceipt
+    reference_simd_minimizer_test_receipt{};
+
+inline void reset_reference_simd_minimizer_test_receipt() noexcept {
+    reference_simd_minimizer_test_receipt = {};
+}
+
+[[nodiscard]] inline ReferenceSimdMinimizerTestReceipt
+reference_simd_minimizer_test_receipt_snapshot() noexcept {
+    return reference_simd_minimizer_test_receipt;
+}
+#endif
+
 template<
 	template<typename H_A> typename simd_hash_t,
 	class MinimizerT,
@@ -1092,6 +1116,12 @@ inline void collect_minimizers_simd(
 
     using seq_traits = compact_sequence_range<R>::traits;
     using storage_unit = typename seq_traits::storage_unit;
+
+#ifdef BIOSEQ_TEST_INDEXES
+    ++reference_simd_minimizer_test_receipt.kernel_calls;
+    reference_simd_minimizer_test_receipt.last_storage_unit_bytes =
+        sizeof(storage_unit);
+#endif
 
     using dd_t = hn::ScalableTag<storage_unit>;
 	const dd_t dd;
@@ -1226,6 +1256,11 @@ inline void collect_minimizers_simd(
 	// just finished.
 	hash_mask_t prev_new_min_mask = hn::MaskFalse(dd);
 	iterate_sequence_bp_simd_offsets(seq, seq_begin, seq_end, k+w-1, [&]<bool is_full>(std::bool_constant<is_full>, auto const& offsets, auto& d, auto& mask, auto&& incoming, auto outgoing_mask, auto outgoing){ //auto&& bp_del1
+#ifdef BIOSEQ_TEST_INDEXES
+        ++reference_simd_minimizer_test_receipt.vector_callback_batches;
+        reference_simd_minimizer_test_receipt.vector_lane_visits +=
+            static_cast<std::uint64_t>(hn::CountTrue(d, mask));
+#endif
         //bioseq_log<DBG>("got vec: {} {}", hwy_str_as<typename seq_traits::alphabet_type>(d, incoming), hwy_str_as<typename seq_traits::alphabet_type>(d, outgoing));
 		hash_vec_t hash_vec = hasher.next(d, incoming, outgoing);
         //bioseq_log<DBG>("  . hash        (<==) = {}", hwy_str(d, hash_vec));

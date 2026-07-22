@@ -63,6 +63,7 @@ enum class piece_tree_injected_failure_point : std::uint8_t {
     join_recursive_intermediate,
     join_retired_root_record,
     join_retired_root_overflow_allocation,
+    split_first_leaf_intermediate,
 };
 
 inline void arm_piece_tree_failure_noexcept(
@@ -905,6 +906,41 @@ export [[nodiscard]] inline piece_edge make_literal_node(
     });
 }
 
+/* Reserve cleanup capacity before entering a leaf factory.  Once a factory
+ * returns its owning arena edge, adopting it into the operation ledger is
+ * noexcept, so PostgreSQL ERROR can never observe an unowned returned edge. */
+export [[nodiscard]] inline tracked_piece_edge
+make_source_node_error_atomic(
+    piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
+    source_piece piece,
+    bioseq::storage::sequence_transform transform =
+        bioseq::storage::sequence_transform::identity)
+{
+    ensure_piece_edge_cleanup_capacity(ledger, 1u);
+    const piece_edge built = make_source_node(destination, piece, transform);
+    return {
+        .edge = built,
+        .cleanup = adopt_piece_edge_cleanup_token_noexcept(ledger, built),
+    };
+}
+
+export [[nodiscard]] inline tracked_piece_edge
+make_literal_node_error_atomic(
+    piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
+    literal_piece piece,
+    bioseq::storage::sequence_transform transform =
+        bioseq::storage::sequence_transform::identity)
+{
+    ensure_piece_edge_cleanup_capacity(ledger, 1u);
+    const piece_edge built = make_literal_node(destination, piece, transform);
+    return {
+        .edge = built,
+        .cleanup = adopt_piece_edge_cleanup_token_noexcept(ledger, built),
+    };
+}
+
 export struct logical_children_result {
     piece_edge first;
     piece_edge second;
@@ -1500,8 +1536,27 @@ export [[nodiscard]] inline tracked_piece_edge retain_piece_edge_error_atomic(
     return retain_tracked_edge(&ledger, borrowed);
 }
 
+export [[nodiscard]] inline tracked_piece_edge
+transform_piece_edge_error_atomic(
+    piece_edge_cleanup_ledger& ledger,
+    piece_edge borrowed,
+    bioseq::storage::sequence_transform transform)
+{
+    tracked_piece_edge tracked = retain_tracked_edge(&ledger, borrowed);
+    if (!tracked) {
+        return {};
+    }
+    const tracked_piece_edge before_transform = tracked;
+    tracked.edge.transform = bioseq::storage::compose(
+        transform, tracked.edge.transform);
+    transition_piece_edge_cleanup_identity_noexcept(
+        &ledger, before_transform, tracked);
+    return tracked;
+}
+
 export [[nodiscard]] inline split_result split_leaf(
     piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
     piece_edge edge,
     std::uint64_t offset)
 {
@@ -1523,10 +1578,13 @@ export [[nodiscard]] inline split_result split_leaf(
             prefix.from = original.to - offset;
             suffix.to = prefix.from;
         }
-        return {
-            make_source_node(destination, prefix, edge.transform),
-            make_source_node(destination, suffix, edge.transform),
-        };
+        tracked_piece_edge left = make_source_node_error_atomic(
+            destination, ledger, prefix, edge.transform);
+        inject_piece_tree_failure(
+            piece_tree_injected_failure_point::split_first_leaf_intermediate);
+        tracked_piece_edge right = make_source_node_error_atomic(
+            destination, ledger, suffix, edge.transform);
+        return {left, right};
     }
     const literal_piece& original = edge.node->payload.literal;
     literal_piece prefix = original;
@@ -1538,14 +1596,18 @@ export [[nodiscard]] inline split_result split_leaf(
         prefix.symbol_from = original.symbol_to - offset;
         suffix.symbol_to = prefix.symbol_from;
     }
-    return {
-        make_literal_node(destination, prefix, edge.transform),
-        make_literal_node(destination, suffix, edge.transform),
-    };
+    tracked_piece_edge left = make_literal_node_error_atomic(
+        destination, ledger, prefix, edge.transform);
+    inject_piece_tree_failure(
+        piece_tree_injected_failure_point::split_first_leaf_intermediate);
+    tracked_piece_edge right = make_literal_node_error_atomic(
+        destination, ledger, suffix, edge.transform);
+    return {left, right};
 }
 
 export [[nodiscard]] inline split_result split_tree(
     piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
     piece_edge tree,
     std::uint64_t offset)
 {
@@ -1553,33 +1615,41 @@ export [[nodiscard]] inline split_result split_tree(
         return {};
     }
     if (offset == 0u) {
-        return {{}, retain_edge(tree)};
+        return {{}, retain_piece_edge_error_atomic(ledger, tree)};
     }
     if (offset >= tree.node->bp_length) {
-        return {retain_edge(tree), {}};
+        return {retain_piece_edge_error_atomic(ledger, tree), {}};
     }
     if (tree.node->node_kind != piece_node::kind::branch) {
-        return split_leaf(destination, tree, offset);
+        return split_leaf(destination, ledger, tree, offset);
     }
     const auto children = logical_children(tree);
     const auto first_length = children.first.node->bp_length;
     if (offset < first_length) {
-        split_result parts = split_tree(destination, children.first, offset);
+        split_result parts = split_tree(
+            destination, ledger, children.first, offset);
+        tracked_piece_edge second = retain_piece_edge_error_atomic(
+            ledger, children.second);
         return {
             parts.left,
-            join_edges(destination, parts.right, retain_edge(children.second)),
+            join_tracked_edges_error_atomic(
+                destination, ledger, parts.right, second),
         };
     }
     split_result parts = split_tree(
-        destination, children.second, offset - first_length);
+        destination, ledger, children.second, offset - first_length);
+    tracked_piece_edge first = retain_piece_edge_error_atomic(
+        ledger, children.first);
     return {
-        join_edges(destination, retain_edge(children.first), parts.left),
+        join_tracked_edges_error_atomic(
+            destination, ledger, first, parts.left),
         parts.right,
     };
 }
 
-export [[nodiscard]] inline piece_edge slice_tree(
+export [[nodiscard]] inline tracked_piece_edge slice_tree(
     piece_tree_arena& destination,
+    piece_edge_cleanup_ledger& ledger,
     piece_edge tree,
     std::uint64_t from,
     std::uint64_t to)
@@ -1592,11 +1662,12 @@ export [[nodiscard]] inline piece_edge slice_tree(
                 (errcode(ERRCODE_ARRAY_SUBSCRIPT_ERROR),
                  errmsg("bioseq slice is outside its logical sequence")));
     }
-    split_result at_end = split_tree(destination, tree, to);
-    release_edge(at_end.right);
-    split_result at_start = split_tree(destination, at_end.left, from);
-    release_edge(at_end.left);
-    release_edge(at_start.left);
+    split_result at_end = split_tree(destination, ledger, tree, to);
+    release_tracked_edge(&ledger, at_end.right);
+    split_result at_start = split_tree(
+        destination, ledger, at_end.left.edge, from);
+    release_tracked_edge(&ledger, at_end.left);
+    release_tracked_edge(&ledger, at_start.left);
     return at_start.right;
 }
 
@@ -3434,6 +3505,211 @@ inline void tracked_join_failure_reset(void *argument) noexcept {
   return true;
 }
 
+[[nodiscard]] inline bool run_tracked_slice_failure_iteration(
+    piece_edge source_root,
+    piece_tree_arena& source_arena,
+    factory_failure_source_state& source_state)
+{
+  const std::uint64_t live_baseline = live_piece_tree_arenas;
+  const std::uint32_t arena_refcount_baseline = source_arena.refcount;
+  const std::uint32_t source_retain_baseline = source_state.retain_calls;
+  const std::uint32_t source_release_baseline = source_state.release_calls;
+  auto* observation = static_cast<tracked_join_failure_observation*>(
+      palloc0(sizeof(tracked_join_failure_observation)));
+  MemoryContext build_context = AllocSetContextCreate(
+      CurrentMemoryContext, "bioseq tracked slice failure",
+      ALLOCSET_SMALL_SIZES);
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile caught = false;
+  bool volatile sqlstate_matched = false;
+  observe_piece_tree_failure_noexcept(
+      piece_tree_injected_failure_point::none);
+  arm_piece_tree_failure_noexcept(
+      piece_tree_injected_failure_point::split_first_leaf_intermediate);
+
+  PG_TRY();
+  {
+    auto* guard = static_cast<tracked_join_failure_guard*>(
+        MemoryContextAllocZero(
+            build_context, sizeof(tracked_join_failure_guard)));
+    guard->callback.func = tracked_join_failure_reset;
+    guard->callback.arg = guard;
+    guard->observation = observation;
+    guard->armed = true;
+    MemoryContextRegisterResetCallback(
+        build_context, std::addressof(guard->callback));
+    guard->destination_arena = make_piece_tree_arena();
+    (void)slice_tree(
+        *guard->destination_arena, guard->ledger,
+        source_root, 1u, 3u);
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    MemoryContextDelete(build_context);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    arm_piece_tree_failure_noexcept(
+        piece_tree_injected_failure_point::none);
+    sqlstate_matched = consume_expected_error(
+        ERRCODE_INTERNAL_ERROR, saved_context);
+    MemoryContextDelete(build_context);
+    caught = true;
+  }
+  PG_END_TRY();
+
+  const bool restored = source_arena.refcount == arena_refcount_baseline
+      && live_piece_tree_arenas == live_baseline
+      && source_state.retain_calls > source_retain_baseline
+      && source_state.release_calls > source_release_baseline
+      && source_state.retain_calls - source_retain_baseline
+          == source_state.release_calls - source_release_baseline;
+  const bool passed = caught && sqlstate_matched
+      && observed_piece_tree_failure_noexcept()
+          == piece_tree_injected_failure_point::split_first_leaf_intermediate
+      && observation->callbacks == 1u
+      && observation->armed_callbacks == 1u
+      && observation->tokens_released == 1u
+      && observation->destination_tokens_released == 1u
+      && observation->ledger_drained && restored;
+  pfree(observation);
+  return passed;
+}
+
+[[nodiscard]] inline bool run_tracked_slice_failure_matrix()
+{
+  constexpr std::uint32_t repetitions = 64u;
+  const std::uint64_t live_baseline = live_piece_tree_arenas;
+  factory_failure_source_state source_state{};
+  const pg_sequence_source_handle source{
+      .state = std::addressof(source_state),
+      .ops = std::addressof(factory_failure_source_ops),
+  };
+  const compact_sequence_stdc_type_params bound_type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 8u,
+  };
+  auto* source_arena = make_piece_tree_arena();
+  const piece_edge source_root = make_source_node(
+      *source_arena,
+      source_piece{
+          .source = source,
+          .locator = {
+              .num_fragments = 1u,
+              .total_bp_size = 4u,
+              .source_epoch = 1u,
+          },
+          .stored_type_params = bound_type,
+          .last_padding_letters = 0u,
+          .from = 0u,
+          .to = 4u,
+      });
+  bool passed = true;
+  for (std::uint32_t iteration = 0u;
+       iteration < repetitions && passed; ++iteration) {
+    passed = run_tracked_slice_failure_iteration(
+        source_root, *source_arena, source_state);
+  }
+  release_edge(source_root);
+  release_arena(source_arena);
+  return passed
+      && source_state.retain_calls == source_state.release_calls
+      && live_piece_tree_arenas == live_baseline;
+}
+
+[[nodiscard]] inline bool run_invalid_later_literal_binding_iteration(
+    piece_edge source_root,
+    piece_tree_arena& source_arena,
+    compact_sequence_stdc_type_params bound_type)
+{
+  const std::uint64_t live_baseline = live_piece_tree_arenas;
+  const std::uint32_t arena_refcount_baseline = source_arena.refcount;
+  auto* observation = static_cast<tracked_join_failure_observation*>(
+      palloc0(sizeof(tracked_join_failure_observation)));
+  MemoryContext build_context = AllocSetContextCreate(
+      CurrentMemoryContext, "bioseq invalid later literal binding",
+      ALLOCSET_SMALL_SIZES);
+  const MemoryContext saved_context = CurrentMemoryContext;
+  bool volatile caught = false;
+  bool volatile sqlstate_matched = false;
+
+  PG_TRY();
+  {
+    auto* guard = static_cast<tracked_join_failure_guard*>(
+        MemoryContextAllocZero(
+            build_context, sizeof(tracked_join_failure_guard)));
+    guard->callback.func = tracked_join_failure_reset;
+    guard->callback.arg = guard;
+    guard->observation = observation;
+    guard->armed = true;
+    MemoryContextRegisterResetCallback(
+        build_context, std::addressof(guard->callback));
+    guard->destination_arena = make_piece_tree_arena();
+    (void)bind_literals_copy_error_atomic(
+        *guard->destination_arena, source_root,
+        bound_type, guard->ledger);
+    MemoryContextDelete(build_context);
+  }
+  PG_CATCH();
+  {
+    MemoryContextSwitchTo(saved_context);
+    sqlstate_matched = consume_expected_error(
+        ERRCODE_INVALID_TEXT_REPRESENTATION, saved_context);
+    MemoryContextDelete(build_context);
+    caught = true;
+  }
+  PG_END_TRY();
+
+  const bool passed = caught && sqlstate_matched
+      && observation->callbacks == 1u
+      && observation->armed_callbacks == 1u
+      && observation->tokens_released == 1u
+      && observation->destination_tokens_released == 1u
+      && observation->ledger_drained
+      && source_arena.refcount == arena_refcount_baseline
+      && live_piece_tree_arenas == live_baseline;
+  pfree(observation);
+  return passed;
+}
+
+[[nodiscard]] inline bool run_invalid_later_literal_binding_matrix()
+{
+  constexpr std::uint32_t repetitions = 64u;
+  const std::uint64_t live_baseline = live_piece_tree_arenas;
+  const compact_sequence_stdc_type_params bound_type{
+      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .storage_unit_byte_width = 8u,
+  };
+  auto* source_arena = make_piece_tree_arena();
+  auto* storage = allocate_piece_literal_storage(*source_arena, 3u);
+  storage[0] = std::byte{0x41};
+  storage[1] = std::byte{0x43};
+  storage[2] = std::byte{0x58};
+  piece_edge valid = make_literal_node(
+      *source_arena,
+      factory_failure_unbound_literal(source_arena, storage, 0u, 2u));
+  piece_edge invalid = make_literal_node(
+      *source_arena,
+      factory_failure_unbound_literal(source_arena, storage, 2u, 3u));
+  const piece_edge source_root = make_branch_node(
+      *source_arena, valid, invalid);
+  bool passed = true;
+  for (std::uint32_t iteration = 0u;
+       iteration < repetitions && passed; ++iteration) {
+    passed = run_invalid_later_literal_binding_iteration(
+        source_root, *source_arena, bound_type);
+  }
+  release_edge(source_root);
+  release_arena(source_arena);
+  return passed && live_piece_tree_arenas == live_baseline;
+}
+
+[[nodiscard]] inline bool run_piece_tree_error_atomic_matrix()
+{
+  return run_tracked_slice_failure_matrix()
+      && run_invalid_later_literal_binding_matrix();
+}
+
 struct binding_retirement_fixture {
   piece_tree_arena *arena;
   piece_edge root;
@@ -4381,10 +4657,13 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   bool volatile million_piece_balanced = false;
   bool volatile deep_release_iterative = false;
   const std::uint64_t arena_baseline = live_piece_tree_arenas;
+  const bool clean_entry = arena_baseline == 0u;
   const bool factory_failure_matrix =
       run_piece_tree_factory_failure_matrix();
   const bool tracked_join_failure_matrix =
       run_tracked_join_failure_matrix();
+  const bool error_atomic_matrix =
+      run_piece_tree_error_atomic_matrix();
   const bool binding_retirement_overflow =
       run_binding_retirement_overflow_regression();
   const bool tree_length_guardrail_matrix =
@@ -4565,8 +4844,9 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   PG_END_TRY();
 
   const bool all_checks_passed =
-      saturation_caught && budget_caught && generation_caught &&
+      clean_entry && saturation_caught && budget_caught && generation_caught &&
       factory_failure_matrix && tracked_join_failure_matrix &&
+      error_atomic_matrix &&
       binding_retirement_overflow &&
       tree_length_guardrail_matrix &&
       arena_alignment_guardrail_matrix &&
@@ -4578,12 +4858,14 @@ export inline Datum piece_tree_self_test_impl(FunctionCallInfo) {
   if (!all_checks_passed) {
     ereport(WARNING,
             (errmsg_internal(
-                "bioseq piece-tree self-test flags: saturation=%d budget=%d generation=%d factory=%d tracked_join=%d binding_retirement=%d length=%d alignment=%d corrupt=%d trusted=%d transformed_join=%d million=%d deep=%d arena_balance=%d",
+                "bioseq piece-tree self-test flags: clean_entry=%d saturation=%d budget=%d generation=%d factory=%d tracked_join=%d error_atomic=%d binding_retirement=%d length=%d alignment=%d corrupt=%d trusted=%d transformed_join=%d million=%d deep=%d arena_balance=%d",
+                clean_entry ? 1 : 0,
                 saturation_caught ? 1 : 0,
                 budget_caught ? 1 : 0,
                 generation_caught ? 1 : 0,
                 factory_failure_matrix ? 1 : 0,
                 tracked_join_failure_matrix ? 1 : 0,
+                error_atomic_matrix ? 1 : 0,
                 binding_retirement_overflow ? 1 : 0,
                 tree_length_guardrail_matrix ? 1 : 0,
                 arena_alignment_guardrail_matrix ? 1 : 0,

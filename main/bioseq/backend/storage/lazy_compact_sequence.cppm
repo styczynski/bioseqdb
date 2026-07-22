@@ -45,6 +45,7 @@ module;
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <climits>
 #include <compare>
 #include <concepts>
@@ -2150,6 +2151,25 @@ enum class sequence_access_route : std::uint8_t {
     materialize_admitted,
 };
 
+/// Controls what a contiguous-resident consumer is permitted to borrow.
+/// CPU algorithms that form or dereference `storage_unit*` must keep the
+/// default.  The byte-upload policy is intentionally narrow: it permits a
+/// layout-compatible cross-width descriptor only for consumers that copy the
+/// object representation as bytes and never form typed loads from it.
+enum class sequence_resident_borrow_policy : std::uint8_t {
+    native_typed_storage_only,
+    byte_upload_compatible,
+};
+
+/// Truthful receipt for the storage behind a borrowed descriptor.  In
+/// particular, `reinterpreted_bytes` is not typed storage of requested_width
+/// and must never be passed to a CPU `compact_sequence_range` consumer.
+enum class sequence_resident_borrow_kind : std::uint8_t {
+    none,
+    native_typed_storage,
+    reinterpreted_bytes,
+};
+
 template <sequence_alphabet Alphabet>
 struct sequence_access_plan {
     using descriptor_type = typename basic_lazy_sequence_view<Alphabet>::
@@ -2159,11 +2179,138 @@ struct sequence_access_plan {
         sequence_access_requirement::sequential_symbols};
     sequence_access_route route{sequence_access_route::stream_symbols};
     std::optional<descriptor_type> resident{};
+    sequence_resident_borrow_kind resident_borrow_kind{
+        sequence_resident_borrow_kind::none};
     std::uint64_t admission_bytes{};
     sequence_size_t from{};
     sequence_size_t to{};
     std::uint8_t requested_width{};
 };
+
+/// Borrow a narrower packed *byte representation* over already resident
+/// storage.  The only cross-width shape required by current upload paths is
+/// canonical u64 -> u32 DNA packing.  On little-endian hosts the low u32 word
+/// of each u64 contains the earlier LSB-first symbols, so splitting each
+/// resident word is byte-for-byte identical to the established packed wire
+/// layout.
+///
+/// The returned descriptor does not change the effective type of the source
+/// allocation.  Its `units` member may be copied/read only through
+/// character/byte access (for example a Vulkan buffer upload); dereferencing
+/// it as `uint32_t*` would violate the C++ effective-type/aliasing rules.
+template <sequence_alphabet Alphabet>
+[[nodiscard]] std::optional<
+    typename basic_lazy_sequence_view<Alphabet>::resident_packed_region>
+try_borrow_reinterpreted_packed_bytes(
+        basic_lazy_sequence_view<Alphabet> view,
+        sequence_size_t from,
+        sequence_size_t to,
+        std::uint8_t requested_width) noexcept {
+    using view_type = basic_lazy_sequence_view<Alphabet>;
+    using descriptor_type = typename view_type::resident_packed_region;
+    if constexpr (std::endian::native != std::endian::little) {
+        return std::nullopt;
+    } else {
+        constexpr std::uint8_t source_width = sizeof(std::uint64_t);
+        constexpr std::uint8_t target_width = sizeof(std::uint32_t);
+        constexpr std::uint8_t bits = static_cast<std::uint8_t>(
+            lazy_rank_stream_traits<Alphabet>::logical_bits_per_symbol);
+        if (requested_width != target_width || from > to
+            || to > view.bp_size()) {
+            return std::nullopt;
+        }
+        if (bits == 0u
+            || (source_width * CHAR_BIT) % bits != 0u
+            || (target_width * CHAR_BIT) % bits != 0u) {
+            return std::nullopt;
+        }
+        const sequence_size_t target_letters_per_unit =
+            lazy_packed_letters_per_unit(target_width, bits);
+        if (target_letters_per_unit == 0u) {
+            return std::nullopt;
+        }
+        auto source = view.try_resident_packed(from, to, source_width);
+        if (!source.has_value()
+            || source->bit_order
+                != view_type::packed_bit_order::
+                    least_significant_symbol_first
+            || source->bits_per_symbol != bits
+            || source->leading_symbol_offset % target_letters_per_unit != 0u) {
+            return std::nullopt;
+        }
+        const sequence_size_t length = to - from;
+        if (length == 0u) {
+            return descriptor_type{
+                .units = nullptr,
+                .unit_count = 0u,
+                .bp_length = 0u,
+                .storage_unit_byte_width = target_width,
+                .bits_per_symbol = bits,
+                .leading_symbol_offset = 0u,
+                .trailing_padding_letters = 0u,
+                .bit_order = view_type::packed_bit_order::
+                    least_significant_symbol_first,
+            };
+        }
+        const sequence_size_t target_units_u64 =
+            length / target_letters_per_unit
+            + static_cast<sequence_size_t>(
+                length % target_letters_per_unit != 0u);
+        if (target_units_u64
+                > static_cast<sequence_size_t>(
+                    (std::numeric_limits<std::size_t>::max)())
+            || target_units_u64
+                > (std::numeric_limits<sequence_size_t>::max)()
+                    / target_letters_per_unit) {
+            return std::nullopt;
+        }
+        const std::size_t halfword_offset = static_cast<std::size_t>(
+            source->leading_symbol_offset / target_letters_per_unit);
+        const std::size_t target_units =
+            static_cast<std::size_t>(target_units_u64);
+        if (source->unit_count
+                > (std::numeric_limits<std::size_t>::max)() / source_width
+            || halfword_offset
+                > (std::numeric_limits<std::size_t>::max)() / target_width
+            || target_units
+                > (std::numeric_limits<std::size_t>::max)() / target_width) {
+            return std::nullopt;
+        }
+        const std::size_t source_bytes = source->unit_count * source_width;
+        const std::size_t byte_offset = halfword_offset * target_width;
+        const std::size_t target_bytes = target_units * target_width;
+        if (byte_offset > source_bytes
+            || target_bytes > source_bytes - byte_offset) {
+            return std::nullopt;
+        }
+        const sequence_size_t trailing_u64 =
+            target_units_u64 * target_letters_per_unit - length;
+        if (trailing_u64
+                > static_cast<sequence_size_t>(
+                    (std::numeric_limits<std::uint16_t>::max)())) {
+            return std::nullopt;
+        }
+        const auto* source_bytes_ptr = static_cast<const std::uint8_t*>(
+            source->units);
+        const void* target_units_ptr = source_bytes_ptr + byte_offset;
+        if (reinterpret_cast<std::uintptr_t>(target_units_ptr)
+                % target_width != 0u) {
+            return std::nullopt;
+        }
+        return descriptor_type{
+            .units = target_units_ptr,
+            .unit_count = target_units,
+            .bp_length = length,
+            .storage_unit_byte_width = target_width,
+            .bits_per_symbol = bits,
+            .leading_symbol_offset = 0u,
+            .trailing_padding_letters =
+                static_cast<std::uint16_t>(trailing_u64),
+            .bit_order = view_type::packed_bit_order::
+                least_significant_symbol_first,
+        };
+    }
+}
 
 template <sequence_alphabet Alphabet>
 [[nodiscard]] sequence_access_plan<Alphabet> plan_sequence_access(
@@ -2171,7 +2318,9 @@ template <sequence_alphabet Alphabet>
         sequence_access_requirement requirement,
         sequence_size_t from,
         sequence_size_t to,
-        std::uint8_t requested_width = 0u) {
+        std::uint8_t requested_width = 0u,
+        sequence_resident_borrow_policy borrow_policy =
+            sequence_resident_borrow_policy::native_typed_storage_only) {
     if (from > to || to > view.bp_size()) {
         throw std::invalid_argument("invalid sequence access range");
     }
@@ -2179,6 +2328,7 @@ template <sequence_alphabet Alphabet>
         .requirement = requirement,
         .route = sequence_access_route::stream_symbols,
         .resident = std::nullopt,
+        .resident_borrow_kind = sequence_resident_borrow_kind::none,
         .admission_bytes = 0u,
         .from = from,
         .to = to,
@@ -2195,12 +2345,25 @@ template <sequence_alphabet Alphabet>
     if (requirement == sequence_access_requirement::contiguous_resident) {
         plan.resident = view.try_resident_packed(
             from, to, requested_width);
+        if (plan.resident.has_value()) {
+            plan.resident_borrow_kind =
+                sequence_resident_borrow_kind::native_typed_storage;
+        } else if (borrow_policy
+                == sequence_resident_borrow_policy::byte_upload_compatible) {
+            plan.resident = try_borrow_reinterpreted_packed_bytes(
+                view, from, to, requested_width);
+            if (plan.resident.has_value()) {
+                plan.resident_borrow_kind =
+                    sequence_resident_borrow_kind::reinterpreted_bytes;
+            }
+        }
         if (plan.resident.has_value()
             && plan.resident->leading_symbol_offset == 0u) {
             plan.route = sequence_access_route::borrow_resident;
             return plan;
         }
         plan.resident.reset();
+        plan.resident_borrow_kind = sequence_resident_borrow_kind::none;
     }
     plan.route = sequence_access_route::materialize_admitted;
     plan.admission_bytes = packed_region_admission_bytes<Alphabet>(

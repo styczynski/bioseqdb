@@ -4589,6 +4589,33 @@ struct algorithm_traits<::bioseq::simd::HWY_NAMESPACE::ChainingAlgorithmType::VU
 // ---------------------------------------------------------------------------
 enum class MinKernelKind { Scalar, Simd, ExactSimd };
 
+/// Invoke reference-SIMD over the facade's native resident storage width.
+/// This retains the production-supported u64/u32 lane selection and avoids a
+/// whole-query repack solely because the facade erased its source type.
+template <sequence_alphabet Alphabet, class Fn>
+[[gnu::always_inline]] inline bool with_native_resident_packed_range(
+    bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+    Fn&& fn)
+{
+    const auto try_width = [&sequence, &fn]<class StorageUnit>() -> bool {
+        auto descriptor = sequence.try_resident_packed(
+            0u, sequence.bp_size(), sizeof(StorageUnit));
+        if (!descriptor.has_value()
+            || descriptor->leading_symbol_offset != 0u) {
+            return false;
+        }
+        ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
+            with_borrowed_compact_range<Alphabet, StorageUnit>(
+                *descriptor,
+                [&fn]<class Range>(Range& range) {
+                    fn(range);
+                });
+        return true;
+    };
+    return try_width.template operator()<std::uint64_t>()
+        || try_width.template operator()<std::uint32_t>();
+}
+
 template <MinKernelKind Kind, class MinimizerT,
           sequence_alphabet Alphabet, class Collector>
 [[gnu::always_inline]] inline TwoStackExecutionProof minimizer_dispatch(
@@ -4604,33 +4631,103 @@ template <MinKernelKind Kind, class MinimizerT,
                 TwoStackContinuationStatus::arithmetic_overflow,
                 "query minimizer sketch"};
         }
-        const auto size = static_cast<std::size_t>(seq.bp_size());
-        auto run_exact = [&c, w, k, size](auto resident_view) {
-            return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                0, 0, MinimizerT>(
-                    c, resident_view, 0u, size, w, k, 0u,
-                    "query minimizer sketch");
-        };
         const auto access = bioseq::storage::plan_sequence_access(
             seq,
             bioseq::storage::sequence_access_requirement::contiguous_resident,
             0u,
             seq.bp_size(),
             4u);
-        if (access.route
-            == bioseq::storage::sequence_access_route::borrow_resident) {
-            return run_exact(seq);
+        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
+        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region descriptor{};
+        const bool borrowed_resident = access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value();
+        if (borrowed_resident) {
+            descriptor = *access.resident;
+        } else {
+            auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(access.admission_bytes);
+            if (!permit) {
+                throw ExactSimdRuntimeError{
+                    TwoStackContinuationStatus::non_contiguous_range,
+                    "query minimizer sketch admission"};
+            }
+            owner.emplace(bioseq::storage::materialize_packed_region(
+                seq, 0u, seq.bp_size(), 4u, std::move(*permit)));
+            descriptor = owner->descriptor();
         }
-        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-            .try_reserve(access.admission_bytes);
-        if (!permit) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::non_contiguous_range,
-                "query minimizer sketch admission"};
+        if constexpr (std::same_as<Alphabet, ::seq::dna4>
+                      && exact_simd_minimizer_representation<MinimizerT>) {
+            if (borrowed_resident && w == 10u && k == 15u) [[likely]] {
+                return collect_minimizers_two_stack_nthash_resident_descriptor_or_throw<
+                    MinimizerT, Alphabet>(c, descriptor, w, k);
+            }
         }
-        auto owner = bioseq::storage::materialize_packed_region(
-            seq, 0u, seq.bp_size(), 4u, std::move(*permit));
-        return run_exact(owner.view());
+        return ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
+            with_borrowed_compact_range<Alphabet, std::uint32_t>(
+                descriptor,
+                [&c, w, k]<class Range>(Range& range) {
+                    return collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw<
+                        0u, 0u, MinimizerT>(
+                            c, range, 0u, range.size(), w, k, 0u,
+                            "query minimizer sketch");
+                });
+    } else if constexpr (Kind == MinKernelKind::Simd) {
+        if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                          traits::logical_bits_per_symbol != 2u) {
+            // Preserve the historical reference-SIMD contract for non-DNA4
+            // alphabets: its explicitly documented route is scalar.
+            collect_minimizers_segment_scalar<MinimizerT>(
+                c, seq, 0u, seq.bp_size(), w, k);
+        } else {
+            const bool used_native = with_native_resident_packed_range(
+                seq,
+                [&c, w, k]<class Range>(Range& range) {
+                    collect_minimizers_simd<
+                        minimap_int_hasher, MinimizerT>(
+                            c, range, range.begin(), range.end(), w, k);
+                });
+            if (used_native) {
+                return {};
+            }
+            const auto access = bioseq::storage::plan_sequence_access(
+                seq,
+                bioseq::storage::sequence_access_requirement::
+                    contiguous_resident,
+                0u,
+                seq.bp_size(),
+                sizeof(std::uint32_t));
+            std::optional<
+                bioseq::storage::admitted_packed_region<Alphabet>> owner;
+            typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                resident_packed_region descriptor{};
+            if (access.route
+                    == bioseq::storage::sequence_access_route::borrow_resident
+                && access.resident.has_value()) {
+                descriptor = *access.resident;
+            } else {
+                auto permit = bioseq::parallelism::
+                    MemoryAdmissionController::instance().try_reserve(
+                        access.admission_bytes);
+                if (!permit) {
+                    throw std::bad_alloc{};
+                }
+                owner.emplace(bioseq::storage::materialize_packed_region(
+                    seq, 0u, seq.bp_size(), sizeof(std::uint32_t),
+                    std::move(*permit)));
+                descriptor = owner->descriptor();
+            }
+            ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
+                with_borrowed_compact_range<Alphabet, std::uint32_t>(
+                    descriptor,
+                    [&c, w, k]<class Range>(Range& range) {
+                        collect_minimizers_simd<
+                            minimap_int_hasher, MinimizerT>(
+                                c, range, range.begin(), range.end(), w, k);
+                    });
+        }
     } else {
         collect_minimizers_segment_scalar<MinimizerT>(
             c, seq, 0u, seq.bp_size(), w, k);
@@ -4654,33 +4751,108 @@ minimizer_dispatch_constexpr(
                 TwoStackContinuationStatus::arithmetic_overflow,
                 "constexpr query minimizer sketch"};
         }
-        const auto size = static_cast<std::size_t>(seq.bp_size());
-        auto run_exact = [&c, w, k, size](auto resident_view) {
-            return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                W, K, MinimizerT>(
-                    c, resident_view, 0u, size, w, k, 0u,
-                    "constexpr query minimizer sketch");
-        };
         const auto access = bioseq::storage::plan_sequence_access(
             seq,
             bioseq::storage::sequence_access_requirement::contiguous_resident,
             0u,
             seq.bp_size(),
             4u);
-        if (access.route
-            == bioseq::storage::sequence_access_route::borrow_resident) {
-            return run_exact(seq);
+        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
+        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region descriptor{};
+        const bool borrowed_resident = access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value();
+        if (borrowed_resident) {
+            descriptor = *access.resident;
+        } else {
+            auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(access.admission_bytes);
+            if (!permit) {
+                throw ExactSimdRuntimeError{
+                    TwoStackContinuationStatus::non_contiguous_range,
+                    "constexpr query minimizer sketch admission"};
+            }
+            owner.emplace(bioseq::storage::materialize_packed_region(
+                seq, 0u, seq.bp_size(), 4u, std::move(*permit)));
+            descriptor = owner->descriptor();
         }
-        auto permit = bioseq::parallelism::MemoryAdmissionController::instance()
-            .try_reserve(access.admission_bytes);
-        if (!permit) {
-            throw ExactSimdRuntimeError{
-                TwoStackContinuationStatus::non_contiguous_range,
-                "constexpr query minimizer sketch admission"};
+        if constexpr (W == 10u && K == 15u
+                      && std::same_as<Alphabet, ::seq::dna4>
+                      && exact_simd_minimizer_representation<MinimizerT>) {
+            if (borrowed_resident) {
+                return ::bioseq::simd::HWY_NAMESPACE::
+                    resident_descriptor_detail::with_borrowed_compact_range<
+                        Alphabet, std::uint32_t>(
+                            descriptor,
+                            [&c, w, k]<class Range>(Range& range) {
+                                return collect_minimizers_two_stack_nthash_resident_constexpr_or_throw<
+                                    W, K, MinimizerT>(c, range, w, k);
+                            });
+            }
         }
-        auto owner = bioseq::storage::materialize_packed_region(
-            seq, 0u, seq.bp_size(), 4u, std::move(*permit));
-        return run_exact(owner.view());
+        return ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
+            with_borrowed_compact_range<Alphabet, std::uint32_t>(
+                descriptor,
+                [&c, w, k]<class Range>(Range& range) {
+                    return collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw<
+                        W, K, MinimizerT>(
+                            c, range, 0u, range.size(), w, k, 0u,
+                            "constexpr query minimizer sketch");
+                });
+    } else if constexpr (Kind == MinKernelKind::Simd) {
+        if constexpr (bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                          traits::logical_bits_per_symbol != 2u) {
+            collect_minimizers_segment_scalar<MinimizerT>(
+                c, seq, 0u, seq.bp_size(), w, k);
+        } else {
+            const bool used_native = with_native_resident_packed_range(
+                seq,
+                [&c]<class Range>(Range& range) {
+                    collect_minimizers_simd_constexpr<
+                        W, K, minimap_int_hasher, MinimizerT>(
+                            c, range, range.begin(), range.end());
+                });
+            if (used_native) {
+                return {};
+            }
+            const auto access = bioseq::storage::plan_sequence_access(
+                seq,
+                bioseq::storage::sequence_access_requirement::
+                    contiguous_resident,
+                0u,
+                seq.bp_size(),
+                sizeof(std::uint32_t));
+            std::optional<
+                bioseq::storage::admitted_packed_region<Alphabet>> owner;
+            typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+                resident_packed_region descriptor{};
+            if (access.route
+                    == bioseq::storage::sequence_access_route::borrow_resident
+                && access.resident.has_value()) {
+                descriptor = *access.resident;
+            } else {
+                auto permit = bioseq::parallelism::
+                    MemoryAdmissionController::instance().try_reserve(
+                        access.admission_bytes);
+                if (!permit) {
+                    throw std::bad_alloc{};
+                }
+                owner.emplace(bioseq::storage::materialize_packed_region(
+                    seq, 0u, seq.bp_size(), sizeof(std::uint32_t),
+                    std::move(*permit)));
+                descriptor = owner->descriptor();
+            }
+            ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
+                with_borrowed_compact_range<Alphabet, std::uint32_t>(
+                    descriptor,
+                    [&c]<class Range>(Range& range) {
+                        collect_minimizers_simd_constexpr<
+                            W, K, minimap_int_hasher, MinimizerT>(
+                                c, range, range.begin(), range.end());
+                    });
+        }
     } else {
         collect_minimizers_segment_scalar<MinimizerT>(
             c, seq, 0u, seq.bp_size(), w, k);
@@ -4955,16 +5127,6 @@ minimizer_dispatch_range(
                 TwoStackContinuationStatus::arithmetic_overflow,
                 "target minimizer range sketch"};
         }
-        auto run_exact = [&collector, window_size, kmer_size](
-                auto resident_view,
-                std::size_t begin,
-                std::size_t end) {
-            return collect_minimizers_two_stack_nthash_exact_range_or_throw<
-                0, 0, MinimizerT>(
-                    collector, resident_view, begin, end,
-                    window_size, kmer_size, 0u,
-                    "target minimizer range sketch");
-        };
         TwoStackExecutionProof proof{};
         const auto access = bioseq::storage::plan_sequence_access(
             seq,
@@ -4972,12 +5134,13 @@ minimizer_dispatch_range(
             lo_bp,
             hi_bp,
             4u);
+        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
+        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region descriptor{};
         if (access.route
-            == bioseq::storage::sequence_access_route::borrow_resident) {
-            proof = run_exact(
-                seq,
-                static_cast<std::size_t>(lo_bp),
-                static_cast<std::size_t>(hi_bp));
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value()) {
+            descriptor = *access.resident;
         } else {
             auto permit =
                 bioseq::parallelism::MemoryAdmissionController::instance()
@@ -4987,11 +5150,21 @@ minimizer_dispatch_range(
                     TwoStackContinuationStatus::non_contiguous_range,
                     "target minimizer range sketch admission"};
             }
-            auto owner = bioseq::storage::materialize_packed_region(
-                seq, lo_bp, hi_bp, 4u, std::move(*permit));
-            proof = run_exact(
-                owner.view(), 0u, static_cast<std::size_t>(length));
+            owner.emplace(bioseq::storage::materialize_packed_region(
+                seq, lo_bp, hi_bp, 4u, std::move(*permit)));
+            descriptor = owner->descriptor();
         }
+        proof = ::bioseq::simd::HWY_NAMESPACE::resident_descriptor_detail::
+            with_borrowed_compact_range<Alphabet, std::uint32_t>(
+                descriptor,
+                [&collector, window_size, kmer_size]<class Range>(
+                        Range& range) {
+                    return collect_minimizers_two_stack_nthash_exact_range_resident_impl_or_throw<
+                        0u, 0u, MinimizerT>(
+                            collector, range, 0u, range.size(),
+                            window_size, kmer_size, 0u,
+                            "target minimizer range sketch");
+                });
         return MinimizerRangeExecutionProof{
             .exact_simd = proof,
             .exact_simd_present = true,

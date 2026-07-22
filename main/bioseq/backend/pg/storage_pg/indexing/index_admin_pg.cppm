@@ -1431,6 +1431,104 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
 	pg_unreachable();
 }
 
+class ScopedForcedPaperIndexFailureForTest {
+public:
+    void arm_after_publisher_state_begin(
+            bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend)
+            noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+        if (bioseq_test_force_paper_index_failure == 1
+            && backend == bioseq::simd::HWY_NAMESPACE::
+                MinimizerSketchBackend::PaperNtHashSimd) {
+            bioseq::indexing::arm_forced_packed_paper_index_status_for_test(
+                bioseq::indexing::PackedPaperNthashIndexStatus::
+                    unsupported_vector_shape);
+            armed_ = true;
+        }
+#else
+        (void)backend;
+#endif
+    }
+
+    ~ScopedForcedPaperIndexFailureForTest() {
+        if (armed_) {
+            bioseq::indexing::
+                disarm_forced_packed_paper_index_status_for_test();
+        }
+    }
+
+private:
+    bool armed_ = false;
+};
+
+[[nodiscard]] constexpr int packed_paper_nthash_index_pg_errcode(
+		bioseq::indexing::PackedPaperNthashIndexStatus status) noexcept {
+	using Status = bioseq::indexing::PackedPaperNthashIndexStatus;
+	switch (status) {
+		case Status::unsupported_alphabet:
+		case Status::unsupported_storage:
+		case Status::unsupported_representation:
+		case Status::unsupported_vector_shape:
+			return ERRCODE_FEATURE_NOT_SUPPORTED;
+		case Status::input_too_large:
+		case Status::admission_denied:
+			return ERRCODE_PROGRAM_LIMIT_EXCEEDED;
+		case Status::invalid_state:
+			return ERRCODE_INTERNAL_ERROR;
+		case Status::invalid_configuration:
+		case Status::input_too_short:
+		case Status::invalid_range:
+			return ERRCODE_INVALID_PARAMETER_VALUE;
+		case Status::ok:
+			return ERRCODE_INTERNAL_ERROR;
+	}
+	return ERRCODE_INTERNAL_ERROR;
+}
+
+static_assert(packed_paper_nthash_index_pg_errcode(
+	bioseq::indexing::PackedPaperNthashIndexStatus::unsupported_alphabet)
+	== ERRCODE_FEATURE_NOT_SUPPORTED);
+static_assert(packed_paper_nthash_index_pg_errcode(
+	bioseq::indexing::PackedPaperNthashIndexStatus::unsupported_vector_shape)
+	== ERRCODE_FEATURE_NOT_SUPPORTED);
+static_assert(packed_paper_nthash_index_pg_errcode(
+	bioseq::indexing::PackedPaperNthashIndexStatus::admission_denied)
+	== ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+static_assert(packed_paper_nthash_index_pg_errcode(
+	bioseq::indexing::PackedPaperNthashIndexStatus::input_too_large)
+	== ERRCODE_PROGRAM_LIMIT_EXCEEDED);
+static_assert(packed_paper_nthash_index_pg_errcode(
+	bioseq::indexing::PackedPaperNthashIndexStatus::invalid_state)
+	== ERRCODE_INTERNAL_ERROR);
+static_assert(packed_paper_nthash_index_pg_errcode(
+	bioseq::indexing::PackedPaperNthashIndexStatus::ok)
+	== ERRCODE_INTERNAL_ERROR);
+
+[[noreturn]] inline void raise_packed_paper_nthash_index_pg_error(
+		bioseq::indexing::PackedPaperNthashIndexStatus status,
+		const char* operation,
+		const char* detail) {
+	const int sqlerrcode = packed_paper_nthash_index_pg_errcode(status);
+	const std::string_view status_name =
+		bioseq::indexing::packed_paper_nthash_index_status_name(status);
+	const char* message = sqlerrcode == ERRCODE_FEATURE_NOT_SUPPORTED
+		? "Paper ntHash SIMD minimizer index build is unsupported for this source"
+		: sqlerrcode == ERRCODE_PROGRAM_LIMIT_EXCEEDED
+			? "Paper ntHash SIMD minimizer index build exceeded a resource limit"
+			: sqlerrcode == ERRCODE_INTERNAL_ERROR
+				? "Paper ntHash SIMD minimizer index status contract was violated"
+				: "Paper ntHash SIMD minimizer index build rejected its request";
+	ereport(ERROR,
+		(errcode(sqlerrcode),
+		 errmsg("%s", message),
+		 errdetail_internal("%s: status=%.*s %s", operation,
+			 static_cast<int>(status_name.size()), status_name.data(), detail),
+		 errhint("Paper ntHash SIMD has no scalar or Exact SIMD fallback; use "
+			 "DNA4 with supported packed storage and vector shape, or increase "
+			 "the index memory limit when status=admission_denied.")));
+	pg_unreachable();
+}
+
 /// SQL-facing boundary: no C++ execution error may cross the PostgreSQL C ABI.
 [[nodiscard]] inline std::int64_t update_index_pg_checked(
         Oid rel_oid,
@@ -1438,7 +1536,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         std::size_t name_size) {
 	ErrorData* exact_error = nullptr;
 	std::array<char, 2048> detail{};
+	auto packed_paper_status =
+		bioseq::indexing::PackedPaperNthashIndexStatus::invalid_state;
 	bool exact_simd_error = false;
+	bool packed_paper_error = false;
 	bool cpp_error = false;
 	bool unknown_cpp_error = false;
 	try {
@@ -1452,6 +1553,14 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
 			err.what() == nullptr ? "Exact SIMD error without detail" : err.what(),
 			detail.size());
 		exact_simd_error = true;
+	} catch (const bioseq::indexing::PackedPaperNthashIndexRuntimeError& err) {
+		strlcpy(
+			detail.data(),
+			err.what() == nullptr
+				? "Paper ntHash SIMD error without detail" : err.what(),
+			detail.size());
+		packed_paper_status = err.status();
+		packed_paper_error = true;
 	} catch (const std::exception& error) {
 		strlcpy(
 			detail.data(),
@@ -1469,6 +1578,10 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
 	if (exact_simd_error) {
 		raise_exact_simd_index_pg_error(
 			"bioseq.update_index", detail.data());
+	}
+	if (packed_paper_error) {
+		raise_packed_paper_nthash_index_pg_error(
+			packed_paper_status, "bioseq.update_index", detail.data());
 	}
 	if (cpp_error) {
 		ereport(ERROR,
@@ -2534,6 +2647,7 @@ build_and_publish_minimizer_format6_generation_pg(
     };
 
     try {
+        ScopedForcedPaperIndexFailureForTest forced_paper_failure;
         state->source_proof.emplace(
             derive_rev3_authoritative_source_proof_pg(
                 state->identity, sequence_rowno,
@@ -2585,6 +2699,7 @@ build_and_publish_minimizer_format6_generation_pg(
         state->writer.emplace(storage.begin_format6_generation_write(
             sequence_rowno, result.generation_id));
         state->count_scratch.emplace();
+        forced_paper_failure.arm_after_publisher_state_begin(backend);
 
         const bioseq::indexing::MinimizerFormat6GenerationOptions options{
             .generation_id = result.generation_id,
@@ -3081,6 +3196,18 @@ build_and_publish_grouped32_minimizer_generation_pg(
             "READY minimizer storage identity disagrees with its source");
     }
 
+    if constexpr (kAlphabetCode
+            != bioseq::indexing::kMinimizerPersistedDna4AlphabetCode) {
+        if (backend == Backend::PaperNtHashSimd) {
+            // Preserve the selected producer's typed capability reason before
+            // the Format-5 registry reports the broader profile mismatch.
+            throw bioseq::indexing::PackedPaperNthashIndexRuntimeError{
+                bioseq::indexing::PackedPaperNthashIndexStatus::
+                    unsupported_alphabet,
+                "grouped minimizer generation preflight"};
+        }
+    }
+
     const bioseq::indexing::MinimizerSchemeIdentity scheme =
         bioseq::indexing::minimizer_scheme_identity_for_backend(backend);
     const bioseq::indexing::MinimizerProducerBackendIdentity producer_backend =
@@ -3164,6 +3291,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
         .selected_backend = backend,
     };
     try {
+            ScopedForcedPaperIndexFailureForTest forced_paper_failure;
             state->source_proof.emplace(
                 derive_rev3_authoritative_source_proof_pg(
                     state->identity, sequence_rowno,
@@ -3207,6 +3335,7 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 [] { return allocate_minimizer_generation_id_pg(); });
             state->writer.emplace(storage.begin_generation_write(
                 sequence_rowno, result.generation_id));
+            forced_paper_failure.arm_after_publisher_state_begin(backend);
             const bioseq::indexing::MinimizerGenerationEncodeOptions options{
                 .wire_format = bioseq::indexing::
                     MinimizerGenerationWireFormat::
@@ -3303,6 +3432,18 @@ build_and_publish_grouped32_minimizer_generation_pg(
                 state->mps_spill_started = false;
             }
             if (state->encode_error) {
+                if (backend == bioseq::simd::HWY_NAMESPACE::
+                        MinimizerSketchBackend::PaperNtHashSimd
+                    && *state->encode_error
+                        == bioseq::indexing::MinimizerGenerationWireError::
+                            admission) {
+                    throw bioseq::indexing::
+                        PackedPaperNthashIndexRuntimeError{
+                            bioseq::indexing::PackedPaperNthashIndexStatus::
+                                admission_denied,
+                            is_mpf ? "MPF generation encode"
+                                   : "MPS generation encode"};
+                }
                 ready_minimizer_error_as_cpp(
                     ERRCODE_DATA_CORRUPTED,
                     "READY minimizer generation encoder failed",

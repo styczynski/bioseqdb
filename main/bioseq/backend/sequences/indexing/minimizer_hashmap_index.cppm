@@ -371,9 +371,10 @@ collect_exact_simd_index_range_or_throw(
     }
 }
 
-// Plain ABI mirror of the packed Paper-ntHash checked kernel. The implementation
-// unit imports the Highway owner and maps its native status/proof without
-// allowing the indexing interface to instantiate or reimplement the algorithm.
+// Plain ABI mirror of the packed Paper-ntHash checked kernel plus one
+// facade-owned admission status. The implementation unit imports the Highway
+// owner and maps its native status/proof without allowing the indexing
+// interface to instantiate or reimplement the algorithm.
 enum class PackedPaperNthashIndexStatus : std::uint8_t {
     ok = 0,
     invalid_configuration,
@@ -385,6 +386,7 @@ enum class PackedPaperNthashIndexStatus : std::uint8_t {
     invalid_range,
     input_too_large,
     invalid_state,
+    admission_denied,
 };
 
 [[nodiscard]] constexpr std::string_view
@@ -410,8 +412,67 @@ packed_paper_nthash_index_status_name(
             return "input_too_large";
         case PackedPaperNthashIndexStatus::invalid_state:
             return "invalid_state";
+        case PackedPaperNthashIndexStatus::admission_denied:
+            return "admission_denied";
     }
     return "unknown";
+}
+
+class PackedPaperNthashIndexRuntimeError final : public std::runtime_error {
+public:
+    PackedPaperNthashIndexRuntimeError(
+            PackedPaperNthashIndexStatus status,
+            std::string_view operation)
+        : std::runtime_error(
+            std::string(operation) + ": checked Paper ntHash route failed ("
+                + std::string(packed_paper_nthash_index_status_name(status))
+                + ")"),
+          status_(status) {}
+
+    [[nodiscard]] PackedPaperNthashIndexStatus status() const noexcept {
+        return status_;
+    }
+
+private:
+    PackedPaperNthashIndexStatus status_;
+};
+
+// Integration-build-only one-shot. The callable surface is present in every
+// module variant so BMIs remain identical, but production builds never retain
+// state and therefore cannot force a biological result.
+#ifdef BIOSEQ_TEST_INDEXES
+inline std::atomic<std::uint8_t> g_forced_packed_paper_index_status{
+    static_cast<std::uint8_t>(PackedPaperNthashIndexStatus::ok)};
+#endif
+
+inline void arm_forced_packed_paper_index_status_for_test(
+        PackedPaperNthashIndexStatus status) noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    g_forced_packed_paper_index_status.store(
+        static_cast<std::uint8_t>(status), std::memory_order_release);
+#else
+    (void)status;
+#endif
+}
+
+inline void disarm_forced_packed_paper_index_status_for_test() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    g_forced_packed_paper_index_status.store(
+        static_cast<std::uint8_t>(PackedPaperNthashIndexStatus::ok),
+        std::memory_order_release);
+#endif
+}
+
+[[nodiscard]] inline std::optional<PackedPaperNthashIndexStatus>
+consume_forced_packed_paper_index_status_for_test() noexcept {
+#ifdef BIOSEQ_TEST_INDEXES
+    const auto status = static_cast<PackedPaperNthashIndexStatus>(
+        g_forced_packed_paper_index_status.exchange(
+            static_cast<std::uint8_t>(PackedPaperNthashIndexStatus::ok),
+            std::memory_order_acq_rel));
+    if (status != PackedPaperNthashIndexStatus::ok) return status;
+#endif
+    return std::nullopt;
 }
 
 enum class PackedPaperNthashIndexAlphabet : std::uint8_t {
@@ -598,6 +659,11 @@ struct PackedPaperNthashIndexBridgeRequest {
     std::size_t local_bp_size = 0;
     std::size_t window_size = 0;
     std::size_t kmer_size = 0;
+    // When true, `sequence_context` names a validated canonical resident
+    // descriptor rather than an owning compact_sequence_range.  This keeps
+    // admitted/borrowed facade ownership outside the non-Highway ABI while
+    // allowing the implementation unit to execute the same checked kernel.
+    bool sequence_context_is_resident_descriptor = false;
 };
 
 struct PackedPaperNthashIndexBridgeResult {
@@ -619,6 +685,106 @@ rejected_packed_paper_nthash_index_result(
 [[nodiscard]] PackedPaperNthashIndexBridgeResult
 collect_packed_paper_nthash_index_erased(
     const PackedPaperNthashIndexBridgeRequest& request);
+
+/// Execute one bounded Paper-ntHash window through a canonical admitted u32
+/// descriptor.  Only the selected BP interval is materialized when the source
+/// cannot expose stable resident u32 storage; a stable resident interval is
+/// borrowed synchronously without allocating or copying it.
+template <sequence_alphabet Alphabet>
+[[nodiscard]] PackedPaperNthashIndexBridgeResult
+collect_bounded_packed_paper_nthash_index_lazy(
+        bioseq::storage::basic_lazy_sequence_view<Alphabet> sequence,
+        sequence_size_t lo_bp,
+        sequence_size_t hi_bp,
+        std::uint64_t local_bp_size,
+        std::uint16_t window_size,
+        std::uint16_t kmer_size,
+        sketch_collector& collector,
+        std::uint64_t* materialized_window_bp_out = nullptr) {
+    if (materialized_window_bp_out != nullptr) {
+        *materialized_window_bp_out = 0u;
+    }
+    if constexpr (!std::same_as<Alphabet, seq::dna4>) {
+        return rejected_packed_paper_nthash_index_result(
+            PackedPaperNthashIndexStatus::unsupported_alphabet);
+    } else {
+        if (lo_bp > hi_bp || hi_bp > sequence.bp_size()
+            || local_bp_size != static_cast<std::uint64_t>(hi_bp - lo_bp)) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::invalid_range);
+        }
+        if (local_bp_size == 0u
+            || local_bp_size - 1u
+                > static_cast<std::uint64_t>(
+                    MinimapSketchData::pos_field_mask)) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::unsupported_representation);
+        }
+        if (local_bp_size
+                > static_cast<std::uint64_t>(
+                    (std::numeric_limits<std::size_t>::max)())) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::input_too_large);
+        }
+
+        constexpr std::uint8_t packed_width = sizeof(std::uint32_t);
+        const auto access = bioseq::storage::plan_sequence_access(
+            sequence,
+            bioseq::storage::sequence_access_requirement::contiguous_resident,
+            lo_bp,
+            hi_bp,
+            packed_width);
+        std::optional<bioseq::storage::admitted_packed_region<Alphabet>> owner;
+        typename bioseq::storage::basic_lazy_sequence_view<Alphabet>::
+            resident_packed_region descriptor{};
+        if (access.route
+                == bioseq::storage::sequence_access_route::borrow_resident
+            && access.resident.has_value()) {
+            descriptor = *access.resident;
+        } else {
+            auto permit =
+                bioseq::parallelism::MemoryAdmissionController::instance()
+                    .try_reserve(access.admission_bytes);
+            if (!permit) {
+                return rejected_packed_paper_nthash_index_result(
+                    PackedPaperNthashIndexStatus::admission_denied);
+            }
+            owner.emplace(bioseq::storage::materialize_packed_region(
+                sequence, lo_bp, hi_bp, packed_width, std::move(*permit)));
+            descriptor = owner->descriptor();
+        }
+        if (descriptor.bp_length != local_bp_size
+            || descriptor.storage_unit_byte_width != packed_width
+            || descriptor.leading_symbol_offset != 0u) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::invalid_range);
+        }
+        if (materialized_window_bp_out != nullptr) {
+            *materialized_window_bp_out = owner.has_value()
+                ? local_bp_size : 0u;
+            DEBUG_ASSERT(
+                (*materialized_window_bp_out != 0u) == owner.has_value(),
+                "Paper materialization receipt must name only owned storage");
+        }
+        if (const auto forced =
+                consume_forced_packed_paper_index_status_for_test()) {
+            return rejected_packed_paper_nthash_index_result(*forced);
+        }
+        return collect_packed_paper_nthash_index_erased(
+            PackedPaperNthashIndexBridgeRequest{
+                .sequence_context = std::addressof(descriptor),
+                .collector_context = std::addressof(collector),
+                .alphabet = PackedPaperNthashIndexAlphabet::dna4,
+                .storage_unit_bytes = packed_width,
+                .letters_per_unit = packed_width * 8u / 2u,
+                .storage_units = descriptor.unit_count,
+                .local_bp_size = static_cast<std::size_t>(local_bp_size),
+                .window_size = window_size,
+                .kmer_size = kmer_size,
+                .sequence_context_is_resident_descriptor = true,
+            });
+    }
+}
 
 // Revision-3 persisted minimizer codecs stay in this wire owner. Their shared
 // CRC implementation is imported from the lower chunk-storage module so row,
@@ -21338,20 +21504,61 @@ public:
         // format before the first encoder scan.
         const std::uint64_t required_scans =
             required_successful_scan_count();
-        if (!backend_bound || saturated || required_scans == 0u
+        if (!common_identity_accepted_() || required_scans == 0u
             || geometry_retry_count
                 > (std::numeric_limits<std::uint64_t>::max)()
                     - required_scans
             || producer_scan_count
-                != geometry_retry_count + required_scans
-            || target_length == 0 || window_size == 0 || kmer_size == 0
-            || minimizer_scheme
-                != minimizer_scheme_identity_for_backend(selected_backend)) {
+                != geometry_retry_count + required_scans) {
             return false;
         }
+        return selected_route_accepted_(requires_backend_work_());
+    }
+
+    /// Accept evidence emitted by the legacy direct MPF builder, which is one
+    /// biological construction operation rather than an encoder replay and
+    /// therefore deliberately has no wire-format/publication binding.
+    [[nodiscard]] bool direct_build_accepted() const noexcept {
+        return common_identity_accepted_()
+            && producer_scan_count == 1u
+            && geometry_retry_count == 0u
+            && generation_wire_format
+                == MinimizerGenerationWireFormat::invalid
+            && window_size == 10u
+            && kmer_size == 15u
+            && !route_snapshot_present_
+            && !publication_binding_present_
+            && selected_route_accepted_(requires_backend_work_());
+    }
+
+    [[nodiscard]] bool publication_accepted(
+            const MinimizerGenerationPublicationBinding& expected)
+            const noexcept {
+        return accepted() && route_snapshot_matches_()
+            && publication_binding_present_
+            && generation_wire_format != MinimizerGenerationWireFormat::invalid
+            && generation_wire_format == expected.wire_format
+            && expected.valid() && publication_binding_ == expected;
+    }
+
+private:
+    [[nodiscard]] bool common_identity_accepted_() const noexcept {
+        return backend_bound && !saturated
+            && target_length != 0u
+            && window_size != 0u
+            && kmer_size != 0u
+            && minimizer_scheme
+                == minimizer_scheme_identity_for_backend(selected_backend);
+    }
+
+    [[nodiscard]] bool requires_backend_work_() const noexcept {
         const std::uint64_t minimum_work_bases =
             static_cast<std::uint64_t>(window_size) + kmer_size - 1u;
-        const bool require_backend_work = target_length >= minimum_work_bases;
+        return target_length >= minimum_work_bases;
+    }
+
+    [[nodiscard]] bool selected_route_accepted_(
+            bool require_backend_work) const noexcept {
         const bool no_exact = exact_simd_core_runs == 0
             && !exact_simd_proof_present;
         const bool no_paper = paper_nthash_core_runs == 0
@@ -21404,18 +21611,6 @@ public:
         }
         return false;
     }
-
-    [[nodiscard]] bool publication_accepted(
-            const MinimizerGenerationPublicationBinding& expected)
-            const noexcept {
-        return accepted() && route_snapshot_matches_()
-            && publication_binding_present_
-            && generation_wire_format != MinimizerGenerationWireFormat::invalid
-            && generation_wire_format == expected.wire_format
-            && expected.valid() && publication_binding_ == expected;
-    }
-
-private:
     template <class>
     friend struct MinimizersPerFragmentIndex;
     template <sequence_alphabet Alphabet>
@@ -21618,20 +21813,75 @@ private:
             return run;
         }
 
-        {
+        if (backend_ == MinimizerSketchBackend::VulkanSegment) {
+            increment_route_counter_(vulkan_core_runs_);
+            bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof core_proof{};
+            auto pairs = bioseq::gpu::vulkan::
+                collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                    sequence_,
+                    static_cast<sequence_size_t>(collect_lo),
+                    static_cast<sequence_size_t>(collect_hi),
+                    static_cast<sequence_size_t>(emit_base),
+                    static_cast<sequence_size_t>(core_lo),
+                    static_cast<sequence_size_t>(core_hi),
+                    window_size_,
+                    kmer_size_,
+                    &core_proof);
+            vulkan_proof_.combine(core_proof);
+            route_evidence_saturated_ = route_evidence_saturated_
+                || vulkan_proof_.saturated;
+            run.reserve(pairs.pairs.size());
+            for (const auto& pair : pairs.pairs) {
+                run.push_back(CanonicalMinimizerEvent{
+                    .hash = pair.first,
+                    .encoded_position = pair.second,
+                });
+            }
+        } else {
             sketch_collector collector;
             if (backend_ == MinimizerSketchBackend::PaperNtHashSimd) {
                 increment_route_counter_(paper_nthash_core_runs_);
-                return std::unexpected(
-                    MinimizerGenerationWireError::compatibility_mismatch);
+                std::uint64_t materialized_window_bp = 0u;
+                const auto paper_result =
+                    collect_bounded_packed_paper_nthash_index_lazy(
+                        sequence_,
+                        static_cast<sequence_size_t>(collect_lo),
+                        static_cast<sequence_size_t>(collect_hi),
+                        collect_hi - emit_base,
+                        window_size_,
+                        kmer_size_,
+                        collector,
+                        &materialized_window_bp);
+                peak_paper_materialized_window_bp_ = std::max(
+                    peak_paper_materialized_window_bp_,
+                    materialized_window_bp);
+                record_packed_paper_result(paper_result);
+                if (paper_result.status
+                        != PackedPaperNthashIndexStatus::ok) {
+                    throw PackedPaperNthashIndexRuntimeError{
+                        paper_result.status,
+                        "MPF generation replay"};
+                }
             } else if (backend_ == MinimizerSketchBackend::ExactSimd) {
                 increment_route_counter_(exact_simd_core_runs_);
-                return std::unexpected(
-                    MinimizerGenerationWireError::compatibility_mismatch);
-            } else if (backend_ == MinimizerSketchBackend::VulkanSegment) {
-                increment_route_counter_(vulkan_core_runs_);
-                return std::unexpected(
-                    MinimizerGenerationWireError::compatibility_mismatch);
+                try {
+                    const auto proof = collect_exact_simd_index_range_or_throw(
+                        collector,
+                        sequence_,
+                        static_cast<sequence_size_t>(collect_lo),
+                        static_cast<sequence_size_t>(collect_hi),
+                        window_size_,
+                        kmer_size_,
+                        0u,
+                        "MPF generation replay");
+                    exact_simd_proof_.combine(proof);
+                    exact_simd_proof_present_ = true;
+                    route_evidence_saturated_ = route_evidence_saturated_
+                        || exact_simd_proof_.saturated;
+                } catch (const ExactSimdIndexRuntimeError&) {
+                    return std::unexpected(
+                        MinimizerGenerationWireError::compatibility_mismatch);
+                }
             } else if (backend_ == MinimizerSketchBackend::Scalar) {
                 increment_route_counter_(scalar_core_runs_);
                 bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
@@ -21956,7 +22206,8 @@ struct MinimizersPerFragmentIndex {
     static void build(
         S& storage,
         bioseq::storage::basic_lazy_sequence_view<Alphabet> seq,
-        MinimizerSketchBackend backend) {
+        MinimizerSketchBackend backend,
+        MpfGenerationExecutionEvidence* execution_evidence_out = nullptr) {
         constexpr std::size_t w = 10, k = 15;                                  // pinned, == sidecar today
         constexpr std::size_t frag_bp    = 32'768u;
         constexpr std::size_t W          = w + k;                              // backward context
@@ -21964,9 +22215,133 @@ struct MinimizersPerFragmentIndex {
             "fragment-core-local positions must fit the 28-bit MinimapSketchData field");
         const sequence_size_t total_bp = seq.bp_size();
         const std::size_t nfrag = (std::size_t)((total_bp + frag_bp - 1) / frag_bp);
+        if (execution_evidence_out != nullptr) {
+            *execution_evidence_out = {};
+            execution_evidence_out->selected_backend = backend;
+            execution_evidence_out->minimizer_scheme =
+                minimizer_scheme_identity_for_backend(backend);
+            execution_evidence_out->target_length = total_bp;
+            execution_evidence_out->window_size = w;
+            execution_evidence_out->kmer_size = k;
+            execution_evidence_out->producer_scan_count = 1u;
+            execution_evidence_out->backend_bound = true;
+        }
+
+        // Batch canonical 32 KiBP fragments into large GPU collection windows,
+        // then scatter the one sorted global pair stream back into persisted
+        // fragment-local blobs.  One synchronous submission per fragment is a
+        // severe regression and defeats the existing GPU MPF batch geometry.
+        if (backend == MinimizerSketchBackend::VulkanSegment) {
+            const std::size_t fragments_per_batch =
+                gpu_mpf_fragments_per_batch(
+                    nfrag, frag_bp, 2u * W, storage.run_buffer_bytes());
+            std::vector<std::vector<
+                std::pair<std::uint64_t, std::uint64_t>>> per_fragment(
+                    fragments_per_batch);
+            std::vector<char> blob;
+            const auto write_fragment_blob =
+                [&storage](std::size_t fragment_no,
+                           const std::vector<char>& fragment_blob) {
+                    const std::size_t bytes = fragment_blob.size();
+                    storage.resize(
+                        static_cast<index_sub_key_t>(fragment_no), bytes);
+                    storage.template write_to_each<char>(
+                        static_cast<index_sub_key_t>(fragment_no),
+                        [&fragment_blob, bytes](
+                                std::size_t chunk_no,
+                                char* buffer,
+                                std::size_t capacity_units) {
+                            DEBUG_ASSERT(
+                                chunk_no == 0u && capacity_units >= bytes,
+                                "one fragment index fits one chunk");
+                            if (bytes != 0u) {
+                                std::memcpy(
+                                    buffer, fragment_blob.data(), bytes);
+                            }
+                            return chunk_no;
+                        });
+                };
+
+            for (std::size_t batch_lo_frag = 0u;
+                 batch_lo_frag < nfrag;
+                 batch_lo_frag += fragments_per_batch) {
+                const std::size_t batch_hi_frag = std::min(
+                    nfrag, batch_lo_frag + fragments_per_batch);
+                const sequence_size_t core_lo =
+                    static_cast<sequence_size_t>(batch_lo_frag) * frag_bp;
+                const sequence_size_t core_hi = std::min(
+                    static_cast<sequence_size_t>(batch_hi_frag) * frag_bp,
+                    total_bp);
+                const sequence_size_t coll_lo =
+                    core_lo >= W ? core_lo - W : 0u;
+                const sequence_size_t coll_hi = std::min(
+                    core_hi + static_cast<sequence_size_t>(W), total_bp);
+                bioseq::gpu::vulkan::VulkanSegmentPairExecutionProof proof{};
+                auto batch_pairs = bioseq::gpu::vulkan::
+                    collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                        seq, coll_lo, coll_hi, coll_lo,
+                        core_lo, core_hi, w, k,
+                        execution_evidence_out != nullptr ? &proof : nullptr);
+                if (execution_evidence_out != nullptr) {
+                    ++execution_evidence_out->vulkan_core_runs;
+                    execution_evidence_out->vulkan_proof.combine(proof);
+                    execution_evidence_out->saturated =
+                        execution_evidence_out->saturated
+                        || execution_evidence_out->vulkan_proof.saturated;
+                }
+                for (auto& fragment_pairs : per_fragment) {
+                    fragment_pairs.clear();
+                }
+                for (const auto& pair : batch_pairs.pairs) {
+                    const sequence_size_t global_pos =
+                        static_cast<sequence_size_t>(pair.second >> 1u);
+                    const std::size_t fragment_no =
+                        static_cast<std::size_t>(global_pos / frag_bp);
+                    if (fragment_no < batch_lo_frag
+                        || fragment_no >= batch_hi_frag) {
+                        continue;
+                    }
+                    const sequence_size_t fragment_lo =
+                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
+                    per_fragment[fragment_no - batch_lo_frag].emplace_back(
+                        pair.first,
+                        (static_cast<std::uint64_t>(
+                            global_pos - fragment_lo) << 1u)
+                            | (pair.second & 1u));
+                }
+                for (std::size_t fragment_no = batch_lo_frag;
+                     fragment_no < batch_hi_frag;
+                     ++fragment_no) {
+                    const sequence_size_t fragment_lo =
+                        static_cast<sequence_size_t>(fragment_no) * frag_bp;
+                    const sequence_size_t fragment_hi = std::min(
+                        fragment_lo + static_cast<sequence_size_t>(frag_bp),
+                        total_bp);
+                    serialize_sorted_pairs_to_fragment_blob(
+                        std::span<const std::pair<
+                            std::uint64_t, std::uint64_t>>{
+                                per_fragment[
+                                    fragment_no - batch_lo_frag]},
+                        fragment_hi - fragment_lo,
+                        blob);
+                    write_fragment_blob(fragment_no, blob);
+                }
+            }
+            const std::int64_t manifest = static_cast<std::int64_t>(nfrag);
+            storage.resize(DIRECTORY_SUB_KEY, sizeof(std::int64_t));
+            storage.template write_to_each<std::int64_t>(
+                DIRECTORY_SUB_KEY,
+                [manifest](std::size_t chunk_no,
+                           std::int64_t* manifest_buffer,
+                           std::size_t) {
+                    manifest_buffer[0] = manifest;
+                    return chunk_no;
+                });
+            return;
+        }
 
         auto build_fragment_blob =
-            [seq, backend, total_bp](std::size_t fragment_no,
+            [seq, backend, total_bp, execution_evidence_out](std::size_t fragment_no,
                                      sketch_collector& collector,
                                      std::vector<MinimapSketchData>& core,
                                      std::vector<char>& out_blob) {
@@ -21979,18 +22354,88 @@ struct MinimizersPerFragmentIndex {
             const sequence_size_t collect_bp = coll_hi > emit_base ? coll_hi - emit_base : 0;
             core.clear();
             if (collect_bp >= (sequence_size_t)W) {
-                // The facade scalar route is the semantic fallback. Packed
-                // accelerators are entered by their resident/admitted owner
-                // seams, never by inspecting the facade representation here.
-                (void)backend;
-                bioseq::simd::HWY_NAMESPACE::collect_minimizers_segment_scalar<
-                    MinimapSketchData>(
-                        collector, seq, coll_lo, coll_hi, w, k);
-                for (const MinimapSketchData& minimizer : collector.extract_sketches_data()) {
-                    const sequence_size_t global_pos = (sequence_size_t)minimizer.last_pos() + emit_base;
-                    if (global_pos < core_lo || global_pos >= core_hi) continue; // belongs to a neighbour fragment's core
-                    core.push_back(MinimapSketchData{ minimizer.kmer(), (std::uint64_t)(global_pos - core_lo), minimizer.strand() });
+                if (backend == MinimizerSketchBackend::VulkanSegment) {
+                    auto pairs = bioseq::gpu::vulkan::
+                        collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
+                            seq, coll_lo, coll_hi, emit_base,
+                            core_lo, core_hi, w, k);
+                    core.reserve(pairs.pairs.size());
+                    for (const auto& pair : pairs.pairs) {
+                        const sequence_size_t global_pos =
+                            static_cast<sequence_size_t>(pair.second >> 1u);
+                        core.push_back(MinimapSketchData{
+                            pair.first,
+                            static_cast<std::uint64_t>(global_pos - core_lo),
+                            static_cast<std::uint64_t>(pair.second & 1u)});
+                    }
+                } else {
+                    if (backend == MinimizerSketchBackend::ExactSimd) {
+                        const auto proof = collect_exact_simd_index_range_or_throw(
+                            collector, seq, coll_lo, coll_hi, w, k, 0u,
+                            "minimizers_per_fragment build");
+                        if (execution_evidence_out != nullptr) {
+                            ++execution_evidence_out->exact_simd_core_runs;
+                            execution_evidence_out->exact_simd_proof.combine(
+                                proof);
+                            execution_evidence_out->exact_simd_proof_present =
+                                true;
+                            execution_evidence_out->saturated =
+                                execution_evidence_out->saturated
+                                || execution_evidence_out->exact_simd_proof.
+                                    saturated;
+                        }
+                    } else if (backend
+                            == MinimizerSketchBackend::PaperNtHashSimd) {
+                        const auto result =
+                            collect_bounded_packed_paper_nthash_index_lazy(
+                                seq, coll_lo, coll_hi, collect_bp,
+                                w, k, collector);
+                        if (result.status
+                                != PackedPaperNthashIndexStatus::ok) {
+                            throw PackedPaperNthashIndexRuntimeError{
+                                result.status,
+                                "minimizers_per_fragment build"};
+                        }
+                        if (execution_evidence_out != nullptr) {
+                            ++execution_evidence_out->paper_nthash_core_runs;
+                            execution_evidence_out->packed_paper_status =
+                                result.status;
+                            execution_evidence_out->packed_paper_proof.combine(
+                                result.proof);
+                            execution_evidence_out->
+                                packed_paper_proof_present = true;
+                            execution_evidence_out->saturated =
+                                execution_evidence_out->saturated
+                                || execution_evidence_out->packed_paper_proof.
+                                    saturated;
+                        }
+                    } else if (backend == MinimizerSketchBackend::Scalar) {
+                        if (execution_evidence_out != nullptr) {
+                            ++execution_evidence_out->scalar_core_runs;
+                        }
+                        bioseq::simd::HWY_NAMESPACE::
+                            collect_minimizers_segment_scalar<MinimapSketchData>(
+                                collector, seq, coll_lo, coll_hi, w, k);
+                    } else {
+                        index_corruption_panic(
+                            "minimizers_per_fragment build: unsupported sketch backend");
+                    }
+                    for (const MinimapSketchData& minimizer
+                         : collector.extract_sketches_data()) {
+                        const sequence_size_t global_pos =
+                            static_cast<sequence_size_t>(minimizer.last_pos())
+                            + emit_base;
+                        if (global_pos < core_lo || global_pos >= core_hi) {
+                            continue;
+                        }
+                        core.push_back(MinimapSketchData{
+                            minimizer.kmer(),
+                            static_cast<std::uint64_t>(global_pos - core_lo),
+                            minimizer.strand()});
+                    }
                 }
+            } else if (execution_evidence_out != nullptr) {
+                ++execution_evidence_out->short_core_runs;
             }
             MinimizerHashmapFragmentIndex frag_idx;
             frag_idx.build(core, core_hi - core_lo);   // fragment-local target_len
@@ -22023,7 +22468,8 @@ struct MinimizersPerFragmentIndex {
 
         auto& pool = bioseq::parallelism::GlobalPool::instance();
         const bool may_parallel_fragments =
-            bioseq::parallelism::task_parallel(pool.mode())
+            execution_evidence_out == nullptr
+            && bioseq::parallelism::task_parallel(pool.mode())
             && pool.max_concurrency() > 1
             && lazy_is_worker_shareable(seq)
             && nfrag >= bioseq::parallelism::TaskParallelMinTriggers::MIN_FRAGMENTS_COUNT;

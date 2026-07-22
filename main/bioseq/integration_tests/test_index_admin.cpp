@@ -4132,6 +4132,90 @@ TEST_CASE("DOC0377 PG index streaming poisons contiguous access and resident "
   REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") == 1);
   REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
 }
+
+TEST_CASE("DOC0377 checked Paper failures unwind grouped MPF and MPS publishers",
+          "[index_admin][doc0377][paper][sqlstate][publisher-cleanup][error]") {
+  struct FailureRoute {
+    std::string_view table;
+    std::string_view index_name;
+    std::string_view operation;
+  };
+  constexpr std::array<FailureRoute, 2> routes{{
+      {"doc0377_paper_forced_mpf", "minimizers_per_fragment",
+       "MPF generation replay"},
+      {"doc0377_paper_forced_mps", "minimizers_per_sequence",
+       "minimizers_per_sequence build"},
+  }};
+
+  for (const FailureRoute& route : routes) {
+    DYNAMIC_SECTION(route.index_name) {
+      auto ctx = fresh_context({route.table});
+      exec_sql(ctx,
+               "SET bioseq.update_index_on_insert=off;"
+               "SET bioseq.index_async_persist=off;"
+               "SET bioseq.recompute_async_persist=off;"
+               "SET bioseq.aligner.grouped32_persisted_generation_enabled=on;"
+               "SET bioseq.aligner.minimizer_algorithm='paper_nthash_simd';");
+      exec_sqlf(ctx,
+                "CREATE TABLE {} "
+                "(id int, seq bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO {} VALUES "
+                "(1,(repeat('ACGT',16391)||'A')::"
+                "bioseq.seq('dna4',64));",
+                route.table, route.table);
+      REQUIRE(only_column_row_number(ctx, route.table) > 0);
+      const long long backend_pid =
+          query_scalar_int(ctx, "SELECT pg_backend_pid();");
+      const long long admission_before = query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();");
+
+      exec_sql(ctx,
+               "SET bioseq.test_force_paper_index_failure="
+               "'unsupported_vector_shape';");
+      const auto rejected = sql_error(ctx, fmt::format(
+          "SELECT bioseq.update_index('{}'::regclass,'{}');",
+          route.table, route.index_name));
+      exec_sql(ctx,
+               "SET bioseq.test_force_paper_index_failure='none';");
+
+      REQUIRE(rejected.sqlstate == "0A000");
+      REQUIRE(rejected.contains("status=unsupported_vector_shape"));
+      REQUIRE(rejected.contains(route.operation));
+      REQUIRE_FALSE(rejected.sqlstate == "XX000");
+      REQUIRE_FALSE(rejected.sqlstate == "XX001");
+      REQUIRE(query_scalar_int(ctx, "SELECT pg_backend_pid();") ==
+              backend_pid);
+      REQUIRE(index_table_row_count(ctx, route.index_name, route.table) == 0);
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM bioseq_internal.metadata_age_log "
+          "WHERE user_relid='{}'::regclass AND index_name='{}';",
+          route.table, route.index_name)) == 0);
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM "
+          "bioseq_internal.minimizer_generation_storage "
+          "WHERE user_relid='{}'::regclass AND index_name='{}';",
+          route.table, route.index_name)) == 0);
+      REQUIRE(query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();") == admission_before);
+      REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+      // The same Paper backend succeeds through the same publisher immediately,
+      // proving the one-shot failure arm, writer, spill, and source owner were
+      // all cleared by the rejected statement.
+      exec_sql(ctx,
+               "SET bioseq.aligner.minimizer_algorithm='paper_nthash_simd';");
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT bioseq.update_index('{}'::regclass,'{}');",
+          route.table, route.index_name)) == 1);
+      REQUIRE(index_table_row_count(ctx, route.index_name, route.table) > 0);
+      REQUIRE(query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();") == admission_before);
+    }
+  }
+}
 #endif
 
 TEST_CASE(
@@ -4195,6 +4279,59 @@ TEST_CASE("ExactSimd update_index accepts DNA5 without scalar fallback",
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table)) == 1);
+}
+
+TEST_CASE("DOC0377 Paper update_index maps checked DNA5 rejection to 0A000",
+          "[index_admin][doc0377][paper][dna5][sqlstate][error]") {
+    struct FailureRoute {
+        std::string_view table;
+        std::string_view index_name;
+        std::string_view operation;
+    };
+    constexpr std::array<FailureRoute, 2> routes{{
+        {"doc0377_paper_grouped_mpf", "minimizers_per_fragment",
+         "grouped minimizer generation preflight"},
+        {"doc0377_paper_grouped_mps", "minimizers_per_sequence",
+         "grouped minimizer generation preflight"},
+    }};
+
+    for (const FailureRoute& route : routes) {
+        DYNAMIC_SECTION("grouped " << route.index_name) {
+            auto ctx = fresh_context({route.table});
+            exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+            exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+            exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+            exec_sql(ctx,
+                "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+            exec_sql(ctx,
+                "SET bioseq.aligner.minimizer_algorithm = 'paper_nthash_simd';");
+            exec_sqlf(ctx,
+                "CREATE TABLE {} "
+                "(id int, seq bioseq.seq('dna5', 64)) USING bioseq;",
+                route.table);
+            exec_sqlf(ctx,
+                "INSERT INTO {} VALUES "
+                "(1, (repeat('ACGTN', 13113) || 'A')::"
+                "bioseq.seq('dna5', 64));",
+                route.table);
+
+            // This source is locator-backed and long enough to enter the
+            // selected Paper producer. In particular, grouped MPS used to
+            // erase unsupported_alphabet into compatibility_mismatch and
+            // report XX001 from the publication encoder.
+            REQUIRE(only_column_row_number(ctx, route.table) > 0);
+            const auto rejected = sql_error(ctx, fmt::format(
+                "SELECT bioseq.update_index('{}'::regclass, '{}');",
+                route.table, route.index_name));
+            REQUIRE(rejected.sqlstate == "0A000");
+            REQUIRE(rejected.contains("Paper ntHash SIMD"));
+            REQUIRE(rejected.contains("status=unsupported_alphabet"));
+            REQUIRE(rejected.contains(route.operation));
+            REQUIRE(index_table_row_count(
+                ctx, route.index_name, route.table) == 0);
+            REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        }
+    }
 }
 #endif
 

@@ -715,6 +715,43 @@ collect_packed_paper_nthash_index_erased(
         return rejected_packed_paper_nthash_index_result(
             PackedPaperNthashIndexStatus::unsupported_alphabet);
     }
+    if (request.sequence_context_is_resident_descriptor) {
+        using facade = bioseq::storage::basic_lazy_sequence_view<seq::dna4>;
+        if (request.sequence_context == nullptr
+            || request.collector_context == nullptr
+            || request.storage_unit_bytes != sizeof(std::uint32_t)
+            || request.letters_per_unit != 16u) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::unsupported_storage);
+        }
+        const auto& descriptor = *static_cast<
+            const facade::resident_packed_region*>(request.sequence_context);
+        if (descriptor.units == nullptr || descriptor.unit_count == 0u
+            || descriptor.unit_count != request.storage_units
+            || descriptor.bp_length != request.local_bp_size
+            || descriptor.storage_unit_byte_width != sizeof(std::uint32_t)
+            || descriptor.bits_per_symbol != 2u
+            || descriptor.leading_symbol_offset != 0u
+            || descriptor.bit_order
+                != facade::packed_bit_order::least_significant_symbol_first) {
+            return rejected_packed_paper_nthash_index_result(
+                PackedPaperNthashIndexStatus::invalid_range);
+        }
+        auto& collector = *static_cast<
+            bioseq::simd::HWY_NAMESPACE::sketch_collector*>(
+                request.collector_context);
+        const auto result = bioseq::simd::HWY_NAMESPACE::
+            collect_minimizers_packed_paper_nthash_resident_descriptor_checked<
+                15u,
+                10u,
+                bioseq::simd::HWY_NAMESPACE::MinimapSketchData,
+                seq::dna4>(
+                    collector, descriptor);
+        return {
+            .status = bridge_paper_status(result.status),
+            .proof = bridge_paper_proof(result.proof),
+        };
+    }
     switch (request.storage_unit_bytes) {
         case sizeof(std::uint32_t):
             return collect_paper_storage_resident_impl<std::uint32_t>(request);

@@ -553,9 +553,11 @@ TEST_CASE("scalar MPS build proof aggregates deterministically across workers",
     CHECK(serial.scalar_collection_calls > 1);
     CHECK(serial.input_symbols >= range.bp_size());
     CHECK(serial.input_bytes
-        == serial.input_storage_units * sizeof(std::uint64_t));
+        == serial.input_storage_units
+            * serial.source_storage_unit_bytes);
     CHECK(serial.input_symbols
-        <= serial.input_storage_units * range_t::traits::letters_per_unit);
+        <= serial.input_storage_units
+            * serial.letters_per_storage_unit);
 }
 
 TEST_CASE("ExactSimd MPS collection accepts fragmented DNA5 with N resets",
@@ -651,8 +653,9 @@ TEST_CASE("persisted minimizer indexes built with Vulkan cover scalar lookups",
             storage_unit,
             bioseq::storage::SCANNER_SEQUENCE_FRAGMENT_SIZE_ALIGNMENT>;
     using lazy_t = lazy_compact_sequence<config_t, scanner_t>;
-    constexpr std::size_t frag_bp =
-        scanner_t::fragment_storage_units * cfg_range_t::traits::letters_per_unit;
+    // Persisted MPF owns canonical 32 KiBP logical fragments; scanner chunk
+    // width is an input-access detail and must not drive assembly geometry.
+    constexpr std::size_t frag_bp = 32'768u;
 
     cfg_range_t target = make_deterministic_test_range<config_t>(8u << 20);
     lazy_t lazy_scalar{scanner_t::from_range(target)};

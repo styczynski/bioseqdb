@@ -28,6 +28,7 @@ module;
 #include <algorithm>
 #include <atomic>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -660,8 +661,12 @@ template <sequence_alphabet Alphabet> struct borrowed_u32_instance {
   static constexpr bool is_valid_compact_sequence_stdc_instance = true;
 };
 
+/// Construct a typed u32 range only when the descriptor is backed by a real
+/// u32 object array (native resident storage or admitted u32 materialization).
+/// Reinterpreted byte descriptors are routed through byte_upload_range below
+/// and must never reach this function.
 template <sequence_alphabet Alphabet, class Fn>
-decltype(auto) with_borrowed_u32_range(
+decltype(auto) with_typed_u32_range(
     const typename bioseq::storage::basic_lazy_sequence_view<
         Alphabet>::resident_packed_region &descriptor,
     Fn &&fn) {
@@ -673,9 +678,84 @@ decltype(auto) with_borrowed_u32_range(
       .storage_unit_byte_width = descriptor.storage_unit_byte_width,
       .padding_letters = descriptor.trailing_padding_letters,
   };
-  range_type range{header};
+    range_type range{header};
   return std::forward<Fn>(fn)(range);
 }
+
+/// Unit iterator for a packed upload whose backing allocation has a different
+/// effective type.  Arithmetic is performed exclusively on object-
+/// representation bytes while each iterator step still means one logical u32
+/// packed unit to the Vulkan geometry code.
+template <std::size_t UnitBytes>
+struct byte_packed_unit_iterator {
+  const std::byte *address = nullptr;
+
+  byte_packed_unit_iterator &operator+=(std::size_t units) noexcept {
+    if (units != 0u) {
+      DEBUG_ASSERT(address != nullptr,
+                   "nonempty byte upload iterator requires backing bytes");
+      address += units * UnitBytes;
+    }
+    return *this;
+  }
+
+  friend byte_packed_unit_iterator operator+(
+      byte_packed_unit_iterator it, std::size_t units) noexcept {
+    it += units;
+    return it;
+  }
+
+  friend bool operator==(const byte_packed_unit_iterator &,
+                         const byte_packed_unit_iterator &) = default;
+};
+
+/// Upload-only sequence surface for a layout-compatible packed byte region.
+/// It deliberately has no dereference or `operator[]`: callers can derive
+/// byte addresses and biological/unit geometry, but cannot form a typed u32
+/// load from the u64-backed allocation.
+template <sequence_alphabet Alphabet>
+class byte_upload_range {
+public:
+  using instance = borrowed_u32_instance<Alphabet>;
+  using traits = typename compact_sequence_range<instance>::traits;
+  using iterator = byte_packed_unit_iterator<sizeof(std::uint32_t)>;
+  static constexpr bool is_byte_addressed_upload_only = true;
+
+private:
+  using descriptor_type = typename bioseq::storage::basic_lazy_sequence_view<
+      Alphabet>::resident_packed_region;
+  descriptor_type descriptor_{};
+
+public:
+  explicit byte_upload_range(const descriptor_type &descriptor) noexcept
+      : descriptor_(descriptor) {
+    DEBUG_ASSERT(
+        descriptor.storage_unit_byte_width == sizeof(std::uint32_t),
+        "byte-addressed Vulkan range requires canonical u32 geometry");
+  }
+
+  [[nodiscard]] std::size_t size() const noexcept {
+    return descriptor_.unit_count;
+  }
+  [[nodiscard]] std::size_t byte_size() const noexcept {
+    return descriptor_.unit_count * sizeof(std::uint32_t);
+  }
+  [[nodiscard]] std::size_t bp_size() const noexcept {
+    return static_cast<std::size_t>(descriptor_.bp_length);
+  }
+  [[nodiscard]] std::size_t padding() const noexcept {
+    return descriptor_.trailing_padding_letters;
+  }
+  [[nodiscard]] iterator cbegin() const noexcept {
+    return iterator{static_cast<const std::byte *>(descriptor_.units)};
+  }
+  [[nodiscard]] iterator cend() const noexcept {
+    return cbegin() + size();
+  }
+  [[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {
+    return it.address;
+  }
+};
 
 template <sequence_alphabet Alphabet> struct canonical_u32_window {
   using owner_type = bioseq::storage::admitted_packed_region<Alphabet>;
@@ -684,6 +764,8 @@ template <sequence_alphabet Alphabet> struct canonical_u32_window {
 
   std::optional<owner_type> owner;
   descriptor_type descriptor{};
+  bioseq::storage::sequence_resident_borrow_kind borrow_kind{
+      bioseq::storage::sequence_resident_borrow_kind::none};
 #ifdef BIOSEQ_TEST_INDEXES
   bool test_admitted_window_tracked = false;
 #endif
@@ -699,8 +781,18 @@ template <sequence_alphabet Alphabet> struct canonical_u32_window {
   {
   }
 
+  explicit canonical_u32_window(
+      const descriptor_type &borrowed,
+      bioseq::storage::sequence_resident_borrow_kind kind) noexcept
+      : descriptor(borrowed), borrow_kind(kind) {
+    DEBUG_ASSERT(
+        kind != bioseq::storage::sequence_resident_borrow_kind::none,
+        "borrowed Vulkan canonical window requires a truthful borrow kind");
+  }
+
   canonical_u32_window(canonical_u32_window &&other) noexcept
-      : owner(std::move(other.owner)), descriptor(other.descriptor)
+      : owner(std::move(other.owner)), descriptor(other.descriptor),
+        borrow_kind(other.borrow_kind)
 #ifdef BIOSEQ_TEST_INDEXES
         ,
         test_admitted_window_tracked(
@@ -718,6 +810,30 @@ template <sequence_alphabet Alphabet> struct canonical_u32_window {
   canonical_u32_window &operator=(const canonical_u32_window &) = delete;
 };
 
+/// Visit canonical Vulkan input without ever representing an effective-type
+/// reinterpretation as a typed range.  Native/admitted u32 storage retains the
+/// established compact range.  A u64-backed byte-layout borrow instead gets a
+/// non-dereferenceable byte_upload_range whose unit stepping is std::byte
+/// arithmetic.
+template <sequence_alphabet Alphabet, class Fn>
+decltype(auto) with_canonical_u32_upload_source(
+    const canonical_u32_window<Alphabet> &window, Fn &&fn) {
+  if (window.borrow_kind
+      == bioseq::storage::sequence_resident_borrow_kind::
+          reinterpreted_bytes) {
+    byte_upload_range<Alphabet> bytes{window.descriptor};
+    return std::forward<Fn>(fn)(bytes);
+  }
+  DEBUG_ASSERT(
+      window.owner.has_value()
+          || window.borrow_kind
+              == bioseq::storage::sequence_resident_borrow_kind::
+                  native_typed_storage,
+      "typed Vulkan range requires native or admitted u32 storage");
+  return with_typed_u32_range<Alphabet>(
+      window.descriptor, std::forward<Fn>(fn));
+}
+
 template <sequence_alphabet Alphabet>
 [[nodiscard]] std::optional<canonical_u32_window<Alphabet>>
 prepare_canonical_u32_window(
@@ -734,16 +850,26 @@ prepare_canonical_u32_window(
   const auto access = bioseq::storage::plan_sequence_access(
       sequence,
       bioseq::storage::sequence_access_requirement::contiguous_resident, from,
-      to, sizeof(std::uint32_t));
-  const std::uint64_t admission_bytes =
-      access.route == bioseq::storage::sequence_access_route::borrow_resident
-          ? bioseq::storage::packed_region_admission_bytes<Alphabet>(
-                to - from, sizeof(std::uint32_t))
-          : access.admission_bytes;
+      to, sizeof(std::uint32_t),
+      bioseq::storage::sequence_resident_borrow_policy::
+          byte_upload_compatible);
+  if (access.route
+          == bioseq::storage::sequence_access_route::borrow_resident
+      && access.resident.has_value()) {
+    // All facade Vulkan entry points below use the range only to derive byte
+    // addresses and upload its object representation; they never load a
+    // requested-width storage unit on the CPU.  They also complete upload,
+    // submission, fence drain, and result delivery before returning.  A
+    // validated stable native descriptor or cross-width byte descriptor can
+    // therefore be borrowed for that synchronous interval without an
+    // admitted O(n) repack/copy.
+    return std::optional<canonical_u32_window<Alphabet>>{
+        std::in_place, *access.resident, access.resident_borrow_kind};
+  }
   bioseq::parallelism::MemoryAdmissionFailure failure{};
   auto permit =
       bioseq::parallelism::MemoryAdmissionController::instance().try_reserve(
-          admission_bytes, &failure);
+          access.admission_bytes, &failure);
   if (!permit) {
     if (decline_out != nullptr) {
       decline_out->reason = VulkanSketchDeclineReason::memory_admission_denied;
@@ -1099,22 +1225,29 @@ template <class MinimizerT, class Seq>
 // BIOSEQ_DOC0377_PRIVATE_PACKED_END phase_c_segment_windows
 
 // BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_upload_view_from_window
-template <class Seq, class StorageUnit>
+template <class Seq, class AddressedElement>
 [[nodiscard]] inline SequenceUploadView make_upload_view_from_window(
     const Seq&,
-    const StorageUnit* base,
+    const AddressedElement* base,
     const SegmentUploadDescriptor& descriptor)
 {
     using traits = typename std::remove_cvref_t<Seq>::traits;
+    using logical_storage_unit = typename traits::storage_unit;
+    static_assert(
+        std::same_as<std::remove_cv_t<AddressedElement>, logical_storage_unit>
+        || std::same_as<std::remove_cv_t<AddressedElement>, std::byte>
+        || std::same_as<std::remove_cv_t<AddressedElement>, unsigned char>,
+        "Vulkan uploads accept native storage pointers or byte addresses");
     const std::uint64_t byte_size =
         static_cast<std::uint64_t>(descriptor.hi_unit - descriptor.lo_unit)
-        * static_cast<std::uint64_t>(sizeof(StorageUnit));
+        * static_cast<std::uint64_t>(sizeof(logical_storage_unit));
     return SequenceUploadView{
         .bytes = byte_size == 0u ? nullptr : static_cast<const void*>(base),
         .byte_size = byte_size,
         .padded_byte_size = round_up4(byte_size),
         .bp_size = descriptor.window_bp,
-        .unit_bits = static_cast<std::uint32_t>(sizeof(StorageUnit) * 8u),
+        .unit_bits = static_cast<std::uint32_t>(
+            sizeof(logical_storage_unit) * 8u),
         .bits_per_char = static_cast<std::uint32_t>(traits::bits_per_char),
         .letters_per_unit = static_cast<std::uint32_t>(traits::letters_per_unit),
         .alphabet_size = static_cast<std::uint32_t>(traits::alphabet_size),
@@ -1128,10 +1261,8 @@ template <class Seq, class StorageUnit>
 // BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN make_sequence_upload_view
 template <vulkan_sketchable_sequence Seq>
 [[nodiscard]] inline SequenceUploadView make_sequence_upload_view(const Seq& seq) {
-    using traits = typename std::remove_cvref_t<Seq>::traits;
-    using storage_unit = typename traits::storage_unit;
     auto begin = seq.cbegin();
-    const storage_unit* ptr =
+    const auto* ptr =
         seq.byte_size() == 0 ? nullptr : seq.read_cptr(begin);
     const SegmentUploadDescriptor descriptor{
         .lo_unit = 0,
@@ -3565,7 +3696,7 @@ collect_sorted_minimizer_pairs_vulkan_segment_resident_impl_or_throw(
                 auto begin_iter = seq.cbegin();
                 begin_iter += static_cast<bioseq::storage::sequence_size_t>(
                     sub_descriptor.lo_unit);
-                const storage_unit* base = seq.read_cptr(begin_iter);
+                const auto* base = seq.read_cptr(begin_iter);
                 const SequenceUploadView upload =
                     make_upload_view_from_window<bare>(seq, base, sub_descriptor);
                 const std::uint64_t max_minimizers =
@@ -3917,8 +4048,8 @@ collect_minimizers_vulkan_result(
     if (!window) {
         return std::nullopt;
     }
-    return admitted_sequence_detail::with_borrowed_u32_range<Alphabet>(
-        window->descriptor,
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
         [window_size, kmer_size, decline_out, host_ownership_route]
         <class Range>(Range& resident) {
             return collect_minimizers_vulkan_result_resident_impl<MinimizerT>(
@@ -3971,8 +4102,8 @@ template <class MinimizerT, sequence_alphabet Alphabet>
     if (!window) {
         return std::nullopt;
     }
-    return admitted_sequence_detail::with_borrowed_u32_range<Alphabet>(
-        window->descriptor,
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
         [window_size, kmer_size, query_gate, decline_out]
         <class Range>(Range& resident) {
             return build_gpu_index_on_device_resident_impl<MinimizerT>(
@@ -4010,8 +4141,8 @@ template <class MinimizerT, sequence_alphabet Alphabet>
     if (!window) {
         return std::nullopt;
     }
-    return admitted_sequence_detail::with_borrowed_u32_range<Alphabet>(
-        window->descriptor,
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
         [window_size, kmer_size, query_gate, decline_out]
         <class Range>(Range& resident) {
             return build_gpu_segment_index_on_device_resident_impl<MinimizerT>(
@@ -4051,8 +4182,8 @@ void collect_minimizers_vulkan_segment_or_throw(
         throw_vulkan_strict_decline(
             "Vulkan segment minimizer sketch", decline);
     }
-    admitted_sequence_detail::with_borrowed_u32_range<Alphabet>(
-        window->descriptor,
+    admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
         [&collector, window_size, kmer_size, query_gate]
         <class Range>(Range& resident) {
             collect_minimizers_vulkan_segment_resident_impl_or_throw<MinimizerT>(
@@ -4095,8 +4226,8 @@ collect_sorted_minimizer_pairs_vulkan_segment_or_throw(
         throw_vulkan_strict_decline(
             "Vulkan segment minimizer pair path", decline);
     }
-    return admitted_sequence_detail::with_borrowed_u32_range<Alphabet>(
-        window->descriptor,
+    return admitted_sequence_detail::with_canonical_u32_upload_source<Alphabet>(
+        *window,
         [emit_base_bp, core_lo_bp, core_hi_bp, window_size, kmer_size,
          execution_proof_out]
         <class Range>(Range& resident) {

@@ -4192,7 +4192,7 @@ inline void release_pg_sequence_source_routes_noexcept(
     PG_END_TRY();
     const auto* destination_entries =
         pg_sequence_source_routes_data(destination);
-    return domain.refcount_fault
+    const bool overflow_and_merge_contract = domain.refcount_fault
         && domain.lifecycle == sequence_source_detail::domain_lifecycle::faulted
         && merge_rejected && overflow.lease_fault
         && !overflow.accepting_lookups
@@ -4201,6 +4201,187 @@ inline void release_pg_sequence_source_routes_noexcept(
         && destination_entries[0].lease.owned
         && retained.active_leases == 1u
         && added.active_leases == 1u;
+    if (!overflow_and_merge_contract
+        || sequence_source_detail::registries != nullptr
+        || sequence_source_detail::providers != nullptr
+        || !ActiveSnapshotSet()
+        || GetActiveSnapshot() == nullptr
+        || !IsMVCCSnapshot(GetActiveSnapshot())) {
+        return false;
+    }
+
+    /* Build one real, readable source control, retain it exactly as a piece
+     * tree leaf does, and drive the production transaction cleanup callback.
+     * The registry token is dropped by cleanup while the retained control
+     * survives with refcount one, so the subsequent read reaches the exact
+     * transaction-ended guard rather than a test-only approximation. */
+    const auto counters_before_xact_end =
+        sequence_source_detail::collect_pg_sequence_source_debug_counters();
+    MemoryContext saved_context = CurrentMemoryContext;
+    pg_sequence_source_registry* volatile pending_registry = nullptr;
+    pg_sequence_source_registry* volatile live_registry = nullptr;
+    sequence_source_detail::pg_sequence_source_domain*
+        volatile retained_domain = nullptr;
+    volatile bool retained_reference_owned = false;
+    volatile bool readable_before_cleanup = false;
+    volatile bool cleanup_completed = false;
+    volatile bool setup_or_cleanup_failed = false;
+    PG_TRY();
+    {
+        sequence_source_detail::ensure_callbacks_registered();
+        auto* registry = static_cast<pg_sequence_source_registry*>(
+            MemoryContextAllocZero(
+                TopMemoryContext, sizeof(pg_sequence_source_registry)));
+        ::new (static_cast<void*>(registry)) pg_sequence_source_registry{};
+        pending_registry = registry;
+        registry->backend_thread =
+            pg_sequence_backend_thread_token::capture();
+        registry->binding_generation =
+            sequence_source_detail::allocate_generation();
+        registry->authoritative_snapshot = GetActiveSnapshot();
+        registry->creating_subid = GetCurrentSubTransactionId();
+        registry->generation =
+            sequence_source_detail::allocate_generation();
+        registry->accepting_lookups = true;
+        registry->next = sequence_source_detail::registries;
+        sequence_source_detail::registries = registry;
+        live_registry = registry;
+        pending_registry = nullptr;
+        ++g_pg_sequence_source_debug_counters.registries_created;
+
+        auto* source_domain = sequence_source_detail::create_domain(
+            *registry, static_cast<AttrNumber>(1),
+            compact_sequence_stdc_type_params{});
+        retained_domain = source_domain;
+        readable_before_cleanup =
+            sequence_source_detail::domain_is_readable(*source_domain);
+        sequence_source_detail::retain_domain(source_domain);
+        retained_reference_owned = true;
+
+        sequence_source_detail::xact_callback(
+            XACT_EVENT_PRE_COMMIT, nullptr);
+        live_registry = nullptr;
+        cleanup_completed = sequence_source_detail::registries == nullptr
+            && source_domain->lifecycle
+                == sequence_source_detail::domain_lifecycle::invalid
+            && source_domain->refcount == 1u
+            && !source_domain->registry_token_owned
+            && source_domain->registry == nullptr;
+    }
+    PG_CATCH();
+    {
+        MemoryContextSwitchTo(saved_context);
+        FlushErrorState();
+        setup_or_cleanup_failed = true;
+        auto* registry = const_cast<pg_sequence_source_registry*>(
+            live_registry);
+        if (registry != nullptr) {
+            sequence_source_detail::abort_registry_at_xact_noerror(
+                *registry);
+            live_registry = nullptr;
+        }
+        auto* pending = const_cast<pg_sequence_source_registry*>(
+            pending_registry);
+        if (pending != nullptr) {
+            pending->backend_thread.~pg_sequence_backend_thread_token();
+            pfree(pending);
+            pending_registry = nullptr;
+        }
+    }
+    PG_END_TRY();
+    MemoryContextSwitchTo(saved_context);
+
+    volatile bool exact_transaction_end_error = false;
+    if (!setup_or_cleanup_failed && cleanup_completed
+        && readable_before_cleanup) {
+        pg_sequence_read_session session{};
+        session.backend_thread =
+            pg_sequence_backend_thread_token::capture();
+        PG_TRY();
+        {
+            (void)sequence_source_detail::read_domain_ranks_on_backend(
+                const_cast<
+                    sequence_source_detail::pg_sequence_source_domain*>(
+                        retained_domain),
+                session, seq_locator{},
+                compact_sequence_stdc_type_params{},
+                sequence_transform::identity, 0u,
+                std::span<std::uint8_t>{});
+        }
+        PG_CATCH();
+        {
+            MemoryContextSwitchTo(saved_context);
+            ErrorData* error = CopyErrorData();
+            exact_transaction_end_error = error != nullptr
+                && error->sqlerrcode
+                    == ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE
+                && error->message != nullptr
+                && std::strcmp(
+                    error->message,
+                    "bioseq source transaction has ended") == 0;
+            FlushErrorState();
+            if (error != nullptr) FreeErrorData(error);
+        }
+        PG_END_TRY();
+        MemoryContextSwitchTo(saved_context);
+    }
+
+    auto* source_domain = const_cast<
+        sequence_source_detail::pg_sequence_source_domain*>(
+            retained_domain);
+    if (retained_reference_owned && source_domain != nullptr) {
+        sequence_source_detail::release_domain(source_domain);
+        retained_reference_owned = false;
+        retained_domain = nullptr;
+    }
+    const auto counters_after_xact_end =
+        sequence_source_detail::collect_pg_sequence_source_debug_counters();
+    return !setup_or_cleanup_failed && readable_before_cleanup
+        && cleanup_completed && exact_transaction_end_error
+        && counters_after_xact_end.registries_created
+            == counters_before_xact_end.registries_created + 1u
+        && counters_after_xact_end.registries_destroyed
+            == counters_before_xact_end.registries_destroyed + 1u
+        && counters_after_xact_end.domains_created
+            == counters_before_xact_end.domains_created + 1u
+        && counters_after_xact_end.domains_destroyed
+            == counters_before_xact_end.domains_destroyed + 1u
+        && counters_after_xact_end.cache_sets_created
+            == counters_before_xact_end.cache_sets_created + 1u
+        && counters_after_xact_end.cache_sets_destroyed
+            == counters_before_xact_end.cache_sets_destroyed + 1u
+        && counters_after_xact_end.snapshots_registered
+            == counters_before_xact_end.snapshots_registered + 1u
+        && counters_after_xact_end.snapshots_unregistered
+            == counters_before_xact_end.snapshots_unregistered + 1u
+        && counters_after_xact_end.cleanup_commit
+            == counters_before_xact_end.cleanup_commit + 1u
+        && counters_after_xact_end.release_before_locks
+            == counters_before_xact_end.release_before_locks + 1u
+        && counters_after_xact_end.release_locks
+            == counters_before_xact_end.release_locks + 1u
+        && counters_after_xact_end.release_after_locks
+            == counters_before_xact_end.release_after_locks + 1u
+        && counters_after_xact_end.refcount_faults
+            == counters_before_xact_end.refcount_faults
+        && counters_after_xact_end.lease_faults
+            == counters_before_xact_end.lease_faults
+        && counters_after_xact_end.leases_acquired
+            == counters_before_xact_end.leases_acquired
+        && counters_after_xact_end.leases_released
+            == counters_before_xact_end.leases_released
+        && counters_after_xact_end.live_registries
+            == counters_before_xact_end.live_registries
+        && counters_after_xact_end.live_providers
+            == counters_before_xact_end.live_providers
+        && counters_after_xact_end.live_domains
+            == counters_before_xact_end.live_domains
+        && counters_after_xact_end.live_leases
+            == counters_before_xact_end.live_leases
+        && counters_after_xact_end.live_cache_sets
+            == counters_before_xact_end.live_cache_sets
+        && counters_after_xact_end.live_snapshots
+            == counters_before_xact_end.live_snapshots;
 }
 
 /** Prove that self-join aliases retain independent exact routes while the

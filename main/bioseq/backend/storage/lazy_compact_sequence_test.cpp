@@ -1365,6 +1365,8 @@ TEST_CASE("DOC0377 — streaming consumers never probe poison resident storage",
         4u);
     REQUIRE(resident.route
             == bioseq::storage::sequence_access_route::materialize_admitted);
+    /* Typed CPU planning probes only canonical u32 storage.  It must not ask
+     * for an aliasing u64 byte view; admitted fallback does not re-probe. */
     REQUIRE(state.resident_probe_count == 1u);
     auto& admission = bioseq::parallelism::MemoryAdmissionController::instance();
     const std::uint64_t reserved_before = admission.reserved_bytes();

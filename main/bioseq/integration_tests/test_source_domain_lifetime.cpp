@@ -968,6 +968,34 @@ TEST_CASE("DOC0377 LIMIT Portal cancellation and xact release phases quiesce exa
     REQUIRE(query_scalar_int(worker, "SELECT 1;") == 1);
 }
 
+TEST_CASE("DOC0377 retained source control fails closed after transaction end",
+          "[seq][slice][source-domain][lifetime][xact-end][error]") {
+    auto ctx = fresh_context();
+    reset_source_counters(ctx);
+
+    /* The existing native probe retains a real source-domain control across
+     * the production PRE_COMMIT cleanup callback, then accepts success only
+     * after the production read guard reports SQLSTATE 55000 and the exact
+     * transaction-ended diagnostic. */
+    REQUIRE(query_scalar(ctx,
+        "SELECT bioseq_internal.sequence_source_fault_contract_probe();")
+        == "t");
+    REQUIRE(source_counter(ctx, "refcount_faults") == 1);
+    REQUIRE(source_counter(ctx, "lease_faults") == 1);
+    REQUIRE(source_counter(ctx, "registries_created") == 1);
+    REQUIRE(source_counter(ctx, "registries_destroyed") == 1);
+    REQUIRE(source_counter(ctx, "domains_created") == 1);
+    REQUIRE(source_counter(ctx, "domains_destroyed") == 1);
+    REQUIRE(source_counter(ctx, "cleanup_commit") == 1);
+    REQUIRE(source_counter(ctx, "cleanup_abort") == 0);
+    REQUIRE(source_counter(ctx, "release_before_locks") == 1);
+    REQUIRE(source_counter(ctx, "release_locks") == 1);
+    REQUIRE(source_counter(ctx, "release_after_locks") == 1);
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+}
+
 TEST_CASE("DOC0377 nested BatchJoin SliceProject shares and releases source routes",
           "[seq][slice][source-domain][batch-join][route][limit]") {
     constexpr std::string_view target = "doc0377_source_batch_target";
@@ -1195,6 +1223,173 @@ TEST_CASE("DOC0377 materialized spill aggregate COPY generated and parallel rout
         REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
         require_source_resources_balanced(ctx);
     }
+}
+
+TEST_CASE("DOC0377 ordinary CTAS owns transformed source values",
+          "[seq][slice][source-domain][ctas][materialization]") {
+    constexpr std::string_view source = "doc0377_source_ctas_input";
+    constexpr std::string_view destination = "doc0377_source_ctas_output";
+    auto ctx = fresh_context({destination, source});
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "CREATE TABLE doc0377_source_ctas_input "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO doc0377_source_ctas_input VALUES "
+        " (7, repeat('ACGT',4096)::bioseq.seq('dna4',32));");
+
+    constexpr auto ctas_sql =
+        "CREATE TABLE doc0377_source_ctas_output USING heap AS "
+        "SELECT id, "
+        " (s[4093:4101] OPERATOR(bioseq.||) "
+        "  bioseq.reverse(s[8190:8194]))::bioseq.seq('dna4',32) "
+        "  AS fragment "
+        "FROM doc0377_source_ctas_input WHERE id=7;";
+    reset_source_counters(ctx);
+    exec_sql(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(0);");
+    const auto ctas_plan = explain_text<true>(ctx, ctas_sql);
+    REQUIRE(plan_contains(
+        ctas_plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE(plan_contains(ctas_plan, "Slice Materialization:"));
+    /* CTAS is planned as CMD_SELECT, so its declared result-datum boundaries
+     * are the two client serialization formats.  The CTAS receiver invokes
+     * neither; core heap ownership performs exactly one packed-full executor
+     * copy instead.  Keep both halves exact so a client-output detour or a
+     * second payload copy cannot masquerade as durable ownership. */
+    REQUIRE(plan_line_count(ctas_plan, "Mechanism: text") == 1u);
+    REQUIRE(plan_line_count(ctas_plan, "Mechanism: binary") == 1u);
+    REQUIRE(plan_line_count(ctas_plan, "Reason: client output") == 2u);
+    REQUIRE(source_boundary_actual_calls(
+        ctas_plan, "text", "client output") == 0u);
+    REQUIRE(source_boundary_actual_calls(
+        ctas_plan, "binary", "client output") == 0u);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(1);") == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(2);") == 1);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(3);") == 0);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT bioseq_internal.slice_payload_allocation_probe(4);") == 0);
+    REQUIRE(source_counter(ctx, "domains_created") >= 1);
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+
+    /* The durable heap tuple must no longer depend on the provider, relation,
+     * statement registry, or snapshot that produced the lazy expression. */
+    exec_sql(ctx, "DROP TABLE doc0377_source_ctas_input;");
+    reset_source_counters(ctx);
+    const auto durable = query_one(ctx,
+        "SELECT bioseq.len(fragment)::text, "
+        "       bioseq.to_text(fragment), "
+        "       encode(bioseq.seq_send(fragment),'hex'), "
+        "       encode(bioseq.seq_send("
+        "         'CGTACGTACATG'::bioseq.seq('dna4',32)),'hex') "
+        "FROM doc0377_source_ctas_output WHERE id=7;");
+    REQUIRE(durable.size() == 4u);
+    REQUIRE(durable[0] == "12");
+    REQUIRE(durable[1] == "CGTACGTACATG");
+    REQUIRE(durable[2].has_value());
+    REQUIRE(durable[2] == durable[3]);
+    REQUIRE(source_counter(ctx, "domains_created") == 0);
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+}
+
+TEST_CASE("DOC0377 caught late binding errors release sliced source ownership",
+          "[seq][slice][cast][concat][source-domain][error-atomic][admission]") {
+    constexpr std::string_view table = "doc0377_source_error_atomic";
+    auto ctx = fresh_context({table});
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "CREATE TABLE doc0377_source_error_atomic "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;"
+        "INSERT INTO doc0377_source_error_atomic VALUES "
+        " (1, repeat('ACGT',4096)::bioseq.seq('dna4',32));"
+        "CREATE FUNCTION pg_temp.doc0377_source_runtime_text(value text) "
+        "RETURNS text LANGUAGE plpgsql VOLATILE STRICT AS $$ "
+        "BEGIN RETURN value; END $$;");
+
+    /* Expression evaluation opens the source-backed left edge before the
+     * volatile RHS conversion.  The level-0 public profile's runtime input
+     * parser rejects N while constructing the intermediate unbound sequence.
+     * Richer profiles admit DNA5, then resolve_concat_type rejects the bound
+     * DNA4/DNA5 pair before literal-ledger construction.  The exact
+     * source-domain counts below prove that neither error happened before the
+     * provider-backed left edge was opened. */
+#if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    constexpr std::string_view late_rhs =
+        "pg_temp.doc0377_source_runtime_text('N')"
+        "::bioseq.seq('dna4',32)";
+    constexpr std::string_view expected_sqlstate = "22P02";
+    constexpr std::string_view expected_message =
+        "invalid symbol at byte 0 in unbound bioseq.seq";
+    constexpr std::string_view expected_condition =
+        "invalid_text_representation";
+#else
+    constexpr std::string_view late_rhs =
+        "pg_temp.doc0377_source_runtime_text('N')"
+        "::bioseq.seq('dna5',32)";
+    constexpr std::string_view expected_sqlstate = "42804";
+    constexpr std::string_view expected_message =
+        "cannot concatenate bioseq alphabets dna4 and dna5";
+    constexpr std::string_view expected_condition = "datatype_mismatch";
+#endif
+    const auto late_error_query = fmt::format(
+        "SELECT sliced OPERATOR(bioseq.||) "
+        "       {} "
+        "FROM ("
+        " SELECT s[17:49] AS sliced "
+        " FROM doc0377_source_error_atomic WHERE id=1 OFFSET 0"
+        ") AS source_row;",
+        late_rhs);
+    const auto planned = explain_text<false>(ctx, late_error_query);
+    REQUIRE(plan_contains(
+        planned, "Custom Scan (BioseqSliceProject)"));
+
+    reset_source_counters(ctx);
+    const auto preflight = sql_error(ctx, late_error_query);
+    REQUIRE(preflight.sqlstate == expected_sqlstate);
+    REQUIRE(preflight.contains(expected_message));
+    REQUIRE(source_counter(ctx, "domains_created") == 1);
+    REQUIRE(source_counter(ctx, "domains_destroyed") == 1);
+    require_source_resources_balanced(ctx);
+
+    const auto admission_baseline = query_scalar_int(ctx,
+        "SELECT index_memory_reserved_bytes "
+        "FROM bioseq.scheduler_stats();");
+    reset_source_counters(ctx);
+    exec_sql(ctx, fmt::format(
+        "DO $doc0377$ "
+        "DECLARE iteration integer; "
+        "BEGIN "
+        "  FOR iteration IN 1..32 LOOP "
+        "    BEGIN "
+        "      PERFORM sliced OPERATOR(bioseq.||) "
+        "              {} "
+        "      FROM ("
+        "       SELECT s[17:49] AS sliced "
+        "       FROM doc0377_source_error_atomic WHERE id=1 OFFSET 0"
+        "      ) AS source_row; "
+        "      RAISE EXCEPTION 'expected late sequence binding error'; "
+        "    EXCEPTION WHEN {} THEN "
+        "      NULL; "
+        "    END; "
+        "  END LOOP; "
+        "END $doc0377$;",
+        late_rhs, expected_condition));
+
+    REQUIRE(source_counter(ctx, "domains_created") == 32);
+    REQUIRE(source_counter(ctx, "domains_destroyed") == 32);
+    REQUIRE(source_counter(ctx, "refcount_faults") == 0);
+    REQUIRE(source_counter(ctx, "lease_faults") == 0);
+    REQUIRE(source_counter(ctx, "wrong_thread_rejections") == 0);
+    require_source_resources_balanced(ctx);
+    REQUIRE(query_scalar_int(ctx,
+        "SELECT index_memory_reserved_bytes "
+        "FROM bioseq.scheduler_stats();") == admission_baseline);
 }
 
 TEST_CASE("DOC0377 BSS3 keeps child resnos distinct from physical attnos",
