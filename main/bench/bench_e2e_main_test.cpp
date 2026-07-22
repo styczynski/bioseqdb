@@ -785,6 +785,37 @@ TEST_CASE("E2E input setup follows exact expanded execution tuples",
     REQUIRE_FALSE(absent.minimap2);
 }
 
+TEST_CASE("DOC0377 sliced E2E config activates the fully attested SIMD pipeline",
+          "[bench_e2e][doc0377][slice][concat][simd][config]") {
+    const auto config_path = std::filesystem::path{BIOSEQ_E2E_DATA_DIR}
+        / "bench_e2e_lazy_slice_mmsearch.json";
+    const auto config = load_e2e_contract_config(config_path);
+    const auto& data = config.at("test_cases")
+        .at("E2E_LAZY_SLICE_DNA4").at("data");
+    REQUIRE(data.at("cigar_projection").get<bool>());
+    REQUIRE(doc0377_sliced_pipeline_proof_config_valid(
+        kDoc0377SlicedNoIndexAlgorithm,
+        data.at("cigar_projection").get<bool>()));
+    REQUIRE_FALSE(doc0377_sliced_pipeline_proof_config_valid(
+        kDoc0377SlicedNoIndexAlgorithm,
+        /*cigar_projection=*/false));
+    REQUIRE(doc0377_sliced_pipeline_proof_config_valid(
+        "bioseq_block_simd_dp_two_stack_nthash_no_index",
+        /*cigar_projection=*/false));
+
+    E2eInput input{};
+    input.cigar_projection = true;
+    const std::string projection = e2e_projection_sql(input);
+    REQUIRE(projection.contains("bioseq.cigar(header) AS cigar"));
+    REQUIRE(projection.contains("bioseq.target_end(header) AS tend"));
+
+    const std::string sql = batched_transformed_coord_sql(
+        "doc0377_target", projection, 1, 4096);
+    REQUIRE(sql.contains("t.seq[4096:4112]"));
+    REQUIRE(sql.contains("OPERATOR(bioseq.||) t.seq[4112:]"));
+    REQUIRE(sql.contains("q.seq[0:]"));
+}
+
 TEST_CASE("E2E primary rows require strand and executable CIGAR replay",
           "[bench_e2e][correctness][cigar][strand]") {
     E2eInput input{};

@@ -22,6 +22,7 @@ module;
 #include <new>
 #include <map>
 #include <optional>
+#include <type_traits>
 #include <vector>
 
 
@@ -40,6 +41,7 @@ import bioseq.table.io;
 import bioseq.pg_utils;
 import bioseq.storage.indexing_pg.admin;   // DOC0279 §11.2 — index_build_on_insert
 import bioseq.storage.manager;
+import bioseq.storage.scanner_pg;
 import bioseq.table.am_cache;
 import bioseq.types.pg_compact_sequence;
 import bioseq.column.tam;   // DOC0322 §7.4 — tid_to_row_number / row_number_to_tid /
@@ -164,11 +166,15 @@ static double BioseqColumnReadRowsIntoIndex(TableScanDesc scan,
 										bool progress,
 										IndexBuildCallback indexCallback,
 										void *indexCallbackState,
-										EState *estate, ExprState *predicate);
+										EState *estate, ExprState *predicate,
+										bioseq::storage::pg_sequence_source_provider*
+											sourceProvider);
 static void BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 											 IndexInfo *indexInfo, EState *estate,
 											 ExprState *predicate,
-											 ValidateIndexState *state);
+											 ValidateIndexState *state,
+											 bioseq::storage::pg_sequence_source_provider*
+												sourceProvider);
 static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSort,
 														ItemPointer targetItemPointer);
 
@@ -185,6 +191,27 @@ static ItemPointerData TupleSortSkipSmallerItemPointers(Tuplesortstate *tupleSor
  * through the per-scan descriptor.
  */
 static bool previousCacheEnabledState = false;
+
+struct OrdinaryInsertPageCacheRestore {
+	ErrorContextCallback callback{};
+	bool previous_value{};
+	bool armed{};
+};
+
+static_assert(std::is_trivially_copyable_v<OrdinaryInsertPageCacheRestore>);
+static_assert(std::is_standard_layout_v<OrdinaryInsertPageCacheRestore>);
+
+static void
+restore_ordinary_insert_page_cache_on_error(void *argument) noexcept
+{
+	auto *restore = static_cast<OrdinaryInsertPageCacheRestore *>(argument);
+	if (geterrlevel() < ERROR || restore == nullptr || !restore->armed)
+	{
+		return;
+	}
+	bioseq_enable_page_cache = restore->previous_value;
+	restore->armed = false;
+}
 
 static TableScanDesc
 bioseq_beginscan(Relation relation, Snapshot snapshot,
@@ -1085,6 +1112,51 @@ bioseq_index_delete_tuples(Relation rel,
 }
 
 
+[[nodiscard]] static bioseq::storage::seq_caches*
+ensure_write_side_seq_caches(Relation relation,
+                             BioseqColumnWriteState* write_state)
+{
+	if (relation == nullptr || write_state == nullptr
+		|| write_state->stripeWriteContext == nullptr)
+	{
+		bioseq_log<ERR, PG>(
+			"bioseq storage: sequence write cache owner is unavailable");
+	}
+
+	if (write_state->seq_caches == nullptr)
+	{
+		MemoryContext owner = MemoryContextGetParent(
+			write_state->stripeWriteContext);
+		if (owner == nullptr)
+		{
+			bioseq_log<ERR, PG>(
+				"bioseq storage: sequence write cache context is unavailable");
+		}
+		auto* fresh = bioseq::storage::alloc_seq_caches(owner);
+		fresh->side = bioseq::storage::seq_caches::Side::Write;
+		fresh->lock_mode = RowExclusiveLock;
+		fresh->main_database_oid = relation->rd_locator.dbOid;
+		fresh->main_tablespace_oid = relation->rd_locator.spcOid;
+		fresh->main_relfilenode = relation->rd_locator.relNumber;
+		fresh->cap_bytes_snapshot =
+			bioseq::storage::read_max_sub_table_cap_bytes();
+		write_state->seq_caches = fresh;
+	}
+
+	auto* caches = static_cast<bioseq::storage::seq_caches*>(
+		write_state->seq_caches);
+	if (caches->side != bioseq::storage::seq_caches::Side::Write
+		|| caches->main_database_oid != relation->rd_locator.dbOid
+		|| caches->main_tablespace_oid != relation->rd_locator.spcOid
+		|| caches->main_relfilenode != relation->rd_locator.relNumber)
+	{
+		bioseq_log<ERR, PG>(
+			"bioseq storage: sequence write cache relation identity changed");
+	}
+	return caches;
+}
+
+
 /*
  * DOC0260 Phase A — rewrite every non-NULL SEQ column in `detoasted_values`
  * to a 40-byte locator stub. The original payload bytes are written to the
@@ -1119,25 +1191,10 @@ rewrite_seq_columns_to_stubs(Relation relation,
 	if (amc.seq_attnos.empty()) {
 		return values_for_write;
 	}
-	// DOC0260 Phase A — lazily allocate the seq_caches on first call,
-	// because write_state_management.cppm intentionally does not import
-	// bioseq_storage (would cycle with bioseq_table). Allocate in the
-	// stable owner of `stripeWriteContext`.  The stripe context itself is
-	// reset after every full stripe, while seq_caches must survive for the
-	// complete write state.  The per-tuple context is also too short-lived.
-	if (writeState->seq_caches == nullptr) {
-		auto *fresh = bioseq::storage::alloc_seq_caches(
-			MemoryContextGetParent(writeState->stripeWriteContext));
-		fresh->side = bioseq::storage::seq_caches::Side::Write;
-		fresh->lock_mode = RowExclusiveLock;
-		fresh->main_database_oid   = relation->rd_locator.dbOid;
-		fresh->main_tablespace_oid = relation->rd_locator.spcOid;
-		fresh->main_relfilenode    = relation->rd_locator.relNumber;
-		fresh->cap_bytes_snapshot  =
-			bioseq::storage::read_max_sub_table_cap_bytes();
-		writeState->seq_caches = fresh;
-	}
-	auto *caches = static_cast<bioseq::storage::seq_caches *>(writeState->seq_caches);
+	// write_state_management.cppm cannot import bioseq_storage without a
+	// module cycle, so the TableAM owns this lazy initialization.  The cache
+	// lives above stripeWriteContext and therefore survives stripe resets.
+	auto* caches = ensure_write_side_seq_caches(relation, writeState);
 	const auto cap_bytes = caches->cap_bytes_snapshot;
 	const std::uint64_t main_storage_id =
 		BioseqColumnStorageGetStorageId(relation, false);
@@ -1222,6 +1279,37 @@ void run_tableam_cpp_checked(const char* operation, Fn&& function) {
 	}
 }
 
+[[nodiscard]] static Datum *
+detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum *values, bool *nulls)
+{
+	Datum *volatile detoasted_values = nullptr;
+	const auto previous_scope = exchange_slice_materialization_scope({
+		.attachment = nullptr,
+		.boundary_id = 0u,
+		.producer_value_id = 0u,
+		.mechanism = materialization_mechanism::packed_full,
+		.reason = materialization_reason::heap_tuple,
+		.local_sink = nullptr,
+	});
+	PG_TRY();
+	{
+		/* Destination-slot copyslot is the primary durable-write boundary.
+		 * Keep this TableAM scope as a fallback when an expanded value reaches
+		 * the access method without having been flattened there.  Each attached
+		 * EOH can still resolve its exact planned producer boundary. */
+		detoasted_values = bioseq::pg_utils::detoast_values(
+			tuple_desc, values, nulls);
+		restore_slice_materialization_scope(previous_scope);
+	}
+	PG_CATCH();
+	{
+		restore_slice_materialization_scope(previous_scope);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+	return detoasted_values;
+}
+
 static void
 bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 					  int options, BulkInsertState bistate)
@@ -1232,37 +1320,49 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
 	}
 
-	previousCacheEnabledState = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
-
 	/*
 	 * bioseq_init_write_state allocates the write state in a longer
 	 * lasting context, so no need to worry about it.
 	 */
 	BioseqColumnWriteState *writeState = bioseq_init_write_state(relation,
-															   RelationGetDescr(relation),
-																 slot->tts_tableOid,
-															   GetCurrentSubTransactionId());
-	run_tableam_cpp_checked("bioseq tuple insert", [&] {
-		MemoryContextScope ctx_guard{BioseqColumnWritePerTupleContext(writeState)};
-
+														   RelationGetDescr(relation),
+															 slot->tts_tableOid,
+														   GetCurrentSubTransactionId());
+	OrdinaryInsertPageCacheRestore cache_restore{
+		.callback = {
+			.previous = error_context_stack,
+			.callback = &restore_ordinary_insert_page_cache_on_error,
+			.arg = nullptr,
+		},
+		.previous_value = bioseq_enable_page_cache,
+		.armed = true,
+	};
+	cache_restore.callback.arg = &cache_restore;
+	error_context_stack = &cache_restore.callback;
+	bioseq_enable_page_cache = false;
+	run_tableam_cpp_checked("bioseq tuple insert",
+		[relation, slot, writeState] {
 		BioseqColumnCheckLogicalReplication(relation);
+
+		MemoryContextScope ctx_guard{
+			BioseqColumnWritePerTupleContext(writeState)};
 
 		slot_getallattrs(slot);
 
-		Datum *detoasted_values = bioseq::pg_utils::detoast_values(slot->tts_tupleDescriptor,
-									   slot->tts_values, slot->tts_isnull);
+		Datum *detoasted_values = detoast_values_for_heap_tuple(
+			slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 
 		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
-		std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
+		std::vector<std::optional<bioseq::storage::PendingSequenceSource>>
+			pending_sources;
 		Datum *values_for_write = rewrite_seq_columns_to_stubs(
 			relation, slot, writeState, amc, detoasted_values,
 			per_col_locator, pending_sources);
 
-		uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState, values_for_write,
-		                                             slot->tts_isnull);
+		uint64_t writtenRowNumber = BioseqColumnWriteRow(
+			writeState, values_for_write, slot->tts_isnull);
 		slot->tts_tid = row_number_to_tid(writtenRowNumber);
 		publish_sequence_sources_after_parent_row(pending_sources);
 
@@ -1274,6 +1374,9 @@ bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 			detoasted_values, per_col_locator, writtenRowNumber,
 			BioseqColumnWritePerTupleContext(writeState));
 	});
+	bioseq_enable_page_cache = cache_restore.previous_value;
+	cache_restore.armed = false;
+	error_context_stack = cache_restore.callback.previous;
 	MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
 
 	pgstat_count_heap_insert(relation, 1);
@@ -1309,8 +1412,8 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 
 		slot_getallattrs(slot);
 
-		Datum *detoasted_values = bioseq::pg_utils::detoast_values(slot->tts_tupleDescriptor,
-									   slot->tts_values, slot->tts_isnull);
+		Datum *detoasted_values = detoast_values_for_heap_tuple(
+			slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
 
 		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
@@ -1396,7 +1499,8 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
 
-	run_tableam_cpp_checked("bioseq multi insert", [&] {
+	run_tableam_cpp_checked("bioseq multi insert",
+		[relation, slots, ntuples, writeState, &amc] {
 		MemoryContextScope ctx_guard{BioseqColumnWritePerTupleContext(writeState)};
 
 		for (int i = 0; i < ntuples; i++)
@@ -1405,8 +1509,9 @@ bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 
 			slot_getallattrs(tupleSlot);
 
-			Datum *detoasted_values = bioseq::pg_utils::detoast_values(tupleSlot->tts_tupleDescriptor,
-										   tupleSlot->tts_values, tupleSlot->tts_isnull);
+			Datum *detoasted_values = detoast_values_for_heap_tuple(
+				tupleSlot->tts_tupleDescriptor,
+				tupleSlot->tts_values, tupleSlot->tts_isnull);
 
 			std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
 			std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
@@ -1773,6 +1878,8 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	 */
 	BioseqColumnWriteState *writeState = bioseq_init_write_state(NewHeap, targetDesc,
 		RelationGetRelid(NewHeap), GetCurrentSubTransactionId());
+	auto* write_caches = ensure_write_side_seq_caches(NewHeap, writeState);
+	const auto cap_bytes = write_caches->cap_bytes_snapshot;
 
 	/* we need all columns */
 	int natts = OldHeap->rd_att->natts;
@@ -1781,8 +1888,12 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	/* no quals for table rewrite */
 	List *scanQual = NIL;
 
-	/* use SnapshotAny when re-writing table as heapAM does */
-	Snapshot snapshot = SnapshotAny;
+	/* Unlike heap tuples, columnar dead-row state lives in an MVCC row-mask
+	 * relation. SnapshotAny would see both the superseded and current mask and
+	 * can therefore copy an UPDATE's dead version into the rewritten table.
+	 * Keep one registered transaction snapshot authoritative for the main row,
+	 * row mask, and sequence-source fragments throughout the rewrite. */
+	Snapshot snapshot = RegisterSnapshot(GetTransactionSnapshot());
 
 	MemoryContext scanContext = CreateBioseqColumnScanMemoryContext();
 	bool randomAccess = false;
@@ -1822,17 +1933,17 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 				DatumGetPointer(values[idx]));
 			if (!bioseq::storage::is_locator_stub(hdr)) continue;
 			const auto loc = bioseq::storage::decode_locator_from_stub(hdr);
-			pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
-				OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
-				OldHeap->rd_locator.relNumber, attno, loc,
-				readState->snapshot, scanContext, read_caches);
+			bioseq::storage::validate_locator_flat_materialization_length(loc);
+			pgseq_t* real =
+				bioseq::storage::bioseq_default_storage_manager::fetch_payload(
+					OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
+					OldHeap->rd_locator.relNumber, attno, loc,
+					readState->snapshot, scanContext, read_caches);
 			values[idx] = PointerGetDatum(real);
 		}
 
 		/* Rewrite SEQ columns into stubs targeting NewHeap's sub-tables.
-		 * We mimic the per-tuple insert path by using the write-side cache. */
-		auto* write_caches = static_cast<bioseq::storage::seq_caches*>(
-			writeState->seq_caches);
+		 * The write-side cache shares the destination write state's lifetime. */
 		for (std::int16_t attno : source_amc.seq_attnos) {
 			const int idx = attno - 1;
 			if (idx < 0 || idx >= sourceDesc->natts) continue;
@@ -1840,9 +1951,6 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			auto* hdr = reinterpret_cast<const pgseq_t*>(
 				DatumGetPointer(values[idx]));
 			if (bioseq::storage::is_locator_stub(hdr)) continue;
-			const auto cap_bytes = write_caches != nullptr
-				? write_caches->cap_bytes_snapshot
-				: bioseq::storage::read_max_sub_table_cap_bytes();
 			auto pending =
 				bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
 					RelationGetRelid(OldHeap), new_main_storage_id,
@@ -1874,6 +1982,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	bioseq::storage::destroy_seq_caches(read_caches);
 
 	BioseqColumnEndRead(readState);
+	UnregisterSnapshot(snapshot);
 	MemoryContextDelete(scanContext);
 
 	/* DOC0260 §8.7 — cascade-drop OldHeap's sub-tables before the
@@ -2492,6 +2601,84 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 }
 
 
+/** Replace only locator stubs before generic predicate/index expression code. */
+static void
+promote_index_source_locators(
+	Relation relation,
+	TupleTableSlot *slot,
+	bioseq::storage::pg_sequence_source_provider *provider,
+	MemoryContext resultContext)
+{
+	if (provider == nullptr)
+		return;
+	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
+	for (const std::int16_t attno : amc.seq_attnos)
+	{
+		const int index = static_cast<int>(attno) - 1;
+		if (index < 0 || index >= slot->tts_tupleDescriptor->natts
+			|| slot->tts_isnull[index])
+			continue;
+		auto *header = reinterpret_cast<const pgseq_t *>(
+			DatumGetPointer(slot->tts_values[index]));
+		if (!bioseq::storage::is_locator_stub(header))
+			continue;
+		try
+		{
+			slot->tts_values[index] =
+				bioseq::storage::promote_pg_sequence_locator(
+					provider, attno, slot->tts_values[index], resultContext);
+		}
+		catch (bioseq::pg_utils::PostgresErrorAsCpp &error)
+		{
+			ReThrowError(error.release_error_data());
+		}
+		catch (const std::exception &error)
+		{
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq expression-index source promotion failed"),
+				 errdetail("%s", error.what())));
+		}
+		catch (...)
+		{
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("bioseq expression-index source promotion failed"),
+				 errdetail("unknown C++ exception")));
+		}
+	}
+}
+
+[[nodiscard]] static bioseq::storage::pg_sequence_source_provider *
+create_index_source_provider(Relation relation, Snapshot snapshot)
+{
+	try
+	{
+		return bioseq::storage::create_standalone_pg_sequence_source_provider(
+			relation, snapshot);
+	}
+	catch (bioseq::pg_utils::PostgresErrorAsCpp &error)
+	{
+		ReThrowError(error.release_error_data());
+	}
+	catch (const std::exception &error)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq expression-index source provider failed"),
+			 errdetail("%s", error.what())));
+	}
+	catch (...)
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("bioseq expression-index source provider failed"),
+			 errdetail("unknown C++ exception")));
+	}
+	pg_unreachable();
+}
+
+
 static double
 bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 								Relation indexRelation,
@@ -2527,18 +2714,12 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
 
 	/*
-	 * In a normal index build, we use SnapshotAny to retrieve all tuples. In
-	 * a concurrent build or during bootstrap, we take a regular MVCC snapshot
-	 * and index whatever's live according to that.
+	 * Columnar tuples have no dead-row form, so outside bootstrap an explicitly
+	 * registered transaction snapshot is both complete and authoritative for
+	 * locator promotion.  Keeping the table scan, source catalog and fragments
+	 * on this exact snapshot prevents expression-index code from consulting a
+	 * different active snapshot.
 	 */
-	TransactionId OldestXmin = InvalidTransactionId;
-	if (!IsBootstrapProcessingMode() && !indexInfo->ii_Concurrent)
-	{
-		/* ignore lazy VACUUM's */
-		OldestXmin = GetOldestNonRemovableTransactionId_compat(bioseqColumnRelation,
-															   PROCARRAY_FLAGS_VACUUM);
-	}
-
 	Snapshot snapshot = { 0 };
 	bool snapshotRegisteredByUs = false;
 
@@ -2546,7 +2727,7 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	 * For serial index build, we begin our own scan. We may also need to
 	 * register a snapshot whose lifetime is under our direct control.
 	 */
-	if (!TransactionIdIsValid(OldestXmin))
+	if (!IsBootstrapProcessingMode())
 	{
 		snapshot = RegisterSnapshot(GetTransactionSnapshot());
 		snapshotRegisteredByUs = true;
@@ -2561,6 +2742,14 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	bool allowAccessStrategy = true;
 	scan = table_beginscan_strat(bioseqColumnRelation, snapshot, nkeys, scanKey,
 								 allowAccessStrategy, allow_sync);
+	bioseq::storage::pg_sequence_source_provider *volatile sourceProvider = nullptr;
+	if (snapshotRegisteredByUs)
+	{
+		auto *bioseqScan = reinterpret_cast<BioseqColumnScanDesc>(scan);
+		bioseqScan->defer_seq_hydration = true;
+		sourceProvider =
+			create_index_source_provider(bioseqColumnRelation, snapshot);
+	}
 
 	if (progress)
 	{
@@ -2577,9 +2766,34 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	econtext->ecxt_scantuple = table_slot_create(bioseqColumnRelation, NULL);
 	ExprState *predicate = ExecPrepareQual(indexInfo->ii_Predicate, estate);
 
-	double reltuples = BioseqColumnReadRowsIntoIndex(scan, indexRelation, indexInfo,
-												 progress, callback, callback_state,
-												 estate, predicate);
+	double volatile reltuples = 0;
+	PG_TRY();
+	{
+		reltuples = BioseqColumnReadRowsIntoIndex(
+			scan, indexRelation, indexInfo, progress, callback,
+			callback_state, estate, predicate,
+			sourceProvider);
+		ResetExprContext(econtext);
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider,
+				/*is_commit=*/true);
+			sourceProvider = nullptr;
+		}
+	}
+	PG_CATCH();
+	{
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider,
+				/*is_commit=*/false);
+			sourceProvider = nullptr;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 	table_endscan(scan);
 
 	if (progress)
@@ -2599,7 +2813,7 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	indexInfo->ii_ExpressionsState = NIL;
 	indexInfo->ii_PredicateState = NULL;
 
-	return reltuples;
+	return static_cast<double>(reltuples);
 }
 
 
@@ -2688,7 +2902,8 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 						  IndexInfo *indexInfo, bool progress,
 						  IndexBuildCallback indexCallback,
 						  void *indexCallbackState, EState *estate,
-						  ExprState *predicate)
+						  ExprState *predicate,
+						  bioseq::storage::pg_sequence_source_provider *sourceProvider)
 {
 	double reltuples = 0;
 
@@ -2716,6 +2931,9 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 		}
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
+		promote_index_source_locators(
+			scan->rs_rd, slot, sourceProvider,
+			econtext->ecxt_per_tuple_memory);
 
 		if (predicate != NULL && !ExecQual(predicate, econtext))
 		{
@@ -2725,14 +2943,33 @@ BioseqColumnReadRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		Datum indexValues[INDEX_MAX_KEYS];
 		bool indexNulls[INDEX_MAX_KEYS];
-		FormIndexDatum(indexInfo, slot, estate, indexValues, indexNulls);
-
 		ItemPointerData itemPointerData = slot->tts_tid;
 
 		/* currently, columnar tables can't have dead tuples */
 		bool tupleIsAlive = true;
-		indexCallback(indexRelation, &itemPointerData, indexValues, indexNulls,
-					  tupleIsAlive, indexCallbackState);
+		const auto previous_scope = exchange_slice_materialization_scope({
+			.attachment = nullptr,
+			.boundary_id = 0u,
+			.producer_value_id = 0u,
+			.mechanism = materialization_mechanism::packed_full,
+			.reason = materialization_reason::index_tuple,
+			.local_sink = nullptr,
+		});
+		PG_TRY();
+		{
+			FormIndexDatum(
+				indexInfo, slot, estate, indexValues, indexNulls);
+			indexCallback(
+				indexRelation, &itemPointerData, indexValues, indexNulls,
+				tupleIsAlive, indexCallbackState);
+			restore_slice_materialization_scope(previous_scope);
+		}
+		PG_CATCH();
+		{
+			restore_slice_materialization_scope(previous_scope);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		reltuples++;
 	}
@@ -2767,9 +3004,40 @@ bioseq_index_validate_scan(Relation bioseqColumnRelation,
 	bool allowSyncScan = false;
 	TableScanDesc scan = table_beginscan_strat(bioseqColumnRelation, snapshot, nkeys, scanKey,
 											   allowAccessStrategy, allowSyncScan);
+	bioseq::storage::pg_sequence_source_provider *volatile sourceProvider = nullptr;
+	if (snapshot != nullptr && IsMVCCSnapshot(snapshot)
+		&& snapshot->regd_count > 0)
+	{
+		auto *bioseqScan = reinterpret_cast<BioseqColumnScanDesc>(scan);
+		bioseqScan->defer_seq_hydration = true;
+		sourceProvider =
+			create_index_source_provider(bioseqColumnRelation, snapshot);
+	}
 
-	BioseqColumnReadMissingRowsIntoIndex(scan, indexRelation, indexInfo, estate,
-									 predicate, validateIndexState);
+	PG_TRY();
+	{
+		BioseqColumnReadMissingRowsIntoIndex(
+			scan, indexRelation, indexInfo, estate, predicate,
+			validateIndexState, sourceProvider);
+		ResetExprContext(econtext);
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider, /*is_commit=*/true);
+			sourceProvider = nullptr;
+		}
+	}
+	PG_CATCH();
+	{
+		if (sourceProvider != nullptr)
+		{
+			bioseq::storage::close_pg_sequence_source_provider(
+				sourceProvider, /*is_commit=*/false);
+			sourceProvider = nullptr;
+		}
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	table_endscan(scan);
 
@@ -2792,7 +3060,8 @@ static void
 BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 								 IndexInfo *indexInfo, EState *estate,
 								 ExprState *predicate,
-								 ValidateIndexState *validateIndexState)
+								 ValidateIndexState *validateIndexState,
+								 bioseq::storage::pg_sequence_source_provider *sourceProvider)
 {
 	BlockNumber lastReportedBlockNumber = InvalidBlockNumber;
 
@@ -2848,6 +3117,9 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 			   ItemPointerCompare(&indexedItemPointerData, bioseqColumnItemPointer) > 0);
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
+		promote_index_source_locators(
+			scan->rs_rd, slot, sourceProvider,
+			econtext->ecxt_per_tuple_memory);
 
 		if (predicate != NULL && !ExecQual(predicate, econtext))
 		{
@@ -2857,13 +3129,34 @@ BioseqColumnReadMissingRowsIntoIndex(TableScanDesc scan, Relation indexRelation,
 
 		Datum indexValues[INDEX_MAX_KEYS];
 		bool indexNulls[INDEX_MAX_KEYS];
-		FormIndexDatum(indexInfo, slot, estate, indexValues, indexNulls);
 
 		Relation bioseqColumnRelation = scan->rs_rd;
 		IndexUniqueCheck indexUniqueCheck =
 			indexInfo->ii_Unique ? UNIQUE_CHECK_YES : UNIQUE_CHECK_NO;
-		index_insert_compat(indexRelation, indexValues, indexNulls, bioseqColumnItemPointer,
-							bioseqColumnRelation, indexUniqueCheck, false, indexInfo);
+		const auto previous_scope = exchange_slice_materialization_scope({
+			.attachment = nullptr,
+			.boundary_id = 0u,
+			.producer_value_id = 0u,
+			.mechanism = materialization_mechanism::packed_full,
+			.reason = materialization_reason::index_tuple,
+			.local_sink = nullptr,
+		});
+		PG_TRY();
+		{
+			FormIndexDatum(
+				indexInfo, slot, estate, indexValues, indexNulls);
+			index_insert_compat(
+				indexRelation, indexValues, indexNulls,
+				bioseqColumnItemPointer, bioseqColumnRelation,
+				indexUniqueCheck, false, indexInfo);
+			restore_slice_materialization_scope(previous_scope);
+		}
+		PG_CATCH();
+		{
+			restore_slice_materialization_scope(previous_scope);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
 		validateIndexState->tups_inserted += 1;
 	}
@@ -3057,9 +3350,22 @@ BioseqColumnSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 }
 
 
-// DOC0322 §7.3/§7 — adapter that satisfies the seq_caches_close hook expected
-// by storage_metadata:write_state. It owns the bioseq_storage-side teardown
-// (close_all + destroy) so storage_metadata never has to import bioseq_storage.
+// DOC0322 §7.3/§7 — adapters that keep storage_metadata independent from
+// bioseq_storage.  A parent flush must also flush its cached sequence-fragment
+// shard states before any caller refreshes or serializes a snapshot.
+static void
+bioseq_flush_pending_writes_adapter(BioseqColumnWriteState* write_state)
+{
+	BioseqColumnFlushPendingWrites(write_state);
+	if (write_state->seq_caches != nullptr)
+	{
+		bioseq::storage::flush_seq_cache_write_states(
+			static_cast<bioseq::storage::seq_caches*>(
+				write_state->seq_caches),
+			GetCurrentSubTransactionId());
+	}
+}
+
 static void
 bioseq_seq_caches_close_adapter(void* p, bool commit)
 {
@@ -3205,7 +3511,8 @@ bioseq_tableam_init()
 	// (default nullptr); register the bioseq_table_io / bioseq_storage callees
 	// here so storage_metadata stays free of those module edges.
 	register_write_state_hooks(&BioseqColumnBeginWrite, &BioseqColumnEndWrite,
-							   &BioseqColumnFlushPendingWrites, &ContainsPendingWrites,
+							   &bioseq_flush_pending_writes_adapter,
+							   &ContainsPendingWrites,
 							   &bioseq_seq_caches_close_adapter);
 	register_read_state_hooks(&BioseqColumnEndRead);
 	BioseqColumnTableSetOptions_hook_type **BioseqColumnTableSetOptions_hook_ptr =

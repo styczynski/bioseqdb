@@ -1650,14 +1650,16 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
           "[indexing][minimizer-hashmap][exact-simd][bridge][contract]") {
     auto data = make_dna4(4097, 0xB81D6EULL);
     range_t range(data);
+    auto range_owner = bioseq::storage::make_lazy_in_memory(range);
+    const auto range_view = bioseq::storage::as_lazy_sequence_view(range_owner);
     sketch_collector exact_collector;
 #if HWY_TARGET == HWY_SCALAR
     REQUIRE_THROWS_AS(
         (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
             exact_collector,
-            range,
+            range_view,
             0,
-            static_cast<std::size_t>(range.size()),
+            range_view.bp_size(),
             10,
             15,
             0,
@@ -1667,9 +1669,9 @@ TEST_CASE("ExactSimd indexing bridge is linked, exact, and instrumented",
     const auto proof =
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             exact_collector,
-            range,
+            range_view,
             0,
-            static_cast<std::size_t>(range.size()),
+            range_view.bp_size(),
             10,
             15,
             0,
@@ -1703,14 +1705,16 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
         data[index].assign_rank(acgt_ranks[(index * 7u + index / 11u) % 4u]);
     }
     dna5_range_t no_n_range(data);
+    auto no_n_owner = bioseq::storage::make_lazy_in_memory(no_n_range);
+    const auto no_n_view = bioseq::storage::as_lazy_sequence_view(no_n_owner);
     sketch_collector no_n_exact_collector;
 #if HWY_TARGET == HWY_SCALAR
     REQUIRE_THROWS_AS(
         (void)bioseq::indexing::collect_exact_simd_index_range_or_throw(
             no_n_exact_collector,
-            no_n_range,
+            no_n_view,
             0,
-            static_cast<std::size_t>(no_n_range.size()),
+            no_n_view.bp_size(),
             w,
             k,
             0,
@@ -1720,9 +1724,9 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
     const auto no_n_proof =
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             no_n_exact_collector,
-            no_n_range,
+            no_n_view,
             0,
-            static_cast<std::size_t>(no_n_range.size()),
+            no_n_view.bp_size(),
             w,
             k,
             0,
@@ -1745,13 +1749,16 @@ TEST_CASE("ExactSimd indexing bridge preserves DNA5 nt4 and N reset proof",
         data[position].assign_rank(3); // SeqAn dna5 N rank
     }
     dna5_range_t with_n_range(data);
+    auto with_n_owner = bioseq::storage::make_lazy_in_memory(with_n_range);
+    const auto with_n_view = bioseq::storage::as_lazy_sequence_view(
+        with_n_owner);
     sketch_collector with_n_collector;
     const auto with_n_proof =
         bioseq::indexing::collect_exact_simd_index_range_or_throw(
             with_n_collector,
-            with_n_range,
+            with_n_view,
             0,
-            static_cast<std::size_t>(with_n_range.size()),
+            with_n_view.bp_size(),
             w,
             k,
             0,
@@ -3705,8 +3712,9 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
 
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     auto mpf_producer = Index::make_generation_replay_producer(
-        lazy, MinimizerSketchBackend::Scalar);
+        lazy_view, MinimizerSketchBackend::Scalar);
     CollectingMinimizerRowSink mpf_sink;
     auto mpf_options = test_generation_options(range.bp_size());
     auto mpf = encode_minimizer_generation(
@@ -3728,7 +3736,7 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
     FakeFragmentStorage<> spill_storage;
     auto spilled = MpsIndex::spill_generation_replay_runs_serial(
         spill_storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::Scalar,
         fragment_bp);
     REQUIRE(spilled.has_value());
@@ -3766,8 +3774,10 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
     // bytes are compared after normalising generation identity.
     lazy_compact_sequence<dna4_u64, chunked> lazy_exact{
         chunked::from_range(range)};
+    const auto lazy_exact_view =
+        bioseq::storage::as_lazy_sequence_view(lazy_exact);
     auto exact_mpf_producer = Index::make_generation_replay_producer(
-        lazy_exact, MinimizerSketchBackend::ExactSimd);
+        lazy_exact_view, MinimizerSketchBackend::ExactSimd);
     CollectingMinimizerRowSink exact_mpf_sink;
     auto exact_mpf_options = mpf_options;
     exact_mpf_options.generation_id += 2;
@@ -3789,7 +3799,7 @@ TEST_CASE("DOC0371 independent MPF halo and MPS merge producers are canonical",
     FakeFragmentStorage<> exact_spill_storage;
     auto exact_spilled = MpsIndex::spill_generation_replay_runs_serial(
         exact_spill_storage,
-        lazy_exact,
+        lazy_exact_view,
         MinimizerSketchBackend::ExactSimd,
         fragment_bp);
     REQUIRE(exact_spilled.has_value());
@@ -3831,11 +3841,13 @@ TEST_CASE("inactive format-4 MPS evidence binds Scalar and Exact spill replay",
     const auto verify_backend = [&](MinimizerSketchBackend backend) {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         MpsGenerationExecutionEvidence spill_evidence;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             storage,
-            lazy,
+            lazy_view,
             backend,
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
@@ -3951,9 +3963,11 @@ TEST_CASE("Format-5 MPS exact SIMD binds the canonical shape profile",
     const auto spill_exact = [&](FakeFragmentStorage<>& storage) {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         return MpsIndex::spill_generation_replay_runs_serial(
             storage,
-            lazy,
+            lazy_view,
             MinimizerSketchBackend::ExactSimd,
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp);
@@ -4181,11 +4195,12 @@ TEST_CASE("inactive format-4 MPS spill authority is non-forgeable and detects mu
     range_t range(data);
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     FakeFragmentStorage<> storage;
     MpsGenerationExecutionEvidence spill_evidence;
     auto spill = MpsIndex::spill_generation_replay_runs_serial(
         storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::Scalar,
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
@@ -4250,10 +4265,11 @@ TEST_CASE("format-4 MPF execution evidence is sealed to one publication identity
     range_t range(data);
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     CollectingMinimizerRowSink sink;
     MpfGenerationExecutionEvidence execution;
     const auto encoded = Index::encode_persisted_generation(
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::Scalar,
         sink,
         test_grouped32_generation_options(range.bp_size()),
@@ -4329,11 +4345,13 @@ TEST_CASE("inactive format-4 MPS accepts real empty and shorter-than-window spil
         range_t range(data);
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         MpsGenerationExecutionEvidence spill_evidence;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             storage,
-            lazy,
+            lazy_view,
             MinimizerSketchBackend::Scalar,
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
@@ -4395,9 +4413,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
     SECTION("duplicate physical run advances the storage mutation version") {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            storage, lazy, MinimizerSketchBackend::Scalar, fragment_bp);
+            storage, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding before =
             storage.segment_spill_storage_binding();
@@ -4428,10 +4448,12 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
     SECTION("wrong storage and moved-from authority cannot be laundered") {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> original;
         FakeFragmentStorage<> replacement;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            original, lazy, MinimizerSketchBackend::Scalar, fragment_bp);
+            original, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
         REQUIRE(spill.has_value());
         CollectingMinimizerRowSink wrong_sink;
         require_wire_error(
@@ -4475,10 +4497,12 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
         range_t empty_range(empty_data);
         lazy_compact_sequence<dna4_u64, chunked> empty_lazy{
             chunked::from_range(empty_range)};
+        const auto empty_lazy_view =
+            bioseq::storage::as_lazy_sequence_view(empty_lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             storage,
-            empty_lazy,
+            empty_lazy_view,
             MinimizerSketchBackend::Scalar,
             fragment_bp);
         REQUIRE(spill.has_value());
@@ -4508,9 +4532,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
     SECTION("moving storage cannot preserve address-bound authority") {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> original;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            original, lazy, MinimizerSketchBackend::Scalar, fragment_bp);
+            original, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding issued =
             original.segment_spill_storage_binding();
@@ -4532,10 +4558,12 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
         range_t empty_range(empty_data);
         lazy_compact_sequence<dna4_u64, chunked> empty_lazy{
             chunked::from_range(empty_range)};
+        const auto empty_lazy_view =
+            bioseq::storage::as_lazy_sequence_view(empty_lazy);
         FakeFragmentStorage<> original;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             original,
-            empty_lazy,
+            empty_lazy_view,
             MinimizerSketchBackend::Scalar,
             fragment_bp);
         REQUIRE(spill.has_value());
@@ -4558,9 +4586,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
     SECTION("representation-only run compaction preserves logical incarnation") {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            storage, lazy, MinimizerSketchBackend::Scalar, fragment_bp);
+            storage, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
         REQUIRE(spill.has_value());
         const MpsSegmentSpillStorageBinding before =
             storage.segment_spill_storage_binding();
@@ -4597,9 +4627,11 @@ TEST_CASE("inactive MPS storage incarnation rejects duplicate runs ABA and reuse
     SECTION("bound producer and consumed spill are single-use") {
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         FakeFragmentStorage<> storage;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
-            storage, lazy, MinimizerSketchBackend::Scalar, fragment_bp);
+            storage, lazy_view, MinimizerSketchBackend::Scalar, fragment_bp);
         REQUIRE(spill.has_value());
         auto producer = MpsIndex::make_generation_replay_producer(
             storage, range.bp_size(), std::move(*spill));
@@ -4705,11 +4737,12 @@ TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
     oracle.erase(std::ranges::unique(oracle).begin(), oracle.end());
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     FakeFragmentStorage<> storage;
     MpsGenerationExecutionEvidence spill_evidence;
     auto spill = MpsIndex::spill_generation_replay_runs_serial(
         storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
@@ -4729,6 +4762,8 @@ TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
         == PackedPaperNthashIndexStatus::ok);
     REQUIRE(spill_evidence.packed_paper_proof.accepted(true));
     REQUIRE(spill_evidence.packed_paper_proof.fallback_calls == 0);
+    REQUIRE(spill_evidence.packed_paper_proof.source_storage_unit_bytes
+        == sizeof(std::uint32_t));
     REQUIRE(spill_evidence.peak_paper_materialized_window_bp
         <= fragment_bp + 2u * halo
             + range_t::traits::letters_per_unit - 1u);
@@ -4750,6 +4785,8 @@ TEST_CASE("inactive format-4 MPS reuses checked bounded packed Paper",
     REQUIRE(execution.packed_paper_proof_present);
     REQUIRE(execution.packed_paper_proof.accepted(true));
     REQUIRE(execution.packed_paper_proof.fallback_calls == 0);
+    REQUIRE(execution.packed_paper_proof.source_storage_unit_bytes
+        == sizeof(std::uint32_t));
     REQUIRE(decode_generation_events(*encoded, sink.rows) == oracle);
     require_complete_generation_rows(*encoded, sink.rows);
 }
@@ -4807,11 +4844,12 @@ TEST_CASE("inactive format-4 MPS canonicalizes periodic Paper ties within admiss
 
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     FakeFragmentStorage<> storage;
     MpsGenerationExecutionEvidence spill_evidence;
     auto spill = MpsIndex::spill_generation_replay_runs_serial(
         storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::PaperNtHashSimd,
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
@@ -4856,17 +4894,29 @@ TEST_CASE("inactive format-4 MPS Paper rejects DNA5 without fallback",
     dna5_range_t range(data);
     lazy_compact_sequence<dna5_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     FakeFragmentStorage<> storage;
     MpsGenerationExecutionEvidence evidence;
-    auto spill = MpsIndex::spill_generation_replay_runs_serial(
-        storage,
-        lazy,
-        MinimizerSketchBackend::PaperNtHashSimd,
-        fragment_bp,
-        kMinimizerPreferredSegmentSpanBp,
-        &evidence);
-    require_wire_error(
-        spill, MinimizerGenerationWireError::compatibility_mismatch);
+    const std::uint64_t admission_before =
+        bioseq::parallelism::MemoryAdmissionController::instance()
+            .reserved_bytes();
+    bool rejected = false;
+    try {
+        (void)MpsIndex::spill_generation_replay_runs_serial(
+            storage,
+            lazy_view,
+            MinimizerSketchBackend::PaperNtHashSimd,
+            fragment_bp,
+            kMinimizerPreferredSegmentSpanBp,
+            &evidence);
+    } catch (const PackedPaperNthashIndexRuntimeError& error) {
+        rejected = true;
+        REQUIRE(error.status()
+            == PackedPaperNthashIndexStatus::unsupported_alphabet);
+        REQUIRE(std::string_view{error.what()}.contains(
+            "minimizers_per_sequence build"));
+    }
+    REQUIRE(rejected);
     REQUIRE_FALSE(evidence.spill_complete);
     REQUIRE_FALSE(evidence.spill_accepted());
     REQUIRE(evidence.scalar_core_runs == 0);
@@ -4879,24 +4929,54 @@ TEST_CASE("inactive format-4 MPS Paper rejects DNA5 without fallback",
     REQUIRE(evidence.packed_paper_proof.fail_closed_rejections == 1);
     REQUIRE(evidence.packed_paper_proof.fallback_calls == 0);
     REQUIRE(storage.segment_spill_run_count() == 0);
+    REQUIRE(bioseq::parallelism::MemoryAdmissionController::instance()
+        .reserved_bytes() == admission_before);
 }
 
-TEST_CASE("DOC0371 selected Vulkan evidence requires a dispatch at w+k-1",
-          "[indexing][minimizer-hashmap][wire][encoder][vulkan][boundary]") {
+TEST_CASE("legacy MPF Vulkan build records accepted operation-originated batched evidence",
+          "[indexing][minimizer-hashmap][vulkan][build][batch][evidence]") {
     using namespace bioseq::indexing;
+    if (!::bioseq::gpu::vulkan::hardware_device_available(
+            ::bioseq::gpu::vulkan::Runtime::instance())) {
+        SUCCEED("no hardware Vulkan device; skipped");
+        return;
+    }
+    constexpr std::size_t source_fragment_units = 64u;
+    constexpr std::size_t persisted_fragment_bp = 32'768u;
+    using chunked = sequence_scanner_test_chunked<
+        std::uint64_t, source_fragment_units>;
+    using Index = MinimizersPerFragmentIndex<FakeFragmentStorage<>>;
+    auto data = make_dna4(98'417u, 0x4D504656554C4B4EULL);
+    range_t range(data);
+    lazy_compact_sequence<dna4_u64, chunked> lazy{
+        chunked::from_range(range)};
+    const auto view = bioseq::storage::as_lazy_sequence_view(lazy);
+    FakeFragmentStorage<> storage;
+    storage.run_buffer_bytes_ = 64u << 20u;
     MpfGenerationExecutionEvidence evidence;
-    evidence.selected_backend = MinimizerSketchBackend::VulkanSegment;
-    evidence.minimizer_scheme = kLegacyMinimapV1SchemeIdentity;
-    evidence.target_length = 10u + 15u - 1u;
-    evidence.window_size = 10u;
-    evidence.kmer_size = 15u;
-    evidence.producer_scan_count = 2u;
-    evidence.vulkan_core_runs = 2u;
-    evidence.backend_bound = true;
-    REQUIRE_FALSE(evidence.accepted());
+    Index::build(
+        storage, view, MinimizerSketchBackend::VulkanSegment, &evidence);
 
-    evidence.vulkan_proof.completed_roundtrips = 2u;
-    REQUIRE(evidence.accepted());
+    REQUIRE_FALSE(evidence.accepted());
+    REQUIRE(evidence.direct_build_accepted());
+    REQUIRE(evidence.selected_backend
+        == MinimizerSketchBackend::VulkanSegment);
+    REQUIRE(evidence.backend_bound);
+    REQUIRE(evidence.target_length == range.bp_size());
+    REQUIRE(evidence.scalar_core_runs == 0u);
+    REQUIRE(evidence.exact_simd_core_runs == 0u);
+    REQUIRE(evidence.paper_nthash_core_runs == 0u);
+    REQUIRE(evidence.vulkan_core_runs > 0u);
+    REQUIRE(evidence.vulkan_proof.accepted(true));
+    REQUIRE(evidence.vulkan_proof.completed_roundtrips
+        == evidence.vulkan_core_runs);
+    const std::size_t expected_fragments = static_cast<std::size_t>(
+        (range.bp_size() + persisted_fragment_bp - 1u)
+        / persisted_fragment_bp);
+    REQUIRE(storage.number_of_chunks(DIRECTORY_SUB_KEY) == 1u);
+    REQUIRE(*storage.template read_chunk<std::int64_t>(
+        DIRECTORY_SUB_KEY, 0u)
+        == static_cast<std::int64_t>(expected_fragments));
 }
 
 TEST_CASE("inactive format-4 MPS carries operation-originated Vulkan proof",
@@ -4916,11 +4996,12 @@ TEST_CASE("inactive format-4 MPS carries operation-originated Vulkan proof",
     }
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     FakeFragmentStorage<> storage;
     MpsGenerationExecutionEvidence spill_evidence;
     auto spill = MpsIndex::spill_generation_replay_runs_serial(
         storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::VulkanSegment,
         fragment_bp,
         kMinimizerPreferredSegmentSpanBp,
@@ -4955,7 +5036,7 @@ TEST_CASE("bounded Paper MPF replay matches one checked resident execution",
           "[indexing][minimizer-hashmap][wire][encoder][paper][simd]") {
     using namespace bioseq::indexing;
     constexpr std::size_t fragment_units = 64;
-    constexpr std::uint64_t fragment_bp = fragment_units * 32u;
+    constexpr std::uint64_t fragment_bp = 32'768u;
     constexpr std::uint64_t halo = 10u + 15u - 2u;
     using chunked = sequence_scanner_test_chunked<
         std::uint64_t, fragment_units>;
@@ -4998,8 +5079,9 @@ TEST_CASE("bounded Paper MPF replay matches one checked resident execution",
 
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     auto producer = Index::make_generation_replay_producer(
-        lazy, MinimizerSketchBackend::PaperNtHashSimd);
+        lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
     auto options = test_generation_options(range.bp_size());
     options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
     options.minimizer_scheme_version =
@@ -5023,6 +5105,8 @@ TEST_CASE("bounded Paper MPF replay matches one checked resident execution",
         == PackedPaperNthashIndexStatus::ok);
     REQUIRE(execution.packed_paper_proof.accepted(true));
     REQUIRE(execution.packed_paper_proof.fallback_calls == 0);
+    REQUIRE(execution.packed_paper_proof.source_storage_unit_bytes
+        == sizeof(std::uint32_t));
     REQUIRE(producer.minimizer_scheme_identity()
         == kPaperNtHashU32R7SumV1SchemeIdentity);
     REQUIRE(producer.packed_paper_proof_present());
@@ -5106,8 +5190,9 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
 
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     auto replay = Index::make_generation_replay_producer(
-        lazy, MinimizerSketchBackend::PaperNtHashSimd);
+        lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
     const auto collect_replay = [](void* context,
             const CanonicalMinimizerEvent& event)
             -> std::expected<void, MinimizerGenerationWireError> {
@@ -5136,7 +5221,7 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
     REQUIRE(replay.execution_evidence().paper_nthash_core_runs > 0u);
 
     auto encoder_replay = Index::make_generation_replay_producer(
-        lazy, MinimizerSketchBackend::PaperNtHashSimd);
+        lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
     auto options = test_generation_options(range.bp_size());
     options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
     options.minimizer_scheme_version =
@@ -5151,7 +5236,7 @@ TEST_CASE("Paper MPF canonicalizes tied periodic events identically across repla
     require_complete_generation_rows(*encoded, sink.rows);
 }
 
-TEST_CASE("Paper MPF replay rejects incompatible biological and storage shapes",
+TEST_CASE("Paper MPF replay canonicalizes storage and rejects incompatible biological shapes",
           "[indexing][minimizer-hashmap][wire][encoder][paper][fail-closed]") {
     using namespace bioseq::indexing;
     using Index = MinimizersPerFragmentIndex<FakeFragmentStorage<>>;
@@ -5165,48 +5250,70 @@ TEST_CASE("Paper MPF replay rejects incompatible biological and storage shapes",
         dna5_range_t range(data);
         lazy_compact_sequence<dna5_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         auto producer = Index::make_generation_replay_producer(
-            lazy, MinimizerSketchBackend::PaperNtHashSimd);
+            lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
         auto options = test_generation_options(range.bp_size());
         options.alphabet_code = 5;
         options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
         options.minimizer_scheme_version =
             kPaperNtHashU32R7SumV1SchemeVersion;
         CollectingMinimizerRowSink sink;
-        require_wire_error(
-            encode_minimizer_generation(producer, sink, options),
-            MinimizerGenerationWireError::compatibility_mismatch);
+        const std::uint64_t admission_before =
+            bioseq::parallelism::MemoryAdmissionController::instance()
+                .reserved_bytes();
+        bool rejected = false;
+        try {
+            (void)encode_minimizer_generation(producer, sink, options);
+        } catch (const PackedPaperNthashIndexRuntimeError& error) {
+            rejected = true;
+            REQUIRE(error.status()
+                == PackedPaperNthashIndexStatus::unsupported_alphabet);
+            REQUIRE(std::string_view{error.what()}.contains(
+                "MPF generation replay"));
+        }
+        REQUIRE(rejected);
         REQUIRE(sink.rows.empty());
+        REQUIRE(producer.scan_count() == 1u);
         REQUIRE(producer.packed_paper_proof_present());
         REQUIRE(producer.packed_paper_status()
             == PackedPaperNthashIndexStatus::unsupported_alphabet);
         REQUIRE(producer.packed_paper_proof().fail_closed_rejections == 1);
         REQUIRE_FALSE(producer.exact_simd_proof_present());
+        REQUIRE(bioseq::parallelism::MemoryAdmissionController::instance()
+            .reserved_bytes() == admission_before);
     }
 
-    SECTION("u16 packed storage cannot enter the checked u32 Paper view") {
+    SECTION("u16 packed storage is admitted into one canonical u32 Paper window") {
         using chunked = sequence_scanner_test_chunked<std::uint16_t, 64>;
         auto data = make_dna4(4096, 0x16B17u);
         dna4_u16_range_t range(data);
         lazy_compact_sequence<dna4_u16, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         auto producer = Index::make_generation_replay_producer(
-            lazy, MinimizerSketchBackend::PaperNtHashSimd);
+            lazy_view, MinimizerSketchBackend::PaperNtHashSimd);
         auto options = test_generation_options(range.bp_size());
         options.storage_unit_byte_width = sizeof(std::uint16_t);
         options.minimizer_scheme_id = kPaperNtHashU32R7SumV1SchemeId;
         options.minimizer_scheme_version =
             kPaperNtHashU32R7SumV1SchemeVersion;
         CollectingMinimizerRowSink sink;
-        require_wire_error(
-            encode_minimizer_generation(producer, sink, options),
-            MinimizerGenerationWireError::compatibility_mismatch);
-        REQUIRE(sink.rows.empty());
+        const auto encoded = encode_minimizer_generation(
+            producer, sink, options);
+        REQUIRE(encoded.has_value());
+        REQUIRE_FALSE(sink.rows.empty());
         REQUIRE(producer.packed_paper_proof_present());
         REQUIRE(producer.packed_paper_status()
-            == PackedPaperNthashIndexStatus::unsupported_storage);
-        REQUIRE(producer.packed_paper_proof().fail_closed_rejections == 1);
+            == PackedPaperNthashIndexStatus::ok);
+        REQUIRE(producer.packed_paper_proof().accepted(true));
+        REQUIRE(producer.packed_paper_proof().fallback_calls == 0u);
+        REQUIRE(producer.peak_paper_materialized_window_bp() > 0u);
+        REQUIRE(producer.execution_evidence().accepted());
         REQUIRE_FALSE(producer.exact_simd_proof_present());
+        require_complete_generation_rows(*encoded, sink.rows);
     }
 
     SECTION("a local position wider than MinimapSketchData fails before dereference") {
@@ -5266,9 +5373,10 @@ TEST_CASE("DOC0371 actual producers cross the persisted 8MiB core edge bounded",
     range_t range(data);
     lazy_compact_sequence<dna4_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
 
     auto mpf_producer = Index::make_generation_replay_producer(
-        lazy, MinimizerSketchBackend::Scalar);
+        lazy_view, MinimizerSketchBackend::Scalar);
     const auto options = test_generation_options(range.bp_size());
     const auto mpf_plan = plan_minimizer_generation(mpf_producer, options);
     REQUIRE(mpf_plan.has_value());
@@ -5279,7 +5387,7 @@ TEST_CASE("DOC0371 actual producers cross the persisted 8MiB core edge bounded",
     FakeFragmentStorage<> spill_storage;
     auto spilled = MpsIndex::spill_generation_replay_runs_serial(
         spill_storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::Scalar,
         fragment_bp);
     REQUIRE(spilled.has_value());
@@ -5383,22 +5491,21 @@ TEST_CASE("DOC0371 actual producers preserve DNA5 N reset and packed tail",
 
     lazy_compact_sequence<dna5_u64, chunked> lazy{
         chunked::from_range(range)};
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
     const auto collection_range = MpsIndex::make_generation_collection_range(
-        lazy,
+        lazy_view,
         fragment_bp,
         fragment_bp + 100u);
     REQUIRE(collection_range.has_value());
     constexpr std::uint64_t halo = 10u + 15u - 2u;
-    REQUIRE(collection_range->cs_u == (fragment_bp - halo) / 21u);
-    REQUIRE(collection_range->ce_u
-        == (fragment_bp + 100u + halo) / 21u
-            + ((fragment_bp + 100u + halo) % 21u != 0 ? 1u : 0u));
+    REQUIRE(collection_range->cs_u == fragment_bp - halo);
+    REQUIRE(collection_range->ce_u == fragment_bp + 100u + halo);
     REQUIRE(collection_range->core_lo_bp == fragment_bp);
     REQUIRE(collection_range->core_hi_bp == fragment_bp + 100u);
     auto options = test_generation_options(range.bp_size());
     options.alphabet_code = 5;
     auto mpf_producer = Index::make_generation_replay_producer(
-        lazy, MinimizerSketchBackend::ExactSimd);
+        lazy_view, MinimizerSketchBackend::ExactSimd);
     CollectingMinimizerRowSink mpf_sink;
     auto mpf = encode_minimizer_generation(
         mpf_producer, mpf_sink, options);
@@ -5407,7 +5514,7 @@ TEST_CASE("DOC0371 actual producers preserve DNA5 N reset and packed tail",
     FakeFragmentStorage<> spill_storage;
     auto spilled = MpsIndex::spill_generation_replay_runs_serial(
         spill_storage,
-        lazy,
+        lazy_view,
         MinimizerSketchBackend::ExactSimd,
         fragment_bp);
     REQUIRE(spilled.has_value());
@@ -14609,8 +14716,10 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         range_t range(data);
         lazy_compact_sequence<dna4_u64, chunked> lazy{
             chunked::from_range(range)};
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
         auto mpf_producer = Index::make_generation_replay_producer(
-            lazy, MinimizerSketchBackend::ExactSimd);
+            lazy_view, MinimizerSketchBackend::ExactSimd);
         CollectingMinimizerRowSink mpf_sink;
         auto mpf_options = test_shape_v5_generation_options(
             range.bp_size(), 65'534u);
@@ -14644,7 +14753,7 @@ TEST_CASE("DOC0373 Format-5 real MPF and spilled MPS replays are identical",
         MpsGenerationExecutionEvidence spill_execution;
         auto spill = MpsIndex::spill_generation_replay_runs_serial(
             spill_storage,
-            lazy,
+            lazy_view,
             MinimizerSketchBackend::ExactSimd,
             fragment_bp,
             kMinimizerPreferredSegmentSpanBp,
@@ -15035,7 +15144,9 @@ TEST_CASE("DOC0279 §9 — assemble_segment over fragmented storage equals whole
 
     FakeFragmentStorage<> storage;
     lazy_compact_sequence<dna4_u64, chunked> lazy{chunked::from_range(range)};
-    bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>::build(storage, lazy);
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
+    bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>::build(
+        storage, lazy_view);
 
     bioseq::indexing::MinimizerAssemblyScratch scratch;
     auto assembled = bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>::assemble_segment(
@@ -15060,7 +15171,9 @@ TEST_CASE("DOC0279 §9 — assemble_segment over fragmented storage equals whole
 TEST_CASE("ExactSimd MPF fragmented build preserves scalar segment lookups",
           "[indexing][minimizer-hashmap][exact-simd][fragmented][parity]") {
     constexpr std::size_t FragUnits = 2;
-    constexpr std::size_t frag_bp = FragUnits * 32;
+    // MPF persistence owns fixed 32 KiBP logical fragments independently of
+    // the much smaller source-scanner fragments used to stress lazy reads.
+    constexpr std::size_t frag_bp = 32'768u;
     using chunked = sequence_scanner_test_chunked<std::uint64_t, FragUnits>;
     using Index =
         bioseq::indexing::MinimizersPerFragmentIndex<FakeFragmentStorage<>>;
@@ -15077,10 +15190,28 @@ TEST_CASE("ExactSimd MPF fragmented build preserves scalar segment lookups",
         chunked::from_range(range)};
     lazy_compact_sequence<dna4_u64, chunked> exact_lazy{
         chunked::from_range(range)};
+    const auto scalar_view =
+        bioseq::storage::as_lazy_sequence_view(scalar_lazy);
+    const auto exact_view =
+        bioseq::storage::as_lazy_sequence_view(exact_lazy);
+    bioseq::indexing::MpfGenerationExecutionEvidence scalar_evidence;
+    bioseq::indexing::MpfGenerationExecutionEvidence exact_evidence;
     Index::build(
-        scalar_storage, scalar_lazy, MinimizerSketchBackend::Scalar);
+        scalar_storage, scalar_view, MinimizerSketchBackend::Scalar,
+        &scalar_evidence);
     Index::build(
-        exact_storage, exact_lazy, MinimizerSketchBackend::ExactSimd);
+        exact_storage, exact_view, MinimizerSketchBackend::ExactSimd,
+        &exact_evidence);
+    REQUIRE(scalar_evidence.scalar_core_runs > 0u);
+    REQUIRE(scalar_evidence.exact_simd_core_runs == 0u);
+    REQUIRE(scalar_evidence.paper_nthash_core_runs == 0u);
+    REQUIRE(scalar_evidence.vulkan_core_runs == 0u);
+    REQUIRE(exact_evidence.scalar_core_runs == 0u);
+    REQUIRE(exact_evidence.exact_simd_core_runs > 0u);
+    REQUIRE(exact_evidence.paper_nthash_core_runs == 0u);
+    REQUIRE(exact_evidence.vulkan_core_runs == 0u);
+    REQUIRE(exact_evidence.exact_simd_proof_present);
+    REQUIRE(exact_evidence.exact_simd_proof.accepted(true));
 
     bioseq::indexing::MinimizerAssemblyScratch scalar_scratch;
     bioseq::indexing::MinimizerAssemblyScratch exact_scratch;

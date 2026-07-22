@@ -83,6 +83,81 @@
         }
       },
       {
+        "name": "test-opt-sanitizer",
+        "inherits": "test-opt",
+        "hidden": true,
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext"
+        }
+      },
+      {
+        "name": "test-opt-asan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "AddressSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 ownership and lifetime checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=address"
+        }
+      },
+      {
+        "name": "test-opt-ubsan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "UndefinedBehaviorSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 arithmetic, representation, and lifecycle checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=undefined"
+        }
+      },
+      {
+        "name": "test-opt-tsan",
+        "inherits": "test-opt-sanitizer",
+        "displayName": "ThreadSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 async-owner, TBB, and DSM publication checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread",
+          "VCPKG_OVERLAY_PORTS": "${sourceDir}/cmake/ports-tsan"
+        }
+      },
+      {
+        "name": "test-opt-level2",
+        "inherits": "test-opt",
+        "displayName": "Optimised level-2 qualification config",
+        "description": "Isolated unit/integration qualification tree with the full dna4/dna5 and 1/2/4/8-byte PostgreSQL profile. The checked-in everyday optimization level remains zero.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "2"
+        }
+      },
+      {
+        "name": "test-opt-level2-trace",
+        "inherits": "test-opt-level2",
+        "displayName": "Optimised level-2 compiler-trace qualification config",
+        "description": "Isolated DOC0377 compiler-instantiation evidence tree. Emits complete Clang time-trace events without changing the everyday test-opt or level-2 qualification trees.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_TIME_TRACE": "ON",
+          "BIOSEQ_TIME_TRACE_GRANULARITY": "0"
+        }
+      },
+      {
         "name": "bench-opt-debug",
         "displayName": "Benchmark-tuned optimisation config (with debug symbols and per-TU temps)",
          "description": "Same -O3 + NDEBUG as `bench-opt`, plus `-save-temps=obj` (keeps per-TU .s/.ii/.bc artifacts beside each .o so the inspect MCP tool can extract assembly and IR for any function) and `-g` (preserves DWARF symbols for source-line cross-references in objdump output). Lives under build/bench-opt-debug/ so it does not invalidate the default bench-opt ninja graph. ~2x slower to compile and ~2-3x peak RSS per TU than `bench-opt`; only use when the inspect tool is needed.",

@@ -349,10 +349,23 @@ public:
       uint32_t logId;
     };
     static constexpr uint32_t BLK_CNT = FMTLOG_QUEUE_SIZE / sizeof(MsgHeader);
+    static_assert(BLK_CNT > 2,
+                  "the logging queue needs a record block, a payload block, and a sentinel");
+
+    // alloc() keeps one MsgHeader block free for the queue sentinel. The
+    // returned record consumes one further block for its own header, leaving
+    // this exact maximum for the caller-owned payload.
+    static constexpr uint32_t MAX_PAYLOAD_SIZE =
+      (BLK_CNT - 2) * sizeof(MsgHeader);
+    static_assert(MAX_PAYLOAD_SIZE < std::numeric_limits<uint32_t>::max());
+    static constexpr uint32_t FIRST_UNSUPPORTED_PAYLOAD_SIZE = MAX_PAYLOAD_SIZE + 1;
 
     MsgHeader* allocMsg(uint32_t size) noexcept;
 
     MsgHeader* alloc(uint32_t size) {
+      // Check before adding the record header so hostile/truncated sizes can
+      // never wrap the block calculation into an undersized reservation.
+      if (size > MAX_PAYLOAD_SIZE) return nullptr;
       size += sizeof(MsgHeader);
       uint32_t blk_sz = (size + sizeof(MsgHeader) - 1) / sizeof(MsgHeader);
       if (blk_sz >= free_write_cnt) {
@@ -588,6 +601,15 @@ public:
   }
 
   template<typename Arg>
+  static inline constexpr bool isStoredCstring() {
+    using ArgType = fmt::remove_cvref_t<Arg>;
+    if constexpr (isNamedArg<ArgType>()) {
+      return isCstring<typename unNamedType<ArgType>::type>();
+    }
+    return isCstring<Arg>();
+  }
+
+  template<typename Arg>
   static inline constexpr bool needCallDtor() {
     using ArgType = fmt::remove_cvref_t<Arg>;
     if constexpr (isNamedArg<Arg>()) {
@@ -597,28 +619,80 @@ public:
     return !std::is_trivially_destructible<ArgType>::value;
   }
 
+  /*
+   * The queue deliberately packs strings and builtin scalar arguments without
+   * padding.  Builtins can therefore begin at any byte after a string and must
+   * be decoded with memcpy.  Objects whose address is retained by fmt (custom
+   * formatters), and objects that have a non-trivial lifetime, instead need a
+   * real, aligned object in the queue until formatTo() has finished with it.
+   */
+  template<typename Arg>
+  static inline constexpr bool needAlignedArgStorage() {
+    using ArgType = fmt::remove_cvref_t<Arg>;
+    return !std::is_scalar_v<ArgType> ||
+      fmt::detail::mapped_type_constant<ArgType, char>::value ==
+        fmt::detail::type::custom_type;
+  }
+
+  template<typename ArgType>
+  static inline char* alignArgStorage(char* ptr) noexcept {
+    constexpr size_t alignment = alignof(ArgType);
+    const auto address = reinterpret_cast<std::uintptr_t>(ptr);
+    const auto padding = (alignment - (address % alignment)) % alignment;
+    return ptr + padding;
+  }
+
+  static constexpr size_t LOG_RECORD_PREFIX_SIZE = sizeof(int64_t);
+  static constexpr size_t MAX_ARGUMENT_STORAGE_SIZE =
+    SPSCVarQueueOPT::MAX_PAYLOAD_SIZE - LOG_RECORD_PREFIX_SIZE;
+
+  static inline constexpr bool reserveArgStorage(size_t& remaining,
+                                                 size_t requested) noexcept {
+    if (requested > remaining) return false;
+    remaining -= requested;
+    return true;
+  }
+
   template<size_t CstringIdx>
-  static inline constexpr size_t getArgSizes(size_t* cstringSize) {
-    return 0;
+  static inline constexpr bool getArgSizes(size_t* cstringSize,
+                                           size_t& remaining) {
+    return true;
   }
 
   template<size_t CstringIdx, typename Arg, typename... Args>
-  static inline constexpr size_t getArgSizes(size_t* cstringSize, const Arg& arg,
-                                             const Args&... args) {
+  static inline constexpr bool getArgSizes(size_t* cstringSize,
+                                           size_t& remaining,
+                                           const Arg& arg,
+                                           const Args&... args) {
     if constexpr (isNamedArg<Arg>()) {
-      return getArgSizes<CstringIdx>(cstringSize, arg.value, args...);
+      return getArgSizes<CstringIdx>(cstringSize, remaining, arg.value, args...);
     }
     else if constexpr (isCstring<Arg>()) {
-      size_t len = strlen(arg) + 1;
-      cstringSize[CstringIdx] = len;
-      return len + getArgSizes<CstringIdx + 1>(cstringSize, args...);
+      const size_t len = strlen(arg);
+      // The terminating NUL is part of the queue representation. Checking
+      // against remaining before +1 avoids both size_t overflow and a partial
+      // queue record.
+      if (len >= remaining) return false;
+      const size_t stored_size = len + 1;
+      cstringSize[CstringIdx] = stored_size;
+      remaining -= stored_size;
+      return getArgSizes<CstringIdx + 1>(cstringSize, remaining, args...);
     }
     else if constexpr (isString<Arg>()) {
-      size_t len = arg.size() + 1;
-      return len + getArgSizes<CstringIdx>(cstringSize, args...);
+      const size_t len = arg.size();
+      if (len >= remaining) return false;
+      remaining -= len + 1;
+      return getArgSizes<CstringIdx>(cstringSize, remaining, args...);
     }
     else {
-      return sizeof(Arg) + getArgSizes<CstringIdx>(cstringSize, args...);
+      using ArgType = fmt::remove_cvref_t<Arg>;
+      constexpr size_t maximum_padding =
+        needAlignedArgStorage<ArgType>() ? alignof(ArgType) - 1 : 0;
+      if (!reserveArgStorage(remaining, maximum_padding) ||
+          !reserveArgStorage(remaining, sizeof(ArgType))) {
+        return false;
+      }
+      return getArgSizes<CstringIdx>(cstringSize, remaining, args...);
     }
   }
 
@@ -645,16 +719,34 @@ public:
       return encodeArgs<CstringIdx>(cstringSize, out + len + 1, std::forward<Args>(args)...);
     }
     else {
-      // If Arg has alignment >= 16, gcc could emit aligned move instructions(e.g. movdqa) for
-      // placement new even if the *out* is misaligned, which would cause segfault. So we use memcpy
-      // when possible
-      if constexpr (std::is_trivially_copyable_v<fmt::remove_cvref_t<Arg>>) {
-        memcpy(out, &arg, sizeof(Arg));
+      using ArgType = fmt::remove_cvref_t<Arg>;
+      if constexpr (needAlignedArgStorage<ArgType>()) {
+        out = alignArgStorage<ArgType>(out);
+      }
+
+      // Packed builtin scalars are only serialized bytes; no ArgType object is
+      // addressed in the queue.  Custom and non-scalar values are real,
+      // aligned objects because fmt may retain their address until the
+      // asynchronous formatting pass completes.
+      if constexpr (!needAlignedArgStorage<ArgType>()) {
+        static_assert(std::is_scalar_v<ArgType> &&
+                      std::is_trivially_copyable_v<ArgType>);
+        memcpy(out, &arg, sizeof(ArgType));
+      }
+      else if constexpr (std::is_constructible_v<ArgType, Arg&&>) {
+        std::construct_at(reinterpret_cast<ArgType*>(out), std::forward<Arg>(arg));
       }
       else {
-        new (out) fmt::remove_cvref_t<Arg>(std::forward<Arg>(arg));
+        // Raw arrays are the relevant non-constructible case.  memcpy starts
+        // their lifetime only when the standard classifies the type as
+        // implicit-lifetime; reject any exotic type for which that guarantee
+        // does not hold rather than reintroducing typed access to raw bytes.
+        static_assert(std::is_trivially_copyable_v<ArgType>);
+        static_assert(std::is_implicit_lifetime_v<ArgType>);
+        memcpy(out, &arg, sizeof(ArgType));
       }
-      return encodeArgs<CstringIdx>(cstringSize, out + sizeof(Arg), std::forward<Args>(args)...);
+      return encodeArgs<CstringIdx>(cstringSize, out + sizeof(ArgType),
+                                    std::forward<Args>(args)...);
     }
   }
 
@@ -671,6 +763,23 @@ public:
     }
     else {
       storeNamedArgs<Idx + 1, NamedIdx>(named_args_store, args...);
+    }
+  }
+
+  template<bool ValueOnly, size_t Idx, typename Decoded>
+  static inline void storeDecodedArg(fmt::basic_format_arg<Context>* args,
+                                     Decoded& decoded) {
+    if constexpr (ValueOnly) {
+      // fmt's basic_format_arg is standard-layout and value_ is its first
+      // member, so these objects are pointer-interconvertible.  Updating only
+      // value_ preserves fmtlog's cached-type fast path after the first record.
+      static_assert(std::is_standard_layout_v<fmt::basic_format_arg<Context>>);
+      auto* value = reinterpret_cast<fmt::detail::value<Context>*>(args + Idx);
+      fmt::detail::value<Context>& value_ = *value;
+      value_ = decoded;
+    }
+    else {
+      args[Idx] = decoded;
     }
   }
 
@@ -692,43 +801,48 @@ public:
     else if constexpr (isCstring<Arg>() || isString<Arg>()) {
       size_t size = strlen(in);
       fmt::string_view v(in, size);
-      if constexpr (ValueOnly) {
-        fmt::detail::value<Context>& value_ = *(fmt::detail::value<Context>*)(args + Idx);
-        value_ = v;
-      }
-      else {
-        args[Idx] = v;
-      }
+      storeDecodedArg<ValueOnly, Idx>(args, v);
       return decodeArgs<ValueOnly, Idx + 1, DestructIdx, Args...>(in + size + 1, args,
                                                                   destruct_args);
     }
     else {
-      if constexpr (ValueOnly) {
-        fmt::detail::value<Context>& value_ = *(fmt::detail::value<Context>*)(args + Idx);
+      char* encoded = const_cast<char*>(in);
+      if constexpr (needAlignedArgStorage<ArgType>()) {
+        encoded = alignArgStorage<ArgType>(encoded);
+        auto& decoded = *std::launder(reinterpret_cast<ArgType*>(encoded));
         if constexpr (UnrefPtr<ArgType>::value) {
-          value_ = **(ArgType*)in;
+          auto& unwrapped = *decoded;
+          storeDecodedArg<ValueOnly, Idx>(args, unwrapped);
         }
         else {
-          value_ = *(ArgType*)in;
+          storeDecodedArg<ValueOnly, Idx>(args, decoded);
         }
       }
       else {
+        // Scalar queue fields are intentionally byte-packed.  Decode through
+        // an aligned local object so odd-offset fields never create a
+        // misaligned pointer or reference.
+        static_assert(std::is_scalar_v<ArgType> &&
+                      std::is_trivially_copyable_v<ArgType>);
+        ArgType decoded{};
+        memcpy(&decoded, encoded, sizeof(ArgType));
         if constexpr (UnrefPtr<ArgType>::value) {
-          args[Idx] = **(ArgType*)in;
+          auto& unwrapped = *decoded;
+          storeDecodedArg<ValueOnly, Idx>(args, unwrapped);
         }
         else {
-          args[Idx] = *(ArgType*)in;
+          storeDecodedArg<ValueOnly, Idx>(args, decoded);
         }
       }
 
       if constexpr (needCallDtor<Arg>()) {
-        destruct_args[DestructIdx] = in;
-        return decodeArgs<ValueOnly, Idx + 1, DestructIdx + 1, Args...>(in + sizeof(ArgType), args,
-                                                                        destruct_args);
+        destruct_args[DestructIdx] = encoded;
+        return decodeArgs<ValueOnly, Idx + 1, DestructIdx + 1, Args...>(
+          encoded + sizeof(ArgType), args, destruct_args);
       }
       else {
-        return decodeArgs<ValueOnly, Idx + 1, DestructIdx, Args...>(in + sizeof(ArgType), args,
-                                                                    destruct_args);
+        return decodeArgs<ValueOnly, Idx + 1, DestructIdx, Args...>(
+          encoded + sizeof(ArgType), args, destruct_args);
       }
     }
   }
@@ -743,7 +857,9 @@ public:
       destructArgs<DestructIdx, typename unNamedType<ArgType>::type, Args...>(destruct_args);
     }
     else if constexpr (needCallDtor<Arg>()) {
-      ((ArgType*)destruct_args[DestructIdx])->~ArgType();
+      auto* stored = std::launder(reinterpret_cast<ArgType*>(
+        const_cast<char*>(destruct_args[DestructIdx])));
+      std::destroy_at(stored);
       destructArgs<DestructIdx + 1, Args...>(destruct_args);
     }
     else {
@@ -841,9 +957,17 @@ public:
       auto unnamed_format = unNameFormat<false>(fmt::string_view(format), nullptr, args...);
       registerLogInfo(logId, formatTo<Args...>, location, level, unnamed_format);
     }
-    constexpr size_t num_cstring = fmt::detail::count<isCstring<Args>()...>();
+    constexpr size_t num_cstring = fmt::detail::count<isStoredCstring<Args>()...>();
     size_t cstringSizes[std::max(num_cstring, (size_t)1)];
-    uint32_t alloc_size = 8 + (uint32_t)getArgSizes<0>(cstringSizes, args...);
+    size_t remaining = MAX_ARGUMENT_STORAGE_SIZE;
+    if (!getArgSizes<0>(cstringSizes, remaining, args...)) {
+      // Preserve the queue-full callback contract while failing permanently
+      // oversized records once, even when FMTLOG_BLOCK is enabled.
+      (void)allocMsg(SPSCVarQueueOPT::FIRST_UNSUPPORTED_PAYLOAD_SIZE, true);
+      return;
+    }
+    const size_t arg_size = MAX_ARGUMENT_STORAGE_SIZE - remaining;
+    const uint32_t alloc_size = static_cast<uint32_t>(LOG_RECORD_PREFIX_SIZE + arg_size);
     bool q_full_cb = true;
     do {
       if (auto header = allocMsg(alloc_size, q_full_cb)) {
@@ -864,8 +988,13 @@ public:
                       Args&&... args) {
     fmt::string_view sv(format);
     auto&& fmt_args = fmt::make_format_args(args...);
-    uint32_t fmt_size = formatted_size(sv, fmt_args);
-    uint32_t alloc_size = 8 + 8 + fmt_size;
+    const size_t fmt_size = formatted_size(sv, fmt_args);
+    constexpr size_t fixed_size = sizeof(int64_t) + sizeof(const char*);
+    if (fmt_size > SPSCVarQueueOPT::MAX_PAYLOAD_SIZE - fixed_size) {
+      (void)allocMsg(SPSCVarQueueOPT::FIRST_UNSUPPORTED_PAYLOAD_SIZE, true);
+      return;
+    }
+    const uint32_t alloc_size = static_cast<uint32_t>(fixed_size + fmt_size);
     bool q_full_cb = true;
     do {
       if (auto header = allocMsg(alloc_size, q_full_cb)) {

@@ -19416,25 +19416,30 @@ inline void IndexStorageTablePg::for_each_sequence(F&& loader) {
         const std::uint8_t alpha = hdr->alphabet_code;
         const std::uint8_t bw = logical_storage_unit_byte_width(hdr);
         if (!is_locator_stub(hdr)) {
-            pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
+            pgseq_t::dispatch_instance(
+                alpha, bw, [hdr, &loader, rowno, total]<class S>() {
                 compact_sequence_range<S> rng{*hdr};
-                bioseq::storage::lazy_compact_sequence<S, bioseq::storage::sequence_scanner_pg<S>>
-                    lazy{ bioseq::storage::make_scanner_pg_in_memory<S>(rng) };
-                loader(lazy, (std::size_t)rowno, total);
+                const auto view =
+                    bioseq::storage::as_lazy_sequence_view(rng);
+                loader(view, static_cast<std::size_t>(rowno), total);
             });
         } else {
             const seq_locator loc = decode_locator_from_stub(hdr);
-            pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
-                constexpr std::size_t lpu = compact_sequence_range<S>::traits::letters_per_unit;
-                const std::size_t pad = (loc.total_bp_size % lpu) == 0
-                    ? 0
-                    : static_cast<std::size_t>(
-                        lpu - loc.total_bp_size % lpu);
-                bioseq::storage::with_lazy_postgres<S>(
+            pgseq_t::dispatch_instance(
+                alpha,
+                bw,
+                [this, &loader, loc, rowno, total, rs, inner]<class S>() {
+                using SourceBinding =
+                    bioseq::storage::postgres_lazy_sequence_binding<S>;
+                const SourceBinding source_binding{
                     db_oid_, tablespace_oid_, main_relfilenode_,
-                    column_attno_, loc, pad, rs->snapshot, read_caches_, inner,
-                    [&](auto& lazy_seq){
-                        loader(lazy_seq, static_cast<std::size_t>(rowno), total);
+                    column_attno_, loc,
+                    SourceBinding::expected_last_fragment_padding(loc),
+                    rs->snapshot, read_caches_, inner};
+                bioseq::storage::with_lazy_postgres<S>(
+                    source_binding,
+                    [&loader, rowno, total](auto view){
+                        loader(view, static_cast<std::size_t>(rowno), total);
                     });
             });
         }

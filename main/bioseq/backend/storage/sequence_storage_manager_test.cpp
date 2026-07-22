@@ -14,8 +14,11 @@
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <span>
 
 import bioseq.storage.bucket_math;
 
@@ -142,4 +145,168 @@ TEST_CASE("DOC0371 — seq_locator v3 is a 40-byte standard-layout POD that roun
     REQUIRE(offsetof(seq_locator, total_bp_size)    == 16u);
     REQUIRE(offsetof(seq_locator, first_sub_row_no) == 24u);
     REQUIRE(offsetof(seq_locator, source_epoch)     == 32u);
+}
+
+TEST_CASE("DOC0377 — canonical locator payload codec validates exact frozen framing",
+          "[storage][locator][unit]") {
+    seq_locator locator{
+        .version = bioseq::storage::kLocatorVersion,
+        .bucket_idx = (std::numeric_limits<std::uint8_t>::max)(),
+        .shard_idx = (std::numeric_limits<std::uint32_t>::max)(),
+        .num_fragments = (std::numeric_limits<std::uint32_t>::max)(),
+        .total_bp_size = (std::numeric_limits<std::uint64_t>::max)(),
+        .first_sub_row_no = (std::numeric_limits<std::uint64_t>::max)(),
+        .source_epoch = 0u,
+    };
+    std::array<std::byte, sizeof(seq_locator)> payload{};
+    REQUIRE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+    const auto decoded = bioseq::storage::decode_seq_locator_payload(payload);
+    REQUIRE(decoded.has_value());
+    REQUIRE(decoded->bucket_idx == locator.bucket_idx);
+    REQUIRE(decoded->shard_idx == locator.shard_idx);
+    REQUIRE(decoded->num_fragments == locator.num_fragments);
+    REQUIRE(decoded->total_bp_size == locator.total_bp_size);
+    REQUIRE(decoded->first_sub_row_no == locator.first_sub_row_no);
+    REQUIRE(decoded->source_epoch == 0u);
+
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(
+        std::span<std::byte>(payload).first(payload.size() - 1u), locator));
+    REQUIRE_FALSE(bioseq::storage::decode_seq_locator_payload(
+        std::span<const std::byte>(payload).first(payload.size() - 1u))
+                      .has_value());
+
+    locator.version = 2u;
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+    payload[0] = std::byte{2u};
+    REQUIRE_FALSE(bioseq::storage::decode_seq_locator_payload(payload)
+                      .has_value());
+
+    locator.version = bioseq::storage::kLocatorVersion;
+    locator._pad_2 = 1u;
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+    locator._pad_2 = 0u;
+    locator._pad_4 = 1u;
+    REQUIRE_FALSE(bioseq::storage::encode_seq_locator_payload(payload, locator));
+
+    REQUIRE(bioseq::storage::is_seq_locator_stub_width(
+        bioseq::storage::k_seq_locator_stub_marker));
+    REQUIRE_FALSE(bioseq::storage::is_seq_locator_stub_width(8u));
+}
+
+TEST_CASE("DOC0377 — flat locator validation rejects every unsafe narrowing and geometry",
+          "[storage][locator][unit][corruption][overflow]") {
+    using error = bioseq::storage::flat_locator_validation_error;
+    const auto validate = [](seq_locator locator) noexcept {
+        return bioseq::storage::validate_flat_locator_geometry(locator);
+    };
+    const seq_locator valid{
+        .version = bioseq::storage::kLocatorVersion,
+        .bucket_idx = 1u,
+        .shard_idx = 2u,
+        .num_fragments = 2u,
+        .total_bp_size = 32'769u,
+        .first_sub_row_no = 17u,
+        .source_epoch = 9u,
+    };
+    REQUIRE(validate(valid) == error::none);
+
+    auto locator = valid;
+    locator.version = 2u;
+    REQUIRE(validate(locator) == error::invalid_wire_metadata);
+    locator = valid;
+    locator.source_epoch = 0u;
+    REQUIRE(validate(locator) == error::invalid_wire_metadata);
+    locator.source_epoch =
+        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+        + 1u;
+    REQUIRE(validate(locator) == error::invalid_wire_metadata);
+
+    locator = valid;
+    locator.total_bp_size =
+        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+        + 1u;
+    REQUIRE(validate(locator) == error::logical_length_exceeds_bigint);
+    locator.total_bp_size =
+        static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)())
+        + 1u;
+    REQUIRE(validate(locator) == error::logical_length_exceeds_flat_field);
+    locator.total_bp_size =
+        static_cast<std::uint64_t>((std::numeric_limits<std::uint32_t>::max)());
+    REQUIRE(validate(locator) == error::none);
+
+    locator = valid;
+    locator.shard_idx =
+        static_cast<std::uint32_t>((std::numeric_limits<std::int32_t>::max)())
+        + 1u;
+    REQUIRE(validate(locator) == error::shard_exceeds_catalog_domain);
+    locator = valid;
+    locator.first_sub_row_no =
+        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)())
+        + 1u;
+    REQUIRE(validate(locator) == error::first_row_exceeds_catalog_domain);
+
+    locator = valid;
+    locator.num_fragments = 0u;
+    REQUIRE(validate(locator) == error::fragment_geometry_inconsistent);
+    locator = valid;
+    locator.total_bp_size = 0u;
+    REQUIRE(validate(locator) == error::fragment_geometry_inconsistent);
+    locator = {};
+    locator.source_epoch = 1u;
+    locator.first_sub_row_no = 1u;
+    REQUIRE(validate(locator) == error::fragment_geometry_inconsistent);
+    locator = valid;
+    locator.first_sub_row_no =
+        static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)());
+    REQUIRE(validate(locator)
+            == error::fragment_row_range_exceeds_catalog_domain);
+}
+
+TEST_CASE("DOC0377 — fragment geometry validation is exact at unit and row boundaries",
+          "[storage][locator][unit][fragment][corruption]") {
+    using frame_error = bioseq::storage::fragment_frame_validation_error;
+    using metadata_error =
+        bioseq::storage::fragment_metadata_validation_error;
+
+    REQUIRE(bioseq::storage::expected_flat_locator_fragment_count(
+                0u, 16u, 1024u) == 0u);
+    REQUIRE(bioseq::storage::expected_flat_locator_fragment_count(
+                16'384u, 16u, 1024u) == 1u);
+    REQUIRE(bioseq::storage::expected_flat_locator_fragment_count(
+                16'385u, 16u, 1024u) == 2u);
+    REQUIRE(bioseq::storage::expected_flat_locator_fragment_count(
+                (std::numeric_limits<std::uint32_t>::max)(), 16u, 1024u)
+            == 262'144u);
+    REQUIRE(bioseq::storage::expected_flat_locator_fragment_count(
+                1u, 0u, 1024u)
+            == (std::numeric_limits<std::uint64_t>::max)());
+    REQUIRE(bioseq::storage::expected_flat_locator_fragment_count(
+                1u, 16u, 0u)
+            == (std::numeric_limits<std::uint64_t>::max)());
+
+    REQUIRE(bioseq::storage::validate_fragment_frame_size(
+                8'208u, 16u, 8'208u) == frame_error::none);
+    REQUIRE(bioseq::storage::validate_fragment_frame_size(
+                15u, 16u, 8'208u) == frame_error::shorter_than_header);
+    REQUIRE(bioseq::storage::validate_fragment_frame_size(
+                8'207u, 16u, 8'208u) == frame_error::size_mismatch);
+    REQUIRE(bioseq::storage::validate_fragment_frame_size(
+                8'209u, 16u, 8'208u) == frame_error::size_mismatch);
+
+    REQUIRE(bioseq::storage::validate_fragment_metadata(
+                0u, 8u, 32'768u, 0u,
+                0u, 8u, 32'768u, 0u) == metadata_error::none);
+    REQUIRE(bioseq::storage::validate_fragment_metadata(
+                1u, 8u, 32'768u, 0u,
+                0u, 8u, 32'768u, 0u) == metadata_error::type_mismatch);
+    REQUIRE(bioseq::storage::validate_fragment_metadata(
+                0u, 4u, 32'768u, 0u,
+                0u, 8u, 32'768u, 0u) == metadata_error::type_mismatch);
+    REQUIRE(bioseq::storage::validate_fragment_metadata(
+                0u, 8u, 32'767u, 0u,
+                0u, 8u, 32'768u, 0u)
+            == metadata_error::logical_length_mismatch);
+    REQUIRE(bioseq::storage::validate_fragment_metadata(
+                0u, 8u, 1u, 31u,
+                0u, 8u, 1u, 0u) == metadata_error::padding_mismatch);
 }

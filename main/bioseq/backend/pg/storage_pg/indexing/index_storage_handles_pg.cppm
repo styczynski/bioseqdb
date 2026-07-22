@@ -208,6 +208,251 @@ inline void reset_active_read_policy_debug_state() noexcept {
     pg_unreachable();
 }
 
+struct MinimizerPersistencePolicyResolution {
+    std::array<bool, bioseq::indexing::MINIMIZER_INDICES.size()> enabled{};
+    std::array<bool, bioseq::indexing::MINIMIZER_INDICES.size()>
+        update_on_insert{};
+};
+
+[[nodiscard]] inline MinimizerPersistencePolicyResolution
+resolve_minimizer_persistence_policy(
+        Oid user_relid,
+        Oid relfilenode,
+        std::int16_t attno,
+        Snapshot registered_snapshot) {
+    if (!OidIsValid(user_relid) || !OidIsValid(relfilenode) || attno <= 0
+        || registered_snapshot == nullptr
+        || !IsMVCCSnapshot(registered_snapshot)
+        || registered_snapshot->regd_count == 0) {
+        active_read_policy_error_as_cpp(
+            "deferred-persist resolver identity is invalid",
+            fmt::format("relation={} relfilenode={} attno={} snapshot={}",
+                static_cast<unsigned>(user_relid),
+                static_cast<unsigned>(relfilenode),
+                static_cast<int>(attno),
+                registered_snapshot == nullptr ? "null" : "unregistered"));
+    }
+
+    constexpr auto minimizers = bioseq::indexing::MINIMIZER_INDICES;
+    MinimizerPersistencePolicyResolution result{};
+    std::array<bool, minimizers.size()> seen{};
+    for (std::size_t i = 0; i < minimizers.size(); ++i) {
+        result.enabled[i] = true;
+        result.update_on_insert[i] =
+            bioseq::indexing::default_update_on_insert_contains(minimizers[i]);
+    }
+
+    struct PolicyScanLedger {
+        Relation volatile relation = nullptr;
+        Relation volatile primary = nullptr;
+        SysScanDesc volatile scan = nullptr;
+    } ledger{};
+    try {
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [user_relid, relfilenode, attno, registered_snapshot,
+             &result, &seen, &minimizers, &ledger] noexcept {
+                const Oid namespace_oid =
+                    get_namespace_oid("bioseq_internal", false);
+                const Oid policy_oid = get_relname_relid(
+                    "index_policy", namespace_oid);
+                if (!OidIsValid(policy_oid)) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_UNDEFINED_TABLE),
+                         errmsg("bioseq deferred-persist policy catalog is missing")));
+                }
+                if (check_enable_rls(policy_oid, InvalidOid, true)
+                    == RLS_ENABLED) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("row security on bioseq deferred-persist policy is unsupported")));
+                }
+
+                ledger.relation = table_open(policy_oid, AccessShareLock);
+                TupleDesc tuple_desc = RelationGetDescr(ledger.relation);
+                struct AttributeContract {
+                    const char* name;
+                    Oid type;
+                };
+                constexpr std::array<AttributeContract, 7> attributes{{
+                    {"user_relid", OIDOID},
+                    {"main_relfilenode", OIDOID},
+                    {"column_attno", INT2OID},
+                    {"index_name", TEXTOID},
+                    {"enabled", BOOLOID},
+                    {"update_on_insert", BOOLOID},
+                    {"is_active_read", BOOLOID},
+                }};
+                if (ledger.relation->rd_rel->relam != HEAP_TABLE_AM_OID
+                    || tuple_desc->natts
+                        != static_cast<int>(attributes.size())) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq deferred-persist policy catalog shape is invalid")));
+                }
+                for (std::size_t i = 0; i < attributes.size(); ++i) {
+                    Form_pg_attribute attribute = TupleDescAttr(
+                        tuple_desc, static_cast<int>(i));
+                    if (attribute->attisdropped
+                        || attribute->atttypid != attributes[i].type
+                        || std::strcmp(NameStr(attribute->attname),
+                            attributes[i].name) != 0) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq deferred-persist policy catalog schema is invalid"),
+                             errdetail("attribute=%zu", i + 1u)));
+                    }
+                }
+
+                const Oid primary_oid = get_relname_relid(
+                    "index_policy_pkey", namespace_oid);
+                if (!OidIsValid(primary_oid)) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq deferred-persist policy primary index is missing")));
+                }
+                ledger.primary = index_open(primary_oid, AccessShareLock);
+                const Form_pg_index primary_form = ledger.primary->rd_index;
+                const bool primary_valid = primary_form != nullptr
+                    && ledger.primary->rd_rel->relam == BTREE_AM_OID
+                    && primary_form->indrelid == policy_oid
+                    && RelationGetPrimaryKeyIndex(ledger.relation)
+                        == primary_oid
+                    && primary_form->indisvalid && primary_form->indisready
+                    && primary_form->indislive && primary_form->indimmediate
+                    && primary_form->indisunique && primary_form->indisprimary
+                    && primary_form->indnatts == 4
+                    && primary_form->indnkeyatts == 4
+                    && primary_form->indkey.values[0] == 1
+                    && primary_form->indkey.values[1] == 2
+                    && primary_form->indkey.values[2] == 3
+                    && primary_form->indkey.values[3] == 4
+                    && RelationGetIndexExpressions(ledger.primary) == NIL
+                    && RelationGetIndexPredicate(ledger.primary) == NIL;
+                if (!primary_valid) {
+                    ereport(ERROR,
+                        (errcode(ERRCODE_DATA_CORRUPTED),
+                         errmsg("bioseq deferred-persist policy primary index is invalid")));
+                }
+
+                ScanKeyData keys[3];
+                ScanKeyInit(&keys[0], 1, BTEqualStrategyNumber, F_OIDEQ,
+                    ObjectIdGetDatum(user_relid));
+                ScanKeyInit(&keys[1], 2, BTEqualStrategyNumber, F_OIDEQ,
+                    ObjectIdGetDatum(relfilenode));
+                ScanKeyInit(&keys[2], 3, BTEqualStrategyNumber, F_INT2EQ,
+                    Int16GetDatum(attno));
+                ledger.scan = systable_beginscan_ordered(
+                    ledger.relation, ledger.primary, registered_snapshot,
+                    3, keys);
+
+                constexpr std::uint64_t max_policy_rows = 64;
+                std::uint64_t row_count = 0;
+                HeapTuple tuple = nullptr;
+                while (HeapTupleIsValid(tuple = systable_getnext_ordered(
+                        ledger.scan, ForwardScanDirection))) {
+                    if (++row_count > max_policy_rows) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq deferred-persist policy row bound exceeded")));
+                    }
+                    bool user_null = false;
+                    bool relfilenode_null = false;
+                    bool attno_null = false;
+                    bool name_null = false;
+                    bool enabled_null = false;
+                    bool update_null = false;
+                    const Datum row_user = heap_getattr(
+                        tuple, 1, tuple_desc, &user_null);
+                    const Datum row_relfilenode = heap_getattr(
+                        tuple, 2, tuple_desc, &relfilenode_null);
+                    const Datum row_attno = heap_getattr(
+                        tuple, 3, tuple_desc, &attno_null);
+                    const Datum row_name = heap_getattr(
+                        tuple, 4, tuple_desc, &name_null);
+                    const Datum row_enabled = heap_getattr(
+                        tuple, 5, tuple_desc, &enabled_null);
+                    const Datum row_update = heap_getattr(
+                        tuple, 6, tuple_desc, &update_null);
+                    if (user_null || relfilenode_null || attno_null
+                        || name_null || enabled_null || update_null) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq deferred-persist policy row contains NULL")));
+                    }
+                    if (DatumGetObjectId(row_user) != user_relid
+                        || DatumGetObjectId(row_relfilenode) != relfilenode
+                        || DatumGetInt16(row_attno) != attno) {
+                        ereport(ERROR,
+                            (errcode(ERRCODE_DATA_CORRUPTED),
+                             errmsg("bioseq deferred-persist policy index returned a foreign row")));
+                    }
+
+                    text* name = DatumGetTextPP(row_name);
+                    const bool free_name = static_cast<void*>(name)
+                        != DatumGetPointer(row_name);
+                    const std::size_t name_size = static_cast<std::size_t>(
+                        VARSIZE_ANY_EXHDR(name));
+                    for (std::size_t i = 0; i < minimizers.size(); ++i) {
+                        if (name_size == minimizers[i].size()
+                            && std::memcmp(VARDATA_ANY(name),
+                                minimizers[i].data(), name_size) == 0) {
+                            if (seen[i]) {
+                                ereport(ERROR,
+                                    (errcode(ERRCODE_DATA_CORRUPTED),
+                                     errmsg("bioseq deferred-persist policy contains a duplicate minimizer row")));
+                            }
+                            seen[i] = true;
+                            result.enabled[i] = DatumGetBool(row_enabled);
+                            result.update_on_insert[i] =
+                                DatumGetBool(row_update);
+                            break;
+                        }
+                    }
+                    if (free_name) {
+                        pfree(name);
+                    }
+                }
+
+                systable_endscan_ordered(ledger.scan);
+                ledger.scan = nullptr;
+                index_close(ledger.primary, AccessShareLock);
+                ledger.primary = nullptr;
+                table_close(ledger.relation, AccessShareLock);
+                ledger.relation = nullptr;
+            });
+    } catch (...) {
+        if (ledger.scan != nullptr) {
+            SysScanDesc scan = ledger.scan;
+            ledger.scan = nullptr;
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [scan] { systable_endscan_ordered(scan); });
+            } catch (...) {
+            }
+        }
+        if (ledger.primary != nullptr) {
+            Relation primary = ledger.primary;
+            ledger.primary = nullptr;
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [primary] { index_close(primary, AccessShareLock); });
+            } catch (...) {
+            }
+        }
+        if (ledger.relation != nullptr) {
+            Relation relation = ledger.relation;
+            ledger.relation = nullptr;
+            try {
+                bioseq::pg_utils::invoke_pg_as_cpp(
+                    [relation] { table_close(relation, AccessShareLock); });
+            } catch (...) {
+            }
+        }
+        throw;
+    }
+    return result;
+}
+
 [[nodiscard]] inline ActiveReadPolicyResolution
 resolve_active_read_index_outcome(
         const BorrowedExecutorReadContextPg& executor_read,

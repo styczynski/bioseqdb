@@ -25,6 +25,34 @@ namespace {
 
 static TupleTableSlotOps TTSOpsBioseqColumn;
 
+/* ModifyTable copies a virtual projection result into the destination
+ * relation slot before invoking the TableAM callback.  PostgreSQL's virtual
+ * copyslot materializes expanded datums during that copy, so classify that
+ * unavoidable flatten at the destination heap-tuple boundary. */
+static void
+BioseqColumnSlotCopySlot(TupleTableSlot *dstslot, TupleTableSlot *srcslot)
+{
+	const auto previous_scope = exchange_slice_materialization_scope({
+		.attachment = nullptr,
+		.boundary_id = 0u,
+		.producer_value_id = 0u,
+		.mechanism = materialization_mechanism::packed_full,
+		.reason = materialization_reason::heap_tuple,
+		.local_sink = nullptr,
+	});
+	PG_TRY();
+	{
+		TTSOpsVirtual.copyslot(dstslot, srcslot);
+		restore_slice_materialization_scope(previous_scope);
+	}
+	PG_CATCH();
+	{
+		restore_slice_materialization_scope(previous_scope);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+}
+
 /*
  * Implementation of TupleTableSlotOps.copy_heap_tuple for TTSOpsBioseqColumn.
  */
@@ -34,9 +62,28 @@ BioseqColumnSlotCopyHeapTuple(TupleTableSlot *slot)
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnSlotCopyHeapTuple() entered");
 	Assert(!TTS_EMPTY(slot));
 
-	HeapTuple tuple = heap_form_tuple(slot->tts_tupleDescriptor,
-									  slot->tts_values,
-									  slot->tts_isnull);
+	HeapTuple volatile tuple = nullptr;
+	const auto previous_scope = exchange_slice_materialization_scope({
+		.attachment = nullptr,
+		.boundary_id = 0u,
+		.producer_value_id = 0u,
+		.mechanism = materialization_mechanism::packed_full,
+		.reason = materialization_reason::heap_tuple,
+		.local_sink = nullptr,
+	});
+	PG_TRY();
+	{
+		tuple = heap_form_tuple(slot->tts_tupleDescriptor,
+								slot->tts_values,
+								slot->tts_isnull);
+		restore_slice_materialization_scope(previous_scope);
+	}
+	PG_CATCH();
+	{
+		restore_slice_materialization_scope(previous_scope);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	/* slot->tts_tid is filled in bioseq_getnextslot */
 	tuple->t_self = slot->tts_tid;
@@ -50,6 +97,7 @@ export void
 BioseqColumnInitTupleSlotOps()
 {
 	TTSOpsBioseqColumn = TTSOpsVirtual;
+	TTSOpsBioseqColumn.copyslot = BioseqColumnSlotCopySlot;
 	TTSOpsBioseqColumn.copy_heap_tuple = BioseqColumnSlotCopyHeapTuple;
 }
 
@@ -149,20 +197,15 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 			DatumGetPointer(slot->tts_values[idx]));
 		if (!bioseq::storage::is_locator_stub(hdr)) continue;
 		const auto loc_decoded = bioseq::storage::decode_locator_from_stub(hdr);
-		const std::uint64_t projected_payload_bytes =
-			(loc_decoded.total_bp_size * /*bits_per_letter min=*/2u + 7u) / 8u;
-		const std::uint64_t projected_varlena =
-			static_cast<std::uint64_t>(pgseq_t::header_bytes())
-			+ projected_payload_bytes;
-		if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
-			bioseq_log<ERR, PG>(
-			       "bioseq storage Phase C: sequence too large ({} bp => ~{} bytes) "
-			       "to materialise as a single varlena. SELECT seq / pg_dump "
-			       "cannot return this row directly. Use bioseq.substring(seq, ...) "
-			       "to project a sub-region, or wait for Phase D D-VARLENA. "
-			       "See DOC0267.",
-			       loc_decoded.total_bp_size, projected_varlena);
-		}
+		bioseq::storage::validate_locator_flat_materialization_length(loc_decoded);
+		/* Two bits per letter is the smallest possible packed payload.  This
+		 * preflight is intentionally conservative; fetch_payload performs the
+		 * exact alphabet/width calculation after reading the first fragment. */
+		const std::uint64_t projected_payload_bytes = checked_ceil_div(
+			loc_decoded.total_bp_size, /*maximum letters per byte=*/4u);
+		(void) checked_materialization_allocation_size(
+			projected_payload_bytes, pgseq_t::header_bytes(),
+			"flat sequence");
 		pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
 			loc.dbOid, loc.spcOid, loc.relNumber,
 			attno, loc_decoded, snapshot, payload_mctx, cache);

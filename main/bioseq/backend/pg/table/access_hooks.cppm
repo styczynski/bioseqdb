@@ -13,9 +13,12 @@ module;
 
 extern "C" {
 #include "catalog/catalog.h"
+#include "catalog/namespace.h"
 #include "catalog/objectaddress.h"
 #include "catalog/partition.h"
 #include "catalog/pg_inherits.h"
+#include "catalog/pg_type.h"
+#include "commands/copy.h"
 #include "storage/lock.h"
 #include "utils/acl.h"
 #include "utils/inval.h"
@@ -595,6 +598,74 @@ BioseqColumnTableAMObjectAccessHook(ObjectAccessType access, Oid classId,
 }
 
 static void
+PreflightTypmodlessLetterTextCopy(Node *parsetree)
+{
+	if (!IsA(parsetree, CopyStmt))
+	{
+		return;
+	}
+	auto *copy = reinterpret_cast<CopyStmt *>(parsetree);
+	if (!copy->is_from || copy->relation == nullptr)
+	{
+		return;
+	}
+
+	CopyFormatOptions options{};
+	ProcessCopyOptions(nullptr, &options, true, copy->options);
+	if (options.binary)
+	{
+		/* Binary letter input carries and validates its physical alphabet. */
+		return;
+	}
+
+	const Oid namespace_oid = get_namespace_oid("bioseq", true);
+	if (!OidIsValid(namespace_oid))
+	{
+		return;
+	}
+	const Oid letter_oid = GetSysCacheOid2(
+		TYPENAMENSP, Anum_pg_type_oid,
+		PointerGetDatum("letter"), ObjectIdGetDatum(namespace_oid));
+	if (!OidIsValid(letter_oid))
+	{
+		return;
+	}
+
+	Relation relation = table_openrv(copy->relation, RowExclusiveLock);
+	List *attribute_numbers = CopyGetAttnums(
+		RelationGetDescr(relation), relation, copy->attlist);
+	ListCell *cell = nullptr;
+	foreach(cell, attribute_numbers)
+	{
+		const AttrNumber attribute_number = static_cast<AttrNumber>(
+			lfirst_int(cell));
+		if (attribute_number <= 0
+			|| attribute_number > RelationGetDescr(relation)->natts)
+		{
+			continue;
+		}
+		Form_pg_attribute attribute = TupleDescAttr(
+			RelationGetDescr(relation), attribute_number - 1);
+		if (!attribute->attisdropped
+			&& attribute->atttypid == letter_oid
+			&& attribute->atttypmod < 0)
+		{
+			char *attribute_name = pstrdup(NameStr(attribute->attname));
+			list_free(attribute_numbers);
+			table_close(relation, NoLock);
+			ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("bioseq.letter text COPY requires an alphabet typmod"),
+				 errdetail("target column \"%s\" has base type bioseq.letter without an alphabet typmod",
+					 attribute_name),
+				 errhint("declare the target as bioseq.letter('dna4') or another supported alphabet, or use validated binary COPY")));
+		}
+	}
+	list_free(attribute_numbers);
+	table_close(relation, NoLock);
+}
+
+static void
 BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 							   const char *queryString,
 						   bool readOnlyTree,
@@ -610,6 +681,7 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 	}
 
 	Node *parsetree = pstmt->utilityStmt;
+	PreflightTypmodlessLetterTextCopy(parsetree);
 
 	if (IsA(parsetree, IndexStmt))
 	{
@@ -650,7 +722,7 @@ BioseqColumnProcessUtilityImpl(PlannedStmt *pstmt,
 	{
 		try
 		{
-			PrevProcessUtilityHook_compat(pstmt, queryString, false, context,
+			PrevProcessUtilityHook_compat(pstmt, queryString, readOnlyTree, context,
 									  params, queryEnv, dest, completionTag);
 		}
 		catch (...)

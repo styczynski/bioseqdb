@@ -247,6 +247,11 @@ export bool bioseq_index_async_persist = true;
 export bool bioseq_recompute_async_persist = false;
 export int  bioseq_index_memory_cap_mb = 0;
 
+// BIOSEQ_TEST_INDEXES registers this backing value as a hidden enum GUC.
+// Production keeps the symbol for a stable module interface but never
+// registers or reads it.
+export int bioseq_test_force_paper_index_failure = 0;
+
 /*
  * DOC0383 P5 — persisted generation payload-provider identity. These values
  * are a stable cross-backend/DSM ABI. The backing value and user-set GUC both

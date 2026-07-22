@@ -110,11 +110,24 @@ TEMPLATE_TEST_CASE_SIG(
     ((int Width), Width),
     8, 16, 32, 64) {
     auto ctx = fresh_context();
+    constexpr int SourceWidth = Width == 8 ? 16 : 8;
     REQUIRE(query_scalar(
         ctx,
+        fmt::format(
+            "SELECT ('ACGTA'::bioseq.seq('dna4', {}))"
+            "       ::bioseq.seq('dna4', {})::text;",
+            SourceWidth, Width)) == "ACGTA");
+
+    const auto invalid_dna4 = sql_error(
+        ctx,
         fmt::format("SELECT 'ACGTN'::bioseq.seq('dna4', {})::text;",
-                    Width)) == "ACGTA");
+                    Width));
+    REQUIRE(invalid_dna4.sqlstate == "22P02");
 #if BIOSEQ_OPTTIMIZATION_LEVEL == 0
+    REQUIRE(invalid_dna4.contains(
+        "invalid symbol at byte 4 in unbound bioseq.seq"));
+    REQUIRE(invalid_dna4.contains("DETAIL: byte value=78"));
+
     const auto unsupported_alphabet = sql_error(
         ctx,
         fmt::format("SELECT 'ACGTN'::bioseq.seq('dna5', {})::text;",
@@ -124,6 +137,10 @@ TEMPLATE_TEST_CASE_SIG(
         "bioseq.seq alphabet \"dna5\" is not supported"));
     REQUIRE(unsupported_alphabet.contains("Valid alphabets: 'dna4'"));
 #else
+    REQUIRE(invalid_dna4.contains(
+        "invalid symbol 'N' for bioseq alphabet dna4"));
+    REQUIRE(invalid_dna4.contains("DETAIL: symbol offset=4"));
+
     REQUIRE(query_scalar(
         ctx,
         fmt::format("SELECT 'ACGTN'::bioseq.seq('dna5', {})::text;",

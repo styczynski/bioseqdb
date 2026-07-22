@@ -33,6 +33,7 @@ export module bioseq.sequences:sequences;
 import bioseq.common.mlogging;
 import bioseq.common.sequan_compat;
 import bioseq.common.templating;
+import bioseq.sequences.rank_pack_core;
 
 export {
 
@@ -990,6 +991,7 @@ struct compact_sequence_range_base {
         static constexpr IteratorMode iterator_mode = p_iterator_mode;
 
         size_t _bit_no;
+        base_iterator_t _end{};
         typename traits::storage_unit _current_unit;
 
     public:
@@ -1002,9 +1004,10 @@ struct compact_sequence_range_base {
 
         explicit bp_scalar_iter(
             base_iterator_t it,
+            base_iterator_t end,
             const size_t bit_no,
             typename traits::storage_unit current_unit
-        ) : super_t(it), _bit_no(bit_no), _current_unit(current_unit) {}
+        ) : super_t(it), _bit_no(bit_no), _end(end), _current_unit(current_unit) {}
 
         constexpr size_t bit_no() const {
             return _bit_no;
@@ -1053,7 +1056,9 @@ struct compact_sequence_range_base {
             } else if (_bit_no == traits::letters_per_unit - 1) {
                 // Need to increment
                 ++this->base_reference();
-                _current_unit = *this->base();
+                if (this->base() != _end) {
+                    _current_unit = *this->base();
+                }
                 _bit_no = 0;
             } else {
                 ++_bit_no;
@@ -1095,12 +1100,20 @@ struct compact_sequence_range_base {
     template<IteratorMode M, typename I>
     requires (is_valid_derived_iter<I>::value == true)
     constexpr inline bp_scalar_iter<I, M> iter(const I& it) const {
-        if constexpr (traits::letters_per_unit == 1) {
-            return bp_scalar_iter<I, M>(it, 0, *it);
-        } else if (super()->end() == it && super()->begin() != it && super()->padding() != 0) {
-            return bp_scalar_iter<I, M>(it-1, traits::letters_per_unit - super()->padding(), 0);
+        if (super()->end() == it) {
+            if constexpr (traits::letters_per_unit != 1) {
+                if (super()->begin() != it && super()->padding() != 0) {
+                    return bp_scalar_iter<I, M>(
+                        it - 1,
+                        super()->end(),
+                        traits::letters_per_unit - super()->padding(),
+                        typename traits::storage_unit{});
+                }
+            }
+            return bp_scalar_iter<I, M>(
+                it, super()->end(), 0, typename traits::storage_unit{});
         }
-        return bp_scalar_iter<I, M>(it, 0, *it);
+        return bp_scalar_iter<I, M>(it, super()->end(), 0, *it);
     };
 
     // template<IteratorMode M, typename I>
@@ -1821,28 +1834,45 @@ public:
         std::is_same_v<std::remove_reference_t<std::ranges::range_reference_t<R>>, typename C::alphabet_type> == true
     )
     static constexpr std::pair<base_container, size_t> _convert(R&& input_seq) {
-        const size_t f_len = input_seq.size() / traits::letters_per_unit + (input_seq.size() % traits::letters_per_unit != 0);
-        base_container data(f_len);
-        typename traits::storage_unit buf = 0;
-        size_t bit_count = traits::letters_per_unit;
-        size_t write_pos = 0;
+        const size_t f_len = input_seq.size() / traits::letters_per_unit
+            + (input_seq.size() % traits::letters_per_unit != 0);
+        base_container data;
+        data.reserve(f_len);
+        typename traits::storage_unit partial_word{};
+        size_t partial_letters = 0u;
+        size_t emitted_symbols = 0u;
+        auto write_unit = [&data](typename traits::storage_unit unit) {
+            data.push_back(unit);
+            return true;
+        };
         for(const auto& letter : input_seq) {
-            buf >>= traits::bits_per_char;
-            buf |= static_cast<typename traits::storage_unit>(letter.to_rank()) << (traits::unit_used_bits - traits::bits_per_char);
-            if (--bit_count == 0) {
-                bit_count = traits::letters_per_unit;
-                data[write_pos++] = buf;
-                if (traits::unit_leftover_bits > 0) {
-                    buf = 0;
-                }
-            }
+            const bool appended =
+                bioseq::sequences::rank_pack_detail::append_valid_rank_lsb<
+                    typename traits::storage_unit,
+                    traits::bits_per_char,
+                    traits::letters_per_unit>(
+                        partial_word,
+                        partial_letters,
+                        emitted_symbols,
+                        letter.to_rank(),
+                        write_unit);
+            DEBUG_ASSERT(appended,
+                         "growing legacy rank pack unexpectedly overflowed");
         }
-        if (bit_count == traits::letters_per_unit) {
-            bit_count = 0;
-        } else {
-            data[write_pos] = buf >> (traits::bits_per_char * bit_count);
-        }
-        return std::make_pair(data, bit_count);
+        const auto finished =
+            bioseq::sequences::rank_pack_detail::finish_lsb<
+                typename traits::storage_unit,
+                traits::bits_per_char,
+                traits::letters_per_unit>(
+                    partial_word, partial_letters, write_unit);
+        DEBUG_ASSERT(finished.capacity_ok,
+                     "growing legacy rank pack unexpectedly overflowed");
+        DEBUG_ASSERT(emitted_symbols == input_seq.size(),
+                     "legacy rank pack emitted-symbol mismatch");
+        DEBUG_ASSERT(data.size() == f_len,
+                     "legacy rank pack unit-count mismatch");
+        return std::make_pair(
+            std::move(data), static_cast<size_t>(finished.padding_letters));
     }
 
     template <typename R>

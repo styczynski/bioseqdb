@@ -40,14 +40,24 @@ namespace {
 
 constexpr std::string_view kTable = "test_index_admin_t";
 
+#ifdef BIOSEQ_TEST_INDEXES
+[[nodiscard]] std::int64_t facade_source_counter(connection_test_context &ctx,
+                                                 std::string_view name) {
+  return query_scalar_int(
+      ctx, fmt::format("SELECT (bioseq_internal.sequence_source_counters()"
+                       "        ->>'{}')::bigint;",
+                       name));
+}
+#endif
+
 [[nodiscard]] std::string nonaligned_three_fragment_dna4_source() {
-    std::string source;
-    source.reserve(65'549);
-    for (std::size_t i = 0; i < 16'387; ++i) {
-        source.append("ACGT");
-    }
-    source.push_back('A');
-    return source;
+  std::string source;
+  source.reserve(65'549);
+  for (std::size_t i = 0; i < 16'387; ++i) {
+    source.append("ACGT");
+  }
+  source.push_back('A');
+  return source;
 }
 
 // Test-local, bit-at-a-time CRC-64/ECMA-182 implementation.  This deliberately
@@ -377,7 +387,7 @@ void require_preserved_ready_bioseq_source(
         expected_oid);
 }
 
-}  // namespace
+} // namespace
 
 TEST_CASE("list_metadata reports all production index kinds for a fresh bioseq table",
           "[index_admin][list]") {
@@ -4024,31 +4034,213 @@ TEST_CASE("ordinary Format-6 replacement preserves its active generation when a 
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table));
-    REQUIRE(error.contains("catalog"));
+    // The immutable-source guard owns this failure before the replacement
+    // publisher can enter a generation-catalog operation.
+    REQUIRE(error.sqlstate == "55000");
+    REQUIRE(error.contains(
+        "bioseq locator no longer matches its immutable source"));
+    REQUIRE(error.contains("source epoch"));
     REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
     REQUIRE(capture_generation_rows() == generation_rows_before);
     REQUIRE(capture_schema_identity() == schema_identity_before);
     REQUIRE(capture_metadata_age() == metadata_age_before);
 }
 
-TEST_CASE("update_index('minimizers_per_fragment') builds the per-fragment index",
-          "[index_admin][update][backfill]") {
-    auto ctx = fresh_context({kTable});
-    // seed_small_bioseq_column sets bioseq.update_index_on_insert = on, so the two
-    // default UPDATE_ON_INSERT indexes (minimizers_per_fragment, symbol_counts)
-    // are populated incrementally at INSERT time.
-    seed_small_bioseq_column(ctx, kTable);
+#ifdef BIOSEQ_TEST_INDEXES
+TEST_CASE("DOC0377 PG index streaming poisons contiguous access and resident "
+          "MPS admits once",
+          "[index_admin][source-backed][slice][batch][poison][admission]") {
+  constexpr std::string_view source_table = "doc0377_index_poison_source";
+  constexpr std::string_view target_table = "doc0377_index_poison_target";
+  auto ctx = fresh_context({source_table, target_table});
+  exec_sql(ctx, "SET bioseq.update_index_on_insert=off;"
+                "SET bioseq.recompute_async_persist=off;"
+                "SET bioseq.aligner.minimizer_algorithm='scalar';"
+                "CREATE TABLE doc0377_index_poison_source ("
+                " id int, value bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO doc0377_index_poison_source VALUES ("
+                " 1, repeat('ACGT',32775)::bioseq.seq('dna4',64));"
+                "CREATE TABLE doc0377_index_poison_target ("
+                " id int, value bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO doc0377_index_poison_target "
+                "SELECT id, value[3:32771] OPERATOR(bioseq.||) "
+                "       bioseq.reverse(value[32771:65539]) "
+                "FROM doc0377_index_poison_source;");
 
-    REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", kTable) > 0);
-    REQUIRE(index_table_row_count(ctx, "symbol_counts", kTable) > 0);
-
-    // Explicit rebuild of the per-fragment index returns the count of
-    // sequences (re)indexed — three seeded rows.
+  for (const std::string_view index_name : std::array<std::string_view, 2>{
+           "minimizers_per_fragment", "symbol_counts"}) {
+    exec_sql(ctx, "SELECT bioseq_internal.reset_sequence_source_counters();"
+                  "SELECT bioseq_internal.arm_sequence_source_failure("
+                  " 'facade_contiguous_access');");
     REQUIRE(query_scalar_int(
                 ctx,
-                fmt::format("SELECT bioseq.update_index('{}'::regclass, "
-                            "'minimizers_per_fragment');",
-                            kTable)) == 3);
+                fmt::format("SELECT bioseq.update_index('{}'::regclass, '{}');",
+                            target_table, index_name)) == 1);
+    exec_sql(ctx, "SELECT bioseq_internal.disarm_sequence_source_failure();");
+    INFO("streaming index=" << index_name);
+    REQUIRE(facade_source_counter(ctx, "facade_source_stream_callbacks") > 0);
+    REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 0);
+    REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") ==
+            0);
+    REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") ==
+            0);
+    REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
+  }
+
+  // max_concurrency is PGC_SIGHUP and cannot be changed by a session.  Use
+  // the cluster's effective pool width; the exact resident-probe and
+  // materialization counters below prove that this branch was admitted.
+  exec_sql(ctx,
+           "SET bioseq.scheduler.pipeline_concurrency_mode='task_parallel';"
+           "SELECT bioseq_internal.reset_sequence_source_counters();");
+  const long long mps_rows_before = index_table_row_count(
+      ctx, "minimizers_per_sequence", target_table);
+  const long long reserved_before = query_scalar_int(
+      ctx, "SELECT index_memory_reserved_bytes "
+           "FROM bioseq.scheduler_stats();");
+  exec_sql(ctx, "SELECT bioseq_internal.arm_sequence_source_failure("
+                " 'facade_materialization');");
+  const auto materialization_error = sql_error(
+      ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                       " 'minimizers_per_sequence');",
+                       target_table));
+  exec_sql(ctx, "SELECT bioseq_internal.disarm_sequence_source_failure();");
+
+  REQUIRE(materialization_error.sqlstate == "XX000");
+  REQUIRE(materialization_error.contains(
+      "poisoned PostgreSQL sequence facade materialization"));
+  REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+  REQUIRE(index_table_row_count(
+              ctx, "minimizers_per_sequence", target_table) ==
+          mps_rows_before);
+  REQUIRE(query_scalar_int(
+              ctx, "SELECT index_memory_reserved_bytes "
+                   "FROM bioseq.scheduler_stats();") == reserved_before);
+  REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") ==
+          1);
+  REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") ==
+          0);
+  REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 1);
+
+  exec_sql(ctx, "SELECT bioseq_internal.reset_sequence_source_counters();");
+  REQUIRE(query_scalar_int(
+              ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                               " 'minimizers_per_sequence');",
+                               target_table)) == 1);
+  REQUIRE(index_table_row_count(
+              ctx, "minimizers_per_sequence", target_table) >
+          mps_rows_before);
+  REQUIRE(facade_source_counter(ctx, "facade_source_stream_callbacks") > 0);
+  REQUIRE(facade_source_counter(ctx, "facade_source_resident_probes") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_declared_materializations") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_completed_materializations") == 1);
+  REQUIRE(facade_source_counter(ctx, "facade_poison_hits") == 0);
+}
+
+TEST_CASE("DOC0377 checked Paper failures unwind grouped MPF and MPS publishers",
+          "[index_admin][doc0377][paper][sqlstate][publisher-cleanup][error]") {
+  struct FailureRoute {
+    std::string_view table;
+    std::string_view index_name;
+    std::string_view operation;
+  };
+  constexpr std::array<FailureRoute, 2> routes{{
+      {"doc0377_paper_forced_mpf", "minimizers_per_fragment",
+       "MPF generation replay"},
+      {"doc0377_paper_forced_mps", "minimizers_per_sequence",
+       "minimizers_per_sequence build"},
+  }};
+
+  for (const FailureRoute& route : routes) {
+    DYNAMIC_SECTION(route.index_name) {
+      auto ctx = fresh_context({route.table});
+      exec_sql(ctx,
+               "SET bioseq.update_index_on_insert=off;"
+               "SET bioseq.index_async_persist=off;"
+               "SET bioseq.recompute_async_persist=off;"
+               "SET bioseq.aligner.grouped32_persisted_generation_enabled=on;"
+               "SET bioseq.aligner.minimizer_algorithm='paper_nthash_simd';");
+      exec_sqlf(ctx,
+                "CREATE TABLE {} "
+                "(id int, seq bioseq.seq('dna4',64)) USING bioseq;"
+                "INSERT INTO {} VALUES "
+                "(1,(repeat('ACGT',16391)||'A')::"
+                "bioseq.seq('dna4',64));",
+                route.table, route.table);
+      REQUIRE(only_column_row_number(ctx, route.table) > 0);
+      const long long backend_pid =
+          query_scalar_int(ctx, "SELECT pg_backend_pid();");
+      const long long admission_before = query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();");
+
+      exec_sql(ctx,
+               "SET bioseq.test_force_paper_index_failure="
+               "'unsupported_vector_shape';");
+      const auto rejected = sql_error(ctx, fmt::format(
+          "SELECT bioseq.update_index('{}'::regclass,'{}');",
+          route.table, route.index_name));
+      exec_sql(ctx,
+               "SET bioseq.test_force_paper_index_failure='none';");
+
+      REQUIRE(rejected.sqlstate == "0A000");
+      REQUIRE(rejected.contains("status=unsupported_vector_shape"));
+      REQUIRE(rejected.contains(route.operation));
+      REQUIRE_FALSE(rejected.sqlstate == "XX000");
+      REQUIRE_FALSE(rejected.sqlstate == "XX001");
+      REQUIRE(query_scalar_int(ctx, "SELECT pg_backend_pid();") ==
+              backend_pid);
+      REQUIRE(index_table_row_count(ctx, route.index_name, route.table) == 0);
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM bioseq_internal.metadata_age_log "
+          "WHERE user_relid='{}'::regclass AND index_name='{}';",
+          route.table, route.index_name)) == 0);
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT count(*) FROM "
+          "bioseq_internal.minimizer_generation_storage "
+          "WHERE user_relid='{}'::regclass AND index_name='{}';",
+          route.table, route.index_name)) == 0);
+      REQUIRE(query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();") == admission_before);
+      REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+
+      // The same Paper backend succeeds through the same publisher immediately,
+      // proving the one-shot failure arm, writer, spill, and source owner were
+      // all cleared by the rejected statement.
+      exec_sql(ctx,
+               "SET bioseq.aligner.minimizer_algorithm='paper_nthash_simd';");
+      REQUIRE(query_scalar_int(ctx, fmt::format(
+          "SELECT bioseq.update_index('{}'::regclass,'{}');",
+          route.table, route.index_name)) == 1);
+      REQUIRE(index_table_row_count(ctx, route.index_name, route.table) > 0);
+      REQUIRE(query_scalar_int(
+          ctx, "SELECT index_memory_reserved_bytes "
+               "FROM bioseq.scheduler_stats();") == admission_before);
+    }
+  }
+}
+#endif
+
+TEST_CASE(
+    "update_index('minimizers_per_fragment') builds the per-fragment index",
+    "[index_admin][update][backfill]") {
+  auto ctx = fresh_context({kTable});
+  // seed_small_bioseq_column sets bioseq.update_index_on_insert = on, so the
+  // two default UPDATE_ON_INSERT indexes (minimizers_per_fragment,
+  // symbol_counts) are populated incrementally at INSERT time.
+  seed_small_bioseq_column(ctx, kTable);
+
+  REQUIRE(index_table_row_count(ctx, "minimizers_per_fragment", kTable) > 0);
+  REQUIRE(index_table_row_count(ctx, "symbol_counts", kTable) > 0);
+
+  // Explicit rebuild of the per-fragment index returns the count of
+  // sequences (re)indexed — three seeded rows.
+  REQUIRE(query_scalar_int(
+              ctx, fmt::format("SELECT bioseq.update_index('{}'::regclass, "
+                               "'minimizers_per_fragment');",
+                               kTable)) == 3);
 }
 
 TEST_CASE("update_index rejects an unknown index name",
@@ -4092,6 +4284,59 @@ TEST_CASE("ExactSimd update_index accepts DNA5 without scalar fallback",
         "SELECT bioseq.update_index('{}'::regclass, "
         "'minimizers_per_sequence');",
         table)) == 1);
+}
+
+TEST_CASE("DOC0377 Paper update_index maps checked DNA5 rejection to 0A000",
+          "[index_admin][doc0377][paper][dna5][sqlstate][error]") {
+    struct FailureRoute {
+        std::string_view table;
+        std::string_view index_name;
+        std::string_view operation;
+    };
+    constexpr std::array<FailureRoute, 2> routes{{
+        {"doc0377_paper_grouped_mpf", "minimizers_per_fragment",
+         "grouped minimizer generation preflight"},
+        {"doc0377_paper_grouped_mps", "minimizers_per_sequence",
+         "grouped minimizer generation preflight"},
+    }};
+
+    for (const FailureRoute& route : routes) {
+        DYNAMIC_SECTION("grouped " << route.index_name) {
+            auto ctx = fresh_context({route.table});
+            exec_sql(ctx, "SET bioseq.update_index_on_insert = off;");
+            exec_sql(ctx, "SET bioseq.index_async_persist = off;");
+            exec_sql(ctx, "SET bioseq.recompute_async_persist = off;");
+            exec_sql(ctx,
+                "SET bioseq.aligner.grouped32_persisted_generation_enabled = on;");
+            exec_sql(ctx,
+                "SET bioseq.aligner.minimizer_algorithm = 'paper_nthash_simd';");
+            exec_sqlf(ctx,
+                "CREATE TABLE {} "
+                "(id int, seq bioseq.seq('dna5', 64)) USING bioseq;",
+                route.table);
+            exec_sqlf(ctx,
+                "INSERT INTO {} VALUES "
+                "(1, (repeat('ACGTN', 13113) || 'A')::"
+                "bioseq.seq('dna5', 64));",
+                route.table);
+
+            // This source is locator-backed and long enough to enter the
+            // selected Paper producer. In particular, grouped MPS used to
+            // erase unsupported_alphabet into compatibility_mismatch and
+            // report XX001 from the publication encoder.
+            REQUIRE(only_column_row_number(ctx, route.table) > 0);
+            const auto rejected = sql_error(ctx, fmt::format(
+                "SELECT bioseq.update_index('{}'::regclass, '{}');",
+                route.table, route.index_name));
+            REQUIRE(rejected.sqlstate == "0A000");
+            REQUIRE(rejected.contains("Paper ntHash SIMD"));
+            REQUIRE(rejected.contains("status=unsupported_alphabet"));
+            REQUIRE(rejected.contains(route.operation));
+            REQUIRE(index_table_row_count(
+                ctx, route.index_name, route.table) == 0);
+            REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+        }
+    }
 }
 #endif
 

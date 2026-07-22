@@ -842,9 +842,10 @@ Node* pg_mutate_expression(Node* root, State& state, Mutator& mutator) {
  * --------------------------------------------------------------------- */
 
 /*
- * Handle a plan mutator visitor uses to recurse into a plan node's left
- * and right subtrees, reassigning them in place. This is the load-bearing
- * "replacing mutator must reassign lefttree/righttree" contract.
+ * Handle a plan mutator visitor uses to recurse into every executable child,
+ * reassigning it in place. CustomScan children live in custom_plans rather
+ * than lefttree/righttree, so omitting that list silently skipped BatchJoin,
+ * BatchSort, and future SliceProject subtrees.
  */
 class pg_plan_mutation_cursor {
 private:
@@ -855,10 +856,19 @@ public:
     constexpr pg_plan_mutation_cursor(void* adapter, Plan* (*trampoline)(Plan*, void*)) noexcept
         : adapter_(adapter), trampoline_(trampoline) {}
 
-    /* Recurse into and reassign plan->lefttree / plan->righttree. */
+    /* Recurse into and reassign CustomScan::custom_plans plus ordinary
+     * plan->lefttree / plan->righttree children. */
     Plan* descend_children(Plan* plan) const {
         if (plan == nullptr) {
             return nullptr;
+        }
+        if (IsA(plan, CustomScan)) {
+            auto* custom = reinterpret_cast<CustomScan*>(plan);
+            ListCell* cell = nullptr;
+            foreach(cell, custom->custom_plans) {
+                Plan* child = reinterpret_cast<Plan*>(lfirst(cell));
+                lfirst(cell) = trampoline_(child, adapter_);
+            }
         }
         plan->lefttree = trampoline_(plan->lefttree, adapter_);
         plan->righttree = trampoline_(plan->righttree, adapter_);

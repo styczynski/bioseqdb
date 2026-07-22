@@ -1423,7 +1423,156 @@ CREATE OR REPLACE FUNCTION bioseq.seq_typmod_out(integer)
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_typmod_out'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
--- 3. Type registration: wires I/O funcs, sets storage + alignment.
+-- bioseq.letter is physically self-describing because array element typmods
+-- are not preserved by PostgreSQL.
+CREATE TYPE bioseq.letter;
+
+CREATE FUNCTION bioseq.letter_in(cstring, oid, integer)
+    RETURNS bioseq.letter
+    AS 'MODULE_PATHNAME', 'letter_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq.letter_out(bioseq.letter)
+    RETURNS cstring
+    AS 'MODULE_PATHNAME', 'letter_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq.letter_recv(internal, oid, integer)
+    RETURNS bioseq.letter
+    AS 'MODULE_PATHNAME', 'letter_recv'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq.letter_send(bioseq.letter)
+    RETURNS bytea
+    AS 'MODULE_PATHNAME', 'letter_send'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq.letter_typmod_in(cstring[])
+    RETURNS integer
+    AS 'MODULE_PATHNAME', 'letter_typmod_in'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq.letter_typmod_out(integer)
+    RETURNS cstring
+    AS 'MODULE_PATHNAME', 'letter_typmod_out'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE TYPE bioseq.letter (
+    INPUT          = bioseq.letter_in,
+    OUTPUT         = bioseq.letter_out,
+    RECEIVE        = bioseq.letter_recv,
+    SEND           = bioseq.letter_send,
+    TYPMOD_IN      = bioseq.letter_typmod_in,
+    TYPMOD_OUT     = bioseq.letter_typmod_out,
+    INTERNALLENGTH = 2,
+    PASSEDBYVALUE,
+    ALIGNMENT      = int2
+);
+
+CREATE FUNCTION bioseq.letter(bioseq.letter, integer, boolean)
+    RETURNS bioseq.letter
+    AS 'MODULE_PATHNAME', 'letter_typmod_cast'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE CAST (bioseq.letter AS bioseq.letter)
+    WITH FUNCTION bioseq.letter(bioseq.letter, integer, boolean)
+    AS ASSIGNMENT;
+
+CREATE FUNCTION bioseq.letter_to_text(bioseq.letter)
+    RETURNS text
+    AS 'MODULE_PATHNAME', 'letter_to_text'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE CAST (bioseq.letter AS text)
+    WITH FUNCTION bioseq.letter_to_text(bioseq.letter);
+
+CREATE FUNCTION bioseq.letter_eq(bioseq.letter, bioseq.letter)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_eq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_ne(bioseq.letter, bioseq.letter)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_ne'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_lt(bioseq.letter, bioseq.letter)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_lt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_le(bioseq.letter, bioseq.letter)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_le'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_gt(bioseq.letter, bioseq.letter)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_gt'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_ge(bioseq.letter, bioseq.letter)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_ge'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_cmp(bioseq.letter, bioseq.letter)
+    RETURNS integer AS 'MODULE_PATHNAME', 'letter_cmp'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_hash(bioseq.letter)
+    RETURNS integer AS 'MODULE_PATHNAME', 'letter_hash'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_hash_extended(bioseq.letter, bigint)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'letter_hash_extended'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR bioseq.< (
+    LEFTARG = bioseq.letter, RIGHTARG = bioseq.letter,
+    FUNCTION = bioseq.letter_lt,
+    COMMUTATOR = OPERATOR(bioseq.>), NEGATOR = OPERATOR(bioseq.>=),
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
+);
+CREATE OPERATOR bioseq.<= (
+    LEFTARG = bioseq.letter, RIGHTARG = bioseq.letter,
+    FUNCTION = bioseq.letter_le,
+    COMMUTATOR = OPERATOR(bioseq.>=), NEGATOR = OPERATOR(bioseq.>),
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
+);
+CREATE OPERATOR bioseq.= (
+    LEFTARG = bioseq.letter, RIGHTARG = bioseq.letter,
+    FUNCTION = bioseq.letter_eq,
+    COMMUTATOR = OPERATOR(bioseq.=), NEGATOR = OPERATOR(bioseq.<>),
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
+    HASHES, MERGES
+);
+CREATE OPERATOR bioseq.<> (
+    LEFTARG = bioseq.letter, RIGHTARG = bioseq.letter,
+    FUNCTION = bioseq.letter_ne,
+    COMMUTATOR = OPERATOR(bioseq.<>), NEGATOR = OPERATOR(bioseq.=),
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
+);
+CREATE OPERATOR bioseq.>= (
+    LEFTARG = bioseq.letter, RIGHTARG = bioseq.letter,
+    FUNCTION = bioseq.letter_ge,
+    COMMUTATOR = OPERATOR(bioseq.<=), NEGATOR = OPERATOR(bioseq.<),
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
+);
+CREATE OPERATOR bioseq.> (
+    LEFTARG = bioseq.letter, RIGHTARG = bioseq.letter,
+    FUNCTION = bioseq.letter_gt,
+    COMMUTATOR = OPERATOR(bioseq.<), NEGATOR = OPERATOR(bioseq.<=),
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
+);
+
+CREATE OPERATOR CLASS bioseq.letter_btree_ops
+    DEFAULT FOR TYPE bioseq.letter USING btree AS
+    OPERATOR 1 bioseq.<,
+    OPERATOR 2 bioseq.<=,
+    OPERATOR 3 bioseq.=,
+    OPERATOR 4 bioseq.>=,
+    OPERATOR 5 bioseq.>,
+    FUNCTION 1 bioseq.letter_cmp(bioseq.letter, bioseq.letter);
+
+CREATE OPERATOR CLASS bioseq.letter_hash_ops
+    DEFAULT FOR TYPE bioseq.letter USING hash AS
+    OPERATOR 1 bioseq.=,
+    FUNCTION 1 bioseq.letter_hash(bioseq.letter),
+    FUNCTION 2 bioseq.letter_hash_extended(bioseq.letter, bigint);
+
+CREATE FUNCTION bioseq.seq_subscript_handler(internal)
+    RETURNS internal
+    AS 'MODULE_PATHNAME', 'seq_subscript_handler'
+    LANGUAGE C IMMUTABLE PARALLEL SAFE;
+
+-- 3. Type registration: wires I/O funcs, custom subscripting, storage and alignment.
 CREATE TYPE bioseq.seq (
     INPUT          = bioseq.seq_in,
     OUTPUT         = bioseq.seq_out,
@@ -1431,6 +1580,7 @@ CREATE TYPE bioseq.seq (
     SEND           = bioseq.seq_send,
     TYPMOD_IN      = bioseq.seq_typmod_in,
     TYPMOD_OUT     = bioseq.seq_typmod_out,
+    SUBSCRIPT      = bioseq.seq_subscript_handler,
     STORAGE        = extended,
     ALIGNMENT      = double,
     INTERNALLENGTH = VARIABLE
@@ -1449,7 +1599,7 @@ CREATE OR REPLACE FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
 
 CREATE CAST (bioseq.seq AS bioseq.seq)
     WITH FUNCTION bioseq.seq_cast(bioseq.seq, integer, boolean)
-    AS IMPLICIT;
+    AS ASSIGNMENT;
 
 -- 4. Comparison functions + operators.
 CREATE OR REPLACE FUNCTION bioseq.seq_cmp(bioseq.seq, bioseq.seq)
@@ -1487,52 +1637,304 @@ CREATE OR REPLACE FUNCTION bioseq.seq_gt(bioseq.seq, bioseq.seq)
     AS 'MODULE_PATHNAME', 'pg_compact_sequence_gt'
     LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
 
-CREATE OPERATOR < (
+CREATE OPERATOR bioseq.< (
     LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_lt,
-    COMMUTATOR = >, NEGATOR = >=,
-    RESTRICT = scalarltsel, JOIN = scalarltjoinsel
+    COMMUTATOR = OPERATOR(bioseq.>), NEGATOR = OPERATOR(bioseq.>=),
+    RESTRICT = pg_catalog.scalarltsel, JOIN = pg_catalog.scalarltjoinsel
 );
 
-CREATE OPERATOR <= (
+CREATE OPERATOR bioseq.<= (
     LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_le,
-    COMMUTATOR = >=, NEGATOR = >,
-    RESTRICT = scalarlesel, JOIN = scalarlejoinsel
+    COMMUTATOR = OPERATOR(bioseq.>=), NEGATOR = OPERATOR(bioseq.>),
+    RESTRICT = pg_catalog.scalarlesel, JOIN = pg_catalog.scalarlejoinsel
 );
 
-CREATE OPERATOR = (
+CREATE OPERATOR bioseq.= (
     LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_eq,
-    COMMUTATOR = =, NEGATOR = <>,
-    RESTRICT = eqsel, JOIN = eqjoinsel,
+    COMMUTATOR = OPERATOR(bioseq.=), NEGATOR = OPERATOR(bioseq.<>),
+    RESTRICT = pg_catalog.eqsel, JOIN = pg_catalog.eqjoinsel,
     HASHES, MERGES
 );
 
-CREATE OPERATOR <> (
+CREATE OPERATOR bioseq.<> (
     LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_ne,
-    COMMUTATOR = <>, NEGATOR = =,
-    RESTRICT = neqsel, JOIN = neqjoinsel
+    COMMUTATOR = OPERATOR(bioseq.<>), NEGATOR = OPERATOR(bioseq.=),
+    RESTRICT = pg_catalog.neqsel, JOIN = pg_catalog.neqjoinsel
 );
 
-CREATE OPERATOR >= (
+CREATE OPERATOR bioseq.>= (
     LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_ge,
-    COMMUTATOR = <=, NEGATOR = <,
-    RESTRICT = scalargesel, JOIN = scalargejoinsel
+    COMMUTATOR = OPERATOR(bioseq.<=), NEGATOR = OPERATOR(bioseq.<),
+    RESTRICT = pg_catalog.scalargesel, JOIN = pg_catalog.scalargejoinsel
 );
 
-CREATE OPERATOR > (
+CREATE OPERATOR bioseq.> (
     LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq, PROCEDURE = bioseq.seq_gt,
-    COMMUTATOR = <, NEGATOR = <=,
-    RESTRICT = scalargtsel, JOIN = scalargtjoinsel
+    COMMUTATOR = OPERATOR(bioseq.<), NEGATOR = OPERATOR(bioseq.<=),
+    RESTRICT = pg_catalog.scalargtsel, JOIN = pg_catalog.scalargtjoinsel
 );
 
 -- 5. Btree operator class.
 CREATE OPERATOR CLASS bioseq.seq_ops
     DEFAULT FOR TYPE bioseq.seq USING btree AS
-    OPERATOR 1 < ,
-    OPERATOR 2 <= ,
-    OPERATOR 3 = ,
-    OPERATOR 4 >= ,
-    OPERATOR 5 > ,
+    OPERATOR 1 bioseq.<,
+    OPERATOR 2 bioseq.<=,
+    OPERATOR 3 bioseq.=,
+    OPERATOR 4 bioseq.>=,
+    OPERATOR 5 bioseq.>,
     FUNCTION 1 bioseq.seq_cmp(bioseq.seq, bioseq.seq);
+
+-- Lazy sequence algebra and explicit materialization bridges.
+CREATE FUNCTION bioseq.seq_concat(bioseq.seq, bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_concat'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.seq_concat_text(bioseq.seq, text)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_concat_text'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.text_concat_seq(text, bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'text_concat_seq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.seq_concat_varchar(bioseq.seq, varchar)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_concat_varchar'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.varchar_concat_seq(varchar, bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'varchar_concat_seq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.seq_concat_text_array(bioseq.seq, text[])
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_concat_text_array'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.text_array_concat_seq(text[], bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'text_array_concat_seq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.seq_concat_letter_array(
+    bioseq.seq, bioseq.letter[])
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_concat_letter_array'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.letter_array_concat_seq(
+    bioseq.letter[], bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'letter_array_concat_seq'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq.reverse(bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_reverse'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.reverse_complement(bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_reverse_complement'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.array_cat(bioseq.seq, bioseq.seq)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'seq_concat'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.array_length(bioseq.seq, integer)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'seq_array_length'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.cardinality(bioseq.seq)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'seq_cardinality'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.to_text(bioseq.seq)
+    RETURNS text AS 'MODULE_PATHNAME', 'seq_to_text'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.to_varchar(bioseq.seq)
+    RETURNS varchar AS 'MODULE_PATHNAME', 'seq_to_varchar'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.to_array(bioseq.seq)
+    RETURNS bioseq.letter[] AS 'MODULE_PATHNAME', 'seq_to_array'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.from_array(bioseq.letter[], integer)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME',
+        'seq_from_letter_array_infer'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.from_array(bioseq.letter[], text, integer)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME',
+        'seq_from_letter_array_named'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.seq,
+    FUNCTION = bioseq.seq_concat
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = bioseq.seq, RIGHTARG = text,
+    FUNCTION = bioseq.seq_concat_text
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = text, RIGHTARG = bioseq.seq,
+    FUNCTION = bioseq.text_concat_seq
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = bioseq.seq, RIGHTARG = varchar,
+    FUNCTION = bioseq.seq_concat_varchar
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = varchar, RIGHTARG = bioseq.seq,
+    FUNCTION = bioseq.varchar_concat_seq
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = bioseq.seq, RIGHTARG = text[],
+    FUNCTION = bioseq.seq_concat_text_array
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = text[], RIGHTARG = bioseq.seq,
+    FUNCTION = bioseq.text_array_concat_seq
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = bioseq.seq, RIGHTARG = bioseq.letter[],
+    FUNCTION = bioseq.seq_concat_letter_array
+);
+CREATE OPERATOR bioseq.|| (
+    LEFTARG = bioseq.letter[], RIGHTARG = bioseq.seq,
+    FUNCTION = bioseq.letter_array_concat_seq
+);
+
+CREATE CAST (bioseq.seq AS text)
+    WITH FUNCTION bioseq.to_text(bioseq.seq)
+    AS ASSIGNMENT;
+CREATE CAST (bioseq.seq AS varchar)
+    WITH FUNCTION bioseq.to_varchar(bioseq.seq)
+    AS ASSIGNMENT;
+
+CREATE FUNCTION bioseq.seq_hash(bioseq.seq)
+    RETURNS integer AS 'MODULE_PATHNAME', 'seq_hash'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+CREATE FUNCTION bioseq.seq_hash_extended(bioseq.seq, bigint)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'seq_hash_extended'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE;
+
+CREATE FUNCTION bioseq_internal.slice_trace_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'slice_trace_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.slice_trace_self_test() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.slice_payload_allocation_probe(integer)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'slice_payload_allocation_probe'
+    LANGUAGE C VOLATILE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.slice_payload_allocation_probe(integer) FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.slice_trace_worker_failure_probe(integer)
+    RETURNS boolean AS 'MODULE_PATHNAME', 'slice_trace_worker_failure_probe'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL SAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.slice_trace_worker_failure_probe(integer) FROM PUBLIC;
+
+-- Revoked, test-build-only replacement for the former diagnostic GUC. Each
+-- non-none call arms exactly one analyzed SliceProject in this backend; the
+-- fixture is consumed before it runs. Production builds fail closed.
+CREATE FUNCTION bioseq_internal.arm_slice_dsm_fixture(text)
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_arm_slice_dsm_fixture'
+    LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.arm_slice_dsm_fixture(text) FROM PUBLIC;
+COMMENT ON FUNCTION bioseq_internal.arm_slice_dsm_fixture(text) IS
+    'Integration-only one-shot SliceProject DSM diagnostic seam; accepts incomplete, malformed, or none.';
+
+CREATE FUNCTION bioseq_internal.synthetic_lazy_sequence(bigint)
+    RETURNS bioseq.seq AS 'MODULE_PATHNAME', 'synthetic_lazy_sequence'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.synthetic_lazy_sequence(bigint)
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_piece_count(bioseq.seq)
+    RETURNS bigint AS 'MODULE_PATHNAME', 'sequence_piece_count'
+    LANGUAGE C IMMUTABLE STRICT PARALLEL RESTRICTED SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.sequence_piece_count(bioseq.seq)
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.materialization_size_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'materialization_size_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.materialization_size_self_test()
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.piece_tree_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'piece_tree_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.piece_tree_self_test() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.expanded_ownership_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'expanded_ownership_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.expanded_ownership_self_test()
+    FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.letter_wire_self_test()
+    RETURNS boolean AS 'MODULE_PATHNAME', 'letter_wire_self_test'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.letter_wire_self_test() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.letter_hook_chain_calls()
+    RETURNS bigint AS 'MODULE_PATHNAME', 'letter_hook_chain_calls'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION bioseq_internal.letter_hook_chain_calls() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.arm_sequence_source_failure(text)
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_arm_sequence_source_failure'
+    LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.arm_sequence_source_failure(text) FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.disarm_sequence_source_failure()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_disarm_sequence_source_failure'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.disarm_sequence_source_failure() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.reset_sequence_source_counters()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_reset_sequence_source_counters'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.reset_sequence_source_counters() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_counters()
+    RETURNS jsonb
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_counters'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_counters() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_wrong_thread_probe()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_wrong_thread_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_wrong_thread_probe() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_fault_contract_probe()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_fault_contract_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_fault_contract_probe() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_route_alias_probe()
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_route_alias_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_route_alias_probe() FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_facade_orientation_probe(bioseq.seq)
+    RETURNS boolean
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_facade_orientation_probe'
+    LANGUAGE C STABLE PARALLEL SAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_facade_orientation_probe(bioseq.seq) FROM PUBLIC;
+
+CREATE FUNCTION bioseq_internal.sequence_source_pre_prepare_probe()
+    RETURNS void
+    AS 'MODULE_PATHNAME', 'bioseq_internal_sequence_source_pre_prepare_probe'
+    LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.sequence_source_pre_prepare_probe() FROM PUBLIC;
+
+CREATE OPERATOR CLASS bioseq.seq_hash_ops
+    DEFAULT FOR TYPE bioseq.seq USING hash AS
+    OPERATOR 1 bioseq.=,
+    FUNCTION 1 bioseq.seq_hash(bioseq.seq),
+    FUNCTION 2 bioseq.seq_hash_extended(bioseq.seq, bigint);
 
 -- 6. bp_size / unit_size projection helpers. DOC0260 §1.1 #10 widened
 --    these from INT4 to BIGINT so sequences with bp_size > INT32_MAX
@@ -2894,6 +3296,25 @@ REVOKE ALL ON FUNCTION bioseq_internal.teardown_diagnostics() FROM PUBLIC;
 COMMENT ON FUNCTION bioseq_internal.teardown_diagnostics() IS
     'Integration-only backend-local counters proving lazy DROP EXTENSION lock classification and absence of stale relation revisits.';
 
+-- Revoked backend-local proof that PostgreSQL ERROR translation unwinds the
+-- heap-backed final match-owner collection before re-entering the PG error ABI.
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.match_owner_finalization_scope_diagnostics(
+    reset boolean,
+    OUT scopes_entered bigint,
+    OUT scopes_exited bigint,
+    OUT scopes_active bigint)
+RETURNS record
+AS 'MODULE_PATHNAME',
+    'bioseq_internal_match_owner_finalization_scope_diagnostics'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.match_owner_finalization_scope_diagnostics(boolean)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.match_owner_finalization_scope_diagnostics(boolean) IS
+    'Integration-only test-build counters proving match-owner finalization C++ scopes unwind across PostgreSQL errors.';
+
 -- A revoked integration seam that constructs planner nodes in C and invokes
 -- the exact production BatchJoin ProjectionPath eligibility guard. Ordinary
 -- SQL cannot reliably keep an unrelated expression at the base projection.
@@ -2915,6 +3336,66 @@ REVOKE ALL ON FUNCTION
 COMMENT ON FUNCTION
     bioseq_internal.batch_join_projection_guard_probe() IS
     'Integration-only direct proof of the production BatchJoin base ProjectionPath guard and wrapper cost ownership.';
+
+-- A revoked integration seam for core wrapper types which ordinary SQL cannot
+-- retain deterministically. It invokes the production exact-owner proof and
+-- copy-on-write helper propagation used by transformed mmsearch planning.
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.match_helper_wrapper_propagation_probe(
+    OUT exact_owner_found boolean,
+    OUT clone_applied boolean,
+    OUT owner_cloned boolean,
+    OUT projection_cloned boolean,
+    OUT material_cloned boolean,
+    OUT memoize_cloned boolean,
+    OUT unique_cloned boolean,
+    OUT append_cloned boolean,
+    OUT helper_on_owner boolean,
+    OUT helper_on_projection boolean,
+    OUT helper_on_material boolean,
+    OUT helper_on_memoize boolean,
+    OUT helper_on_unique boolean,
+    OUT helper_on_append boolean,
+    OUT originals_unchanged boolean,
+    OUT sibling_unchanged boolean,
+    OUT duplicate_owner_rejected boolean,
+    OUT unknown_wrapper_rejected boolean,
+    OUT group_result_qual_rejected boolean)
+RETURNS record
+AS 'MODULE_PATHNAME',
+    'bioseq_internal_match_helper_wrapper_propagation_probe'
+LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.match_helper_wrapper_propagation_probe() FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.match_helper_wrapper_propagation_probe() IS
+    'Integration-only proof of production match-helper ownership and copy-on-write propagation through Projection, Material, Memoize, Unique, and Append paths.';
+
+-- A revoked predicate seam for the split base-BioseqScan planner/executor
+-- match-owner ABI. Valid plans exercise the accepted post-setrefs translation;
+-- this pins the fail-closed attribute/alias disagreement branches directly.
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.base_match_executor_translation_probe(
+    OUT target_offset_accepted boolean,
+    OUT target_attno_disagreement_rejected boolean,
+    OUT exact_site_offset_accepted boolean,
+    OUT lineage_alias_disagreement_rejected boolean,
+    OUT outer_slot_accepted boolean,
+    OUT outer_wrong_slot_rejected boolean,
+    OUT inner_slot_accepted boolean,
+    OUT inner_wrong_slot_rejected boolean,
+    OUT index_slot_accepted boolean,
+    OUT index_wrong_slot_rejected boolean,
+    OUT special_out_of_range_rejected boolean)
+RETURNS record
+AS 'MODULE_PATHNAME',
+    'bioseq_internal_base_match_executor_translation_probe'
+LANGUAGE C VOLATILE PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.base_match_executor_translation_probe() FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.base_match_executor_translation_probe() IS
+    'Integration-only proof that base and finalized carrier translation accept exact setrefs offsets/slots and reject attribute, alias, slot, or range disagreement.';
 CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name text, query_key bigint) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION bioseq.column_row_number(rel regclass, ctid tid) RETURNS bigint

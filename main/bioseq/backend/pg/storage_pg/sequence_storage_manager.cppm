@@ -29,9 +29,11 @@ extern "C" {
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/genam.h"
+#include "access/xact.h"
 #include "executor/spi.h"
 #include "storage/lmgr.h"
 #include "utils/snapmgr.h"
+#include "utils/resowner.h"
 #include "utils/lsyscache.h"
 #include "utils/syscache.h"
 #include "utils/builtins.h"
@@ -86,6 +88,7 @@ import bioseq.sequences.simd;
 import bioseq.indexing.storage;
 import bioseq.common.sequan_compat;  // DOC0264 §8.1 — ceil_log2 used in letters_per_unit_for
 import bioseq.storage.size;  // DOC0263 §2.2 — standalone module (was :sequence_size)
+import bioseq.storage.coordinates;
 // DOC0260 §12.1 — the PG-free bucket math + seq_locator POD live in their own
 // module so the unit-test TU can link them without the Postgres backend.
 // Re-exported here so existing `import bioseq_storage` consumers are unchanged.
@@ -1570,8 +1573,6 @@ static_assert(!std::is_move_assignable_v<PendingSequenceSource>,
 // DOC0264 R0 / §1.1#10).
 // ---------------------------------------------------------------------------
 
-constexpr std::uint8_t kLocatorStubMarker = 0x80;
-
 // DOC0260 §12.1 + DOC0264 §5 — `kLocatorVersion` and the `seq_locator` POD
 // (with its 32-byte / offset static_asserts) live in the PG-free
 // `bioseq_bucket_math` module so the unit-test TU can link them; they are
@@ -1586,8 +1587,8 @@ static_assert(kLocatorStubVarlenaBytes == 56,
 [[nodiscard]] [[gnu::always_inline]]
 inline bool is_locator_stub(const pgseq_t* hdr) noexcept {
     return hdr != nullptr
-        && (static_cast<std::uint8_t>(hdr->storage_unit_byte_width)
-            & kLocatorStubMarker) != 0u;
+        && is_seq_locator_stub_width(
+            static_cast<std::uint8_t>(hdr->storage_unit_byte_width));
 }
 
 [[nodiscard]] [[gnu::always_inline]]
@@ -1605,15 +1606,145 @@ inline seq_locator decode_locator_from_stub(const pgseq_t* hdr) {
                "is_locator_stub(hdr) first.",
                static_cast<unsigned>(hdr->storage_unit_byte_width));
     }
-    seq_locator out{};
-    std::memcpy(&out, hdr->data, sizeof(out));
-    if (out.version != kLocatorVersion) {
+    if (VARSIZE(hdr) != kLocatorStubVarlenaBytes) {
         bioseq_log<ERR, PG>(
-               "bioseq storage: locator version mismatch (got {}, expected {})",
-               static_cast<unsigned>(out.version),
-               static_cast<unsigned>(kLocatorVersion));
+               "bioseq storage: locator stub size mismatch (got {}, expected {})",
+               static_cast<unsigned long long>(VARSIZE(hdr)),
+               static_cast<unsigned long long>(kLocatorStubVarlenaBytes));
     }
-    return out;
+    const auto payload = std::span<std::byte const>{
+        reinterpret_cast<std::byte const*>(hdr->data), sizeof(seq_locator)};
+    const auto decoded = decode_seq_locator_payload(payload);
+    if (!decoded.has_value()) {
+        bioseq_log<ERR, PG>(
+               "bioseq storage: locator payload is not canonical v3 data");
+    }
+    return *decoded;
+}
+
+/* Raw locator consumers that hydrate a contiguous pgseq_t must reject every
+ * narrowing and row-range violation before opening a shard, doing allocation
+ * arithmetic, or converting catalog-width fields. */
+[[gnu::always_inline]]
+inline void validate_locator_flat_materialization_length(
+    const seq_locator& loc)
+{
+    using error = flat_locator_validation_error;
+    switch (validate_flat_locator_geometry(loc)) {
+        case error::none:
+            return;
+        case error::logical_length_exceeds_bigint:
+            ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq locator logical length exceeds bigint")));
+        case error::logical_length_exceeds_flat_field:
+            ereport(ERROR,
+                (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+                 errmsg("bioseq sequence is too long to flatten")));
+        case error::invalid_wire_metadata:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator wire metadata is invalid")));
+        case error::shard_exceeds_catalog_domain:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator shard exceeds the catalog domain")));
+        case error::first_row_exceeds_catalog_domain:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator first fragment row exceeds bigint")));
+        case error::fragment_geometry_inconsistent:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator fragment geometry is inconsistent"),
+                 errdetail("logical length=%llu fragments=%u first row=%llu",
+                     static_cast<unsigned long long>(loc.total_bp_size),
+                     loc.num_fragments,
+                     static_cast<unsigned long long>(loc.first_sub_row_no))));
+        case error::fragment_row_range_exceeds_catalog_domain:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator fragment row range exceeds bigint")));
+    }
+    pg_unreachable();
+}
+
+[[gnu::always_inline]]
+inline void validate_sequence_fragment_frame(
+    Size raw_bytes, Size expected_bytes, std::uint64_t row_no)
+{
+    using error = fragment_frame_validation_error;
+    switch (validate_fragment_frame_size(
+        static_cast<std::uint64_t>(raw_bytes),
+        static_cast<std::uint64_t>(pgseq_t::header_bytes()),
+        static_cast<std::uint64_t>(expected_bytes))) {
+        case error::none:
+            return;
+        case error::shorter_than_header:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq fragment row is shorter than its sequence header"),
+                 errdetail("fragment row=%llu bytes=%zu header bytes=%zu",
+                     static_cast<unsigned long long>(row_no), raw_bytes,
+                     pgseq_t::header_bytes())));
+        case error::size_mismatch:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq fragment row has an invalid physical size"),
+                 errdetail("fragment row=%llu bytes=%zu expected bytes=%zu",
+                     static_cast<unsigned long long>(row_no), raw_bytes,
+                     expected_bytes)));
+    }
+    pg_unreachable();
+}
+
+[[gnu::always_inline]]
+inline void validate_sequence_fragment_metadata(
+    const pgseq_t* raw,
+    std::uint8_t expected_alphabet,
+    std::uint8_t expected_width,
+    std::uint64_t expected_bp_size,
+    std::uint64_t expected_padding,
+    std::uint64_t row_no)
+{
+    using error = fragment_metadata_validation_error;
+    switch (validate_fragment_metadata(
+        static_cast<std::uint8_t>(raw->alphabet_code),
+        static_cast<std::uint8_t>(raw->storage_unit_byte_width),
+        static_cast<std::uint64_t>(raw->bp_size),
+        static_cast<std::uint64_t>(raw->padding_letters),
+        expected_alphabet, expected_width, expected_bp_size,
+        expected_padding)) {
+        case error::none:
+            return;
+        case error::type_mismatch:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq fragment row type does not match its sequence"),
+                 errdetail("fragment row=%llu alphabet=%u width=%u expected alphabet=%u width=%u",
+                     static_cast<unsigned long long>(row_no),
+                     static_cast<unsigned>(raw->alphabet_code),
+                     static_cast<unsigned>(raw->storage_unit_byte_width),
+                     static_cast<unsigned>(expected_alphabet),
+                     static_cast<unsigned>(expected_width))));
+        case error::logical_length_mismatch:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq fragment row has an invalid logical length"),
+                 errdetail("fragment row=%llu length=%llu expected length=%llu",
+                     static_cast<unsigned long long>(row_no),
+                     static_cast<unsigned long long>(raw->bp_size),
+                     static_cast<unsigned long long>(expected_bp_size))));
+        case error::padding_mismatch:
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq fragment row has invalid padding"),
+                 errdetail("fragment row=%llu padding=%u expected padding=%llu",
+                     static_cast<unsigned long long>(row_no),
+                     static_cast<unsigned>(raw->padding_letters),
+                     static_cast<unsigned long long>(expected_padding))));
+    }
+    pg_unreachable();
 }
 
 [[gnu::always_inline]]
@@ -1635,13 +1766,18 @@ inline void encode_locator_into_stub(
     SET_VARSIZE(dst, kLocatorStubVarlenaBytes);
     dst->alphabet_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
     dst->storage_unit_byte_width = static_cast<std::uint8_t>(
-        kLocatorStubMarker | logical_byte_width);
+        k_seq_locator_stub_marker | logical_byte_width);
     dst->padding_letters = padding_letters;
     constexpr sequence_size_t kBpSizeFieldMax =
         static_cast<sequence_size_t>(std::numeric_limits<pgseq_t::bp_size_t>::max());
     dst->bp_size = static_cast<pgseq_t::bp_size_t>(
         std::min<sequence_size_t>(total_bp_size, kBpSizeFieldMax));
-    std::memcpy(dst->data, &loc, sizeof(loc));
+    const auto payload = std::span<std::byte>{
+        reinterpret_cast<std::byte*>(dst->data), sizeof(seq_locator)};
+    if (!encode_seq_locator_payload(payload, loc)) {
+        bioseq_log<ERR, PG>(
+            "bioseq storage: failed to encode canonical v3 locator payload");
+    }
 }
 
 [[nodiscard]] [[gnu::always_inline]]
@@ -1752,6 +1888,13 @@ struct seq_caches {
 
     MemoryContext read_state_mctx = nullptr;
 
+    // Optional explicit owner for read-side caches whose lifetime is longer
+    // than the executor scan that first opened them.  Ordinary scan caches
+    // leave this null and continue to use CurrentResourceOwner.  Locator
+    // source domains set it to their transaction-owned child so a retained
+    // expanded datum can finish reading after the provider scan has ended.
+    ResourceOwner read_resource_owner = nullptr;
+
     sequence_size_t cap_bytes_snapshot = std::numeric_limits<sequence_size_t>::max();
 
     Oid main_database_oid   = InvalidOid;
@@ -1808,7 +1951,7 @@ inline constexpr std::size_t kSequenceFragmentStorageUnits = std::size_t{1024};
 // this only flushes pending columnar writes (it does NOT pop/close the write
 // state); the central xact-commit teardown still owns lifecycle.
 void flush_seq_cache_write_states(seq_caches* caches,
-                                  SubTransactionId current_sub_xid) noexcept;
+                                  SubTransactionId current_sub_xid);
 
 /// DOC0286 §4.3 — bounded streaming fragment writer for one sequence. Accepts
 /// column-native packed bytes, writes full fragment rows (each
@@ -1981,7 +2124,7 @@ struct sequence_storage_manager {
     // contiguous palloc'd `pgseq_t*` in `out_mctx`. Used by the legacy
     // hydration path; Phase C raises bioseq_log<ERR, PG>() if the stitched varlena
     // would exceed MaxAllocSize (DOC0264 §9.4). Streaming readers should
-    // use `sequence_scanner_pg<S>` directly.
+    // use the source-backed facade adapter directly.
     [[nodiscard]] static pgseq_t*
     fetch_payload(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
                   std::int16_t column_attno, const seq_locator& loc,
@@ -2019,8 +2162,8 @@ struct sequence_storage_manager {
 using bioseq_default_storage_manager =
     sequence_storage_manager<sequence_size_t, /*min=*/8, /*max=*/42>;
 
-// DOC0264 §7.9 — exported entry point so the Phase C `sequence_scanner_pg<S>`
-// (in `bioseq_storage_scanner_pg`) can resolve a sub-table relation via the
+// DOC0264 §7.9 — exported entry point so the Phase C source-backed adapter
+// can resolve a sub-table relation via the
 // per-scan `seq_caches`. Implementation lives below in the .cppm body.
 [[nodiscard]] Relation
 open_sub_table_for_locator(Oid db_oid, Oid spc_oid, Oid main_relfilenode,
@@ -2236,8 +2379,15 @@ void seq_caches::close_all(bool commit) noexcept {
                 } else {
                     if (e.read_state != nullptr) {
                         BioseqColumnReadState* read_state = e.read_state;
-                        bioseq::pg_utils::invoke_pg_as_cpp([read_state] {
+                        const ResourceOwner saved_owner = CurrentResourceOwner;
+                        bioseq::pg_utils::invoke_pg_as_cpp([read_state,
+                                                           saved_owner,
+                                                           this] {
+                            if (read_resource_owner != nullptr) {
+                                CurrentResourceOwner = read_resource_owner;
+                            }
                             BioseqColumnEndRead(read_state);
+                            CurrentResourceOwner = saved_owner;
                         });
                         e.read_state = nullptr;
                     }
@@ -2251,6 +2401,14 @@ void seq_caches::close_all(bool commit) noexcept {
                             [relation, saved_owner, this] {
                                 CurrentResourceOwner =
                                     TopTransactionResourceOwner;
+                                relation_close(relation, lock_mode);
+                                CurrentResourceOwner = saved_owner;
+                            });
+                    } else if (read_resource_owner != nullptr) {
+                        const ResourceOwner saved_owner = CurrentResourceOwner;
+                        bioseq::pg_utils::invoke_pg_as_cpp(
+                            [relation, saved_owner, this] {
+                                CurrentResourceOwner = read_resource_owner;
                                 relation_close(relation, lock_mode);
                                 CurrentResourceOwner = saved_owner;
                             });
@@ -2300,7 +2458,7 @@ void seq_caches::close_all(bool commit) noexcept {
 // so a same-statement index scan sees the just-written fragment rows.
 // `FlushWriteStateForRelfilenode` is keyed on the shard relation's relfilenode.
 void flush_seq_cache_write_states(seq_caches* caches,
-                                  SubTransactionId current_sub_xid) noexcept {
+                                  SubTransactionId current_sub_xid) {
     if (caches == nullptr || caches->side != seq_caches::Side::Write) return;
     for (auto& kv : caches->entries) {
         seq_caches::entry& e = kv.second;
@@ -2353,6 +2511,16 @@ open_relation_cached(Oid sub_table_relid, LOCKMODE lock_mode,
             rel = bioseq::pg_utils::invoke_pg_as_cpp(
                 [sub_table_relid, lock_mode, saved_owner] {
                     CurrentResourceOwner = TopTransactionResourceOwner;
+                    Relation result = try_safe_relation_open(
+                        sub_table_relid, lock_mode);
+                    CurrentResourceOwner = saved_owner;
+                    return result;
+                });
+        } else if (cache->read_resource_owner != nullptr) {
+            const ResourceOwner saved_owner = CurrentResourceOwner;
+            rel = bioseq::pg_utils::invoke_pg_as_cpp(
+                [sub_table_relid, lock_mode, saved_owner, cache] {
+                    CurrentResourceOwner = cache->read_resource_owner;
                     Relation result = try_safe_relation_open(
                         sub_table_relid, lock_mode);
                     CurrentResourceOwner = saved_owner;
@@ -3550,7 +3718,7 @@ void sequence_stream_writer::abort() {
 // the right offset of the destination varlena's payload region.
 //
 // Raises bioseq_log<ERR, PG>() if the assembled varlena would exceed MaxAllocSize —
-// streaming readers must use `sequence_scanner_pg<S>` instead. The legacy
+// streaming readers must use the source-backed facade instead. The legacy
 // callers (auto-hydration of stub-backed scan slots) are bounded by the
 // MaxAllocSize gate in `hydrate_seq_columns_in_slot` (§9.4 access_method).
 // ---------------------------------------------------------------------------
@@ -3591,6 +3759,8 @@ sequence_storage_manager<L, M, X>::fetch_payload(
         bioseq_log<ERR, PG>(
             "bioseq storage: fetch_payload requires an explicit snapshot");
     }
+
+    validate_locator_flat_materialization_length(loc);
     const bool registered_mvcc_snapshot =
         IsMVCCSnapshot(snapshot) && snapshot->regd_count != 0;
     // SnapshotAny is backend-lifetime static state. Other non-MVCC snapshots
@@ -3668,58 +3838,107 @@ sequence_storage_manager<L, M, X>::fetch_payload(
                loc.first_sub_row_no);
     }
     pgseq_t* first_raw = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(first_vals[0]));
+    const Size first_raw_bytes = static_cast<Size>(VARSIZE(first_raw));
+    if (first_raw_bytes < pgseq_t::header_bytes()) {
+        validate_sequence_fragment_frame(
+            first_raw_bytes, pgseq_t::header_bytes(),
+            loc.first_sub_row_no);
+    }
     if (is_locator_stub(first_raw)) {
-        bioseq_log<ERR, PG>(
-               "bioseq storage Phase C: first sub-table row {} is itself a stub (corruption)",
-               loc.first_sub_row_no);
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq fragment row is itself a locator stub"),
+             errdetail("fragment row=%llu",
+                 static_cast<unsigned long long>(loc.first_sub_row_no))));
     }
 
     const std::uint8_t logical_alphabet_code =
         static_cast<std::uint8_t>(first_raw->alphabet_code);
     const std::uint8_t logical_byte_width =
         static_cast<std::uint8_t>(first_raw->storage_unit_byte_width);
-    if ((logical_byte_width & kLocatorStubMarker) != 0u) {
-        bioseq_log<ERR, PG>(
-               "bioseq storage Phase C: fragment-row header carries the stub marker "
-               "(sub_w={}) — corruption", static_cast<unsigned>(logical_byte_width));
+    if (logical_alphabet_code >= pgseq_supported_alphabets::alphabet_count) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq fragment row has an unsupported alphabet"),
+             errdetail("fragment row=%llu alphabet=%u",
+                 static_cast<unsigned long long>(loc.first_sub_row_no),
+                 static_cast<unsigned>(logical_alphabet_code))));
+    }
+    if (logical_byte_width != 1u && logical_byte_width != 2u
+        && logical_byte_width != 4u && logical_byte_width != 8u) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq fragment row has an unsupported storage width"),
+             errdetail("fragment row=%llu width=%u",
+                 static_cast<unsigned long long>(loc.first_sub_row_no),
+                 static_cast<unsigned>(logical_byte_width))));
     }
 
     const auto alpha_code = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
     const std::size_t lpu = detail::letters_per_unit_for(alpha_code, logical_byte_width);
     if (lpu == 0) {
-        bioseq_log<ERR, PG>(
-               "bioseq storage Phase C: fetch_payload could not derive letters_per_unit "
-               "(alphabet_code={}, byte_width={})",
-               static_cast<unsigned>(alpha_code),
-               static_cast<unsigned>(logical_byte_width));
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq fragment row has an unsupported sequence type"),
+             errdetail("fragment row=%llu alphabet=%u width=%u",
+                 static_cast<unsigned long long>(loc.first_sub_row_no),
+                 static_cast<unsigned>(alpha_code),
+                 static_cast<unsigned>(logical_byte_width))));
     }
     const std::size_t bytes_per_unit = static_cast<std::size_t>(logical_byte_width);
-    const std::size_t fragment_storage_bytes =
-        detail::kFragmentStorageUnits * bytes_per_unit;
+    const Size fragment_storage_bytes = checked_mul_size(
+        checked_size_cast(detail::kFragmentStorageUnits), bytes_per_unit);
+    const Size expected_fragment_bytes = checked_add_size(
+        pgseq_t::header_bytes(), fragment_storage_bytes);
+    validate_sequence_fragment_frame(
+        first_raw_bytes, expected_fragment_bytes,
+        loc.first_sub_row_no);
 
-    // Compute the assembled varlena size and guard against MaxAllocSize.
-    const sequence_size_t total_units =
-        loc.total_bp_size == 0
-            ? sequence_size_t{0}
-            : (loc.total_bp_size + lpu - 1) / lpu;
-    const sequence_size_t total_payload_bytes =
-        static_cast<sequence_size_t>(total_units)
-        * static_cast<sequence_size_t>(bytes_per_unit);
-    const sequence_size_t assembled_varlena_bytes =
-        static_cast<sequence_size_t>(pgseq_t::header_bytes())
-        + total_payload_bytes;
-    if (assembled_varlena_bytes > static_cast<sequence_size_t>(MaxAllocSize)) {
-        bioseq_log<ERR, PG>(
-               "bioseq storage Phase C: sequence too large to materialise as a "
-               "single varlena ({} bp ⇒ ~{} bytes > MaxAllocSize). Stream via "
-               "sequence_scanner_pg<S> or wait for Phase D D-VARLENA.",
-               loc.total_bp_size,
-               assembled_varlena_bytes);
+    // Compute exact payload/flat sizes without overflowing before either
+    // PostgreSQL's Size or MaxAllocSize boundary can reject the request.
+    const std::uint64_t total_units_u64 = checked_ceil_div(
+        loc.total_bp_size, static_cast<std::uint64_t>(lpu));
+    const Size total_units = checked_size_cast(total_units_u64);
+    const Size total_payload_bytes = checked_mul_size(
+        total_units, bytes_per_unit);
+    const Size assembled_varlena_bytes =
+        checked_materialization_allocation_size(
+            checked_round_up_to_uint64(total_payload_bytes),
+            pgseq_t::header_bytes(), "flat sequence");
+
+    const std::uint64_t expected_fragments =
+        expected_flat_locator_fragment_count(
+            loc.total_bp_size, static_cast<std::uint64_t>(lpu),
+            detail::kFragmentStorageUnits);
+    if (expected_fragments != loc.num_fragments) {
+        ereport(ERROR,
+            (errcode(ERRCODE_DATA_CORRUPTED),
+             errmsg("bioseq locator fragment geometry is inconsistent"),
+             errdetail("expected fragments=%llu locator fragments=%u",
+                 static_cast<unsigned long long>(expected_fragments),
+                 loc.num_fragments)));
     }
+    const std::uint64_t fragment_bp =
+        static_cast<std::uint64_t>(detail::kFragmentStorageUnits)
+        * static_cast<std::uint64_t>(lpu);
+    const std::uint64_t expected_last_padding =
+        (static_cast<std::uint64_t>(lpu)
+            - loc.total_bp_size % static_cast<std::uint64_t>(lpu))
+        % static_cast<std::uint64_t>(lpu);
+    const std::uint64_t first_expected_bp = loc.num_fragments == 1u
+        ? loc.total_bp_size
+        : fragment_bp;
+    const std::uint64_t first_expected_padding = loc.num_fragments == 1u
+        ? expected_last_padding
+        : 0u;
+    validate_sequence_fragment_metadata(
+        first_raw, logical_alphabet_code, logical_byte_width,
+        first_expected_bp, first_expected_padding,
+        loc.first_sub_row_no);
 
     MemoryContextScope ctx{out_mctx};
-    pgseq_t* out = static_cast<pgseq_t*>(palloc0(static_cast<std::size_t>(assembled_varlena_bytes)));
-    SET_VARSIZE(out, static_cast<std::size_t>(assembled_varlena_bytes));
+    pgseq_t* out = static_cast<pgseq_t*>(palloc0(assembled_varlena_bytes));
+    SET_VARSIZE(out, assembled_varlena_bytes);
     out->alphabet_code           = static_cast<pgseq_t::alphabet_code_t>(logical_alphabet_code);
     out->storage_unit_byte_width = logical_byte_width;
     out->bp_size                 = static_cast<pgseq_t::bp_size_t>(loc.total_bp_size);
@@ -3727,18 +3946,14 @@ sequence_storage_manager<L, M, X>::fetch_payload(
 
     std::uint8_t* const out_data = reinterpret_cast<std::uint8_t*>(out->data);
 
-    // Copy the already-fetched first fragment.
-    const std::size_t first_payload_bytes =
-        static_cast<std::size_t>(VARSIZE(first_raw)) - pgseq_t::header_bytes();
-    const std::size_t first_copy_bytes =
-        std::min(first_payload_bytes,
-                 static_cast<std::size_t>(total_payload_bytes));
+    // Copy the already-fetched and fully validated first fragment.
+    const Size first_copy_bytes =
+        std::min(fragment_storage_bytes, total_payload_bytes);
     if (first_copy_bytes > 0) {
         std::memcpy(out_data, first_raw->data, first_copy_bytes);
     }
-    if (loc.num_fragments > 0) {
-        out->padding_letters = static_cast<std::uint16_t>(first_raw->padding_letters);
-    }
+    out->padding_letters =
+        static_cast<std::uint16_t>(expected_last_padding);
 
     for (std::uint32_t fragment_no = 1; fragment_no < loc.num_fragments; ++fragment_no) {
         // DOC0276 — full-hydration of a multi-Gbp target into one varlena walks
@@ -3763,23 +3978,41 @@ sequence_storage_manager<L, M, X>::fetch_payload(
             bioseq_log<ERR, PG>( "bioseq storage Phase C: sub-table row {} is NULL", row_no);
         }
         pgseq_t* raw = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[0]));
-        if (is_locator_stub(raw)) {
-            bioseq_log<ERR, PG>(
-                   "bioseq storage Phase C: sub-table fragment row {} is itself a stub",
-                   row_no);
+        const Size raw_bytes = static_cast<Size>(VARSIZE(raw));
+        if (raw_bytes < pgseq_t::header_bytes()) {
+            validate_sequence_fragment_frame(
+                raw_bytes, pgseq_t::header_bytes(), row_no);
         }
-        const std::size_t dst_offset =
-            static_cast<std::size_t>(fragment_no) * fragment_storage_bytes;
-        const std::size_t raw_payload =
-            static_cast<std::size_t>(VARSIZE(raw)) - pgseq_t::header_bytes();
-        const std::size_t copy_bytes =
-            std::min(raw_payload,
-                     static_cast<std::size_t>(total_payload_bytes) - dst_offset);
+        if (is_locator_stub(raw)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq fragment row is itself a locator stub"),
+                 errdetail("fragment row=%llu",
+                     static_cast<unsigned long long>(row_no))));
+        }
+        validate_sequence_fragment_frame(
+            raw_bytes, expected_fragment_bytes, row_no);
+        const bool is_last = fragment_no + 1u == loc.num_fragments;
+        const std::uint64_t expected_bp = is_last
+            ? loc.total_bp_size
+                - static_cast<std::uint64_t>(fragment_no) * fragment_bp
+            : fragment_bp;
+        validate_sequence_fragment_metadata(
+            raw, logical_alphabet_code, logical_byte_width,
+            expected_bp, is_last ? expected_last_padding : 0u,
+            row_no);
+        const Size dst_offset = checked_mul_size(
+            checked_size_cast(fragment_no), fragment_storage_bytes);
+        if (dst_offset > total_payload_bytes) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATA_CORRUPTED),
+                 errmsg("bioseq locator fragment offset exceeds its payload")));
+        }
+        const Size copy_bytes =
+            std::min(fragment_storage_bytes,
+                     total_payload_bytes - dst_offset);
         if (copy_bytes > 0) {
             std::memcpy(out_data + dst_offset, raw->data, copy_bytes);
-        }
-        if (fragment_no + 1 == loc.num_fragments) {
-            out->padding_letters = static_cast<std::uint16_t>(raw->padding_letters);
         }
     }
 

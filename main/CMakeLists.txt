@@ -301,10 +301,25 @@ endif()
 # and bloat the build tree.
 option(BIOSEQ_TIME_TRACE
   "Emit clang -ftime-trace JSON per TU into the build tree (profiling only)" OFF)
+set(BIOSEQ_TIME_TRACE_GRANULARITY "" CACHE STRING
+  "Optional non-negative clang -ftime-trace-granularity value")
+if(NOT "${BIOSEQ_TIME_TRACE_GRANULARITY}" STREQUAL ""
+   AND NOT "${BIOSEQ_TIME_TRACE_GRANULARITY}" MATCHES "^[0-9]+$")
+  message(FATAL_ERROR
+    "BIOSEQ_TIME_TRACE_GRANULARITY must be empty or a non-negative integer; "
+    "got '${BIOSEQ_TIME_TRACE_GRANULARITY}'")
+endif()
 if(BIOSEQ_TIME_TRACE)
-  string(APPEND CMAKE_C_FLAGS " -ftime-trace")
-  string(APPEND CMAKE_CXX_FLAGS " -ftime-trace")
-  message(STATUS "bioseq: -ftime-trace enabled; profiling JSON written next to each .o")
+  set(_bioseq_time_trace_flags " -ftime-trace")
+  if(NOT "${BIOSEQ_TIME_TRACE_GRANULARITY}" STREQUAL "")
+    string(APPEND _bioseq_time_trace_flags
+      " -ftime-trace-granularity=${BIOSEQ_TIME_TRACE_GRANULARITY}")
+  endif()
+  string(APPEND CMAKE_C_FLAGS "${_bioseq_time_trace_flags}")
+  string(APPEND CMAKE_CXX_FLAGS "${_bioseq_time_trace_flags}")
+  message(STATUS
+    "bioseq: clang time trace enabled (${_bioseq_time_trace_flags}); "
+    "profiling JSON written next to each .o")
 endif()
 
 # set this to "${PROJECT_VERSION}" on release

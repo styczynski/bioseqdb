@@ -15,6 +15,9 @@ module;
 
 #include "safe_lib.h"
 
+#include <cstdint>
+#include <limits>
+
 export module bioseq.table.io:reader;
 
 import bioseq.common.mlogging;
@@ -709,30 +712,66 @@ AdvanceStripeRead(BioseqColumnReadState *readState)
 				readState->stripeReadState->chunkGroupsFiltered;
 		}
 
-		SpinLockAcquire(&readState->parallelBioseqColumnScan->mutex);
-
-		/* Fetch atomic next stripe id to be read by this scan. */
-		uint64_t nextStripeId = 
-			pg_atomic_fetch_add_u64(&readState->parallelBioseqColumnScan->nextStripeId, 1);
-
-		uint64_t nextHigherStripeId = nextStripeId;
-
-		readState->currentStripeMetadata = FindNextStripeForParallelWorker(readState->relation,
-																		   readState->snapshot,
-																		   nextStripeId,
-																		   &nextHigherStripeId);
-
-		/* 
-		 * There exists higher stripe id than this one so adjust and 
-		 * add +1 for next workers.
-		 */
-		if (nextHigherStripeId != nextStripeId)
+		auto *parallel_scan = readState->parallelBioseqColumnScan;
+		for (;;)
 		{
-			pg_atomic_write_u64(&readState->parallelBioseqColumnScan->nextStripeId,
-								nextHigherStripeId + 1);
-		}
+			/* Stripe ids are relation-local, and aborted reservations may leave
+			 * gaps.  Resolve the next relation-local id without holding a
+			 * spinlock: the catalog/index scan is interruptible, and a parallel
+			 * worker terminated while holding a spinlock would poison the DSM
+			 * lock for every peer. */
+			uint64 claimed_id = pg_atomic_read_u64(&parallel_scan->nextStripeId);
+			constexpr uint64 max_stripe_id = static_cast<uint64>(
+				std::numeric_limits<std::int64_t>::max());
+			constexpr uint64 eof_sentinel = max_stripe_id + 1u;
+			if (claimed_id == eof_sentinel)
+			{
+				readState->currentStripeMetadata = nullptr;
+				break;
+			}
+			if (claimed_id == 0u || claimed_id > max_stripe_id)
+			{
+				bioseq_log<ERR, PG>(
+					"bioseq parallel scan cursor is outside the stripe-id domain");
+			}
 
-		SpinLockRelease(&readState->parallelBioseqColumnScan->mutex);
+			std::uint64_t lookup_found_id = claimed_id;
+			StripeMetadata *candidate = FindNextStripeForParallelWorker(
+				readState->relation, readState->snapshot, claimed_id,
+				&lookup_found_id);
+
+			if (candidate == nullptr)
+			{
+				readState->currentStripeMetadata = nullptr;
+				break;
+			}
+
+			if (lookup_found_id < claimed_id
+				|| lookup_found_id > max_stripe_id)
+			{
+				pfree(candidate);
+				bioseq_log<ERR, PG>(
+					"bioseq parallel scan returned an invalid stripe id");
+			}
+
+			/* CAS makes the lookup and gap skip one logical claim.  A peer
+			 * that raced on the same candidate retries from the winner's
+			 * successor, so no stripe is duplicated. */
+			const uint64 found_id = static_cast<uint64>(lookup_found_id);
+			const uint64 successor = found_id + 1;
+			uint64 expected = claimed_id;
+			if (pg_atomic_compare_exchange_u64(
+					&parallel_scan->nextStripeId, &expected, successor))
+			{
+				readState->currentStripeMetadata = candidate;
+				break;
+			}
+
+			if (candidate != nullptr)
+			{
+				pfree(candidate);
+			}
+		}
 	}
 
 	if (readState->currentStripeMetadata &&

@@ -19,6 +19,8 @@ module;
 
 module bioseq.sequences.simd;
 
+import bioseq.sequences.rank_pack_core;
+
 HWY_BEFORE_NAMESPACE();
 
 namespace bioseq::simd::HWY_NAMESPACE {
@@ -32,6 +34,31 @@ namespace hn = hwy::HWY_NAMESPACE;
 #endif
 
 namespace detail {
+
+template <typename storage_unit_t,
+          std::size_t BitsPerChar,
+          std::size_t LettersPerUnit>
+HWY_INLINE void append_valid_rank_to_locals(
+        storage_unit_t& partial_word,
+        std::size_t& partial_letters,
+        std::size_t& total_letters,
+        std::vector<storage_unit_t>* HWY_RESTRICT packed_words,
+        std::uint8_t rank) {
+    auto write_unit = [packed_words](storage_unit_t value) {
+        packed_words->push_back(value);
+        return true;
+    };
+    const bool appended =
+        bioseq::sequences::rank_pack_detail::append_valid_rank_lsb<
+            storage_unit_t, BitsPerChar, LettersPerUnit>(
+                partial_word,
+                partial_letters,
+                total_letters,
+                rank,
+                write_unit);
+    DEBUG_ASSERT(appended,
+                 "growing SIMD rank pack unexpectedly overflowed");
+}
 
 template <typename storage_unit_t,
           std::size_t BitsPerChar,
@@ -92,16 +119,13 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
                     const std::uint8_t letter_rank =
                         fallback_lut[body_bytes[read_cursor + scalar_offset]];
                     if (letter_rank != 0xFF) {
-                        local_partial_word |=
-                            static_cast<storage_unit_t>(letter_rank)
-                            << (BitsPerChar * local_partial_letters);
-                        local_partial_letters += 1;
-                        local_total_letters += 1;
-                        if (local_partial_letters == LettersPerUnit) {
-                            packed_words->push_back(local_partial_word);
-                            local_partial_word = 0;
-                            local_partial_letters = 0;
-                        }
+                        append_valid_rank_to_locals<
+                            storage_unit_t, BitsPerChar, LettersPerUnit>(
+                                local_partial_word,
+                                local_partial_letters,
+                                local_total_letters,
+                                packed_words,
+                                letter_rank);
                     }
                 }
                 read_cursor += 2 * lanes;
@@ -136,16 +160,13 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
                     const std::uint8_t letter_rank =
                         fallback_lut[body_bytes[read_cursor + scalar_offset]];
                     if (letter_rank != 0xFF) {
-                        local_partial_word |=
-                            static_cast<storage_unit_t>(letter_rank)
-                            << (BitsPerChar * local_partial_letters);
-                        local_partial_letters += 1;
-                        local_total_letters += 1;
-                        if (local_partial_letters == LettersPerUnit) {
-                            packed_words->push_back(local_partial_word);
-                            local_partial_word = 0;
-                            local_partial_letters = 0;
-                        }
+                        append_valid_rank_to_locals<
+                            storage_unit_t, BitsPerChar, LettersPerUnit>(
+                                local_partial_word,
+                                local_partial_letters,
+                                local_total_letters,
+                                packed_words,
+                                letter_rank);
                     }
                 }
             } else {
@@ -163,15 +184,13 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
         while (read_cursor < body_size) {
             const std::uint8_t letter_rank = fallback_lut[body_bytes[read_cursor]];
             if (letter_rank != 0xFF) {
-                local_partial_word |= static_cast<storage_unit_t>(letter_rank)
-                                      << (BitsPerChar * local_partial_letters);
-                local_partial_letters += 1;
-                local_total_letters += 1;
-                if (local_partial_letters == LettersPerUnit) {
-                    packed_words->push_back(local_partial_word);
-                    local_partial_word = 0;
-                    local_partial_letters = 0;
-                }
+                append_valid_rank_to_locals<
+                    storage_unit_t, BitsPerChar, LettersPerUnit>(
+                        local_partial_word,
+                        local_partial_letters,
+                        local_total_letters,
+                        packed_words,
+                        letter_rank);
             }
             read_cursor += 1;
         }
@@ -200,15 +219,13 @@ HWY_INLINE void encode_body_chunk_dna4_simd_impl(
         // Scalar tail (always-valid rank under MAP_TO_DEFAULT).
         while (read_cursor < body_size) {
             const std::uint8_t letter_rank = fallback_lut[body_bytes[read_cursor]];
-            local_partial_word |= static_cast<storage_unit_t>(letter_rank)
-                                  << (BitsPerChar * local_partial_letters);
-            local_partial_letters += 1;
-            local_total_letters += 1;
-            if (local_partial_letters == LettersPerUnit) {
-                packed_words->push_back(local_partial_word);
-                local_partial_word = 0;
-                local_partial_letters = 0;
-            }
+            append_valid_rank_to_locals<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    local_partial_word,
+                    local_partial_letters,
+                    local_total_letters,
+                    packed_words,
+                    letter_rank);
             read_cursor += 1;
         }
     }
@@ -294,16 +311,13 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline_impl(
             const std::uint8_t letter_rank =
                 fallback_lut[body_bytes[read_cursor + lane]];
             if (letter_rank == 0xFF) continue;
-            local_partial_word |=
-                static_cast<storage_unit_t>(letter_rank)
-                << (BitsPerChar * local_partial_letters);
-            local_partial_letters += 1;
-            local_total_letters += 1;
-            if (local_partial_letters == LettersPerUnit) {
-                packed_words->push_back(local_partial_word);
-                local_partial_word = 0;
-                local_partial_letters = 0;
-            }
+            append_valid_rank_to_locals<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    local_partial_word,
+                    local_partial_letters,
+                    local_total_letters,
+                    packed_words,
+                    letter_rank);
         }
         read_cursor += lanes;
     }
@@ -312,16 +326,13 @@ HWY_INLINE void encode_body_chunk_dna4_simd_multiline_impl(
         const std::uint8_t letter_rank =
             fallback_lut[body_bytes[read_cursor]];
         if (letter_rank != 0xFF) {
-            local_partial_word |=
-                static_cast<storage_unit_t>(letter_rank)
-                << (BitsPerChar * local_partial_letters);
-            local_partial_letters += 1;
-            local_total_letters += 1;
-            if (local_partial_letters == LettersPerUnit) {
-                packed_words->push_back(local_partial_word);
-                local_partial_word = 0;
-                local_partial_letters = 0;
-            }
+            append_valid_rank_to_locals<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    local_partial_word,
+                    local_partial_letters,
+                    local_total_letters,
+                    packed_words,
+                    letter_rank);
         }
         read_cursor += 1;
     }
@@ -410,16 +421,13 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
                 }
                 const std::uint8_t rank = fallback_lut[b];
                 if (rank != 0xFF) {
-                    local_partial_word |=
-                        static_cast<storage_unit_t>(rank)
-                        << (BitsPerChar * local_partial_letters);
-                    local_partial_letters += 1;
-                    local_total_letters += 1;
-                    if (local_partial_letters == LettersPerUnit) {
-                        packed_words->push_back(local_partial_word);
-                        local_partial_word = 0;
-                        local_partial_letters = 0;
-                    }
+                    append_valid_rank_to_locals<
+                        storage_unit_t, BitsPerChar, LettersPerUnit>(
+                            local_partial_word,
+                            local_partial_letters,
+                            local_total_letters,
+                            packed_words,
+                            rank);
                 }
             }
             return flush_state_and_return(scalar_end);
@@ -456,16 +464,13 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
             if (current_byte == '\n' || current_byte == '\r') continue;
             const std::uint8_t rank = fallback_lut[current_byte];
             if (rank == 0xFF) continue;
-            local_partial_word |=
-                static_cast<storage_unit_t>(rank)
-                << (BitsPerChar * local_partial_letters);
-            local_partial_letters += 1;
-            local_total_letters += 1;
-            if (local_partial_letters == LettersPerUnit) {
-                packed_words->push_back(local_partial_word);
-                local_partial_word = 0;
-                local_partial_letters = 0;
-            }
+            append_valid_rank_to_locals<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    local_partial_word,
+                    local_partial_letters,
+                    local_total_letters,
+                    packed_words,
+                    rank);
         }
         read_cursor += lanes;
     }
@@ -482,16 +487,13 @@ encode_body_chunk_dna4_simd_multiline_until_byte_runtime_impl(
         }
         const std::uint8_t rank = fallback_lut[current_byte];
         if (rank != 0xFF) {
-            local_partial_word |=
-                static_cast<storage_unit_t>(rank)
-                << (BitsPerChar * local_partial_letters);
-            local_partial_letters += 1;
-            local_total_letters += 1;
-            if (local_partial_letters == LettersPerUnit) {
-                packed_words->push_back(local_partial_word);
-                local_partial_word = 0;
-                local_partial_letters = 0;
-            }
+            append_valid_rank_to_locals<
+                storage_unit_t, BitsPerChar, LettersPerUnit>(
+                    local_partial_word,
+                    local_partial_letters,
+                    local_total_letters,
+                    packed_words,
+                    rank);
         }
         read_cursor += 1;
     }
@@ -631,15 +633,12 @@ HWY_INLINE void encode_body_chunk_dna5_uint8_simd_impl(
     std::size_t local_total_letters = state.total_letters;
 
     auto append_one_rank = [&](std::uint8_t rank) {
-        local_partial_word |=
-            static_cast<std::uint8_t>(rank << (3 * local_partial_letters));
-        local_partial_letters += 1;
-        local_total_letters += 1;
-        if (local_partial_letters == 2) {
-            packed_words->push_back(local_partial_word);
-            local_partial_word = 0;
-            local_partial_letters = 0;
-        }
+        append_valid_rank_to_locals<std::uint8_t, 3u, 2u>(
+            local_partial_word,
+            local_partial_letters,
+            local_total_letters,
+            packed_words,
+            rank);
     };
 
     std::size_t cursor = 0;

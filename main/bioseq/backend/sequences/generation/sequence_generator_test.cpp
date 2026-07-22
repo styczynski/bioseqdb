@@ -311,7 +311,9 @@ TEST_CASE("generator: dna5 symbol frequencies", "[generator][doc0335]") {
                    .generate_sequences(1)
                    .front();
     auto lazy = bioseq::storage::make_lazy_in_memory(seq);
-    auto counts = bioseq::indexing::tally_symbol_counts(lazy);
+    const auto sequence_view =
+        bioseq::storage::as_lazy_sequence_view(lazy);
+    auto counts = bioseq::indexing::tally_symbol_counts(sequence_view);
     const double total = static_cast<double>(gp.reference_length);
     for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {
         const double p = gen::alphabet_probability<seq::dna5>::probability()[rank];
@@ -418,7 +420,10 @@ TEST_CASE("generator: DOC0335 manual 2Gbp validation harness", "[.][generator][d
     auto reference = generator.generate_reference();
 
     auto lazy = bioseq::storage::make_lazy_in_memory(*reference);
-    const auto counts = bioseq::indexing::tally_symbol_counts(lazy);
+    const auto reference_view =
+        bioseq::storage::as_lazy_sequence_view(lazy);
+    const auto counts =
+        bioseq::indexing::tally_symbol_counts(reference_view);
     const auto probs = gen::alphabet_probability<seq::dna5>::probability();
 
     for (std::size_t rank = 0; rank < seqan3::alphabet_size<seq::dna5>; ++rank) {

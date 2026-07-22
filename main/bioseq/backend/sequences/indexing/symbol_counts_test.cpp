@@ -78,7 +78,9 @@ TEST_CASE("DOC0279 §12.5 — tally_symbol_counts is exact over scanner_none AND
     // scanner_none (all-in-RAM) path.
     {
         auto lazy = make_lazy_in_memory(range);
-        auto got = bioseq::indexing::tally_symbol_counts(lazy);
+        const auto lazy_view =
+            bioseq::storage::as_lazy_sequence_view(lazy);
+        auto got = bioseq::indexing::tally_symbol_counts(lazy_view);
         REQUIRE(got.size() == 4u);
         std::int64_t total = 0;
         for (std::size_t r = 0; r < 4; ++r) { REQUIRE(got[r] == want[r]); total += got[r]; }
@@ -88,7 +90,9 @@ TEST_CASE("DOC0279 §12.5 — tally_symbol_counts is exact over scanner_none AND
     // fragmented (chunked) path.
     {
         lazy_compact_sequence<dna4_u64, chunked> frag{chunked::from_range(range)};
-        auto got = bioseq::indexing::tally_symbol_counts(frag);
+        const auto frag_view =
+            bioseq::storage::as_lazy_sequence_view(frag);
+        auto got = bioseq::indexing::tally_symbol_counts(frag_view);
         REQUIRE(got.size() == 4u);
         std::int64_t total = 0;
         for (std::size_t r = 0; r < 4; ++r) { REQUIRE(got[r] == want[r]); total += got[r]; }
@@ -109,12 +113,14 @@ TEST_CASE("DOC0279 §12.5 — SymbolCountsIndex build + read_count round-trips t
         bioseq::indexing::SymbolCountsIndex<FakeSequenceStorage>::read_count(storage, 0).has_value());
 
     auto lazy = make_lazy_in_memory(range);
-    bioseq::indexing::SymbolCountsIndex<FakeSequenceStorage>::build(storage, lazy);
+    const auto lazy_view = bioseq::storage::as_lazy_sequence_view(lazy);
+    bioseq::indexing::SymbolCountsIndex<FakeSequenceStorage>::build(
+        storage, lazy_view);
 
     REQUIRE(storage.number_of_chunks() == 1u);                 // exactly one inline chunk
     REQUIRE(storage.chunk_byte_size() == 4u * sizeof(std::int64_t));
 
-    auto tally = bioseq::indexing::tally_symbol_counts(lazy);
+    auto tally = bioseq::indexing::tally_symbol_counts(lazy_view);
     for (std::size_t r = 0; r < 4; ++r) {
         auto v = bioseq::indexing::SymbolCountsIndex<FakeSequenceStorage>::read_count(storage, r);
         REQUIRE(v.has_value());

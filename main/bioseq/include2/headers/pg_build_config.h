@@ -17,12 +17,16 @@
  *   5 - level 4 plus specialised ConstexprAlignerParams (SpecCep) branches.
  *
  * Lower levels reduce compile time and binary size by pruning template
- * instantiations. This literal define is the single source of truth: CMake
+ * instantiations. This literal define is the default source of truth: CMake
  * reads it to prune split typed-dispatch translation units and automatically
- * reconfigures when this file changes.
+ * reconfigures when this file changes. Isolated qualification presets may
+ * provide the same macro on the compiler command line without changing this
+ * checked-in default.
  */
 /* AI agents must not change this default optimization level. */
+#ifndef BIOSEQ_OPTTIMIZATION_LEVEL
 #define BIOSEQ_OPTTIMIZATION_LEVEL 0
+#endif
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL < 0 || BIOSEQ_OPTTIMIZATION_LEVEL > 5
 #error "BIOSEQ_OPTTIMIZATION_LEVEL must be an integer in the range 0..5"

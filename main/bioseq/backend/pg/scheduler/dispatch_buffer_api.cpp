@@ -30,6 +30,8 @@ import bioseq.sequences.simd;
 import bioseq.sequences.minimap_port;
 import bioseq.sequences.pipe;
 import bioseq.indexing.type;
+import bioseq.types.pg_compact_sequence;
+import bioseq.storage.scanner_pg;
 
 namespace bioseq::scheduler {
 
@@ -81,7 +83,8 @@ void DispatchBufferRuntime::configure_params(
     const Oid scan_user_tablespace_oid,
     const Oid scan_user_main_relfilenode,
     Relation executor_relation,
-    Snapshot executor_snapshot) {
+    Snapshot executor_snapshot,
+    MemoryContext executor_query_context) {
     as_buffer(impl)->configure_params(
         params,
         index_read_requirement,
@@ -91,7 +94,8 @@ void DispatchBufferRuntime::configure_params(
         scan_user_tablespace_oid,
         scan_user_main_relfilenode,
         executor_relation,
-        executor_snapshot);
+        executor_snapshot,
+        executor_query_context);
 }
 
 void DispatchBufferRuntime::replace_executor_snapshot(
@@ -99,9 +103,33 @@ void DispatchBufferRuntime::replace_executor_snapshot(
     as_buffer(impl)->replace_executor_snapshot(executor_snapshot);
 }
 
+void DispatchBufferRuntime::bind_sequence_source_provider(
+        bioseq::storage::pg_sequence_source_provider* provider) {
+    as_buffer(impl)->bind_sequence_source_provider(provider);
+}
+
+void DispatchBufferRuntime::clear_sequence_source_provider_binding() noexcept {
+    if (impl != nullptr) {
+        as_buffer(impl)->clear_sequence_source_provider_binding();
+    }
+}
+
 void DispatchBufferRuntime::bind_persisted_gpu_operation_evidence_sink(
     bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger& sink) {
     as_buffer(impl)->bind_persisted_gpu_operation_evidence_sink(sink);
+}
+
+void DispatchBufferRuntime::bind_slice_async_owner(
+    slice_async_owner_guard* owner) {
+    as_buffer(impl)->bind_slice_async_owner(owner);
+}
+
+void DispatchBufferRuntime::release_per_row_slice_async_owner_after_drain() {
+    as_buffer(impl)->release_per_row_slice_async_owner_after_drain();
+}
+
+void DispatchBufferRuntime::release_join_slice_async_owner_after_drain() {
+	as_buffer(impl)->release_join_slice_async_owner_after_drain();
 }
 
 void DispatchBufferRuntime::configure_mmsearch(
@@ -127,6 +155,8 @@ void DispatchBufferRuntime::configure_mmsearch_per_row(
     const bool per_row_self_alignment,
     const std::uint8_t alphabet_code,
     const std::uint8_t storage_unit_byte_width,
+    const std::uint8_t query_alphabet_code,
+    const std::uint8_t query_storage_unit_byte_width,
     const AttrNumber primary_key_attno) {
     as_buffer(impl)->configure_mmsearch_per_row(
         seq_attno,
@@ -135,16 +165,14 @@ void DispatchBufferRuntime::configure_mmsearch_per_row(
         per_row_self_alignment,
         alphabet_code,
         storage_unit_byte_width,
+        query_alphabet_code,
+        query_storage_unit_byte_width,
         primary_key_attno);
 }
 
 void DispatchBufferRuntime::apply_typmod_coalesce(
     std::vector<char> coalesced_bytes) {
     as_buffer(impl)->apply_typmod_coalesce(std::move(coalesced_bytes));
-}
-
-void DispatchBufferRuntime::mark_alphabet_mismatch_recompute() {
-    as_buffer(impl)->mark_alphabet_mismatch_recompute();
 }
 
 void DispatchBufferRuntime::clear_mmsearch_context(const bool clear_extras) {
@@ -164,7 +192,9 @@ void DispatchBufferRuntime::configure_mmsearch_join(
     const AttrNumber query_slot_seq_resno,
     std::string target_column_name,
     const std::uint8_t alphabet_code,
-    const std::uint8_t storage_unit_byte_width) {
+    const std::uint8_t storage_unit_byte_width,
+    const std::uint8_t query_alphabet_code,
+    const std::uint8_t query_storage_unit_byte_width) {
     as_buffer(impl)->configure_mmsearch_join(
         target_relation_oid,
         target_storage_seq_attno,
@@ -173,7 +203,9 @@ void DispatchBufferRuntime::configure_mmsearch_join(
         query_slot_seq_resno,
         std::move(target_column_name),
         alphabet_code,
-        storage_unit_byte_width);
+        storage_unit_byte_width,
+        query_alphabet_code,
+        query_storage_unit_byte_width);
 }
 
 void DispatchBufferRuntime::begin_join_target(
@@ -281,10 +313,6 @@ bool DispatchBufferRuntime::coalesce_active() const {
     return as_buffer(impl)->coalesce_active();
 }
 
-bool DispatchBufferRuntime::recompute_due_to_alphabet_mismatch() const {
-    return as_buffer(impl)->recompute_due_to_alphabet_mismatch();
-}
-
 std::uint8_t DispatchBufferRuntime::mmsearch_alphabet_code() const {
     return as_buffer(impl)->mmsearch_alphabet_code();
 }
@@ -293,12 +321,15 @@ std::uint8_t DispatchBufferRuntime::mmsearch_storage_unit_byte_width() const {
     return as_buffer(impl)->mmsearch_storage_unit_byte_width();
 }
 
-std::uint8_t DispatchBufferRuntime::raw_query_alphabet_code() const {
-    return as_buffer(impl)->raw_query_alphabet_code();
+AttrNumber DispatchBufferRuntime::target_sequence_attno() const noexcept {
+    return impl == nullptr
+        ? InvalidAttrNumber : as_buffer(impl)->target_sequence_attno();
 }
 
-std::uint8_t DispatchBufferRuntime::raw_query_storage_unit_byte_width() const {
-    return as_buffer(impl)->raw_query_storage_unit_byte_width();
+AttrNumber DispatchBufferRuntime::per_row_query_sequence_attno() const noexcept {
+    return impl == nullptr
+        ? InvalidAttrNumber
+        : as_buffer(impl)->per_row_query_sequence_attno();
 }
 
 } // namespace bioseq::scheduler
