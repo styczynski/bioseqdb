@@ -5,12 +5,85 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 import bioseq.common.mlogging;
+
+struct alignas(64) MloggingTrackedArgument {
+    int value = 0;
+
+    inline static int live_count = 0;
+    inline static int copy_count = 0;
+    inline static int move_count = 0;
+    inline static int destructor_count = 0;
+
+    explicit MloggingTrackedArgument(int initial_value)
+        : value(initial_value)
+    {
+        ++live_count;
+    }
+
+    MloggingTrackedArgument(const MloggingTrackedArgument& other)
+        : value(other.value)
+    {
+        ++live_count;
+        ++copy_count;
+    }
+
+    MloggingTrackedArgument(MloggingTrackedArgument&& other) noexcept
+        : value(other.value)
+    {
+        ++live_count;
+        ++move_count;
+    }
+
+    ~MloggingTrackedArgument()
+    {
+        --live_count;
+        ++destructor_count;
+    }
+
+    static void reset_counts()
+    {
+        live_count = 0;
+        copy_count = 0;
+        move_count = 0;
+        destructor_count = 0;
+    }
+};
+
+template<>
+struct fmt::formatter<MloggingTrackedArgument> {
+    constexpr auto parse(fmt::format_parse_context& context)
+    {
+        return context.begin();
+    }
+
+    template<typename FormatContext>
+    auto format(const MloggingTrackedArgument& argument,
+                FormatContext& context) const
+    {
+        return fmt::format_to(context.out(), "tracked({})", argument.value);
+    }
+};
+
+// fmtlog intentionally unwraps smart pointers while decoding an asynchronous
+// record.  fmt still validates the producer-side checked format string before
+// that decode step, so provide the matching test-only formatting contract.
+template<>
+struct fmt::formatter<std::shared_ptr<int>> : fmt::formatter<int> {
+    template<typename FormatContext>
+    auto format(const std::shared_ptr<int>& value,
+                FormatContext& context) const
+    {
+        return fmt::formatter<int>::format(*value, context);
+    }
+};
 
 namespace {
 
@@ -271,4 +344,135 @@ TEST_CASE("DOC0297 mlogging fallback keeps caller location and report component 
         log_text,
         "mlogging_test.cpp",
         fallback_report_line));
+}
+
+TEST_CASE("mlogging byte-packed arguments decode odd-offset scalars safely",
+          "[mlogging][ubsan][alignment]") {
+    FallbackFileGuard guard;
+    REQUIRE(guard.file != nullptr);
+
+    // The terminating NUL makes this first encoded field five bytes long, so
+    // both the u32 immediately after it and the u64 after the bool start at
+    // deliberately unaligned queue offsets.
+    const char odd_prefix[] = "odd!";
+    const auto emit_packed = [&](std::uint32_t scalar32,
+                                 bool flag,
+                                 std::uint64_t scalar64) {
+        bioseq_log<INF>("packed {} {:08x} {} {:016x}",
+                        odd_prefix, scalar32, flag, scalar64);
+    };
+    emit_packed(0x01020304u, true, 0x0102030405060708ull);
+    emit_packed(0xaabbccddu, false, 0x1112131415161718ull);
+
+    const std::string log_text = guard.contents();
+    CHECK(log_text.find(
+        "packed odd! 01020304 true 0102030405060708") != std::string::npos);
+    CHECK(log_text.find(
+        "packed odd! aabbccdd false 1112131415161718") != std::string::npos);
+}
+
+TEST_CASE("mlogging aligns retained custom arguments after packed strings",
+          "[mlogging][ubsan][alignment]") {
+    FallbackFileGuard guard;
+    REQUIRE(guard.file != nullptr);
+
+    MloggingTrackedArgument::reset_counts();
+    {
+        const char odd_prefix[] = "odd!";
+        const MloggingTrackedArgument first{17};
+        const MloggingTrackedArgument second{29};
+        const auto emit_custom = [&](const MloggingTrackedArgument& argument) {
+            bioseq_log<INF>("custom {} {}", odd_prefix, argument);
+        };
+
+        emit_custom(first);
+        emit_custom(second);
+        CHECK(MloggingTrackedArgument::copy_count == 2);
+        CHECK(MloggingTrackedArgument::move_count == 0);
+        CHECK(MloggingTrackedArgument::live_count == 4);
+
+        const std::string log_text = guard.contents();
+        CHECK(log_text.find("custom odd! tracked(17)") != std::string::npos);
+        CHECK(log_text.find("custom odd! tracked(29)") != std::string::npos);
+        CHECK(MloggingTrackedArgument::destructor_count == 2);
+        CHECK(MloggingTrackedArgument::live_count == 2);
+    }
+
+    CHECK(MloggingTrackedArgument::destructor_count == 4);
+    CHECK(MloggingTrackedArgument::live_count == 0);
+}
+
+TEST_CASE("mlogging checked argument sizing enforces exact queue record bounds",
+          "[mlogging][ubsan][alignment][bounds]") {
+    using Queue = fmtlog::SPSCVarQueueOPT;
+
+    auto boundary_queue = std::make_unique<Queue>();
+    CHECK(boundary_queue->alloc(Queue::MAX_PAYLOAD_SIZE) != nullptr);
+
+    auto rejected_queue = std::make_unique<Queue>();
+    CHECK(rejected_queue->alloc(Queue::FIRST_UNSUPPORTED_PAYLOAD_SIZE) == nullptr);
+    CHECK(rejected_queue->alloc(std::numeric_limits<std::uint32_t>::max()) == nullptr);
+
+    MloggingTrackedArgument::reset_counts();
+    {
+        const MloggingTrackedArgument tracked{41};
+        constexpr std::size_t tracked_storage_bound =
+            alignof(MloggingTrackedArgument) - 1 + sizeof(MloggingTrackedArgument);
+        static_assert(fmtlog::MAX_ARGUMENT_STORAGE_SIZE > tracked_storage_bound + 1);
+
+        // The string's terminating NUL plus the custom object's maximum
+        // padding and storage consume the argument budget exactly.
+        std::string prefix(
+            fmtlog::MAX_ARGUMENT_STORAGE_SIZE - tracked_storage_bound - 1,
+            'x');
+        std::size_t cstring_sizes[1]{};
+        std::size_t remaining = fmtlog::MAX_ARGUMENT_STORAGE_SIZE;
+        CHECK(fmtlog::getArgSizes<0>(
+            cstring_sizes,
+            remaining,
+            std::string_view(prefix),
+            tracked));
+        CHECK(remaining == 0);
+
+        prefix.push_back('x');
+        remaining = fmtlog::MAX_ARGUMENT_STORAGE_SIZE;
+        CHECK_FALSE(fmtlog::getArgSizes<0>(
+            cstring_sizes,
+            remaining,
+            std::string_view(prefix),
+            tracked));
+
+        // Exercise the noexcept public enqueue path as well: sizing rejects
+        // this record before the tracked argument is copied or constructed in
+        // queue storage.
+        std::uint32_t oversized_log_id = 0;
+        fmtlogWrapper<>::impl.log(
+            oversized_log_id,
+            fmtlogWrapper<>::impl.tscns.rdtsc(),
+            "mlogging_test.cpp:oversized",
+            fmtlog::INF,
+            "oversized {} {}",
+            std::string_view(prefix),
+            tracked);
+        CHECK(MloggingTrackedArgument::copy_count == 0);
+        CHECK(MloggingTrackedArgument::move_count == 0);
+        CHECK(MloggingTrackedArgument::live_count == 1);
+    }
+    CHECK(MloggingTrackedArgument::destructor_count == 1);
+    CHECK(MloggingTrackedArgument::live_count == 0);
+}
+
+TEST_CASE("mlogging retains smart pointers and raw trivial arrays until polling",
+          "[mlogging][ubsan][alignment][lifetime]") {
+    FallbackFileGuard guard;
+    REQUIRE(guard.file != nullptr);
+
+    auto retained = std::make_shared<int>(73);
+    const int raw_values[] = {4, 5, 6};
+    bioseq_log<INF>("indirect {} {}", retained, raw_values);
+    CHECK(retained.use_count() == 2);
+
+    const std::string log_text = guard.contents();
+    CHECK(log_text.find("indirect 73 [4, 5, 6]") != std::string::npos);
+    CHECK(retained.use_count() == 1);
 }

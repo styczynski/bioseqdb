@@ -19,12 +19,21 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <new>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#ifndef __has_feature
+#define __has_feature(feature) 0
+#endif
+
+#if __has_feature(address_sanitizer)
+#include <sanitizer/asan_interface.h>
+#endif
 
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
@@ -40,6 +49,35 @@ import bioseq.indexing.symbol_counts;   // DOC0279 §12.5 — tally_symbol_count
 using namespace seq::literals;
 
 namespace {
+
+// The mixed-libc++ ASAN lane waives the entire libc++ container-poison
+// category.  This contract deliberately proves only the independent ordinary
+// allocation-redzone and freed-storage poisoning that must remain active.
+TEST_CASE(
+    "DOC0377 ASAN mixed-libcxx lane retains heap redzone and freed-storage poisoning",
+    "[doc0377][sanitizer][asan][ownership][contract]") {
+#if __has_feature(address_sanitizer)
+    constexpr std::size_t allocation_size = 37u;
+    const auto release = [](void* address) noexcept {
+        ::operator delete(address);
+    };
+    std::unique_ptr<void, decltype(release)> allocation{
+        ::operator new(allocation_size), release};
+    auto* const live = static_cast<std::byte*>(allocation.get());
+    const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(live);
+
+    REQUIRE(__asan_address_is_poisoned(live) == 0);
+    REQUIRE(__asan_address_is_poisoned(live + allocation_size - 1u) == 0);
+    REQUIRE(__asan_address_is_poisoned(live + allocation_size) != 0);
+
+    allocation.reset();
+    const bool freed_storage_is_poisoned = __asan_address_is_poisoned(
+        reinterpret_cast<const void*>(address)) != 0;
+    REQUIRE(freed_storage_is_poisoned);
+#else
+    SUCCEED("standalone test lane is not ASAN-instrumented");
+#endif
+}
 
 using bioseq::storage::sequence_scanner_none;
 using bioseq::storage::sequence_scanner_test_chunked;

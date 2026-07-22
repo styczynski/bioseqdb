@@ -1,0 +1,3 @@
+TBB_SANITIZE=thread
+CMAKE_C_COMPILER=/opt/homebrew/opt/llvm@22/bin/clang
+CMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@22/bin/clang++

@@ -16,6 +16,22 @@ from typing import Mapping, Sequence
 
 SANITIZER_RUNTIME_ENV = "BIOSEQ_SANITIZER_RUNTIME"
 DYLD_INSERT_ENV = "DYLD_INSERT_LIBRARIES"
+ASAN_OPTIONS_ENV = "ASAN_OPTIONS"
+
+# Several macOS vcpkg static C++ dependencies are built with Apple libc++ and
+# without ASAN container annotations, while Bioseq's sanitizer executables use
+# Homebrew LLVM's newer annotated libc++.  Darwin's linker may coalesce weak
+# container instantiations from both libraries, leaving one container
+# alternately maintained by annotated and unannotated methods.  This was
+# observed independently in glslang shader compilation and nlohmann teardown.
+# This disables the entire libc++ size-within-capacity/container-poison
+# category in the mixed-libc++ lane, including genuine logical overruns that
+# stay inside an allocation's capacity.  Ordinary ASAN heap redzones, stack,
+# lifetime, and freed-storage poisoning remain enabled.  A future full-
+# container qualification lane must rebuild every C++ dependency with one
+# ABI-consistent, annotation-consistent libc++ toolchain; that lane can remove
+# this explicit coverage waiver.
+ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION = "detect_container_overflow=0"
 
 # These stable Homebrew LLVM 22 paths are the only runtimes supported by the
 # local arm64 sanitizer presets.  Validation resolves the stable symlink and
@@ -33,6 +49,29 @@ LLVM_SANITIZER_RUNTIME_PATHS = (
 
 class SanitizerRuntimeError(ValueError):
     """The requested sanitizer runtime is outside the bounded allowlist."""
+
+
+def _force_colon_option(value: str, option: str) -> str:
+    """Set one sanitizer option once while preserving all unrelated options."""
+    key = option.partition("=")[0]
+    retained = [
+        part for part in value.split(":")
+        if part and part.partition("=")[0] != key
+    ]
+    retained.append(option)
+    return ":".join(retained)
+
+
+def _apply_runtime_compatibility_options(env: dict[str, str]) -> None:
+    """Apply compatibility required by the selected, already-validated RT."""
+    runtime = env.get(SANITIZER_RUNTIME_ENV)
+    if runtime is None:
+        return
+    if Path(runtime).name.startswith("libclang_rt.asan_"):
+        env[ASAN_OPTIONS_ENV] = _force_colon_option(
+            env.get(ASAN_OPTIONS_ENV, ""),
+            ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+        )
 
 
 def validate_sanitizer_runtime(
@@ -90,6 +129,7 @@ def sanitizer_descendant_environment(
     if requested is not None:
         env[SANITIZER_RUNTIME_ENV] = validate_sanitizer_runtime(
             requested, allowed_paths=allowed_paths)
+    _apply_runtime_compatibility_options(env)
     return env
 
 

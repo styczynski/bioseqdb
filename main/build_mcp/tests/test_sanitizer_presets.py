@@ -17,10 +17,14 @@ sys.path.insert(0, str(BUILD_MCP_DIR))
 sys.path.insert(0, str(MAIN_DIR / "cmake"))
 
 import server  # noqa: E402
+import private_postgres  # noqa: E402
 from sanitizer_runtime import (  # noqa: E402
+    ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+    ASAN_OPTIONS_ENV,
     DYLD_INSERT_ENV,
     SANITIZER_RUNTIME_ENV,
     SanitizerRuntimeError,
+    _force_colon_option,
     postgres_sanitizer_environment,
     sanitizer_descendant_environment,
 )
@@ -110,6 +114,77 @@ class SanitizerPresetContractTest(unittest.TestCase):
                     self.assertEqual(variables[linker_key], expected)
                 self.assertNotIn("CMAKE_LINKER_FLAGS", variables)
 
+    def test_only_tsan_selects_instrumented_tbb_overlay(self) -> None:
+        overlay_key = "VCPKG_OVERLAY_PORTS"
+        self.assertEqual(
+            self.resolved_cache_variables("test-opt-tsan")[overlay_key],
+            "${sourceDir}/cmake/ports-tsan",
+        )
+        for name in ("test-opt", "test-opt-asan", "test-opt-ubsan"):
+            with self.subTest(name=name):
+                self.assertNotIn(
+                    overlay_key, self.resolved_cache_variables(name))
+
+        overlay = MAIN_DIR / "cmake" / "ports-tsan" / "tbb"
+        portfile = (overlay / "portfile.cmake").read_text()
+        self.assertEqual(
+            (overlay / "bioseq-tsan-instrumented.txt").read_text(),
+            "TBB_SANITIZE=thread\n"
+            "CMAKE_C_COMPILER=/opt/homebrew/opt/llvm@22/bin/clang\n"
+            "CMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@22/bin/clang++\n",
+        )
+        self.assertEqual(portfile.count("-DTBB_SANITIZE=thread"), 1)
+        self.assertIn(
+            '"-DCMAKE_C_COMPILER:FILEPATH=${_bioseq_tsan_clang}"',
+            portfile,
+        )
+        self.assertIn(
+            '"-DCMAKE_CXX_COMPILER:FILEPATH=${_bioseq_tsan_clangxx}"',
+            portfile,
+        )
+        self.assertIn(
+            "foreach(_bioseq_tbb_variant IN ITEMS dbg rel)", portfile)
+        self.assertIn(
+            '"${CURRENT_BUILDTREES_DIR}/${TARGET_TRIPLET}-'
+            '${_bioseq_tbb_variant}/CMakeCache.txt"',
+            portfile,
+        )
+        self.assertIn(
+            "list(FIND _bioseq_tbb_cache_lines", portfile)
+        self.assertIn(
+            '"TBB_SANITIZE:STRING=thread"', portfile)
+        self.assertIn(
+            "list(FILTER _bioseq_tbb_compiler_cache_entries INCLUDE REGEX",
+            portfile,
+        )
+        self.assertIn(
+            "_bioseq_tbb_compiler_cache_entry_count EQUAL 1", portfile)
+        for cache_type in ("STRING", "FILEPATH"):
+            with self.subTest(cache_type=cache_type):
+                self.assertIn(
+                    "CMAKE_${_bioseq_tbb_compiler_kind}_COMPILER:"
+                    f"{cache_type}=${{_bioseq_tbb_expected_compiler}}",
+                    portfile,
+                )
+        self.assertIn(
+            "_bioseq_tbb_validated_cache_count EQUAL 0", portfile)
+        configure_start = portfile.index("vcpkg_cmake_configure(")
+        validation_start = portfile.index(
+            "set(_bioseq_tbb_validated_cache_count")
+        package_install = portfile.index("vcpkg_cmake_install()")
+        marker_install = portfile.index(
+            'file(INSTALL "${CMAKE_CURRENT_LIST_DIR}/'
+            'bioseq-tsan-instrumented.txt"')
+        self.assertLess(configure_start, validation_start)
+        self.assertLess(validation_start, package_install)
+        self.assertLess(package_install, marker_install)
+
+        bioseq_cmake = (MAIN_DIR / "bioseq" / "CMakeLists.txt").read_text()
+        self.assertIn(
+            "-fsanitize=([^ ;]*,)?thread(,[^ ;]*)?", bioseq_cmake)
+        self.assertIn(
+            "_bioseq_tbb_tsan_expected_marker", bioseq_cmake)
+
     def test_postgresql_nls_dependency_is_target_scoped(self) -> None:
         module = (MAIN_DIR / "cmake" / "FindPostgreSQL.cmake").read_text()
         self.assertIn(
@@ -170,6 +245,10 @@ class SanitizerPresetContractTest(unittest.TestCase):
             self.assertNotIn(DYLD_INSERT_ENV, descendant)
             self.assertEqual(
                 descendant[SANITIZER_RUNTIME_ENV], str(runtime.resolve()))
+            self.assertEqual(
+                descendant[ASAN_OPTIONS_ENV],
+                ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+            )
             worker = server._build_worker_descendant_environment(
                 base, allowed_paths=(runtime,))
             self.assertNotIn(DYLD_INSERT_ENV, worker)
@@ -186,6 +265,120 @@ class SanitizerPresetContractTest(unittest.TestCase):
                 sanitizer_descendant_environment(
                     {SANITIZER_RUNTIME_ENV: str(untrusted)},
                     allowed_paths=(runtime,))
+
+    def test_mixed_libcxx_asan_lane_disables_entire_container_poison_category(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = (Path(temporary) /
+                "libclang_rt.asan_osx_dynamic.dylib")
+            runtime.touch()
+            base = {
+                SANITIZER_RUNTIME_ENV: str(runtime),
+                ASAN_OPTIONS_ENV: (
+                    "abort_on_error=1:detect_container_overflow=1:"
+                    "detect_stack_use_after_return=1"),
+            }
+            descendant = sanitizer_descendant_environment(
+                base, allowed_paths=(runtime,))
+            options = descendant[ASAN_OPTIONS_ENV].split(":")
+            self.assertIn("abort_on_error=1", options)
+            self.assertIn("detect_stack_use_after_return=1", options)
+            self.assertEqual(
+                options.count(ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION), 1)
+            self.assertNotIn("detect_container_overflow=1", options)
+
+            postgres = postgres_sanitizer_environment(
+                base, allowed_paths=(runtime,))
+            self.assertEqual(
+                postgres[ASAN_OPTIONS_ENV], descendant[ASAN_OPTIONS_ENV])
+            self.assertEqual(
+                postgres[DYLD_INSERT_ENV], str(runtime.resolve()))
+
+    def test_colon_option_parser_replaces_every_duplicate_target_key(
+            self) -> None:
+        observed = _force_colon_option(
+            "abort_on_error=1:detect_container_overflow=1:"
+            "detect_container_overflow=0:detect_container_overflow=maybe:"
+            "symbolize=1",
+            ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+        )
+        self.assertEqual(
+            observed,
+            "abort_on_error=1:symbolize=1:"
+            + ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+        )
+
+    def test_colon_option_parser_drops_empty_fields_but_preserves_unrelated(
+            self) -> None:
+        observed = _force_colon_option(
+            ":abort_on_error=1::malformed:=empty-key:other==value:"
+            "trailing=::",
+            ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+        )
+        self.assertEqual(
+            observed,
+            "abort_on_error=1:malformed:=empty-key:other==value:trailing=:"
+            + ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+        )
+
+    def test_private_cluster_child_receives_normalized_asan_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "libclang_rt.asan_osx_dynamic.dylib"
+            runtime.touch()
+            cluster = private_postgres.UniquePrivateCluster(
+                private_postgres.ClusterInputs(
+                    bindir=root,
+                    database="sanitizer_contract",
+                    config_template=root / "unused.conf.in",
+                    output_root=root / "output",
+                    run_label="sanitizer_child_env",
+                ))
+            base = {
+                SANITIZER_RUNTIME_ENV: str(runtime),
+                ASAN_OPTIONS_ENV: (
+                    "abort_on_error=1:detect_container_overflow=1:"
+                    "symbolize=1"),
+            }
+
+            def normalize(env):
+                return sanitizer_descendant_environment(
+                    env, allowed_paths=(runtime,))
+
+            try:
+                with mock.patch.dict(os.environ, base, clear=True), \
+                        mock.patch.object(
+                            private_postgres,
+                            "sanitizer_descendant_environment",
+                            side_effect=normalize):
+                    child = cluster.child_environment()
+            finally:
+                if cluster.socket_dir.exists():
+                    cluster.socket_dir.rmdir()
+
+            self.assertEqual(
+                child[ASAN_OPTIONS_ENV],
+                "abort_on_error=1:symbolize=1:"
+                + ASAN_MIXED_LIBCXX_CONTAINER_COMPAT_OPTION,
+            )
+            self.assertEqual(
+                child[SANITIZER_RUNTIME_ENV], str(runtime.resolve()))
+
+    def test_non_asan_runtime_does_not_rewrite_asan_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = (Path(temporary) /
+                "libclang_rt.ubsan_osx_dynamic.dylib")
+            runtime.touch()
+            base = {
+                SANITIZER_RUNTIME_ENV: str(runtime),
+                ASAN_OPTIONS_ENV: "detect_container_overflow=1",
+            }
+            descendant = sanitizer_descendant_environment(
+                base, allowed_paths=(runtime,))
+            self.assertEqual(
+                descendant[ASAN_OPTIONS_ENV],
+                base[ASAN_OPTIONS_ENV],
+            )
 
     def test_detached_worker_spawn_receives_no_raw_dyld_state(self) -> None:
         fake_process = mock.Mock(pid=4242)

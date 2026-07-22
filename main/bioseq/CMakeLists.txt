@@ -616,6 +616,53 @@ find_package(ftxui REQUIRED)
 find_package(simdjson REQUIRED)
 find_package(nlohmann_json_schema_validator REQUIRED)
 find_package(TBB REQUIRED tbb)
+
+set(_bioseq_configured_sanitizer_flags
+  "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS} ${CMAKE_EXE_LINKER_FLAGS} "
+  "${CMAKE_SHARED_LINKER_FLAGS} ${CMAKE_MODULE_LINKER_FLAGS}")
+if(CMAKE_BUILD_TYPE)
+  string(TOUPPER "${CMAKE_BUILD_TYPE}" _bioseq_build_type_upper)
+  foreach(_bioseq_flag_kind IN ITEMS
+      C CXX EXE_LINKER SHARED_LINKER MODULE_LINKER)
+    set(_bioseq_config_flag_var
+      "CMAKE_${_bioseq_flag_kind}_FLAGS_${_bioseq_build_type_upper}")
+    string(APPEND _bioseq_configured_sanitizer_flags
+      " ${${_bioseq_config_flag_var}}")
+  endforeach()
+endif()
+if(_bioseq_configured_sanitizer_flags MATCHES
+    "(^|[ ;])-fsanitize=([^ ;]*,)?thread(,[^ ;]*)?($|[ ;])")
+  set(_bioseq_tbb_tsan_marker
+    "${TBB_DIR}/bioseq-tsan-instrumented.txt")
+  if(NOT EXISTS "${_bioseq_tbb_tsan_marker}")
+    message(FATAL_ERROR
+      "ThreadSanitizer builds require a TSan-instrumented oneTBB runtime; "
+      "missing ${_bioseq_tbb_tsan_marker}. Configure with the "
+      "test-opt-tsan preset so its vcpkg overlay rebuilds oneTBB with "
+      "TBB_SANITIZE=thread.")
+  endif()
+  file(READ "${_bioseq_tbb_tsan_marker}" _bioseq_tbb_tsan_marker_value)
+  string(STRIP "${_bioseq_tbb_tsan_marker_value}"
+    _bioseq_tbb_tsan_marker_value)
+  string(CONCAT _bioseq_tbb_tsan_expected_marker
+    "TBB_SANITIZE=thread\n"
+    "CMAKE_C_COMPILER=/opt/homebrew/opt/llvm@22/bin/clang\n"
+    "CMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm@22/bin/clang++")
+  if(NOT _bioseq_tbb_tsan_marker_value STREQUAL
+      _bioseq_tbb_tsan_expected_marker)
+    message(FATAL_ERROR
+      "ThreadSanitizer oneTBB marker has unexpected content: "
+      "${_bioseq_tbb_tsan_marker}")
+  endif()
+endif()
+unset(_bioseq_tbb_tsan_expected_marker)
+unset(_bioseq_tbb_tsan_marker_value)
+unset(_bioseq_tbb_tsan_marker)
+unset(_bioseq_config_flag_var)
+unset(_bioseq_flag_kind)
+unset(_bioseq_build_type_upper)
+unset(_bioseq_configured_sanitizer_flags)
+
 find_package(lfreist-hwinfo REQUIRED)
 find_package(HWY 1.3.0 REQUIRED NO_MODULE)
 find_package(Boost 1.90.0 REQUIRED COMPONENTS program_options regex serialization iterator integer)
