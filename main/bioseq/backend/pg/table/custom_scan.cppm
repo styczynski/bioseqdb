@@ -1516,6 +1516,30 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 			constant_expr = normalized;
 		} else {
 			if (primary_expr != nullptr) {
+				Node* prior_query = list_length(primary_expr->args) < 2
+					? nullptr : reinterpret_cast<Node*>(
+						lsecond(primary_expr->args));
+				Var* prior_outer = pg_node_try_as<Var>(prior_query);
+				Var* current_outer = pg_node_try_as<Var>(query);
+				/* Two PPI clauses supplied by different outer relations may be
+				 * rendezvous points for two nested join owners.  This baserel path
+				 * cannot know whether they share one join frontier, so leave the
+				 * combined candidate unowned and let each join hook invocation make
+				 * the authoritative one-call ownership decision.  A same-frontier
+				 * pair is still rejected there, while the individual parameterized
+				 * paths remain available to form nested owners. */
+				const bool distinct_join_owner_candidates =
+					prior_outer != nullptr && current_outer != nullptr
+					&& prior_outer->varno != current_outer->varno
+					&& bms_is_member(static_cast<int>(prior_outer->varno),
+						param_relids)
+					&& bms_is_member(static_cast<int>(current_outer->varno),
+						param_relids)
+					&& !list_member_ptr(
+						rel->baserestrictinfo, primary_restriction)
+					&& !list_member_ptr(
+						rel->baserestrictinfo, semantic_restriction);
+				if (distinct_join_owner_candidates) return {};
 				ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("stacked mmsearch qualifiers are unsupported"),
@@ -1550,6 +1574,23 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 		|| primary_query_var->varno > static_cast<Index>(
 			list_length(root->parse->rtable))
 		? nullptr : rt_fetch(primary_query_var->varno, root->parse->rtable);
+	/* A base-local constant restriction and a parameterized join restriction
+	 * with distinct target recipes belong to two different DOC0377 owners.  The
+	 * parameterized baserel candidate sees both through ParamPathInfo, but must
+	 * not collapse them into the narrow same-target fallback (or reject the
+	 * whole query before BioseqPerRowMmsearch can reconstruct the join owner).
+	 * Leave this candidate unowned; the unparameterized BioseqScan owns the base
+	 * restriction and the join hook structurally removes/owns the other one. */
+	const bool distinct_join_owner_candidate =
+		primary_restriction != nullptr && primary_expr != nullptr
+		&& constant_restriction != nullptr && constant_expr != nullptr
+		&& primary_query_var != nullptr
+		&& bms_is_member(static_cast<int>(primary_query_var->varno),
+			param_relids)
+		&& list_member_ptr(rel->baserestrictinfo, constant_restriction)
+		&& !list_member_ptr(rel->baserestrictinfo, primary_restriction)
+		&& !equal(primary_target, constant_target);
+	if (distinct_join_owner_candidate) return {};
 	/* Preserve the established general stacked-qualifier rejection.  The sole
 	 * admitted exception is the BatchJoin fallback contract: an explicitly
 	 * require-absent primary over an outer Var from an ordinary relation becomes
@@ -17094,22 +17135,28 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 				if (is_bioseq_projection_funcid(fe->funcid, plan_stub_oids)) {
 					FuncExpr* helper = batch_join_well_formed_match_helper(
 						reinterpret_cast<Node*>(fe), plan_stub_oids);
+					Var* argument = helper == nullptr ? nullptr
+						: pg_node_try_as<Var>(
+							batch_join_match_helper_argument(helper));
+					const bool direct_scan_argument = argument != nullptr
+						&& argument->varno == scan_relid
+						&& argument->varattno > 0
+						&& argument->varlevelsup == 0
+						&& bms_is_empty(argument->varnullingrels);
+					/* Keep a direct scan-local mismatch inside this owner so its
+					 * finalized injector emits the established target-column
+					 * diagnostic.  Wrapped mismatches remain unclaimed and reach
+					 * the scalar fail-closed boundary. */
 					if (helper != nullptr
 						&& planner_owned_target_recipe != nullptr) {
 						belongs_to_scan = batch_join_match_helper_names_recipe(
 							helper, planner_owned_target_recipe)
 							|| batch_join_match_helper_names_base_lineage(
 								helper, planner_owned_target_recipe,
-								plan_stub_oids);
+								plan_stub_oids)
+							|| direct_scan_argument;
 					} else {
-						Var* argument = helper == nullptr ? nullptr
-							: pg_node_try_as<Var>(
-								batch_join_match_helper_argument(helper));
-						belongs_to_scan = argument != nullptr
-							&& argument->varno == scan_relid
-							&& argument->varattno > 0
-							&& argument->varlevelsup == 0
-							&& bms_is_empty(argument->varnullingrels);
+						belongs_to_scan = direct_scan_argument;
 					}
 				} else if (fe->funcid == plan_stub_oids.symbol_count_oid) {
 					constexpr int pull_flags = PVC_RECURSE_AGGREGATES
@@ -27613,8 +27660,16 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 				&& !runtime.lazy_source_projection) {
 				bioseq_hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
 			}
+			/* Evaluated operands need source-backed leaves before their ExprStates
+			 * run.  A raw-Var mmsearch must retain the locator in its buffered
+			 * output row: each match promotes that locator in the fresh output
+			 * context and restores the exact batch-owned Datum before the next
+			 * reset.  Promoting every raw owner here bypasses that lifetime and
+			 * ERROR-unwind boundary. */
 			if (runtime.lazy_source_projection
-				&& !runtime.locator_passthrough) {
+				&& !runtime.locator_passthrough
+				&& (!runtime.buffer.mmsearch_active()
+					|| runtime.match_evaluated_submission)) {
 				promote_slice_project_sources(
 					bioseqScanState, slot,
 					econtext->ecxt_per_tuple_memory,
