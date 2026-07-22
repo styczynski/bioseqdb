@@ -74,6 +74,16 @@ import bootstrap  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 WORKSPACE_ROOT = PROJECT_ROOT.parent
+_CMAKE_HELPER_DIR = PROJECT_ROOT / "cmake"
+if str(_CMAKE_HELPER_DIR) not in sys.path:
+    sys.path.insert(0, str(_CMAKE_HELPER_DIR))
+
+from sanitizer_runtime import (  # noqa: E402
+    SANITIZER_RUNTIME_ENV,
+    SanitizerRuntimeError,
+    postgres_sanitizer_environment,
+    sanitizer_descendant_environment,
+)
 
 # DOC0270/DOC0371 — isolated production, test, and cache build families:
 #
@@ -170,8 +180,22 @@ CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET")
 CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET_DEBUG")
+
+
+def _default_external_api_preset(host_platform: str, host_machine: str,
+                                 local_test_preset: str) -> str:
+    """Select a host-valid external API tree for supported local builders."""
+    if (host_platform == "darwin"
+            and host_machine.lower() in {"arm64", "aarch64"}):
+        return local_test_preset
+    return "aws-x64-linux-gcc161"
+
+
 EXTERNAL_API_BUILD_PRESET = os.environ.get(
-    "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
+    "BIOSEQ_EXTERNAL_API_BUILD_PRESET",
+    _default_external_api_preset(
+        sys.platform, os.uname().machine, TEST_BUILD_PRESET),
+)
 WEBSITE_BUILD_PRESET = os.environ.get(
     "BIOSEQ_WEBSITE_BUILD_PRESET", "website-aws-x64-linux")
 WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
@@ -210,7 +234,7 @@ def _default_cache_preset(core_preset: str, *, combined: bool) -> str:
 
 
 def preset_for(mode: str, debug: bool) -> str:
-    # A mode may pin an explicit preset (e.g. external-api → GCC16 toolchain);
+    # A mode may pin an explicit preset (e.g. external-api's host-valid tree);
     # an override wins outright and is not split into debug/production families.
     mode_details = MODES.get(mode)
     if mode_details is None:
@@ -963,6 +987,19 @@ def get_modes_short_documentation() -> str:
     return f"Modes: {modes_list_str}"
 
 
+def _preset_expects_test_indexes(mode: str, active_preset: str) -> bool:
+    return (
+        MODES[mode].preset_family == "test"
+        or (
+            mode == "external-api"
+            and (
+                active_preset.startswith("test-")
+                or active_preset == TEST_BUILD_PRESET
+            )
+        )
+    )
+
+
 def post_build_targets_for(mode: str, build_only: bool) -> tuple[str, ...]:
     """Return CMake-owned run targets, suppressing all execution for build-only."""
     if build_only:
@@ -1249,7 +1286,9 @@ def _prepare_aws_postgresql_test_database(active_preset: str, log_handle,
             f"PostgreSQL test database setup exited with code {rc}")
 
 
-def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
+def _run_postgresql_restart_cmd(
+        restart_cmd: list[str], log_handle,
+        *, env: dict[str, str] | None = None) -> None:
     pretty = " ".join(restart_cmd)
     log_handle.write(f"\n+ {pretty}\n")
     log_handle.flush()
@@ -1258,6 +1297,7 @@ def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
     try:
         result = subprocess.run(
             restart_cmd,
+            env=env,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             timeout=90,
@@ -1274,6 +1314,53 @@ def _run_postgresql_restart_cmd(restart_cmd: list[str], log_handle) -> None:
         msg = "PostgreSQL restart timed out after 90s; refusing to run with a potentially stale bioseq.dylib"
         _log(f"ERROR: {msg}")
         raise RuntimeError(msg) from exc
+
+
+def _is_homebrew_arm64_pg_ctl(pg_ctl: str) -> bool:
+    """Whether pg_ctl is from the native /opt/homebrew arm64 installation."""
+    try:
+        Path(pg_ctl).resolve(strict=False).relative_to(Path("/opt/homebrew"))
+        return True
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _darwin_postgresql_restart_argv(
+        pg_ctl: str, data_dir: str) -> list[str]:
+    """Keep Postgres.app native via arch, but never scrub Homebrew dyld env."""
+    command = [pg_ctl, "-D", data_dir, "restart"]
+    if _is_homebrew_arm64_pg_ctl(pg_ctl):
+        return command
+    return ["arch", "-arm64", *command]
+
+
+def _build_worker_descendant_environment(
+        base_env: dict[str, str] | None = None,
+        *, allowed_paths=None) -> dict[str, str]:
+    """Validate the neutral selector and strip raw dyld state for workers."""
+    try:
+        validation = {} if allowed_paths is None else {
+            "allowed_paths": allowed_paths}
+        return sanitizer_descendant_environment(
+            os.environ if base_env is None else base_env, **validation)
+    except SanitizerRuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
+def _postgresql_restart_environment(
+        base_env: dict[str, str] | None = None,
+        *, allowed_paths=None) -> dict[str, str]:
+    """Strip ambient dyld injection and map one validated runtime at PG only."""
+    try:
+        validation = {} if allowed_paths is None else {
+            "allowed_paths": allowed_paths}
+        clean = sanitizer_descendant_environment(
+            os.environ if base_env is None else base_env, **validation)
+        if sys.platform == "darwin":
+            return postgres_sanitizer_environment(clean, **validation)
+        return clean
+    except SanitizerRuntimeError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def _trusted_root_owned_executable(path: str) -> Path:
@@ -1407,10 +1494,19 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
         _log(f"ERROR: {msg}")
         raise RuntimeError(msg)
 
-    # On macOS use arch -arm64 so pg_ctl (universal binary) runs natively;
-    # Rosetta and dyld interact badly with arm64-only extension dylibs.
+    restart_env = _postgresql_restart_environment()
+    sanitizer_runtime = restart_env.get(SANITIZER_RUNTIME_ENV)
+
+    # Postgres.app's universal pg_ctl still needs the native-architecture
+    # wrapper.  Homebrew pg_ctl is already thin arm64 and must run directly:
+    # /usr/bin/arch is a platform binary, so macOS strips DYLD insertion before
+    # the replacement postmaster can inherit the sanitizer runtime.
     if sys.platform == "darwin":
-        restart_cmd = ["arch", "-arm64", pg_ctl, "-D", data_dir, "restart"]
+        if sanitizer_runtime is not None and not _is_homebrew_arm64_pg_ctl(pg_ctl):
+            raise RuntimeError(
+                f"{SANITIZER_RUNTIME_ENV} requires native Homebrew pg_ctl; "
+                f"refusing platform-wrapped restart through {pg_ctl}")
+        restart_cmd = _darwin_postgresql_restart_argv(pg_ctl, data_dir)
     elif _is_aws_preset(active_preset):
         systemctl = shutil.which("systemctl")
         if systemctl:
@@ -1429,7 +1525,7 @@ def _restart_postgresql(active_build_dir: Path, active_preset: str,
     # then calls proc.wait() which returns as soon as pg_ctl itself exits
     # (after the postmaster signals readiness), regardless of what the
     # postmaster does with the file handle afterwards.
-    _run_postgresql_restart_cmd(restart_cmd, log_handle)
+    _run_postgresql_restart_cmd(restart_cmd, log_handle, env=restart_env)
 
 
 def _pg_config_from_cache(active_build_dir: Path) -> str:
@@ -1562,9 +1658,9 @@ def _run_build_worker(mode: str, build_only: bool = False,
 
     Unit/integration mode resolves to the isolated test preset family; benchmark
     modes resolve to the production preset family; a mode with `preset_override`
-    (e.g. external-api → GCC 16) pins its own preset outright. `debug=True`
-    selects that family's debug/inspect tree with per-TU `.s`/`.bc` and DWARF
-    artefacts; `debug=False` selects its lean everyday tree.
+    (e.g. external-api's host-valid test/toolchain tree) pins its own preset
+    outright. `debug=True` selects that family's debug/inspect tree with per-TU
+    `.s`/`.bc` and DWARF artefacts; `debug=False` selects its lean everyday tree.
 
     `bench_flags` is a list of extra argv tokens (e.g. ['--filter','tags=gpu',
     '--debug']) appended only to bench-mode commands (§5.4). `test_flags` is a
@@ -1627,27 +1723,28 @@ def _run_build_worker(mode: str, build_only: bool = False,
     if mode_details.is_bench_mode and mode_details.reporting_dir.exists():
         pre_reports = _report_paths(mode_details.reporting_dir)
 
-    env = os.environ.copy()
-    # Never let ambient MCP-server state select an E2E configuration. The
-    # explicit start_build argument below is the sole supported override.
-    env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
-    env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
-    # The local MCP may itself run on the provisioned Linux build host.  Keep
-    # the provisioned environment when present, but also recover VCPKG_ROOT
-    # from an existing configured tree for a fresh sibling test/debug tree.
-    _ensure_local_toolchain_environment(env, active_build_dir)
-    if _is_aws_clang_preset(active_preset):
-        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
-    elif _is_aws_gcc_preset(active_preset):
-        env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
-    if _is_aws_preset(active_preset):
-        env.setdefault("BIOSEQ_TEST_PGUSER", "postgres")
-        env.setdefault("BIOSEQ_TEST_PGPASSWORD", "postgres")
-        env.setdefault("BIOSEQ_TEST_PGHOST", "localhost")
-        env.setdefault("BIOSEQ_TEST_PGDATABASE", "bioseq")
-        env.setdefault("BIOSEQ_TEST_PGPORT", "5432")
-
     try:
+        env = _build_worker_descendant_environment()
+        # Never let ambient MCP-server state select an E2E configuration. The
+        # explicit start_build argument below is the sole supported override.
+        env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
+        env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
+        # The local MCP may itself run on the provisioned Linux build host.
+        # Keep the provisioned environment when present, but also recover
+        # VCPKG_ROOT from an existing configured tree for a fresh sibling
+        # test/debug tree.
+        _ensure_local_toolchain_environment(env, active_build_dir)
+        if _is_aws_clang_preset(active_preset):
+            env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64"
+        elif _is_aws_gcc_preset(active_preset):
+            env["CMAKE_NAMED_ENV_TYPE"] = "AWS_MACHINE_X64_GCC16"
+        if _is_aws_preset(active_preset):
+            env.setdefault("BIOSEQ_TEST_PGUSER", "postgres")
+            env.setdefault("BIOSEQ_TEST_PGPASSWORD", "postgres")
+            env.setdefault("BIOSEQ_TEST_PGHOST", "localhost")
+            env.setdefault("BIOSEQ_TEST_PGDATABASE", "bioseq")
+            env.setdefault("BIOSEQ_TEST_PGPORT", "5432")
+
         machine_rt_priority = _configured_local_build_rt_priority()
         effective_rt_priority = (
             machine_rt_priority
@@ -1683,7 +1780,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
         initial_clang_rt_args = _initial_clang_rt_cmake_args(
             active_preset, machine_rt_priority)
         build_ninja = active_build_dir / "build.ninja"
-        expected_test_indexes = mode_details.preset_family == "test"
+        expected_test_indexes = _preset_expects_test_indexes(
+            mode, active_preset)
         if not build_ninja.exists():
             if (active_build_dir / "CMakeCache.txt").exists():
                 _clear_cmake_configure_cache(
@@ -2478,6 +2576,11 @@ def tool_start_build(mode: str, build_only: bool = False,
                     f"Current step: {step}. "
                     f"Predicted finish in {_format_minutes(eta_min)}")
 
+        try:
+            worker_env = _build_worker_descendant_environment()
+        except RuntimeError as exc:
+            return f"Build worker environment error: {exc}"
+
         # Validate the machine-owned compiler policy only after request
         # validation and conflict detection.  The preflight creates one
         # short-lived unprivileged RR/1 probe; it never changes this persistent
@@ -2520,6 +2623,7 @@ def tool_start_build(mode: str, build_only: bool = False,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+                env=worker_env,
             )
         except OSError as exc:
             return f"Build worker spawn error: {exc}"

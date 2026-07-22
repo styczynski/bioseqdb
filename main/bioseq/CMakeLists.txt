@@ -237,6 +237,7 @@ function(bioseq_doc0377_private_packed_scope_names
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
     set(_bioseq_scopes
+      byte_upload_range_address_adapter
       vulkan_sketchable_sequence
       compute_segment_descriptor
       make_phase_c_segment_window
@@ -326,7 +327,11 @@ function(bioseq_doc0377_private_packed_line_allowed
     endif()
   elseif("${_bioseq_source}" STREQUAL
       "${CMAKE_CURRENT_LIST_DIR}/backend/sequences/kmers/minimizers_vulkan.cppm")
-    if("${_bioseq_scope}" STREQUAL "vulkan_sketchable_sequence"
+    if("${_bioseq_scope}" STREQUAL "byte_upload_range_address_adapter"
+        AND "${_bioseq_line}" STREQUAL
+          "[[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {")
+      set(_bioseq_allowed TRUE)
+    elseif("${_bioseq_scope}" STREQUAL "vulkan_sketchable_sequence"
         AND ("${_bioseq_line}" STREQUAL "{ seq.padding() };"
           OR "${_bioseq_line}" STREQUAL "{ seq.read_cptr(seq.cbegin()) };"))
       set(_bioseq_allowed TRUE)
@@ -364,7 +369,7 @@ function(bioseq_doc0377_private_packed_line_allowed
         AND ("${_bioseq_line}" STREQUAL
           "std::max<std::size_t>(1u, traits::letters_per_unit);"
           OR "${_bioseq_line}" STREQUAL
-            "const storage_unit* base = seq.read_cptr(begin_iter);"))
+            "const auto* base = seq.read_cptr(begin_iter);"))
       set(_bioseq_allowed TRUE)
     elseif("${_bioseq_scope}" STREQUAL
         "collect_minimizers_vulkan_segment_resident_impl_or_throw"

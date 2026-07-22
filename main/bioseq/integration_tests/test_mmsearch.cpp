@@ -4624,7 +4624,7 @@ TEST_CASE("bioseq.edit strict predicate drives SneakySnake and exact post-filter
         query_literal));
     REQUIRE(wrapped_wrong_projection.sqlstate == "0A000");
     REQUIRE(wrapped_wrong_projection.contains(
-        "bioseq.edit projection must reference the mmsearch target column"));
+        "bioseq.edit requires a bioseq alignment custom scan"));
 }
 
 TEST_CASE("bioseq.edit drives an exact GateKeeper Vulkan prefilter proof",
@@ -5058,8 +5058,7 @@ TEST_CASE("nested mmsearch Boolean shape fails closed",
         "SELECT pk FROM {} WHERE NOT mmsearch(seq0, {});",
         kHoe, hoe_probe_literal()));
     REQUIRE(error.sqlstate == "0A000");
-    REQUIRE((error.contains("not owned")
-             || error.contains("no Bioseq executor owner")));
+    REQUIRE(error.contains("nested mmsearch qualifier shape is unsupported"));
 }
 
 TEST_CASE("owned mmsearch is strict for NULL target and query",

@@ -83,6 +83,54 @@
         }
       },
       {
+        "name": "test-opt-asan",
+        "inherits": "test-opt",
+        "displayName": "AddressSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 ownership and lifetime checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with AddressSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address -fsanitize-address-use-after-scope",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=address",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=address"
+        }
+      },
+      {
+        "name": "test-opt-ubsan",
+        "inherits": "test-opt",
+        "displayName": "UndefinedBehaviorSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 arithmetic, representation, and lifecycle checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with UndefinedBehaviorSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=undefined -fno-sanitize-recover=undefined",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=undefined",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=undefined"
+        }
+      },
+      {
+        "name": "test-opt-tsan",
+        "inherits": "test-opt",
+        "displayName": "ThreadSanitizer unit/integration qualification",
+        "description": "Isolated local arm64 qualification tree for DOC0377 async-owner, TBB, and DSM publication checks. Inherits test hooks and the complete local ABI/toolchain from test-opt, pins the Bioseq profile to level zero, and instruments C, C++, executables, shared libraries, and PostgreSQL modules with ThreadSanitizer.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE": "0",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_C_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_CXX_FLAGS": "-O1 -DNDEBUG -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=thread",
+          "CMAKE_EXE_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_SHARED_LINKER_FLAGS": "-fsanitize=thread",
+          "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread"
+        }
+      },
+      {
         "name": "test-opt-level2",
         "inherits": "test-opt",
         "displayName": "Optimised level-2 qualification config",

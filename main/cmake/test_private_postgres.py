@@ -12,6 +12,7 @@ PostgreSQL bindir.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -69,16 +70,48 @@ def test_basic_lifecycle_and_bootstrap(bindir: Path, scratch: Path) -> None:
 def test_environment_allowlist(bindir: Path, scratch: Path) -> None:
     cluster = UniquePrivateCluster(_inputs(bindir, scratch, "env"))
     cluster.start()
+    injected = {
+        "BIOSEQ_TEST_BUILD_PRESET": "test-opt-asan",
+        "BIOSEQ_TEST_BUILD_PRESET_DEBUG": "test-opt-asan",
+        # Raw loader injection is hostile ambient state. A sanitizer run uses
+        # the separately validated BIOSEQ_SANITIZER_RUNTIME selector instead.
+        "DYLD_INSERT_LIBRARIES": "/tmp/untrusted-interposer.dylib",
+        "ASAN_OPTIONS": "halt_on_error=1:abort_on_error=1",
+        "ASAN_SYMBOLIZER_PATH": "/tmp/llvm-symbolizer",
+        # Ambient connection aliases must be replaced by the owned cluster.
+        "BIOSEQ_TEST_PGHOST": "/tmp/not-the-private-cluster",
+        "BIOSEQ_TEST_PGPORT": "1",
+        "BIOSEQ_TEST_PGDATABASE": "wrong_database",
+        "BIOSEQ_TEST_PGUSER": "wrong_user",
+    }
+    previous = {name: os.environ.get(name) for name in injected}
     try:
+        os.environ.update(injected)
         env = cluster.child_environment()
     finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         cluster.stop()
     assert env["PGHOST"] == str(cluster.socket_dir)
+    assert env["PGPORT"] == str(cluster.port)
     assert env["PGDATABASE"] == "lifecycle_probe"
+    assert env["PGUSER"] == cluster.database_user
     for banned in ("PGPASSWORD", "PGSERVICE", "PGHOSTADDR", "PGOPTIONS"):
         assert banned not in env, f"{banned} leaked into child environment"
+    assert "DYLD_INSERT_LIBRARIES" not in env
+    assert env["BIOSEQ_TEST_PGHOST"] == str(cluster.socket_dir)
+    assert env["BIOSEQ_TEST_PGPORT"] == str(cluster.port)
+    assert env["BIOSEQ_TEST_PGDATABASE"] == "lifecycle_probe"
+    assert env["BIOSEQ_TEST_PGUSER"] == cluster.database_user
     assert env["BIOSEQ_TEST_PG_HOST"] == str(cluster.socket_dir)
     assert env["BIOSEQ_TEST_PG_DATA_DIR"] == str(cluster.data_dir)
+    for name in (
+            "BIOSEQ_TEST_BUILD_PRESET", "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
+            "ASAN_OPTIONS", "ASAN_SYMBOLIZER_PATH"):
+        assert env[name] == injected[name], f"{name} was not preserved"
 
 
 def test_unique_allocation(bindir: Path, scratch: Path) -> None:

@@ -752,9 +752,11 @@ public:
   [[nodiscard]] iterator cend() const noexcept {
     return cbegin() + size();
   }
+  // BIOSEQ_DOC0377_PRIVATE_PACKED_BEGIN byte_upload_range_address_adapter
   [[nodiscard]] const std::byte *read_cptr(const iterator &it) const noexcept {
     return it.address;
   }
+  // BIOSEQ_DOC0377_PRIVATE_PACKED_END byte_upload_range_address_adapter
 };
 
 template <sequence_alphabet Alphabet> struct canonical_u32_window {

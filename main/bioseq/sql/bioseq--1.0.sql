@@ -3296,6 +3296,25 @@ REVOKE ALL ON FUNCTION bioseq_internal.teardown_diagnostics() FROM PUBLIC;
 COMMENT ON FUNCTION bioseq_internal.teardown_diagnostics() IS
     'Integration-only backend-local counters proving lazy DROP EXTENSION lock classification and absence of stale relation revisits.';
 
+-- Revoked backend-local proof that PostgreSQL ERROR translation unwinds the
+-- heap-backed final match-owner collection before re-entering the PG error ABI.
+CREATE OR REPLACE FUNCTION
+    bioseq_internal.match_owner_finalization_scope_diagnostics(
+    reset boolean,
+    OUT scopes_entered bigint,
+    OUT scopes_exited bigint,
+    OUT scopes_active bigint)
+RETURNS record
+AS 'MODULE_PATHNAME',
+    'bioseq_internal_match_owner_finalization_scope_diagnostics'
+LANGUAGE C VOLATILE STRICT PARALLEL UNSAFE SECURITY INVOKER;
+REVOKE ALL ON FUNCTION
+    bioseq_internal.match_owner_finalization_scope_diagnostics(boolean)
+    FROM PUBLIC;
+COMMENT ON FUNCTION
+    bioseq_internal.match_owner_finalization_scope_diagnostics(boolean) IS
+    'Integration-only test-build counters proving match-owner finalization C++ scopes unwind across PostgreSQL errors.';
+
 -- A revoked integration seam that constructs planner nodes in C and invokes
 -- the exact production BatchJoin ProjectionPath eligibility guard. Ordinary
 -- SQL cannot reliably keep an unrelated expression at the base projection.
@@ -3340,7 +3359,8 @@ CREATE OR REPLACE FUNCTION
     OUT originals_unchanged boolean,
     OUT sibling_unchanged boolean,
     OUT duplicate_owner_rejected boolean,
-    OUT unknown_wrapper_rejected boolean)
+    OUT unknown_wrapper_rejected boolean,
+    OUT group_result_qual_rejected boolean)
 RETURNS record
 AS 'MODULE_PATHNAME',
     'bioseq_internal_match_helper_wrapper_propagation_probe'
@@ -3359,7 +3379,14 @@ CREATE OR REPLACE FUNCTION
     OUT target_offset_accepted boolean,
     OUT target_attno_disagreement_rejected boolean,
     OUT exact_site_offset_accepted boolean,
-    OUT lineage_alias_disagreement_rejected boolean)
+    OUT lineage_alias_disagreement_rejected boolean,
+    OUT outer_slot_accepted boolean,
+    OUT outer_wrong_slot_rejected boolean,
+    OUT inner_slot_accepted boolean,
+    OUT inner_wrong_slot_rejected boolean,
+    OUT index_slot_accepted boolean,
+    OUT index_wrong_slot_rejected boolean,
+    OUT special_out_of_range_rejected boolean)
 RETURNS record
 AS 'MODULE_PATHNAME',
     'bioseq_internal_base_match_executor_translation_probe'
@@ -3368,7 +3395,7 @@ REVOKE ALL ON FUNCTION
     bioseq_internal.base_match_executor_translation_probe() FROM PUBLIC;
 COMMENT ON FUNCTION
     bioseq_internal.base_match_executor_translation_probe() IS
-    'Integration-only proof that base match-owner executor translation accepts an RTE offset and rejects attribute or alias disagreement.';
+    'Integration-only proof that base and finalized carrier translation accept exact setrefs offsets/slots and reject attribute, alias, slot, or range disagreement.';
 CREATE OR REPLACE FUNCTION bioseq.index_distinct_sub_keys(rel regclass, name text, query_key bigint) RETURNS bigint
     AS 'MODULE_PATHNAME', 'bioseq_index_distinct_sub_keys' LANGUAGE C VOLATILE STRICT;
 CREATE OR REPLACE FUNCTION bioseq.column_row_number(rel regclass, ctid tid) RETURNS bigint

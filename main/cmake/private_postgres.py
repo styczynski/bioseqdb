@@ -20,6 +20,7 @@ import contextlib
 import dataclasses
 import datetime as dt
 import getpass
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -30,6 +31,53 @@ import sys
 import tempfile
 import uuid
 from typing import Sequence
+
+
+def _load_sibling_sanitizer_runtime():
+    """Load the exact sibling helper under direct and file-spec imports."""
+    helper_path = Path(__file__).resolve().with_name("sanitizer_runtime.py")
+    try:
+        helper_path = helper_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ImportError(
+            f"sanitizer runtime helper is missing: {helper_path}") from exc
+
+    module_name = "sanitizer_runtime"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        existing_file = getattr(existing, "__file__", None)
+        try:
+            existing_path = Path(existing_file).resolve(strict=True)
+        except (OSError, RuntimeError, TypeError) as exc:
+            raise ImportError(
+                "loaded sanitizer_runtime has no valid source path") from exc
+        if existing_path != helper_path:
+            raise ImportError(
+                "refusing non-sibling sanitizer_runtime module: "
+                f"{existing_path}")
+        return existing
+
+    spec = importlib.util.spec_from_file_location(module_name, helper_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(
+            f"cannot load sanitizer runtime helper: {helper_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if sys.modules.get(module_name) is module:
+            sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+_sanitizer_runtime = _load_sibling_sanitizer_runtime()
+SANITIZER_RUNTIME_ENV = _sanitizer_runtime.SANITIZER_RUNTIME_ENV
+postgres_sanitizer_environment = (
+    _sanitizer_runtime.postgres_sanitizer_environment)
+sanitizer_descendant_environment = (
+    _sanitizer_runtime.sanitizer_descendant_environment)
 
 
 class ClusterCommandError(RuntimeError):
@@ -49,6 +97,11 @@ _ALLOWED_ENV_EXACT = frozenset({
     "LOGNAME", "LD_LIBRARY_PATH", "LD_PRELOAD", "DYLD_LIBRARY_PATH",
     "ASAN_OPTIONS", "UBSAN_OPTIONS", "TSAN_OPTIONS", "MSAN_OPTIONS",
     "ASAN_SYMBOLIZER_PATH", "PYTHONUNBUFFERED",
+    # A private-cluster runner may own the long-lived bioseq-build MCP server.
+    # Preserve only its bounded preset selectors; the child still receives no
+    # ambient connection state and cannot redirect libpq away from this node.
+    "BIOSEQ_TEST_BUILD_PRESET", "BIOSEQ_TEST_BUILD_PRESET_DEBUG",
+    SANITIZER_RUNTIME_ENV,
 })
 _ALLOWED_ENV_PREFIXES = ("LC_",)
 
@@ -260,6 +313,7 @@ class UniquePrivateCluster:
         init_timeout = _validated_timeout(
             self.inputs.init_command_timeout, "init-command-timeout")
         self._append_lifecycle(f"initializing data directory {self.data_dir}")
+        lifecycle_env = sanitizer_descendant_environment(os.environ)
         _run_checked(
             [
                 str(self._program("initdb")),
@@ -272,6 +326,7 @@ class UniquePrivateCluster:
                 "--no-sync",
             ],
             timeout=init_timeout,
+            env=lifecycle_env,
             output_path=self.run_dir / "initdb.log",
         )
         self._write_configuration()
@@ -284,6 +339,7 @@ class UniquePrivateCluster:
                 "--wait", "start",
             ],
             timeout=_validated_timeout(self.inputs.startup_timeout, "startup-timeout"),
+            env=postgres_sanitizer_environment(lifecycle_env),
             output_path=self.run_dir / "pg_ctl_start.log",
             preexec_fn=_address_space_preexec(self.inputs.address_space_limit_mib),
         )
@@ -297,6 +353,7 @@ class UniquePrivateCluster:
                 self.database,
             ],
             timeout=init_timeout,
+            env=lifecycle_env,
             output_path=self.run_dir / "createdb.log",
         )
         self._database_created = True
@@ -306,9 +363,11 @@ class UniquePrivateCluster:
                 if index < len(self.inputs.bootstrap_labels)
                 else f"bootstrap_{index}"
             )
-            self._bootstrap(bootstrap, label)
+            self._bootstrap(bootstrap, label, lifecycle_env)
 
-    def _bootstrap(self, bootstrap: Path, label: str) -> None:
+    def _bootstrap(
+        self, bootstrap: Path, label: str, lifecycle_env: dict[str, str]
+    ) -> None:
         self._append_lifecycle(f"executing {label} {bootstrap}")
         _run_checked(
             [
@@ -321,6 +380,7 @@ class UniquePrivateCluster:
                 "--file", str(bootstrap),
             ],
             timeout=_validated_timeout(self.inputs.bootstrap_timeout, "bootstrap-timeout"),
+            env=lifecycle_env,
             output_path=self.run_dir / f"{label}.log",
         )
 
@@ -339,6 +399,14 @@ class UniquePrivateCluster:
             "PGPORT": str(self.port),
             "PGDATABASE": self.database,
             "PGUSER": self.database_user,
+            # The core integration executable predates the generic private-PG
+            # spelling below. Publish both exact ABIs from the same owned
+            # values so an MCP server can run unit+integration inside this
+            # cluster without a shell adapter or ambient connection fallback.
+            "BIOSEQ_TEST_PGHOST": str(self.socket_dir),
+            "BIOSEQ_TEST_PGPORT": str(self.port),
+            "BIOSEQ_TEST_PGDATABASE": self.database,
+            "BIOSEQ_TEST_PGUSER": self.database_user,
             "BIOSEQ_TEST_PG_HOST": str(self.socket_dir),
             "BIOSEQ_TEST_PG_PORT": str(self.port),
             "BIOSEQ_TEST_PG_DATABASE": self.database,
@@ -346,7 +414,7 @@ class UniquePrivateCluster:
             "BIOSEQ_TEST_PG_RUN_DIR": str(self.run_dir),
             "BIOSEQ_TEST_PG_DATA_DIR": str(self.data_dir),
         })
-        return env
+        return sanitizer_descendant_environment(env)
 
     def run_child(self, command: Sequence[str]) -> int:
         """Launch exactly one child in a new process group, forwarding signals."""
@@ -385,6 +453,7 @@ class UniquePrivateCluster:
     def stop(self) -> None:
         shutdown_timeout = _validated_timeout(
             self.inputs.shutdown_timeout, "shutdown-timeout")
+        lifecycle_env = sanitizer_descendant_environment(os.environ)
         if self._started and self._database_created:
             with contextlib.suppress(Exception):
                 _run_checked(
@@ -397,6 +466,7 @@ class UniquePrivateCluster:
                         self.database,
                     ],
                     timeout=shutdown_timeout,
+                    env=lifecycle_env,
                     output_path=self.run_dir / "dropdb.log",
                 )
         if self._started:
@@ -408,6 +478,7 @@ class UniquePrivateCluster:
                         "--wait", "--mode=fast", "stop",
                     ],
                     timeout=shutdown_timeout,
+                    env=lifecycle_env,
                     output_path=self.run_dir / "pg_ctl_stop.log",
                 )
             except Exception:
@@ -419,6 +490,7 @@ class UniquePrivateCluster:
                             "--wait", "--mode=immediate", "stop",
                         ],
                         timeout=shutdown_timeout,
+                        env=lifecycle_env,
                         output_path=self.run_dir / "pg_ctl_stop_immediate.log",
                     )
         self._copy_collector_logs()

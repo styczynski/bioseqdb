@@ -383,10 +383,11 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
         "helper_on_unique::text, helper_on_append::text, "
         "originals_unchanged::text, sibling_unchanged::text, "
         "duplicate_owner_rejected::text, "
-        "unknown_wrapper_rejected::text "
+        "unknown_wrapper_rejected::text, "
+        "group_result_qual_rejected::text "
         "FROM bioseq_internal."
         "match_helper_wrapper_propagation_probe();");
-    REQUIRE(wrapper_proof.size() == 18u);
+    REQUIRE(wrapper_proof.size() == 19u);
     for (const auto& field : wrapper_proof) {
         REQUIRE(field.has_value());
         REQUIRE(*field == "true");
@@ -396,10 +397,17 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
 		"SELECT target_offset_accepted::text, "
 		"target_attno_disagreement_rejected::text, "
 		"exact_site_offset_accepted::text, "
-		"lineage_alias_disagreement_rejected::text "
+		"lineage_alias_disagreement_rejected::text, "
+		"outer_slot_accepted::text, "
+		"outer_wrong_slot_rejected::text, "
+		"inner_slot_accepted::text, "
+		"inner_wrong_slot_rejected::text, "
+		"index_slot_accepted::text, "
+		"index_wrong_slot_rejected::text, "
+		"special_out_of_range_rejected::text "
 		"FROM bioseq_internal."
 		"base_match_executor_translation_probe();");
-	REQUIRE(executor_translation_proof.size() == 4u);
+	REQUIRE(executor_translation_proof.size() == 11u);
 	for (const auto& field : executor_translation_proof) {
 		REQUIRE(field.has_value());
 		REQUIRE(*field == "true");
@@ -478,6 +486,18 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
 
     /* The base owner and an outer sliced owner share t.seq0 lineage.  A row
      * marker cannot select between their MatchResults and must fail closed. */
+    const auto finalization_scope_reset = query_one(ctx,
+        "SELECT scopes_entered::text, scopes_exited::text, "
+        "       scopes_active::text "
+        "FROM bioseq_internal."
+        "match_owner_finalization_scope_diagnostics(true);");
+    REQUIRE(finalization_scope_reset.size() == 3u);
+    REQUIRE(finalization_scope_reset[0]
+        == std::optional<std::string>{"0"});
+    REQUIRE(finalization_scope_reset[1]
+        == std::optional<std::string>{"0"});
+    REQUIRE(finalization_scope_reset[2]
+        == std::optional<std::string>{"0"});
     const auto base_outer_ambiguous = sql_error(ctx, fmt::format(
         "SELECT bioseq.cigar(t.pk) "
         "FROM {} AS t "
@@ -489,6 +509,18 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
     REQUIRE(base_outer_ambiguous.contains(
         "bioseq match-result helper binding is ambiguous"));
     REQUIRE(base_outer_ambiguous.contains("candidate_match_owners=2"));
+    const auto finalization_scope_after_error = query_one(ctx,
+        "SELECT scopes_entered::text, scopes_exited::text, "
+        "       scopes_active::text "
+        "FROM bioseq_internal."
+        "match_owner_finalization_scope_diagnostics(false);");
+    REQUIRE(finalization_scope_after_error.size() == 3u);
+    REQUIRE(finalization_scope_after_error[0].has_value());
+    REQUIRE(finalization_scope_after_error[1].has_value());
+    REQUIRE(finalization_scope_after_error[0]
+        == finalization_scope_after_error[1]);
+    REQUIRE(finalization_scope_after_error[2]
+        == std::optional<std::string>{"0"});
 
     /* Every result helper names the complete transformed target recipe.  In
      * particular, the coordinate helpers must describe the 128-letter logical

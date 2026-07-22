@@ -39,6 +39,7 @@ module;
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -10885,12 +10886,27 @@ static void count_exact_parameterized_bmo_owners(
 		}
 		return;
 	}
+	if (IsA(path, GroupResultPath)) {
+		/* GroupResultPath is childless, but its bare HAVING quals are executable
+		 * and are not represented by pathtarget or ParamPathInfo.  It can never
+		 * own a BMO restriction, so any surviving mmsearch here invalidates the
+		 * closed-world owner count instead of disappearing behind a leaf tag. */
+		for (Node* qual : PList<Node>(
+				reinterpret_cast<GroupResultPath*>(path)->quals)) {
+			if (count_mmsearch_occurrences(
+					qual, get_cached_stub_oids()) != 0u) {
+				reject_exact_parameterized_bmo_owner(
+					proof, kExactBmoNestedJoinClause);
+				return;
+			}
+		}
+		return;
+	}
 	/* Closed-world proof: these are the only childless core Path variants
 	 * admitted as leaves.  Any other tag may hide a child/owner layout this
 	 * narrow fallback does not understand. */
 	if (IsA(path, Path) || IsA(path, IndexPath)
-		|| IsA(path, TidPath) || IsA(path, TidRangePath)
-		|| IsA(path, GroupResultPath)) return;
+		|| IsA(path, TidPath) || IsA(path, TidRangePath)) return;
 	reject_exact_parameterized_bmo_owner(
 		proof, kExactBmoUnknownCorePath);
 }
@@ -12946,7 +12962,61 @@ POSTGRES_FN(bioseq_internal_match_helper_wrapper_propagation_probe)
 		&& unknown_proof.unsupported_wrapper
 		&& !unknown_proof.invalid_owner_abi;
 
-	Datum values[18] = {
+	/* GroupResultPath has no child, but it owns executable bare quals outside
+	 * PathTarget and ParamPathInfo.  Put one hidden mmsearch beside an otherwise
+	 * exact parameterized BioseqScan owner and invoke the production closed-world
+	 * proof: the GroupResult qual must invalidate the unique-owner result. */
+	auto* bmo_target = makeVar(
+		/*varno=*/1, /*varattno=*/1, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
+	auto* bmo_query = makeVar(
+		/*varno=*/2, /*varattno=*/1, oids.bioseq_seq_type_oid,
+		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
+	auto* bmo_mmsearch = makeFuncExpr(
+		oids.mmsearch_oid, BOOLOID,
+		list_make2(bmo_target, bmo_query),
+		InvalidOid, InvalidOid, COERCE_EXPLICIT_CALL);
+	auto* bmo_restriction = makeNode(RestrictInfo);
+	bmo_restriction->clause = reinterpret_cast<Expr*>(bmo_mmsearch);
+	bmo_restriction->rinfo_serial = 71;
+	auto* bmo_param = makeNode(ParamPathInfo);
+	bmo_param->ppi_clauses = list_make1(bmo_restriction);
+	auto* bmo_owner = makeNode(CustomPath);
+	match_helper_wrapper_probe_init_path(
+		&bmo_owner->path, T_CustomScan, left_rel, create_empty_pathtarget());
+	bmo_owner->path.param_info = bmo_param;
+	bmo_owner->custom_paths = NIL;
+	bmo_owner->custom_restrictinfo = list_make1(bmo_restriction);
+	bmo_owner->custom_private = list_make2(NIL, NIL);
+	bmo_owner->custom_private = lappend(
+		bmo_owner->custom_private,
+		list_make3(
+			makeInteger(kBioseqMmsearchOwnerMagic),
+			makeInteger(kBioseqMmsearchOwnerVersion),
+			list_make1(copyObject(bmo_mmsearch))));
+	bmo_owner->methods = &BioseqColumnScanPathMethods;
+
+	auto* hidden_group = makeNode(GroupResultPath);
+	match_helper_wrapper_probe_init_path(
+		&hidden_group->path, T_Result, sibling_rel,
+		create_empty_pathtarget());
+	hidden_group->quals = list_make1(copyObject(bmo_mmsearch));
+	auto* bmo_append = makeNode(AppendPath);
+	match_helper_wrapper_probe_init_path(
+		&bmo_append->path, T_Append, join_rel, create_empty_pathtarget());
+	bmo_append->subpaths = list_make2(bmo_owner, hidden_group);
+	bmo_append->first_partial_path = 2;
+	bmo_append->limit_tuples = -1.0;
+	ExactParameterizedBmoOwnerProof group_result_proof{};
+	count_exact_parameterized_bmo_owners(
+		planner_root, &bmo_append->path, bmo_restriction,
+		group_result_proof, /*admit_known_wrapper_owner=*/true);
+	const bool group_result_qual_rejected = group_result_proof.matches == 1u
+		&& group_result_proof.invalid
+		&& (group_result_proof.rejection_mask
+			& static_cast<std::uint32_t>(kExactBmoNestedJoinClause)) != 0u;
+
+	Datum values[19] = {
 		BoolGetDatum(exact_owner_found),
 		BoolGetDatum(clone_applied),
 		BoolGetDatum(owner_cloned),
@@ -12965,8 +13035,9 @@ POSTGRES_FN(bioseq_internal_match_helper_wrapper_propagation_probe)
 		BoolGetDatum(sibling_unchanged),
 		BoolGetDatum(duplicate_owner_rejected),
 		BoolGetDatum(unknown_wrapper_rejected),
+		BoolGetDatum(group_result_qual_rejected),
 	};
-	bool nulls[18]{};
+	bool nulls[19]{};
 	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
@@ -16491,14 +16562,25 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 	return reinterpret_cast<Plan *>(cscan);
 }
 
-struct MatchLineageVarKey {
-	Index varno = 0;
-	AttrNumber attno = InvalidAttrNumber;
-	Index level = 0;
-	int32 typmod = -1;
-	Oid collation = InvalidOid;
-	Var* value = nullptr;
-};
+[[nodiscard]] static int canonical_match_lineage_var_compare(
+		const ListCell* left_cell, const ListCell* right_cell) noexcept {
+	const Var* left = reinterpret_cast<const Var*>(lfirst(left_cell));
+	const Var* right = reinterpret_cast<const Var*>(lfirst(right_cell));
+	if (left->varno != right->varno) return left->varno < right->varno ? -1 : 1;
+	if (left->varattno != right->varattno) {
+		return left->varattno < right->varattno ? -1 : 1;
+	}
+	if (left->varlevelsup != right->varlevelsup) {
+		return left->varlevelsup < right->varlevelsup ? -1 : 1;
+	}
+	if (left->vartypmod != right->vartypmod) {
+		return left->vartypmod < right->vartypmod ? -1 : 1;
+	}
+	if (left->varcollid != right->varcollid) {
+		return left->varcollid < right->varcollid ? -1 : 1;
+	}
+	return 0;
+}
 
 [[nodiscard]] static List* canonical_match_base_lineage(
 		Node* target_recipe, const BioseqStubOids& oids) {
@@ -16506,7 +16588,7 @@ struct MatchLineageVarKey {
 	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
 		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
 	List* variables = pull_var_clause(target_recipe, pull_flags);
-	std::vector<MatchLineageVarKey> lineage;
+	List* lineage = NIL;
 	for (Var* variable : PList<Var>(variables)) {
 		if (variable == nullptr
 			|| variable->vartype != oids.bioseq_seq_type_oid
@@ -16514,32 +16596,23 @@ struct MatchLineageVarKey {
 			|| variable->varattno <= 0 || variable->varlevelsup != 0
 			|| !bms_is_empty(variable->varnullingrels)) continue;
 		bool duplicate = false;
-		for (const MatchLineageVarKey& existing : lineage) {
-			if (equal(existing.value, variable)) {
+		for (Var* existing : PList<Var>(lineage)) {
+			if (equal(existing, variable)) {
 				duplicate = true;
 				break;
 			}
 		}
-		if (!duplicate) {
-			lineage.push_back(MatchLineageVarKey{
-				variable->varno, variable->varattno,
-				variable->varlevelsup, variable->vartypmod,
-				variable->varcollid, variable});
-		}
+		if (!duplicate) lineage = lappend(lineage, variable);
 	}
-	std::sort(lineage.begin(), lineage.end(),
-		[](const MatchLineageVarKey& left,
-				const MatchLineageVarKey& right) noexcept {
-			if (left.varno != right.varno) return left.varno < right.varno;
-			if (left.attno != right.attno) return left.attno < right.attno;
-			if (left.level != right.level) return left.level < right.level;
-			if (left.typmod != right.typmod) return left.typmod < right.typmod;
-			return left.collation < right.collation;
-		});
+	if (list_length(lineage) > 1) {
+		list_sort(lineage, canonical_match_lineage_var_compare);
+	}
 	List* result = NIL;
-	for (const MatchLineageVarKey& entry : lineage) {
-		result = lappend(result, copyObject(entry.value));
+	for (Var* entry : PList<Var>(lineage)) {
+		result = lappend(result, copyObject(entry));
 	}
+	list_free(lineage);
+	list_free(variables);
 	return result;
 }
 
@@ -18338,6 +18411,32 @@ struct MatchOwnerFinalization {
 	 * distinct post-setrefs executor image after resolution succeeds. */
 	List* base_owner_tag = NIL;
 };
+static_assert(std::is_trivially_destructible_v<MatchOwnerFinalization>);
+static_assert(std::is_trivially_destructible_v<
+	std::array<MatchOwnerFinalization, 4>>);
+static_assert(std::is_trivially_destructible_v<
+	std::span<MatchOwnerFinalization>>);
+
+#ifdef BIOSEQ_TEST_INDEXES
+/* Backend-local proof that a PostgreSQL ERROR cannot jump across the heap-
+ * backed owner vector.  The revoked diagnostic seam reads the balance after
+ * a user-triggered ambiguous-owner error in the same backend. */
+static std::uint64_t MatchOwnerFinalizationScopesEntered = 0u;
+static std::uint64_t MatchOwnerFinalizationScopesExited = 0u;
+
+struct MatchOwnerFinalizationScopeGuard {
+	MatchOwnerFinalizationScopeGuard() noexcept {
+		++MatchOwnerFinalizationScopesEntered;
+	}
+	MatchOwnerFinalizationScopeGuard(
+		const MatchOwnerFinalizationScopeGuard&) = delete;
+	MatchOwnerFinalizationScopeGuard& operator=(
+		const MatchOwnerFinalizationScopeGuard&) = delete;
+	~MatchOwnerFinalizationScopeGuard() noexcept {
+		++MatchOwnerFinalizationScopesExited;
+	}
+};
+#endif
 
 enum class MatchSiteResolutionStatus : std::uint8_t {
 	bound,
@@ -18398,7 +18497,7 @@ struct MatchSiteResolution {
 
 [[nodiscard]] static MatchSiteResolution resolve_match_helper_site(
 		MatchOwnerFinalization& site_owner, Node* canonical_argument,
-		std::vector<MatchOwnerFinalization>& owners,
+		std::span<MatchOwnerFinalization> owners,
 		const BioseqStubOids& oids) noexcept {
 	MatchSiteResolution result{};
 	/* Resolve exact recipes across the complete query-local owner set before
@@ -18472,8 +18571,7 @@ static void verify_match_owner_scope_resolution(
 		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
 	constexpr Oid fixture_relation_oid = 4242;
 
-	std::vector<MatchOwnerFinalization> fixture;
-	fixture.reserve(4u);
+	std::array<MatchOwnerFinalization, 4> fixture{};
 	MatchOwnerFinalization first{};
 	first.target_recipe = reinterpret_cast<Node*>(copyObject(source));
 	first.base_lineage = list_make1(copyObject(source));
@@ -18481,7 +18579,7 @@ static void verify_match_owner_scope_resolution(
 	first.target_relation_oid = fixture_relation_oid;
 	first.stable_match_id = 101;
 	first.query_scope_id = 11u;
-	fixture.push_back(first);
+	fixture[0] = first;
 
 	MatchOwnerFinalization unrelated_scope{};
 	unrelated_scope.target_recipe = reinterpret_cast<Node*>(copyObject(source));
@@ -18490,10 +18588,11 @@ static void verify_match_owner_scope_resolution(
 	unrelated_scope.target_relation_oid = fixture_relation_oid;
 	unrelated_scope.stable_match_id = 102;
 	unrelated_scope.query_scope_id = 12u;
-	fixture.push_back(unrelated_scope);
+	fixture[1] = unrelated_scope;
 
 	const MatchSiteResolution scoped = resolve_match_helper_site(
-		fixture[0], reinterpret_cast<Node*>(legacy_key), fixture, oids);
+		fixture[0], reinterpret_cast<Node*>(legacy_key),
+		std::span<MatchOwnerFinalization>{fixture.data(), 2u}, oids);
 	if (scoped.status != MatchSiteResolutionStatus::bound
 		|| scoped.kind != BioseqMatchHelperBindingKind::unique_lineage
 		|| scoped.owner != &fixture[0] || scoped.candidate_count != 1u) {
@@ -18510,7 +18609,7 @@ static void verify_match_owner_scope_resolution(
 	same_scope.target_relation_oid = fixture_relation_oid + 1;
 	same_scope.stable_match_id = 103;
 	same_scope.query_scope_id = 11u;
-	fixture.push_back(same_scope);
+	fixture[2] = same_scope;
 
 	Var* alias_source = makeVar(
 		/*varno=*/2, /*varattno=*/1, oids.bioseq_seq_type_oid,
@@ -18523,12 +18622,14 @@ static void verify_match_owner_scope_resolution(
 	same_relation_alias.target_relation_oid = fixture_relation_oid;
 	same_relation_alias.stable_match_id = 104;
 	same_relation_alias.query_scope_id = 11u;
-	fixture.push_back(same_relation_alias);
+	fixture[3] = same_relation_alias;
 
 	const MatchSiteResolution ambiguous = resolve_match_helper_site(
-		fixture[0], reinterpret_cast<Node*>(legacy_key), fixture, oids);
+		fixture[0], reinterpret_cast<Node*>(legacy_key),
+		std::span<MatchOwnerFinalization>{fixture}, oids);
 	const MatchSiteResolution duplicate_exact = resolve_match_helper_site(
-		fixture[0], fixture[0].target_recipe, fixture, oids);
+		fixture[0], fixture[0].target_recipe,
+		std::span<MatchOwnerFinalization>{fixture}, oids);
 	if (ambiguous.status != MatchSiteResolutionStatus::ambiguous
 		|| ambiguous.candidate_count != 2u
 		|| duplicate_exact.status != MatchSiteResolutionStatus::ambiguous
@@ -18542,7 +18643,7 @@ static void verify_match_owner_scope_resolution(
 	Var* secondary_key = makeVar(
 		/*varno=*/2, /*varattno=*/2, INT4OID,
 		/*vartypmod=*/-1, /*varcollid=*/InvalidOid, /*varlevelsup=*/0);
-	std::vector<MatchOwnerFinalization> composite_fixture;
+	std::array<MatchOwnerFinalization, 2> composite_fixture{};
 	MatchOwnerFinalization composite{};
 	composite.target_recipe = reinterpret_cast<Node*>(copyObject(source));
 	composite.base_lineage = list_make2(
@@ -18550,17 +18651,17 @@ static void verify_match_owner_scope_resolution(
 	composite.legacy_target_relid = 1;
 	composite.stable_match_id = 201;
 	composite.query_scope_id = 21u;
-	composite_fixture.push_back(composite);
+	composite_fixture[0] = composite;
 	MatchOwnerFinalization secondary{};
 	secondary.target_recipe = reinterpret_cast<Node*>(copyObject(alias_source));
 	secondary.base_lineage = list_make1(copyObject(alias_source));
 	secondary.legacy_target_relid = 2;
 	secondary.stable_match_id = 202;
 	secondary.query_scope_id = 21u;
-	composite_fixture.push_back(secondary);
+	composite_fixture[1] = secondary;
 	const MatchSiteResolution secondary_ambiguous = resolve_match_helper_site(
 		composite_fixture[0], reinterpret_cast<Node*>(secondary_key),
-		composite_fixture, oids);
+		std::span<MatchOwnerFinalization>{composite_fixture}, oids);
 	if (secondary_ambiguous.status
 			!= MatchSiteResolutionStatus::ambiguous
 		|| secondary_ambiguous.candidate_count != 2u) {
@@ -18881,6 +18982,9 @@ static void collect_match_owner_plan(
 		&& planner_argument->varcollid == executor_argument->varcollid;
 }
 
+[[nodiscard]] static bool finalized_match_helper_argument_translation_agrees(
+	CustomScan* scan, Node* translated, Node* canonical) noexcept;
+
 /* Revoked integration seam for the fail-closed half of the split BMP ABI.
  * Real SQL below exercises the complete post-setrefs executor image; this
  * small predicate probe pins the disagreement branches which core setrefs
@@ -18912,6 +19016,8 @@ POSTGRES_FN(bioseq_internal_base_match_executor_translation_probe)
 		executor_varno, 2, INT4OID, -1, InvalidOid, 0);
 	Var* wrong_alias_marker = makeVar(
 		executor_varno + 1, 2, INT4OID, -1, InvalidOid, 0);
+	Var* wrong_attno_marker = makeVar(
+		executor_varno, 3, INT4OID, -1, InvalidOid, 0);
 	const bool target_offset_accepted =
 		base_match_target_var_translation_agrees(
 			planner_target, executor_target, executor_varno, oids);
@@ -18932,13 +19038,69 @@ POSTGRES_FN(bioseq_internal_base_match_executor_translation_probe)
 			planner_marker, wrong_alias_marker,
 			planner_target, executor_target,
 			BioseqMatchHelperBindingKind::unique_lineage, oids);
-	Datum values[4] = {
+
+	auto* outer_source = makeNode(Result);
+	outer_source->plan.targetlist = list_make2(
+		makeTargetEntry(
+			reinterpret_cast<Expr*>(copyObject(executor_marker)),
+			/*resno=*/1, nullptr, false),
+		makeTargetEntry(
+			reinterpret_cast<Expr*>(copyObject(wrong_attno_marker)),
+			/*resno=*/2, nullptr, false));
+	auto* inner_source = makeNode(Result);
+	inner_source->plan.targetlist = static_cast<List*>(copyObject(
+		outer_source->plan.targetlist));
+	auto* carrier_scan = makeNode(CustomScan);
+	carrier_scan->custom_plans = list_make2(
+		&outer_source->plan, &inner_source->plan);
+	carrier_scan->custom_scan_tlist = static_cast<List*>(copyObject(
+		outer_source->plan.targetlist));
+	auto special_var = [](const Index varno, const AttrNumber attno) {
+		return reinterpret_cast<Node*>(makeVar(
+			varno, attno, INT4OID, -1, InvalidOid, 0));
+	};
+	const bool outer_slot_accepted =
+		finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(OUTER_VAR, 1),
+			reinterpret_cast<Node*>(planner_marker));
+	const bool outer_wrong_slot_rejected =
+		!finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(OUTER_VAR, 2),
+			reinterpret_cast<Node*>(planner_marker));
+	const bool inner_slot_accepted =
+		finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(INNER_VAR, 1),
+			reinterpret_cast<Node*>(planner_marker));
+	const bool inner_wrong_slot_rejected =
+		!finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(INNER_VAR, 2),
+			reinterpret_cast<Node*>(planner_marker));
+	const bool index_slot_accepted =
+		finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(INDEX_VAR, 1),
+			reinterpret_cast<Node*>(planner_marker));
+	const bool index_wrong_slot_rejected =
+		!finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(INDEX_VAR, 2),
+			reinterpret_cast<Node*>(planner_marker));
+	const bool special_out_of_range_rejected =
+		!finalized_match_helper_argument_translation_agrees(
+			carrier_scan, special_var(OUTER_VAR, 3),
+			reinterpret_cast<Node*>(planner_marker));
+	Datum values[11] = {
 		BoolGetDatum(target_offset_accepted),
 		BoolGetDatum(target_attno_disagreement_rejected),
 		BoolGetDatum(exact_site_offset_accepted),
 		BoolGetDatum(lineage_alias_disagreement_rejected),
+		BoolGetDatum(outer_slot_accepted),
+		BoolGetDatum(outer_wrong_slot_rejected),
+		BoolGetDatum(inner_slot_accepted),
+		BoolGetDatum(inner_wrong_slot_rejected),
+		BoolGetDatum(index_slot_accepted),
+		BoolGetDatum(index_wrong_slot_rejected),
+		BoolGetDatum(special_out_of_range_rejected),
 	};
-	bool nulls[4]{};
+	bool nulls[11]{};
 	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
 	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
@@ -19056,7 +19218,7 @@ static void finalize_base_match_owner_executor_image(
 }
 
 static void finalize_match_owner_bindings(
-		std::vector<MatchOwnerFinalization>& owners) {
+		std::span<MatchOwnerFinalization> owners) {
 	const BioseqStubOids& oids = get_cached_stub_oids();
 #ifdef BIOSEQ_TEST_INDEXES
 	verify_match_owner_scope_resolution(oids);
@@ -19155,29 +19317,90 @@ static void finalize_match_owner_bindings(
 
 static void neutralize_ancestor_owned_dummy_match_helpers(
 	PlannedStmt* statement,
-	std::vector<MatchOwnerFinalization>& owners);
+	std::span<MatchOwnerFinalization> owners);
 
 export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
 	if (statement == nullptr || statement->planTree == nullptr
 		|| !OidIsValid(get_extension_oid("bioseq", /*missing_ok=*/true))) {
 		return;
 	}
-	std::vector<MatchOwnerFinalization> owners;
-	std::uint64_t next_scope_id = 1u;
-	const std::uint64_t statement_scope =
-		allocate_match_owner_scope(next_scope_id);
-	collect_match_owner_plan(
-		statement->planTree, owners, statement_scope, next_scope_id);
-	for (Plan* subplan : PList<Plan>(statement->subplans)) {
-		const std::uint64_t subplan_scope =
-			allocate_match_owner_scope(next_scope_id);
-		collect_match_owner_plan(
-			subplan, owners, subplan_scope, next_scope_id);
+	ErrorData* exact_error = nullptr;
+	{
+#ifdef BIOSEQ_TEST_INDEXES
+		[[maybe_unused]] MatchOwnerFinalizationScopeGuard scope_guard;
+#endif
+		std::vector<MatchOwnerFinalization> owners;
+		try {
+			/* This callback is below PostgreSQL's sigsetjmp boundary.  Every local
+			 * it reaches is either PostgreSQL-owned (List/Bitmapset) or statically
+			 * trivially destructible (span/fixed fixture/scalars).  The sole heap-
+			 * owning C++ container is this outer vector, which remains above the
+			 * boundary and therefore unwinds after a translated PG error. */
+			bioseq::pg_utils::invoke_pg_as_cpp([&] {
+				std::uint64_t next_scope_id = 1u;
+				const std::uint64_t statement_scope =
+					allocate_match_owner_scope(next_scope_id);
+				collect_match_owner_plan(
+					statement->planTree, owners, statement_scope, next_scope_id);
+				for (Plan* subplan : PList<Plan>(statement->subplans)) {
+					const std::uint64_t subplan_scope =
+						allocate_match_owner_scope(next_scope_id);
+					collect_match_owner_plan(
+						subplan, owners, subplan_scope, next_scope_id);
+				}
+				if (!owners.empty()) {
+					finalize_match_owner_bindings(
+						std::span<MatchOwnerFinalization>{owners});
+					neutralize_ancestor_owned_dummy_match_helpers(
+						statement,
+						std::span<MatchOwnerFinalization>{owners});
+				}
+			});
+		} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+			exact_error = error.release_error_data();
+		}
 	}
-	if (!owners.empty()) {
-		finalize_match_owner_bindings(owners);
-		neutralize_ancestor_owned_dummy_match_helpers(statement, owners);
+	/* Re-enter PostgreSQL's error ABI only after the vector and every other C++
+	 * owner in the finalization scope have been destroyed. */
+	if (exact_error != nullptr) ReThrowError(exact_error);
+}
+
+POSTGRES_FN(bioseq_internal_match_owner_finalization_scope_diagnostics)
+{
+#ifdef BIOSEQ_TEST_INDEXES
+	if (PG_GETARG_BOOL(0)) {
+		MatchOwnerFinalizationScopesEntered = 0u;
+		MatchOwnerFinalizationScopesExited = 0u;
 	}
+	TupleDesc tupdesc = nullptr;
+	if (get_call_result_type(fcinfo, nullptr, &tupdesc)
+			!= TYPEFUNC_COMPOSITE) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("bioseq match-owner finalization diagnostics require a composite result")));
+	}
+	tupdesc = BlessTupleDesc(tupdesc);
+	const std::uint64_t active = MatchOwnerFinalizationScopesEntered
+		>= MatchOwnerFinalizationScopesExited
+		? MatchOwnerFinalizationScopesEntered
+			- MatchOwnerFinalizationScopesExited
+		: std::numeric_limits<std::uint64_t>::max();
+	Datum values[3] = {
+		Int64GetDatum(static_cast<std::int64_t>(
+			MatchOwnerFinalizationScopesEntered)),
+		Int64GetDatum(static_cast<std::int64_t>(
+			MatchOwnerFinalizationScopesExited)),
+		Int64GetDatum(static_cast<std::int64_t>(active)),
+	};
+	bool nulls[3]{};
+	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
+	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+#else
+	ereport(ERROR,
+		(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+		 errmsg("match-owner finalization diagnostics require a test build"),
+		 errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
+#endif
 }
 
 [[nodiscard]] static int validate_finalized_match_owner_descriptor_value(
@@ -19326,12 +19549,27 @@ export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
 	return target_recipe;
 }
 
-[[nodiscard]] static bool finalized_match_helper_argument_translation_agrees(
-		Node* translated, Node* canonical) noexcept {
+[[nodiscard]] static TargetEntry* finalized_match_helper_resno_entry(
+		List* targetlist, const AttrNumber resno) noexcept {
+	if (resno <= 0) return nullptr;
+	for (TargetEntry* entry : PList<TargetEntry>(targetlist)) {
+		if (entry != nullptr && entry->resno == resno) return entry;
+	}
+	return nullptr;
+}
+
+[[nodiscard]] static bool
+finalized_match_helper_argument_translation_agrees_impl(
+		Plan* context, Node* translated, Node* canonical,
+		const unsigned int depth) noexcept {
+	if (depth > 16u) return false;
 	if (translated == nullptr || canonical == nullptr) return false;
-	if (equal(translated, canonical)) return true;
 	Var* translated_var = pg_node_try_as<Var>(translated);
 	Var* canonical_var = pg_node_try_as<Var>(canonical);
+	if (equal(translated, canonical)) {
+		return canonical_var == nullptr
+			|| bioseq_is_concrete_rte_varno(canonical_var->varno);
+	}
 	if (translated_var == nullptr || canonical_var == nullptr
 		|| translated_var->varattno <= 0 || canonical_var->varattno <= 0
 		|| translated_var->varlevelsup != canonical_var->varlevelsup
@@ -19340,16 +19578,62 @@ export void bioseq_finalize_match_helper_bindings(PlannedStmt* statement) {
 		|| translated_var->vartype != canonical_var->vartype
 		|| translated_var->vartypmod != canonical_var->vartypmod
 		|| translated_var->varcollid != canonical_var->varcollid) return false;
-	const bool translated_slot = translated_var->varno == OUTER_VAR
-		|| translated_var->varno == INNER_VAR
-		|| translated_var->varno == INDEX_VAR;
-	/* A special Var names the child scan-tuple column selected by setrefs, so
-	 * its attno need not equal the physical canonical attribute.  A concrete
-	 * Var can only differ by the statement rtable offset and must retain attno. */
-	return translated_slot
-		|| (bioseq_is_concrete_rte_varno(translated_var->varno)
-			&& bioseq_is_concrete_rte_varno(canonical_var->varno)
-			&& translated_var->varattno == canonical_var->varattno);
+	if (!bioseq_is_concrete_rte_varno(canonical_var->varno)) return false;
+	/* A concrete Var can only differ by the statement rtable offset and must
+	 * retain its physical attribute identity. */
+	if (bioseq_is_concrete_rte_varno(translated_var->varno)) {
+		return translated_var->varattno == canonical_var->varattno;
+	}
+	if (context == nullptr) return false;
+
+	List* source_tlist = NIL;
+	Plan* source_context = context;
+	if (translated_var->varno == INDEX_VAR) {
+		if (!IsA(context, CustomScan)) return false;
+		source_tlist = reinterpret_cast<CustomScan*>(context)
+			->custom_scan_tlist;
+	} else {
+		Plan* child = nullptr;
+		if (IsA(context, CustomScan)) {
+			List* children = reinterpret_cast<CustomScan*>(context)->custom_plans;
+			const int child_index = translated_var->varno == OUTER_VAR ? 0
+				: (translated_var->varno == INNER_VAR ? 1 : -1);
+			child = child_index >= 0 && child_index < list_length(children)
+				? reinterpret_cast<Plan*>(list_nth(children, child_index))
+				: nullptr;
+		} else if (translated_var->varno == OUTER_VAR) {
+			child = outerPlan(context);
+		} else if (translated_var->varno == INNER_VAR) {
+			child = innerPlan(context);
+		} else {
+			return false;
+		}
+		if (child == nullptr) return false;
+		source_context = child;
+		source_tlist = child->targetlist;
+	}
+	TargetEntry* source = finalized_match_helper_resno_entry(
+		source_tlist, translated_var->varattno);
+	Node* source_expression = source == nullptr
+		? nullptr : reinterpret_cast<Node*>(source->expr);
+	if (source_expression == nullptr
+		|| exprType(source_expression) != translated_var->vartype
+		|| exprTypmod(source_expression) != translated_var->vartypmod
+		|| exprCollation(source_expression) != translated_var->varcollid
+		|| equal(source_expression, translated)) return false;
+	/* Resolve the exact setrefs slot rather than accepting its type metadata as
+	 * provenance.  A nested special Var is followed only through the concrete
+	 * child/scan tlist which owns that slot; cycles and unsupported INDEX_VAR
+	 * namespaces fail closed. */
+	return finalized_match_helper_argument_translation_agrees_impl(
+		source_context, source_expression, canonical, depth + 1u);
+}
+
+[[nodiscard]] static bool finalized_match_helper_argument_translation_agrees(
+		CustomScan* scan, Node* translated, Node* canonical) noexcept {
+	return finalized_match_helper_argument_translation_agrees_impl(
+		scan == nullptr ? nullptr : &scan->scan.plan,
+		translated, canonical, 0u);
 }
 
 [[nodiscard]] constexpr bool finalized_match_helper_carrier_shape_supported(
@@ -19384,10 +19668,11 @@ static_assert(!finalized_match_helper_carrier_shape_supported(
  * both require the leaf carrier's exact canonical argument and full function
  * ABI.  A carrier-side PHV is never a dummy leaf carrier. */
 [[nodiscard]] static bool finalized_match_helper_carrier_equivalent(
-		Node* supplied_identity, Node* carrier_identity,
+		CustomScan* scan, Node* supplied_identity, Node* carrier_identity,
 		Node* canonical_argument, const int site_phid,
 		const BioseqStubOids& oids) noexcept {
-	if (supplied_identity == nullptr || carrier_identity == nullptr
+	if (scan == nullptr || supplied_identity == nullptr
+		|| carrier_identity == nullptr
 		|| canonical_argument == nullptr) return false;
 	PlaceHolderVar* supplied_phv = pg_node_try_as<PlaceHolderVar>(
 		supplied_identity);
@@ -19424,7 +19709,7 @@ static_assert(!finalized_match_helper_carrier_shape_supported(
 	if (site_phid == 0) return identities_equal;
 	return equal(carrier_argument, canonical_argument)
 		&& finalized_match_helper_argument_translation_agrees(
-			supplied_argument, canonical_argument);
+			scan, supplied_argument, canonical_argument);
 }
 
 struct FinalizedMatchHelperCarrierAudit {
@@ -19580,7 +19865,7 @@ finalized_batch_owner_matching_site_count(
 			batch_join_match_helper_argument(supplied_helper);
 		const bool equivalent = supplied != nullptr
 			&& finalized_match_helper_carrier_equivalent(
-				reinterpret_cast<Node*>(supplied->expr), identity,
+				scan, reinterpret_cast<Node*>(supplied->expr), identity,
 				canonical_argument, site_phid, oids);
 		if (audit != nullptr && !audit->inspected) {
 			audit->inspected = true;
@@ -19634,11 +19919,13 @@ struct FinalizedBaseOwnerSiteContext {
 	int stable_match_id = 0;
 };
 
-[[nodiscard]] static std::optional<FinalizedBaseOwnerSiteContext>
+[[nodiscard]] static bool
 finalized_base_owner_site_context(
-		CustomScan* scan, const BioseqStubOids& oids) {
+		CustomScan* scan, const BioseqStubOids& oids,
+		FinalizedBaseOwnerSiteContext& context) {
+	context = {};
 	if (scan == nullptr || scan->methods != &BioseqColumnScanScanMethods) {
-		return std::nullopt;
+		return false;
 	}
 	List* owner_tag = find_base_match_owner_plan_tag(scan);
 	Node* descriptor_node = owner_tag == NIL ? nullptr
@@ -19649,7 +19936,7 @@ finalized_base_owner_site_context(
 			owner_tag, kBaseMatchPlanExecutorSites));
 	if (descriptor_node == nullptr || !IsA(descriptor_node, List)
 		|| sites_node == nullptr || !IsA(sites_node, List)) {
-		return std::nullopt;
+		return false;
 	}
 	List* descriptor = reinterpret_cast<List*>(descriptor_node);
 	const int stable_match_id =
@@ -19660,10 +19947,11 @@ finalized_base_owner_site_context(
 		|| target_recipe->varattno <= 0 || target_recipe->varlevelsup != 0
 		|| !bms_is_empty(target_recipe->varnullingrels)
 		|| target_recipe->vartype != oids.bioseq_seq_type_oid) {
-		return std::nullopt;
+		return false;
 	}
-	return FinalizedBaseOwnerSiteContext{
+	context = FinalizedBaseOwnerSiteContext{
 		reinterpret_cast<List*>(sites_node), target_recipe, stable_match_id};
+	return true;
 }
 
 [[nodiscard]] static bool finalized_base_owner_site_matches(
@@ -19721,7 +20009,7 @@ struct FinalizedBaseTargetlistAudit {
 	FinalizedBaseOwnerSiteContext context{};
 	const BioseqStubOids* oids = nullptr;
 	AttrNumber resno = InvalidAttrNumber;
-	std::vector<bool>* matched_sites = nullptr;
+	Bitmapset** matched_sites = nullptr;
 	bool invalid = false;
 };
 
@@ -19764,7 +20052,8 @@ struct finalized_base_targetlist_audit_visitor {
 			audit.invalid = true;
 			return pg_walk_step::stop;
 		}
-		(*audit.matched_sites)[matched_index] = true;
+		*audit.matched_sites = bms_add_member(
+			*audit.matched_sites, static_cast<int>(matched_index));
 		return pg_walk_step::skip_subtree;
 	}
 };
@@ -19772,36 +20061,41 @@ struct finalized_base_targetlist_audit_visitor {
 [[nodiscard]] static bool
 base_scan_targetlist_has_only_finalized_match_helpers(
 		CustomScan* scan, const BioseqStubOids& oids) {
-	const auto context = finalized_base_owner_site_context(scan, oids);
-	if (!context.has_value() || context->sites == NIL) return false;
-	std::vector<bool> matched_sites(
-		static_cast<std::size_t>(list_length(context->sites)), false);
+	FinalizedBaseOwnerSiteContext context{};
+	if (!finalized_base_owner_site_context(scan, oids, context)
+		|| context.sites == NIL) return false;
+	Bitmapset* matched_sites = nullptr;
 	FinalizedBaseTargetlistAudit audit{
-		*context, &oids, InvalidAttrNumber, &matched_sites, false};
+		context, &oids, InvalidAttrNumber, &matched_sites, false};
 	finalized_base_targetlist_audit_visitor visitor;
 	for (TargetEntry* entry : PList<TargetEntry>(scan->scan.plan.targetlist)) {
 		if (entry == nullptr || entry->expr == nullptr) continue;
 		audit.resno = entry->resno;
 		pg_walk_expression_including_root(
 			reinterpret_cast<Node*>(entry->expr), audit, visitor);
-		if (audit.invalid) return false;
+		if (audit.invalid) {
+			bms_free(matched_sites);
+			return false;
+		}
 	}
-	return std::all_of(
-		matched_sites.begin(), matched_sites.end(),
-		[](const bool matched) noexcept { return matched; });
+	const bool all_sites_matched = bms_num_members(matched_sites)
+		== list_length(context.sites);
+	bms_free(matched_sites);
+	return all_sites_matched;
 }
 
 [[nodiscard]] static std::size_t finalized_base_owner_matching_site_count(
 		CustomScan* scan, Node* identity, const BioseqStubOids& oids) {
-	const auto context = finalized_base_owner_site_context(scan, oids);
-	if (!context.has_value() || identity == nullptr) return 0u;
+	FinalizedBaseOwnerSiteContext context{};
+	if (!finalized_base_owner_site_context(scan, oids, context)
+		|| identity == nullptr) return 0u;
 	PlaceHolderVar* placeholder = pg_node_try_as<PlaceHolderVar>(identity);
 	FuncExpr* helper = placeholder == nullptr
 		? batch_join_well_formed_match_helper(identity, oids)
 		: batch_join_match_helper_phv_function(placeholder, oids);
 	if (helper == nullptr) return 0u;
 	std::size_t matches = 0u;
-	for (Node* raw_site : PList<Node>(context->sites)) {
+	for (Node* raw_site : PList<Node>(context.sites)) {
 		List* site = raw_site != nullptr && IsA(raw_site, List)
 			? reinterpret_cast<List*>(raw_site) : NIL;
 		if (list_length(site) != kBioseqMatchHelperSiteFields) return 2u;
@@ -19821,7 +20115,7 @@ base_scan_targetlist_has_only_finalized_match_helpers(
 			&& equal(supplied->expr, identity)
 			&& finalized_base_owner_site_matches(
 				site, helper, static_cast<AttrNumber>(resno),
-				*context, oids, malformed)) {
+				context, oids, malformed)) {
 			++matches;
 		}
 		if (malformed) return 2u;
@@ -20040,7 +20334,7 @@ static_assert(!dummy_match_helper_is_unique_ancestor_carrier(0u, 2u));
 [[nodiscard]] static MatchOwnerFinalization*
 finalized_batch_owner_for_ancestor_stack(
 		CustomScan* scan,
-		std::vector<MatchOwnerFinalization>& owners) {
+		std::span<MatchOwnerFinalization> owners) {
 	MatchOwnerFinalization* result = nullptr;
 	for (MatchOwnerFinalization& owner : owners) {
 		if (owner.scan != scan || owner.base_owner_tag != NIL) continue;
@@ -20112,10 +20406,10 @@ finalized_batch_owner_for_ancestor_stack(
 
 static void neutralize_bioseq_scan_ancestor_helper_carriers(
 		CustomScan* scan,
-		const std::vector<MatchOwnerFinalization*>& ancestor_stack,
+		List* ancestor_stack,
 		const BioseqStubOids& oids) {
 	if (scan == nullptr || scan->methods != &BioseqColumnScanScanMethods
-		|| ancestor_stack.empty()) return;
+		|| ancestor_stack == NIL) return;
 	if (batch_join_expression_has_match_helper(
 			reinterpret_cast<Node*>(scan->scan.plan.qual), oids)) {
 		ereport(ERROR,
@@ -20157,7 +20451,8 @@ static void neutralize_bioseq_scan_ancestor_helper_carriers(
 			finalized_base_owner_matching_site_count(scan, identity, oids);
 		std::size_t ancestor_matches = 0u;
 		FinalizedMatchHelperCarrierAudit carrier_audit{};
-		for (MatchOwnerFinalization* ancestor : ancestor_stack) {
+		for (MatchOwnerFinalization* ancestor
+				: PList<MatchOwnerFinalization>(ancestor_stack)) {
 			if (ancestor == nullptr || ancestor->scan == nullptr) {
 				ereport(ERROR,
 					(errcode(ERRCODE_INTERNAL_ERROR),
@@ -20249,18 +20544,17 @@ static void neutralize_bioseq_scan_ancestor_helper_carriers(
 }
 
 static void neutralize_ancestor_owned_dummy_match_helpers_plan(
-		Plan* plan, std::vector<MatchOwnerFinalization>& owners,
-		std::vector<MatchOwnerFinalization*>& ancestor_stack,
+		Plan* plan, std::span<MatchOwnerFinalization> owners,
+		List* ancestor_stack,
 		const BioseqStubOids& oids) {
 	if (plan == nullptr) return;
 	check_stack_depth();
 	if (IsA(plan, SubqueryScan)) {
 		/* A SubqueryScan is a hard query-scope boundary.  An owner above it can
 		 * never justify neutralizing an equal local helper spelling below it. */
-		std::vector<MatchOwnerFinalization*> subquery_ancestors;
 		neutralize_ancestor_owned_dummy_match_helpers_plan(
 			reinterpret_cast<SubqueryScan*>(plan)->subplan, owners,
-			subquery_ancestors, oids);
+			NIL, oids);
 		return;
 	}
 	if (IsA(plan, CustomScan)) {
@@ -20271,26 +20565,29 @@ static void neutralize_ancestor_owned_dummy_match_helpers_plan(
 		}
 		MatchOwnerFinalization* owner =
 			finalized_batch_owner_for_ancestor_stack(custom, owners);
-		if (owner != nullptr && !ancestor_stack.empty()
-			&& ancestor_stack.back()->query_scope_id
+		MatchOwnerFinalization* parent_owner = ancestor_stack == NIL
+			? nullptr : reinterpret_cast<MatchOwnerFinalization*>(
+				llast(ancestor_stack));
+		if (owner != nullptr && parent_owner != nullptr
+			&& parent_owner->query_scope_id
 				!= owner->query_scope_id) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("Bioseq finalized ancestor stack crosses query scopes"),
 				 errdetail("parent_scope_id=" UINT64_FORMAT " child_scope_id=" UINT64_FORMAT,
-					static_cast<uint64>(
-						ancestor_stack.back()->query_scope_id),
+					static_cast<uint64>(parent_owner->query_scope_id),
 					static_cast<uint64>(owner->query_scope_id))));
 		}
-		if (owner != nullptr) ancestor_stack.push_back(owner);
+		List* child_ancestors = owner == nullptr
+			? ancestor_stack : lappend(list_copy(ancestor_stack), owner);
 		for (Plan* child : PList<Plan>(custom->custom_plans)) {
 			neutralize_ancestor_owned_dummy_match_helpers_plan(
-				child, owners, ancestor_stack, oids);
+				child, owners, child_ancestors, oids);
 		}
-		if (owner != nullptr) ancestor_stack.pop_back();
+		if (owner != nullptr) list_free(child_ancestors);
 		return;
 	}
-	auto visit_plan_list = [&owners, &ancestor_stack, &oids](List* plans) {
+	auto visit_plan_list = [owners, ancestor_stack, &oids](List* plans) {
 		for (Plan* child : PList<Plan>(plans)) {
 			neutralize_ancestor_owned_dummy_match_helpers_plan(
 				child, owners, ancestor_stack, oids);
@@ -20322,16 +20619,14 @@ static void neutralize_ancestor_owned_dummy_match_helpers_plan(
 
 static void neutralize_ancestor_owned_dummy_match_helpers(
 		PlannedStmt* statement,
-		std::vector<MatchOwnerFinalization>& owners) {
+		std::span<MatchOwnerFinalization> owners) {
 	if (statement == nullptr || statement->planTree == nullptr) return;
 	const BioseqStubOids& oids = get_cached_stub_oids();
-	std::vector<MatchOwnerFinalization*> ancestor_stack;
 	neutralize_ancestor_owned_dummy_match_helpers_plan(
-		statement->planTree, owners, ancestor_stack, oids);
+		statement->planTree, owners, NIL, oids);
 	for (Plan* subplan : PList<Plan>(statement->subplans)) {
-		ancestor_stack.clear();
 		neutralize_ancestor_owned_dummy_match_helpers_plan(
-			subplan, owners, ancestor_stack, oids);
+			subplan, owners, NIL, oids);
 	}
 }
 
