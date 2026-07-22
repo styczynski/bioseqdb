@@ -11,6 +11,8 @@ For modes list see MODES dict.
 
 Concurrency rules:
     - At most one run per "lock group" at a time.
+    - Runs resolving to the same CMake build directory never overlap, even when
+      their modes belong to different lock groups.
     - "tests"  group covers unit+integration and external-api.
     - "cache-tests" covers cache unit and private-cluster integration modes.
     - "bench" covers the core and cache benchmark modes; concurrent reports
@@ -618,8 +620,10 @@ class ModeDefinition:
     Two runs with the same lock group cannot run in parallel. bench and
     bench-fast share the same binary + reporting/ directory, so they're
     grouped together; unit+integration and external-api share the "tests"
-    group. Runtime modes that install/restart the shared PostgreSQL instance
-    also conflict across lock groups, while build-only runs remain independent.
+    group. Modes resolving to the same CMake build directory also conflict
+    across lock groups. Runtime modes that install/restart the shared PostgreSQL
+    instance conflict as well, while unrelated build-only runs remain
+    independent.
     """
     lock_group: str
     """
@@ -708,7 +712,11 @@ MODES: Dict[str, ModeDefinition] = {
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
         preset_override=EXTERNAL_API_BUILD_PRESET,
-        required_cache_variables={"BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON"},
+        required_cache_variables={
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
+            "BIOSEQ_BUILD_WEBSITE": "OFF",
+            "BIOSEQ_WEBSITE_BROWSER_TESTS": "OFF",
+        },
     ),
     "website": ModeDefinition(
         lock_group="website",
@@ -741,6 +749,7 @@ MODES: Dict[str, ModeDefinition] = {
         required_cache_variables={
             "BIOSEQ_BUILD_WEBSITE": "ON",
             "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
         },
     ),
     "unit+integration": ModeDefinition(
@@ -771,6 +780,15 @@ MODES: Dict[str, ModeDefinition] = {
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
         preset_family="test",
+        # Optional component modes may be deliberately pointed at this test
+        # preset for local qualification.  Restore the ordinary test tree
+        # before any unit/integration target is built so their sticky CMake
+        # cache entries cannot pull unavailable website/codegen toolchains
+        # into an otherwise incremental test run.
+        required_cache_variables={
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+            "BIOSEQ_BUILD_WEBSITE": "OFF",
+        },
     ),
     "bench": ModeDefinition(
         lock_group="bench",
@@ -1784,7 +1802,8 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     f"reconfiguring with preset {active_preset}.\n")
                 log_handle.flush()
                 rc = _stream_subprocess(
-                    ["cmake", "--preset", active_preset],
+                    ["cmake", "--preset", active_preset,
+                     *required_cache_args, *initial_clang_rt_args],
                     log_handle, deadline, cwd=PROJECT_ROOT, env=env,
                 )
                 if rc != 0:
@@ -1808,7 +1827,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             repair_description = ", ".join(
                 f"{name}={value}" for name, value in cache_repairs.items())
             log_handle.write(
-                f"# mode cache enable: setting {repair_description}.\n")
+                f"# mode cache repair: setting {repair_description}.\n")
             log_handle.flush()
             rc = _stream_subprocess(
                 ["cmake", "--preset", active_preset,
@@ -1817,7 +1836,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
             )
             if rc != 0:
                 raise RuntimeError(
-                    f"mode cache enable exited with code {rc}")
+                    f"mode cache repair exited with code {rc}")
 
         if _is_aws_preset(active_preset):
             if (
@@ -2172,15 +2191,23 @@ def _format_minutes(minutes: float, *, plural_int: bool = False) -> str:
 
 
 def _running_in_same_group(
-        state: dict, mode: str, build_only: bool) -> tuple[str | None, dict | None]:
+        state: dict, mode: str, build_only: bool,
+        requested_build_dir: Path) -> tuple[str | None, dict | None]:
     """Find any currently-running run that conflicts with `mode`.
 
     Returns (running_mode, entry) or (None, None). Conflicts are decided by
-    lock groups, plus the shared PostgreSQL install/restart resource. bench and
-    bench-fast share a group; runtime unit+integration and runtime bench-e2e
-    also conflict because both replace and restart the same extension.
+    lock groups, the resolved CMake build directory, and the shared PostgreSQL
+    install/restart resource. Build-directory comparison uses the path recorded
+    when a worker was reserved; legacy entries fall back to their recorded
+    debug selection. An unreadable or malformed running path fails closed.
     """
     mode_details = MODES[mode]
+    try:
+        resolved_requested_build_dir = requested_build_dir.resolve(strict=False)
+    except (OSError, RuntimeError):
+        # If any worker is live below, an indeterminate requested tree must
+        # conflict rather than risk racing that worker's configure.
+        resolved_requested_build_dir = None
     for other_mode in VALID_MODES:
         entry = _refresh(state, other_mode)
         if not entry:
@@ -2189,13 +2216,31 @@ def _running_in_same_group(
             continue
         other_details = MODES[other_mode]
         same_lock_group = other_details.lock_group == mode_details.lock_group
+        recorded_build_dir = entry.get("build_dir")
+        try:
+            if resolved_requested_build_dir is None:
+                same_build_dir = True
+            else:
+                if recorded_build_dir is None:
+                    recorded_build_dir = build_dir_for(
+                        other_mode, bool(entry.get("debug", False)))
+                elif (not isinstance(recorded_build_dir, (str, os.PathLike))
+                        or not os.fspath(recorded_build_dir)):
+                    raise TypeError("running build directory is malformed")
+                other_build_dir = Path(recorded_build_dir).resolve(strict=False)
+                same_build_dir = (
+                    other_build_dir == resolved_requested_build_dir)
+        except (OSError, RuntimeError, TypeError):
+            # A live worker with an indeterminate tree must block scheduling;
+            # allowing it through could race a configure in that same tree.
+            same_build_dir = True
         shared_postgresql_runtime = (
             not build_only
             and not bool(entry.get("build_only", False))
             and mode_details.install_extension
             and other_details.install_extension
         )
-        if same_lock_group or shared_postgresql_runtime:
+        if same_lock_group or same_build_dir or shared_postgresql_runtime:
             return other_mode, entry
     return None, None
 
@@ -2536,7 +2581,8 @@ def tool_start_build(mode: str, build_only: bool = False,
     with _global_lock():
         state = _load_state()
         running_mode, running_entry = _running_in_same_group(
-            state, mode, build_only)
+            state, mode, build_only,
+            PROJECT_ROOT / "build" / selected_preset)
         if running_entry:
             elapsed_min = (time.time() - running_entry["started_at"]) / 60.0
             eta_min = max(
@@ -2657,9 +2703,10 @@ def _run_build_inline(mode: str, build_only: bool = False,
     would make the SSH command return instantly with no result.
 
     Reserving the slot first means `_run_build_worker` (which requires a
-    pre-existing entry) finds its state, and the same-host lock-group guard still
-    prevents two conflicting builds racing on the box. pid is this process's own
-    pid so `status`/`_refresh` reconcile correctly if we die mid-build.
+    pre-existing entry) finds its state, and the same-host conflict guard still
+    prevents lock-group or shared-build-tree races on the box. pid is this
+    process's own pid so `status`/`_refresh` reconcile correctly if we die
+    mid-build.
 
     Returns the worker's exit code, or a small non-worker code on a pre-flight
     refusal (2 = invalid mode, 3 = a conflicting build is already running here).
@@ -2685,7 +2732,8 @@ def _run_build_inline(mode: str, build_only: bool = False,
     with _global_lock():
         state = _load_state()
         running_mode, running_entry = _running_in_same_group(
-            state, mode, build_only)
+            state, mode, build_only,
+            PROJECT_ROOT / "build" / selected_preset)
         if running_entry:
             _log(f"--run-build-sync: a conflicting build ({running_mode}) is "
                  f"already running on this host (pid={running_entry.get('pid')}); "
@@ -4427,7 +4475,8 @@ TOOL_DEFINITIONS = [
         "description": (
             "Schedule a build/test/benchmark run. The build runs detached so "
             "it survives MCP server restarts. If a run of the same lock group "
-            "is already in progress (non-SQL benchmarks may run with tests; "
+            "or resolved build tree is already in progress (non-SQL benchmarks "
+            "may run with tests when their trees differ; "
             "unit+integration and bench-e2e serialize because both install "
             "and restart the shared PostgreSQL extension) "
             "returns the current status instead of starting a duplicate. "

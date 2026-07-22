@@ -31,6 +31,7 @@ SANITIZERS = {
     "test-opt-ubsan": "undefined",
     "test-opt-tsan": "thread",
 }
+SANITIZER_BASE = "test-opt-sanitizer"
 COMMON_COMPILE_FLAGS = {
     "-O1",
     "-DNDEBUG",
@@ -54,16 +55,35 @@ class SanitizerPresetContractTest(unittest.TestCase):
             for preset in payload["configurePresets"]
         }
 
+    @classmethod
+    def resolved_cache_variables(cls, name: str) -> dict[str, str]:
+        preset = cls.presets[name]
+        variables: dict[str, str] = {}
+        inherited = preset.get("inherits", [])
+        if isinstance(inherited, str):
+            inherited = [inherited]
+        for parent in inherited:
+            variables.update(cls.resolved_cache_variables(parent))
+        variables.update(preset.get("cacheVariables", {}))
+        return variables
+
     def test_presets_are_isolated_test_trees_with_profile_zero(self) -> None:
         self.assertEqual(
             self.presets["test-opt"]["cacheVariables"]["BIOSEQ_TEST_INDEXES"],
             "ON",
         )
+        base = self.presets[SANITIZER_BASE]
+        self.assertTrue(base["hidden"])
+        self.assertEqual(base["inherits"], "test-opt")
+        self.assertEqual(
+            base["cacheVariables"]["CMAKE_PREFIX_PATH"],
+            "/opt/homebrew/opt/gettext",
+        )
         for name in SANITIZERS:
             with self.subTest(name=name):
                 preset = self.presets[name]
-                variables = preset["cacheVariables"]
-                self.assertEqual(preset["inherits"], "test-opt")
+                variables = self.resolved_cache_variables(name)
+                self.assertEqual(preset["inherits"], SANITIZER_BASE)
                 self.assertEqual(
                     preset["binaryDir"], "${sourceDir}/build/${presetName}")
                 self.assertEqual(
@@ -72,11 +92,15 @@ class SanitizerPresetContractTest(unittest.TestCase):
                     variables["PostgreSQL_CONFIG"],
                     "/opt/homebrew/opt/postgresql@17/bin/pg_config",
                 )
+                self.assertEqual(
+                    variables["CMAKE_PREFIX_PATH"],
+                    "/opt/homebrew/opt/gettext",
+                )
 
     def test_c_cxx_and_every_link_product_use_the_same_sanitizer(self) -> None:
         for name, sanitizer in SANITIZERS.items():
             with self.subTest(name=name):
-                variables = self.presets[name]["cacheVariables"]
+                variables = self.resolved_cache_variables(name)
                 expected = f"-fsanitize={sanitizer}"
                 for compile_key in ("CMAKE_C_FLAGS", "CMAKE_CXX_FLAGS"):
                     flags = set(variables[compile_key].split())
@@ -85,6 +109,38 @@ class SanitizerPresetContractTest(unittest.TestCase):
                 for linker_key in LINKER_KEYS:
                     self.assertEqual(variables[linker_key], expected)
                 self.assertNotIn("CMAKE_LINKER_FLAGS", variables)
+
+    def test_postgresql_nls_dependency_is_target_scoped(self) -> None:
+        module = (MAIN_DIR / "cmake" / "FindPostgreSQL.cmake").read_text()
+        self.assertIn(
+            'file(STRINGS "${_PostgreSQL_CONFIG_HEADER}" '
+            "_PostgreSQL_ENABLE_NLS",
+            module,
+        )
+        self.assertIn("find_package(Intl REQUIRED)", module)
+        self.assertIn(
+            "list(APPEND PostgreSQL_INCLUDE_DIRS ${Intl_INCLUDE_DIRS})",
+            module,
+        )
+        self.assertIn(
+            "list(APPEND PostgreSQL_SERVER_LINK_LIBRARIES Intl::Intl)",
+            module,
+        )
+        self.assertEqual(
+            module.count(
+                'INTERFACE_LINK_LIBRARIES '
+                '"${PostgreSQL_SERVER_LINK_LIBRARIES}"'),
+            2,
+        )
+        for name in SANITIZERS:
+            variables = self.resolved_cache_variables(name)
+            self.assertNotIn("-I/opt/homebrew/opt/gettext", " ".join(
+                (variables["CMAKE_C_FLAGS"], variables["CMAKE_CXX_FLAGS"])))
+            for linker_key in LINKER_KEYS:
+                self.assertNotIn(
+                    "-L/opt/homebrew/opt/gettext",
+                    variables[linker_key],
+                )
 
     def test_builder_override_routes_unit_integration_to_each_tree(self) -> None:
         for name in SANITIZERS:

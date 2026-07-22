@@ -88,6 +88,7 @@ import bioseq.sequences.cigar;                    // for format_cigar
 import bioseq.types.pg_compact_sequence; // bioseq.seq varlena layout + typmod helpers
 import bioseq.storage.manager;                   // DOC0279 §12.5 — seq_locator, is_locator_stub, decode_locator_from_stub, seq_caches
 import bioseq.storage.bucket_math;               // bucket_index_for_size (inline-value placement)
+import bioseq.storage.coordinates;               // checked signed slice-bound magnitudes
 import bioseq.storage.lazy;              // make_lazy_in_memory (inline-value tally)
 import bioseq.storage.scanner_pg;        // statement source-provider promotion/lifetime
 import bioseq.indexing.type;             // DOC0279 §11.5 — SequenceIndexType
@@ -747,6 +748,7 @@ struct BioseqStubOids {
 	Oid seq_from_letter_array_infer_oid;
 	Oid seq_from_letter_array_named_oid;
 	Oid seq_len_oid;
+	Oid seq_cast_oid;
 };
 
 /*
@@ -864,7 +866,9 @@ struct BioseqStubOids {
 		&& exact_function_exists_missing_ok(
 			"bioseq", "from_array", {letter_array_oid, TEXTOID, INT4OID})
 		&& exact_function_exists_missing_ok(
-			"bioseq", "len", {seq_oid});
+			"bioseq", "len", {seq_oid})
+		&& exact_function_exists_missing_ok(
+			"bioseq", "seq_cast", {seq_oid, INT4OID, BOOLOID});
 }
 
 /*
@@ -948,6 +952,8 @@ struct BioseqStubOids {
 	result.seq_from_letter_array_named_oid = resolve(
 		"bioseq.from_array(bioseq.letter[],text,integer)");
 	result.seq_len_oid = resolve("bioseq.len(bioseq.seq)");
+	result.seq_cast_oid = resolve(
+		"bioseq.seq_cast(bioseq.seq,integer,boolean)");
 	return result;
 }
 
@@ -1033,6 +1039,7 @@ static void invalidate_cached_stub_oids_syscache(Datum /*arg*/, int /*cacheid*/,
 		o.seq_from_letter_array_infer_oid,
 		o.seq_from_letter_array_named_oid,
 		o.seq_len_oid,
+		o.seq_cast_oid,
 	};
 	for (const Oid oid : func_oids) {
 		if (!oid_exists_in_syscache(PROCOID, oid)) {
@@ -2944,6 +2951,16 @@ slice_project_node_opcode(Node* node, const BioseqStubOids& oids) noexcept {
 		if (subscript->refcontainertype != oids.bioseq_seq_type_oid) {
 			return std::nullopt;
 		}
+		/* A valid one-dimensional PG17 bound coordinate is NIL or exactly
+		 * one cell (whose payload may be nullptr for an omitted bound).
+		 * Leave wider/corrupt shapes opaque so the native subscript path
+		 * raises its normative unsupported-shape error. */
+		if ((subscript->reflowerindexpr != NIL
+				&& list_length(subscript->reflowerindexpr) != 1)
+			|| (subscript->refupperindexpr != NIL
+				&& list_length(subscript->refupperindexpr) != 1)) {
+			return std::nullopt;
+		}
 		return subscript->reflowerindexpr == NIL
 			? SliceProjectOpcode::element : SliceProjectOpcode::slice;
 	}
@@ -2979,16 +2996,68 @@ slice_project_node_opcode(Node* node, const BioseqStubOids& oids) noexcept {
 	return NIL;
 }
 
+/* PostgreSQL wraps INSERT projection values in the registered same-type
+ * typmod cast.  The cast preserves logical length and the child lazy recipe;
+ * the destination slot is still the one unavoidable heap boundary.  Admit
+ * only the exact implicit, planner-constant cast shape.  Explicit calls and
+ * unrelated sequence-returning functions remain opaque producer leaves. */
+[[nodiscard]] static inline Node* slice_project_typmod_cast_source(
+		Node* node, const BioseqStubOids& oids) noexcept {
+	FuncExpr* function = pg_node_try_as<FuncExpr>(node);
+	if (function == nullptr || function->funcid != oids.seq_cast_oid
+		|| function->funcresulttype != oids.bioseq_seq_type_oid
+		|| function->funcretset || OidIsValid(function->funcvariadic)
+		|| function->funcformat != COERCE_IMPLICIT_CAST
+		|| list_length(function->args) != 3) return nullptr;
+	Node* source = reinterpret_cast<Node*>(linitial(function->args));
+	Const* target_typmod = pg_node_try_as<Const>(
+		reinterpret_cast<Node*>(lsecond(function->args)));
+	Const* explicit_cast = pg_node_try_as<Const>(
+		reinterpret_cast<Node*>(lthird(function->args)));
+	if (source == nullptr || exprType(source) != oids.bioseq_seq_type_oid
+		|| target_typmod == nullptr || target_typmod->constisnull
+		|| target_typmod->consttype != INT4OID
+		|| DatumGetInt32(target_typmod->constvalue) < 0
+		|| explicit_cast == nullptr || explicit_cast->constisnull
+		|| explicit_cast->consttype != BOOLOID
+		|| DatumGetBool(explicit_cast->constvalue)) return nullptr;
+	return source;
+}
+
+/* PG17 represents an omitted slice bound as either NIL or a one-cell List
+ * whose cell contains nullptr.  Both forms are canonical omission; no nullptr
+ * may enter custom_exprs and deparse as an empty string. */
+[[nodiscard]] static inline Node* slice_project_subscript_bound(
+		List* expressions) {
+	if (expressions == NIL) return nullptr;
+	if (list_length(expressions) != 1) {
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_CORRUPTED),
+			 errmsg("BioseqSliceProject slice bound list is invalid"),
+			 errdetail("bound_count=%d expected_count=1",
+				 list_length(expressions))));
+	}
+	return reinterpret_cast<Node*>(linitial(expressions));
+}
+
 [[nodiscard]] static std::uint64_t slice_project_estimated_symbols(
 		Node* node, const BioseqStubOids& oids) {
 	if (node == nullptr) return 0u;
+	if (Node* source = slice_project_typmod_cast_source(node, oids)) {
+		return slice_project_estimated_symbols(source, oids);
+	}
 	if (IsA(node, SubscriptingRef)) {
 		auto* subscript = reinterpret_cast<SubscriptingRef*>(node);
 		if (subscript->reflowerindexpr == NIL) return 1u;
-		Node* lower = subscript->reflowerindexpr == NIL
-			? nullptr : reinterpret_cast<Node*>(linitial(subscript->reflowerindexpr));
-		Node* upper = subscript->refupperindexpr == NIL
-			? nullptr : reinterpret_cast<Node*>(linitial(subscript->refupperindexpr));
+		if (list_length(subscript->reflowerindexpr) != 1
+			|| (subscript->refupperindexpr != NIL
+				&& list_length(subscript->refupperindexpr) != 1)) {
+			return 4096u;
+		}
+		Node* lower = slice_project_subscript_bound(
+			subscript->reflowerindexpr);
+		Node* upper = slice_project_subscript_bound(
+			subscript->refupperindexpr);
 		auto constant_bound = [](Node* expression)
 				-> std::optional<std::int64_t> {
 			Const* constant = pg_node_try_as<Const>(expression);
@@ -2996,11 +3065,26 @@ slice_project_node_opcode(Node* node, const BioseqStubOids& oids) noexcept {
 				|| constant->consttype != INT8OID) return std::nullopt;
 			return DatumGetInt64(constant->constvalue);
 		};
-		const auto lo = lower == nullptr
-			? std::optional<std::int64_t>{0} : constant_bound(lower);
+		const auto lo = constant_bound(lower);
 		const auto hi = constant_bound(upper);
-		if (lo.has_value() && hi.has_value() && *lo >= 0 && *hi >= *lo) {
-			return static_cast<std::uint64_t>(*hi - *lo);
+		if (lower == nullptr && hi.has_value() && *hi >= 0) {
+			return static_cast<std::uint64_t>(*hi);
+		}
+		if (upper == nullptr && lo.has_value() && *lo < 0) {
+			return bioseq::storage::magnitude_of_negative(*lo);
+		}
+		if (lo.has_value() && hi.has_value() && *hi >= *lo) {
+			if (*lo >= 0) {
+				return static_cast<std::uint64_t>(*hi - *lo);
+			}
+			if (*hi < 0) {
+				return bioseq::storage::magnitude_of_negative(*lo)
+					- bioseq::storage::magnitude_of_negative(*hi);
+			}
+			/* A negative lower with a nonnegative upper depends on the
+			 * unknown source length; do not mislabel an upper bound as an
+			 * exact selected-range estimate. */
+			return 4096u;
 		}
 		return 4096u;
 	}
@@ -3169,6 +3253,11 @@ struct SliceProjectIrBuilder {
 		bool distinct_consumer = false, bool force_value = false) {
 	check_stack_depth();
 	if (expression == nullptr) return 0u;
+	if (Node* source = slice_project_typmod_cast_source(
+			expression, *builder.oids)) {
+		return slice_project_add_producer(
+			builder, source, distinct_consumer, force_value);
+	}
 	const auto operation = slice_project_node_opcode(expression, *builder.oids);
 	if (exprType(expression) != builder.oids->bioseq_seq_type_oid
 		&& !operation.has_value() && !force_value) return 0u;
@@ -3229,15 +3318,19 @@ struct SliceProjectIrBuilder {
 			: SliceProjectOpcode::source_expr);
 	int lower_expression_index = -1;
 	int upper_expression_index = -1;
-	if (IsA(expression, SubscriptingRef)) {
+	if ((opcode == SliceProjectOpcode::slice
+			|| opcode == SliceProjectOpcode::element)
+		&& IsA(expression, SubscriptingRef)) {
 		auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
-		if (subscript->reflowerindexpr != NIL) {
+		if (Node* lower = slice_project_subscript_bound(
+				subscript->reflowerindexpr)) {
 			lower_expression_index = slice_project_add_expression(builder,
-				reinterpret_cast<Node*>(linitial(subscript->reflowerindexpr)));
+				lower);
 		}
-		if (subscript->refupperindexpr != NIL) {
+		if (Node* upper = slice_project_subscript_bound(
+				subscript->refupperindexpr)) {
 			upper_expression_index = slice_project_add_expression(builder,
-				reinterpret_cast<Node*>(linitial(subscript->refupperindexpr)));
+				upper);
 		}
 	}
 	int transform = 0;

@@ -291,11 +291,17 @@ add_custom_command(
   COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/cmake/test_private_postgres.py"
           --pg-bin-dir "${_pg_bindir}"
           --scratch-root "${_output_root}/private-runner-tests"
+  COMMAND "${Python3_EXECUTABLE}"
+          "${CMAKE_SOURCE_DIR}/cmake/test_stage_private_postgres.py"
+          --cmake "${CMAKE_COMMAND}"
+          --scratch-root "${_output_root}/private-stage-tests"
   COMMAND "${CMAKE_COMMAND}" -E touch "${_runner_tests_stamp}"
   DEPENDS "${CMAKE_SOURCE_DIR}/cmake/test_private_postgres.py"
+          "${CMAKE_SOURCE_DIR}/cmake/test_stage_private_postgres.py"
+          "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
           "${CMAKE_SOURCE_DIR}/cmake/run_private_postgres.py"
           "${CMAKE_SOURCE_DIR}/cmake/private_postgres.py"
-  COMMENT "website: private PostgreSQL runner self-tests"
+  COMMENT "website: private PostgreSQL runner and relocation self-tests"
   USES_TERMINAL VERBATIM)
 add_custom_target(bioseq_private_postgres_tests DEPENDS "${_runner_tests_stamp}")
 

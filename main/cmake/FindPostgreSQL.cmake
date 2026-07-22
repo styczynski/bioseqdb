@@ -63,6 +63,25 @@ execute_process(COMMAND ${PostgreSQL_CONFIG} --pkglibdir         OUTPUT_VARIABLE
 list(APPEND PostgreSQL_INCLUDE_DIRS "${PostgreSQL_INCLUDE_DIR}" "${PostgreSQL_PKG_INCLUDE_DIR}" "${PostgreSQL_SERVER_INCLUDE_DIR}")
 list(APPEND PostgreSQL_LIBRARY_DIRS "${PostgreSQL_LIBRARY_DIR}")
 
+# PostgreSQL's installed server headers expose the configuration of the
+# PostgreSQL build itself.  In particular, an NLS-enabled c.h includes
+# <libintl.h>; consumers therefore need both gettext's headers while compiling
+# and its library when they link.  Keep this dependency on the PostgreSQL
+# interfaces instead of adding Homebrew include/link flags globally.
+set(PostgreSQL_SERVER_LINK_LIBRARIES "")
+set(_PostgreSQL_CONFIG_HEADER "${PostgreSQL_SERVER_INCLUDE_DIR}/pg_config.h")
+if(EXISTS "${_PostgreSQL_CONFIG_HEADER}")
+  file(STRINGS "${_PostgreSQL_CONFIG_HEADER}" _PostgreSQL_ENABLE_NLS
+    REGEX "^#define[ \t]+ENABLE_NLS([ \t]+1)?[ \t]*$")
+  if(_PostgreSQL_ENABLE_NLS)
+    find_package(Intl REQUIRED)
+    list(APPEND PostgreSQL_INCLUDE_DIRS ${Intl_INCLUDE_DIRS})
+    list(APPEND PostgreSQL_SERVER_LINK_LIBRARIES Intl::Intl)
+  endif()
+endif()
+unset(_PostgreSQL_ENABLE_NLS)
+unset(_PostgreSQL_CONFIG_HEADER)
+
 # Set library to search for (which is different on WIN32)
 set(FIND_LIBRARY pq)
 
@@ -159,6 +178,7 @@ if(PostgreSQL_FOUND)
   endif()
   set_target_properties(PostgreSQL::ServerHeaders PROPERTIES
     INTERFACE_INCLUDE_DIRECTORIES "${PostgreSQL_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${PostgreSQL_SERVER_LINK_LIBRARIES}"
   )
 
   # When providing imported targets, these should be namespaced (hence the Foo:: prefix);
@@ -191,6 +211,7 @@ if(PostgreSQL_FOUND)
   set_target_properties(PostgreSQL::PostgreSQL PROPERTIES
     #INTERFACE_COMPILE_OPTIONS "${PostgreSQL_CFLAGS_OTHER}"
     INTERFACE_INCLUDE_DIRECTORIES "${PostgreSQL_INCLUDE_DIRS}"
+    INTERFACE_LINK_LIBRARIES "${PostgreSQL_SERVER_LINK_LIBRARIES}"
   )
 endif()
 

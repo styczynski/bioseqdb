@@ -374,7 +374,9 @@ TEST_CASE("DOC0377 explicit text and array bridges validate and round-trip",
 
 TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
           "[seq][slice][storage][materialization]") {
-    auto ctx = fresh_context({"doc0377_slice_src", "doc0377_slice_dst"});
+    auto ctx = fresh_context({
+        "doc0377_slice_src", "doc0377_slice_dst",
+        "doc0377_slice_plan_dst"});
     exec_sql(ctx,
         "CREATE TABLE doc0377_slice_src "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
@@ -384,6 +386,15 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
     exec_sql(ctx,
         "CREATE TABLE doc0377_slice_dst "
         " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+    exec_sql(ctx,
+        "CREATE TABLE doc0377_slice_plan_dst "
+        " (id int, s bioseq.seq('dna4',32)) USING bioseq;");
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_cast_namespace_probe(marker int);"
+        "CREATE FUNCTION pg_temp.doc0377_unrelated_seq_cast("
+        " input_value bioseq.seq, target_typmod integer, is_explicit boolean) "
+        "RETURNS bioseq.seq LANGUAGE plpgsql IMMUTABLE STRICT PARALLEL SAFE AS "
+        "$function$ BEGIN RETURN input_value; END $function$;");
     exec_sql(ctx,
         "INSERT INTO doc0377_slice_dst "
         "SELECT id, s[500000:500064] OPERATOR(bioseq.||) s[-64:] "
@@ -432,6 +443,157 @@ TEST_CASE("DOC0377 sliced source concatenations survive INSERT boundaries",
         REQUIRE(boundary_explain_property(
             provenance_plan, "text", "SQL conversion", "Actual Calls")
             == "1");
+    }
+
+    /* Keep a separate destination so the instrumented INSERT and its durable
+     * row can both be proved independently of the plain INSERT above. */
+    const auto concat_insert_plan = explain_text(
+        ctx,
+        "INSERT INTO doc0377_slice_plan_dst "
+        "SELECT id, s[500000:500064] OPERATOR(bioseq.||) s[-64:] "
+        "FROM doc0377_slice_src;");
+    REQUIRE(plan_line_count(
+        concat_insert_plan, "Custom Scan (BioseqSliceProject)") == 1u);
+    REQUIRE(plan_line_count(
+        concat_insert_plan, "value_1 [source] =") == 1u);
+    REQUIRE(plan_line_count(
+        concat_insert_plan, "value_2 [slice] =") == 1u);
+    REQUIRE(plan_line_count(
+        concat_insert_plan, "value_3 [slice] =") == 1u);
+    REQUIRE(plan_line_count(
+        concat_insert_plan, "value_4 [concat] =") == 1u);
+    REQUIRE(plan_line_count(concat_insert_plan, "value_5 [") == 0u);
+    const auto first_slice = plan_line_index(
+        concat_insert_plan, "value_2 [slice] =");
+    const auto tail_slice = plan_line_index(
+        concat_insert_plan, "value_3 [slice] =");
+    const auto concat_node = plan_line_index(
+        concat_insert_plan, "value_4 [concat] =");
+    REQUIRE(first_slice.has_value());
+    REQUIRE(tail_slice.has_value());
+    REQUIRE(concat_node.has_value());
+    REQUIRE(*first_slice + 2u < concat_insert_plan.size());
+    REQUIRE(*tail_slice + 2u < concat_insert_plan.size());
+    REQUIRE(*concat_node + 1u < concat_insert_plan.size());
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{concat_insert_plan}.subspan(
+            *first_slice + 1u, 1u), "Depends On") == "value_1");
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{concat_insert_plan}.subspan(
+            *first_slice + 2u, 1u), "Bounds")
+        == "lower='500000'::bigint upper='500064'::bigint");
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{concat_insert_plan}.subspan(
+            *tail_slice + 1u, 1u), "Depends On") == "value_1");
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{concat_insert_plan}.subspan(
+            *tail_slice + 2u, 1u), "Bounds")
+        == "lower='-64'::bigint upper=omitted");
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{concat_insert_plan}.subspan(
+            *concat_node + 1u, 1u), "Depends On")
+        == "value_2, value_3");
+    REQUIRE(boundary_explain_property(
+        concat_insert_plan, "packed full", "heap tuple", "Producer Value")
+        == "4");
+    REQUIRE(boundary_explain_property(
+        concat_insert_plan, "packed full", "heap tuple", "Estimated Symbols")
+        == "128");
+    REQUIRE(boundary_explain_property(
+        concat_insert_plan, "packed full", "heap tuple", "Estimated Bytes")
+        == "128 bytes");
+    REQUIRE(boundary_explain_property(
+        concat_insert_plan, "packed full", "heap tuple", "Actual Calls")
+        == "1");
+    REQUIRE(boundary_explain_property(
+        concat_insert_plan, "packed full", "heap tuple",
+        "Actual Input Symbols") == "128");
+    REQUIRE(boundary_explain_property(
+        concat_insert_plan, "packed full", "heap tuple",
+        "Actual Output Symbols") == "128");
+    REQUIRE(find_explain_property(
+        concat_insert_plan, "Planned Materialized Symbols") == "128");
+    REQUIRE(find_explain_property(
+        concat_insert_plan, "Planned Materialized Bytes") == "128 bytes");
+    const auto durable_plan_rows = query_rows(
+        ctx,
+        "SELECT id, bioseq.len(s), s::text "
+        "FROM doc0377_slice_plan_dst ORDER BY id;");
+    REQUIRE(durable_plan_rows.size() == 1u);
+    REQUIRE(durable_plan_rows.front().size() == 3u);
+    REQUIRE(durable_plan_rows.front()[0]
+        == std::optional<std::string>{"1"});
+    REQUIRE(durable_plan_rows.front()[1]
+        == std::optional<std::string>{"128"});
+    std::string expected_concat;
+    expected_concat.reserve(128u);
+    for (int repetition = 0; repetition < 32; ++repetition) {
+        expected_concat += "ACGT";
+    }
+    REQUIRE(durable_plan_rows.front()[2]
+        == std::optional<std::string>{expected_concat});
+
+    /* A cast-shaped but unrelated function remains an opaque producer.  The
+     * INSERT repair must recognize the exact registered implicit cast OID and
+     * shape, never unwrap arbitrary sequence-returning FuncExprs. */
+    const auto unrelated_cast_plan = explain_text<false>(
+        ctx,
+        "SELECT pg_temp.doc0377_unrelated_seq_cast("
+        " s[500000:500064], 3, false) FROM doc0377_slice_src;");
+    REQUIRE(plan_line_count(
+        unrelated_cast_plan, "value_1 [source] =") == 1u);
+    REQUIRE(plan_line_count(
+        unrelated_cast_plan, "value_2 [slice] =") == 1u);
+    REQUIRE(plan_line_count(
+        unrelated_cast_plan, "value_3 [source] =") == 1u);
+    const auto opaque_cast = plan_line_index(
+        unrelated_cast_plan, "value_3 [source] =");
+    REQUIRE(opaque_cast.has_value());
+    REQUIRE(*opaque_cast + 1u < unrelated_cast_plan.size());
+    REQUIRE(find_explain_property(
+        std::span<const std::string>{unrelated_cast_plan}.subspan(
+            *opaque_cast + 1u, 1u), "Depends On") == "none");
+    for (const std::string_view mechanism : {"text", "binary"}) {
+        CAPTURE(mechanism);
+        REQUIRE(boundary_explain_property(
+            unrelated_cast_plan, mechanism, "client output",
+            "Producer Value") == "3");
+    }
+
+    /* Even the exact registered OID is transparent only for PostgreSQL's
+     * implicit assignment-cast shape.  Direct SQL calls (including explicit
+     * and typmodless variants) remain opaque leaves. */
+    const std::array<std::string_view, 3> explicit_cast_sql{
+        "SELECT bioseq.seq_cast(s[500000:500064], 3, false) "
+        "FROM doc0377_slice_src;",
+        "SELECT bioseq.seq_cast(s[500000:500064], 3, true) "
+        "FROM doc0377_slice_src;",
+        "SELECT bioseq.seq_cast(s[500000:500064], -1, false) "
+        "FROM doc0377_slice_src;",
+    };
+    for (const std::string_view sql : explicit_cast_sql) {
+        CAPTURE(sql);
+        const auto explicit_cast_plan = explain_text<false>(ctx, sql);
+        REQUIRE(plan_line_count(
+            explicit_cast_plan, "value_1 [source] =") == 1u);
+        REQUIRE(plan_line_count(
+            explicit_cast_plan, "value_2 [slice] =") == 1u);
+        REQUIRE(plan_line_count(
+            explicit_cast_plan, "value_3 [source] =") == 1u);
+        REQUIRE(plan_line_count(explicit_cast_plan, "value_4 [") == 0u);
+        const auto opaque_exact_cast = plan_line_index(
+            explicit_cast_plan, "value_3 [source] =");
+        REQUIRE(opaque_exact_cast.has_value());
+        REQUIRE(*opaque_exact_cast + 1u < explicit_cast_plan.size());
+        REQUIRE(find_explain_property(
+            std::span<const std::string>{explicit_cast_plan}.subspan(
+                *opaque_exact_cast + 1u, 1u), "Depends On") == "none");
+        for (const std::string_view mechanism : {"text", "binary"}) {
+            CAPTURE(mechanism);
+            REQUIRE(boundary_explain_property(
+                explicit_cast_plan, mechanism, "client output",
+                "Producer Value") == "3");
+        }
     }
 
     const auto plan = explain_text(
