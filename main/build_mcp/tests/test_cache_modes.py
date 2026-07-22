@@ -21,40 +21,6 @@ AWS_CLANG = ("aws-x64-linux", "aws-x64-linux-debug")
 AWS_GCC = ("aws-x64-linux-gcc161", "aws-x64-linux-gcc161-debug")
 
 
-class ExternalApiPresetContractTest(unittest.TestCase):
-    def test_arm64_macos_uses_the_local_test_tree(self) -> None:
-        for machine in ("arm64", "aarch64", "ARM64"):
-            with self.subTest(machine=machine):
-                self.assertEqual(
-                    server._default_external_api_preset(
-                        "darwin", machine, "test-local-arm64"),
-                    "test-local-arm64",
-                )
-
-    def test_linux_x86_preserves_the_aws_gcc_tree(self) -> None:
-        for machine in ("x86_64", "amd64"):
-            with self.subTest(machine=machine):
-                self.assertEqual(
-                    server._default_external_api_preset(
-                        "linux", machine, "test-local-arm64"),
-                    "aws-x64-linux-gcc161",
-                )
-
-    def test_custom_local_test_tree_retains_the_hook_contract(self) -> None:
-        with mock.patch.object(
-                server, "TEST_BUILD_PRESET", "local-arm-tests"):
-            self.assertTrue(server._preset_expects_test_indexes(
-                "external-api", "local-arm-tests"))
-            self.assertTrue(server._preset_expects_test_indexes(
-                "external-api", "test-opt"))
-            self.assertFalse(server._preset_expects_test_indexes(
-                "external-api", "aws-x64-linux-gcc161"))
-
-    def test_benchmark_mode_rejects_test_tree_hooks(self) -> None:
-        self.assertFalse(server._preset_expects_test_indexes(
-            "bench", "test-opt"))
-
-
 class CachePresetContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

@@ -180,22 +180,8 @@ CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET")
 CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET_DEBUG")
-
-
-def _default_external_api_preset(host_platform: str, host_machine: str,
-                                 local_test_preset: str) -> str:
-    """Select a host-valid external API tree for supported local builders."""
-    if (host_platform == "darwin"
-            and host_machine.lower() in {"arm64", "aarch64"}):
-        return local_test_preset
-    return "aws-x64-linux-gcc161"
-
-
 EXTERNAL_API_BUILD_PRESET = os.environ.get(
-    "BIOSEQ_EXTERNAL_API_BUILD_PRESET",
-    _default_external_api_preset(
-        sys.platform, os.uname().machine, TEST_BUILD_PRESET),
-)
+    "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
 WEBSITE_BUILD_PRESET = os.environ.get(
     "BIOSEQ_WEBSITE_BUILD_PRESET", "website-aws-x64-linux")
 WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
@@ -234,7 +220,7 @@ def _default_cache_preset(core_preset: str, *, combined: bool) -> str:
 
 
 def preset_for(mode: str, debug: bool) -> str:
-    # A mode may pin an explicit preset (e.g. external-api's host-valid tree);
+    # A mode may pin an explicit preset (e.g. external-api → GCC16 toolchain);
     # an override wins outright and is not split into debug/production families.
     mode_details = MODES.get(mode)
     if mode_details is None:
@@ -985,19 +971,6 @@ def get_modes_short_documentation() -> str:
         for mode in sorted(VALID_MODES)
     )
     return f"Modes: {modes_list_str}"
-
-
-def _preset_expects_test_indexes(mode: str, active_preset: str) -> bool:
-    return (
-        MODES[mode].preset_family == "test"
-        or (
-            mode == "external-api"
-            and (
-                active_preset.startswith("test-")
-                or active_preset == TEST_BUILD_PRESET
-            )
-        )
-    )
 
 
 def post_build_targets_for(mode: str, build_only: bool) -> tuple[str, ...]:
@@ -1780,8 +1753,7 @@ def _run_build_worker(mode: str, build_only: bool = False,
         initial_clang_rt_args = _initial_clang_rt_cmake_args(
             active_preset, machine_rt_priority)
         build_ninja = active_build_dir / "build.ninja"
-        expected_test_indexes = _preset_expects_test_indexes(
-            mode, active_preset)
+        expected_test_indexes = mode_details.preset_family == "test"
         if not build_ninja.exists():
             if (active_build_dir / "CMakeCache.txt").exists():
                 _clear_cmake_configure_cache(
