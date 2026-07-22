@@ -348,6 +348,34 @@ static_assert(
     std::uint64_t{1} != extra_broadcast_query_ordinal(true, 2, 0),
     "per-row primary row 1 and the first extra broadcast query must differ");
 
+[[nodiscard]] constexpr bool dispatch_uses_per_row_query(
+        const bool active,
+        const AttrNumber raw_query_attno,
+        const bool evaluated_query) noexcept {
+    return active
+        && (raw_query_attno != InvalidAttrNumber || evaluated_query);
+}
+
+static_assert(!dispatch_uses_per_row_query(
+    false, InvalidAttrNumber, true));
+static_assert(dispatch_uses_per_row_query(
+    true, AttrNumber{1}, false));
+static_assert(dispatch_uses_per_row_query(
+    true, InvalidAttrNumber, true));
+
+[[nodiscard]] constexpr bool evaluated_mmsearch_index_policy_valid(
+        const bioseq::indexing::IndexReadRequirement requirement,
+        const bool read_sequence_index) noexcept {
+    return requirement
+            == bioseq::indexing::IndexReadRequirement::require_absent
+        && !read_sequence_index;
+}
+
+static_assert(evaluated_mmsearch_index_policy_valid(
+    bioseq::indexing::IndexReadRequirement::require_absent, false));
+static_assert(!evaluated_mmsearch_index_policy_valid(
+    bioseq::indexing::IndexReadRequirement::allow, false));
+
 enum class CursorBoundary : std::uint8_t {
     value,
     exact_eof,
@@ -733,6 +761,7 @@ public:
          */
         AttrNumber per_row_query_attno      = InvalidAttrNumber;
         bool       per_row_self_alignment   = false;
+        bool       per_row_evaluated        = false;
 
         /*
          * Typmod coalesce: when the column and the query have the same
@@ -785,6 +814,7 @@ public:
         int64_t         sequence_rowno      = -1;   /* derived from scan_slot->tts_tid; -1 when the TID was invalid */
         std::vector<char> seq_varlena;
         bool            seq_is_null         = true;
+        bool            target_from_evaluated_expression = false;
 
         /*
          * Per-row mmsearch query, populated only when MmsearchContext's
@@ -799,6 +829,7 @@ public:
          */
         std::vector<char> per_row_query_varlena;
         bool            per_row_query_is_null = true;
+        bool            query_from_evaluated_expression = false;
 
         /*
          * DOC0260 §9.1 — Phase A deferred-hydration path. Under
@@ -1049,6 +1080,24 @@ private:
     std::uint64_t explain_bucket_touched_mask      = 0;
     std::uint64_t explain_storage_bulk_fetch_calls = 0;
 
+    struct EvaluatedRowOperands {
+        Datum target = Datum{0};
+        bool target_is_null = true;
+        bool has_query_override = false;
+        Datum query = Datum{0};
+        bool query_is_null = true;
+    };
+
+    void require_evaluated_mmsearch_index_policy_() const {
+        if (!evaluated_mmsearch_index_policy_valid(
+                index_read_requirement, read_sequence_index_active)) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("evaluated bioseq mmsearch target requires no persisted target index"),
+                 errdetail("index policy must be require_absent and payload reads must be disabled")));
+        }
+    }
+
     static void require_registered_mvcc_snapshot_(Snapshot snapshot) {
         if (snapshot == nullptr
             || !IsMVCCSnapshot(snapshot)
@@ -1255,11 +1304,13 @@ private:
             Datum retained = Datum{0};
             pg_sequence_descriptor descriptor{};
             if (attno == mmsearch_context.seq_attno
-                && entry.has_seq_recipe()) {
+                && entry.has_seq_recipe()
+                && !entry.target_from_evaluated_expression) {
                 retained = entry.seq_recipe_datum;
                 descriptor = entry.seq_recipe_descriptor;
             } else if (attno == mmsearch_context.per_row_query_attno
-                && entry.has_per_row_query_recipe()) {
+                && entry.has_per_row_query_recipe()
+                && !entry.query_from_evaluated_expression) {
                 retained = entry.per_row_query_recipe_datum;
                 descriptor = entry.per_row_query_recipe_descriptor;
             } else {
@@ -1432,6 +1483,9 @@ public:
                         require_compatible_persisted
                 ? true
                 : read_sequence_index;
+        if (mmsearch_context.per_row_evaluated) {
+            require_evaluated_mmsearch_index_policy_();
+        }
         user_relid                   = scan_user_relid;
         user_main_database_oid       = scan_user_database_oid;
         user_main_tablespace_oid     = scan_user_tablespace_oid;
@@ -1528,6 +1582,7 @@ public:
         mmsearch_context.coalesced_query_varlena.clear();
         mmsearch_context.per_row_query_attno = InvalidAttrNumber;
         mmsearch_context.per_row_self_alignment = false;
+        mmsearch_context.per_row_evaluated   = false;
         mmsearch_context.active             = true;
 
         uint32_t query_bp_size = 0;
@@ -1584,6 +1639,7 @@ public:
             query_storage_unit_byte_width;
         mmsearch_context.per_row_query_attno    = per_row_query_attno;
         mmsearch_context.per_row_self_alignment = per_row_self_alignment;
+        mmsearch_context.per_row_evaluated      = false;
         mmsearch_context.active                 = true;
 
         bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::configure_mmsearch_per_row() seq_attno={} per_row_query_attno={} self_alignment={} target_typmod=({},{}) query_typmod=({},{})",
@@ -1594,6 +1650,41 @@ public:
                 static_cast<unsigned>(storage_unit_byte_width),
                 static_cast<unsigned>(query_alphabet_code),
                 static_cast<unsigned>(query_storage_unit_byte_width));
+    }
+
+    /* Evaluated target/query expressions are submitted explicitly for each
+     * passing base row.  The physical seq_attno remains source metadata and
+     * identifies the raw output attribute, but is never read as an operand by
+     * this mode. */
+    void configure_mmsearch_per_row_evaluated(
+            const AttrNumber seq_attno,
+            std::string column_name,
+            const std::uint8_t alphabet_code,
+            const std::uint8_t storage_unit_byte_width,
+            const std::uint8_t query_alphabet_code,
+            const std::uint8_t query_storage_unit_byte_width,
+            const AttrNumber primary_key_attno) {
+        if (alphabet_code != query_alphabet_code) {
+            ereport(ERROR,
+                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                 errmsg("bioseq mmsearch requires operands with the same bound alphabet")));
+        }
+        mmsearch_context.seq_attno = seq_attno;
+        mmsearch_context.primary_key_attno = primary_key_attno;
+        mmsearch_context.column_name = std::move(column_name);
+        mmsearch_context.query_varlena.clear();
+        mmsearch_context.coalesced_query_varlena.clear();
+        mmsearch_context.coalesce_active = false;
+        mmsearch_context.alphabet_code = alphabet_code;
+        mmsearch_context.storage_unit_byte_width =
+            storage_unit_byte_width;
+        mmsearch_context.query_alphabet_code = query_alphabet_code;
+        mmsearch_context.query_storage_unit_byte_width =
+            query_storage_unit_byte_width;
+        mmsearch_context.per_row_query_attno = InvalidAttrNumber;
+        mmsearch_context.per_row_self_alignment = false;
+        mmsearch_context.per_row_evaluated = true;
+        mmsearch_context.active = true;
     }
 
     /* Configure the narrow two-child BioseqBatchJoin seam. */
@@ -2048,12 +2139,22 @@ public:
                 mmsearch_context.coalesced_query_varlena.size());
     }
 
-    [[nodiscard]] bool per_row_mode() const {
-        return mmsearch_context.active
-            && mmsearch_context.per_row_query_attno != InvalidAttrNumber;
+    [[nodiscard]] bool per_row_mode() const noexcept {
+        return dispatch_uses_per_row_query(
+            mmsearch_context.active,
+            mmsearch_context.per_row_query_attno,
+            mmsearch_context.per_row_evaluated);
     }
     [[nodiscard]] AttrNumber per_row_query_attno() const {
         return mmsearch_context.per_row_query_attno;
+    }
+    [[nodiscard]] AttrNumber query_source_attno() const noexcept {
+        if (!per_row_mode()) {
+            return InvalidAttrNumber;
+        }
+        return mmsearch_context.per_row_query_attno != InvalidAttrNumber
+            ? mmsearch_context.per_row_query_attno
+            : mmsearch_context.seq_attno;
     }
     [[nodiscard]] bool coalesce_active() const {
         return mmsearch_context.coalesce_active;
@@ -2132,6 +2233,39 @@ public:
      * clone so the data outlives the next ExecScanFetch call.
      */
     [[gnu::always_inline]] inline void submit_scan(TupleTableSlot* scan_slot) {
+        submit_scan_impl_(scan_slot, nullptr);
+    }
+
+    void submit_scan_evaluated(
+            TupleTableSlot* scan_slot,
+            const Datum target,
+            const bool target_is_null,
+            const bool has_query_override,
+            const Datum query,
+            const bool query_is_null) {
+        require_evaluated_mmsearch_index_policy_();
+        if (has_query_override != per_row_mode()) {
+            ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("evaluated bioseq mmsearch query submission disagrees with its configuration"),
+                 errdetail("per_row_mode=%s has_query_override=%s",
+                    per_row_mode() ? "true" : "false",
+                    has_query_override ? "true" : "false")));
+        }
+        const EvaluatedRowOperands evaluated{
+            .target = target,
+            .target_is_null = target_is_null,
+            .has_query_override = has_query_override,
+            .query = query,
+            .query_is_null = query_is_null,
+        };
+        submit_scan_impl_(scan_slot, std::addressof(evaluated));
+    }
+
+private:
+    [[gnu::always_inline]] inline void submit_scan_impl_(
+            TupleTableSlot* scan_slot,
+            const EvaluatedRowOperands* evaluated) {
         if (!mmsearch_context.active) {
             bioseq_log<DBG>("[bioseq] pg: submit_scan called while mmsearch_context inactive; skipping");
             return;
@@ -2163,8 +2297,21 @@ public:
                 tid_to_row_number(scan_slot->tts_tid));
         }
 
-        /* Extract the target bioseq.seq column (mmsearch arg0). */
-        if (mmsearch_context.seq_attno == InvalidAttrNumber) {
+        /* ExprState NULL is authoritative for an evaluated operand.  Do not
+         * consult the physical seq attribute: it may be non-NULL while the
+         * expression is NULL, or vice versa. */
+        if (evaluated != nullptr) {
+            entry.target_from_evaluated_expression = true;
+            if (evaluated->target_is_null) {
+                entry.seq_is_null = true;
+            } else if (evaluated->target == Datum{0}) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("evaluated bioseq mmsearch target has a null Datum")));
+            } else {
+                capture_target_datum_(entry, evaluated->target);
+            }
+        } else if (mmsearch_context.seq_attno == InvalidAttrNumber) {
             entry.seq_is_null = true;
         } else {
             bool is_null = true;
@@ -2207,7 +2354,23 @@ public:
          * copied output slot. The private dispatch copy is rewidthed once to
          * the target shape when both operands bind the same alphabet.
          */
-        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+        if (evaluated != nullptr && evaluated->has_query_override) {
+            entry.query_from_evaluated_expression = true;
+            if (evaluated->query_is_null) {
+                entry.per_row_query_is_null = true;
+            } else if (evaluated->query == Datum{0}) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_CORRUPTED),
+                     errmsg("evaluated bioseq mmsearch query has a null Datum")));
+            } else {
+                /* Evaluate and retain target/query independently.  In
+                 * particular, a self-alignment may contain two different
+                 * slices of the same physical base column and must not reuse
+                 * the target recipe merely because the raw attnos match. */
+                capture_query_datum_(entry, evaluated->query);
+            }
+        } else if (mmsearch_context.per_row_query_attno
+                != InvalidAttrNumber) {
             bool query_null = true;
             Datum query_datum = slot_getattr(scan_slot,
                 mmsearch_context.per_row_query_attno, &query_null);
@@ -2332,6 +2495,7 @@ public:
         buffered_entries.push_back(std::move(entry));
     }
 
+public:
     /* True exactly when the current physical buffer must be dispatched. */
     [[nodiscard]] bool ready_to_dispatch() const noexcept {
         return buffered_entries.size() == kDispatchBatchCapacity;
@@ -2493,7 +2657,10 @@ public:
                 buffered_entries[i].hydrated_seq_hdr = out_payloads[i];
             }
 	            TupleTableSlot* sslot = buffered_entries[i].scan_slot_copy;
-	            if (sslot != nullptr) {
+                const bool preserve_raw_output = is_query
+                    ? buffered_entries[i].query_from_evaluated_expression
+                    : buffered_entries[i].target_from_evaluated_expression;
+	            if (sslot != nullptr && !preserve_raw_output) {
 	                const int idx = column_attno - 1;
 	                if (idx >= 0 && idx < sslot->tts_tupleDescriptor->natts) {
 	                    bioseq::pg_utils::pg_slot_datums_view{sslot}.set_raw(
@@ -2545,9 +2712,9 @@ public:
             per_bucket_target_requests, hydrated_target_payloads,
             /*is_query=*/false);
 
-        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+        if (per_row_mode()) {
             hydrate_one_column(rows, cache,
-                static_cast<std::int16_t>(mmsearch_context.per_row_query_attno),
+                static_cast<std::int16_t>(query_source_attno()),
                 per_bucket_query_requests, hydrated_query_payloads,
                 /*is_query=*/true);
         }
@@ -3494,7 +3661,7 @@ public:
         std::size_t query_lpu_for_hydration = lpu_for_hydration;
         std::size_t query_bytes_per_unit_for_hydration =
             bytes_per_unit_for_hydration;
-        if (mmsearch_context.per_row_query_attno != InvalidAttrNumber) {
+        if (per_row_mode()) {
             pgseq_t::dispatch_instance(
                 mmsearch_context.query_alphabet_code,
                 mmsearch_context.query_storage_unit_byte_width,
@@ -3679,7 +3846,7 @@ public:
         scanner_pg_ctx.mmsearch_seq_attno =
             static_cast<std::int16_t>(mmsearch_context.seq_attno);
         scanner_pg_ctx.mmsearch_query_attno =
-            static_cast<std::int16_t>(mmsearch_context.per_row_query_attno);
+            static_cast<std::int16_t>(query_source_attno());
         scanner_pg_ctx.query_alphabet_code =
             mmsearch_context.query_alphabet_code;
         scanner_pg_ctx.query_storage_unit_byte_width =

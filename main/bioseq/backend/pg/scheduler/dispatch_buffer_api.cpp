@@ -170,6 +170,24 @@ void DispatchBufferRuntime::configure_mmsearch_per_row(
         primary_key_attno);
 }
 
+void DispatchBufferRuntime::configure_mmsearch_per_row_evaluated(
+    const AttrNumber seq_attno,
+    std::string column_name,
+    const std::uint8_t alphabet_code,
+    const std::uint8_t storage_unit_byte_width,
+    const std::uint8_t query_alphabet_code,
+    const std::uint8_t query_storage_unit_byte_width,
+    const AttrNumber primary_key_attno) {
+    as_buffer(impl)->configure_mmsearch_per_row_evaluated(
+        seq_attno,
+        std::move(column_name),
+        alphabet_code,
+        storage_unit_byte_width,
+        query_alphabet_code,
+        query_storage_unit_byte_width,
+        primary_key_attno);
+}
+
 void DispatchBufferRuntime::apply_typmod_coalesce(
     std::vector<char> coalesced_bytes) {
     as_buffer(impl)->apply_typmod_coalesce(std::move(coalesced_bytes));
@@ -261,6 +279,22 @@ void DispatchBufferRuntime::abandon_join_runtime_after_pg_error_noexcept()
 
 void DispatchBufferRuntime::submit_scan(TupleTableSlot* scan_slot) {
     as_buffer(impl)->submit_scan(scan_slot);
+}
+
+void DispatchBufferRuntime::submit_scan_evaluated(
+    TupleTableSlot* scan_slot,
+    const Datum target,
+    const bool target_is_null,
+    const bool has_query_override,
+    const Datum query,
+    const bool query_is_null) {
+    as_buffer(impl)->submit_scan_evaluated(
+        scan_slot,
+        target,
+        target_is_null,
+        has_query_override,
+        query,
+        query_is_null);
 }
 
 bool DispatchBufferRuntime::ready_to_dispatch() const {
