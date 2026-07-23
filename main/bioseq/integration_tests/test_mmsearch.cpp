@@ -906,15 +906,18 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     const auto canonical_rows = hoe_seed_rows();
     std::string target = canonical_rows.back().sequences.front();
     target.append(16384u, 'A');
+    const std::string projected_source(16384u, 'C');
+    const std::string projected_slice = projected_source.substr(7u, 16u);
     create_seq_table(
         ctx,
         seq_table_spec{
             .name = std::string{kDoc0377OutputRestore},
             .typmod = {.alphabet = "dna4", .width = 32},
-            .seq_columns = 1,
+            .seq_columns = 3,
             .using_bioseq = true,
         },
-        {seq_row{.pk = 5, .sequences = {target}}});
+        {seq_row{.pk = 5, .sequences = {
+            target, projected_source, std::string{kHoeProbeSequence}}}});
 
     /* Coordinate-only plans intentionally retain chain-only candidates, whose
      * absent base alignment may carry the documented 0/0 sentinel.  Request
@@ -924,26 +927,96 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     const std::string output_sql = fmt::format(
         "SELECT pk, bioseq.target_start(seq0), "
         "       bioseq.target_end(seq0), seq0::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
         "       bioseq.has_cigar(seq0) "
         "FROM {} "
         "WHERE mmsearch(seq0, {}, "
         " aligner_options(best_n=>5,index_read_requirement=>1)) "
         "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
         kDoc0377OutputRestore, hoe_probe_literal());
+    const std::string evaluated_output_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0[0:]), "
+        "       bioseq.target_end(seq0[0:]), (seq0[0:32])::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0[0:]) "
+        "FROM {} "
+        "WHERE mmsearch(seq0[0:], {}, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0[0:]), "
+        "         bioseq.target_end(seq0[0:]);",
+        kDoc0377OutputRestore, hoe_probe_literal());
+    const std::string raw_var_pair_output_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0), "
+        "       bioseq.target_end(seq0), seq0::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, seq2, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
+        kDoc0377OutputRestore);
+    const std::string transformed_target_raw_query_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0[0:]), "
+        "       bioseq.target_end(seq0[0:]), (seq0[0:32])::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0[0:]) "
+        "FROM {} "
+        "WHERE mmsearch(seq0[0:], seq2, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0[0:]), "
+        "         bioseq.target_end(seq0[0:]);",
+        kDoc0377OutputRestore);
+    const std::string raw_target_transformed_query_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0), "
+        "       bioseq.target_end(seq0), (seq0[0:32])::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, seq2[0:], "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
+        kDoc0377OutputRestore);
     const auto plan = explain_text<false>(ctx, output_sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+    const auto evaluated_plan = explain_text<false>(ctx, evaluated_output_sql);
+    REQUIRE(plan_contains(evaluated_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        evaluated_plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE_FALSE(plan_contains(evaluated_plan, "Filter: mmsearch"));
+    for (const auto& mixed_operand_sql : {
+            raw_var_pair_output_sql,
+            transformed_target_raw_query_sql,
+            raw_target_transformed_query_sql}) {
+        const auto mixed_plan = explain_text<false>(ctx, mixed_operand_sql);
+        REQUIRE(plan_contains(mixed_plan, "Custom Scan (BioseqScan)"));
+        REQUIRE(plan_contains(
+            mixed_plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE_FALSE(plan_contains(mixed_plan, "Filter: mmsearch"));
+    }
 
-    const auto require_exact_outputs = [&target](const rowset_t& outputs) {
+    const auto require_exact_outputs = [&projected_slice](
+            const rowset_t& outputs,
+            const std::string& expected_target_projection) {
         REQUIRE(outputs.size() >= 3u);
         std::set<long long> starts;
         for (const auto& row : outputs) {
-            REQUIRE(row.size() == 5u);
+            REQUIRE(row.size() == 7u);
             REQUIRE(row[0] == std::optional<std::string>{"5"});
             REQUIRE(row[1].has_value());
             REQUIRE(row[2].has_value());
-            REQUIRE(row[3] == std::optional<std::string>{target});
-            REQUIRE(row[4] == std::optional<std::string>{"t"});
+            REQUIRE(row[3]
+                == std::optional<std::string>{expected_target_projection});
+            REQUIRE(row[4] == std::optional<std::string>{projected_slice});
+            REQUIRE(row[5]
+                == std::optional<std::string>{std::string{kHoeProbeSequence}});
+            REQUIRE(row[6] == std::optional<std::string>{"t"});
             const long long start = std::stoll(*row[1]);
             const long long end = std::stoll(*row[2]);
             REQUIRE(start >= 0);
@@ -955,7 +1028,7 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
 
     reset_mmsearch_source_counters(ctx);
     const rowset_t baseline = query_rows(ctx, output_sql);
-    require_exact_outputs(baseline);
+    require_exact_outputs(baseline, target);
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_context_resets")
         == static_cast<std::int64_t>(baseline.size()));
@@ -967,10 +1040,72 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_restore_mismatches") == 0);
     REQUIRE(mmsearch_source_counter(ctx, "scan_providers_created") == 1);
-    REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 1);
+    /* Source domains are keyed by physical attribute.  The three projected
+     * sequence columns therefore establish three reusable domains under the
+     * one scan provider. */
+    REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 3);
     REQUIRE(mmsearch_source_counter(ctx, "domains_reused")
         >= static_cast<std::int64_t>(baseline.size() - 1u));
     require_mmsearch_source_resources_balanced(ctx);
+
+    /* Raw target, raw per-row query, and an unrelated BSS3 output occupy
+     * three distinct physical columns.  Their locator snapshots form one
+     * duplicate-free output union and every multi-match row sees the same
+     * stable values after per-output restoration. */
+    reset_mmsearch_source_counters(ctx);
+    const rowset_t raw_var_pair = query_rows(ctx, raw_var_pair_output_sql);
+    REQUIRE(raw_var_pair == baseline);
+    require_exact_outputs(raw_var_pair, target);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets")
+        == static_cast<std::int64_t>(raw_var_pair.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions")
+        == static_cast<std::int64_t>(raw_var_pair.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    require_mmsearch_source_resources_balanced(ctx);
+
+    /* The transformed target consumes seq0 before submission while seq1 is
+     * output-only.  The same seq0 locator is also needed by an independent
+     * output slice.  Both physical columns must be restored into the buffered
+     * row and promoted under each MatchResult's fresh output context. */
+    reset_mmsearch_source_counters(ctx);
+    const rowset_t evaluated = query_rows(ctx, evaluated_output_sql);
+    REQUIRE(evaluated.size() == baseline.size());
+    require_exact_outputs(evaluated, target.substr(0u, 32u));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets")
+        == static_cast<std::int64_t>(evaluated.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions")
+        == static_cast<std::int64_t>(evaluated.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_pg_error_restores") == 0);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    require_mmsearch_source_resources_balanced(ctx);
+
+    /* Evaluated submission executes ExprStates for both operands.  Exercise
+     * each asymmetric shape so the raw-Var side is promoted too, then restored
+     * with the transformed side before the stable locator row is buffered. */
+    for (const auto& mixed_operand_sql : {
+            transformed_target_raw_query_sql,
+            raw_target_transformed_query_sql}) {
+        reset_mmsearch_source_counters(ctx);
+        const rowset_t mixed_rows = query_rows(ctx, mixed_operand_sql);
+        REQUIRE(mixed_rows.size() == baseline.size());
+        require_exact_outputs(mixed_rows, target.substr(0u, 32u));
+        REQUIRE(mmsearch_source_counter(
+            ctx, "mmsearch_output_context_resets")
+            == static_cast<std::int64_t>(mixed_rows.size()));
+        REQUIRE(mmsearch_source_counter(
+            ctx, "mmsearch_output_locator_promotions")
+            == static_cast<std::int64_t>(mixed_rows.size()));
+        REQUIRE(mmsearch_source_counter(
+            ctx, "mmsearch_output_restore_mismatches") == 0);
+        require_mmsearch_source_resources_balanced(ctx);
+    }
 
     /* This one-shot ERROR occurs after the locator Datum was replaced by an
      * EOH and before ExecProject.  The PG_CATCH path must put the exact
@@ -979,7 +1114,7 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     exec_sql(ctx,
         "SELECT bioseq_internal.arm_sequence_source_failure("
         " 'mmsearch_output_after_promotion');");
-    const auto injected = sql_error(ctx, output_sql);
+    const auto injected = sql_error(ctx, raw_var_pair_output_sql);
     REQUIRE(injected.sqlstate == "XX000");
     REQUIRE(injected.contains(
         "injected PostgreSQL sequence source-domain failure"));
@@ -997,9 +1132,9 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
 
     /* Do not disarm before this replay: success proves the fixture was
      * consumed before raising and cannot poison a later scan in the backend. */
-    const rowset_t replay = query_rows(ctx, output_sql);
-    REQUIRE(replay == baseline);
-    require_exact_outputs(replay);
+    const rowset_t replay = query_rows(ctx, raw_var_pair_output_sql);
+    REQUIRE(replay == raw_var_pair);
+    require_exact_outputs(replay, target);
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_context_resets")
         == 1 + static_cast<std::int64_t>(replay.size()));

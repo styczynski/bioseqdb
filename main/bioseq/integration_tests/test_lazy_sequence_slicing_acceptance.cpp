@@ -353,8 +353,9 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
         " id integer PRIMARY KEY, seq bioseq.seq('dna4',32)); "
         "INSERT INTO doc0377_match_binding_queries VALUES "
         " (1, '{}'::bioseq.seq('dna4',32)),"
-        " (2, '{}'::bioseq.seq('dna4',32));",
-        motif, short_motif));
+        " (2, '{}'::bioseq.seq('dna4',32)),"
+        " (3, '{}'::bioseq.seq('dna4',32));",
+        motif, short_motif, motif));
     exec_sql(ctx,
         "SET max_parallel_workers_per_gather = 0; "
         "SET bioseq.read_sequence_index = off; "
@@ -651,6 +652,121 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
     REQUIRE(*tail_exact.front()[2] != "!UNEXPECTED!");
     REQUIRE(raw_exact.front()[2] != tail_exact.front()[2]);
 
+    /* A parameterized baserel candidate sees both the base PARAM_EXTERN owner
+     * and the higher sliced join owner through ParamPathInfo.  Their distinct
+     * RestrictInfo frontiers must be decided before query operand shape; each
+     * exact helper then binds to its own MatchResult. */
+    exec_sql(ctx,
+        "SET plan_cache_mode = force_generic_plan; "
+        "PREPARE doc0377_base_param_sliced_join(bioseq.seq) AS "
+        "SELECT t.pk, q.id, "
+        "       bioseq.query_len(t.seq0), "
+        "       bioseq.target_len(t.seq0), bioseq.cigar(t.seq0), "
+        "       bioseq.query_len(t.seq0[128:224]), "
+        "       bioseq.target_len(t.seq0[128:224]), "
+        "       bioseq.cigar(t.seq0[128:224]) "
+        "FROM doc0377_match_binding_target AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=2 AND mmsearch(t.seq0[128:224], q.seq[0:]) "
+        "WHERE mmsearch(t.seq0, $1) "
+        "ORDER BY t.pk;");
+    const std::string base_param_execution = fmt::format(
+        "EXECUTE doc0377_base_param_sliced_join({});",
+        format_literal(
+            motif, seq_typmod{.alphabet = "dna4", .width = 32}));
+    const auto base_param_plan = explain_text<false>(
+        ctx, base_param_execution);
+    REQUIRE(std::count_if(
+        base_param_plan.begin(), base_param_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos;
+        }) == 1);
+    REQUIRE(std::count_if(
+        base_param_plan.begin(), base_param_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqScan)")
+                != std::string::npos;
+        }) == 1);
+    const auto base_param_rows = query_rows(ctx, base_param_execution);
+    REQUIRE(base_param_rows.size() == 1u);
+    REQUIRE(base_param_rows.front()
+        == std::vector<std::optional<std::string>>{
+            std::optional<std::string>{"1"},
+            std::optional<std::string>{"2"},
+            raw_exact.front()[0], raw_exact.front()[1], raw_exact.front()[2],
+            tail_exact.front()[0], tail_exact.front()[1],
+            tail_exact.front()[2]});
+    exec_sql(ctx,
+        "DEALLOCATE doc0377_base_param_sliced_join; "
+        "RESET plan_cache_mode;");
+
+    /* The same physical/recipe target can still belong to two frontiers when
+     * the base restriction has a Const query and the higher join evaluates a
+     * sliced query recipe.  This is not the legacy jointly owned fallback:
+     * the plan must contain one owner at each frontier and no executable SQL
+     * mmsearch filter. */
+    const std::string base_const_same_target_sql = fmt::format(
+        "SELECT t.pk, q.id "
+        "FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch(t.seq0, q.seq[0:]) "
+        "WHERE mmsearch(t.seq0, {}) "
+        "ORDER BY t.pk, q.id",
+        target_table,
+        format_literal(
+            motif, seq_typmod{.alphabet = "dna4", .width = 32}));
+    const auto base_const_same_target_plan = explain_text<false>(
+        ctx, base_const_same_target_sql);
+    REQUIRE(std::count_if(
+        base_const_same_target_plan.begin(),
+        base_const_same_target_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos;
+        }) == 1);
+    REQUIRE(std::count_if(
+        base_const_same_target_plan.begin(),
+        base_const_same_target_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqScan)")
+                != std::string::npos;
+        }) == 1);
+    REQUIRE_FALSE(plan_contains(
+        base_const_same_target_plan, "Filter: mmsearch"));
+    REQUIRE_FALSE(plan_contains(
+        base_const_same_target_plan, "Join Filter: mmsearch"));
+    /* Without a match-result helper both owners retain the full hit and the
+     * strong chain-only candidate.  Independent owner frontiers therefore
+     * compose as the Cartesian MatchResult multiset, rather than executing
+     * either RestrictInfo twice. */
+    const auto base_const_rows = query_rows(ctx, fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE mmsearch(t.seq0, {}) "
+        "ORDER BY t.pk",
+        target_table,
+        format_literal(
+            motif, seq_typmod{.alphabet = "dna4", .width = 32})));
+    const auto sliced_query_rows = query_rows(ctx, fmt::format(
+        "SELECT t.pk, q.id FROM {} AS t "
+        "INNER JOIN doc0377_match_binding_queries AS q "
+        "ON q.id=1 AND mmsearch(t.seq0, q.seq[0:]) "
+        "ORDER BY t.pk, q.id",
+        target_table));
+    REQUIRE(base_const_rows.size() == 2u);
+    REQUIRE(sliced_query_rows.size() == 2u);
+    const auto base_const_same_target_rows = query_rows(
+        ctx, base_const_same_target_sql);
+    REQUIRE(base_const_same_target_rows.size()
+        == base_const_rows.size() * sliced_query_rows.size());
+    REQUIRE(std::all_of(
+        base_const_same_target_rows.begin(),
+        base_const_same_target_rows.end(),
+        [](const auto& row) {
+            return row == std::vector<std::optional<std::string>>{
+                std::optional<std::string>{"1"},
+                std::optional<std::string>{"1"}};
+        }));
+
     /* A parenthesized, collapse-disabled join tree creates two owner nodes in
      * one PlannerInfo and therefore one stable-binding scope.  The inner raw
      * owner aligns the 224-letter whole source; the outer transformed owner
@@ -697,6 +813,47 @@ TEST_CASE("DOC0377 sliced mmsearch helpers bind one stable owner",
     REQUIRE(prepared_first == nested_rows);
     REQUIRE(prepared_second == nested_rows);
     exec_sql(ctx, "DEALLOCATE doc0377_exact_match_owners;");
+
+    /* Three pairwise-distinct PPI required-relids sets are three owning
+     * frontiers, not a three-call stack in the deepest baserel candidate. */
+    const std::string three_owner_sql = fmt::format(
+        "SELECT t.pk, q1.id, q2.id, q3.id, "
+        "       bioseq.query_len(t.seq0), "
+        "       bioseq.target_len(t.seq0), bioseq.cigar(t.seq0), "
+        "       bioseq.query_len(t.seq0[128:224]), "
+        "       bioseq.target_len(t.seq0[128:224]), "
+        "       bioseq.cigar(t.seq0[128:224]), "
+        "       bioseq.query_len(t.seq0[0:128]), "
+        "       bioseq.target_len(t.seq0[0:128]), "
+        "       bioseq.cigar(t.seq0[0:128]) "
+        "FROM (({} AS t "
+        " INNER JOIN doc0377_match_binding_queries AS q1 "
+        " ON q1.id=1 AND mmsearch(t.seq0,q1.seq)) "
+        " INNER JOIN doc0377_match_binding_queries AS q2 "
+        " ON q2.id=2 AND mmsearch(t.seq0[128:224],q2.seq)) "
+        "INNER JOIN doc0377_match_binding_queries AS q3 "
+        "ON q3.id=3 AND mmsearch(t.seq0[0:128],q3.seq) "
+        "ORDER BY t.pk",
+        target_table);
+    const auto three_owner_plan = explain_text<false>(ctx, three_owner_sql);
+    REQUIRE(std::count_if(
+        three_owner_plan.begin(), three_owner_plan.end(),
+        [](const std::string& line) {
+            return line.find("Custom Scan (BioseqBatchJoin)")
+                != std::string::npos;
+        }) == 3);
+    const auto three_owner_rows = query_rows(ctx, three_owner_sql);
+    REQUIRE(three_owner_rows.size() == 1u);
+    REQUIRE(three_owner_rows.front()
+        == std::vector<std::optional<std::string>>{
+            std::optional<std::string>{"1"},
+            std::optional<std::string>{"1"},
+            std::optional<std::string>{"2"},
+            std::optional<std::string>{"3"},
+            raw_exact.front()[0], raw_exact.front()[1], raw_exact.front()[2],
+            tail_exact.front()[0], tail_exact.front()[1], tail_exact.front()[2],
+            exact_rows.front()[0], exact_rows.front()[3],
+            exact_rows.front()[9]});
 
     /* Force a safe SortPath on the route from the raw descendant owner to the
      * transformed owner.  The exact inner helper identities must survive each
