@@ -799,6 +799,32 @@ TEST_CASE(
 }
 
 TEST_CASE(
+    "exact SIMD primary backtracking masks inactive gather indices",
+    "[chaining][simd][exact][backtrack][masked-gather][regression]")
+{
+    const hn::ScalableTag<std::int32_t> d;
+    const std::size_t lanes = hn::Lanes(d);
+    REQUIRE(lanes >= 2u);
+
+    auto params = exact_params();
+    params.max_chain_skip = 10000;
+    const std::size_t group_count = 2u * lanes + 1u;
+    const auto anchors = equal_score_tie_fixture(group_count);
+    const auto expected = run_scalar(anchors, params);
+    const auto actual = run_simd(anchors, params);
+
+    require_same_outputs(
+        actual, expected, "masked primary backtrack gather");
+    require_no_forbidden_scalar_work(actual.proof);
+    REQUIRE_FALSE(actual.chains.empty());
+    REQUIRE(
+        actual.chains.front().anchor_count
+        == static_cast<std::int32_t>(group_count));
+    REQUIRE(actual.proof.backtrack_path_vector_batches > 1u);
+    REQUIRE(actual.proof.backtrack_primary_contiguous_batches == 0u);
+}
+
+TEST_CASE(
     "SIMD backtracking keeps zero-threshold visited starts observable",
     "[chaining][simd][exact][backtrack][visited-starts][zero-threshold]")
 {

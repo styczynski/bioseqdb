@@ -438,6 +438,25 @@ void require_no_current_compatible_persisted_index(
         table, kDoc0377LazyQueries);
 }
 
+[[nodiscard]] std::string doc0377_base_alignment_sql(
+        const std::string_view table,
+        const std::string_view target_expression,
+        const std::string_view query_expression,
+        const std::string_view residual_expression = {}) {
+    const std::string residual = residual_expression.empty()
+        ? std::string{}
+        : fmt::format("{} AND ", residual_expression);
+    return fmt::format(
+        "SELECT t.pk, bioseq.query_start({2}), bioseq.query_end({2}), "
+        "bioseq.target_start({2}), bioseq.target_end({2}), "
+        "bioseq.is_reverse({2}), bioseq.cigar({2}), "
+        "bioseq.has_cigar({2}) "
+        "FROM {0} AS t WHERE {1}mmsearch({2}, {3}, "
+        "aligner_options(index_read_requirement => 1)) "
+        "ORDER BY 2, 3, 4, 5, 6, 7;",
+        table, residual, target_expression, query_expression);
+}
+
 [[nodiscard]] std::string doc0377_high_entropy_sequence(
         const std::size_t length) {
     constexpr std::string_view bases = "ACGT";
@@ -887,15 +906,18 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     const auto canonical_rows = hoe_seed_rows();
     std::string target = canonical_rows.back().sequences.front();
     target.append(16384u, 'A');
+    const std::string projected_source(16384u, 'C');
+    const std::string projected_slice = projected_source.substr(7u, 16u);
     create_seq_table(
         ctx,
         seq_table_spec{
             .name = std::string{kDoc0377OutputRestore},
             .typmod = {.alphabet = "dna4", .width = 32},
-            .seq_columns = 1,
+            .seq_columns = 3,
             .using_bioseq = true,
         },
-        {seq_row{.pk = 5, .sequences = {target}}});
+        {seq_row{.pk = 5, .sequences = {
+            target, projected_source, std::string{kHoeProbeSequence}}}});
 
     /* Coordinate-only plans intentionally retain chain-only candidates, whose
      * absent base alignment may carry the documented 0/0 sentinel.  Request
@@ -905,26 +927,96 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     const std::string output_sql = fmt::format(
         "SELECT pk, bioseq.target_start(seq0), "
         "       bioseq.target_end(seq0), seq0::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
         "       bioseq.has_cigar(seq0) "
         "FROM {} "
         "WHERE mmsearch(seq0, {}, "
         " aligner_options(best_n=>5,index_read_requirement=>1)) "
         "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
         kDoc0377OutputRestore, hoe_probe_literal());
+    const std::string evaluated_output_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0[0:]), "
+        "       bioseq.target_end(seq0[0:]), (seq0[0:32])::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0[0:]) "
+        "FROM {} "
+        "WHERE mmsearch(seq0[0:], {}, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0[0:]), "
+        "         bioseq.target_end(seq0[0:]);",
+        kDoc0377OutputRestore, hoe_probe_literal());
+    const std::string raw_var_pair_output_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0), "
+        "       bioseq.target_end(seq0), seq0::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, seq2, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
+        kDoc0377OutputRestore);
+    const std::string transformed_target_raw_query_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0[0:]), "
+        "       bioseq.target_end(seq0[0:]), (seq0[0:32])::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0[0:]) "
+        "FROM {} "
+        "WHERE mmsearch(seq0[0:], seq2, "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0[0:]), "
+        "         bioseq.target_end(seq0[0:]);",
+        kDoc0377OutputRestore);
+    const std::string raw_target_transformed_query_sql = fmt::format(
+        "SELECT pk, bioseq.target_start(seq0), "
+        "       bioseq.target_end(seq0), (seq0[0:32])::text, "
+        "       (seq1[7:23])::text, "
+        "       seq2::text, "
+        "       bioseq.has_cigar(seq0) "
+        "FROM {} "
+        "WHERE mmsearch(seq0, seq2[0:], "
+        " aligner_options(best_n=>5,index_read_requirement=>1)) "
+        "ORDER BY bioseq.target_start(seq0), bioseq.target_end(seq0);",
+        kDoc0377OutputRestore);
     const auto plan = explain_text<false>(ctx, output_sql);
     REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqSliceProject)"));
     REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+    const auto evaluated_plan = explain_text<false>(ctx, evaluated_output_sql);
+    REQUIRE(plan_contains(evaluated_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        evaluated_plan, "Custom Scan (BioseqSliceProject)"));
+    REQUIRE_FALSE(plan_contains(evaluated_plan, "Filter: mmsearch"));
+    for (const auto& mixed_operand_sql : {
+            raw_var_pair_output_sql,
+            transformed_target_raw_query_sql,
+            raw_target_transformed_query_sql}) {
+        const auto mixed_plan = explain_text<false>(ctx, mixed_operand_sql);
+        REQUIRE(plan_contains(mixed_plan, "Custom Scan (BioseqScan)"));
+        REQUIRE(plan_contains(
+            mixed_plan, "Custom Scan (BioseqSliceProject)"));
+        REQUIRE_FALSE(plan_contains(mixed_plan, "Filter: mmsearch"));
+    }
 
-    const auto require_exact_outputs = [&target](const rowset_t& outputs) {
+    const auto require_exact_outputs = [&projected_slice](
+            const rowset_t& outputs,
+            const std::string& expected_target_projection) {
         REQUIRE(outputs.size() >= 3u);
         std::set<long long> starts;
         for (const auto& row : outputs) {
-            REQUIRE(row.size() == 5u);
+            REQUIRE(row.size() == 7u);
             REQUIRE(row[0] == std::optional<std::string>{"5"});
             REQUIRE(row[1].has_value());
             REQUIRE(row[2].has_value());
-            REQUIRE(row[3] == std::optional<std::string>{target});
-            REQUIRE(row[4] == std::optional<std::string>{"t"});
+            REQUIRE(row[3]
+                == std::optional<std::string>{expected_target_projection});
+            REQUIRE(row[4] == std::optional<std::string>{projected_slice});
+            REQUIRE(row[5]
+                == std::optional<std::string>{std::string{kHoeProbeSequence}});
+            REQUIRE(row[6] == std::optional<std::string>{"t"});
             const long long start = std::stoll(*row[1]);
             const long long end = std::stoll(*row[2]);
             REQUIRE(start >= 0);
@@ -936,7 +1028,7 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
 
     reset_mmsearch_source_counters(ctx);
     const rowset_t baseline = query_rows(ctx, output_sql);
-    require_exact_outputs(baseline);
+    require_exact_outputs(baseline, target);
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_context_resets")
         == static_cast<std::int64_t>(baseline.size()));
@@ -948,10 +1040,72 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_restore_mismatches") == 0);
     REQUIRE(mmsearch_source_counter(ctx, "scan_providers_created") == 1);
-    REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 1);
+    /* Source domains are keyed by physical attribute.  The three projected
+     * sequence columns therefore establish three reusable domains under the
+     * one scan provider. */
+    REQUIRE(mmsearch_source_counter(ctx, "domains_created") == 3);
     REQUIRE(mmsearch_source_counter(ctx, "domains_reused")
         >= static_cast<std::int64_t>(baseline.size() - 1u));
     require_mmsearch_source_resources_balanced(ctx);
+
+    /* Raw target, raw per-row query, and an unrelated BSS3 output occupy
+     * three distinct physical columns.  Their locator snapshots form one
+     * duplicate-free output union and every multi-match row sees the same
+     * stable values after per-output restoration. */
+    reset_mmsearch_source_counters(ctx);
+    const rowset_t raw_var_pair = query_rows(ctx, raw_var_pair_output_sql);
+    REQUIRE(raw_var_pair == baseline);
+    require_exact_outputs(raw_var_pair, target);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets")
+        == static_cast<std::int64_t>(raw_var_pair.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions")
+        == static_cast<std::int64_t>(raw_var_pair.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    require_mmsearch_source_resources_balanced(ctx);
+
+    /* The transformed target consumes seq0 before submission while seq1 is
+     * output-only.  The same seq0 locator is also needed by an independent
+     * output slice.  Both physical columns must be restored into the buffered
+     * row and promoted under each MatchResult's fresh output context. */
+    reset_mmsearch_source_counters(ctx);
+    const rowset_t evaluated = query_rows(ctx, evaluated_output_sql);
+    REQUIRE(evaluated.size() == baseline.size());
+    require_exact_outputs(evaluated, target.substr(0u, 32u));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_context_resets")
+        == static_cast<std::int64_t>(evaluated.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_locator_promotions")
+        == static_cast<std::int64_t>(evaluated.size()));
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_pg_error_restores") == 0);
+    REQUIRE(mmsearch_source_counter(
+        ctx, "mmsearch_output_restore_mismatches") == 0);
+    require_mmsearch_source_resources_balanced(ctx);
+
+    /* Evaluated submission executes ExprStates for both operands.  Exercise
+     * each asymmetric shape so the raw-Var side is promoted too, then restored
+     * with the transformed side before the stable locator row is buffered. */
+    for (const auto& mixed_operand_sql : {
+            transformed_target_raw_query_sql,
+            raw_target_transformed_query_sql}) {
+        reset_mmsearch_source_counters(ctx);
+        const rowset_t mixed_rows = query_rows(ctx, mixed_operand_sql);
+        REQUIRE(mixed_rows.size() == baseline.size());
+        require_exact_outputs(mixed_rows, target.substr(0u, 32u));
+        REQUIRE(mmsearch_source_counter(
+            ctx, "mmsearch_output_context_resets")
+            == static_cast<std::int64_t>(mixed_rows.size()));
+        REQUIRE(mmsearch_source_counter(
+            ctx, "mmsearch_output_locator_promotions")
+            == static_cast<std::int64_t>(mixed_rows.size()));
+        REQUIRE(mmsearch_source_counter(
+            ctx, "mmsearch_output_restore_mismatches") == 0);
+        require_mmsearch_source_resources_balanced(ctx);
+    }
 
     /* This one-shot ERROR occurs after the locator Datum was replaced by an
      * EOH and before ExecProject.  The PG_CATCH path must put the exact
@@ -960,7 +1114,7 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
     exec_sql(ctx,
         "SELECT bioseq_internal.arm_sequence_source_failure("
         " 'mmsearch_output_after_promotion');");
-    const auto injected = sql_error(ctx, output_sql);
+    const auto injected = sql_error(ctx, raw_var_pair_output_sql);
     REQUIRE(injected.sqlstate == "XX000");
     REQUIRE(injected.contains(
         "injected PostgreSQL sequence source-domain failure"));
@@ -978,9 +1132,9 @@ TEST_CASE("DOC0377 locator output survives every multi-match context reset",
 
     /* Do not disarm before this replay: success proves the fixture was
      * consumed before raising and cannot poison a later scan in the backend. */
-    const rowset_t replay = query_rows(ctx, output_sql);
-    REQUIRE(replay == baseline);
-    require_exact_outputs(replay);
+    const rowset_t replay = query_rows(ctx, raw_var_pair_output_sql);
+    REQUIRE(replay == raw_var_pair);
+    require_exact_outputs(replay, target);
     REQUIRE(mmsearch_source_counter(
         ctx, "mmsearch_output_context_resets")
         == 1 + static_cast<std::int64_t>(replay.size()));
@@ -3993,14 +4147,567 @@ TEST_CASE("DOC0377 sliced concat reverse mmsearch preserves coordinates across G
     }
 }
 
-TEST_CASE("DOC0377 transformed base-relation mmsearch fails closed",
-          "[mmsearch][slice][base-relation][error]") {
-    auto ctx = fresh_context({kHoe});
-    seed_hoe_fixture(ctx, kHoe);
-    const auto error = sql_error(ctx, fmt::format(
-        "SELECT pk FROM {} WHERE mmsearch(seq0[1:], {});",
-        kHoe, hoe_probe_literal()));
-    REQUIRE(error.sqlstate == "0A000");
+TEST_CASE("DOC0377 base-local sliced mmsearch matches a flat logical oracle",
+          "[mmsearch][slice][base-relation][coordinates][cigar][parity]"
+          "[algorithms][doc0377]") {
+    auto ctx = fresh_context(
+        {kDoc0377TransformTarget, kDoc0377OracleTarget});
+    const std::string source = doc0377_high_entropy_sequence(384u);
+    const std::string logical_target = source.substr(1u);
+    constexpr std::size_t query_source_offset = 97u;
+    constexpr std::size_t query_length = 96u;
+    const std::string query = source.substr(
+        query_source_offset, query_length);
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.read_sequence_index=on;"
+        "SET bioseq.aligner.min_chain_score=20;");
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377TransformTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {source}}});
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377OracleTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {logical_target}}});
+
+    REQUIRE(query_scalar_int(ctx, fmt::format(
+        "SELECT bioseq.update_index('{}'::regclass,"
+        "'minimizers_per_fragment');",
+        kDoc0377TransformTarget)) == 1);
+    exec_sql(ctx, fmt::format(
+        "SELECT bioseq.set_active_read_index('{}'::regclass,"
+        "'minimizers_per_fragment');",
+        kDoc0377TransformTarget));
+    REQUIRE(index_table_row_count(
+        ctx, "minimizers_per_fragment", kDoc0377TransformTarget) > 0);
+    const std::string raw_control = fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE mmsearch(t.seq0, {}, "
+        "aligner_options(index_read_requirement=>0));",
+        kDoc0377TransformTarget, query_literal);
+    const auto raw_plan = explain_text<true>(ctx, raw_control);
+    REQUIRE(plan_contains(
+        raw_plan,
+        "requested_index_source=persisted actual_index_source=persisted"));
+    REQUIRE(plan_contains(
+        raw_plan, "Index outcomes [targets=1 persisted=1"));
+    const auto raw_stats = last_alignment_stats(ctx);
+    REQUIRE(raw_stats.size() == 20u);
+    for (const auto& stage : raw_stats) {
+        REQUIRE(stage[18].value_or("") == "persisted");
+        REQUIRE(stage[19].value_or("") == "persisted");
+    }
+    REQUIRE(stats_i64(raw_stats.front(), 45) == 1);
+    REQUIRE(stats_i64(raw_stats.front(), 46) == 0);
+    REQUIRE(stats_i64(raw_stats.front(), 47) == 0);
+
+    const long long mpf_rows_before = index_table_row_count(
+        ctx, "minimizers_per_fragment", kDoc0377TransformTarget);
+    const long long mps_rows_before = index_table_row_count(
+        ctx, "minimizers_per_sequence", kDoc0377TransformTarget);
+    const rowset_t age_log_before = query_rows(ctx, fmt::format(
+        "SELECT index_name,last_updated::text "
+        "FROM bioseq_internal.metadata_age_log "
+        "WHERE user_relid='{}'::regclass AND column_attno=2 "
+        "ORDER BY index_name;",
+        kDoc0377TransformTarget));
+    const long long async_waiting_before = query_scalar_int(
+        ctx,
+        "SELECT async_persist_jobs_waiting FROM bioseq.scheduler_stats();");
+
+    const std::string transformed = doc0377_base_alignment_sql(
+        kDoc0377TransformTarget, "t.seq0[1:]", query_literal);
+    const std::string oracle = doc0377_base_alignment_sql(
+        kDoc0377OracleTarget, "t.seq0", query_literal);
+    const auto plan = explain_text<true>(ctx, transformed);
+    REQUIRE(std::count_if(
+        plan.begin(), plan.end(), [](const std::string& line) {
+            return line.find("Custom Scan (BioseqScan)")
+                != std::string::npos;
+        }) == 1);
+    REQUIRE(plan_contains(
+        plan,
+        "Bioseq Match Operand Evaluation: base-local ExprState "
+        "(target then query; persisted target index absent)"));
+    REQUIRE(plan_contains(
+        plan,
+        "Bioseq Recomputed: minimizers 100% "
+        "(evaluated logical view requires index absence)"));
+    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+    REQUIRE_FALSE(plan_contains(plan, "One-Time Filter: mmsearch"));
+    REQUIRE_FALSE(plan_contains(plan, "Fetched From Sequence Index"));
+    REQUIRE(plan_contains(
+        plan,
+        "requested_index_source=recomputed actual_index_source=recomputed"));
+    REQUIRE(plan_contains(plan, "Index outcomes [targets=1 persisted=0"));
+    REQUIRE(plan_contains(plan, "missing_persisted=0 recomputed=1]"));
+    const auto transformed_stats = last_alignment_stats(ctx);
+    REQUIRE(transformed_stats.size() == 20u);
+    for (const auto& stage : transformed_stats) {
+        REQUIRE(stage[18].value_or("") == "recomputed");
+        REQUIRE(stage[19].value_or("") == "recomputed");
+        REQUIRE(stats_i64(stage, 45) == 0);
+        REQUIRE(stats_i64(stage, 46) == 0);
+        REQUIRE(stats_i64(stage, 47) == 1);
+    }
+
+    const rowset_t expected = query_rows(ctx, oracle);
+    const rowset_t actual = expect_query_invariant_under_options(
+        ctx, transformed,
+        {
+            {"bioseq.enable_vectorization", {"on", "off"}},
+            {"bioseq.enable_column_cache", {"on", "off"}},
+            {"bioseq.read_sequence_index", {"on", "off"}},
+            {"bioseq.index_async_persist", {"on", "off"}},
+            {"bioseq.recompute_async_persist", {"on", "off"}},
+        });
+    REQUIRE(actual == expected);
+    REQUIRE_FALSE(actual.empty());
+    bool found_exact_logical_hit = false;
+    for (const auto& row : actual) {
+        REQUIRE(row.size() == 8u);
+        for (const auto& value : row) REQUIRE(value.has_value());
+        REQUIRE(is_valid_cigar(*row[6]));
+        REQUIRE(*row[7] == "t");
+        found_exact_logical_hit = found_exact_logical_hit
+            || (std::stoull(*row[1]) == 0u
+                && std::stoull(*row[2]) == query_length
+                && std::stoull(*row[3]) == query_source_offset - 1u
+                && std::stoull(*row[4])
+                    == query_source_offset - 1u + query_length
+                && *row[5] == "f");
+    }
+    REQUIRE(found_exact_logical_hit);
+
+    const std::string compound_target =
+        "bioseq.reverse(bioseq.reverse("
+        "t.seq0[1:193] OPERATOR(bioseq.||) t.seq0[193:]))";
+    const std::string compound_query =
+        "bioseq.reverse_complement(bioseq.reverse_complement("
+        "t.seq0[97:193]))";
+    const std::string compound = doc0377_base_alignment_sql(
+        kDoc0377TransformTarget, compound_target, compound_query);
+    const auto compound_plan = explain_text<false>(ctx, compound);
+    REQUIRE(plan_contains(compound_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        compound_plan,
+        "Bioseq Match Operand Evaluation: base-local ExprState "
+        "(target then query; persisted target index absent)"));
+    REQUIRE_FALSE(plan_contains(compound_plan, "Filter: mmsearch"));
+    const rowset_t compound_rows = query_rows(ctx, compound);
+    REQUIRE(compound_rows == expected);
+    REQUIRE_FALSE(compound_rows.empty());
+
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (query_scalar_int(
+                ctx,
+                "SELECT async_persist_jobs_waiting "
+                "FROM bioseq.scheduler_stats();")
+                == async_waiting_before) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{25});
+    }
+    REQUIRE(query_scalar_int(
+        ctx,
+        "SELECT async_persist_jobs_waiting FROM bioseq.scheduler_stats();")
+        == async_waiting_before);
+    REQUIRE(index_table_row_count(
+        ctx, "minimizers_per_fragment", kDoc0377TransformTarget)
+        == mpf_rows_before);
+    REQUIRE(index_table_row_count(
+        ctx, "minimizers_per_sequence", kDoc0377TransformTarget)
+        == mps_rows_before);
+    REQUIRE(query_rows(ctx, fmt::format(
+        "SELECT index_name,last_updated::text "
+        "FROM bioseq_internal.metadata_age_log "
+        "WHERE user_relid='{}'::regclass AND column_attno=2 "
+        "ORDER BY index_name;",
+        kDoc0377TransformTarget)) == age_log_before);
+}
+
+TEST_CASE("DOC0377 base-local sliced mmsearch preserves algorithm-route parity",
+          "[mmsearch][slice][base-relation][scalar][simd][paper][vulkan]"
+          "[algorithms][doc0377]") {
+    auto ctx = fresh_context(
+        {kDoc0377TransformTarget, kDoc0377OracleTarget});
+    const std::string source = doc0377_high_entropy_sequence(384u);
+    const std::string logical_target = source.substr(1u);
+    const std::string query = source.substr(97u, 96u);
+    const std::string query_literal = format_literal(
+        query, seq_typmod{.alphabet = "dna4", .width = 32});
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.read_sequence_index=off;"
+        "SET bioseq.index_async_persist=off;"
+        "SET bioseq.recompute_async_persist=off;"
+        "SET bioseq.aligner.min_chain_score=20;");
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377TransformTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {source}}});
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377OracleTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 1,
+            .using_bioseq = true,
+        },
+        {seq_row{.pk = 1, .sequences = {logical_target}}});
+    const std::string transformed = doc0377_base_alignment_sql(
+        kDoc0377TransformTarget, "t.seq0[1:]", query_literal);
+    const std::string oracle = doc0377_base_alignment_sql(
+        kDoc0377OracleTarget, "t.seq0", query_literal);
+
+    struct AlgorithmRoute {
+        std::string_view name;
+        std::string_view minimizer;
+        std::string_view chaining;
+        std::string_view base_alignment;
+        std::string_view requested_backend;
+        std::string_view actual_backend;
+        std::size_t execution_column = 0u;
+        bool fully_attested = true;
+        bool vulkan = false;
+    };
+    std::vector<AlgorithmRoute> routes{
+        {"scalar", "scalar", "scalar_mm2", "ksw2",
+         "scalar_cpu", "scalar_cpu", 26u, true, false},
+        {"Exact SIMD", "two_stack_nthash", "simd_mm2",
+         "block_aligner", "simd_cpu", "simd_cpu", 27u, true, false},
+        {"paper ntHash SIMD", "paper_nthash_simd", "simd_mm2",
+         "block_aligner", "simd_cpu", "simd_cpu", 27u, true, false},
+    };
+    const bool vulkan_untrusted = selected_vulkan_runtime_untrusted(ctx);
+    if (!vulkan_untrusted) {
+        routes.push_back({
+            "physical Vulkan", "vulkan_minimap_int", "vulkan_tiled_dp",
+            "block_aligner", "vulkan_gpu", "mixed_invalid", 28u,
+            false, true});
+    }
+
+    for (const auto& route : routes) {
+        DYNAMIC_SECTION(route.name) {
+            exec_sql(ctx, fmt::format(
+                "SET bioseq.aligner.minimizer_algorithm='{}';"
+                "SET bioseq.aligner.chaining_algorithm='{}';"
+                "SET bioseq.aligner.base_alignment_algorithm='{}';"
+                "SET bioseq.aligner.vulkan_enabled={};",
+                route.minimizer, route.chaining, route.base_alignment,
+                route.vulkan ? "on" : "off"));
+            if (route.vulkan) {
+                exec_sql(ctx,
+                    "SET bioseq.aligner.vulkan_seed_hits_enabled=on;"
+                    "SET bioseq.aligner.vulkan_index_cache_enabled=on;"
+                    "SET bioseq.aligner.vulkan_fused_frontend_enabled=on;"
+                    "SET bioseq.aligner.vulkan_gpu_index_build_enabled=on;"
+                    "SET bioseq.aligner.vulkan_extend_enabled=on;");
+            }
+            const rowset_t route_expected = query_rows(ctx, oracle);
+            const rowset_t route_actual = query_rows(ctx, transformed);
+            REQUIRE(route_actual == route_expected);
+            REQUIRE_FALSE(route_actual.empty());
+
+            const auto stats = last_alignment_stats(ctx);
+            REQUIRE(stats.size() == 20u);
+            for (const auto& stage : stats) {
+                REQUIRE(stage.size() == 150u);
+                REQUIRE(stage[16].value_or("")
+                    == route.requested_backend);
+                REQUIRE(stage[17].value_or("") == route.actual_backend);
+                REQUIRE(stats_bool(stage, 13));
+                REQUIRE_FALSE(stats_bool(stage, 14));
+                REQUIRE(stats_bool(stage, 15));
+                REQUIRE(stats_i64(stage, 33) > 0);
+                if (route.fully_attested) {
+                    REQUIRE(stats_i64(stage, 34)
+                        == stats_i64(stage, 33));
+                    REQUIRE(stats_i64(stage, 35) == 0);
+                } else {
+                    REQUIRE(stats_i64(stage, 34) == 0);
+                    REQUIRE(stats_i64(stage, 35)
+                        == stats_i64(stage, 33));
+                }
+                REQUIRE(stats_i64(stage, 29) == 0);
+            }
+            for (const std::size_t stage_no : {
+                     std::size_t{0}, std::size_t{1},
+                     std::size_t{7}, std::size_t{8}}) {
+                REQUIRE(stats_i64(stats[stage_no], 24) > 0);
+                REQUIRE(stats_i64(
+                    stats[stage_no], route.execution_column)
+                    == stats_i64(stats[stage_no], 24));
+                for (const std::size_t execution_column : {
+                         std::size_t{26}, std::size_t{27},
+                         std::size_t{28}}) {
+                    if (execution_column != route.execution_column) {
+                        REQUIRE(stats_i64(
+                            stats[stage_no], execution_column) == 0);
+                    }
+                }
+                REQUIRE(stats_i64(stats[stage_no], 25) == 0);
+                REQUIRE(stats_i64(stats[stage_no], 29) == 0);
+            }
+            if (!route.fully_attested) {
+                REQUIRE(stats_i64(stats.front(), 113) > 0);
+                REQUIRE(stats_i64(stats.front(), 114) > 0);
+                REQUIRE(stats_i64(stats.front(), 115) > 0);
+            }
+        }
+    }
+
+    if (vulkan_untrusted) {
+        exec_sql(ctx,
+            "SET bioseq.aligner.minimizer_algorithm='vulkan_minimap_int';"
+            "SET bioseq.aligner.chaining_algorithm='vulkan_tiled_dp';"
+            "SET bioseq.aligner.base_alignment_algorithm='block_aligner';"
+            "SET bioseq.aligner.vulkan_enabled=on;"
+            "SET bioseq.aligner.vulkan_seed_hits_enabled=on;"
+            "SET bioseq.aligner.vulkan_index_cache_enabled=on;"
+            "SET bioseq.aligner.vulkan_fused_frontend_enabled=on;"
+            "SET bioseq.aligner.vulkan_gpu_index_build_enabled=on;"
+            "SET bioseq.aligner.vulkan_extend_enabled=on;");
+        const auto error = sql_error(ctx, transformed);
+        REQUIRE(error.sqlstate == "XX000");
+        REQUIRE(error.contains("Vulkan aligner execution failed"));
+        REQUIRE((error.contains("software/CPU Vulkan device")
+                 || error.contains("usable Vulkan runtime")));
+        REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
+    }
+}
+
+TEST_CASE("DOC0377 base-local operands preserve roots effects and control flow",
+          "[mmsearch][slice][base-relation][query][self-alignment]"
+          "[raw-output][residual][effects][order][null][case][coalesce]"
+          "[volatile][error][doc0377]") {
+    auto ctx = fresh_context({kDoc0377TransformTarget});
+    const std::string source = doc0377_high_entropy_sequence(384u);
+    const std::string residual_source = source.substr(8u, 32u);
+    const std::string rejected_residual(residual_source.size(), 'A');
+    exec_sql(ctx,
+        "SET max_parallel_workers_per_gather=0;"
+        "SET bioseq.update_index_on_insert=off;"
+        "SET bioseq.read_sequence_index=off;"
+        "SET bioseq.aligner.min_chain_score=20;"
+        "SET bioseq.aligner.vulkan_enabled=off;");
+    create_seq_table(
+        ctx,
+        seq_table_spec{
+            .name = std::string{kDoc0377TransformTarget},
+            .typmod = {.alphabet = "dna4", .width = 32},
+            .seq_columns = 2,
+            .using_bioseq = true,
+        },
+        {
+            seq_row{.pk = 1, .sequences = {source, residual_source}},
+            seq_row{.pk = 2, .sequences = {source, rejected_residual}},
+        });
+    const std::string target = "t.seq0[1:]";
+    const std::string sql = fmt::format(
+        "SELECT t.pk, bioseq.query_start({0}), bioseq.query_end({0}), "
+        "bioseq.target_start({0}), bioseq.target_end({0}), "
+        "bioseq.cigar({0}), t.seq0::text "
+        "FROM {1} AS t "
+        "WHERE t.seq1::text='{2}'::text "
+        "AND mmsearch({0}, t.seq0[97:193], "
+        "aligner_options(index_read_requirement=>1)) "
+        "ORDER BY 2, 3, 4, 5, 6;",
+        target, kDoc0377TransformTarget, residual_source);
+    const auto plan = explain_text<false>(ctx, sql);
+    REQUIRE(plan_contains(plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        plan,
+        "Bioseq Match Operand Evaluation: base-local ExprState "
+        "(target then query; persisted target index absent)"));
+    REQUIRE_FALSE(plan_contains(plan, "Filter: mmsearch"));
+
+    const auto rows = query_rows(ctx, sql);
+    REQUIRE_FALSE(rows.empty());
+    bool found_exact_logical_hit = false;
+    for (const auto& row : rows) {
+        REQUIRE(row.size() == 7u);
+        for (const auto& value : row) REQUIRE(value.has_value());
+        REQUIRE(*row[0] == "1");
+        REQUIRE(is_valid_cigar(*row[5]));
+        REQUIRE(*row[6] == source);
+        found_exact_logical_hit = found_exact_logical_hit
+            || (std::stoull(*row[1]) == 0u
+                && std::stoull(*row[2]) == 96u
+                && std::stoull(*row[3]) == 96u
+                && std::stoull(*row[4]) == 192u);
+    }
+    REQUIRE(found_exact_logical_hit);
+
+    const std::string query_only = doc0377_base_alignment_sql(
+        kDoc0377TransformTarget, "t.seq0", "t.seq0[97:193]",
+        "t.pk=1");
+    const auto query_only_plan = explain_text<false>(ctx, query_only);
+    REQUIRE(plan_contains(query_only_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        query_only_plan,
+        "Bioseq Match Operand Evaluation: base-local ExprState "
+        "(target then query; persisted target index absent)"));
+    const rowset_t query_only_rows = query_rows(ctx, query_only);
+    REQUIRE_FALSE(query_only_rows.empty());
+    REQUIRE(std::any_of(
+        query_only_rows.begin(), query_only_rows.end(),
+        [](const row_t& row) {
+            return row.size() == 8u
+                && row[1] == std::optional<std::string>{"0"}
+                && row[2] == std::optional<std::string>{"96"}
+                && row[3] == std::optional<std::string>{"97"}
+                && row[4] == std::optional<std::string>{"193"};
+        }));
+
+    exec_sql(ctx,
+        "CREATE TEMP TABLE doc0377_base_effect_log ("
+        "ordinal bigserial PRIMARY KEY, label text NOT NULL);"
+        "CREATE FUNCTION pg_temp.doc0377_mark_bound("
+        "label text, value bigint) RETURNS bigint "
+        "LANGUAGE plpgsql VOLATILE AS $$"
+        "BEGIN "
+        "  INSERT INTO doc0377_base_effect_log(label) VALUES(label); "
+        "  RETURN value; "
+        "END$$;"
+        "CREATE FUNCTION pg_temp.doc0377_fail_bound(label text) "
+        "RETURNS bigint LANGUAGE plpgsql VOLATILE AS $$"
+        "BEGIN RAISE EXCEPTION 'DOC0377 active % arm', label; END$$;");
+
+    const std::string ordered = fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
+        "t.seq0[pg_temp.doc0377_mark_bound('target',1):], "
+        "t.seq0[pg_temp.doc0377_mark_bound('query',97):193], "
+        "aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget);
+    const auto ordered_plan = explain_text<false>(ctx, ordered);
+    REQUIRE(plan_contains(ordered_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        ordered_plan,
+        "Bioseq Match Operand Evaluation: base-local ExprState "
+        "(target then query; persisted target index absent)"));
+    REQUIRE(query_scalar_int(
+        ctx, "SELECT count(*) FROM doc0377_base_effect_log;") == 0);
+    REQUIRE_FALSE(query_rows(ctx, ordered).empty());
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT string_agg(label,',' ORDER BY ordinal) "
+        "FROM doc0377_base_effect_log;") == "target,query");
+
+    const auto require_no_alignment_jobs = [&ctx](const long long prior_id) {
+        const auto stats = last_alignment_stats(ctx);
+        REQUIRE(stats.size() == 20u);
+        REQUIRE((stats_i64(stats.front(), 0) == prior_id
+                 || stats_i64(stats.front(), 33) == 0));
+    };
+
+    exec_sql(ctx, "TRUNCATE doc0377_base_effect_log RESTART IDENTITY;");
+    long long prior_id = stats_i64(last_alignment_stats(ctx).front(), 0);
+    const std::string global_null_query = fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
+        "t.seq0[pg_temp.doc0377_mark_bound("
+        "'target-before-global-null',1):], "
+        "NULL::bioseq.seq('dna4',32), "
+        "aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget);
+    const auto global_null_plan = explain_text<false>(
+        ctx, global_null_query);
+    REQUIRE(plan_contains(global_null_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE(plan_contains(
+        global_null_plan,
+        "Bioseq Match Operand Evaluation: base-local ExprState "
+        "(target then query; persisted target index absent)"));
+    REQUIRE(query_rows(ctx, global_null_query).empty());
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT string_agg(label,',' ORDER BY ordinal) "
+        "FROM doc0377_base_effect_log;") == "target-before-global-null");
+    require_no_alignment_jobs(prior_id);
+
+    exec_sql(ctx, "TRUNCATE doc0377_base_effect_log RESTART IDENTITY;");
+    prior_id = stats_i64(last_alignment_stats(ctx).front(), 0);
+    const std::string null_target = fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
+        "CASE WHEN t.pk=1 THEN NULL::bioseq.seq('dna4',32) "
+        "ELSE t.seq0[1:] END, "
+        "t.seq0[pg_temp.doc0377_mark_bound('query-after-null-target',97):193], "
+        "aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget);
+    REQUIRE(query_rows(ctx, null_target).empty());
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT string_agg(label,',' ORDER BY ordinal) "
+        "FROM doc0377_base_effect_log;") == "query-after-null-target");
+    require_no_alignment_jobs(prior_id);
+
+    exec_sql(ctx, "TRUNCATE doc0377_base_effect_log RESTART IDENTITY;");
+    prior_id = stats_i64(last_alignment_stats(ctx).front(), 0);
+    const std::string null_query = fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
+        "t.seq0[pg_temp.doc0377_mark_bound('target-before-null-query',1):], "
+        "CASE WHEN t.pk=1 THEN NULL::bioseq.seq('dna4',32) "
+        "ELSE t.seq0[97:193] END, "
+        "aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget);
+    REQUIRE(query_rows(ctx, null_query).empty());
+    REQUIRE(query_scalar(
+        ctx,
+        "SELECT string_agg(label,',' ORDER BY ordinal) "
+        "FROM doc0377_base_effect_log;") == "target-before-null-query");
+    require_no_alignment_jobs(prior_id);
+
+    const std::string dead_arms = fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
+        "CASE WHEN t.pk=1 THEN t.seq0[1:] "
+        "ELSE t.seq0[pg_temp.doc0377_fail_bound('target'):] END, "
+        "COALESCE(NULL::bioseq.seq('dna4',32), t.seq0[97:193], "
+        "t.seq0[pg_temp.doc0377_fail_bound('query'):]), "
+        "aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget);
+    const auto dead_arm_plan = explain_text<false>(ctx, dead_arms);
+    REQUIRE(plan_contains(dead_arm_plan, "Custom Scan (BioseqScan)"));
+    REQUIRE_FALSE(query_rows(ctx, dead_arms).empty());
+
+    const auto target_error = sql_error(ctx, fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 AND mmsearch("
+        "CASE WHEN t.pk=0 THEN t.seq0[1:] "
+        "ELSE t.seq0[pg_temp.doc0377_fail_bound('target'):] END, "
+        "t.seq0[97:193], aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget));
+    REQUIRE(target_error.sqlstate == "P0001");
+    REQUIRE(target_error.contains("DOC0377 active target arm"));
+    const auto query_error = sql_error(ctx, fmt::format(
+        "SELECT t.pk FROM {} AS t WHERE t.pk=1 "
+        "AND mmsearch(t.seq0[1:], "
+        "COALESCE(NULL::bioseq.seq('dna4',32), "
+        "CASE WHEN t.pk=0 THEN t.seq0[97:193] "
+        "ELSE NULL::bioseq.seq('dna4',32) END, "
+        "t.seq0[pg_temp.doc0377_fail_bound('query'):]), "
+        "aligner_options(index_read_requirement=>1));",
+        kDoc0377TransformTarget));
+    REQUIRE(query_error.sqlstate == "P0001");
+    REQUIRE(query_error.contains("DOC0377 active query arm"));
+    REQUIRE(query_scalar_int(ctx, "SELECT 1;") == 1);
 }
 
 TEST_CASE("DOC0377 transformed INNER mmsearch matches a flat logical oracle",

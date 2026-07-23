@@ -101,6 +101,19 @@ public:
         std::uint8_t query_storage_unit_byte_width,
         AttrNumber primary_key_attno);
 
+    /* Configure a base-local mmsearch whose target and query ExprStates are
+     * evaluated per row.  seq_attno continues to identify the physical base
+     * column for source authority and raw-output preservation; it is not an
+     * instruction to read either operand from that slot attribute. */
+    void configure_mmsearch_per_row_evaluated(
+        AttrNumber seq_attno,
+        std::string column_name,
+        std::uint8_t alphabet_code,
+        std::uint8_t storage_unit_byte_width,
+        std::uint8_t query_alphabet_code,
+        std::uint8_t query_storage_unit_byte_width,
+        AttrNumber primary_key_attno);
+
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes);
     void clear_mmsearch_context(bool clear_extras = false);
     void add_extra_const_query(std::vector<char> query_varlena_bytes);
@@ -126,6 +139,13 @@ public:
     void abandon_join_runtime_after_pg_error_noexcept() noexcept;
 
     void submit_scan(TupleTableSlot* scan_slot);
+    void submit_scan_evaluated(
+        TupleTableSlot* scan_slot,
+        Datum target,
+        bool target_is_null,
+        bool has_query_override,
+        Datum query,
+        bool query_is_null);
     [[nodiscard]] bool ready_to_dispatch() const;
     [[nodiscard]] bool run_batch_and_build_cursors();
     void clear_slots();

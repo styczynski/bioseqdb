@@ -1771,10 +1771,13 @@ void backtrack_chains_simd(
 
             hn::StoreN(
                 current, d, primary_path + primary_length, 1u);
+            // Generic Highway gathers validate masked-off indices too.
+            const auto safe_current = hn::IfThenElse(
+                active, current, hn::Zero(d));
             hn::MaskedScatterIndex(
-                one, active, d, visited.data(), current);
+                one, active, d, visited.data(), safe_current);
             const auto next = hn::MaskedGatherIndex(
-                active, d, predecessors.data(), current);
+                active, d, predecessors.data(), safe_current);
             active = hn::And(active, hn::Gt(next, minus_one));
             current = hn::IfThenElse(active, next, minus_one);
             primary_current = hn::GetLane(next);

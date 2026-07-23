@@ -53,6 +53,7 @@ extern "C" {
 #include "commands/extension.h"
 #include "optimizer/appendinfo.h"
 #include "optimizer/planmain.h"
+#include "rewrite/rewriteManip.h"
 #include "storage/dsm.h"
 #include "storage/shmem.h"
 #include "utils/inval.h"
@@ -319,6 +320,21 @@ struct BioseqScanRuntime {
 	AttrNumber                                edit_sequence_attno = InvalidAttrNumber;
 	Index                                     match_sequence_varno = 0;
 	AttrNumber                                match_sequence_attno = InvalidAttrNumber;
+	/* The finalized post-setrefs operand recipes are executor identities, not
+	 * deparse-only metadata.  Raw-Var owners keep the historical attribute fast
+	 * path; every other base-local target/query is evaluated exactly once per
+	 * admitted row by these ExprStates after its BSS3 leaves are promoted. */
+	Node*                                     match_target_recipe = nullptr;
+	Node*                                     match_query_recipe = nullptr;
+	List*                                     match_target_lineage = NIL;
+	List*                                     match_query_lineage = NIL;
+	ExprState*                                match_target_expr_state = nullptr;
+	ExprState*                                match_query_expr_state = nullptr;
+	int32                                     match_target_typmod = -1;
+	int32                                     match_query_typmod = -1;
+	bool                                      match_target_evaluated = false;
+	bool                                      match_query_evaluated = false;
+	bool                                      match_evaluated_submission = false;
 	/* SQL strictness for an owned mmsearch whose Const/Param query is NULL. */
 	bool                                      mmsearch_null_input = false;
 	/* True only after the access-method source itself returned EOF. */
@@ -338,6 +354,13 @@ struct BioseqScanRuntime {
 	                                          lazy_source_projected_bindings{};
 	std::vector<std::uint32_t>                lazy_source_physical_producer_ids{};
 	std::vector<std::uint8_t>                 lazy_source_physical_bound{};
+	/* Per-physical-column lifetime roles derived after final executor
+	 * injection.  Residual-qual/operand sources are promoted only across their
+	 * authoritative ExprStates; output sources stay as locators until a
+	 * particular MatchResult is projected. */
+	std::vector<std::uint8_t>                 mmsearch_pre_eval_source_bound{};
+	std::vector<std::uint8_t>                 mmsearch_output_source_bound{};
+	bool                                      mmsearch_pre_eval_sources_present = false;
 	int                                       locator_parent_token = 0;
 	AttrNumber                                locator_rowno_resno = InvalidAttrNumber;
 	List*                                     match_helper_sites = NIL;
@@ -1292,6 +1315,42 @@ struct OwnedMmsearchRestriction {
 	List* extra_normalized_exprs = NIL;
 };
 
+/* Cheap prefilter used by the early clause-ownership pass.  The complete
+ * grammar/nulling/type proof lives beside the per-row recipe validator (which
+ * is declared later in this translation unit); this predicate only keeps a
+ * potentially base-local sequence expression alive until that exact proof can
+ * run in AddBioseqColumnScanPath.  Volatility inside an operand is deliberately
+ * not rejected: the expression remains at its original baserel frontier and is
+ * evaluated once by its authoritative ExprState. */
+[[nodiscard]] static bool coarse_base_mmsearch_operand_candidate(
+		Node* expression, RelOptInfo* rel, const BioseqStubOids& oids,
+		const bool require_sequence_var) {
+	if (expression == nullptr || rel == nullptr
+		|| exprType(expression) != oids.bioseq_seq_type_oid
+		|| expression_returns_set(expression)
+		|| contain_subplans(expression)) return false;
+	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	List* variables = pull_var_clause(expression, pull_flags);
+	bool saw_sequence_var = false;
+	bool valid = true;
+	for (Var* variable : PList<Var>(variables)) {
+		if (variable == nullptr
+			|| !bioseq_is_concrete_rte_varno(variable->varno)
+			|| variable->varno != rel->relid
+			|| variable->varattno <= 0 || variable->varlevelsup != 0
+			|| !bms_is_empty(variable->varnullingrels)) {
+			valid = false;
+			break;
+		}
+		if (variable->vartype == oids.bioseq_seq_type_oid) {
+			saw_sequence_var = true;
+		}
+	}
+	list_free(variables);
+	return valid && (!require_sequence_var || saw_sequence_var);
+}
+
 [[nodiscard]] static bool
 bounded_batch_fallback_options_are_supported(
 	FuncExpr* primary, FuncExpr* extra, const BioseqStubOids& oids);
@@ -1308,6 +1367,7 @@ bounded_batch_fallback_options_are_supported(
 [[nodiscard]] static OwnedMmsearchRestriction
 choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 								 RangeTblEntry* rte, List* restrictions,
+								 List* ppi_restrictions,
 								 Relids param_relids,
 								 const BioseqStubOids& oids)
 {
@@ -1319,13 +1379,6 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 		semantic_calls += in_clause;
 		if (in_clause != 0) semantic_restrictions = lappend(
 			semantic_restrictions, rinfo);
-	}
-	if (semantic_calls > 2) {
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("stacked mmsearch qualifiers are unsupported"),
-			 errdetail("A Bioseq scan can own one semantic mmsearch call; only the explicitly proven BatchJoin fallback may also own one constant base filter."),
-			 errhint("Split the alignment predicates into separate query levels.")));
 	}
 	if (semantic_calls == 0 || semantic_restrictions == NIL) {
 		return {};
@@ -1354,6 +1407,107 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 		}
 	}
 
+	/* A parameterized baserel candidate can rendezvous restrictions from any
+	 * number of higher owners.  Provenance, not operand syntax, decides whether
+	 * this candidate may classify them together. */
+	if (semantic_calls > 1u) {
+		/* Walk PostgreSQL Lists directly.  Do not retain a std::vector (or any
+		 * other nontrivial C++ owner) across ereport(ERROR): PostgreSQL's longjmp
+		 * would skip its destructor in the backend. */
+		for (ListCell* current_cell = list_head(semantic_restrictions);
+				 current_cell != nullptr;
+				 current_cell = lnext(semantic_restrictions, current_cell)) {
+			RestrictInfo* current = reinterpret_cast<RestrictInfo*>(
+				lfirst(current_cell));
+			FuncExpr* current_expression = current == nullptr ? nullptr
+				: pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(
+					current->clause));
+			const bool exact_expression = current_expression != nullptr
+				&& is_mmsearch_funcid(current_expression->funcid, oids)
+				&& ((current_expression->funcid == oids.mmsearch_oid
+						&& list_length(current_expression->args) == 2)
+					|| (current_expression->funcid
+							== oids.mmsearch_with_opts_oid
+						&& list_length(current_expression->args) == 3));
+			const bool current_base = current != nullptr
+				&& list_member_ptr(rel->baserestrictinfo, current);
+			const bool current_ppi = current != nullptr
+				&& list_member_ptr(ppi_restrictions, current);
+			if (!exact_expression || current_base == current_ppi
+				|| current->required_relids == nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("stacked mmsearch qualifiers are unsupported"),
+					 errhint("Split the alignment predicates into separate query levels.")));
+			}
+
+			for (ListCell* prior_cell = list_head(semantic_restrictions);
+					 prior_cell != current_cell;
+					 prior_cell = lnext(semantic_restrictions, prior_cell)) {
+				RestrictInfo* prior = reinterpret_cast<RestrictInfo*>(
+					lfirst(prior_cell));
+				const bool prior_base = list_member_ptr(
+					rel->baserestrictinfo, prior);
+				if (current_base == prior_base
+					&& bms_equal(current->required_relids,
+						prior->required_relids)) {
+					ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("stacked mmsearch qualifiers are unsupported"),
+						 errdetail("Two semantic mmsearch calls share one ownership frontier."),
+						 errhint("Split the alignment predicates into separate query levels.")));
+				}
+			}
+		}
+
+		bool legacy_bounded_fallback_candidate = false;
+		if (semantic_calls == 2u) {
+			RestrictInfo* first = reinterpret_cast<RestrictInfo*>(
+				linitial(semantic_restrictions));
+			RestrictInfo* second = reinterpret_cast<RestrictInfo*>(
+				lsecond(semantic_restrictions));
+			const bool first_base = list_member_ptr(
+				rel->baserestrictinfo, first);
+			const bool second_base = list_member_ptr(
+				rel->baserestrictinfo, second);
+			if (first_base != second_base) {
+				RestrictInfo* base_restriction = first_base ? first : second;
+				RestrictInfo* ppi_restriction = first_base ? second : first;
+				FuncExpr* base_expression = pg_node_try_as<FuncExpr>(
+					reinterpret_cast<Node*>(base_restriction->clause));
+				FuncExpr* ppi_expression = pg_node_try_as<FuncExpr>(
+					reinterpret_cast<Node*>(ppi_restriction->clause));
+				Node* base_target = reinterpret_cast<Node*>(
+					linitial(base_expression->args));
+				Node* base_query = reinterpret_cast<Node*>(
+					lsecond(base_expression->args));
+				Node* ppi_target = reinterpret_cast<Node*>(
+					linitial(ppi_expression->args));
+				Node* ppi_query = reinterpret_cast<Node*>(
+					lsecond(ppi_expression->args));
+				Var* ppi_query_var = pg_node_try_as<Var>(ppi_query);
+				Const* base_query_const = pg_node_try_as<Const>(base_query);
+				legacy_bounded_fallback_candidate =
+					pg_node_try_as<Var>(base_target) != nullptr
+					&& pg_node_try_as<Var>(ppi_target) != nullptr
+					&& equal(base_target, ppi_target)
+					&& base_query_const != nullptr
+					&& base_query_const->consttype
+						== oids.bioseq_seq_type_oid
+					&& ppi_query_var != nullptr
+					&& ppi_query_var->varlevelsup == 0
+					&& ppi_query_var->varattno > 0
+					&& ppi_query_var->vartype
+						== oids.bioseq_seq_type_oid
+					&& bms_is_empty(ppi_query_var->varnullingrels)
+					&& bms_is_member(
+						static_cast<int>(ppi_query_var->varno),
+						param_relids);
+			}
+		}
+		if (!legacy_bounded_fallback_candidate) return {};
+	}
+
 	RestrictInfo* primary_restriction = nullptr;
 	FuncExpr* primary_expr = nullptr;
 	RestrictInfo* constant_restriction = nullptr;
@@ -1375,11 +1529,17 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 				&& arity != 3)) return {};
 		pg_first_two_node_args args = pg_first_two_args_if_arity_between(
 			*original, 2, 3);
-		Var* target = args.present() ? pg_node_try_as<Var>(args.first) : nullptr;
-		if (target == nullptr || target->varlevelsup != 0
-			|| target->varno != rel->relid || target->varattno <= 0
-			|| target->vartype != oids.bioseq_seq_type_oid
-			|| target->vartypmod < 0) return {};
+		Node* target_node = args.present() ? args.first : nullptr;
+		Var* target = pg_node_try_as<Var>(target_node);
+		const bool raw_target = target != nullptr
+			&& target->varlevelsup == 0
+			&& target->varno == rel->relid && target->varattno > 0
+			&& bms_is_empty(target->varnullingrels)
+			&& target->vartype == oids.bioseq_seq_type_oid
+			&& target->vartypmod >= 0;
+		if (!raw_target && !coarse_base_mmsearch_operand_candidate(
+				target_node, rel, oids,
+				/*require_sequence_var=*/true)) return {};
 
 		Node* query = args.second;
 		Const* query_constant = pg_node_try_as<Const>(query);
@@ -1415,6 +1575,15 @@ choose_owned_mmsearch_restriction(PlannerInfo* root, RelOptInfo* rel,
 				if (same_relation && semantic_calls == 2) {
 					parameterized_query = false;
 				}
+			} else {
+				/* A complete base-local query recipe (slice/concat/reverse,
+				 * CASE/COALESCE, dynamic bounds, or an opaque effectful arm) is
+				 * evaluated once per row after the target.  The later exact proof
+				 * validates every Var/nulling frontier and derives its bound type. */
+				parameterized_query = semantic_calls == 1
+					&& coarse_base_mmsearch_operand_candidate(
+						query, rel, oids,
+						/*require_sequence_var=*/false);
 			}
 		}
 		if (!constant_query && !parameterized_query) {
@@ -2455,6 +2624,8 @@ struct VarInjectorCtx {
 	Relation                 current_relation;
 	Index                    match_sequence_varno;
 	AttrNumber               match_sequence_attno;
+	Node*                    match_target_recipe;
+	List*                    match_target_lineage;
 	List*                    match_helper_sites;
 	int                      stable_match_id;
 };
@@ -8472,6 +8643,10 @@ struct BatchJoinBioseqPathCandidate {
 [[nodiscard]] static List* canonical_match_base_lineage(
 	Node* target_recipe, const BioseqStubOids& oids);
 
+[[nodiscard]] static List* make_match_owner_descriptor(
+	Node* target_recipe, Index legacy_target_relid,
+	const BioseqStubOids& oids);
+
 [[nodiscard]] static bool batch_join_match_helper_names_recipe(
 		FuncExpr* helper, Node* target_recipe) noexcept {
 	Node* argument = batch_join_match_helper_argument(helper);
@@ -9169,16 +9344,27 @@ struct per_row_output_semantic_visitor {
 			PerRowOutputSemanticProof& proof) const {
 		if (PlaceHolderVar* placeholder = node.try_as<PlaceHolderVar>()) {
 			/* The exact helper PHV is deliberately evaluated by the BatchJoin
-			 * owner after MatchResult production.  Every generic PHV retains a
-			 * planner-selected frontier which this transformation cannot move. */
+			 * owner after MatchResult production.  At an intermediate joinrel the
+			 * reltarget can also carry a whole helper PHV for a transformed owner
+			 * that will be constructed at a higher join frontier.  Admit that exact
+			 * sequence-valued identity here; the higher-owner COW normalization
+			 * removes it from every descendant target before PlanCustomPath.  Every
+			 * generic PHV retains a planner-selected frontier which this
+			 * transformation cannot move. */
 			FuncExpr* helper = batch_join_match_helper_phv_function(
 				placeholder, get_cached_stub_oids());
+			Node* argument = batch_join_match_helper_argument(helper);
+			const bool possible_higher_owner = helper != nullptr
+				&& argument != nullptr
+				&& exprType(argument)
+					== get_cached_stub_oids().bioseq_seq_type_oid;
 			if (helper == nullptr
 				|| (!batch_join_match_helper_names_recipe(
 					helper, proof.target_recipe)
 					&& !batch_join_match_helper_names_base_lineage(
 						helper, proof.target_recipe,
-						get_cached_stub_oids()))) {
+						get_cached_stub_oids())
+					&& !possible_higher_owner)) {
 				proof.invalid = true;
 			}
 			return proof.invalid
@@ -9489,6 +9675,366 @@ struct per_row_owner_support_visitor {
 	per_row_operand_source_visitor visitor;
 	pg_walk_expression_including_root(expression, proof, visitor);
 	return !proof.invalid;
+}
+
+/* Exact baserel operand proof for BioseqScan-owned mmsearch.  Unlike the join
+ * relocation proof above, this expression is not moved across a planner
+ * frontier: its original post-setrefs ExprState remains authoritative at the
+ * scan.  Volatile functions and opaque/erroring CASE/COALESCE arms are thus
+ * legal and execute once in PostgreSQL order.  What must still be proven is
+ * that no aggregate/window/subplan/PHV/SRF frontier is crossed and that every
+ * Var belongs to this non-nullable scan relation. */
+struct BaseLocalMmsearchOperandProof {
+	Node* expression = nullptr;
+	List* sequence_vars = NIL;
+	Var* primary_sequence_var = nullptr;
+	int32 typmod = -1;
+	bool evaluated = false;
+};
+
+struct BaseLocalMmsearchOperandWalker {
+	RelOptInfo* rel = nullptr;
+	const BioseqStubOids* oids = nullptr;
+	List* sequence_vars = NIL;
+	bool invalid = false;
+};
+
+struct base_local_mmsearch_operand_visitor {
+	[[nodiscard]] pg_walk_step operator()(
+			pg_expression_walk_cursor, pg_node_view node,
+			BaseLocalMmsearchOperandWalker& proof) const {
+		Node* raw = node.raw();
+		if (raw == nullptr || proof.rel == nullptr || proof.oids == nullptr) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (IsA(raw, PlaceHolderVar) || IsA(raw, Aggref)
+			|| IsA(raw, GroupingFunc) || IsA(raw, WindowFunc)
+			|| IsA(raw, SubPlan) || IsA(raw, AlternativeSubPlan)
+			|| IsA(raw, SubLink)) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (FuncExpr* function = node.try_as<FuncExpr>()) {
+			if (function->funcretset
+				|| is_mmsearch_funcid(function->funcid, *proof.oids)) {
+				proof.invalid = true;
+				return pg_walk_step::stop;
+			}
+		}
+		if (OpExpr* operation = node.try_as<OpExpr>();
+			operation != nullptr && operation->opretset) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		Var* variable = node.try_as<Var>();
+		if (variable == nullptr) return pg_walk_step::descend;
+		if (!bioseq_is_concrete_rte_varno(variable->varno)
+			|| variable->varno != proof.rel->relid
+			|| variable->varattno <= 0 || variable->varlevelsup != 0
+			|| !bms_is_empty(variable->varnullingrels)) {
+			proof.invalid = true;
+			return pg_walk_step::stop;
+		}
+		if (variable->vartype == proof.oids->bioseq_seq_type_oid) {
+			bool duplicate = false;
+			for (Var* existing : PList<Var>(proof.sequence_vars)) {
+				if (equal(existing, variable)) {
+					duplicate = true;
+					break;
+				}
+			}
+			if (!duplicate) proof.sequence_vars = lappend(
+				proof.sequence_vars, variable);
+		}
+		return pg_walk_step::skip_subtree;
+	}
+};
+
+struct BaseLocalSequenceTypmodResolution {
+	int32 typmod = -1;
+	bool invalid = false;
+};
+
+[[nodiscard]] static BaseLocalSequenceTypmodResolution
+base_local_sequence_typmod_resolution(
+		Node* expression, const BioseqStubOids& oids) {
+	check_stack_depth();
+	if (expression == nullptr
+		|| exprType(expression) != oids.bioseq_seq_type_oid) {
+		return {.invalid = true};
+	}
+	auto supported_descriptor = [](const int32 typmod) noexcept {
+		return typmod >= 0 && batch_join_typmod_is_supported(typmod);
+	};
+	auto finish = [expression, &supported_descriptor](
+			BaseLocalSequenceTypmodResolution derived) {
+		if (derived.invalid) return derived;
+		const int32 descriptor = exprTypmod(expression);
+		if (descriptor < -1
+			|| (descriptor >= 0 && !supported_descriptor(descriptor))) {
+			return BaseLocalSequenceTypmodResolution{.invalid = true};
+		}
+		if (descriptor >= 0) {
+			if (derived.typmod >= 0) {
+				const auto declared = compact_sequence_stdc_type_params::decode(
+					descriptor);
+				const auto child = compact_sequence_stdc_type_params::decode(
+					derived.typmod);
+				if (declared.alphabet_code != child.alphabet_code) {
+					return BaseLocalSequenceTypmodResolution{.invalid = true};
+				}
+			}
+			derived.typmod = descriptor;
+		}
+		return derived;
+	};
+	auto merge_exact = [](BaseLocalSequenceTypmodResolution& destination,
+			const BaseLocalSequenceTypmodResolution source) {
+		if (source.invalid) {
+			destination.invalid = true;
+			return;
+		}
+		/* An opaque, descriptor-erased arm is intentionally neutral.  If it is
+		 * selected, capture_target/query_datum validates the actual bound type
+		 * before dispatch; an unselected throwing arm is never inspected. */
+		if (source.typmod < 0) return;
+		if (destination.typmod < 0) {
+			destination.typmod = source.typmod;
+			return;
+		}
+		if (destination.typmod != source.typmod) destination.invalid = true;
+	};
+
+	if (Node* source = slice_project_typmod_cast_source(expression, oids)) {
+		BaseLocalSequenceTypmodResolution child =
+			base_local_sequence_typmod_resolution(source, oids);
+		Const* target_typmod = pg_node_try_as<Const>(
+			reinterpret_cast<Node*>(lsecond(
+				reinterpret_cast<FuncExpr*>(expression)->args)));
+		if (child.invalid || target_typmod == nullptr
+			|| target_typmod->constisnull) return {.invalid = true};
+		const int32 cast_typmod = DatumGetInt32(target_typmod->constvalue);
+		if (!supported_descriptor(cast_typmod)) return {.invalid = true};
+		if (child.typmod >= 0
+			&& compact_sequence_stdc_type_params::decode(child.typmod).
+				alphabet_code
+				!= compact_sequence_stdc_type_params::decode(cast_typmod).
+					alphabet_code) return {.invalid = true};
+		return BaseLocalSequenceTypmodResolution{cast_typmod, false};
+	}
+	if (IsA(expression, RelabelType)) {
+		auto* relabel = reinterpret_cast<RelabelType*>(expression);
+		return finish(base_local_sequence_typmod_resolution(
+			reinterpret_cast<Node*>(relabel->arg), oids));
+	}
+	if (nodeTag(expression) == T_CaseExpr) {
+		CaseExpr* choice = castNode(CaseExpr, expression);
+		BaseLocalSequenceTypmodResolution result{};
+		for (CaseWhen* arm : PList<CaseWhen>(choice->args)) {
+			if (arm == nullptr || arm->result == nullptr
+				|| exprType(reinterpret_cast<Node*>(arm->result))
+					!= oids.bioseq_seq_type_oid) {
+				result.invalid = true;
+				break;
+			}
+			merge_exact(result, base_local_sequence_typmod_resolution(
+				reinterpret_cast<Node*>(arm->result), oids));
+			if (result.invalid) break;
+		}
+		if (!result.invalid && choice->defresult != nullptr) {
+			merge_exact(result, base_local_sequence_typmod_resolution(
+				reinterpret_cast<Node*>(choice->defresult), oids));
+		}
+		return finish(result);
+	}
+	if (nodeTag(expression) == T_CoalesceExpr) {
+		CoalesceExpr* choice = castNode(CoalesceExpr, expression);
+		BaseLocalSequenceTypmodResolution result{};
+		for (Node* arm : PList<Node>(choice->args)) {
+			merge_exact(result,
+				base_local_sequence_typmod_resolution(arm, oids));
+			if (result.invalid) break;
+		}
+		return finish(result);
+	}
+
+	const auto opcode = slice_project_node_opcode(expression, oids);
+	if (opcode.has_value() && *opcode == SliceProjectOpcode::slice) {
+		auto* subscript = reinterpret_cast<SubscriptingRef*>(expression);
+		if (subscript->refexpr == nullptr || subscript->refassgnexpr != nullptr
+			|| subscript->refcontainertype != oids.bioseq_seq_type_oid
+			|| subscript->refrestype != oids.bioseq_seq_type_oid) {
+			return {.invalid = true};
+		}
+		return finish(base_local_sequence_typmod_resolution(
+			reinterpret_cast<Node*>(subscript->refexpr), oids));
+	}
+	if (opcode.has_value()
+		&& (*opcode == SliceProjectOpcode::reverse
+			|| *opcode == SliceProjectOpcode::reverse_complement)) {
+		FuncExpr* function = pg_node_try_as<FuncExpr>(expression);
+		if (function == nullptr || list_length(function->args) != 1
+			|| !per_row_function_signature_is_exact(function)) {
+			return {.invalid = true};
+		}
+		return finish(base_local_sequence_typmod_resolution(
+			reinterpret_cast<Node*>(linitial(function->args)), oids));
+	}
+	if (opcode.has_value() && *opcode == SliceProjectOpcode::concat) {
+		List* arguments = NIL;
+		if (FuncExpr* function = pg_node_try_as<FuncExpr>(expression)) {
+			if (!slice_project_concat_oid(function->funcid, oids)
+				|| !per_row_function_signature_is_exact(function)) {
+				return {.invalid = true};
+			}
+			arguments = function->args;
+		} else if (OpExpr* operation = pg_node_try_as<OpExpr>(expression)) {
+			if (!slice_project_concat_oid(operation->opfuncid, oids)
+				|| !per_row_operator_signature_is_exact(operation)) {
+				return {.invalid = true};
+			}
+			arguments = operation->args;
+		} else {
+			return {.invalid = true};
+		}
+		BaseLocalSequenceTypmodResolution result{};
+		for (Node* argument : PList<Node>(arguments)) {
+			if (exprType(argument) != oids.bioseq_seq_type_oid) continue;
+			const auto child = base_local_sequence_typmod_resolution(
+				argument, oids);
+			if (child.invalid) return child;
+			if (child.typmod < 0) continue;
+			if (result.typmod < 0) {
+				/* Registered concat uses the first bound sequence operand's
+				 * storage width; later bound operands need only share alphabet. */
+				result.typmod = child.typmod;
+				continue;
+			}
+			if (compact_sequence_stdc_type_params::decode(result.typmod).
+					alphabet_code
+				!= compact_sequence_stdc_type_params::decode(child.typmod).
+					alphabet_code) return {.invalid = true};
+		}
+		return finish(result);
+	}
+
+	/* Raw Vars/Consts/Params and opaque sequence-producing arms are legal
+	 * leaves.  A concrete descriptor proves their dispatch type.  An erased
+	 * opaque leaf is neutral only when an enclosing CASE/COALESCE supplies a
+	 * concrete sibling; it cannot be the root of an owned operand. */
+	const int32 descriptor = exprTypmod(expression);
+	return descriptor >= 0 && supported_descriptor(descriptor)
+		? BaseLocalSequenceTypmodResolution{descriptor, false}
+		: BaseLocalSequenceTypmodResolution{};
+}
+
+[[nodiscard]] static std::optional<BaseLocalMmsearchOperandProof>
+prove_base_local_mmsearch_operand(
+		Node* expression, RelOptInfo* rel, const BioseqStubOids& oids,
+		const bool require_sequence_var) {
+	if (expression == nullptr || rel == nullptr
+		|| exprType(expression) != oids.bioseq_seq_type_oid
+		|| expression_returns_set(expression)
+		|| contain_subplans(expression)) return std::nullopt;
+	BaseLocalMmsearchOperandWalker walker{rel, &oids, NIL, false};
+	base_local_mmsearch_operand_visitor visitor;
+	pg_walk_expression_including_root(expression, walker, visitor);
+	if (walker.invalid
+		|| (require_sequence_var && walker.sequence_vars == NIL)) {
+		return std::nullopt;
+	}
+	const BaseLocalSequenceTypmodResolution type =
+		base_local_sequence_typmod_resolution(expression, oids);
+	if (type.invalid || type.typmod < 0
+		|| !batch_join_typmod_is_supported(type.typmod)) return std::nullopt;
+	Var* raw = pg_node_try_as<Var>(expression);
+	return BaseLocalMmsearchOperandProof{
+		.expression = expression,
+		.sequence_vars = walker.sequence_vars,
+		.primary_sequence_var = walker.sequence_vars == NIL
+			? nullptr : reinterpret_cast<Var*>(linitial(walker.sequence_vars)),
+		.typmod = type.typmod,
+		.evaluated = raw == nullptr,
+	};
+}
+
+struct BaseLocalMmsearchOwnershipProof {
+	BaseLocalMmsearchOperandProof target{};
+	std::optional<BaseLocalMmsearchOperandProof> local_query{};
+	bool query_is_const = false;
+	bool query_is_param = false;
+	bool query_is_outer_var = false;
+	bool any_evaluated_operand = false;
+};
+
+[[nodiscard]] static std::optional<BaseLocalMmsearchOwnershipProof>
+prove_base_local_mmsearch_ownership(
+		FuncExpr* function, RelOptInfo* rel, Relids param_relids,
+		const BioseqStubOids& oids) {
+	if (function == nullptr || rel == nullptr
+		|| !is_mmsearch_funcid(function->funcid, oids)) return std::nullopt;
+	pg_first_two_node_args arguments = pg_first_two_args_if_arity_between(
+		*function, 2, 3);
+	if (!arguments.present()) return std::nullopt;
+	auto target = prove_base_local_mmsearch_operand(
+		arguments.first, rel, oids, /*require_sequence_var=*/true);
+	if (!target.has_value()) return std::nullopt;
+	BaseLocalMmsearchOwnershipProof result{};
+	result.target = *target;
+	result.any_evaluated_operand = target->evaluated;
+	Node* query = arguments.second;
+	if (Const* constant = pg_node_try_as<Const>(query)) {
+		if (constant->consttype != oids.bioseq_seq_type_oid
+			|| constant->consttypmod < 0
+			|| !batch_join_typmod_is_supported(constant->consttypmod)
+			|| (!constant->constisnull
+				&& !mmsearch_typmods_share_alphabet(
+					target->typmod, constant->consttypmod))) {
+			return std::nullopt;
+		}
+		result.query_is_const = true;
+		return result;
+	}
+	if (Param* parameter = pg_node_try_as<Param>(query)) {
+		const bool runtime_typed_external = parameter->paramkind == PARAM_EXTERN
+			&& parameter->paramtypmod < 0;
+		if (parameter->paramtype != oids.bioseq_seq_type_oid
+			|| (parameter->paramkind != PARAM_EXEC
+				&& parameter->paramkind != PARAM_EXTERN)
+			|| (!runtime_typed_external
+				&& (parameter->paramtypmod < 0
+					|| !batch_join_typmod_is_supported(parameter->paramtypmod)
+					|| !mmsearch_typmods_share_alphabet(
+						target->typmod, parameter->paramtypmod)))) {
+			return std::nullopt;
+		}
+		result.query_is_param = true;
+		return result;
+	}
+	if (Var* variable = pg_node_try_as<Var>(query);
+		variable != nullptr && variable->varno != rel->relid) {
+		if (!bioseq_is_concrete_rte_varno(variable->varno)
+			|| !bms_is_member(static_cast<int>(variable->varno), param_relids)
+			|| variable->varattno <= 0 || variable->varlevelsup != 0
+			|| !bms_is_empty(variable->varnullingrels)
+			|| variable->vartype != oids.bioseq_seq_type_oid
+			|| variable->vartypmod < 0
+			|| !batch_join_typmod_is_supported(variable->vartypmod)
+			|| !mmsearch_typmods_share_alphabet(
+				target->typmod, variable->vartypmod)) return std::nullopt;
+		result.query_is_outer_var = true;
+		return result;
+	}
+	auto local_query = prove_base_local_mmsearch_operand(
+		query, rel, oids, /*require_sequence_var=*/false);
+	if (!local_query.has_value()
+		|| !mmsearch_typmods_share_alphabet(
+			target->typmod, local_query->typmod)) return std::nullopt;
+	result.any_evaluated_operand = result.any_evaluated_operand
+		|| local_query->evaluated;
+	result.local_query = *local_query;
+	return result;
 }
 
 [[nodiscard]] static List* per_row_without_restriction(
@@ -10196,6 +10742,7 @@ static void per_row_prove_descendant_exact_owner(
  * current subtree: a descendant-owned helper is retained at its owner and
  * above it, but is removed from every child below that owner. */
 struct PerRowBaseHelperOwnerProof {
+	CustomPath* owner = nullptr;
 	std::size_t matches = 0u;
 	bool invalid_owner_abi = false;
 	bool unsupported_wrapper = false;
@@ -12088,6 +12635,7 @@ static void per_row_prove_descendant_base_helper_owner(
 					|| batch_join_match_helper_names_base_lineage(
 						helper, recipe, get_cached_stub_oids()))) {
 				++proof.matches;
+				proof.owner = custom;
 			}
 		} else if (custom->methods != &BioseqBatchJoinPathMethods
 			&& custom->methods != &BioseqPerRowJoinPathMethods
@@ -12173,6 +12721,7 @@ static void per_row_prove_descendant_base_helper_owner(
 		Node* argument = batch_join_match_helper_argument(helper);
 		if (helper == nullptr || argument == nullptr) return false;
 		bool supplied = false;
+		std::size_t inherited_owner_matches = 0u;
 		if (per_row_expression_list_contains(
 				proven_inherited_helpers, identity)) {
 			PerRowDescendantOwnerProof proof{};
@@ -12187,13 +12736,23 @@ static void per_row_prove_descendant_base_helper_owner(
 						reinterpret_cast<Expr*>(identity))) return false;
 				supplied = true;
 			}
+			inherited_owner_matches = proof.matches;
 		}
 		PerRowBaseHelperOwnerProof base_proof{};
 		per_row_prove_descendant_base_helper_owner(path, helper, base_proof);
-		if (base_proof.invalid_owner_abi || base_proof.unsupported_wrapper) {
+		if (base_proof.invalid_owner_abi || base_proof.unsupported_wrapper
+			|| base_proof.matches > 1u
+			|| inherited_owner_matches + base_proof.matches > 1u) {
 			return false;
 		}
-		supplied = supplied || base_proof.matches > 0u;
+		if (base_proof.matches == 1u) {
+			if (base_proof.owner == nullptr
+				|| base_proof.owner->path.pathtarget == nullptr
+				|| !path_target_contains_expression(
+					base_proof.owner->path.pathtarget,
+					reinterpret_cast<Expr*>(identity))) return false;
+			supplied = true;
+		}
 		if (supplied) available = lappend(available, identity);
 	}
 	return true;
@@ -13604,19 +14163,29 @@ static void per_row_record_path_identity(
 			PerRowDescendantOwnerProof proof{};
 			per_row_prove_descendant_exact_owner(
 				helper_ready_incumbent, argument, proof);
-			const bool foreign_exact = per_row_expression_list_contains(
-				owner_support.foreign_exact_helper_identities, identity);
+			PerRowBaseHelperOwnerProof base_proof{};
+			per_row_prove_descendant_base_helper_owner(
+				helper_ready_incumbent, helper, base_proof);
 			if (proof.invalid_owner_abi || proof.unsupported_wrapper
-				|| proof.matches > 1u
-				|| (foreign_exact && proof.matches != 1u)) {
+				|| base_proof.invalid_owner_abi
+				|| base_proof.unsupported_wrapper
+				|| proof.matches > 1u || base_proof.matches > 1u
+				|| proof.matches + base_proof.matches > 1u) {
 				helper_provenance_invalid = true;
 				break;
 			}
-			if (proof.matches == 0u) continue;
+			/* root->processed_tlist is query-global.  No descendant match means
+			 * either that this exact helper belongs to the owner being constructed,
+			 * or that its owner will be constructed at a higher join frontier.  In
+			 * both cases it is not inherited here.  A helper with one exact
+			 * descendant remains inherited, while multiplicity still fails above. */
+			if (proof.matches + base_proof.matches == 0u) continue;
+			CustomPath* inherited_owner = proof.matches == 1u
+				? proof.owner : base_proof.owner;
 			bool applied = false;
 			bool propagation_invalid = false;
 			helper_ready_incumbent = per_row_clone_path_to_helper_owner(
-				root, helper_ready_incumbent, proof.owner, identity,
+				root, helper_ready_incumbent, inherited_owner, identity,
 				applied, propagation_invalid);
 			if (!applied || propagation_invalid) {
 				helper_provenance_invalid = true;
@@ -13659,11 +14228,20 @@ static void per_row_record_path_identity(
 			PerRowDescendantOwnerProof proof{};
 			per_row_prove_descendant_exact_owner(
 				reconstructed, batch_join_match_helper_argument(helper), proof);
+			PerRowBaseHelperOwnerProof base_proof{};
+			per_row_prove_descendant_base_helper_owner(
+				reconstructed, helper, base_proof);
+			const std::size_t owner_matches =
+				proof.matches + base_proof.matches;
+			CustomPath* inherited_owner = proof.matches == 1u
+				? proof.owner : base_proof.owner;
 			if (proof.invalid_owner_abi || proof.unsupported_wrapper
-				|| proof.matches != 1u || proof.owner == nullptr
-				|| proof.owner->path.pathtarget == nullptr
+				|| base_proof.invalid_owner_abi
+				|| base_proof.unsupported_wrapper
+				|| owner_matches != 1u || inherited_owner == nullptr
+				|| inherited_owner->path.pathtarget == nullptr
 				|| !path_target_contains_expression(
-					proof.owner->path.pathtarget,
+					inherited_owner->path.pathtarget,
 					reinterpret_cast<Expr*>(identity))) {
 				helper_provenance_invalid = true;
 				break;
@@ -14991,10 +15569,14 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 		return false;
 	}
 	Node* arg1 = two_args.second;
-	Var* col_var = pg_node_try_as<Var>(two_args.first);
-	if (col_var == nullptr) {
+	auto target_proof = prove_base_local_mmsearch_operand(
+		two_args.first, rel, stub_oids,
+		/*require_sequence_var=*/true);
+	if (!target_proof.has_value()
+		|| target_proof->primary_sequence_var == nullptr) {
 		return false;
 	}
+	Var* col_var = target_proof->primary_sequence_var;
 	/*
 	 * The first argument is the column to align — it MUST belong to
 	 * `rel`. Cross-table mmsearch with the column on the OTHER side
@@ -15019,17 +15601,17 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 	 * projections back to NULL — the very bug §8 of
 	 * REPORT_POSTGRES_QUERY_BUGFIXING_1.md is meant to fix.
 	 */
-	if (!pg_node_view{arg1}.is<Const>() && !pg_node_view{arg1}.is<Var>() && !pg_node_view{arg1}.is<Param>()) {
-		return false;
-	}
-	/*
-	 * Reject volatile second arguments. The OpExpr branch already
-	 * does this (search for `contain_volatile_functions` below); the
-	 * mmsearch branch needs the same protection so a query like
-	 *   WHERE mmsearch(t.seq, gen_random_seq())
-	 * does not get re-evaluated arbitrarily often on rescan.
-	 */
-	if (contain_volatile_functions(arg1)) {
+	const bool local_query_recipe = !pg_node_view{arg1}.is<Const>()
+		&& !pg_node_view{arg1}.is<Var>() && !pg_node_view{arg1}.is<Param>()
+		&& prove_base_local_mmsearch_operand(
+			arg1, rel, stub_oids,
+			/*require_sequence_var=*/false).has_value();
+	if (!pg_node_view{arg1}.is<Const>() && !pg_node_view{arg1}.is<Var>()
+		&& !pg_node_view{arg1}.is<Param>() && !local_query_recipe) return false;
+	/* A volatile function inside a proven base-local query recipe stays at
+	 * this scan frontier and is evaluated by one retained ExprState exactly
+	 * once per admitted row.  Only an unproven volatile shape is ineligible. */
+	if (contain_volatile_functions(arg1) && !local_query_recipe) {
 		return false;
 	}
 	/*
@@ -15047,7 +15629,7 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 	 * BeginCustomScan is what gives the user useful results.
 	 */
 	if (col_var->vartype != stub_oids.bioseq_seq_type_oid
-		|| col_var->vartypmod < 0) {
+		|| target_proof->typmod < 0) {
 		return false;
 	}
 	int32 arg1_typmod = -1;
@@ -15061,6 +15643,12 @@ IsMmsearchPushdownable(RelOptInfo* rel, FuncExpr* fe,
 	} else if (Param* p = pg_node_try_as<Param>(arg1)) {
 		arg1_typmod = p->paramtypmod;
 		arg1_typoid = p->paramtype;
+	} else if (local_query_recipe) {
+		auto query_proof = prove_base_local_mmsearch_operand(
+			arg1, rel, stub_oids,
+			/*require_sequence_var=*/false);
+		arg1_typmod = query_proof.has_value() ? query_proof->typmod : -1;
+		arg1_typoid = stub_oids.bioseq_seq_type_oid;
 	}
 	if (arg1_typoid != stub_oids.bioseq_seq_type_oid
 		|| arg1_typmod < 0) {
@@ -15905,9 +16493,63 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 			}
 		}
 	}
-	const OwnedMmsearchRestriction owned_mmsearch =
+	OwnedMmsearchRestriction owned_mmsearch =
 		choose_owned_mmsearch_restriction(
-			root, rel, rte, clauseReferences.ptr(), paramRelids, stub_oids);
+			root, rel, rte, clauseReferences.ptr(),
+			path->param_info == nullptr
+				? NIL : path->param_info->ppi_clauses,
+			paramRelids, stub_oids);
+	std::optional<BaseLocalMmsearchOwnershipProof> owned_mmsearch_proof;
+	if (owned_mmsearch.normalized_expr != nullptr) {
+		List* candidate_expressions = list_concat(
+			list_make1(owned_mmsearch.normalized_expr),
+			list_copy(owned_mmsearch.extra_normalized_exprs));
+		bool exact = true;
+		Node* canonical_target = nullptr;
+		for (FuncExpr* candidate : PList<FuncExpr>(candidate_expressions)) {
+			auto proof = prove_base_local_mmsearch_ownership(
+				candidate, rel, paramRelids, stub_oids);
+			Node* target = candidate == nullptr
+				|| list_length(candidate->args) < 1 ? nullptr
+				: reinterpret_cast<Node*>(linitial(candidate->args));
+			if (!proof.has_value()
+				|| (canonical_target != nullptr
+					&& !equal(canonical_target, target))) {
+				exact = false;
+				break;
+			}
+			bioseq::simd::active_target::Minimap2Params option_probe =
+				build_params_from_gucs();
+			bioseq::indexing::IndexReadRequirement requirement_probe =
+				bioseq::indexing::IndexReadRequirement::allow;
+			(void)apply_aligner_options_override(
+				candidate, option_probe, requirement_probe, stub_oids);
+			if (proof->any_evaluated_operand
+				&& requirement_probe
+					== bioseq::indexing::IndexReadRequirement::
+						require_compatible_persisted) {
+				exact = false;
+				break;
+			}
+			if (canonical_target == nullptr) {
+				canonical_target = target;
+				owned_mmsearch_proof = *proof;
+			}
+		}
+		/* The legacy two-call fallback has one target capture and one query
+		 * configuration.  Effectful/evaluated operands would either be shared
+		 * across SQL occurrences or duplicated, so keep that contract raw-only. */
+		if (exact && list_length(candidate_expressions) > 1
+			&& owned_mmsearch_proof.has_value()
+			&& owned_mmsearch_proof->any_evaluated_operand) {
+			exact = false;
+		}
+		list_free(candidate_expressions);
+		if (!exact) {
+			owned_mmsearch = {};
+			owned_mmsearch_proof.reset();
+		}
+	}
 
 	bioseq_log<DBG>("[bioseq] pg: AddBioseqColumnScanPath() iterating allClauses (no-op pass for tracing)");
 	for (auto restrict_info : clauseReferences)
@@ -15935,6 +16577,77 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		 * leader proof, so every alignment-owning path is parallel unsafe.
 		 */
 		path->parallel_safe = false;
+	}
+
+	SliceProjectIrBuilder base_operand_sources{
+		.oids = &stub_oids,
+		.command_type = CMD_SELECT,
+		.planner_root = root,
+		.target_leaf_support_relid = rel->relid,
+		.source_bindings_only = true,
+	};
+	const bool needs_evaluated_operands = owned_mmsearch_proof.has_value()
+		&& owned_mmsearch_proof->any_evaluated_operand;
+	auto append_support_var = [&base_operand_sources](Var* variable) {
+		if (variable == nullptr) return;
+		for (Var* existing : PList<Var>(
+				base_operand_sources.target_leaf_support_vars)) {
+			if (equal(existing, variable)) return;
+		}
+		base_operand_sources.target_leaf_support_vars = lappend(
+			base_operand_sources.target_leaf_support_vars, variable);
+	};
+	if (needs_evaluated_operands) {
+		auto register_operand = [&base_operand_sources, &append_support_var](
+				const BaseLocalMmsearchOperandProof& proof) {
+			const std::uint32_t producer = slice_project_build_ir_node(
+				base_operand_sources, proof.expression);
+			slice_project_note_source_binding(
+				base_operand_sources, proof.expression, producer);
+			for (Var* source : PList<Var>(proof.sequence_vars)) {
+				append_support_var(source);
+			}
+		};
+		register_operand(owned_mmsearch_proof->target);
+		if (owned_mmsearch_proof->local_query.has_value()) {
+			register_operand(*owned_mmsearch_proof->local_query);
+		}
+		/* Residual quals execute before operand ExprStates.  Discover them from
+		 * the full baserestrictinfo + parameterized-clause set, not allClauses:
+		 * FilterPushdownClauses deliberately omits executor-only quals, while
+		 * PlanCustomPath installs those full residuals in scan.plan.qual. */
+		List* executable_residual_restrictions =
+			restrictions_without_owned_mmsearch(
+				clauseReferences.ptr(), owned_mmsearch_restrictions,
+				/*restrictions_are_private_copies=*/false);
+		constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+			| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+		for (RestrictInfo* residual : PList<RestrictInfo>(
+				executable_residual_restrictions)) {
+			if (residual == nullptr || residual->clause == nullptr) continue;
+			List* variables = pull_var_clause(
+				reinterpret_cast<Node*>(residual->clause), pull_flags);
+			for (Var* variable : PList<Var>(variables)) {
+				if (variable == nullptr || variable->varno != rel->relid
+					|| variable->varattno <= 0 || variable->varlevelsup != 0
+					|| !bms_is_empty(variable->varnullingrels)
+					|| variable->vartype != stub_oids.bioseq_seq_type_oid) continue;
+				append_support_var(variable);
+				bool already_bound = false;
+				for (auto const& binding : base_operand_sources.source_bindings) {
+					if (equal(binding.first, variable)) {
+						already_bound = true;
+						break;
+					}
+				}
+				if (!already_bound) {
+					base_operand_sources.source_bindings.emplace_back(
+						reinterpret_cast<Node*>(copyObject(variable)), 0u);
+				}
+			}
+			list_free(variables);
+		}
+		list_free(executable_residual_restrictions);
 	}
 
 	/*
@@ -16045,6 +16758,11 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 		(void)apply_aligner_options_override(
 			owned_expr, planned_params,
 			planned_requirement, stub_oids);
+		if (owned_mmsearch_proof.has_value()
+			&& owned_mmsearch_proof->any_evaluated_operand) {
+			planned_requirement =
+				bioseq::indexing::IndexReadRequirement::require_absent;
+		}
 		const owned_mmsearch_cost alignment = estimate_owned_mmsearch_cost(
 			target_symbols, query_symbols, path->rows,
 			planned_requirement
@@ -16081,6 +16799,18 @@ AddBioseqColumnScanPath(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 						numberOfClausesPushed);
 	});
 
+	if (needs_evaluated_operands) {
+		Path* private_path = slice_project_clone_mutable_path_spine(path);
+		bool tagged_source = false;
+		private_path = slice_project_tag_owned_path_tree(
+			private_path, base_operand_sources, tagged_source);
+		if (!tagged_source) {
+			ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("BioseqScan evaluated mmsearch operand has no source provider")));
+		}
+		return private_path;
+	}
 	return path;
 }
 
@@ -16213,14 +16943,17 @@ BioseqColumnTableStripeCount(Oid relationId)
 
 struct BaseMatchHelperRegistration {
 	const BioseqStubOids* oids = nullptr;
-	Var* target_recipe = nullptr;
+	Node* target_recipe = nullptr;
+	Index target_relid = 0;
+	AttrNumber primary_target_attno = InvalidAttrNumber;
 	AttrNumber current_resno = InvalidAttrNumber;
 	List* sites = NIL;
 	bool invalid = false;
 };
 
 [[nodiscard]] static bool base_match_helper_site_already_registered(
-		List* sites, FuncExpr* helper) noexcept {
+		List* sites, FuncExpr* helper,
+		const AttrNumber resno) noexcept {
 	if (helper == nullptr) return false;
 	Node* argument = batch_join_match_helper_argument(helper);
 	for (List* encoded : PList<List>(sites)) {
@@ -16228,9 +16961,13 @@ struct BaseMatchHelperRegistration {
 			|| list_length(encoded) != kBioseqMatchHelperSiteFields) continue;
 		Node* funcid_node = reinterpret_cast<Node*>(list_nth(
 			encoded, kMatchSiteFuncid));
+		Node* resno_node = reinterpret_cast<Node*>(list_nth(
+			encoded, kMatchSiteResno));
 		Node* encoded_argument = reinterpret_cast<Node*>(list_nth(
 			encoded, kMatchSiteCanonicalArgument));
 		if (funcid_node != nullptr && IsA(funcid_node, Integer)
+			&& resno_node != nullptr && IsA(resno_node, Integer)
+			&& intVal(resno_node) == resno
 			&& static_cast<Oid>(intVal(funcid_node)) == helper->funcid
 			&& encoded_argument != nullptr && argument != nullptr
 			&& equal(encoded_argument, argument)) return true;
@@ -16255,26 +16992,27 @@ struct base_match_helper_registration_visitor {
 			return pg_walk_step::stop;
 		}
 		const bool names_recipe = batch_join_match_helper_names_recipe(
-			helper, reinterpret_cast<Node*>(registration.target_recipe));
+			helper, registration.target_recipe);
 		const bool names_lineage = batch_join_match_helper_names_base_lineage(
-			helper, reinterpret_cast<Node*>(registration.target_recipe),
+			helper, registration.target_recipe,
 			*registration.oids);
-		/* A base owner may claim only its exact sequence column or a legacy
-		 * row marker from the same query-local alias.  A transformed expression
-		 * or another sequence column must remain executable so its actual owner
-		 * can bind it, or the scalar stub can fail closed. */
+		/* Exact transformed recipes and their unique canonical base lineage are
+		 * both valid spellings for one base owner.  Resolution across multiple
+		 * owners remains query-scope fail-closed in the common finalizer. */
 		if (!names_recipe && !names_lineage) {
 			return pg_walk_step::skip_subtree;
 		}
-		if (!edit_sequence_argument_matches_target(
-				helper, registration.target_recipe->varno,
-				registration.target_recipe->varattno,
+		if (!edit_sequence_argument_matches_recipe(
+				helper, registration.target_recipe,
+				registration.target_relid,
+				registration.primary_target_attno,
 				*registration.oids)) {
 			registration.invalid = true;
 			return pg_walk_step::stop;
 		}
 		if (base_match_helper_site_already_registered(
-				registration.sites, helper)) {
+				registration.sites, helper,
+				registration.current_resno)) {
 			return pg_walk_step::skip_subtree;
 		}
 		const Oid result_type = exprType(reinterpret_cast<Node*>(helper));
@@ -16303,10 +17041,12 @@ struct base_match_helper_registration_visitor {
 };
 
 [[nodiscard]] static List* collect_base_match_helper_sites(
-		List* targetlist, Var* target_recipe,
+		List* targetlist, Node* target_recipe, const Index target_relid,
+		const AttrNumber primary_target_attno,
 		const BioseqStubOids& oids) {
 	BaseMatchHelperRegistration registration{
-		&oids, target_recipe, InvalidAttrNumber, NIL, false};
+		&oids, target_recipe, target_relid, primary_target_attno,
+		InvalidAttrNumber, NIL, false};
 	base_match_helper_registration_visitor visitor;
 	for (TargetEntry* entry : PList<TargetEntry>(targetlist)) {
 		if (entry == nullptr || entry->expr == nullptr) continue;
@@ -16314,10 +17054,10 @@ struct base_match_helper_registration_visitor {
 		pg_walk_expression_including_root(
 			reinterpret_cast<Node*>(entry->expr), registration, visitor);
 		if (registration.invalid) {
-			ereport(ERROR,
+				ereport(ERROR,
 				(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 				 errmsg("BioseqScan match helper identity is invalid"),
-				 errhint("Use the exact mmsearch target sequence column or a row marker from the same table alias.")));
+				 errhint("Use the exact mmsearch target recipe or its unique base source lineage.")));
 		}
 	}
 	return registration.sites;
@@ -16399,6 +17139,13 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("Bioseq mmsearch ownership metadata is inconsistent")));
 	}
+	Node* planner_owned_target_recipe = owned_mmsearch_exprs == NIL
+		? nullptr : reinterpret_cast<Node*>(linitial(
+			reinterpret_cast<FuncExpr*>(linitial(
+				owned_mmsearch_exprs))->args));
+	const bool planner_owned_target_evaluated =
+		planner_owned_target_recipe != nullptr
+		&& pg_node_try_as<Var>(planner_owned_target_recipe) == nullptr;
 
 	/* XXX: also need to store projected column list for EXPLAIN */
 
@@ -16457,6 +17204,12 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 				pre_alignment_quals.append(qual);
 				continue;
 			}
+			if (planner_owned_target_evaluated) {
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("bioseq.edit scan predicates do not support a transformed mmsearch target"),
+					 errhint("Project bioseq.edit with the exact transformed recipe, or apply the edit predicate in a separate query level.")));
+			}
 			const auto decoded = decode_strict_edit_upper_bound(
 				qual, best_path->path.parent->relid, edit_oids);
 			if (!decoded.has_value() || strict_edit_predicate.has_value()) {
@@ -16498,11 +17251,26 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 					Var* argument = helper == nullptr ? nullptr
 						: pg_node_try_as<Var>(
 							batch_join_match_helper_argument(helper));
-					belongs_to_scan = argument != nullptr
+					const bool direct_scan_argument = argument != nullptr
 						&& argument->varno == scan_relid
 						&& argument->varattno > 0
 						&& argument->varlevelsup == 0
 						&& bms_is_empty(argument->varnullingrels);
+					/* Keep a direct scan-local mismatch inside this owner so its
+					 * finalized injector emits the established target-column
+					 * diagnostic.  Wrapped mismatches remain unclaimed and reach
+					 * the scalar fail-closed boundary. */
+					if (helper != nullptr
+						&& planner_owned_target_recipe != nullptr) {
+						belongs_to_scan = batch_join_match_helper_names_recipe(
+							helper, planner_owned_target_recipe)
+							|| batch_join_match_helper_names_base_lineage(
+								helper, planner_owned_target_recipe,
+								plan_stub_oids)
+							|| direct_scan_argument;
+					} else {
+						belongs_to_scan = direct_scan_argument;
+					}
 				} else if (fe->funcid == plan_stub_oids.symbol_count_oid) {
 					constexpr int pull_flags = PVC_RECURSE_AGGREGATES
 						| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
@@ -16518,9 +17286,24 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 					}
 				}
 				if (belongs_to_scan) {
-					TargetEntry* projected = copyObject(n);
-					projected->resno = static_cast<AttrNumber>(list_length(tlist) + 1);
-					tlist = lappend(tlist, projected);
+					/* Descendant-owner propagation may already have widened this
+					 * private BioseqScan PathTarget with the exact whole helper.
+					 * Retain one authoritative carrier/site instead of appending a
+					 * duplicate from processed_tlist. */
+					bool already_projected = false;
+					for (TargetEntry* existing : PList<TargetEntry>(tlist)) {
+						if (existing != nullptr
+							&& equal(existing->expr, n->expr)) {
+							already_projected = true;
+							break;
+						}
+					}
+					if (!already_projected) {
+						TargetEntry* projected = copyObject(n);
+						projected->resno = static_cast<AttrNumber>(
+							list_length(tlist) + 1);
+						tlist = lappend(tlist, projected);
+					}
 				}
 			}
 		}
@@ -16534,7 +17317,7 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 		Node* target_node = list_length(owned_mmsearch_expr->args) >= 1
 			? reinterpret_cast<Node*>(linitial(owned_mmsearch_expr->args))
 			: nullptr;
-		Var* target_recipe = pg_node_try_as<Var>(target_node);
+		Node* target_recipe = target_node;
 		RangeTblEntry* owner_rte = root != nullptr && root->parse != nullptr
 			&& bioseq_is_concrete_rte_varno(cscan->scan.scanrelid)
 			&& cscan->scan.scanrelid <= static_cast<Index>(
@@ -16542,28 +17325,34 @@ BioseqColumnScanPath_PlanCustomPath(PlannerInfo *root,
 			? rt_fetch(cscan->scan.scanrelid, root->parse->rtable)
 			: nullptr;
 		const BioseqStubOids& owner_oids = get_cached_stub_oids();
+		List* target_lineage = canonical_match_base_lineage(
+			target_recipe, owner_oids);
+		Var* primary_source = target_lineage == NIL ? nullptr
+			: reinterpret_cast<Var*>(linitial(target_lineage));
+		bool valid_lineage = primary_source != nullptr;
+		for (Var* source : PList<Var>(target_lineage)) {
+			if (source == nullptr || source->varno != cscan->scan.scanrelid
+				|| source->varattno <= 0 || source->varlevelsup != 0
+				|| !bms_is_empty(source->varnullingrels)
+				|| source->vartype != owner_oids.bioseq_seq_type_oid) {
+				valid_lineage = false;
+				break;
+			}
+		}
 		if (target_recipe == nullptr
-			|| target_recipe->varno != cscan->scan.scanrelid
-			|| target_recipe->varattno <= 0
-			|| target_recipe->varlevelsup != 0
-			|| !bms_is_empty(target_recipe->varnullingrels)
-			|| target_recipe->vartype != owner_oids.bioseq_seq_type_oid
+			|| exprType(target_recipe) != owner_oids.bioseq_seq_type_oid
+			|| !valid_lineage
 			|| owner_rte == nullptr || owner_rte->rtekind != RTE_RELATION
 			|| !OidIsValid(owner_rte->relid)) {
 			ereport(ERROR,
 				(errcode(ERRCODE_DATA_CORRUPTED),
 				 errmsg("BioseqScan match owner target identity is invalid")));
 		}
-		List* descriptor = list_make5(
-			makeInteger(kBioseqMatchOwnerDescriptorMagic),
-			makeInteger(kBioseqMatchOwnerDescriptorVersion),
-			makeInteger(0),
-			copyObject(target_recipe),
-			list_make1(copyObject(target_recipe)));
-		descriptor = lappend(descriptor,
-			makeInteger(static_cast<int>(target_recipe->varno)));
+		List* descriptor = make_match_owner_descriptor(
+			target_recipe, cscan->scan.scanrelid, owner_oids);
 		List* sites = collect_base_match_helper_sites(
-			cscan->scan.plan.targetlist, target_recipe, owner_oids);
+			cscan->scan.plan.targetlist, target_recipe,
+			cscan->scan.scanrelid, primary_source->varattno, owner_oids);
 		List* owner_tag = list_make5(
 			makeInteger(kBioseqBaseMatchOwnerPlanMagic),
 			makeInteger(kBioseqBaseMatchOwnerPlanVersion),
@@ -18191,6 +18980,18 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 	std::vector<PerRowPlanOnlyHelperBinding> plan_only_helper_bindings;
 	List* inherited_helper_identities =
 		batch_join_proven_inherited_helper_identities(child_plan, oids);
+	List* current_owner_helper_identities = NIL;
+	for (Node* identity : PList<Node>(plan_owner_support.helper_identities)) {
+		FuncExpr* helper = per_row_helper_identity_function(identity, oids);
+		if (helper != nullptr
+			&& (batch_join_match_helper_names_recipe(
+				helper, target_expression)
+				|| batch_join_match_helper_names_base_lineage(
+					helper, target_expression, oids))) {
+			per_row_append_unique_expression(
+				current_owner_helper_identities, identity);
+		}
+	}
 	for (Node* identity : PList<Node>(plan_owner_support.helper_identities)) {
 		if (!batch_join_descendant_owns_helper_identity(
 				child_plan, identity)) continue;
@@ -18234,7 +19035,7 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 		per_row_append_unique_expression(
 			plan_only_passthrough_support, support);
 	}
-	for (Node* support : PList<Node>(plan_owner_support.helper_identities)) {
+	for (Node* support : PList<Node>(current_owner_helper_identities)) {
 		if (batch_join_identity_list_contains(
 				inherited_helper_identities, support)) continue;
 		if (find_plan_tlist_expression_resno(
@@ -18245,7 +19046,7 @@ static Plan* BioseqPerRowJoin_PlanCustomPath(
 			nullptr, /*resjunk=*/true));
 		per_row_append_unique_expression(plan_only_helper_support, support);
 	}
-	for (Node* identity : PList<Node>(plan_owner_support.helper_identities)) {
+	for (Node* identity : PList<Node>(current_owner_helper_identities)) {
 		if (batch_join_identity_list_contains(
 				inherited_helper_identities, identity)) continue;
 		if (find_plan_tlist_expression_resno(
@@ -19075,6 +19876,104 @@ static void collect_match_owner_plan(
 		&& planner_argument->varcollid == executor_argument->varcollid;
 }
 
+[[nodiscard]] static bool base_match_expression_translation_agrees(
+		Node* planner_expression, Node* executor_expression,
+		const Index planner_relid, const Index executor_relid) {
+	if (planner_expression == nullptr || executor_expression == nullptr
+		|| !bioseq_is_concrete_rte_varno(planner_relid)
+		|| !bioseq_is_concrete_rte_varno(executor_relid)
+		|| exprType(planner_expression) != exprType(executor_expression)
+		|| exprTypmod(planner_expression) != exprTypmod(executor_expression)
+		|| exprCollation(planner_expression)
+			!= exprCollation(executor_expression)) return false;
+	Node* translated = reinterpret_cast<Node*>(copyObject(planner_expression));
+	ChangeVarNodes(translated, static_cast<int>(planner_relid),
+		static_cast<int>(executor_relid), /*sublevels_up=*/0);
+	return equal(translated, executor_expression);
+}
+
+[[nodiscard]] static bool base_match_target_expression_translation_agrees(
+		Node* planner_target, Node* executor_target,
+		const Index planner_relid, const Index executor_scanrelid,
+		const BioseqStubOids& oids) {
+	if (planner_target == nullptr || executor_target == nullptr
+		|| exprType(planner_target) != oids.bioseq_seq_type_oid
+		|| exprType(executor_target) != oids.bioseq_seq_type_oid
+		|| !base_match_expression_translation_agrees(
+			planner_target, executor_target,
+			planner_relid, executor_scanrelid)) return false;
+	List* planner_lineage = canonical_match_base_lineage(
+		planner_target, oids);
+	List* executor_lineage = canonical_match_base_lineage(
+		executor_target, oids);
+	if (planner_lineage == NIL
+		|| list_length(planner_lineage) != list_length(executor_lineage)) {
+		return false;
+	}
+	for (int index = 0; index < list_length(planner_lineage); ++index) {
+		Var* planner_source = reinterpret_cast<Var*>(list_nth(
+			planner_lineage, index));
+		Var* executor_source = reinterpret_cast<Var*>(list_nth(
+			executor_lineage, index));
+		if (!base_match_target_var_translation_agrees(
+				planner_source, executor_source, executor_scanrelid, oids)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+[[nodiscard]] static bool base_match_site_expression_translation_agrees(
+		Node* planner_argument, Node* executor_argument,
+		Node* planner_target, Node* executor_target,
+		const Index planner_relid, const Index executor_relid,
+		const BioseqMatchHelperBindingKind binding_kind,
+		const BioseqStubOids& oids) {
+	if (planner_argument == nullptr || executor_argument == nullptr
+		|| planner_target == nullptr || executor_target == nullptr) return false;
+	if (binding_kind == BioseqMatchHelperBindingKind::exact_recipe) {
+		return equal(planner_argument, planner_target)
+			&& equal(executor_argument, executor_target)
+			&& base_match_expression_translation_agrees(
+				planner_argument, executor_argument,
+				planner_relid, executor_relid);
+	}
+	if (binding_kind != BioseqMatchHelperBindingKind::unique_lineage) {
+		return false;
+	}
+	Var* planner_var = pg_node_try_as<Var>(planner_argument);
+	Var* executor_var = pg_node_try_as<Var>(executor_argument);
+	if (planner_var == nullptr || executor_var == nullptr
+		|| planner_var->varno != planner_relid
+		|| executor_var->varno != executor_relid
+		|| planner_var->varattno <= 0 || executor_var->varattno <= 0
+		|| planner_var->varlevelsup != 0 || executor_var->varlevelsup != 0
+		|| !bms_is_empty(planner_var->varnullingrels)
+		|| !bms_is_empty(executor_var->varnullingrels)
+		|| planner_var->varattno != executor_var->varattno
+		|| planner_var->vartype != executor_var->vartype
+		|| planner_var->vartypmod != executor_var->vartypmod
+		|| planner_var->varcollid != executor_var->varcollid) return false;
+	if (planner_var->vartype != oids.bioseq_seq_type_oid) return true;
+	bool planner_member = false;
+	for (Var* source : PList<Var>(
+			canonical_match_base_lineage(planner_target, oids))) {
+		if (equal(source, planner_var)) {
+			planner_member = true;
+			break;
+		}
+	}
+	bool executor_member = false;
+	for (Var* source : PList<Var>(
+			canonical_match_base_lineage(executor_target, oids))) {
+		if (equal(source, executor_var)) {
+			executor_member = true;
+			break;
+		}
+	}
+	return planner_member && executor_member;
+}
+
 [[nodiscard]] static bool finalized_match_helper_argument_translation_agrees(
 	CustomScan* scan, Node* translated, Node* canonical) noexcept;
 
@@ -19215,30 +20114,40 @@ static void finalize_base_match_owner_executor_image(
 	FuncExpr* mmsearch = list_length(owned_quals) >= 1
 		? pg_node_try_as<FuncExpr>(reinterpret_cast<Node*>(linitial(owned_quals)))
 		: nullptr;
-	Var* executor_target = mmsearch != nullptr
+	Node* executor_target = mmsearch != nullptr
 		&& is_mmsearch_funcid(mmsearch->funcid, oids)
 		&& list_length(mmsearch->args) >= 1
-		? pg_node_try_as<Var>(reinterpret_cast<Node*>(linitial(mmsearch->args)))
+		? reinterpret_cast<Node*>(linitial(mmsearch->args))
 		: nullptr;
-	Var* planner_target = pg_node_try_as<Var>(owner.target_recipe);
+	Node* planner_target = owner.target_recipe;
 	if (scan == nullptr || existing_descriptor != nullptr
 		|| existing_sites != nullptr || planner_target == nullptr
 		|| executor_target == nullptr
-		|| planner_target->varno != owner.legacy_target_relid
-		|| !base_match_target_var_translation_agrees(
-			planner_target, executor_target, scan->scan.scanrelid, oids)) {
+		|| !base_match_target_expression_translation_agrees(
+			planner_target, executor_target, owner.legacy_target_relid,
+			scan->scan.scanrelid, oids)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("BioseqScan post-setrefs match owner identity disagrees with its planner descriptor")));
 	}
 
 	List* executor_descriptor = make_match_owner_descriptor(
-		reinterpret_cast<Node*>(executor_target), executor_target->varno, oids);
+		executor_target, scan->scan.scanrelid, oids);
 	match_binding_integer(executor_descriptor,
 		kMatchOwnerStableId, "executor_owner.stable_id")->ival =
 		owner.stable_match_id;
+	List* executor_lineage = canonical_match_base_lineage(
+		executor_target, oids);
+	Var* executor_primary_source = executor_lineage == NIL ? nullptr
+		: reinterpret_cast<Var*>(linitial(executor_lineage));
+	if (executor_primary_source == nullptr) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("BioseqScan post-setrefs match owner lineage is empty")));
+	}
 	List* executor_sites = collect_base_match_helper_sites(
-		scan->scan.plan.targetlist, executor_target, oids);
+		scan->scan.plan.targetlist, executor_target,
+		scan->scan.scanrelid, executor_primary_source->varattno, oids);
 	if (list_length(executor_sites) != list_length(owner.sites)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_INTERNAL_ERROR),
@@ -19270,10 +20179,10 @@ static void finalize_base_match_owner_executor_image(
 		}
 		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
 			intVal(list_nth(planner_site, kMatchSiteBindingKind)));
-		Var* planner_argument = pg_node_try_as<Var>(reinterpret_cast<Node*>(
-			list_nth(planner_site, kMatchSiteCanonicalArgument)));
-		Var* executor_argument = pg_node_try_as<Var>(reinterpret_cast<Node*>(
-			list_nth(executor_site, kMatchSiteCanonicalArgument)));
+		Node* planner_argument = reinterpret_cast<Node*>(
+			list_nth(planner_site, kMatchSiteCanonicalArgument));
+		Node* executor_argument = reinterpret_cast<Node*>(
+			list_nth(executor_site, kMatchSiteCanonicalArgument));
 		const bool integer_identity_agrees =
 			intVal(list_nth(planner_site, kMatchSiteResno))
 				== intVal(list_nth(executor_site, kMatchSiteResno))
@@ -19288,9 +20197,11 @@ static void finalize_base_match_owner_executor_image(
 		if (!integer_identity_agrees
 			|| intVal(list_nth(planner_site, kMatchSiteStableId))
 				!= owner.stable_match_id
-			|| !base_match_site_var_translation_agrees(
+			|| !base_match_site_expression_translation_agrees(
 				planner_argument, executor_argument,
-				planner_target, executor_target, binding_kind, oids)) {
+				planner_target, executor_target,
+				owner.legacy_target_relid, scan->scan.scanrelid,
+				binding_kind, oids)) {
 			ereport(ERROR,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("BioseqScan post-setrefs match helper identity disagrees with its planner site"),
@@ -19546,7 +20457,7 @@ POSTGRES_FN(bioseq_internal_match_owner_finalization_scope_diagnostics)
 		scan, reinterpret_cast<List*>(descriptor_node));
 }
 
-[[nodiscard]] static Var* initialize_base_match_owner_runtime(
+[[nodiscard]] static Node* initialize_base_match_owner_runtime(
 		CustomScan* scan, Relation relation, BioseqScanRuntime& runtime) {
 	List* owner_tag = find_base_match_owner_plan_tag(scan);
 	if (owner_tag == NIL) return nullptr;
@@ -19571,29 +20482,47 @@ POSTGRES_FN(bioseq_internal_match_owner_finalization_scope_diagnostics)
 	List* descriptor = reinterpret_cast<List*>(descriptor_node);
 	runtime.stable_match_id =
 		validate_finalized_match_owner_descriptor_value(scan, descriptor);
-	Var* target_recipe = pg_node_try_as<Var>(reinterpret_cast<Node*>(
-		list_nth(descriptor, kMatchOwnerTargetRecipe)));
+	Node* target_recipe = reinterpret_cast<Node*>(
+		list_nth(descriptor, kMatchOwnerTargetRecipe));
 	TupleDesc relation_descriptor = RelationGetDescr(relation);
-	Form_pg_attribute target_attribute = target_recipe != nullptr
-		&& target_recipe->varattno > 0
-		&& target_recipe->varattno <= relation_descriptor->natts
-		? TupleDescAttr(relation_descriptor, target_recipe->varattno - 1)
-		: nullptr;
 	const BioseqStubOids& oids = get_cached_stub_oids();
+	List* target_lineage = canonical_match_base_lineage(target_recipe, oids);
+	Var* primary_source = target_lineage == NIL ? nullptr
+		: reinterpret_cast<Var*>(linitial(target_lineage));
+	bool lineage_valid = primary_source != nullptr;
+	for (Var* source : PList<Var>(target_lineage)) {
+		Form_pg_attribute attribute = source != nullptr
+			&& source->varattno > 0
+			&& source->varattno <= relation_descriptor->natts
+			? TupleDescAttr(relation_descriptor, source->varattno - 1)
+			: nullptr;
+		if (source == nullptr || source->varno != scan->scan.scanrelid
+			|| source->varattno <= 0 || source->varlevelsup != 0
+			|| !bms_is_empty(source->varnullingrels)
+			|| source->vartype != oids.bioseq_seq_type_oid
+			|| attribute == nullptr || attribute->attisdropped
+			|| attribute->atttypid != source->vartype
+			|| attribute->atttypmod != source->vartypmod
+			|| attribute->attcollation != source->varcollid) {
+			lineage_valid = false;
+			break;
+		}
+	}
+	const BaseLocalSequenceTypmodResolution target_type =
+		base_local_sequence_typmod_resolution(target_recipe, oids);
 	if (target_recipe == nullptr
-		|| target_recipe->varno != scan->scan.scanrelid
-		|| target_recipe->varattno <= 0
-		|| target_recipe->varlevelsup != 0
-		|| !bms_is_empty(target_recipe->varnullingrels)
-		|| target_recipe->vartype != oids.bioseq_seq_type_oid
-		|| target_attribute == nullptr || target_attribute->attisdropped
-		|| target_attribute->atttypid != target_recipe->vartype
-		|| target_attribute->atttypmod != target_recipe->vartypmod
-		|| target_attribute->attcollation != target_recipe->varcollid) {
+		|| exprType(target_recipe) != oids.bioseq_seq_type_oid
+		|| !lineage_valid || target_type.invalid || target_type.typmod < 0) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqScan match owner target recipe is invalid")));
 	}
+	runtime.match_target_recipe = target_recipe;
+	runtime.match_target_lineage = target_lineage;
+	runtime.match_target_typmod = target_type.typmod;
+	runtime.match_target_evaluated = pg_node_try_as<Var>(target_recipe) == nullptr;
+	runtime.match_sequence_varno = primary_source->varno;
+	runtime.match_sequence_attno = primary_source->varattno;
 	runtime.match_helper_sites = sites_node == nullptr
 		? NIL : reinterpret_cast<List*>(sites_node);
 	for (List* site : PList<List>(runtime.match_helper_sites)) {
@@ -19615,18 +20544,28 @@ POSTGRES_FN(bioseq_internal_match_owner_finalization_scope_diagnostics)
 			site, kMatchSiteFuncid)));
 		const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
 			intVal(list_nth(site, kMatchSiteBindingKind)));
-		Var* argument = pg_node_try_as<Var>(reinterpret_cast<Node*>(
-			list_nth(site, kMatchSiteCanonicalArgument)));
-		const bool exact_sequence_argument = argument != nullptr
-			&& argument->vartype == oids.bioseq_seq_type_oid
-			&& equal(argument, target_recipe)
+		Node* argument_node = reinterpret_cast<Node*>(
+			list_nth(site, kMatchSiteCanonicalArgument));
+		Var* argument = pg_node_try_as<Var>(argument_node);
+		const bool exact_sequence_argument = argument_node != nullptr
+			&& exprType(argument_node) == oids.bioseq_seq_type_oid
+			&& equal(argument_node, target_recipe)
 			&& binding_kind == BioseqMatchHelperBindingKind::exact_recipe;
-		const bool legacy_lineage_argument = argument != nullptr
-			&& argument->vartype != oids.bioseq_seq_type_oid
-			&& argument->varno == target_recipe->varno
+		bool legacy_lineage_argument = argument != nullptr
+			&& argument->varno == scan->scan.scanrelid
 			&& argument->varattno > 0 && argument->varlevelsup == 0
 			&& bms_is_empty(argument->varnullingrels)
 			&& binding_kind == BioseqMatchHelperBindingKind::unique_lineage;
+		if (legacy_lineage_argument
+			&& argument->vartype == oids.bioseq_seq_type_oid) {
+			legacy_lineage_argument = false;
+			for (Var* source : PList<Var>(target_lineage)) {
+				if (equal(source, argument)) {
+					legacy_lineage_argument = true;
+					break;
+				}
+			}
+		}
 		if (resno <= 0 || resno > list_length(scan->scan.plan.targetlist)
 			|| !is_bioseq_projection_funcid(funcid, oids)
 			|| get_func_rettype(funcid) == InvalidOid
@@ -20008,7 +20947,9 @@ finalized_batch_owner_matching_site_count(
 
 struct FinalizedBaseOwnerSiteContext {
 	List* sites = NIL;
-	Var* target_recipe = nullptr;
+	Node* target_recipe = nullptr;
+	List* target_lineage = NIL;
+	Index target_relid = 0;
 	int stable_match_id = 0;
 };
 
@@ -20034,16 +20975,27 @@ finalized_base_owner_site_context(
 	List* descriptor = reinterpret_cast<List*>(descriptor_node);
 	const int stable_match_id =
 		validate_finalized_match_owner_descriptor_value(scan, descriptor);
-	Var* target_recipe = pg_node_try_as<Var>(reinterpret_cast<Node*>(
-		list_nth(descriptor, kMatchOwnerTargetRecipe)));
-	if (target_recipe == nullptr || target_recipe->varno != scan->scan.scanrelid
-		|| target_recipe->varattno <= 0 || target_recipe->varlevelsup != 0
-		|| !bms_is_empty(target_recipe->varnullingrels)
-		|| target_recipe->vartype != oids.bioseq_seq_type_oid) {
+	Node* target_recipe = reinterpret_cast<Node*>(
+		list_nth(descriptor, kMatchOwnerTargetRecipe));
+	List* target_lineage = canonical_match_base_lineage(target_recipe, oids);
+	bool valid_lineage = target_lineage != NIL;
+	for (Var* source : PList<Var>(target_lineage)) {
+		if (source == nullptr || source->varno != scan->scan.scanrelid
+			|| source->varattno <= 0 || source->varlevelsup != 0
+			|| !bms_is_empty(source->varnullingrels)
+			|| source->vartype != oids.bioseq_seq_type_oid) {
+			valid_lineage = false;
+			break;
+		}
+	}
+	if (target_recipe == nullptr
+		|| exprType(target_recipe) != oids.bioseq_seq_type_oid
+		|| !valid_lineage) {
 		return false;
 	}
 	context = FinalizedBaseOwnerSiteContext{
-		reinterpret_cast<List*>(sites_node), target_recipe, stable_match_id};
+		reinterpret_cast<List*>(sites_node), target_recipe, target_lineage,
+		scan->scan.scanrelid, stable_match_id};
 	return true;
 }
 
@@ -20072,16 +21024,25 @@ finalized_base_owner_site_context(
 	Var* argument = pg_node_try_as<Var>(canonical_argument);
 	const auto binding_kind = static_cast<BioseqMatchHelperBindingKind>(
 		intVal(list_nth(site, kMatchSiteBindingKind)));
-	const bool exact_sequence_argument = argument != nullptr
-		&& argument->vartype == oids.bioseq_seq_type_oid
-		&& equal(argument, context.target_recipe)
+	const bool exact_sequence_argument = canonical_argument != nullptr
+		&& exprType(canonical_argument) == oids.bioseq_seq_type_oid
+		&& equal(canonical_argument, context.target_recipe)
 		&& binding_kind == BioseqMatchHelperBindingKind::exact_recipe;
-	const bool legacy_lineage_argument = argument != nullptr
-		&& argument->vartype != oids.bioseq_seq_type_oid
-		&& argument->varno == context.target_recipe->varno
+	bool legacy_lineage_argument = argument != nullptr
+		&& argument->varno == context.target_relid
 		&& argument->varattno > 0 && argument->varlevelsup == 0
 		&& bms_is_empty(argument->varnullingrels)
 		&& binding_kind == BioseqMatchHelperBindingKind::unique_lineage;
+	if (legacy_lineage_argument
+		&& argument->vartype == oids.bioseq_seq_type_oid) {
+		legacy_lineage_argument = false;
+		for (Var* source : PList<Var>(context.target_lineage)) {
+			if (equal(source, argument)) {
+				legacy_lineage_argument = true;
+				break;
+			}
+		}
+	}
 	return helper_argument != nullptr && canonical_argument != nullptr
 		&& equal(canonical_argument, helper_argument)
 		&& intVal(list_nth(site, kMatchSiteResno)) == resno
@@ -20209,7 +21170,13 @@ base_scan_targetlist_has_only_finalized_match_helpers(
 			&& finalized_base_owner_site_matches(
 				site, helper, static_cast<AttrNumber>(resno),
 				context, oids, malformed)) {
-			++matches;
+			/* Planner PHV and bare-Func carriers can legitimately collapse to
+			 * equal post-setrefs expressions at distinct resnos.  They are two
+			 * authoritative carrier sites for one base MatchResult owner, not two
+			 * competing owners.  This routine feeds owner-counting audits, so
+			 * classify the owner once while the resno-specific targetlist audit
+			 * above continues to prove every individual site. */
+			matches = 1u;
 		}
 		if (malformed) return 2u;
 	}
@@ -21469,6 +22436,9 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	runtime.lazy_source_projected_bindings.clear();
 	runtime.lazy_source_physical_producer_ids.clear();
 	runtime.lazy_source_physical_bound.clear();
+	runtime.mmsearch_pre_eval_source_bound.clear();
+	runtime.mmsearch_output_source_bound.clear();
+	runtime.mmsearch_pre_eval_sources_present = false;
 	runtime.locator_parent_token = 0;
 	runtime.locator_rowno_resno = InvalidAttrNumber;
 	runtime.edit_predicate_active = false;
@@ -21476,10 +22446,21 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	runtime.edit_sequence_attno = InvalidAttrNumber;
 	runtime.match_sequence_varno = 0;
 	runtime.match_sequence_attno = InvalidAttrNumber;
+	runtime.match_target_recipe = nullptr;
+	runtime.match_query_recipe = nullptr;
+	runtime.match_target_lineage = NIL;
+	runtime.match_query_lineage = NIL;
+	runtime.match_target_expr_state = nullptr;
+	runtime.match_query_expr_state = nullptr;
+	runtime.match_target_typmod = -1;
+	runtime.match_query_typmod = -1;
+	runtime.match_target_evaluated = false;
+	runtime.match_query_evaluated = false;
+	runtime.match_evaluated_submission = false;
 	runtime.match_helper_sites = NIL;
 	runtime.stable_match_id = 0;
 	runtime.mmsearch_null_input = false;
-	Var* base_match_target_recipe = initialize_base_match_owner_runtime(
+	Node* base_match_target_recipe = initialize_base_match_owner_runtime(
 		cscan, cscanstate->ss.ss_currentRelation, runtime);
 	for (Node* private_node : PList<Node>(cscan->custom_private)) {
 		if (private_node == nullptr || !IsA(private_node, List)) continue;
@@ -21858,6 +22839,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		bool is_const;
 		bool is_param;
 		bool is_var_same_rel;
+		bool is_evaluated_row_query;
 	};
 	std::vector<ClassifiedMmsearchQual> classified_quals;
 	std::size_t top_level_mmsearch_qual_count = 0;
@@ -21892,22 +22874,27 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		}
 		Node* a0 = classify_args.first;
 		Node* a1 = classify_args.second;
-		Var* v0 = pg_node_try_as<Var>(a0);
-		if (v0 == nullptr) {
+		if (base_match_target_recipe == nullptr
+			|| !equal(a0, base_match_target_recipe)) {
 			continue;
 		}
 		const bool is_c = pg_node_view{a1}.is<Const>();
 		const bool is_p = pg_node_view{a1}.is<Param>();
 		Var* a1_var = pg_node_try_as<Var>(a1);
 		const bool is_v = a1_var != nullptr
-			&& a1_var->varno == v0->varno
+			&& a1_var->varno == cscan->scan.scanrelid
 			&& a1_var->varattno > 0;
-		if (!is_c && !is_p && !is_v) {
+		const bool is_evaluated_query = !is_c && !is_p && !is_v
+			&& a1 != nullptr
+			&& exprType(a1) == scan_stub_oids.bioseq_seq_type_oid;
+		if (!is_c && !is_p && !is_v && !is_evaluated_query) {
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() classifier skipping mmsearch (arg1 tag={} is not Const/Param/same-rel-Var)",
 					pg_node_tag_name(pg_node_tag_or_invalid(a1)));
 			continue;
 		}
-		classified_quals.push_back({fe_classify, a0, a1, is_c, is_p, is_v});
+		classified_quals.push_back({
+			fe_classify, a0, a1, is_c, is_p, is_v,
+			is_evaluated_query});
 	}
 	/*
 	 * Sort by priority (Var-same-rel > Param > Const) using stable
@@ -21919,7 +22906,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	std::stable_sort(classified_quals.begin(), classified_quals.end(),
 		[](const ClassifiedMmsearchQual& lhs, const ClassifiedMmsearchQual& rhs) {
 			auto pri = [](const ClassifiedMmsearchQual& q) {
-				if (q.is_var_same_rel) return 0;
+			if (q.is_var_same_rel) return 0;
+			if (q.is_evaluated_row_query) return 0;
 				if (q.is_param)        return 1;
 				return 2;  /* Const */
 			};
@@ -21935,7 +22923,12 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		const bool arg1_is_const     = classified.is_const;
 		const bool arg1_is_param     = classified.is_param;
 		const bool arg1_is_var_same_rel = classified.is_var_same_rel;
-		Var* col_var                 = reinterpret_cast<Var*>(arg0);
+		const bool arg1_is_evaluated_row =
+			classified.is_evaluated_row_query;
+		Var* col_var = runtime.match_target_lineage == NIL ? nullptr
+			: reinterpret_cast<Var*>(linitial(runtime.match_target_lineage));
+		if (col_var == nullptr || arg0 == nullptr
+			|| !equal(arg0, runtime.match_target_recipe)) continue;
 
 		if (arg1_is_const)
 		{
@@ -21968,7 +22961,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				continue;
 			}
 		}
-		else /* arg1_is_var_same_rel */
+		else if (arg1_is_var_same_rel)
 		{
 			Var* query_var = reinterpret_cast<Var*>(arg1);
 			if (query_var->vartype != scan_stub_oids.bioseq_seq_type_oid)
@@ -21977,6 +22970,10 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 						query_var->vartype);
 				continue;
 			}
+		}
+		else if (!arg1_is_evaluated_row)
+		{
+			continue;
 		}
 
 		TupleDesc tuple_descriptor = RelationGetDescr(relation_for_attname);
@@ -22002,7 +22999,7 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		 *   - different bound alphabets: SQLSTATE 42804 before any
 		 *     detoast, dispatch, sidecar read, or generic recoder.
 		 */
-		if (col_var->vartypmod < 0)
+		if (runtime.match_target_typmod < 0)
 		{
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg0 has unconstrained typmod; bioseq.seq columns require an explicit (alphabet,width)");
 			continue;
@@ -22012,8 +23009,13 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			arg1_typmod = reinterpret_cast<Const*>(arg1)->consttypmod;
 		} else if (arg1_is_param) {
 			arg1_typmod = reinterpret_cast<Param*>(arg1)->paramtypmod;
-		} else /* arg1_is_var_same_rel */ {
+		} else if (arg1_is_var_same_rel) {
 			arg1_typmod = reinterpret_cast<Var*>(arg1)->vartypmod;
+		} else {
+			const BaseLocalSequenceTypmodResolution query_type =
+				base_local_sequence_typmod_resolution(arg1, scan_stub_oids);
+			if (query_type.invalid || query_type.typmod < 0) continue;
+			arg1_typmod = query_type.typmod;
 		}
 		const bool runtime_typed_external_param =
 			arg1_is_param && arg1_typmod < 0
@@ -22023,7 +23025,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() mmsearch arg1 has unconstrained typmod; add ::bioseq.seq('dna4', N) to the literal/param");
 			continue;
 		}
-		const auto unpacked_typmod      = compact_sequence_stdc_type_params::decode(col_var->vartypmod);
+		const auto unpacked_typmod = compact_sequence_stdc_type_params::decode(
+			runtime.match_target_typmod);
 		/* PostgreSQL's generic PREPARE Param retains only the base type OID and
 		 * commonly reports paramtypmod=-1 even when the declaration spells a
 		 * bioseq typmod.  Its varlena header remains authoritative and is checked
@@ -22235,33 +23238,47 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 					static_cast<unsigned>(unpacked_typmod.alphabet_code),
 					static_cast<unsigned>(unpacked_typmod.storage_unit_byte_width));
 		}
-		else /* arg1_is_var_same_rel */
+		else /* same-row raw Var or complete evaluated query recipe */
 		{
-			/*
-			 * Per-row alignment — each row contributes its own
-			 * arg1 column value. Same-Var (varattno equal) is the
-			 * `mmsearch(t.seq, t.seq)` self-alignment shape;
-			 * different varattno is `mmsearch(t.seq, t.seq2)`
-			 * sibling-column shape. Both go through the same
-			 * dispatch path.
-			 */
-			Var* query_var = reinterpret_cast<Var*>(arg1);
-			const bool self_alignment =
-				query_var->varattno == col_var->varattno;
-			runtime.buffer.configure_mmsearch_per_row(
-				col_var->varattno,
-				std::string(attname_cstr),
-				query_var->varattno,
-				self_alignment,
-				unpacked_typmod.alphabet_code,
-				unpacked_typmod.storage_unit_byte_width,
-				unpacked_arg1_typmod.alphabet_code,
-				unpacked_arg1_typmod.storage_unit_byte_width,
-				primary_key_attno);
-			bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
-					static_cast<int>(col_var->varattno),
-					static_cast<int>(query_var->varattno),
-					self_alignment);
+			const bool evaluated_submission = runtime.match_target_evaluated
+				|| arg1_is_evaluated_row;
+			if (evaluated_submission) {
+				runtime.match_evaluated_submission = true;
+				runtime.match_query_evaluated = true;
+				runtime.match_query_recipe = arg1;
+				runtime.match_query_lineage = canonical_match_base_lineage(
+					arg1, scan_stub_oids);
+				runtime.match_query_typmod = arg1_typmod;
+				runtime.buffer.configure_mmsearch_per_row_evaluated(
+					col_var->varattno,
+					std::string(attname_cstr),
+					unpacked_typmod.alphabet_code,
+					unpacked_typmod.storage_unit_byte_width,
+					unpacked_arg1_typmod.alphabet_code,
+					unpacked_arg1_typmod.storage_unit_byte_width,
+					primary_key_attno);
+			} else {
+				Var* query_var = reinterpret_cast<Var*>(arg1);
+				const bool self_alignment =
+					query_var->varattno == col_var->varattno;
+				runtime.buffer.configure_mmsearch_per_row(
+					col_var->varattno,
+					std::string(attname_cstr),
+					query_var->varattno,
+					self_alignment,
+					unpacked_typmod.alphabet_code,
+					unpacked_typmod.storage_unit_byte_width,
+					unpacked_arg1_typmod.alphabet_code,
+					unpacked_arg1_typmod.storage_unit_byte_width,
+					primary_key_attno);
+				bioseq_log<DBG>("[bioseq] pg: BeginCustomScan() registering per-row mmsearch col_attno={} arg1_attno={} self_alignment={}",
+						static_cast<int>(col_var->varattno),
+						static_cast<int>(query_var->varattno),
+						self_alignment);
+			}
+		}
+		if (runtime.match_target_evaluated) {
+			runtime.match_evaluated_submission = true;
 		}
 
 		primary_configured = true;
@@ -22289,22 +23306,39 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 				static_cast<unsigned long long>(top_level_mmsearch_qual_count)),
 				 errhint("Use a bioseq.seq column as the first argument and a non-null Const, PARAM_EXEC, PARAM_EXTERN, or same-relation bioseq.seq Var as the second argument.")));
 	}
-	Var* configured_match_target = primary_mmsearch_fe == nullptr
+	Node* configured_match_target = primary_mmsearch_fe == nullptr
 		|| list_length(primary_mmsearch_fe->args) < 1
-		? nullptr : pg_node_try_as<Var>(reinterpret_cast<Node*>(
-			linitial(primary_mmsearch_fe->args)));
+		? nullptr : reinterpret_cast<Node*>(
+			linitial(primary_mmsearch_fe->args));
 	if (base_match_target_recipe != nullptr
 		&& (configured_match_target == nullptr
 			|| !equal(configured_match_target, base_match_target_recipe)
-			|| runtime.match_sequence_varno != base_match_target_recipe->varno
-			|| runtime.match_sequence_attno
-				!= base_match_target_recipe->varattno)) {
+			|| runtime.match_target_lineage == NIL)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_DATA_CORRUPTED),
 			 errmsg("BioseqScan configured match target disagrees with its finalized owner")));
 	}
+	if (runtime.match_evaluated_submission) {
+		/* These are the exact post-setrefs argument cells in custom_exprs[3].
+		 * The metadata-only mmsearch FuncExpr itself is never initialized. */
+		runtime.match_target_recipe = configured_match_target;
+		runtime.match_target_expr_state = ExecInitExpr(
+			reinterpret_cast<Expr*>(configured_match_target),
+			&cscanstate->ss.ps);
+		if (runtime.match_query_evaluated) {
+			if (runtime.match_query_recipe == nullptr) {
+				ereport(ERROR,
+					(errcode(ERRCODE_DATA_CORRUPTED),
+					 errmsg("BioseqScan evaluated query recipe is missing")));
+			}
+			runtime.match_query_expr_state = ExecInitExpr(
+				reinterpret_cast<Expr*>(runtime.match_query_recipe),
+				&cscanstate->ss.ps);
+		}
+	}
 	if (runtime.edit_predicate_active
-		&& (primary_seq_attno == InvalidAttrNumber
+		&& (runtime.match_target_evaluated
+			|| primary_seq_attno == InvalidAttrNumber
 			|| runtime.edit_sequence_attno != primary_seq_attno)) {
 		ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -22353,8 +23387,19 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 		scan_stub_oids,
 		&primary_vulkan_enabled_explicit);
 	finalize_simd_chaining_policy(aligner_params);
+	if (runtime.match_evaluated_submission
+		&& primary_requirement
+			== bioseq::indexing::IndexReadRequirement::
+				require_compatible_persisted) {
+		ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("a transformed mmsearch operand cannot require a persisted target index"),
+			 errhint("Use index_read_requirement=allow or require_absent; evaluated base-local operands run against their exact logical views.")));
+	}
 	const bioseq::indexing::IndexReadRequirement index_read_requirement =
-		primary_requirement;
+		runtime.match_evaluated_submission
+		? bioseq::indexing::IndexReadRequirement::require_absent
+		: primary_requirement;
 	aligner_params.do_cigar           = features.uses_cigar || features.uses_edit;
 	aligner_params.compute_divergence = features.uses_divergence;
 	aligner_params.compute_mapq       = features.uses_mapq;
@@ -22516,7 +23561,8 @@ BioseqColumnScan_BeginCustomScanImpl(CustomScanState *cscanstate, EState *estate
 	}
 	runtime.buffer.configure_params(aligner_params,
 							index_read_requirement,
-							features.has_mmsearch && bioseq_read_sequence_index,
+							features.has_mmsearch && bioseq_read_sequence_index
+								&& !runtime.match_evaluated_submission,
 							resolved_user_relid,
 							scan_db_oid, scan_spc_oid, scan_relfile,
 							cscanstate->ss.ss_currentRelation,
@@ -22741,21 +23787,8 @@ lookup_bioseq_placeholder_const(Oid funcid, const VarInjectorCtx* ctx)
 			reinterpret_cast<Node*>(function), *context.oids) == nullptr) {
 		return false;
 	}
-	Var* argument = pg_node_try_as<Var>(
-		batch_join_match_helper_argument(function));
-	if (argument == nullptr
-		|| !bioseq_is_concrete_rte_varno(argument->varno)
-		|| argument->varattno <= 0 || argument->varlevelsup != 0
-		|| !bms_is_empty(argument->varnullingrels)) return false;
-	BioseqMatchHelperBindingKind required_kind{};
-	if (argument->vartype == context.oids->bioseq_seq_type_oid) {
-		if (argument->varno != context.match_sequence_varno
-			|| argument->varattno != context.match_sequence_attno) return false;
-		required_kind = BioseqMatchHelperBindingKind::exact_recipe;
-	} else {
-		if (argument->varno != context.match_sequence_varno) return false;
-		required_kind = BioseqMatchHelperBindingKind::unique_lineage;
-	}
+	Node* argument = batch_join_match_helper_argument(function);
+	if (argument == nullptr) return false;
 	for (List* site : PList<List>(context.match_helper_sites)) {
 		if (site == nullptr || !IsA(site, List)
 			|| list_length(site) != kBioseqMatchHelperSiteFields) continue;
@@ -22763,8 +23796,12 @@ lookup_bioseq_placeholder_const(Oid funcid, const VarInjectorCtx* ctx)
 			site, kMatchSiteCanonicalArgument));
 		if (static_cast<Oid>(intVal(list_nth(site, kMatchSiteFuncid)))
 				== function->funcid
-			&& static_cast<BioseqMatchHelperBindingKind>(intVal(list_nth(
-				site, kMatchSiteBindingKind))) == required_kind
+			&& (static_cast<BioseqMatchHelperBindingKind>(intVal(list_nth(
+				site, kMatchSiteBindingKind)))
+					== BioseqMatchHelperBindingKind::exact_recipe
+				|| static_cast<BioseqMatchHelperBindingKind>(intVal(list_nth(
+					site, kMatchSiteBindingKind)))
+					== BioseqMatchHelperBindingKind::unique_lineage)
 			&& intVal(list_nth(site, kMatchSiteStableId))
 				== context.stable_match_id
 			&& canonical_argument != nullptr
@@ -22887,8 +23924,9 @@ struct var_injector_mutator {
 	[[nodiscard]] pg_node_mutation
 	operator()(pg_expression_mutation_cursor, pg_node_view node, VarInjectorCtx &injector_context) const {
 		if (FuncExpr* funcExpr = node.try_as<FuncExpr>()) {
-			if (!edit_sequence_argument_matches_target(
+			if (!edit_sequence_argument_matches_recipe(
 					funcExpr,
+					injector_context.match_target_recipe,
 					injector_context.match_sequence_varno,
 					injector_context.match_sequence_attno,
 					*injector_context.oids)) {
@@ -26351,52 +27389,205 @@ static void promote_slice_project_sources(
 	}
 }
 
-struct MmsearchOutputSourceRestore {
-	std::array<AttrNumber, 2u> attnos{InvalidAttrNumber, InvalidAttrNumber};
-	std::array<Datum, 2u> datums{};
-	std::size_t count = 0u;
+enum class MmsearchSourceCaptureRole : std::uint8_t {
+	evaluated_operand,
+	output_projection,
 };
 
-static MmsearchOutputSourceRestore capture_mmsearch_output_sources(
-		BioseqScanRuntime& runtime,
-		TupleTableSlot* slot) {
-	MmsearchOutputSourceRestore restore{};
-	if (runtime.lazy_source_provider == nullptr || slot == nullptr) {
-		return restore;
+struct MmsearchSourceRestoreEntry {
+	AttrNumber attno = InvalidAttrNumber;
+	Datum datum{};
+};
+
+/* Four physical sources cover the ordinary target/query/output case without
+ * a per-MatchResult allocation.  Wider projections spill into the executor
+ * per-tuple MemoryContext, which PostgreSQL releases even when ERROR skips C++
+ * destructors.  The object is populated before PG_TRY and never mutated in
+ * its setjmp region, so either storage form is safe to read from PG_CATCH. */
+struct MmsearchSourceRestore {
+	static constexpr std::size_t inline_capacity = 4u;
+	std::array<MmsearchSourceRestoreEntry, inline_capacity> inline_entries{};
+	MmsearchSourceRestoreEntry* overflow_entries = nullptr;
+	std::size_t count = 0u;
+
+	[[nodiscard]] MmsearchSourceRestoreEntry& entry(
+			const std::size_t index) noexcept {
+		return overflow_entries == nullptr
+			? inline_entries[index] : overflow_entries[index];
 	}
-	slot_getallattrs(slot);
-	const std::array<AttrNumber, 2u> candidates{
-		runtime.buffer.target_sequence_attno(),
-		runtime.buffer.per_row_query_sequence_attno(),
-	};
-	for (const AttrNumber attno : candidates) {
-		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts) continue;
-		bool duplicate = false;
-		for (std::size_t prior = 0u; prior < restore.count; ++prior) {
-			duplicate = duplicate || restore.attnos[prior] == attno;
+
+	[[nodiscard]] const MmsearchSourceRestoreEntry& entry(
+			const std::size_t index) const noexcept {
+		return overflow_entries == nullptr
+			? inline_entries[index] : overflow_entries[index];
+	}
+};
+
+static void mark_mmsearch_physical_sequence_source(
+		std::vector<std::uint8_t>& roles,
+		TupleDesc relation_descriptor,
+		const AttrNumber attno,
+		const Oid sequence_type_oid) {
+	if (relation_descriptor == nullptr) return;
+	const int natts = relation_descriptor->natts;
+	if (attno == 0) {
+		for (int index = 0; index < natts; ++index) {
+			Form_pg_attribute attribute = TupleDescAttr(
+				relation_descriptor, index);
+			if (attribute != nullptr && !attribute->attisdropped
+				&& attribute->atttypid == sequence_type_oid) {
+				roles[static_cast<std::size_t>(index + 1)] = 1u;
+			}
 		}
-		if (duplicate || slot->tts_isnull[attno - 1]) continue;
-		restore.attnos[restore.count] = attno;
-		restore.datums[restore.count] = slot->tts_values[attno - 1];
-		++restore.count;
+		return;
+	}
+	if (attno <= 0 || attno > natts) return;
+	Form_pg_attribute attribute = TupleDescAttr(
+		relation_descriptor, attno - 1);
+	if (attribute != nullptr && !attribute->attisdropped
+		&& attribute->atttypid == sequence_type_oid) {
+		roles[static_cast<std::size_t>(attno)] = 1u;
+	}
+}
+
+/* Mark physical sequence Vars from one finalized executor expression tree.
+ * This mirrors BioseqColumnAttrNeeded's Var/whole-row rules, but records only
+ * sequence columns and keeps the lifetime role separate from read demand. */
+static void mark_mmsearch_sequence_sources_from_expression(
+		std::vector<std::uint8_t>& roles,
+		TupleDesc relation_descriptor,
+		Node* expression,
+		const Oid sequence_type_oid) {
+	if (expression == nullptr) return;
+	constexpr int pull_flags = PVC_RECURSE_AGGREGATES
+		| PVC_RECURSE_WINDOWFUNCS | PVC_RECURSE_PLACEHOLDERS;
+	List* variables = pull_var_clause(expression, pull_flags);
+	for (Var* variable : PList<Var>(variables)) {
+		if (variable != nullptr) mark_mmsearch_physical_sequence_source(
+			roles, relation_descriptor, variable->varattno,
+			sequence_type_oid);
+	}
+	list_free(variables);
+}
+
+/* Derive timing from the final executor trees, not the broader BSS3 provider
+ * tag.  newtargetlist is the exact per-MatchResult projection after helper
+ * injection; plan.qual is the executable residual frontier.  Operand lineage
+ * is added because evaluated submission executes both operand ExprStates even
+ * when only one side is syntactically transformed. */
+static void derive_mmsearch_source_lifetime_roles(
+		BioseqScanRuntime& runtime,
+		Plan* plan,
+		TupleDesc relation_descriptor) {
+	runtime.mmsearch_pre_eval_sources_present = false;
+	if (relation_descriptor == nullptr) return;
+	const std::size_t role_count = static_cast<std::size_t>(
+		relation_descriptor->natts + 1);
+	runtime.mmsearch_pre_eval_source_bound.assign(role_count, 0u);
+	runtime.mmsearch_output_source_bound.assign(role_count, 0u);
+	const Oid sequence_type_oid = get_cached_stub_oids().bioseq_seq_type_oid;
+	mark_mmsearch_sequence_sources_from_expression(
+		runtime.mmsearch_output_source_bound,
+		relation_descriptor,
+		reinterpret_cast<Node*>(runtime.newtargetlist),
+		sequence_type_oid);
+	if (plan != nullptr) mark_mmsearch_sequence_sources_from_expression(
+		runtime.mmsearch_pre_eval_source_bound,
+		relation_descriptor,
+		reinterpret_cast<Node*>(plan->qual),
+		sequence_type_oid);
+	if (runtime.match_evaluated_submission) {
+		for (Var* source : PList<Var>(runtime.match_target_lineage)) {
+			if (source != nullptr) mark_mmsearch_physical_sequence_source(
+				runtime.mmsearch_pre_eval_source_bound,
+				relation_descriptor, source->varattno, sequence_type_oid);
+		}
+		if (runtime.match_query_evaluated) {
+			for (Var* source : PList<Var>(runtime.match_query_lineage)) {
+				if (source != nullptr) mark_mmsearch_physical_sequence_source(
+					runtime.mmsearch_pre_eval_source_bound,
+					relation_descriptor, source->varattno, sequence_type_oid);
+			}
+		}
+	}
+	runtime.mmsearch_pre_eval_sources_present = std::any_of(
+		runtime.mmsearch_pre_eval_source_bound.begin(),
+		runtime.mmsearch_pre_eval_source_bound.end(),
+		[](const std::uint8_t bound) { return bound != 0u; });
+}
+
+[[nodiscard]] static bool mmsearch_source_matches_capture_role(
+		const BioseqScanRuntime& runtime,
+		const AttrNumber attno,
+		const MmsearchSourceCaptureRole role) noexcept {
+	const auto& roles = role == MmsearchSourceCaptureRole::output_projection
+		? runtime.mmsearch_output_source_bound
+		: runtime.mmsearch_pre_eval_source_bound;
+	const std::size_t index = static_cast<std::size_t>(attno);
+	return index < roles.size() && roles[index] != 0u;
+}
+
+/* Capture each physical attribute at most once.  Iterating the slot's attno
+ * namespace forms the exact union required by the role: evaluated operand
+ * leaves before ExprState execution, or finalized output-projection sources
+ * before per-MatchResult projection. */
+[[nodiscard]] static MmsearchSourceRestore capture_mmsearch_sources(
+		BioseqScanRuntime& runtime,
+		TupleTableSlot* slot,
+		MemoryContext restore_context,
+		const MmsearchSourceCaptureRole role) {
+	MmsearchSourceRestore restore{};
+	if (runtime.lazy_source_provider == nullptr || slot == nullptr
+		|| slot->tts_tupleDescriptor == nullptr
+		|| restore_context == nullptr) return restore;
+	slot_getallattrs(slot);
+	const int natts = slot->tts_tupleDescriptor->natts;
+	std::size_t count = 0u;
+	for (int index = 0; index < natts; ++index) {
+		const AttrNumber attno = static_cast<AttrNumber>(index + 1);
+		if (!slot->tts_isnull[index]
+			&& mmsearch_source_matches_capture_role(runtime, attno, role)) {
+			++count;
+		}
+	}
+	if (count == 0u) return restore;
+	restore.count = count;
+	if (count > MmsearchSourceRestore::inline_capacity) {
+		restore.overflow_entries = static_cast<MmsearchSourceRestoreEntry*>(
+			MemoryContextAlloc(
+				restore_context,
+				count * sizeof(MmsearchSourceRestoreEntry)));
+	}
+	std::size_t captured = 0u;
+	for (int index = 0; index < natts; ++index) {
+		const AttrNumber attno = static_cast<AttrNumber>(index + 1);
+		if (slot->tts_isnull[index]
+			|| !mmsearch_source_matches_capture_role(runtime, attno, role)) {
+			continue;
+		}
+		restore.entry(captured) = MmsearchSourceRestoreEntry{
+			.attno = attno,
+			.datum = slot->tts_values[index],
+		};
+		++captured;
 	}
 	return restore;
 }
 
-[[nodiscard]] static std::size_t promote_mmsearch_output_sources(
+[[nodiscard]] static std::size_t promote_mmsearch_sources(
 		BioseqScanRuntime& runtime,
 		TupleTableSlot* slot,
 		MemoryContext output_context,
-		const MmsearchOutputSourceRestore& restore) {
+		const MmsearchSourceRestore& restore) {
 	if (runtime.lazy_source_provider == nullptr || slot == nullptr
 		|| output_context == nullptr) {
 		return 0u;
 	}
 	std::size_t promoted_count = 0u;
 	for (std::size_t index = 0u; index < restore.count; ++index) {
-		const AttrNumber attno = restore.attnos[index];
+		const AttrNumber attno = restore.entry(index).attno;
 		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts) continue;
-		const Datum source = restore.datums[index];
+		const Datum source = restore.entry(index).datum;
 		if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(source))) continue;
 
 		/* ExecCopySlotMinimalTuple may short-pack this STORAGE=extended value.
@@ -26446,32 +27637,128 @@ static MmsearchOutputSourceRestore capture_mmsearch_output_sources(
 	return promoted_count;
 }
 
-static void restore_mmsearch_output_sources(
+static void restore_mmsearch_sources(
 		TupleTableSlot* slot,
-		const MmsearchOutputSourceRestore& restore) noexcept {
+		const MmsearchSourceRestore& restore) noexcept {
 	if (slot == nullptr) return;
 	for (std::size_t index = 0u; index < restore.count; ++index) {
-		const AttrNumber attno = restore.attnos[index];
+		const AttrNumber attno = restore.entry(index).attno;
 		if (attno > 0 && attno <= slot->tts_tupleDescriptor->natts) {
-			slot->tts_values[attno - 1] = restore.datums[index];
+			slot->tts_values[attno - 1] = restore.entry(index).datum;
 		}
 	}
 }
 
-[[nodiscard]] static bool mmsearch_output_sources_restored_exactly(
+[[nodiscard]] static bool mmsearch_sources_restored_exactly(
 		TupleTableSlot* slot,
-		const MmsearchOutputSourceRestore& restore) noexcept {
+		const MmsearchSourceRestore& restore) noexcept {
 	if (slot == nullptr || slot->tts_tupleDescriptor == nullptr) {
 		return restore.count == 0u;
 	}
 	for (std::size_t index = 0u; index < restore.count; ++index) {
-		const AttrNumber attno = restore.attnos[index];
+		const AttrNumber attno = restore.entry(index).attno;
 		if (attno <= 0 || attno > slot->tts_tupleDescriptor->natts
-			|| slot->tts_values[attno - 1] != restore.datums[index]) {
+			|| slot->tts_values[attno - 1]
+				!= restore.entry(index).datum) {
 			return false;
 		}
 	}
 	return true;
+}
+
+struct MmsearchRowEvaluation {
+	bool qual_passed = false;
+	Datum target{};
+	bool target_is_null = true;
+	Datum query{};
+	bool query_is_null = true;
+};
+
+/* Evaluate the residual frontier and, when configured, both mmsearch operand
+ * ExprStates while only their physical sources are promoted.  The scan slot is
+ * restored on normal completion, C++ unwind, and PostgreSQL longjmp before a
+ * caller can buffer it. */
+[[nodiscard]] static MmsearchRowEvaluation evaluate_mmsearch_input_row(
+		BioseqScanRuntime& runtime,
+		TupleTableSlot* slot,
+		ExprState* qual,
+		ExprContext* expression_context) {
+	MmsearchRowEvaluation result{};
+	if (!runtime.match_evaluated_submission
+		&& !runtime.mmsearch_pre_eval_sources_present) {
+		result.qual_passed = qual == nullptr
+			|| ExecQual(qual, expression_context);
+		return result;
+	}
+	const MmsearchSourceRestore source_restore = capture_mmsearch_sources(
+		runtime,
+		slot,
+		expression_context->ecxt_per_tuple_memory,
+		MmsearchSourceCaptureRole::evaluated_operand);
+	if (source_restore.count == 0u && !runtime.match_evaluated_submission) {
+		result.qual_passed = qual == nullptr
+			|| ExecQual(qual, expression_context);
+		return result;
+	}
+	MemoryContext saved_context = CurrentMemoryContext;
+	ErrorData* exact_pg_error = nullptr;
+	{
+		std::exception_ptr cpp_error;
+		ErrorData* volatile pg_error = nullptr;
+		PG_TRY();
+		{
+			try {
+				(void)promote_mmsearch_sources(
+					runtime,
+					slot,
+					expression_context->ecxt_per_tuple_memory,
+					source_restore);
+				result.qual_passed = qual == nullptr
+					|| ExecQual(qual, expression_context);
+				if (result.qual_passed && runtime.match_evaluated_submission) {
+					if (runtime.match_target_expr_state == nullptr) {
+						ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("BioseqScan evaluated target ExprState is missing")));
+					}
+					result.target = ExecEvalExprSwitchContext(
+						runtime.match_target_expr_state,
+						expression_context,
+						&result.target_is_null);
+					if (runtime.match_query_evaluated) {
+						if (runtime.match_query_expr_state == nullptr) {
+							ereport(ERROR,
+								(errcode(ERRCODE_DATA_CORRUPTED),
+								 errmsg("BioseqScan evaluated query ExprState is missing")));
+						}
+						/* Preserve SQL argument order even when the target is NULL. */
+						result.query = ExecEvalExprSwitchContext(
+							runtime.match_query_expr_state,
+							expression_context,
+							&result.query_is_null);
+					}
+				}
+				restore_mmsearch_sources(slot, source_restore);
+			} catch (...) {
+				MemoryContextSwitchTo(saved_context);
+				restore_mmsearch_sources(slot, source_restore);
+				cpp_error = std::current_exception();
+			}
+		}
+		PG_CATCH();
+		{
+			MemoryContextSwitchTo(saved_context);
+			restore_mmsearch_sources(slot, source_restore);
+			pg_error = CopyErrorData();
+			FlushErrorState();
+		}
+		PG_END_TRY();
+		if (pg_error != nullptr) exact_pg_error = pg_error;
+		if (cpp_error != nullptr) std::rethrow_exception(cpp_error);
+	}
+	/* Re-enter PostgreSQL only after std::exception_ptr has been destroyed. */
+	if (exact_pg_error != nullptr) ReThrowError(exact_pg_error);
+	return result;
 }
 
 static TupleTableSlot *
@@ -26576,9 +27863,12 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			 * only for this output projection, then restore the stable locator so a
 			 * second match from the same row never points into a reset per-tuple
 			 * context. */
-			const MmsearchOutputSourceRestore source_restore =
-				capture_mmsearch_output_sources(
-					runtime, next->scan_slot_copy);
+			const MmsearchSourceRestore source_restore =
+				capture_mmsearch_sources(
+					runtime,
+					next->scan_slot_copy,
+					econtext->ecxt_per_tuple_memory,
+					MmsearchSourceCaptureRole::output_projection);
 			TupleTableSlot* projected = nullptr;
 			std::exception_ptr projection_error;
 			MemoryContext saved_context = CurrentMemoryContext;
@@ -26591,11 +27881,11 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			{
 				try {
 					const std::size_t promoted_source_count =
-						promote_mmsearch_output_sources(
-						runtime,
-						next->scan_slot_copy,
-						econtext->ecxt_per_tuple_memory,
-						source_restore);
+						promote_mmsearch_sources(
+							runtime,
+							next->scan_slot_copy,
+							econtext->ecxt_per_tuple_memory,
+							source_restore);
 					bioseq::storage::
 						note_mmsearch_output_locator_promotion_for_test(
 							promoted_source_count != 0u);
@@ -26613,11 +27903,11 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 						&(node->ps),
 						next->scan_slot_copy->tts_tupleDescriptor);
 					projected = ExecProject(proj);
-					restore_mmsearch_output_sources(
+					restore_mmsearch_sources(
 						next->scan_slot_copy, source_restore);
 				} catch (...) {
 					MemoryContextSwitchTo(saved_context);
-					restore_mmsearch_output_sources(
+					restore_mmsearch_sources(
 						next->scan_slot_copy, source_restore);
 					projection_error = std::current_exception();
 				}
@@ -26625,11 +27915,11 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			PG_CATCH();
 			{
 				MemoryContextSwitchTo(saved_context);
-				restore_mmsearch_output_sources(
+				restore_mmsearch_sources(
 					next->scan_slot_copy, source_restore);
 				bioseq::storage::
 					note_mmsearch_output_pg_error_restore_for_test(
-						mmsearch_output_sources_restored_exactly(
+						mmsearch_sources_restored_exactly(
 							next->scan_slot_copy, source_restore));
 				projection_pg_error = CopyErrorData();
 				FlushErrorState();
@@ -26748,6 +28038,13 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 				continue;
 		}
 
+		/* Every fetched input row owns a fresh expression/root arena.  BSS3
+		 * promotion and the authoritative operand ExprStates retain only until
+		 * submit_scan_evaluated copies their small EOH wrappers into the batch
+		 * arena. */
+		ResetExprContext(econtext);
+		econtext->ecxt_scantuple = slot;
+
 		/*
 		 * DOC0260 §9 — the scan runs with defer_seq_hydration=true, so `slot`
 		 * carries 40-byte locator stubs. When there is an mmsearch qual the
@@ -26764,16 +28061,20 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 				&& !runtime.lazy_source_projection) {
 				bioseq_hydrate_scan_slot(node->ss_currentScanDesc, slot, /*force=*/true);
 			}
-			if (!runtime.buffer.mmsearch_active()
-				&& runtime.lazy_source_projection
-				&& !runtime.locator_passthrough) {
+			/* A non-mmsearch scan projects immediately and may promote every BSS3
+			 * source.  Alignment scans instead retain stable locators in their
+			 * buffered row.  Evaluated operand leaves are promoted temporarily at
+			 * their ExprState boundary below; output-only sources are promoted once
+			 * per MatchResult under the PG_TRY restoration boundary above. */
+			if (runtime.lazy_source_projection
+				&& !runtime.locator_passthrough
+				&& !runtime.buffer.mmsearch_active()) {
 				promote_slice_project_sources(
 					bioseqScanState, slot,
-					bioseqScanState->custom_scanstate.ss.ps.
-						ps_ExprContext->ecxt_per_tuple_memory,
+					econtext->ecxt_per_tuple_memory,
 					/*allow_locator_passthrough=*/false,
 					SliceProjectSourceSlotLayout::physical_relation,
-					bioseqScanState->custom_scanstate.ss.ps.scandesc);
+					slot->tts_tupleDescriptor);
 			}
 
 		/*
@@ -26781,27 +28082,39 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 		 * non-vectorized qual (e.g. mmsearch()). Both scalar and
 		 * vectorized paths converge here.
 		 */
-		econtext->ecxt_scantuple = slot;
-
 		bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() applying qual filter");
-		if (qual == NULL || ExecQual(qual, econtext))
+		MmsearchRowEvaluation mmsearch_evaluation{};
+		bool qual_passed = false;
+		if (runtime.buffer.mmsearch_active()) {
+			mmsearch_evaluation = evaluate_mmsearch_input_row(
+				runtime, econtext->ecxt_scantuple, qual, econtext);
+			qual_passed = mmsearch_evaluation.qual_passed;
+		} else {
+			qual_passed = qual == nullptr || ExecQual(qual, econtext);
+		}
+		if (qual_passed)
 		{
-			if (runtime.mmsearch_null_input) {
-				/* mmsearch is strict: a NULL owned query yields no rows, while
-				 * ordinary sibling quals above retain their normal evaluation. */
-				continue;
-			}
 				if (runtime.buffer.mmsearch_active()) {
-					bool target_is_null = false;
-					(void)slot_getattr(
-						econtext->ecxt_scantuple,
-						runtime.match_sequence_attno,
-						&target_is_null);
-					if (target_is_null) {
-						continue;
-					}
 					bioseq_log<DBG>("[bioseq] pg: Inner_CustomExecScan() qual passed; buffering scan tuple");
-					runtime.buffer.submit_scan(econtext->ecxt_scantuple);
+					if (runtime.match_evaluated_submission) {
+						if (runtime.mmsearch_null_input) continue;
+						runtime.buffer.submit_scan_evaluated(
+							econtext->ecxt_scantuple,
+							mmsearch_evaluation.target,
+							mmsearch_evaluation.target_is_null,
+							runtime.match_query_evaluated,
+							mmsearch_evaluation.query,
+							mmsearch_evaluation.query_is_null);
+					} else {
+						if (runtime.mmsearch_null_input) continue;
+						bool target_is_null = false;
+						(void)slot_getattr(
+							econtext->ecxt_scantuple,
+							runtime.match_sequence_attno,
+							&target_is_null);
+						if (target_is_null) continue;
+						runtime.buffer.submit_scan(econtext->ecxt_scantuple);
+					}
 					if (runtime.buffer.ready_to_dispatch()) {
 						if (runtime.buffer.run_batch_and_build_cursors()) {
 							bioseq::pg::alignment_execution::merge_alignment_batch(
@@ -26811,6 +28124,18 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 					}
 				}
 			else {
+				if (runtime.mmsearch_null_input) {
+					/* A NULL global Const/Param leaves the buffer inactive.  An
+					 * evaluated target still has SQL effects and must run once. */
+					if (runtime.match_evaluated_submission
+						&& runtime.match_target_expr_state != nullptr) {
+						bool ignored_null = false;
+						(void)ExecEvalExprSwitchContext(
+							runtime.match_target_expr_state, econtext,
+							&ignored_null);
+					}
+					continue;
+				}
 				/*
 				 * No WHERE mmsearch(...) qual installed -> there is nothing
 				 * to batch. Project the scan tuple to the CustomScan target
@@ -27004,12 +28329,19 @@ CustomExecScan(BioseqScanState *bioseqScanState,
 		injector_ctx.current_relation = bioseqScanState->custom_scanstate.ss.ss_currentRelation;
 		injector_ctx.match_sequence_varno = runtime.match_sequence_varno;
 		injector_ctx.match_sequence_attno = runtime.match_sequence_attno;
+		injector_ctx.match_target_recipe = runtime.match_target_recipe;
+		injector_ctx.match_target_lineage = runtime.match_target_lineage;
 		injector_ctx.match_helper_sites = runtime.match_helper_sites;
 		injector_ctx.stable_match_id = runtime.stable_match_id;
 
 		runtime.newtargetlist = reinterpret_cast<List *>(var_injector(
 			reinterpret_cast<Node *>(targetlist),
 			&injector_ctx));
+		derive_mmsearch_source_lifetime_roles(
+			runtime,
+			ps.plan,
+			bioseqScanState->custom_scanstate.ss.ss_ScanTupleSlot
+				->tts_tupleDescriptor);
 	}
 
 
@@ -27162,10 +28494,12 @@ BioseqColumnScan_ExecCustomScan(CustomScanState *node)
 	try {
 		BioseqScanState* state = BioseqScanState::from_custom_scan_state(node);
 		BioseqScanRuntime& runtime = bioseq_runtime(state);
-		if (runtime.mmsearch_null_input) {
-			/* Strict mmsearch with a NULL owned query is statement-empty.  Stop
-			 * before registering an alignment node or touching the table scan;
-			 * a later non-NULL Param rescan clears this flag and registers lazily. */
+		if (runtime.mmsearch_null_input
+			&& !runtime.match_evaluated_submission) {
+			/* A raw target with a NULL owned query is statement-empty.  An
+			 * evaluated target must still run once for every residual-admitted row
+			 * before strict NULL semantics discard the result, so only the raw
+			 * owner may bypass the table scan here. */
 			if (runtime.alignment_registration.registered()) {
 				bioseq::pg::alignment_execution::
 					mark_alignment_pass_fully_drained(
@@ -27814,6 +29148,21 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 									   node->ss.ps.plan->qual, explain_oids);
 		features.has_mmsearch = features.has_mmsearch
 			|| explain_owned_mmsearch != NIL;
+		bool evaluated_operand_owner = explain_runtime != nullptr
+			&& explain_runtime->match_evaluated_submission;
+		if (!evaluated_operand_owner && explain_owned_mmsearch != NIL) {
+			FuncExpr* owned = pg_node_try_as<FuncExpr>(
+				reinterpret_cast<Node*>(linitial(explain_owned_mmsearch)));
+			if (owned != nullptr && list_length(owned->args) >= 2) {
+				Node* target = reinterpret_cast<Node*>(linitial(owned->args));
+				Node* query = reinterpret_cast<Node*>(lsecond(owned->args));
+				Var* query_var = pg_node_try_as<Var>(query);
+				evaluated_operand_owner = pg_node_try_as<Var>(target) == nullptr
+					|| (pg_node_try_as<Const>(query) == nullptr
+						&& pg_node_try_as<Param>(query) == nullptr
+						&& query_var == nullptr);
+			}
+		}
 
 		/*
 		 * Only the WHERE mmsearch(...) pipeline consults the minimizer
@@ -27824,6 +29173,12 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 		 */
 		if (features.has_mmsearch)
 		{
+			if (evaluated_operand_owner) {
+				ExplainPropertyText(
+					"Bioseq Match Operand Evaluation",
+					"base-local ExprState (target then query; persisted target index absent)",
+					es);
+			}
 			/*
 			 * DOC0279 — plan-time typmod-coalesce hint. `EXPLAIN` without
 			 * `ANALYZE` never populates the runtime coalesce buffer, so the
@@ -27897,7 +29252,11 @@ BioseqColumnScan_ExplainCustomScan(CustomScanState *node, List *ancestors,
 				const bool runtime_coalesce_active =
 					(explain_runtime != nullptr)
 					&& explain_runtime->buffer.coalesce_active();
-				if (bioseq_read_sequence_index) {
+				if (evaluated_operand_owner) {
+					ExplainPropertyText("Bioseq Recomputed",
+						"minimizers 100% (evaluated logical view requires index absence)",
+						es);
+				} else if (bioseq_read_sequence_index) {
 					fetched_pct    = index_presence * 100.0f;
 					recomputed_pct = (1.0f - index_presence) * 100.0f;
 					if (fetched_pct > 0.0f) {
