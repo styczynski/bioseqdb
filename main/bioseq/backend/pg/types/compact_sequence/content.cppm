@@ -10,13 +10,13 @@ module;
 #include <span>
 
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 extern "C" {
 #include "utils/expandeddatum.h"
 }
 
 export module bioseq.types.pg_compact_sequence:content;
 
+import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :tree_types;
 import :view_session;
@@ -27,7 +27,7 @@ namespace {
 
 struct content_operand {
     Datum dispatch;
-    pgseq_t* flat;
+    bioseq::pg_types::seq* flat;
     pg_sequence_descriptor descriptor;
     bool free_flat;
 };
@@ -42,7 +42,7 @@ struct content_operand {
             .free_flat = false,
         };
     }
-    auto* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+    auto* flat = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
     return {
         .dispatch = PointerGetDatum(flat),
         .flat = flat,
@@ -179,10 +179,12 @@ inline void read_unbound_chunk(
 
 } // namespace
 
-export [[nodiscard]] inline int seq_compare_internal(FunctionCallInfo fcinfo)
+[[nodiscard]] inline int seq_compare_internal(
+    Datum left_input,
+    Datum right_input)
 {
-    content_operand left = describe_content_operand(PG_GETARG_DATUM(0));
-    content_operand right = describe_content_operand(PG_GETARG_DATUM(1));
+    content_operand left = describe_content_operand(left_input);
+    content_operand right = describe_content_operand(right_input);
     if (left.descriptor.kind == pg_sequence_datum_kind::locator
         || right.descriptor.kind == pg_sequence_datum_kind::locator) {
         content_locator_error();
@@ -200,7 +202,7 @@ export [[nodiscard]] inline int seq_compare_internal(FunctionCallInfo fcinfo)
                 < right.descriptor.alphabet_code ? -1 : 1;
     } else {
         result = with_pg_sequence_views<int>(
-            fcinfo, 0, 1,
+            left_input, right_input,
             [](auto left_view, auto right_view) {
                 return bioseq::storage::compare_sequence_views(
                     left_view, right_view);
@@ -211,46 +213,191 @@ export [[nodiscard]] inline int seq_compare_internal(FunctionCallInfo fcinfo)
     return result;
 }
 
-extern "C" PGDLLEXPORT Datum seq_cmp_impl(FunctionCallInfo fcinfo)
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+std::int32_t seq_cmp(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_INT32(seq_compare_internal(fcinfo));
+    return static_cast<std::int32_t>(
+        seq_compare_internal(left, right));
 }
 
-extern "C" PGDLLEXPORT Datum seq_lt_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "<",
+    .commutator = bioseq::pg_types::sql_routines::seq_gt,
+    .negator = bioseq::pg_types::sql_routines::seq_ge,
+    .restrict = bioseq::sql::pg_catalog_reference::scalarltsel,
+    .join = bioseq::sql::pg_catalog_reference::scalarltjoinsel,
+})]]
+bool seq_lt(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_BOOL(seq_compare_internal(fcinfo) < 0);
+    return seq_compare_internal(left, right) < 0;
 }
 
-extern "C" PGDLLEXPORT Datum seq_le_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "<=",
+    .commutator = bioseq::pg_types::sql_routines::seq_ge,
+    .negator = bioseq::pg_types::sql_routines::seq_gt,
+    .restrict = bioseq::sql::pg_catalog_reference::scalarlesel,
+    .join = bioseq::sql::pg_catalog_reference::scalarlejoinsel,
+})]]
+bool seq_le(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_BOOL(seq_compare_internal(fcinfo) <= 0);
+    return seq_compare_internal(left, right) <= 0;
 }
 
-extern "C" PGDLLEXPORT Datum seq_eq_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "=",
+    .commutator = bioseq::pg_types::sql_routines::seq_eq,
+    .negator = bioseq::pg_types::sql_routines::seq_ne,
+    .restrict = bioseq::sql::pg_catalog_reference::eqsel,
+    .join = bioseq::sql::pg_catalog_reference::eqjoinsel,
+    .hashes = true,
+    .merges = true,
+})]]
+bool seq_eq(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_BOOL(seq_compare_internal(fcinfo) == 0);
+    return seq_compare_internal(left, right) == 0;
 }
 
-extern "C" PGDLLEXPORT Datum seq_ne_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "<>",
+    .commutator = bioseq::pg_types::sql_routines::seq_ne,
+    .negator = bioseq::pg_types::sql_routines::seq_eq,
+    .restrict = bioseq::sql::pg_catalog_reference::neqsel,
+    .join = bioseq::sql::pg_catalog_reference::neqjoinsel,
+})]]
+bool seq_ne(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_BOOL(seq_compare_internal(fcinfo) != 0);
+    return seq_compare_internal(left, right) != 0;
 }
 
-extern "C" PGDLLEXPORT Datum seq_ge_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = ">=",
+    .commutator = bioseq::pg_types::sql_routines::seq_le,
+    .negator = bioseq::pg_types::sql_routines::seq_lt,
+    .restrict = bioseq::sql::pg_catalog_reference::scalargesel,
+    .join = bioseq::sql::pg_catalog_reference::scalargejoinsel,
+})]]
+bool seq_ge(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_BOOL(seq_compare_internal(fcinfo) >= 0);
+    return seq_compare_internal(left, right) >= 0;
 }
 
-extern "C" PGDLLEXPORT Datum seq_gt_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = ">",
+    .commutator = bioseq::pg_types::sql_routines::seq_lt,
+    .negator = bioseq::pg_types::sql_routines::seq_le,
+    .restrict = bioseq::sql::pg_catalog_reference::scalargtsel,
+    .join = bioseq::sql::pg_catalog_reference::scalargtjoinsel,
+})]]
+bool seq_gt(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_BOOL(seq_compare_internal(fcinfo) > 0);
+    return seq_compare_internal(left, right) > 0;
 }
 
-export [[nodiscard]] inline std::uint64_t seq_hash_internal(
-    FunctionCallInfo fcinfo,
+[[nodiscard]] inline std::uint64_t seq_hash_internal(
+    Datum input,
     std::uint64_t seed)
 {
-    content_operand operand = describe_content_operand(PG_GETARG_DATUM(0));
+    content_operand operand = describe_content_operand(input);
     if (operand.descriptor.kind == pg_sequence_datum_kind::locator) {
         content_locator_error();
     }
@@ -262,7 +409,7 @@ export [[nodiscard]] inline std::uint64_t seq_hash_internal(
         const std::uint64_t prefixed = prefix_hash_seed(
             seed, 1u, true, operand.descriptor.alphabet_code);
         result = with_pg_sequence_view<std::uint64_t>(
-            fcinfo, 0,
+            input,
             [prefixed](auto view) {
                 return bioseq::storage::sequence_logical_hash_v1(
                     view, prefixed);
@@ -272,16 +419,37 @@ export [[nodiscard]] inline std::uint64_t seq_hash_internal(
     return result;
 }
 
-extern "C" PGDLLEXPORT Datum seq_hash_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+std::int32_t seq_hash(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
-    const std::uint64_t hash = seq_hash_internal(fcinfo, 0u);
-    PG_RETURN_INT32(static_cast<std::int32_t>(
-        static_cast<std::uint32_t>(hash ^ (hash >> 32u))));
+    const std::uint64_t hash = seq_hash_internal(input, 0u);
+    return static_cast<std::int32_t>(
+        static_cast<std::uint32_t>(hash ^ (hash >> 32u)));
 }
 
-extern "C" PGDLLEXPORT Datum seq_hash_extended_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+std::int64_t seq_hash_extended(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input,
+    std::int64_t seed)
 {
-    const auto seed = static_cast<std::uint64_t>(PG_GETARG_INT64(1));
-    PG_RETURN_INT64(static_cast<std::int64_t>(
-        seq_hash_internal(fcinfo, seed)));
+    return static_cast<std::int64_t>(
+        seq_hash_internal(
+            input, static_cast<std::uint64_t>(seed)));
 }
+
+}  // namespace bioseq::pg_types::sql_routines

@@ -22,7 +22,9 @@ module;
 #include <new>
 #include <map>
 #include <optional>
+#include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 
@@ -34,13 +36,20 @@ export module bioseq.table:access_method;
 import bioseq.storage.physical;
 import bioseq.common.mlogging;
 import bioseq.storage.metadata;
+import bioseq.storage_metadata.core;
+import bioseq.storage.metadata.sql_rows;
 import bioseq.vector.types;
 import bioseq.table.types;
 import bioseq.config;
 import bioseq.table.io;
 import bioseq.pg_utils;
+import bioseq.codegen.sql.annotation_model;
 import bioseq.storage.indexing_pg.admin;   // DOC0279 §11.2 — index_build_on_insert
+import bioseq.storage.indexing_pg.chunked_storage;
+import bioseq.storage_indexing_pg.chunked_storage;
 import bioseq.storage.manager;
+import bioseq.storage_manager.sequence_storage_manager;
+import bioseq.storage.manager.sql_rows;
 import bioseq.storage.scanner_pg;
 import bioseq.table.am_cache;
 import bioseq.types.pg_compact_sequence;
@@ -64,22 +73,91 @@ struct PendingSpeculativeSources {
     std::vector<bioseq::storage::PendingSequenceSource> sources;
 };
 
-// PostgreSQL severity levels are consecutive: ERROR, FATAL, PANIC.  Some
-// C++ module builds do not retain the PANIC preprocessor spelling after the
-// global module fragment, while ERROR remains available.  Bind the numeric
-// severity without relying on that non-exported macro.
-constexpr int kPostgresPanicLevel = ERROR + 2;
+using PendingSequenceSourceSlots =
+    std::vector<std::optional<bioseq::storage::PendingSequenceSource>>;
+
+static_assert(!std::is_trivially_destructible_v<MemoryContextScope>);
+static_assert(!std::is_trivially_destructible_v<PendingSequenceSourceSlots>);
+static_assert(std::is_nothrow_move_constructible_v<
+    bioseq::storage::PendingSequenceSource>);
 
 using PendingSpeculativeKey = std::pair<Oid, std::uint64_t>;
+using PendingSpeculativeSourceMap =
+    std::map<PendingSpeculativeKey, PendingSpeculativeSources>;
+
+struct PendingSpeculativeTerminalQuarantine {
+    std::uint64_t invariant_events = 0u;
+    std::uint64_t quarantined_rows = 0u;
+    std::uint64_t quarantined_sources = 0u;
+    XactEvent last_event = XACT_EVENT_COMMIT;
+    bool storage_exhausted = false;
+    bool active_map_quarantined = false;
+};
 
 [[nodiscard]] auto& pending_speculative_sources() {
-    static std::map<PendingSpeculativeKey, PendingSpeculativeSources> pending;
+    static PendingSpeculativeSourceMap pending;
     return pending;
 }
 
-void require_no_pending_speculative_sources(
-        const char* phase,
-        const int error_level = ERROR) {
+[[nodiscard]] auto& quarantined_speculative_sources_noexcept() noexcept {
+    // A terminal transaction callback cannot allocate, destroy retained
+    // source authority, or raise a PostgreSQL error.  Fixed map slots let the
+    // callback quarantine an impossible survivor with an allocation-free,
+    // noexcept swap while retaining the move-only authority for diagnosis.
+    static std::array<PendingSpeculativeSourceMap, 4u> quarantined;
+    return quarantined;
+}
+
+[[nodiscard]] auto& speculative_source_quarantine_state_noexcept() noexcept {
+    static PendingSpeculativeTerminalQuarantine state;
+    return state;
+}
+
+static_assert(noexcept(
+    std::declval<PendingSpeculativeSourceMap&>().swap(
+        std::declval<PendingSpeculativeSourceMap&>())));
+
+void quarantine_pending_speculative_sources_noexcept(XactEvent event) noexcept {
+    auto& pending = pending_speculative_sources();
+    if (pending.empty()) return;
+
+    std::uint64_t source_count = 0u;
+    for (const auto& [key, entry] : pending) {
+        (void)key;
+        const auto entry_count =
+            static_cast<std::uint64_t>(entry.sources.size());
+        source_count = UINT64_MAX - source_count < entry_count
+            ? UINT64_MAX
+            : source_count + entry_count;
+    }
+
+    auto& state = speculative_source_quarantine_state_noexcept();
+    if (state.invariant_events != UINT64_MAX) ++state.invariant_events;
+    const auto pending_rows = static_cast<std::uint64_t>(pending.size());
+    state.quarantined_rows =
+        UINT64_MAX - state.quarantined_rows < pending_rows
+            ? UINT64_MAX
+            : state.quarantined_rows + pending_rows;
+    state.quarantined_sources =
+        UINT64_MAX - state.quarantined_sources < source_count
+            ? UINT64_MAX
+            : state.quarantined_sources + source_count;
+    state.last_event = event;
+
+    for (auto& quarantine : quarantined_speculative_sources_noexcept()) {
+        if (quarantine.empty()) {
+            quarantine.swap(pending);
+            return;
+        }
+    }
+    // Retain the authority in the active map if every fixed quarantine slot
+    // is occupied.  This poisons later PRE_* validation rather than silently
+    // destroying an authority after its parent transaction has committed.
+    state.storage_exhausted = true;
+    state.active_map_quarantined = true;
+}
+
+void require_no_pending_speculative_sources(const char* phase) {
     const auto& pending = pending_speculative_sources();
     if (pending.empty()) return;
 
@@ -88,24 +166,13 @@ void require_no_pending_speculative_sources(
         (void)key;
         source_count += entry.sources.size();
     }
-    ereport(error_level,
+    ereport(ERROR,
         (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
          errmsg("bioseq speculative source publication authority was not consumed"),
          errdetail("phase=%s speculative_rows=%zu pending_sources=%zu",
              phase, pending.size(), source_count)));
 }
 }
-
-/*
- * This is a check whether we need to bail out of a vacuum, it is set by the
- * signal handler, and checked by the vacuum UDF process.
- */
-static bool need_to_bail = false;
-static int last_signal = 0;
-sact abt_action = {};
-sact int_action = {};
-sact trm_action = {};
-sact kil_action = {};
 
 /*
  * DOC0322 §7.4 — tid_to_row_number / row_number_to_tid / IsBioseqColumnTableAmTable
@@ -209,7 +276,7 @@ restore_ordinary_insert_page_cache_on_error(void *argument) noexcept
 	{
 		return;
 	}
-	bioseq_enable_page_cache = restore->previous_value;
+	bioseq::settings::enable_column_cache = restore->previous_value;
 	restore->armed = false;
 }
 
@@ -219,7 +286,7 @@ bioseq_beginscan(Relation relation, Snapshot snapshot,
 				   ParallelTableScanDesc parallel_scan,
 				   uint32_t flags)
 {
-	previousCacheEnabledState = bioseq_enable_page_cache;
+	previousCacheEnabledState = bioseq::settings::enable_column_cache;
 
 	int natts = relation->rd_att->natts;
 
@@ -307,7 +374,7 @@ bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 							bool returnVectorizedTuple,
 							bool defer_seq_hydration)
 {
-	previousCacheEnabledState = bioseq_enable_page_cache;
+	previousCacheEnabledState = bioseq::settings::enable_column_cache;
 	Oid relfilelocator = relation->rd_locator.relNumber;
 	/*
 	 * A memory context to use for scan-wide data, including the lazily
@@ -366,99 +433,108 @@ bioseq_beginscan_with_options(Relation relation, Snapshot snapshot,
 	return reinterpret_cast<TableScanDesc>(scan);
 }
 
-/*
- * bioseq_relation_storageid returns storage id associated with the
- * given relation id, or -1 if there is no associated storage id yet.
- */
-POSTGRES_FN(bioseq_relation_storageid)
-{
-	Oid relationId = PG_GETARG_OID(0);
-	Relation relation = safe_relation_open(relationId, AccessShareLock);
-	if (!IsBioseqColumnTableAmTable(relationId))
-	{
-		bioseq_log<ERR, PG>( "relation \"{}\" is not a columnar table",
-			 RelationGetRelationName(relation));
-	}
+namespace {
 
-	uint64_t storageId = BioseqColumnStorageGetStorageId(relation, false);
+class sql_relation_lock final {
+public:
+	sql_relation_lock(
+			Relation relation,
+			LOCKMODE close_lock,
+			bool opened_as_table) noexcept
+		: relation_{relation},
+		  close_lock_{close_lock},
+		  opened_as_table_{opened_as_table} {}
 
-	relation_close(relation, AccessShareLock);
+	sql_relation_lock(const sql_relation_lock&) = delete;
+	sql_relation_lock& operator=(const sql_relation_lock&) = delete;
 
-	PG_RETURN_INT64(storageId);
-}
-
-/*
- * create_table_row_mask creates empty row mask for table
- */
-POSTGRES_FN(create_table_row_mask)
-{
-	Oid relationId = PG_GETARG_OID(0);
-
-	Relation relation = safe_relation_open(relationId, AccessShareLock);
-
-	if (!IsBioseqColumnTableAmTable(relationId))
-	{
-		bioseq_log<ERR, PG>( "relation \"{}\" is not a columnar table",
-			 RelationGetRelationName(relation));
-	}
-
-	uint64_t storageId = BioseqColumnStorageGetStorageId(relation, false);
-
-	ScanKeyData scanKey[1];
-	StripeMetadata *stripeMetadata = NULL;
-
-	ScanKeyInit(&scanKey[0], Anum_bioseq_stripe_storageid,
-				BTEqualStrategyNumber, F_INT8EQ, Int64GetDatum(storageId));
-
-	Relation bioseqColumnStripes = table_open(BioseqColumnStripeRelationId(), AccessShareLock);
-	
-	Relation index = index_open(BioseqColumnStripePKeyIndexRelationId(),
-								AccessShareLock);
-
-	SysScanDesc scanDescriptor = systable_beginscan_ordered(bioseqColumnStripes, index,
-															SnapshotSelf, 1, scanKey);
-
-	HeapTuple heapTuple = NULL;
-
-	bool created = true;
-
-	while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
-																 ForwardScanDirection)))
-	{
-		stripeMetadata = BuildStripeMetadata(bioseqColumnStripes, heapTuple);
-
-		List *chunkGroupRowCount = NIL;
-
-		int64_t lastChunkRowCount = stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount ?
-									stripeMetadata->rowCount % stripeMetadata->chunkGroupRowCount :
-									stripeMetadata->chunkGroupRowCount;
-
-		for (int i = 0; i < stripeMetadata->chunkCount - 1; i++)
-		{
-			chunkGroupRowCount = 
-				lappend_int(chunkGroupRowCount, stripeMetadata->chunkGroupRowCount);
-		}
-
-		chunkGroupRowCount = 
-				lappend_int(chunkGroupRowCount, lastChunkRowCount);
-
-		if(!SaveEmptyRowMask(storageId, stripeMetadata->id,
-							 stripeMetadata->firstRowNumber, chunkGroupRowCount))
-		{
-			bioseq_log<WRN, PG>( "relation \"{}\" already has bioseq.row_mask populated.",
-				 RelationGetRelationName(relation));
-			created = false;
-			break;
+	~sql_relation_lock() noexcept {
+		if (relation_ == nullptr) return;
+		if (opened_as_table_) {
+			table_close(relation_, close_lock_);
+		} else {
+			relation_close(relation_, close_lock_);
 		}
 	}
 
-	systable_endscan_ordered(scanDescriptor);
-	index_close(index, AccessShareLock);
-	table_close(bioseqColumnStripes, AccessShareLock);
-	relation_close(relation, AccessShareLock);
+private:
+	Relation relation_ = nullptr;
+	LOCKMODE close_lock_ = NoLock;
+	bool opened_as_table_ = false;
+};
 
-	PG_RETURN_BOOL(created);
+[[nodiscard]] std::string quoted_relation_name(Relation relation) {
+	const char* const relation_name = RelationGetRelationName(relation);
+	const char* const quoted = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_name] { return quote_identifier(relation_name); });
+	return quoted == nullptr ? std::string{} : std::string{quoted};
 }
+
+void require_bioseq_table(
+		Relation relation,
+		Oid relation_id,
+		const char* object_kind = "table") {
+	const bool is_bioseq = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			return IsBioseqColumnTableAmTable(relation_id);
+		});
+	if (is_bioseq) return;
+	bioseq::pg_utils::raise_sql_error(
+		ERRCODE_INTERNAL_ERROR,
+		{
+			.message = std::string{object_kind} + " "
+				+ quoted_relation_name(relation)
+				+ " is not a columnar table",
+		});
+}
+
+void require_relation_owner(Oid relation_id) {
+	const Oid user_id = GetUserId();
+	const bool is_owner = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id, user_id] {
+			return object_ownercheck(
+				RelationRelationId, relation_id, user_id);
+		});
+	if (is_owner) return;
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			aclcheck_error(
+				ACLCHECK_NOT_OWNER,
+				OBJECT_TABLE,
+				get_rel_name(relation_id));
+		});
+}
+
+}  // namespace
+
+export namespace bioseq::table::sql_routines {
+
+[[bioseq_sql::function({
+	.schema = bioseq::sql::fixed_schema<"bioseq">,
+	.create = bioseq::sql::create_mode::create,
+})]]
+std::int64_t get_storage_id(
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::regclass,
+		})]]
+		Oid relation_id) {
+	Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			return safe_relation_open(relation_id, AccessShareLock);
+		});
+	const sql_relation_lock relation_lock{
+		relation, AccessShareLock, false};
+	require_bioseq_table(relation, relation_id, "relation");
+	const std::uint64_t storage_id =
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[relation] {
+				return BioseqColumnStorageGetStorageId(
+					relation, false);
+			});
+	return static_cast<std::int64_t>(storage_id);
+}
+
+}  // namespace bioseq::table::sql_routines
 
 /*
  * init_bioseq_read_state initializes a column store table read and returns the
@@ -508,14 +584,14 @@ bioseq_endscan(TableScanDesc sscan)
 	}
 
 	/* clean up any caches. */
-	if (bioseq_enable_page_cache == true)
+	if (bioseq::settings::enable_column_cache == true)
 	{
 		BioseqColumnResetCache();
 	}
 
 	MemoryContextDelete(scan->scanContext);
 
-	bioseq_enable_page_cache = previousCacheEnabledState;
+	bioseq::settings::enable_column_cache = previousCacheEnabledState;
 }
 
 
@@ -536,7 +612,10 @@ bioseq_rescan(TableScanDesc sscan, ScanKey key, bool set_params,
 
 
 static bool
-bioseq_getnextslot(TableScanDesc sscan, ScanDirection direction, TupleTableSlot *slot)
+bioseq_getnextslot_impl(
+	TableScanDesc sscan,
+	ScanDirection direction,
+	TupleTableSlot *slot)
 {
 	BioseqColumnScanDesc scan = reinterpret_cast<BioseqColumnScanDesc>(sscan);
 
@@ -744,7 +823,7 @@ bioseq_index_fetch_end(IndexFetchTableData *sscan)
 	scan->attr_needed.free();
 
 	/* clean up any caches. */
-	if (bioseq_enable_page_cache == true)
+	if (bioseq::settings::enable_column_cache == true)
 	{
 		BioseqColumnResetCache();
 	}
@@ -1067,8 +1146,8 @@ static TransactionId
 bioseq_index_delete_tuples(Relation rel,
 							 TM_IndexDeleteOp *delstate)
 {
-	previousCacheEnabledState = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
+	previousCacheEnabledState = bioseq::settings::enable_column_cache;
+	bioseq::settings::enable_column_cache = false;
 
 	/*
 	 * XXX: We didn't bother implementing index_delete_tuple for neither of
@@ -1119,8 +1198,10 @@ ensure_write_side_seq_caches(Relation relation,
 	if (relation == nullptr || write_state == nullptr
 		|| write_state->stripeWriteContext == nullptr)
 	{
-		bioseq_log<ERR, PG>(
-			"bioseq storage: sequence write cache owner is unavailable");
+		bioseq::pg_utils::invoke_pg_as_cpp([] {
+			bioseq_log<ERR, PG>(
+				"bioseq storage: sequence write cache owner is unavailable");
+		});
 	}
 
 	if (write_state->seq_caches == nullptr)
@@ -1129,10 +1210,14 @@ ensure_write_side_seq_caches(Relation relation,
 			write_state->stripeWriteContext);
 		if (owner == nullptr)
 		{
-			bioseq_log<ERR, PG>(
-				"bioseq storage: sequence write cache context is unavailable");
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				bioseq_log<ERR, PG>(
+					"bioseq storage: sequence write cache context is unavailable");
+			});
 		}
-		auto* fresh = bioseq::storage::alloc_seq_caches(owner);
+		auto* fresh = bioseq::pg_utils::invoke_pg_as_cpp([owner] {
+			return bioseq::storage::alloc_seq_caches(owner);
+		});
 		fresh->side = bioseq::storage::seq_caches::Side::Write;
 		fresh->lock_mode = RowExclusiveLock;
 		fresh->main_database_oid = relation->rd_locator.dbOid;
@@ -1150,8 +1235,10 @@ ensure_write_side_seq_caches(Relation relation,
 		|| caches->main_tablespace_oid != relation->rd_locator.spcOid
 		|| caches->main_relfilenode != relation->rd_locator.relNumber)
 	{
-		bioseq_log<ERR, PG>(
-			"bioseq storage: sequence write cache relation identity changed");
+		bioseq::pg_utils::invoke_pg_as_cpp([] {
+			bioseq_log<ERR, PG>(
+				"bioseq storage: sequence write cache relation identity changed");
+		});
 	}
 	return caches;
 }
@@ -1181,8 +1268,9 @@ rewrite_seq_columns_to_stubs(Relation relation,
                                  &out_pending_sources)
 {
 	TupleDesc td = slot->tts_tupleDescriptor;
-	Datum *values_for_write = static_cast<Datum *>(
-		palloc(sizeof(Datum) * td->natts));
+	Datum *values_for_write = bioseq::pg_utils::invoke_pg_as_cpp([td] {
+		return static_cast<Datum *>(palloc(sizeof(Datum) * td->natts));
+	});
 	std::memcpy(values_for_write, detoasted_values, sizeof(Datum) * td->natts);
 
 	out_per_col_locator.assign(amc.seq_attnos.size(), std::nullopt);
@@ -1197,36 +1285,46 @@ rewrite_seq_columns_to_stubs(Relation relation,
 	auto* caches = ensure_write_side_seq_caches(relation, writeState);
 	const auto cap_bytes = caches->cap_bytes_snapshot;
 	const std::uint64_t main_storage_id =
-		BioseqColumnStorageGetStorageId(relation, false);
+		bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+			return BioseqColumnStorageGetStorageId(relation, false);
+		});
 
 	for (std::size_t c = 0; c < amc.seq_attnos.size(); ++c) {
 		const std::int16_t attno = amc.seq_attnos[c];
 		const int idx = attno - 1;
 		if (idx < 0 || idx >= td->natts) continue;
 		if (slot->tts_isnull[idx]) continue;
-		auto *hdr = reinterpret_cast<pgseq_t *>(
+		auto *hdr = reinterpret_cast<bioseq::pg_types::seq *>(
 			DatumGetPointer(values_for_write[idx]));
 		if (bioseq::storage::is_locator_stub(hdr)) {
-			bioseq_log<ERR, PG>(
-				"bioseq storage: a locator stub cannot be shared by a second parent row");
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				bioseq_log<ERR, PG>(
+					"bioseq storage: a locator stub cannot be shared by a second parent row");
+			});
 		}
-		auto pending =
-			bioseq::storage::bioseq_default_storage_manager::insert_payload_as_fragments(
+		auto pending = bioseq::pg_utils::invoke_pg_as_cpp(
+			[relation, main_storage_id, attno, td, hdr, cap_bytes, caches] {
+				return bioseq::storage::bioseq_default_storage_manager::
+					insert_payload_as_fragments(
 				RelationGetRelid(relation), main_storage_id,
 				relation->rd_locator.dbOid,
 				relation->rd_locator.spcOid,
 				relation->rd_locator.relNumber,
 				attno, td, hdr, cap_bytes, caches);
+			});
 		const auto loc = pending.locator();
 		out_per_col_locator[c] = loc;
 		out_pending_sources[c].emplace(std::move(pending));
-		pgseq_t *stub = bioseq::storage::alloc_locator_stub_in(
-			BioseqColumnWritePerTupleContext(writeState),
-			static_cast<std::uint8_t>(hdr->alphabet_code),
-			static_cast<std::uint8_t>(hdr->storage_unit_byte_width),
-			hdr->padding_letters,
-			/*total_bp_size=*/loc.total_bp_size,
-			loc);
+		bioseq::pg_types::seq *stub = bioseq::pg_utils::invoke_pg_as_cpp(
+			[writeState, hdr, loc] {
+				return bioseq::storage::alloc_locator_stub_in(
+					BioseqColumnWritePerTupleContext(writeState),
+					static_cast<std::uint8_t>(hdr->alphabet_code),
+					static_cast<std::uint8_t>(hdr->storage_unit_byte_width),
+					hdr->padding_letters,
+					/*total_bp_size=*/loc.total_bp_size,
+					loc);
+			});
 		values_for_write[idx] = PointerGetDatum(stub);
 	}
 	return values_for_write;
@@ -1236,19 +1334,29 @@ static void publish_sequence_sources_after_parent_row(
 		std::vector<std::optional<bioseq::storage::PendingSequenceSource>>& sources)
 {
 	for (auto& source : sources) {
-		if (source.has_value()) source->publish_after_parent_row();
+		if (source.has_value()) {
+			Assert(source->pending());
+			bioseq::pg_utils::invoke_pg_as_cpp([&source] {
+				source->publish_after_parent_row();
+			});
+			Assert(!source->pending());
+		}
 	}
 }
 
 template <class Fn>
-void run_tableam_cpp_checked(const char* operation, Fn&& function) {
+decltype(auto) run_tableam_cpp_checked(const char* operation, Fn&& function) {
 	ErrorData* exact_error = nullptr;
 	std::array<char, 512> detail{};
 	bool cpp_error = false;
 	bool unknown_cpp_error = false;
 	try {
-		function();
-		return;
+		if constexpr (std::is_void_v<std::invoke_result_t<Fn&>>) {
+			function();
+			return;
+		} else {
+			return function();
+		}
 	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
 		exact_error = error.release_error_data();
 	} catch (const std::exception& error) {
@@ -1277,12 +1385,74 @@ void run_tableam_cpp_checked(const char* operation, Fn&& function) {
 			(errcode(ERRCODE_INTERNAL_ERROR),
 			 errmsg("%s raised an unknown C++ exception", operation)));
 	}
+	pg_unreachable();
+}
+
+template <class Fn>
+decltype(auto) run_index_source_cpp_checked(
+	const char* failure_message,
+	Fn&& function)
+{
+	ErrorData* exact_error = nullptr;
+	std::array<char, 512> detail{};
+	bool cpp_error = false;
+	bool unknown_cpp_error = false;
+	try {
+		if constexpr (std::is_void_v<std::invoke_result_t<Fn&>>) {
+			function();
+			return;
+		} else {
+			return function();
+		}
+	} catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+		exact_error = error.release_error_data();
+	} catch (const std::exception& error) {
+		strlcpy(
+			detail.data(),
+			error.what() == nullptr ? "std::exception without detail" : error.what(),
+			detail.size());
+		cpp_error = true;
+	} catch (...) {
+		unknown_cpp_error = true;
+	}
+
+	// PostgreSQL reporting is a tail action after every C++ handler has ended.
+	// ReThrowError preserves the original ErrorData byte-for-byte; translated
+	// C++ failures retain the historical XX000 message/detail contract.
+	if (exact_error != nullptr) {
+		ReThrowError(exact_error);
+	}
+	if (cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("%s", failure_message),
+			 errdetail("%s", detail.data())));
+	}
+	if (unknown_cpp_error) {
+		ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("%s", failure_message),
+			 errdetail("unknown C++ exception")));
+	}
+	pg_unreachable();
+}
+
+static bool
+bioseq_getnextslot(
+	TableScanDesc scan,
+	ScanDirection direction,
+	TupleTableSlot* slot)
+{
+	return run_tableam_cpp_checked(
+		"bioseq getnextslot",
+		[scan, direction, slot] {
+			return bioseq_getnextslot_impl(scan, direction, slot);
+		});
 }
 
 [[nodiscard]] static Datum *
 detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum *values, bool *nulls)
 {
-	Datum *volatile detoasted_values = nullptr;
 	const auto previous_scope = exchange_slice_materialization_scope({
 		.attachment = nullptr,
 		.boundary_id = 0u,
@@ -1291,95 +1461,127 @@ detoast_values_for_heap_tuple(TupleDesc tuple_desc, Datum *values, bool *nulls)
 		.reason = materialization_reason::heap_tuple,
 		.local_sink = nullptr,
 	});
-	PG_TRY();
-	{
+	const auto scope_was_restored = [&previous_scope] {
+		const auto active = get_current_slice_materialization_scope();
+		return active.attachment == previous_scope.attachment
+			&& active.boundary_id == previous_scope.boundary_id
+			&& active.producer_value_id == previous_scope.producer_value_id
+			&& active.mechanism == previous_scope.mechanism
+			&& active.reason == previous_scope.reason
+			&& active.local_sink == previous_scope.local_sink;
+	};
+	try {
 		/* Destination-slot copyslot is the primary durable-write boundary.
 		 * Keep this TableAM scope as a fallback when an expanded value reaches
 		 * the access method without having been flattened there.  Each attached
 		 * EOH can still resolve its exact planned producer boundary. */
-		detoasted_values = bioseq::pg_utils::detoast_values(
-			tuple_desc, values, nulls);
+		Datum *detoasted_values = bioseq::pg_utils::invoke_pg_as_cpp(
+			[tuple_desc, values, nulls] {
+				return bioseq::pg_utils::detoast_values(
+					tuple_desc, values, nulls);
+			});
 		restore_slice_materialization_scope(previous_scope);
-	}
-	PG_CATCH();
-	{
+		Assert(scope_was_restored());
+		return detoasted_values;
+	} catch (...) {
 		restore_slice_materialization_scope(previous_scope);
-		PG_RE_THROW();
+		Assert(scope_was_restored());
+		throw;
 	}
-	PG_END_TRY();
-	return detoasted_values;
 }
 
 static void
 bioseq_tuple_insert(Relation relation, TupleTableSlot *slot, CommandId cid,
 					  int options, BulkInsertState bistate)
 {
-	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
-	{
-		bioseq_log<ERR, PG>(
-			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
-	}
-
-	/*
-	 * bioseq_init_write_state allocates the write state in a longer
-	 * lasting context, so no need to worry about it.
-	 */
-	BioseqColumnWriteState *writeState = bioseq_init_write_state(relation,
-														   RelationGetDescr(relation),
-															 slot->tts_tableOid,
-														   GetCurrentSubTransactionId());
+	BioseqColumnWriteState *writeState = nullptr;
 	OrdinaryInsertPageCacheRestore cache_restore{
 		.callback = {
 			.previous = error_context_stack,
 			.callback = &restore_ordinary_insert_page_cache_on_error,
 			.arg = nullptr,
 		},
-		.previous_value = bioseq_enable_page_cache,
+		.previous_value = bioseq::settings::enable_column_cache,
 		.armed = true,
 	};
 	cache_restore.callback.arg = &cache_restore;
 	error_context_stack = &cache_restore.callback;
-	bioseq_enable_page_cache = false;
+	bioseq::settings::enable_column_cache = false;
 	run_tableam_cpp_checked("bioseq tuple insert",
-		[relation, slot, writeState] {
-		BioseqColumnCheckLogicalReplication(relation);
+		[relation, slot, &writeState] {
+		if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+		{
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				bioseq_log<ERR, PG>(
+					"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
+			});
+		}
+		writeState = bioseq::pg_utils::invoke_pg_as_cpp([relation, slot] {
+			return bioseq_init_write_state(
+				relation, RelationGetDescr(relation), slot->tts_tableOid,
+				GetCurrentSubTransactionId());
+		});
+		bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+			BioseqColumnCheckLogicalReplication(relation);
+		});
+		const auto *amc = bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+			return &bioseq::storage::bioseq_am_cache_for(relation);
+		});
 
-		MemoryContextScope ctx_guard{
-			BioseqColumnWritePerTupleContext(writeState)};
+		{
+			MemoryContextScope ctx_guard{
+				BioseqColumnWritePerTupleContext(writeState)};
 
-		slot_getallattrs(slot);
+			bioseq::pg_utils::invoke_pg_as_cpp([slot] {
+				slot_getallattrs(slot);
+			});
 
-		Datum *detoasted_values = detoast_values_for_heap_tuple(
-			slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
+			Datum *detoasted_values = detoast_values_for_heap_tuple(
+				slot->tts_tupleDescriptor, slot->tts_values,
+				slot->tts_isnull);
 
-		/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
-		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
-		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
-		std::vector<std::optional<bioseq::storage::PendingSequenceSource>>
-			pending_sources;
-		Datum *values_for_write = rewrite_seq_columns_to_stubs(
-			relation, slot, writeState, amc, detoasted_values,
-			per_col_locator, pending_sources);
+			/* DOC0260 Phase A — rewrite SEQ columns to locator stubs. */
+			std::vector<std::optional<bioseq::storage::seq_locator>>
+				per_col_locator;
+			std::vector<std::optional<
+				bioseq::storage::PendingSequenceSource>> pending_sources;
+			Datum *values_for_write = rewrite_seq_columns_to_stubs(
+				relation, slot, writeState, *amc, detoasted_values,
+				per_col_locator, pending_sources);
 
-		uint64_t writtenRowNumber = BioseqColumnWriteRow(
-			writeState, values_for_write, slot->tts_isnull);
-		slot->tts_tid = row_number_to_tid(writtenRowNumber);
-		publish_sequence_sources_after_parent_row(pending_sources);
+			const uint64_t writtenRowNumber =
+				bioseq::pg_utils::invoke_pg_as_cpp(
+					[writeState, values_for_write, slot] {
+						return BioseqColumnWriteRow(
+							writeState, values_for_write, slot->tts_isnull);
+					});
+			slot->tts_tid = bioseq::pg_utils::invoke_pg_as_cpp(
+				[writtenRowNumber] {
+					return row_number_to_tid(writtenRowNumber);
+				});
+			publish_sequence_sources_after_parent_row(pending_sources);
 
-		/* DOC0279 §11.2 — build every UPDATE_ON_INSERT index (per SEQ column)
-		 * via the new chunked-storage drivers. detoasted_values carries the
-		 * ORIGINAL payload (pre-stub) so the index sees the real bytes. */
-		bioseq::storage::indexing::index_build_on_insert_columns(
-			RelationGetRelid(relation), amc.seq_attnos, slot->tts_isnull,
-			detoasted_values, per_col_locator, writtenRowNumber,
-			BioseqColumnWritePerTupleContext(writeState));
+			/* DOC0279 §11.2 — build every UPDATE_ON_INSERT index (per SEQ column)
+			 * via the new chunked-storage drivers. detoasted_values carries the
+			 * ORIGINAL payload (pre-stub) so the index sees the real bytes. */
+			bioseq::storage::indexing::index_build_on_insert_columns(
+				RelationGetRelid(relation), amc->seq_attnos,
+				slot->tts_isnull, detoasted_values, per_col_locator,
+				writtenRowNumber,
+				BioseqColumnWritePerTupleContext(writeState));
+		}
+		bioseq::pg_utils::invoke_pg_as_cpp([writeState] {
+			MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
+		});
+		bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+			pgstat_count_heap_insert(relation, 1);
+		});
 	});
-	bioseq_enable_page_cache = cache_restore.previous_value;
+	Assert(writeState != nullptr);
+	Assert(error_context_stack == &cache_restore.callback);
+	bioseq::settings::enable_column_cache = cache_restore.previous_value;
 	cache_restore.armed = false;
 	error_context_stack = cache_restore.callback.previous;
-	MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
-
-	pgstat_count_heap_insert(relation, 1);
 }
 
 
@@ -1388,65 +1590,121 @@ bioseq_tuple_insert_speculative(Relation relation, TupleTableSlot *slot,
 								  CommandId cid, int options,
 								  BulkInsertState bistate, uint32_t specToken)
 {
-	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
-	{
-		bioseq_log<ERR, PG>(
-			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
-	}
+	previousCacheEnabledState = bioseq::settings::enable_column_cache;
+	bioseq::settings::enable_column_cache = false;
 
-	previousCacheEnabledState = bioseq_enable_page_cache;
-	bioseq_enable_page_cache = false;
-
-	/*
-	 * bioseq_init_write_state allocates the write state in a longer
-	 * lasting context, so no need to worry about it.
-	 */
-	BioseqColumnWriteState *writeState = bioseq_init_write_state(relation,
-															   RelationGetDescr(relation),
-																 slot->tts_tableOid,
-															   GetCurrentSubTransactionId());
-	{
-		MemoryContextScope ctx_guard{BioseqColumnWritePerTupleContext(writeState)};
-
-		BioseqColumnCheckLogicalReplication(relation);
-
-		slot_getallattrs(slot);
-
-		Datum *detoasted_values = detoast_values_for_heap_tuple(
-			slot->tts_tupleDescriptor, slot->tts_values, slot->tts_isnull);
-
-		const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
-		std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
-		std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
-		Datum *values_for_write = rewrite_seq_columns_to_stubs(
-			relation, slot, writeState, amc, detoasted_values,
-			per_col_locator, pending_sources);
-
-		uint64_t storageId = LookupStorageId(relation->rd_locator);
-		uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState, values_for_write,
-		                                             slot->tts_isnull);
-		UpdateRowMask(relation->rd_locator, storageId,  NULL, writtenRowNumber);
-		slot->tts_tid = row_number_to_tid(writtenRowNumber);
-		PendingSpeculativeSources speculative{
-			.subtransaction_id = GetCurrentSubTransactionId(),
-		};
-		speculative.sources.reserve(pending_sources.size());
-		for (auto& source : pending_sources) {
-			if (source.has_value()) {
-				speculative.sources.push_back(std::move(*source));
+	OrdinaryInsertPageCacheRestore cache_restore{
+		.callback = {
+			.previous = error_context_stack,
+			.callback = &restore_ordinary_insert_page_cache_on_error,
+			.arg = nullptr,
+		},
+		.previous_value = previousCacheEnabledState,
+		.armed = true,
+	};
+	cache_restore.callback.arg = &cache_restore;
+	error_context_stack = &cache_restore.callback;
+	BioseqColumnWriteState *writeState = nullptr;
+	run_tableam_cpp_checked("bioseq speculative tuple insert",
+		[relation, slot, &writeState] {
+			if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
+			{
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					bioseq_log<ERR, PG>(
+						"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
+				});
 			}
-		}
-		const PendingSpeculativeKey key{
-			RelationGetRelid(relation), writtenRowNumber};
-		if (!pending_speculative_sources().emplace(
-				key, std::move(speculative)).second) {
-			bioseq_log<ERR, PG>(
-				"bioseq storage: duplicate speculative source publication key");
-		}
-	}
-	MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
+			writeState = bioseq::pg_utils::invoke_pg_as_cpp(
+				[relation, slot] {
+					return bioseq_init_write_state(
+						relation, RelationGetDescr(relation),
+						slot->tts_tableOid, GetCurrentSubTransactionId());
+				});
+			bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+				BioseqColumnCheckLogicalReplication(relation);
+			});
+			const auto *amc = bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+				return &bioseq::storage::bioseq_am_cache_for(relation);
+			});
 
-	pgstat_count_heap_insert(relation, 1);
+			{
+				MemoryContextScope ctx_guard{
+					BioseqColumnWritePerTupleContext(writeState)};
+
+				bioseq::pg_utils::invoke_pg_as_cpp([slot] {
+					slot_getallattrs(slot);
+				});
+
+				Datum *detoasted_values = detoast_values_for_heap_tuple(
+					slot->tts_tupleDescriptor, slot->tts_values,
+					slot->tts_isnull);
+
+				std::vector<std::optional<bioseq::storage::seq_locator>>
+					per_col_locator;
+				std::vector<std::optional<
+					bioseq::storage::PendingSequenceSource>> pending_sources;
+				Datum *values_for_write = rewrite_seq_columns_to_stubs(
+					relation, slot, writeState, *amc, detoasted_values,
+					per_col_locator, pending_sources);
+
+				const uint64_t storageId =
+					bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+						return LookupStorageId(relation->rd_locator);
+					});
+				const uint64_t writtenRowNumber =
+					bioseq::pg_utils::invoke_pg_as_cpp(
+						[writeState, values_for_write, slot] {
+							return BioseqColumnWriteRow(
+								writeState, values_for_write,
+								slot->tts_isnull);
+						});
+				bioseq::pg_utils::invoke_pg_as_cpp(
+					[relation, storageId, writtenRowNumber] {
+						UpdateRowMask(
+							relation->rd_locator, storageId, nullptr,
+							writtenRowNumber);
+					});
+					slot->tts_tid = bioseq::pg_utils::invoke_pg_as_cpp(
+						[writtenRowNumber] {
+							return row_number_to_tid(writtenRowNumber);
+						});
+					const SubTransactionId subtransaction_id =
+						bioseq::pg_utils::invoke_pg_as_cpp([] {
+							return GetCurrentSubTransactionId();
+						});
+					PendingSpeculativeSources speculative{
+						.subtransaction_id = subtransaction_id,
+					};
+				speculative.sources.reserve(pending_sources.size());
+				for (auto& source : pending_sources) {
+					if (source.has_value()) {
+						speculative.sources.push_back(std::move(*source));
+						Assert(!source->pending());
+						Assert(speculative.sources.back().pending());
+					}
+				}
+				const PendingSpeculativeKey key{
+					RelationGetRelid(relation), writtenRowNumber};
+				if (!pending_speculative_sources().emplace(
+						key, std::move(speculative)).second) {
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						bioseq_log<ERR, PG>(
+							"bioseq storage: duplicate speculative source publication key");
+					});
+				}
+			}
+			bioseq::pg_utils::invoke_pg_as_cpp([writeState] {
+				MemoryContextReset(
+					BioseqColumnWritePerTupleContext(writeState));
+			});
+			bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+				pgstat_count_heap_insert(relation, 1);
+			});
+		});
+	Assert(writeState != nullptr);
+	Assert(error_context_stack == &cache_restore.callback);
+	cache_restore.armed = false;
+	error_context_stack = cache_restore.callback.previous;
 }
 
 
@@ -1455,105 +1713,194 @@ bioseq_tuple_complete_speculative(Relation relation, TupleTableSlot *slot,
 									uint32_t specToken, bool succeeded)
 {
 	(void)specToken;
-	uint64_t storageId = LookupStorageId(relation->rd_locator);
-	/* Set lock for relation until transaction ends */
-	DirectFunctionCall1(pg_advisory_xact_lock_int8,
-						Int64GetDatum((int64_t) storageId));
-	const std::uint64_t row_number = tid_to_row_number(slot->tts_tid);
-	const PendingSpeculativeKey key{RelationGetRelid(relation), row_number};
-	auto pending = pending_speculative_sources().find(key);
-	if (pending == pending_speculative_sources().end()) {
-		bioseq_log<ERR, PG>(
-			"bioseq storage: speculative source publication authority is missing");
-	}
-	if (succeeded) {
-		for (auto& source : pending->second.sources) {
-			source.publish_after_parent_row();
-		}
-	} else {
-		for (auto& source : pending->second.sources) {
-			source.invalidate_without_parent_row();
-		}
-	}
-	pending_speculative_sources().erase(pending);
-
-	bioseq_enable_page_cache = previousCacheEnabledState;
+	OrdinaryInsertPageCacheRestore cache_restore{
+		.callback = {
+			.previous = error_context_stack,
+			.callback = &restore_ordinary_insert_page_cache_on_error,
+			.arg = nullptr,
+		},
+		.previous_value = previousCacheEnabledState,
+		.armed = true,
+	};
+	cache_restore.callback.arg = &cache_restore;
+	error_context_stack = &cache_restore.callback;
+	run_tableam_cpp_checked("bioseq complete speculative tuple insert",
+		[relation, slot, succeeded] {
+			const uint64_t storageId =
+				bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+					return LookupStorageId(relation->rd_locator);
+				});
+			/* Set lock for relation until transaction ends. */
+			bioseq::pg_utils::invoke_pg_as_cpp([storageId] {
+				(void)DirectFunctionCall1(
+					pg_advisory_xact_lock_int8,
+					Int64GetDatum(static_cast<int64_t>(storageId)));
+			});
+			const std::uint64_t row_number =
+				bioseq::pg_utils::invoke_pg_as_cpp([slot] {
+					return tid_to_row_number(slot->tts_tid);
+				});
+			const PendingSpeculativeKey key{
+				RelationGetRelid(relation), row_number};
+			auto pending = pending_speculative_sources().find(key);
+			if (pending == pending_speculative_sources().end()) {
+				bioseq::pg_utils::invoke_pg_as_cpp([] {
+					bioseq_log<ERR, PG>(
+						"bioseq storage: speculative source publication authority is missing");
+				});
+			}
+			if (succeeded) {
+				for (auto& source : pending->second.sources) {
+					Assert(source.pending());
+					bioseq::pg_utils::invoke_pg_as_cpp([&source] {
+						source.publish_after_parent_row();
+					});
+					Assert(!source.pending());
+				}
+			} else {
+				for (auto& source : pending->second.sources) {
+					Assert(source.pending());
+					bioseq::pg_utils::invoke_pg_as_cpp([&source] {
+						source.invalidate_without_parent_row();
+					});
+					Assert(!source.pending());
+				}
+			}
+			pending_speculative_sources().erase(pending);
+		});
+	Assert(error_context_stack == &cache_restore.callback);
+	bioseq::settings::enable_column_cache = previousCacheEnabledState;
+	cache_restore.armed = false;
+	error_context_stack = cache_restore.callback.previous;
 }
 
 static void
 bioseq_multi_insert(Relation relation, TupleTableSlot **slots, int ntuples,
 					  CommandId cid, int options, BulkInsertState bistate)
 {
-	if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
-	{
-		bioseq_log<ERR, PG>(
-			"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
-	}
-
-	BioseqColumnWriteState *writeState = bioseq_init_write_state(relation,
-															   RelationGetDescr(relation),
-																 slots[0]->tts_tableOid,
-															   GetCurrentSubTransactionId());
-
-	BioseqColumnCheckLogicalReplication(relation);
-
-	const auto &amc = bioseq::storage::bioseq_am_cache_for(relation);
-
 	run_tableam_cpp_checked("bioseq multi insert",
-		[relation, slots, ntuples, writeState, &amc] {
-		MemoryContextScope ctx_guard{BioseqColumnWritePerTupleContext(writeState)};
-
-		for (int i = 0; i < ntuples; i++)
+		[relation, slots, ntuples] {
+		if (relation->rd_rel->relpersistence == RELPERSISTENCE_TEMP)
 		{
-			TupleTableSlot *tupleSlot = slots[i];
-
-			slot_getallattrs(tupleSlot);
-
-			Datum *detoasted_values = detoast_values_for_heap_tuple(
-				tupleSlot->tts_tupleDescriptor,
-				tupleSlot->tts_values, tupleSlot->tts_isnull);
-
-			std::vector<std::optional<bioseq::storage::seq_locator>> per_col_locator;
-			std::vector<std::optional<bioseq::storage::PendingSequenceSource>> pending_sources;
-			Datum *values_for_write = rewrite_seq_columns_to_stubs(
-				relation, tupleSlot, writeState, amc,
-				detoasted_values, per_col_locator, pending_sources);
-
-			uint64_t writtenRowNumber = BioseqColumnWriteRow(writeState,
-				values_for_write, tupleSlot->tts_isnull);
-			publish_sequence_sources_after_parent_row(pending_sources);
-
-			bioseq::storage::indexing::index_build_on_insert_columns(
-				RelationGetRelid(relation), amc.seq_attnos, tupleSlot->tts_isnull,
-				detoasted_values, per_col_locator, writtenRowNumber,
-				BioseqColumnWritePerTupleContext(writeState));
-
-			EState *estate = create_estate_for_relation(relation);
-
-			ResultRelInfo *resultRelInfo = makeNode(ResultRelInfo);
-			InitResultRelInfo(resultRelInfo, relation, 1, NULL, 0);
-
-			ExecOpenIndices(resultRelInfo, false);
-
-			if (relation->rd_att->constr)
-				ExecConstraints(resultRelInfo, tupleSlot, estate);
-
-			ExecCloseIndices(resultRelInfo);
-
-			AfterTriggerEndQuery(estate);
-			ExecCloseResultRelations(estate);
-			ExecCloseRangeTableRelations(estate);
-
-			ExecResetTupleTable(estate->es_tupleTable, false);
-			FreeExecutorState(estate);
-
-			tupleSlot->tts_tid = row_number_to_tid(writtenRowNumber);
-
-			MemoryContextReset(BioseqColumnWritePerTupleContext(writeState));
+			bioseq::pg_utils::invoke_pg_as_cpp([] {
+				bioseq_log<ERR, PG>(
+					"bioseq tables cannot be TEMPORARY; use UNLOGGED or permanent");
+			});
 		}
-	});
+		BioseqColumnWriteState *writeState =
+			bioseq::pg_utils::invoke_pg_as_cpp([relation, slots] {
+				return bioseq_init_write_state(
+					relation, RelationGetDescr(relation),
+					slots[0]->tts_tableOid, GetCurrentSubTransactionId());
+			});
+		bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+			BioseqColumnCheckLogicalReplication(relation);
+		});
+		const auto *amc = bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+			return &bioseq::storage::bioseq_am_cache_for(relation);
+		});
 
-	pgstat_count_heap_insert(relation, ntuples);
+		{
+			MemoryContextScope ctx_guard{
+				BioseqColumnWritePerTupleContext(writeState)};
+
+			for (int i = 0; i < ntuples; i++)
+			{
+				TupleTableSlot *tupleSlot = slots[i];
+
+				bioseq::pg_utils::invoke_pg_as_cpp([tupleSlot] {
+					slot_getallattrs(tupleSlot);
+				});
+
+				Datum *detoasted_values = detoast_values_for_heap_tuple(
+					tupleSlot->tts_tupleDescriptor,
+					tupleSlot->tts_values, tupleSlot->tts_isnull);
+
+				std::vector<std::optional<bioseq::storage::seq_locator>>
+					per_col_locator;
+				std::vector<std::optional<
+					bioseq::storage::PendingSequenceSource>> pending_sources;
+				Datum *values_for_write = rewrite_seq_columns_to_stubs(
+					relation, tupleSlot, writeState, *amc,
+					detoasted_values, per_col_locator, pending_sources);
+
+				const uint64_t writtenRowNumber =
+					bioseq::pg_utils::invoke_pg_as_cpp(
+						[writeState, values_for_write, tupleSlot] {
+							return BioseqColumnWriteRow(
+								writeState, values_for_write,
+								tupleSlot->tts_isnull);
+						});
+				publish_sequence_sources_after_parent_row(pending_sources);
+
+				bioseq::storage::indexing::index_build_on_insert_columns(
+					RelationGetRelid(relation), amc->seq_attnos,
+					tupleSlot->tts_isnull, detoasted_values,
+					per_col_locator, writtenRowNumber,
+					BioseqColumnWritePerTupleContext(writeState));
+
+				EState *estate =
+					bioseq::pg_utils::invoke_pg_as_cpp([relation] {
+						return create_estate_for_relation(relation);
+					});
+
+				ResultRelInfo *resultRelInfo =
+					bioseq::pg_utils::invoke_pg_as_cpp([] {
+						return makeNode(ResultRelInfo);
+					});
+				bioseq::pg_utils::invoke_pg_as_cpp(
+					[resultRelInfo, relation] {
+						InitResultRelInfo(
+							resultRelInfo, relation, 1, nullptr, 0);
+					});
+
+				bioseq::pg_utils::invoke_pg_as_cpp([resultRelInfo] {
+					ExecOpenIndices(resultRelInfo, false);
+				});
+
+				if (relation->rd_att->constr)
+					bioseq::pg_utils::invoke_pg_as_cpp(
+						[resultRelInfo, tupleSlot, estate] {
+							ExecConstraints(
+								resultRelInfo, tupleSlot, estate);
+						});
+
+				bioseq::pg_utils::invoke_pg_as_cpp([resultRelInfo] {
+					ExecCloseIndices(resultRelInfo);
+				});
+
+				bioseq::pg_utils::invoke_pg_as_cpp([estate] {
+					AfterTriggerEndQuery(estate);
+				});
+				bioseq::pg_utils::invoke_pg_as_cpp([estate] {
+					ExecCloseResultRelations(estate);
+				});
+				bioseq::pg_utils::invoke_pg_as_cpp([estate] {
+					ExecCloseRangeTableRelations(estate);
+				});
+
+				bioseq::pg_utils::invoke_pg_as_cpp([estate] {
+					ExecResetTupleTable(estate->es_tupleTable, false);
+				});
+				bioseq::pg_utils::invoke_pg_as_cpp([estate] {
+					FreeExecutorState(estate);
+				});
+
+				tupleSlot->tts_tid = bioseq::pg_utils::invoke_pg_as_cpp(
+					[writtenRowNumber] {
+						return row_number_to_tid(writtenRowNumber);
+					});
+
+				bioseq::pg_utils::invoke_pg_as_cpp([writeState] {
+					MemoryContextReset(
+						BioseqColumnWritePerTupleContext(writeState));
+				});
+			}
+		}
+		bioseq::pg_utils::invoke_pg_as_cpp([relation, ntuples] {
+			pgstat_count_heap_insert(relation, ntuples);
+		});
+	});
 }
 
 /// Invalidate only the epoch(s) carried by the exact old parent row before its
@@ -1584,7 +1931,7 @@ invalidate_sequence_source_epochs_for_row(Relation relation,
 			for (const std::int16_t attno : amc.seq_attnos) {
 				const int index = attno - 1;
 				if (index < 0 || index >= descriptor->natts || nulls[index]) continue;
-				const auto *header = reinterpret_cast<const pgseq_t *>(
+				const auto *header = reinterpret_cast<const bioseq::pg_types::seq *>(
 					DatumGetPointer(values[index]));
 				if (!bioseq::storage::is_locator_stub(header)) continue;
 				const auto locator = bioseq::storage::decode_locator_from_stub(header);
@@ -1861,7 +2208,9 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 	Assert(sourceDesc->natts == targetDesc->natts);
 
 	/* read settings from old heap, relfilelocator will be swapped at the end */
-	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(OldHeap->rd_id).value_or(BioseqColumnOptions{});
+	BioseqColumnOptions bioseqColumnOptions =
+		read_bioseq_column_options(OldHeap->rd_id)
+			.value_or(BioseqColumnOptions{});
 
 	/*
 	 * DOC0260 Phase A — CLUSTER allocates a new relfilenode for NewHeap.
@@ -1929,12 +2278,12 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			const int idx = attno - 1;
 			if (idx < 0 || idx >= sourceDesc->natts) continue;
 			if (nulls[idx]) continue;
-			auto* hdr = reinterpret_cast<const pgseq_t*>(
+			auto* hdr = reinterpret_cast<const bioseq::pg_types::seq*>(
 				DatumGetPointer(values[idx]));
 			if (!bioseq::storage::is_locator_stub(hdr)) continue;
 			const auto loc = bioseq::storage::decode_locator_from_stub(hdr);
 			bioseq::storage::validate_locator_flat_materialization_length(loc);
-			pgseq_t* real =
+			bioseq::pg_types::seq* real =
 				bioseq::storage::bioseq_default_storage_manager::fetch_payload(
 					OldHeap->rd_locator.dbOid, OldHeap->rd_locator.spcOid,
 					OldHeap->rd_locator.relNumber, attno, loc,
@@ -1948,7 +2297,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 			const int idx = attno - 1;
 			if (idx < 0 || idx >= sourceDesc->natts) continue;
 			if (nulls[idx]) continue;
-			auto* hdr = reinterpret_cast<const pgseq_t*>(
+			auto* hdr = reinterpret_cast<const bioseq::pg_types::seq*>(
 				DatumGetPointer(values[idx]));
 			if (bioseq::storage::is_locator_stub(hdr)) continue;
 			auto pending =
@@ -1958,7 +2307,7 @@ bioseq_relation_copy_for_cluster(Relation OldHeap, Relation NewHeap,
 					NewHeap->rd_locator.relNumber,
 					attno, targetDesc, hdr, cap_bytes, write_caches);
 			const auto loc = pending.locator();
-			pgseq_t* stub = bioseq::storage::alloc_locator_stub_in(
+			bioseq::pg_types::seq* stub = bioseq::storage::alloc_locator_stub_in(
 				BioseqColumnWritePerTupleContext(writeState),
 				static_cast<std::uint8_t>(hdr->alphabet_code),
 				static_cast<std::uint8_t>(hdr->storage_unit_byte_width),
@@ -2019,7 +2368,9 @@ TruncateAndCombineBioseqColumnStripes(Relation rel, int elevel)
 	}
 
 	/* Get current columnar options */
-	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(rel->rd_id).value_or(BioseqColumnOptions{});
+	BioseqColumnOptions bioseqColumnOptions =
+		read_bioseq_column_options(rel->rd_id)
+			.value_or(BioseqColumnOptions{});
 
 	/* Get all stripes in reverse order */
 	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, BackwardScanDirection);
@@ -2195,9 +2546,11 @@ static void
 bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 					BufferAccessStrategy bstrategy)
 {
-	/* Disable the page cache for the duration of the vacuum. */
-	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
-
+	static_cast<void>(bstrategy);
+	run_tableam_cpp_checked("bioseq_vacuum_rel", [rel, params] {
+		PageCacheDisableScope cache_guard{
+			bioseq::settings::enable_column_cache};
+		bioseq::pg_utils::invoke_pg_as_cpp([rel, params] {
 	pgstat_progress_start_command(PROGRESS_COMMAND_VACUUM,
  									RelationGetRelid(rel));
 
@@ -2293,6 +2646,8 @@ bioseq_vacuum_rel(Relation rel, VacuumParams *params,
 							0);
 #endif
 	pgstat_progress_end_command();
+		});
+	});
 }
 
 
@@ -2341,7 +2696,8 @@ LogRelationStats(Relation rel, int elevel)
 					/* ignore zero length chunks for dropped attributes */
 					if (skipnode->valueLength > 0)
 					{
-						compressionStats[skipnode->valueCompressionType]++;
+						compressionStats[
+							static_cast<int>(skipnode->valueCompressionType)]++;
 						chunkCount++;
 
 						if (attrDropped)
@@ -2369,14 +2725,14 @@ LogRelationStats(Relation rel, int elevel)
 	uint64_t relPages = smgrnblocks(RelationGetSmgr(rel), MAIN_FORKNUM);
 	RelationCloseSmgr(rel);
 
-	Datum storageId = DirectFunctionCall1(bioseq_relation_storageid,
-										  ObjectIdGetDatum(RelationGetRelid(rel)));
+	const std::int64_t storage_id = static_cast<std::int64_t>(
+		BioseqColumnStorageGetStorageId(rel, false));
 
 	double compressionRate = totalStripeLength ?
 							 (double) totalDecompressedLength / totalStripeLength :
 							 1.0;
 
-	appendStringInfo(infoBuf, "storage id: %ld\n", DatumGetInt64(storageId));
+	appendStringInfo(infoBuf, "storage id: %ld\n", storage_id);
 	appendStringInfo(infoBuf, "total file size: %ld, total data size: %ld\n",
 					 relPages * BLCKSZ, totalStripeLength);
 	appendStringInfo(infoBuf, "compression rate: %.2fx\n", compressionRate);
@@ -2502,7 +2858,13 @@ TruncateBioseqColumn(Relation rel, int elevel)
 
 		BlockNumber new_rel_pages = smgrnblocks(rel->rd_smgr, MAIN_FORKNUM);
 
-		bioseq_report_pg_lazy(elevel, [&] {
+		bioseq_report_pg_lazy(
+			elevel,
+			[elevel,
+			 rel,
+			 old_rel_pages,
+			 new_rel_pages,
+			 &ru0] {
 			bioseq_report_pg(elevel)
 				.msg("\"{}\": truncated {} to {} pages",
 					 RelationGetRelationName(rel),
@@ -2578,7 +2940,7 @@ bioseq_scan_analyze_next_tuple(TableScanDesc scan, TransactionId OldestXmin,
 								 TupleTableSlot *slot)
 {
 	/* Disable the page cache while ANALYZE collects sample rows. */
-	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
+	PageCacheDisableScope cache_guard{bioseq::settings::enable_column_cache};
 
 	/*
 	 * Currently we don't do anything smart to reduce number of rows returned
@@ -2618,64 +2980,29 @@ promote_index_source_locators(
 		if (index < 0 || index >= slot->tts_tupleDescriptor->natts
 			|| slot->tts_isnull[index])
 			continue;
-		auto *header = reinterpret_cast<const pgseq_t *>(
+		auto *header = reinterpret_cast<const bioseq::pg_types::seq *>(
 			DatumGetPointer(slot->tts_values[index]));
 		if (!bioseq::storage::is_locator_stub(header))
 			continue;
-		try
-		{
-			slot->tts_values[index] =
+		slot->tts_values[index] = run_index_source_cpp_checked(
+			"bioseq expression-index source promotion failed",
+			[provider, attno, slot, index, resultContext] {
+				return
 				bioseq::storage::promote_pg_sequence_locator(
 					provider, attno, slot->tts_values[index], resultContext);
-		}
-		catch (bioseq::pg_utils::PostgresErrorAsCpp &error)
-		{
-			ReThrowError(error.release_error_data());
-		}
-		catch (const std::exception &error)
-		{
-			ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("bioseq expression-index source promotion failed"),
-				 errdetail("%s", error.what())));
-		}
-		catch (...)
-		{
-			ereport(ERROR,
-				(errcode(ERRCODE_INTERNAL_ERROR),
-				 errmsg("bioseq expression-index source promotion failed"),
-				 errdetail("unknown C++ exception")));
-		}
+			});
 	}
 }
 
 [[nodiscard]] static bioseq::storage::pg_sequence_source_provider *
 create_index_source_provider(Relation relation, Snapshot snapshot)
 {
-	try
-	{
-		return bioseq::storage::create_standalone_pg_sequence_source_provider(
-			relation, snapshot);
-	}
-	catch (bioseq::pg_utils::PostgresErrorAsCpp &error)
-	{
-		ReThrowError(error.release_error_data());
-	}
-	catch (const std::exception &error)
-	{
-		ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("bioseq expression-index source provider failed"),
-			 errdetail("%s", error.what())));
-	}
-	catch (...)
-	{
-		ereport(ERROR,
-			(errcode(ERRCODE_INTERNAL_ERROR),
-			 errmsg("bioseq expression-index source provider failed"),
-			 errdetail("unknown C++ exception")));
-	}
-	pg_unreachable();
+	return run_index_source_cpp_checked(
+		"bioseq expression-index source provider failed",
+		[relation, snapshot] {
+			return bioseq::storage::create_standalone_pg_sequence_source_provider(
+				relation, snapshot);
+		});
 }
 
 
@@ -2711,7 +3038,7 @@ bioseq_index_build_range_scan(Relation bioseqColumnRelation,
 	}
 
 	/* Disable the page cache for the duration of the index build. */
-	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
+	PageCacheDisableScope cache_guard{bioseq::settings::enable_column_cache};
 
 	/*
 	 * Columnar tuples have no dead-row form, so outside bootstrap an explicitly
@@ -3282,10 +3609,9 @@ BioseqColumnXactCallback(XactEvent event, void *arg)
 		{
 			// PRE_COMMIT/PRE_PREPARE below must have proved this empty. A
 			// surviving move-only authority here is an internal invariant breach;
-			// never silently discard it after the transaction boundary.
-			require_no_pending_speculative_sources(
-				"commit/prepare after pre-commit validation",
-				kPostgresPanicLevel);
+			// quarantine it without a PostgreSQL jump or destructor-bearing
+			// callback frame after the terminal transaction boundary.
+			quarantine_pending_speculative_sources_noexcept(event);
 			break;
 		}
 
@@ -3294,7 +3620,12 @@ BioseqColumnXactCallback(XactEvent event, void *arg)
 		{
 			DiscardWriteStateForAllRels(GetCurrentSubTransactionId(), 0);
 			CleanupReadStateCache(GetCurrentSubTransactionId());
-			pending_speculative_sources().clear();
+			const bool active_map_quarantined =
+				speculative_source_quarantine_state_noexcept()
+					.active_map_quarantined;
+			if (!active_map_quarantined) {
+				pending_speculative_sources().clear();
+			}
 			break;
 		}
 
@@ -3489,11 +3820,45 @@ GetBioseqColumnTableAmRoutine(void)
 	return &bioseq_am_methods;
 }
 
-POSTGRES_FN(bioseq_handler)
-{
+export namespace bioseq::table::sql_routines {
+
+/** @brief Returns the table access-method handler for Bioseq tables. */
+[[bioseq_sql::function({
+	.schema = bioseq::sql::fixed_schema<"bioseq">,
+	.create = bioseq::sql::create_mode::or_replace,
+})]]
+[[bioseq_sql::access_method]]
+[[bioseq_sql::am_catalog_dependencies({
+	.roots = bioseq::sql::entities<
+		bioseq::storage::metadata::catalog_rows::chunk,
+		bioseq::storage::metadata::catalog_rows::chunk_group,
+		bioseq::storage::metadata::catalog_rows::options,
+		bioseq::storage::metadata::catalog_rows::stripe,
+		bioseq::storage::catalog_rows::sequence_source_version>(
+			bioseq::metadata::sql_entities::storageid_seq,
+			bioseq::storage::sql_entities::sequence_source_epoch_seq,
+			bioseq::storage::indexing::sql_entities::
+				minimizer_generation_id_seq),
+})]]
+[[bioseq_sql::result({
+	.sql_type = bioseq::sql::pg::table_am_handler,
+})]]
+/**
+ * @brief Returns the table access-method handler for Bioseq tables.
+ */
+const TableAmRoutine* bioseq_handler(
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::internal,
+		})]]
+		std::optional<
+			bioseq::pg_utils::table_am_handler_context>
+			handler_context) {
+	static_cast<void>(handler_context);
 	bioseq_log<DBG>("[bioseq] pg: bioseq_handler() entered");
-	PG_RETURN_POINTER(&bioseq_am_methods);
+	return &bioseq_am_methods;
 }
+
+}  // namespace bioseq::table::sql_routines
 
 
 export void
@@ -3533,804 +3898,292 @@ bioseq_tableam_init()
 }
 
 
-/*
- * alter_bioseq_table_set is a UDF exposed in postgres to change settings on a columnar
- * table. Calling this function on a non-columnar table gives an error.
- *
- * sql syntax:
- *   pg_catalog.alter_bioseq_table_set(
- *        table_name regclass,
- *        chunk_group_row_limit int DEFAULT NULL,
- *        stripe_row_limit int DEFAULT NULL,
- *        compression name DEFAULT null)
- *
- * All arguments except the table name are optional. The UDF is supposed to be called
- * like:
- *   SELECT alter_bioseq_table_set('table', compression => 'pglz');
- *
- * This will only update the compression of the table, keeping all other settings the
- * same. Multiple settings can be changed at the same time by providing multiple
- * arguments. Calling the argument with the NULL value will be interperted as not having
- * provided the argument.
- */
-POSTGRES_FN(alter_bioseq_table_set)
-{
-	Oid relationId = PG_GETARG_OID(0);
+export namespace bioseq::table::sql_routines {
 
-	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
-	if (!IsBioseqColumnTableAmTable(relationId))
-	{
-		bioseq_log<ERR, PG>( "table {} is not a columnar table",
-			   quote_identifier(RelationGetRelationName(rel)));
+[[bioseq_sql::function({
+	.schema = bioseq::sql::pg_catalog,
+	.create = bioseq::sql::create_mode::or_replace,
+})]]
+/** @brief Sets selected storage options on a Bioseq table; NULL options are unchanged. */
+void alter_bioseq_table_set(
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::regclass,
+		})]]
+		std::optional<Oid> table_name,
+		std::optional<std::int32_t> chunk_group_row_limit =
+			std::nullopt,
+		std::optional<std::int32_t> stripe_row_limit =
+			std::nullopt,
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::name,
+		})]]
+		std::optional<NameData> compression = std::nullopt,
+		std::optional<std::int32_t> compression_level =
+			std::nullopt) {
+	const bool change_requested =
+		chunk_group_row_limit.has_value()
+		|| stripe_row_limit.has_value()
+		|| compression.has_value()
+		|| compression_level.has_value();
+	if (!change_requested) return;
+	if (!table_name.has_value()) {
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{.message = "table_name must not be NULL"});
 	}
-	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
-	{
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
-					   get_rel_name(relationId));
-	}
+	const Oid relation_id = *table_name;
+	Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			return table_open(relation_id, AccessExclusiveLock);
+		});
+	const sql_relation_lock relation_lock{
+		relation, NoLock, true};
+	require_bioseq_table(relation, relation_id);
+	require_relation_owner(relation_id);
 
-	auto maybe_options = FormDataBioseqOptions::read_options(relationId);
+	auto maybe_options = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			return read_bioseq_column_options(relation_id);
+		});
 	if (!maybe_options)
 	{
-		bioseq_log<ERR, PG>( "unable to read current options for table");
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{.message = "unable to read current options for table"});
 	}
 	BioseqColumnOptions options = *maybe_options;
 
-	/* chunk_group_row_limit => not null */
-	if (!PG_ARGISNULL(1))
+	if (chunk_group_row_limit.has_value())
 	{
-		options.chunkRowCount = PG_GETARG_INT32(1);
+		options.chunkRowCount = *chunk_group_row_limit;
 		if (options.chunkRowCount < CHUNK_ROW_COUNT_MINIMUM ||
 			options.chunkRowCount > CHUNK_ROW_COUNT_MAXIMUM)
 		{
-			bioseq_report<ERR, PG>()
-				.msg("chunk group row count limit out of range")
-				.hint("chunk group row count limit must be between {} and {}",
-					  static_cast<uint64_t>(CHUNK_ROW_COUNT_MINIMUM),
-					  static_cast<uint64_t>(CHUNK_ROW_COUNT_MAXIMUM));
+			bioseq::pg_utils::raise_sql_error(
+				ERRCODE_INTERNAL_ERROR,
+				{
+					.message =
+						"chunk group row count limit out of range",
+					.hint =
+						"chunk group row count limit must be between "
+						+ std::to_string(CHUNK_ROW_COUNT_MINIMUM)
+						+ " and "
+						+ std::to_string(CHUNK_ROW_COUNT_MAXIMUM),
+				});
 		}
-		bioseq_log_pg(DEBUG1, "updating chunk row count to {}", options.chunkRowCount);
 	}
 
-	/* stripe_row_limit => not null */
-	if (!PG_ARGISNULL(2))
+	if (stripe_row_limit.has_value())
 	{
-		options.stripeRowCount = PG_GETARG_INT32(2);
+		options.stripeRowCount = *stripe_row_limit;
 		if (options.stripeRowCount < STRIPE_ROW_COUNT_MINIMUM ||
 			options.stripeRowCount > STRIPE_ROW_COUNT_MAXIMUM)
 		{
-			bioseq_report<ERR, PG>()
-				.msg("stripe row count limit out of range")
-				.hint("stripe row count limit must be between {} and {}",
-					  static_cast<uint64_t>(STRIPE_ROW_COUNT_MINIMUM),
-					  static_cast<uint64_t>(STRIPE_ROW_COUNT_MAXIMUM));
+			bioseq::pg_utils::raise_sql_error(
+				ERRCODE_INTERNAL_ERROR,
+				{
+					.message = "stripe row count limit out of range",
+					.hint =
+						"stripe row count limit must be between "
+						+ std::to_string(STRIPE_ROW_COUNT_MINIMUM)
+						+ " and "
+						+ std::to_string(STRIPE_ROW_COUNT_MAXIMUM),
+				});
 		}
-		bioseq_log_pg(DEBUG1, "updating stripe row count to {}", options.stripeRowCount);
 	}
 
-	/* compression => not null */
-	if (!PG_ARGISNULL(3))
+	if (compression.has_value())
 	{
-		Name compressionName = PG_GETARG_NAME(3);
-		options.compressionType = ParseCompressionType(NameStr(*compressionName));
+		options.compressionType =
+			ParseCompressionType(NameStr(*compression));
 		if (options.compressionType == COMPRESSION_TYPE_INVALID)
 		{
-			bioseq_log<ERR, PG>( "unknown compression type for columnar table: {}",
-				   quote_identifier(NameStr(*compressionName)));
+			const char* const compression_name =
+				NameStr(*compression);
+			const char* const quoted_name =
+				bioseq::pg_utils::invoke_pg_as_cpp(
+					[compression_name] {
+						return quote_identifier(
+							compression_name);
+					});
+			bioseq::pg_utils::raise_sql_error(
+				ERRCODE_INTERNAL_ERROR,
+				{
+					.message =
+						"unknown compression type for columnar table: "
+						+ std::string{quoted_name},
+				});
 		}
-		bioseq_log_pg(DEBUG1, "updating compression to {}",
-			   CompressionTypeStr(options.compressionType));
 	}
 
-	/* compression_level => not null */
-	if (!PG_ARGISNULL(4))
+	if (compression_level.has_value())
 	{
-		options.compressionLevel = PG_GETARG_INT32(4);
+		options.compressionLevel = *compression_level;
 		if (options.compressionLevel < COMPRESSION_LEVEL_MIN ||
 			options.compressionLevel > COMPRESSION_LEVEL_MAX)
 		{
-			bioseq_report<ERR, PG>()
-				.msg("compression level out of range")
-				.hint("compression level must be between {} and {}",
-					  COMPRESSION_LEVEL_MIN,
-					  COMPRESSION_LEVEL_MAX);
+			bioseq::pg_utils::raise_sql_error(
+				ERRCODE_INTERNAL_ERROR,
+				{
+					.message = "compression level out of range",
+					.hint =
+						"compression level must be between "
+						+ std::to_string(COMPRESSION_LEVEL_MIN)
+						+ " and "
+						+ std::to_string(COMPRESSION_LEVEL_MAX),
+				});
 		}
-
-		bioseq_log_pg(DEBUG1, "updating compression level to {}", options.compressionLevel);
 	}
 
 	if (BioseqColumnTableSetOptions_hook != NULL)
 	{
-		BioseqColumnTableSetOptions_hook(relationId, options);
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[relation_id, options] {
+				BioseqColumnTableSetOptions_hook(
+					relation_id, options);
+			});
 	}
 
-	SetBioseqColumnOptions(relationId, &options);
-
-	table_close(rel, NoLock);
-
-	PG_RETURN_VOID();
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id, &options] {
+			SetBioseqColumnOptions(relation_id, &options);
+		});
 }
 
+}  // namespace bioseq::table::sql_routines
 
-/*
- * alter_bioseq_table_reset is a UDF exposed in postgres to reset the settings on a
- * columnar table. Calling this function on a non-columnar table gives an error.
- *
- * sql syntax:
- *   pg_catalog.alter_bioseq_table_re
- *   teset(
- *        table_name regclass,
- *        chunk_group_row_limit bool DEFAULT FALSE,
- *        stripe_row_limit bool DEFAULT FALSE,
- *        compression bool DEFAULT FALSE)
- *
- * All arguments except the table name are optional. The UDF is supposed to be called
- * like:
- *   SELECT alter_bioseq_table_set('table', compression => true);
- *
- * All options set to true will be reset to the default system value.
- */
-POSTGRES_FN(alter_bioseq_table_reset)
-{
-	Oid relationId = PG_GETARG_OID(0);
+export namespace bioseq::table::sql_routines {
 
-	Relation rel = table_open(relationId, AccessExclusiveLock); /* ALTER TABLE LOCK */
-	if (!IsBioseqColumnTableAmTable(relationId))
-	{
-		bioseq_log<ERR, PG>( "table {} is not a columnar table",
-			   quote_identifier(RelationGetRelationName(rel)));
+[[bioseq_sql::function({
+	.schema = bioseq::sql::pg_catalog,
+	.create = bioseq::sql::create_mode::or_replace,
+})]]
+/** @brief Resets selected Bioseq table options to their system defaults. */
+void alter_bioseq_table_reset(
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::regclass,
+		})]]
+		std::optional<Oid> table_name,
+		std::optional<bool> chunk_group_row_limit = false,
+		std::optional<bool> stripe_row_limit = false,
+		std::optional<bool> compression = false,
+		std::optional<bool> compression_level = false) {
+	const bool reset_requested =
+		chunk_group_row_limit.value_or(false)
+		|| stripe_row_limit.value_or(false)
+		|| compression.value_or(false)
+		|| compression_level.value_or(false);
+	if (!reset_requested) return;
+	if (!table_name.has_value()) {
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{.message = "table_name must not be NULL"});
 	}
+	const Oid relation_id = *table_name;
+	Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			return table_open(relation_id, AccessExclusiveLock);
+		});
+	const sql_relation_lock relation_lock{
+		relation, NoLock, true};
+	require_bioseq_table(relation, relation_id);
+	require_relation_owner(relation_id);
 
-	if (!object_ownercheck(RelationRelationId, relationId, GetUserId()))
-	{
-		aclcheck_error(ACLCHECK_NOT_OWNER, OBJECT_TABLE,
-					   get_rel_name(relationId));
-	}
-
-	auto maybe_options = FormDataBioseqOptions::read_options(relationId);
+	auto maybe_options = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id] {
+			return read_bioseq_column_options(relation_id);
+		});
 	if (!maybe_options)
 	{
-		bioseq_log<ERR, PG>( "unable to read current options for table");
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{.message = "unable to read current options for table"});
 	}
 	BioseqColumnOptions options = *maybe_options;
 
-	/* chunk_group_row_limit => true */
-	if (!PG_ARGISNULL(1) && PG_GETARG_BOOL(1))
+	if (chunk_group_row_limit.value_or(false))
 	{
-		options.chunkRowCount = bioseq_chunk_group_row_limit;
-		bioseq_log_pg(DEBUG1, "resetting chunk row count to {}", options.chunkRowCount);
+		options.chunkRowCount = bioseq::settings::chunk_group_row_limit;
 	}
 
-	/* stripe_row_limit => true */
-	if (!PG_ARGISNULL(2) && PG_GETARG_BOOL(2))
+	if (stripe_row_limit.value_or(false))
 	{
-		options.stripeRowCount = bioseq_stripe_row_limit;
-		bioseq_log_pg(DEBUG1, "resetting stripe row count to {}", options.stripeRowCount);
+		options.stripeRowCount = bioseq::settings::stripe_row_limit;
 	}
 
-	/* compression => true */
-	if (!PG_ARGISNULL(3) && PG_GETARG_BOOL(3))
+	if (compression.value_or(false))
 	{
-		options.compressionType = static_cast<CompressionType>(bioseq_compression);
-		bioseq_log_pg(DEBUG1, "resetting compression to {}",
-			   CompressionTypeStr(options.compressionType));
+		options.compressionType = static_cast<CompressionType>(static_cast<int>(bioseq::settings::compression.value()));
 	}
 
-	/* compression_level => true */
-	if (!PG_ARGISNULL(4) && PG_GETARG_BOOL(4))
+	if (compression_level.value_or(false))
 	{
-		options.compressionLevel = bioseq_compression_level;
-		bioseq_log_pg(DEBUG1, "reseting compression level to {}", bioseq_compression_level);
+		options.compressionLevel = bioseq::settings::compression_level;
 	}
 
 	if (BioseqColumnTableSetOptions_hook != NULL)
 	{
-		BioseqColumnTableSetOptions_hook(relationId, options);
+		bioseq::pg_utils::invoke_pg_as_cpp(
+			[relation_id, options] {
+				BioseqColumnTableSetOptions_hook(
+					relation_id, options);
+			});
 	}
 
-	SetBioseqColumnOptions(relationId, &options);
-
-	table_close(rel, NoLock);
-
-	PG_RETURN_VOID();
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation_id, &options] {
+			SetBioseqColumnOptions(relation_id, &options);
+		});
 }
 
+}  // namespace bioseq::table::sql_routines
 
-/*
- * upgrade_bioseq_storage - upgrade columnar storage to the current
- * version.
- *
- * DDL:
- *   CREATE OR REPLACE FUNCTION upgrade_bioseq_storage(rel regclass)
- *     RETURNS VOID
- *     STRICT
- *     LANGUAGE c AS 'MODULE_PATHNAME', 'upgrade_bioseq_storage';
- */
-POSTGRES_FN(upgrade_bioseq_storage)
-{
-	Oid relid = PG_GETARG_OID(0);
+export namespace bioseq::table::sql_routines {
 
-	/*
-	 * ACCESS EXCLUSIVE LOCK is not required by the low-level routines, so we
-	 * can take only an ACCESS SHARE LOCK. But all access to non-current
-	 * columnar tables will fail anyway, so it's better to take ACCESS
-	 * EXCLUSIVE LOCK now.
-	 */
-	Relation rel = table_open(relid, AccessExclusiveLock);
-	if (!IsBioseqColumnTableAmTable(relid))
-	{
-		bioseq_log<ERR, PG>( "table {} is not a columnar table",
-			   quote_identifier(RelationGetRelationName(rel)));
-	}
-
-	BioseqColumnStorageUpdateIfNeeded(rel, true);
-
-	table_close(rel, AccessExclusiveLock);
-	PG_RETURN_VOID();
+[[bioseq_sql::function({
+	.schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+	.create = bioseq::sql::create_mode::or_replace,
+})]]
+/** @brief Upgrades Bioseq storage metadata when the relation uses an older layout. */
+void upgrade_bioseq_storage(
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::regclass,
+		})]]
+		Oid rel) {
+	Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+		[rel] {
+			return table_open(rel, AccessExclusiveLock);
+		});
+	const sql_relation_lock relation_lock{
+		relation, AccessExclusiveLock, true};
+	require_bioseq_table(relation, rel);
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation] {
+			BioseqColumnStorageUpdateIfNeeded(relation, true);
+		});
 }
 
-
-/*
- * downgrade_bioseq_storage - downgrade columnar storage to the
- * current version.
- *
- * DDL:
- *   CREATE OR REPLACE FUNCTION downgrade_bioseq_storage(rel regclass)
- *     RETURNS VOID
- *     STRICT
- *     LANGUAGE c AS 'MODULE_PATHNAME', 'downgrade_bioseq_storage';
- */
-POSTGRES_FN(downgrade_bioseq_storage)
-{
-	Oid relid = PG_GETARG_OID(0);
-
-	/*
-	 * ACCESS EXCLUSIVE LOCK is not required by the low-level routines, so we
-	 * can take only an ACCESS SHARE LOCK. But all access to non-current
-	 * columnar tables will fail anyway, so it's better to take ACCESS
-	 * EXCLUSIVE LOCK now.
-	 */
-	Relation rel = table_open(relid, AccessExclusiveLock);
-	if (!IsBioseqColumnTableAmTable(relid))
-	{
-		bioseq_log<ERR, PG>( "table {} is not a columnar table",
-			   quote_identifier(RelationGetRelationName(rel)));
-	}
-
-	BioseqColumnStorageUpdateIfNeeded(rel, false);
-
-	table_close(rel, AccessExclusiveLock);
-	PG_RETURN_VOID();
+[[bioseq_sql::function({
+	.schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+	.create = bioseq::sql::create_mode::or_replace,
+})]]
+/** @brief Downgrades Bioseq storage metadata when the relation uses a newer layout. */
+void downgrade_bioseq_storage(
+		[[bioseq_sql::param({
+			.sql_type = bioseq::sql::pg::regclass,
+		})]]
+		Oid rel) {
+	Relation relation = bioseq::pg_utils::invoke_pg_as_cpp(
+		[rel] {
+			return table_open(rel, AccessExclusiveLock);
+		});
+	const sql_relation_lock relation_lock{
+		relation, AccessExclusiveLock, true};
+	require_bioseq_table(relation, rel);
+	bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation] {
+			BioseqColumnStorageUpdateIfNeeded(relation, false);
+		});
 }
 
-struct StripeHole
-{
-	uint64_t fileOffset;
-	uint64_t dataLength;
-};
-
-/*
- * HolesForRelation returns a list of holes in the Relation id in the current
- * MemoryContext.
- */
-static List *HolesForRelation(Relation rel)
-{
-	List *holes = NIL;
-
-	/* Get current columnar options */
-	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(rel->rd_id).value_or(BioseqColumnOptions{});
-
-	ListCell *lc = NULL;
-
-	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-	uint64_t lastMinimalOffset = BioseqColumnFirstLogicalOffset;
-
-	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
-	{
-		/* Arbitrary check to see if the offset will be large enough, 10000 bytes is what was chosen. */
-		if (stripeMetadata->fileOffset == lastMinimalOffset || stripeMetadata->fileOffset - lastMinimalOffset < 10000) {
-			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
-			continue;
-		} else {
-			StripeHole * hole = make0<StripeHole>();
-			hole->fileOffset = lastMinimalOffset;
-			hole->dataLength = stripeMetadata->fileOffset + stripeMetadata->dataLength - lastMinimalOffset;
-			lastMinimalOffset = stripeMetadata->fileOffset + stripeMetadata->dataLength;
-
-			holes = lappend(holes, hole);
-		}
-	}
-
-	return holes;
-}
-
-
-
-/*
- * vacuum_signal_handler - catch any signals sent during the UDF vacuum, and
- * attempt to clean up as much as we can and bail as cleanly as possible.
- */
-static void vacuum_signal_handler(int signal)
-{
-	bioseq_log_pg(DEBUG3, "Received signal {} during a vacuum request", signal);
-
-	/* Set up the ability to bail from the vacuum, with needed information. */
-	need_to_bail = true;
-	last_signal = signal;
-}
-
-/*
- * vacuum_bioseq_table
- */
-struct StripeVacuumCandidate
-{
-	uint64_t stripeId;
-	int32_t stripeMetadataIndex;
-	uint32_t candidateTotalSize;
-	uint32_t activeRows;
-	StripeMetadata *stripeMetadata;
-};
-
-POSTGRES_FN(vacuum_bioseq_table)
-{
-	Oid relid = PG_GETARG_OID(0);
-	Relation rel = RelationIdGetRelation(relid);
-	TupleDesc tupleDesc = RelationGetDescr(rel);
-	MemoryContext oldcontext = CurrentMemoryContext;
-	uint32_t stripeCount = PG_GETARG_UINT32(1);
-	uint32_t progress = 0;
-	bool completelyDone = false;
-	sact action;
-
-	/*
-	 * Disable the page cache for the duration of the vacuum. The guard
-	 * restores the previous state on every exit path — including the
-	 * early PG_RETURN_* returns scattered through the signal-handling
-	 * branches below — so individual restore calls are no longer needed.
-	 */
-	PageCacheDisableScope cache_guard{bioseq_enable_page_cache};
-
-	/*
-	 * Set up signal handlers for any incoming signals during the vacuum,
-	 * killing during a write could cause corruption.  Give us time to
-	 * clean as much as we can up before letting the signal pass on.
-	 */
-	need_to_bail = false;
-	last_signal = 0;
-
-	action.sa_handler = vacuum_signal_handler;
-	sigemptyset (&action.sa_mask);
-	action.sa_flags = 0;
-
-	sigaction(SIGINT, &action, &int_action);
-	sigaction(SIGTERM, &action, &trm_action);
-	sigaction(SIGABRT, &action, &abt_action);
-	sigaction(SIGKILL, &action, &kil_action);
-
-	MemoryContext vacuum_context = AllocSetContextCreate(CurrentMemoryContext,
-						"BioseqColumn Vacuum Context",
-						ALLOCSET_SMALL_SIZES);
-
-	oldcontext = MemoryContextSwitchTo(vacuum_context);
-
-	if (tupleDesc->natts == 0)
-	{
-		bioseq_log_pg(INFO, "\"{}\": stopping vacuum due to zero column table",
-			   RelationGetRelationName(rel));
-
-		MemoryContextSwitchTo(oldcontext);
-		PG_RETURN_VOID();
-	}
-
-	LockRelation(rel, ExclusiveLock);
-
-	/* Get current columnar options */
-	BioseqColumnOptions bioseqColumnOptions = FormDataBioseqOptions::read_options(rel->rd_id).value_or(BioseqColumnOptions{});
-
-	/* Get all stripes in order. */
-	List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-	List *vacuumCandidatesStripeList = NIL;
-
-	/* Empty table nothing to do */
-	if (stripeMetadataList == NIL)
-	{
-		bioseq_log_pg(INFO, "\"{}\": stopping vacuum due to empty table",
-			   RelationGetRelationName(rel));
-
-		/* Close the relation as we are done with it */
-		RelationClose(rel);
-
-		MemoryContextSwitchTo(oldcontext);
-		PG_RETURN_VOID();
-	}
-
-
-	int stripeMetadataIndex = 0;
-
-	bioseq_log_pg(DEBUG3, "Beginning combination of stripes");
-
-	/*
-	 * Get a list of all stripes that can be combined into larger stripes.
-	 */
-	for (auto stripeMetadata : PList<StripeMetadata>(stripeMetadataList))
-	{
-		/* We should not consider the last stripe. */
-		if (stripeMetadata == static_cast<StripeMetadata*>(llast(stripeMetadataList)))
-		{
-			break;
-		}
-
-		uint32_t stripeDeletedRows = DeletedRowsForStripe(rel->rd_locator,
-												 		stripeMetadata->chunkCount,
-														stripeMetadata->id);
-		float percentageOfDeleteRows =
-			(float)stripeDeletedRows / (float)(stripeMetadata->rowCount);
-
-		/*
-		 * If inspected stripe has less than 0.5 percent of maximum strip row size
-		 * or percentage of deleted rows is less than 20% we will skip this stripe
-		 * for vacuum.
-		*/
-		if ((stripeMetadata->rowCount > bioseqColumnOptions.stripeRowCount * 0.5) &&
-			percentageOfDeleteRows <= 0.2f)
-		{
-			continue;
-		}
-
-		StripeVacuumCandidate *vacuumCandidate = make0<StripeVacuumCandidate>();
-		vacuumCandidate->stripeMetadataIndex = stripeMetadataIndex;
-		vacuumCandidate->candidateTotalSize = stripeMetadata->rowCount - stripeDeletedRows;
-		vacuumCandidate->stripeMetadata = stripeMetadata;
-		vacuumCandidate->activeRows = stripeMetadata->rowCount - stripeDeletedRows;
-
-		vacuumCandidatesStripeList = lappend(vacuumCandidatesStripeList, vacuumCandidate);
-	}
-
-	/* We need all columns. */
-	int natts = rel->rd_att->natts;
-	PBitmapset attr_needed = PBitmapset::full_range(natts);
-
-	/* No quals for table rewrite */
-	List *scanQual = NIL;
-
-	/* Use SnapshotAny when re-writing table as heapAM does. */
-	Snapshot snapshot = SnapshotAny;
-
-	MemoryContext scanContext = CreateBioseqColumnScanMemoryContext();
-	bool randomAccess = true;
-
-	BioseqColumnWriteState *writeState = BioseqColumnBeginWrite(rel->rd_locator,
-											bioseqColumnOptions,
-											tupleDesc);
-
-	/*
-	 * Combine the vacuum candidates into their own stripes appended to the rel, this
-	 * should clear out any space from partial stripes to make space to move stripes into.
-	 */
-	for (auto vacuumCandidate : PList<StripeVacuumCandidate>(vacuumCandidatesStripeList))
-	{
-		MemoryContext combineContext = AllocSetContextCreate(CurrentMemoryContext,
-						"Stripe Combine Context", ALLOCSET_DEFAULT_SIZES);
-		MemoryContext previousContext = MemoryContextSwitchTo(combineContext);
-
-		BioseqColumnReadState *readState = init_bioseq_read_state(rel, tupleDesc,
-															attr_needed, scanQual,
-															scanContext, snapshot,
-															randomAccess,
-															NULL);
-
-
-		BioseqColumnSetStripeReadState(readState,
-								vacuumCandidate->stripeMetadata);
-
-		Datum *values = make_array<Datum>(tupleDesc->natts);
-		bool *nulls = make_array<bool>(tupleDesc->natts);
-
-		int32_t rowCount = 0;
-
-		while (rowCount < vacuumCandidate->activeRows && BioseqColumnReadNextRow(readState, values, nulls, NULL))
-		{
-			BioseqColumnWriteRow(writeState, values, nulls);
-			rowCount++;
-		}
-
-		DeleteMetadataRowsForStripeId(rel->rd_locator, vacuumCandidate->stripeMetadata->id);
-		BioseqColumnEndRead(readState);
-
-		pfree(values);
-		pfree(nulls);
-
-		progress++;
-
-		/* Check if a signal has been sent, if so close out and deal with it. */
-		if (need_to_bail)
-		{
-			BioseqColumnEndWrite(writeState);
-			UnlockRelation(rel, ExclusiveLock);
-			relation_close(rel, NoLock);
-
-			need_to_bail = 0;
-			/* Reset the signal handlers back to their original state. */
-			sigaction(SIGINT, &int_action, NULL);
-			sigaction(SIGTERM, &trm_action, NULL);
-			sigaction(SIGABRT, &abt_action, NULL);
-			sigaction(SIGKILL, &kil_action, NULL);
-
-			/* Call any missed signal handlers. */
-			if (last_signal == SIGABRT && abt_action.sa_handler)
-			{
-				abt_action.sa_handler(SIGABRT);
-			} else if (last_signal == SIGTERM && trm_action.sa_handler)
-			{
-				trm_action.sa_handler(SIGTERM);
-			} else if (last_signal == SIGINT && int_action.sa_handler)
-			{
-				int_action.sa_handler(SIGINT);
-			} else if (last_signal == SIGKILL && kil_action.sa_handler)
-			{
-				kil_action.sa_handler(SIGKILL);
-			}
-			PG_RETURN_NULL();
-		}
-
-		if (stripeCount && progress >= stripeCount)
-		{
-			completelyDone = true;
-			break;
-		}
-
-		MemoryContextSwitchTo(previousContext);
-		MemoryContextDelete(combineContext);
-	}
-	/*
-	 * We have finished the first route of writes, let's drop our lock until we are
-	 * ready for the next stage: compaction.
-	 */
-	BioseqColumnEndWrite(writeState);
-
-	bioseq_log_pg(DEBUG3, "Combined {} stripes", progress);
-
-	if (completelyDone)
-	{
-		relation_close(rel, NoLock);
-		TruncateBioseqColumn(rel, DEBUG3);
-		UnlockRelation(rel, ExclusiveLock);
-		PG_RETURN_UINT32(progress);
-	}
-
-	bioseq_log_pg(DEBUG3, "Beginning reorganization");
-	/*
-	 * Continually iterate through the holes, finding where we can place
-	 * old stripes.
-	 */
-	bool done = false;
-
-	uint32_t relocationProgress = 0;
-
-	while (!done)
-	{
-		MemoryContext rewriteContext = AllocSetContextCreate(CurrentMemoryContext,
-					"Stripe Rewrite Context", ALLOCSET_DEFAULT_SIZES);
-		MemoryContext previousContext = MemoryContextSwitchTo(rewriteContext);
-
-		/* Check if a signal has been sent, if so close out and deal with it. */
-		if (need_to_bail)
-		{
-			relation_close(rel, NoLock);
-			TruncateBioseqColumn(rel, DEBUG3);
-			UnlockRelation(rel, ExclusiveLock);
-			ForceSyncCommit();
-
-			need_to_bail = 0;
-			/* Reset the signal handlers back to their original state. */
-			sigaction(SIGINT, &int_action, NULL);
-			sigaction(SIGTERM, &trm_action, NULL);
-			sigaction(SIGABRT, &abt_action, NULL);
-			sigaction(SIGKILL, &kil_action, NULL);
-
-			/* Call any missed signal handlers. */
-			if (last_signal == SIGABRT && abt_action.sa_handler)
-			{
-				abt_action.sa_handler(SIGABRT);
-			} else if (last_signal == SIGTERM && trm_action.sa_handler)
-			{
-				trm_action.sa_handler(SIGTERM);
-			} else if (last_signal == SIGINT && int_action.sa_handler)
-			{
-				int_action.sa_handler(SIGINT);
-			} else if (last_signal == SIGKILL && kil_action.sa_handler)
-			{
-				kil_action.sa_handler(SIGKILL);
-			}
-			PG_RETURN_NULL();
-		}
-
-		/*
-		 * Get a List of empty spaces to fill with later stripes.
-		 */
-		List *holes = HolesForRelation(rel);
-
-		if (list_length(holes) == 0)
-		{
-			done = true;
-			continue;
-		}
-
-		/*
-		 * Iterate through the holes, moving later slices into the holes.
-		 */
-		for (auto hole : PList<StripeHole>(holes))
-		{
-			/* Reload the metadata. */
-			stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-			for (auto stripe : PList<StripeMetadata>(stripeMetadataList))
-			{
-				/* If we are marked done, we should simply drop out. */
-				if (done)
-				{
-					break;
-				}
-
-				/* Find one that will fit, and move it. */
-				if (hole->fileOffset && stripe->dataLength < hole->dataLength && stripe->fileOffset > hole->fileOffset)
-				{
-					/* Read a copy of the old row. */
-					char * data = make1<char>(stripe->dataLength);
-					BioseqColumnStorageRead(rel, stripe->fileOffset, data, stripe->dataLength);
-
-					/* Write the data to the new offset. */
-					BioseqColumnStorageWrite(rel, hole->fileOffset, data, stripe->dataLength);
-
-					/* Update the stripe metadata for the moved stripe. */
-					RewriteStripeMetadataRowWithNewValues(rel, stripe->id, stripe->dataLength, hole->fileOffset, stripe->rowCount, stripe->chunkCount);
-
-					relocationProgress++;
-
-					pfree(data);
-
-					if (relocationProgress >= 1)
-					{
-						done = true;
-					}
-
-					break;
-				}
-			}
-
-
-			if (relocationProgress >= 1)
-			{
-				done = true;
-			}
-
-			holes = HolesForRelation(rel);
-		}
-
-		MemoryContextSwitchTo(previousContext);
-		MemoryContextDelete(rewriteContext);
-	}
-
-	bioseq_log_pg(DEBUG3, "Ending reorganization");
-
-	relation_close(rel, NoLock);
-
-	TruncateBioseqColumn(rel, DEBUG3);
-	UnlockRelation(rel, ExclusiveLock);
-
-	MemoryContextSwitchTo(oldcontext);
-
-	/* Reset the signal handlers back to their original state. */
-	sigaction(SIGINT, &int_action, NULL);
-	sigaction(SIGTERM, &trm_action, NULL);
-	sigaction(SIGABRT, &abt_action, NULL);
-	sigaction(SIGKILL, &kil_action, NULL);
-	PG_RETURN_UINT32(progress + relocationProgress);
-}
-
-/*
- * Data storage for columnar stats.
- */
-struct BioseqColumnStats
-{
-	uint64_t stripeId;
-	uint64_t fileOffset;
-	uint32_t rowCount;
-	uint32_t deletedRows;
-	uint32_t chunkCount;
-	uint32_t dataLength;
-};
-
-/* We return 6 columns. */
-constexpr int STATS_INFO_NATTS = 6;
-
-POSTGRES_FN(bioseq_stats)
-{
-	FuncCallContext *funcctx;
-	int call_cntr;
-	int max_calls;
-	TupleDesc tupdesc;
-	AttInMetadata *attinmeta;
-
-
-	/* If this is the first call in, set up the data. */
-	if (SRF_IS_FIRSTCALL())
-	{
-		MemoryContext oldcontext;
-
-		Oid relid = PG_GETARG_OID(0);
-		Relation rel = RelationIdGetRelation(relid);
-
-		/* Function context for persistance. */
-		funcctx = SRF_FIRSTCALL_INIT();
-
-		/* Use the SRF memory context */
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		/* Retrieve the stripe metadata. */
-		List *stripeMetadataList = StripesForRelfilenode(rel->rd_locator, ForwardScanDirection);
-		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-				bioseq_report<ERR, PG>().code(ERRCODE_FEATURE_NOT_SUPPORTED)
-					.msg("function returning record called in context "
-						 "that cannot accept type record");
-
-		attinmeta = TupleDescGetAttInMetadata(tupdesc);
-		funcctx->attinmeta = attinmeta;
-
-		/* Set up the stats. */
-		BioseqColumnStats *stats = make_array<BioseqColumnStats>(list_length(stripeMetadataList));
-		funcctx->max_calls = list_length(stripeMetadataList);
-
-		/* Iterate through the stripes to get a copy of the important data. */
-		for (int i = 0; i < funcctx->max_calls; i++)
-		{
-			StripeMetadata *data = static_cast<StripeMetadata*>(list_nth(stripeMetadataList, i));
-
-			stats[i].stripeId = data->id;
-			stats[i].fileOffset = data->fileOffset;
-			stats[i].rowCount = data->rowCount;
-			stats[i].chunkCount = data->chunkCount;
-			stats[i].dataLength = data->dataLength;
-			stats[i].deletedRows = DeletedRowsForStripe(rel->rd_locator,
-												 		data->chunkCount,
-														data->id);
-		}
-
-		funcctx->user_fctx = stats;
-
-		table_close(rel, NoLock);
-
-		MemoryContextSwitchTo(oldcontext);
-	}
-
-	funcctx = SRF_PERCALL_SETUP();
-
-	call_cntr = funcctx->call_cntr;
-	max_calls = funcctx->max_calls;
-	BioseqColumnStats *stats = static_cast<BioseqColumnStats*>(funcctx->user_fctx);
-
-	if (call_cntr < max_calls)
-	{
-		Datum result;
-
-		Datum values[STATS_INFO_NATTS] = { 0 };
-		bool nulls[STATS_INFO_NATTS] = { 0 };
-
-		get_call_result_type(fcinfo, NULL, &tupdesc);
-
-		values[0] = Int64GetDatum(stats[call_cntr].stripeId);
-		values[1] = Int64GetDatum(stats[call_cntr].fileOffset);
-		values[2] = Int32GetDatum(stats[call_cntr].rowCount);
-		values[3] = Int32GetDatum(stats[call_cntr].deletedRows);
-		values[4] = Int32GetDatum(stats[call_cntr].chunkCount);
-		values[5] = Int32GetDatum(stats[call_cntr].dataLength);
-
-		HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
-		result = HeapTupleGetDatum(tuple);
-
-		SRF_RETURN_NEXT(funcctx, result);
-	}
-	else
-	{
-		SRF_RETURN_DONE(funcctx);
-	}
-}
+}  // namespace bioseq::table::sql_routines

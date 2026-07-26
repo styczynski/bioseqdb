@@ -125,7 +125,7 @@ TEST_CASE("DOC0371 — seq_locator v3 is a 40-byte standard-layout POD that roun
     loc.source_epoch     = 0x1020304050607080ull;
 
     // memcpy out and back — the encode/decode helpers in
-    // sequence_storage_manager do exactly this into the pgseq_t stub data[].
+    // sequence_storage_manager do exactly this into the bioseq::pg_types::seq stub data[].
     std::array<unsigned char, sizeof(seq_locator)> bytes{};
     std::memcpy(bytes.data(), &loc, sizeof(loc));
 

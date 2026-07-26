@@ -266,12 +266,6 @@ struct site_configuration {
     std::vector<std::string> required_documentation_entities;
 };
 
-/// @brief Validated SQL API allowlist (§9 sql_api.yaml closed schema, §12.2).
-struct sql_api_configuration {
-    std::vector<std::string> include_schemas;   // unique, nonempty, PG identifiers
-    std::vector<std::string> public_entities;   // exact canonical IDs, unique, nonempty
-};
-
 namespace {
 
 void validate_base_path(std::string_view value, std::string_view path) {
@@ -453,77 +447,6 @@ void reject_placeholder_origin(std::string_view value, std::string_view field) {
         }
         config.required_documentation_entities.push_back(std::move(entity));
     }
-    return config;
-}
-
-/// @brief Parses and validates main/website/sql_api.yaml (§9, §12.2).
-///
-/// The file has exactly three keys: `schema`, `include_schemas` (a unique nonempty
-/// sequence of unquoted PostgreSQL identifiers), and `public_entities` (a unique
-/// nonempty sequence of exact canonical type/function IDs, not patterns). Unknown or
-/// missing keys, non-sequences, empty sequences, and duplicates are fatal.
-/// @param yaml Raw sql_api.yaml text.
-/// @param path Source path for diagnostics.
-/// @return The validated, closed-schema allowlist.
-[[nodiscard]] sql_api_configuration parse_sql_api(
-    std::string_view yaml, std::string_view path) {
-    const std::string yaml_text(yaml);
-    validate_yaml_strict(yaml_text, path);
-    YAML::Node root = YAML::Load(yaml_text);
-    if (!root.IsMap()) {
-        throw std::runtime_error("sql_api.yaml must be a YAML mapping: "
-                                 + std::string(path));
-    }
-    static constexpr std::string_view known_keys[] = {
-        "schema", "include_schemas", "public_entities"};
-    for (const auto& entry : root) {
-        const auto key = entry.first.as<std::string>();
-        bool known = false;
-        for (const std::string_view candidate : known_keys) {
-            if (key == candidate) {
-                known = true;
-                break;
-            }
-        }
-        if (!known) {
-            throw std::runtime_error("unknown sql_api.yaml key '" + key + "' in "
-                                     + std::string(path));
-        }
-    }
-    (void)require_scalar(root["schema"], "schema", path);
-    const auto parse_unique_nonempty =
-        [&](std::string_view field, bool as_identifier) {
-            const YAML::Node node = root[std::string(field)];
-            if (!node || !node.IsSequence() || node.size() == 0) {
-                throw std::runtime_error("sql_api.yaml " + std::string(field)
-                    + " is required and must be a nonempty sequence: "
-                    + std::string(path));
-            }
-            std::vector<std::string> values;
-            std::set<std::string> seen;
-            for (const auto& item : node) {
-                std::string value = item.as<std::string>();
-                if (value.empty()) {
-                    throw std::runtime_error("sql_api.yaml " + std::string(field)
-                        + " has an empty entry: " + std::string(path));
-                }
-                if (as_identifier && !is_lower_snake(value)) {
-                    throw std::runtime_error("sql_api.yaml " + std::string(field)
-                        + " entry '" + value + "' must be an unquoted lower-case "
-                        "PostgreSQL identifier: " + std::string(path));
-                }
-                if (!seen.insert(value).second) {
-                    throw std::runtime_error("sql_api.yaml " + std::string(field)
-                        + " has a duplicate entry '" + value + "': "
-                        + std::string(path));
-                }
-                values.push_back(std::move(value));
-            }
-            return values;
-        };
-    sql_api_configuration config;
-    config.include_schemas = parse_unique_nonempty("include_schemas", true);
-    config.public_entities = parse_unique_nonempty("public_entities", false);
     return config;
 }
 

@@ -219,7 +219,7 @@ struct SinkGuard {
 
 struct FallbackFileGuard {
     FILE* file = nullptr;
-    bool saved_enable_logging = enable_logging;
+    bool saved_debug_logging = bioseq_debug_logging_enabled();
     fmtlog::LogLevel saved_log_level = fmtlog::getLogLevel();
 
     FallbackFileGuard()
@@ -230,7 +230,7 @@ struct FallbackFileGuard {
         if (file == nullptr) {
             return;
         }
-        enable_logging = true;
+        bioseq_set_fallback_debug_logging_enabled(true);
         fmtlog::setLogLevel(fmtlog::DBG);
         fmtlog::flushOn(fmtlog::DBG);
         fmtlog::setLogFile(file, false);
@@ -242,7 +242,7 @@ struct FallbackFileGuard {
         fmtlog::setLogFile(stderr, false);
         fmtlog::flushOn(fmtlog::OFF);
         fmtlog::setLogLevel(saved_log_level);
-        enable_logging = saved_enable_logging;
+        bioseq_set_fallback_debug_logging_enabled(saved_debug_logging);
         if (file != nullptr) {
             std::fclose(file);
         }

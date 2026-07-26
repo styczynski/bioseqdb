@@ -41,14 +41,14 @@ extern "C" {
 export module bioseq.storage.indexing_pg.admin;
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
-import bioseq.config;                             // DOC0322 §9.3 — bioseq_update_index_on_insert GUC
+import bioseq.config;                             // DOC0322 §9.3 — bioseq::settings::update_index_on_insert GUC
 import bioseq.storage.manager;                     // seq_caches, seq_locator, is_locator_stub, decode_locator_from_stub
 import bioseq.storage.bucket_math;
 import bioseq.storage.size;
 import bioseq.storage.lazy;                // make_lazy_in_memory
 import bioseq.storage.scanner;             // sequence access requirements
 import bioseq.storage.scanner_pg;          // with_lazy_postgres
-import bioseq.types.pg_compact_sequence;   // pgseq_t, dispatch_instance
+import bioseq.types.pg_compact_sequence;   // bioseq::pg_types::seq, dispatch_instance
 import bioseq.sequences;                   // compact_sequence_range
 import bioseq.common.sequan_compat;                      // seqan3::char_is_valid_for
 import bioseq.indexing.type;
@@ -148,77 +148,127 @@ using pg_supported_indexes = bioseq::indexing::supported_indexes<
 
 // ---- policy catalog (§12.3) ----------------------------------------------
 struct PolicyRow { std::string name; bool enabled; bool update_on_insert; };
-[[nodiscard]] inline std::vector<PolicyRow> load_table_policy(Oid user_relid, Oid relfn, std::int16_t attno) {
+
+[[noreturn]] inline void table_policy_spi_error_as_cpp(
+        const char* stage,
+        int status,
+        std::uint64_t row = (std::numeric_limits<std::uint64_t>::max)()) {
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [stage, status, row] {
+            if (row == (std::numeric_limits<std::uint64_t>::max)()) {
+                ereport(ERROR,
+                    (errcode(ERRCODE_INTERNAL_ERROR),
+                     errmsg("could not load the index policy"),
+                     errdetail("SPI stage=%s status=%d", stage, status)));
+            } else {
+                ereport(ERROR,
+                    (errcode(ERRCODE_DATA_EXCEPTION),
+                     errmsg("index policy row is invalid"),
+                     errdetail("SPI stage=%s row=%llu",
+                               stage,
+                               static_cast<unsigned long long>(row))));
+            }
+            pg_unreachable();
+        });
+    pg_unreachable();
+}
+
+[[nodiscard]] inline std::vector<PolicyRow> load_table_policy(
+        Oid user_relid,
+        Oid relfn,
+        std::int16_t attno) {
+    const std::string sql = fmt::format(
+        "SELECT index_name, enabled, update_on_insert "
+        "FROM bioseq_internal.index_policy "
+        "WHERE user_relid = {}::oid AND main_relfilenode = {}::oid "
+        "AND column_attno = {}",
+        static_cast<unsigned>(user_relid),
+        static_cast<unsigned>(relfn),
+        static_cast<int>(attno));
+
     std::vector<PolicyRow> out;
-    if (SPI_connect() != SPI_OK_CONNECT) return out;
-    std::string sql = fmt::format(
-        "SELECT index_name, enabled, update_on_insert FROM bioseq_internal.index_policy "
-        "WHERE user_relid = {}::oid AND main_relfilenode = {}::oid AND column_attno = {}",
-        (unsigned)user_relid, (unsigned)relfn, (int)attno);
-    if (SPI_execute(sql.c_str(), true, 0) == SPI_OK_SELECT) {
-        for (std::uint64_t i = 0; i < SPI_processed; ++i) {
-            bool n1,n2,n3;
-            char* nm = SPI_getvalue(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 1);
-            Datum en = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &n2);
-            Datum ui = SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3, &n3);
-            (void)n1;
-            out.push_back(PolicyRow{ nm ? std::string(nm) : std::string(), DatumGetBool(en), DatumGetBool(ui) });
-        }
+    bioseq::pg_utils::scoped_spi_session session;
+    const int connect_status = session.connect();
+    if (connect_status != SPI_OK_CONNECT) {
+        table_policy_spi_error_as_cpp(
+            "SPI_connect", connect_status);
     }
-    SPI_finish();
+
+    const int execute_status = bioseq::pg_utils::invoke_pg_as_cpp(
+        [&sql] {
+            return SPI_execute(sql.c_str(), /*read_only=*/true, /*tcount=*/0);
+        });
+    if (execute_status != SPI_OK_SELECT || SPI_tuptable == nullptr) {
+        table_policy_spi_error_as_cpp(
+            "SPI_execute", execute_status);
+    }
+
+    const std::uint64_t row_count = SPI_processed;
+    out.reserve(static_cast<std::size_t>(row_count));
+    for (std::uint64_t row = 0; row < row_count; ++row) {
+        bool enabled_is_null = false;
+        bool update_is_null = false;
+        const Datum enabled = bioseq::pg_utils::invoke_pg_as_cpp(
+            [row, &enabled_is_null] {
+                return SPI_getbinval(
+                    SPI_tuptable->vals[row],
+                    SPI_tuptable->tupdesc,
+                    2,
+                    &enabled_is_null);
+            });
+        const Datum update_on_insert = bioseq::pg_utils::invoke_pg_as_cpp(
+            [row, &update_is_null] {
+                return SPI_getbinval(
+                    SPI_tuptable->vals[row],
+                    SPI_tuptable->tupdesc,
+                    3,
+                    &update_is_null);
+            });
+        if (enabled_is_null || update_is_null) {
+            table_policy_spi_error_as_cpp(
+                "SPI_getbinval", execute_status, row);
+        }
+
+        char* name_data = bioseq::pg_utils::invoke_pg_as_cpp(
+            [row] {
+                return SPI_getvalue(
+                    SPI_tuptable->vals[row],
+                    SPI_tuptable->tupdesc,
+                    1);
+            });
+        if (name_data == nullptr) {
+            table_policy_spi_error_as_cpp(
+                "SPI_getvalue", execute_status, row);
+        }
+
+        std::string name;
+        try {
+            name.assign(name_data);
+        } catch (...) {
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [name_data] { pfree(name_data); });
+            throw;
+        }
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [name_data] { pfree(name_data); });
+        out.push_back(PolicyRow{
+            std::move(name),
+            DatumGetBool(enabled),
+            DatumGetBool(update_on_insert)});
+    }
+
+    const int finish_status = session.finish();
+    if (finish_status != SPI_OK_FINISH) {
+        table_policy_spi_error_as_cpp(
+            "SPI_finish", finish_status);
+    }
     return out;
 }
 
 // ---- age log + policy upsert ---------------------------------------------
 inline void note_successful_write(Oid user_relid, Oid relfn, std::int16_t attno, std::string_view name) {
-    const std::string owned_name{name};
-    char* quoted_pg = bioseq::pg_utils::invoke_pg_as_cpp(
-        [&owned_name] { return quote_literal_cstr(owned_name.c_str()); });
-    std::string quoted_name;
-    try {
-        quoted_name.assign(quoted_pg);
-    } catch (...) {
-        bioseq::pg_utils::invoke_pg_as_cpp(
-            [quoted_pg] { pfree(quoted_pg); });
-        throw;
-    }
-    bioseq::pg_utils::invoke_pg_as_cpp(
-        [quoted_pg] { pfree(quoted_pg); });
-    const std::string sql = fmt::format(
-        "INSERT INTO bioseq_internal.metadata_age_log (user_relid, main_relfilenode, column_attno, index_name, last_updated) "
-        "VALUES ({}::oid, {}::oid, {}, {}, now()) "
-        "ON CONFLICT (user_relid, main_relfilenode, column_attno, index_name) DO UPDATE SET last_updated = now()",
-        (unsigned)user_relid, (unsigned)relfn, (int)attno, quoted_name);
-    struct SpiWriteState {
-        int connect_status = 0;
-        int execute_status = 0;
-        int finish_status = 0;
-        std::uint64_t affected_rows = 0;
-    } state{};
-    const char* sql_data = sql.c_str();
-    bioseq::pg_utils::invoke_pg_as_cpp([&state, sql_data] noexcept {
-        state.connect_status = SPI_connect();
-        if (state.connect_status != SPI_OK_CONNECT) return;
-        state.execute_status = SPI_execute(sql_data, false, 0);
-        state.affected_rows = SPI_processed;
-        state.finish_status = SPI_finish();
-    });
-    if (state.connect_status != SPI_OK_CONNECT
-        || state.execute_status != SPI_OK_INSERT
-        || state.affected_rows != 1
-        || state.finish_status != SPI_OK_FINISH) {
-        bioseq::pg_utils::invoke_pg_as_cpp([&state] {
-            ereport(ERROR,
-                (errcode(ERRCODE_INTERNAL_ERROR),
-                 errmsg("bioseq index metadata-age write failed"),
-                 errdetail("SPI_connect_status=%d SPI_execute_status=%d "
-                           "affected_rows=%llu SPI_finish_status=%d",
-                           state.connect_status, state.execute_status,
-                           static_cast<unsigned long long>(state.affected_rows),
-                           state.finish_status)));
-        });
-        pg_unreachable();
-    }
+    static_cast<void>(upsert_metadata_age_log_pg(
+        user_relid, relfn, attno, name));
 }
 
 inline void note_policy_on_insert_writes(
@@ -246,17 +296,17 @@ resolve_index_sketch_backend_from_gucs() noexcept
 {
     using bioseq::simd::HWY_NAMESPACE::MinimizerAlgorithmType;
     using bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend;
-    if (bioseq_aligner_vulkan_enabled
-        && bioseq_aligner_vulkan_gpu_index_build_enabled
-        && bioseq_aligner_minimizer_algorithm
+    if (bioseq::aligner::settings::vulkan_enabled
+        && bioseq::aligner::settings::vulkan_gpu_index_build_enabled
+        && static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value())
             == static_cast<int>(MinimizerAlgorithmType::VULKAN_MINIMAP_INT)) {
         return MinimizerSketchBackend::VulkanSegment;
     }
-    if (bioseq_aligner_minimizer_algorithm
+    if (static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value())
             == static_cast<int>(MinimizerAlgorithmType::TWO_STACK_NTHASH)) {
         return MinimizerSketchBackend::ExactSimd;
     }
-    if (bioseq_aligner_minimizer_algorithm
+    if (static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value())
             == static_cast<int>(MinimizerAlgorithmType::PAPER_NTHASH_SIMD)) {
         return MinimizerSketchBackend::PaperNtHashSimd;
     }
@@ -323,16 +373,16 @@ inline void ensure_vulkan_index_build_runtime_ready(
 }
 
 // ---- INSERT-time build (§11.2) -------------------------------------------
-inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint64_t rowno, const pgseq_t* hdr,
+inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint64_t rowno, const bioseq::pg_types::seq* hdr,
                                   const std::optional<seq_locator>& loc_opt, MemoryContext mctx) {
-    if (!bioseq_update_index_on_insert) return;
+    if (!bioseq::settings::update_index_on_insert) return;
     if (!loc_opt.has_value()) return;
     const seq_locator& loc = *loc_opt;
     const RelationIdentity rid = index_relation_identity(user_relid);
     auto policy_rows = load_table_policy(user_relid, rid.relfilenode, attno);
     pg_supported_indexes idx; idx.apply_table_defaults(); idx.merge_overrides(policy_rows);
     reset_last_mps_build_stats();
-    if (bioseq_aligner_grouped32_persisted_generation_enabled) {
+    if (bioseq::aligner::settings::grouped32_persisted_generation_enabled) {
         constexpr auto types = pg_supported_indexes::list_types();
         for (std::size_t i = 0; i < types.size(); ++i) {
             const bool minimizer =
@@ -373,7 +423,11 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
         }
     }
     ensure_vulkan_index_build_runtime_ready(backend);  // DOC0350
-    pgseq_t::dispatch_instance(hdr->alphabet_code, hdr->storage_unit_byte_width, [&]<class S>() {
+    bioseq::pg_types::seq::dispatch_instance(
+        hdr->alphabet_code,
+        hdr->storage_unit_byte_width,
+        [hdr, rid, attno, user_relid, loc, rowno, mctx, &idx,
+         backend]<class S>() {
         compact_sequence_range<S> rng{*hdr};
         auto lazy = bioseq::storage::make_lazy_in_memory(rng);
         const auto lazy_view =
@@ -421,12 +475,12 @@ inline void index_build_on_insert(Oid user_relid, std::int16_t attno, std::uint6
 inline void index_build_on_insert_columns(Oid user_relid, const std::vector<std::int16_t>& seq_attnos,
         const bool* tts_isnull, Datum* detoasted_values,
         const std::vector<std::optional<seq_locator>>& per_col_locator, std::uint64_t rowno, MemoryContext mctx) {
-    if (!bioseq_update_index_on_insert) return;
+    if (!bioseq::settings::update_index_on_insert) return;
     for (std::size_t c = 0; c < seq_attnos.size() && c < per_col_locator.size(); ++c) {
         if (!per_col_locator[c].has_value()) continue;
         const std::int16_t attno = seq_attnos[c];
         if (tts_isnull[attno - 1]) continue;
-        const pgseq_t* hdr = reinterpret_cast<const pgseq_t*>(DatumGetPointer(detoasted_values[attno - 1]));
+        const bioseq::pg_types::seq* hdr = reinterpret_cast<const bioseq::pg_types::seq*>(DatumGetPointer(detoasted_values[attno - 1]));
         index_build_on_insert(user_relid, attno, rowno, hdr, per_col_locator[c], mctx);
     }
 }
@@ -440,7 +494,7 @@ inline auto build_letter_rank_table() {
     for (auto& row : table) row.fill((std::int8_t)-1);
     for (std::uint8_t ac = 0; ac < kNumAlphabets; ++ac) {
         // Rank conversion depends only on the alphabet.  Dispatching a
-        // fabricated storage width here violates pgseq_t's active width
+        // fabricated storage width here violates bioseq::pg_types::seq's active width
         // policy in optimized PostgreSQL builds (which intentionally enable
         // only 8-byte storage units).
         pgseq_supported_alphabets::dispatch_alphabet_by_code(
@@ -815,11 +869,11 @@ inline void verify_grouped32_rebuild_sources_are_locators(
                 if (nulls[attno - 1]) {
                     continue;
                 }
-                pgseq_t* header = bioseq::pg_utils::invoke_pg_as_cpp(
+                bioseq::pg_types::seq* header = bioseq::pg_utils::invoke_pg_as_cpp(
                     [&state, &values, attno] {
                         const MemoryContext previous =
                             MemoryContextSwitchTo(state.row_context);
-                        pgseq_t* result = reinterpret_cast<pgseq_t*>(
+                        bioseq::pg_types::seq* result = reinterpret_cast<bioseq::pg_types::seq*>(
                             PG_DETOAST_DATUM(values[attno - 1]));
                         MemoryContextSwitchTo(previous);
                         return result;
@@ -911,7 +965,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     // coordinator boundary receives this value explicitly and never rereads
     // session configuration.
     const int requested_provider_wire_value =
-        bioseq_index_payload_storage_backend;
+        static_cast<int>(bioseq::settings::index_payload_storage_backend.value());
     const auto decoded_requested_provider =
         decode_index_payload_storage_backend(
             requested_provider_wire_value);
@@ -935,7 +989,7 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         name == bioseq::indexing::MINIMIZERS_PER_FRAGMENT_INDEX_NAME
         || name == bioseq::indexing::MINIMIZERS_PER_SEQUENCE_INDEX_NAME;
     const bool use_grouped32_generation = is_minimizer_index
-        && bioseq_aligner_grouped32_persisted_generation_enabled;
+        && bioseq::aligner::settings::grouped32_persisted_generation_enabled;
     if (is_minimizer_index
         && requested_provider == IndexPayloadStorageBackend::mapped_file) {
         const bool is_mps = name
@@ -958,8 +1012,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
     }
     reset_last_mps_build_stats();
     if (use_grouped32_generation
-        && (bioseq_index_async_persist
-            || bioseq_recompute_async_persist)) {
+        && (bioseq::settings::index_async_persist
+            || bioseq::settings::recompute_async_persist)) {
         bioseq::pg_utils::invoke_pg_as_cpp([] {
             ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -967,8 +1021,8 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                         "persistence to be disabled"),
                  errdetail("bioseq.index_async_persist=%s, "
                            "bioseq.recompute_async_persist=%s",
-                           bioseq_index_async_persist ? "on" : "off",
-                           bioseq_recompute_async_persist ? "on" : "off"),
+                           bioseq::settings::index_async_persist ? "on" : "off",
+                           bioseq::settings::recompute_async_persist ? "on" : "off"),
                  errhint("Set bioseq.index_async_persist=off and "
                          "bioseq.recompute_async_persist=off before the "
                          "controlled format-4 rebuild.")));
@@ -981,9 +1035,9 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         "vulkan_gpu_index_build={} minimizer_algorithm={} grouped32={}",
         name,
         bioseq::simd::HWY_NAMESPACE::minimizer_sketch_backend_name(backend),
-        bioseq_aligner_vulkan_enabled,
-        bioseq_aligner_vulkan_gpu_index_build_enabled,
-        bioseq_aligner_minimizer_algorithm,
+        bioseq::aligner::settings::vulkan_enabled,
+        bioseq::aligner::settings::vulkan_gpu_index_build_enabled,
+        static_cast<int>(bioseq::aligner::settings::minimizer_algorithm.value()),
         use_grouped32_generation);
 
     // locate EVERY bioseq.seq column (§11.4 builds the index for each SEQ column;
@@ -1226,11 +1280,11 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
         bool any_col = false;
         for (std::int16_t seq_attno : seq_attnos) {
             if (nulls[seq_attno - 1]) continue;
-            pgseq_t* hdr = bioseq::pg_utils::invoke_pg_as_cpp(
+            bioseq::pg_types::seq* hdr = bioseq::pg_utils::invoke_pg_as_cpp(
                 [inner, valp, seq_attno] {
                     const MemoryContext previous =
                         MemoryContextSwitchTo(inner);
-                    pgseq_t* result = reinterpret_cast<pgseq_t*>(
+                    bioseq::pg_types::seq* result = reinterpret_cast<bioseq::pg_types::seq*>(
                         PG_DETOAST_DATUM(valp[seq_attno - 1]));
                     MemoryContextSwitchTo(previous);
                     return result;
@@ -1249,7 +1303,13 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                     bioseq::storage::promote_pg_sequence_locator(
                         source_provider, seq_attno, PointerGetDatum(hdr),
                         inner);
-                pgseq_t::dispatch_instance(alpha, bw, [&]<class S>(){
+                bioseq::pg_types::seq::dispatch_instance(
+                    alpha,
+                    bw,
+                    [rid, seq_attno, loc, rs, caches, inner,
+                     promoted_datum, layout, rel_oid, name, rowno, work,
+                     &idx, use_grouped32_generation, backend,
+                     requested_provider, bw]<class S>() {
                     using SourceBinding =
                         bioseq::storage::postgres_lazy_sequence_binding<S>;
                     const SourceBinding source_binding{
@@ -1296,7 +1356,11 @@ inline std::int64_t update_index_impl(Oid rel_oid, std::string_view name) {
                 if (use_grouped32_generation) {
                     reject_grouped32_nonlocator_source_as_cpp(name);
                 }
-                pgseq_t::dispatch_instance(alpha, hdr->storage_unit_byte_width, [&]<class S>(){
+                bioseq::pg_types::seq::dispatch_instance(
+                    alpha,
+                    hdr->storage_unit_byte_width,
+                    [hdr, layout, rel_oid, rid, seq_attno, name, rowno,
+                     caches, work, &idx, bw, backend]<class S>() {
                     compact_sequence_range<S> rng{*hdr};
                     auto lazy = bioseq::storage::make_lazy_in_memory(rng);
                     const auto lazy_view =
@@ -1437,7 +1501,7 @@ public:
             bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend backend)
             noexcept {
 #ifdef BIOSEQ_TEST_INDEXES
-        if (bioseq_test_force_paper_index_failure == 1
+        if (static_cast<int>(bioseq::settings::test_force_paper_index_failure.value()) == 1
             && backend == bioseq::simd::HWY_NAMESPACE::
                 MinimizerSketchBackend::PaperNtHashSimd) {
             bioseq::indexing::arm_forced_packed_paper_index_status_for_test(
@@ -4191,9 +4255,9 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
                 "READY minimizer fixture source row is not visible",
                 fmt::format("sequence_rowno={}", sequence_rowno));
         }
-        pgseq_t* source_header = bioseq::pg_utils::invoke_pg_as_cpp(
+        bioseq::pg_types::seq* source_header = bioseq::pg_utils::invoke_pg_as_cpp(
             [values, seq_attno] {
-                return reinterpret_cast<pgseq_t*>(
+                return reinterpret_cast<bioseq::pg_types::seq*>(
                     PG_DETOAST_DATUM(values[seq_attno - 1]));
             });
         if (!is_locator_stub(source_header)) {
@@ -4248,7 +4312,7 @@ build_ready_minimizer_generation_coordinator_fixture_impl(
         state->fragment_caches->main_relfilenode =
             relation_identity.relfilenode;
 
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
                 result.alphabet_code, result.storage_unit_byte_width,
                 [state, rel_oid, relation_identity, seq_attno, index_name,
                  sequence_rowno, backend, backend_request,
@@ -5979,7 +6043,7 @@ read_rev3_pg_full_generation_fixture_impl(
 /// fail while walking the same locator under its registered snapshot.  Ordinal
 /// zero is deliberately forbidden so this seam proves later-fragment
 /// participation rather than merely checking the first physical row.
-inline void rev3_test_remove_source_fragment_impl(
+inline void remove_sequence_fragment_impl(
         Oid rel_oid,
         std::string_view index_name,
         std::uint64_t sequence_rowno,
@@ -6205,8 +6269,8 @@ inline void exercise_rev3_pg_session_failure_impl(
                 bioseq::simd::HWY_NAMESPACE::MinimizerSketchBackend::Scalar,
                 source.alphabet_code,
                 source.storage_unit_byte_width,
-                static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
-                static_cast<std::uint16_t>(bioseq_aligner_window_size));
+                static_cast<std::uint16_t>(bioseq::aligner::settings::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::window_size));
         if (!expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_DATA_CORRUPTED,
@@ -6691,18 +6755,9 @@ exercise_rev3_generation_storage_state_impl(
             result.assembled_cache_hit = false;
         } else if (clear_generation_rollback) {
             result.operation_oid = result.before_oid;
-            MemoryContext subxact_saved_context = CurrentMemoryContext;
-            ResourceOwner subxact_saved_owner = CurrentResourceOwner;
-            bioseq::pg_utils::invoke_pg_as_cpp([] {
-                BeginInternalSubTransaction(
-                    "bioseq generation clear rollback fixture");
-            });
-            bioseq::pg_utils::invoke_pg_as_cpp(
-                [subxact_saved_context] {
-                    MemoryContextSwitchTo(subxact_saved_context);
-                });
-            std::exception_ptr subxact_error;
-            try {
+            {
+                auto subtransaction =
+                    bioseq::pg_utils::sql_subtransaction::begin();
                 const MinimizerGenerationClearResult cleared =
                     storage.clear_minimizer_generation_storage();
                 const bool chunk_hit =
@@ -6717,22 +6772,7 @@ exercise_rev3_generation_storage_state_impl(
                     rev3_storage_error(
                         "generation clear rollback fixture did not clear inside its savepoint");
                 }
-            } catch (...) {
-                subxact_error = std::current_exception();
-            }
-            try {
-                bioseq::pg_utils::invoke_pg_as_cpp(
-                    [subxact_saved_context, subxact_saved_owner] {
-                        MemoryContextSwitchTo(subxact_saved_context);
-                        RollbackAndReleaseCurrentSubTransaction();
-                        MemoryContextSwitchTo(subxact_saved_context);
-                        CurrentResourceOwner = subxact_saved_owner;
-                    });
-            } catch (...) {
-                subxact_error = std::current_exception();
-            }
-            if (subxact_error != nullptr) {
-                std::rethrow_exception(subxact_error);
+                subtransaction.rollback();
             }
 
             bioseq::pg_utils::invoke_pg_as_cpp(
@@ -6769,18 +6809,9 @@ exercise_rev3_generation_storage_state_impl(
             result.chunk_cache_hit = false;
             result.assembled_cache_hit = false;
         } else {
-            MemoryContext subxact_saved_context = CurrentMemoryContext;
-            ResourceOwner subxact_saved_owner = CurrentResourceOwner;
-            bioseq::pg_utils::invoke_pg_as_cpp([] {
-                BeginInternalSubTransaction(
-                    "bioseq generation storage rollback fixture");
-            });
-            bioseq::pg_utils::invoke_pg_as_cpp(
-                [subxact_saved_context] {
-                    MemoryContextSwitchTo(subxact_saved_context);
-                });
-            std::exception_ptr subxact_error;
-            try {
+            {
+                auto subtransaction =
+                    bioseq::pg_utils::sql_subtransaction::begin();
                 // Savepoint rollback starts from the legacy five-column
                 // relation and must restore that exact object.  The strict
                 // generation-only clear cannot remove this legacy input.
@@ -6799,22 +6830,7 @@ exercise_rev3_generation_storage_state_impl(
                     rev3_storage_error(
                         "generation-storage fixture could not cache the speculative OID");
                 }
-            } catch (...) {
-                subxact_error = std::current_exception();
-            }
-            try {
-                bioseq::pg_utils::invoke_pg_as_cpp(
-                    [subxact_saved_context, subxact_saved_owner] {
-                        MemoryContextSwitchTo(subxact_saved_context);
-                        RollbackAndReleaseCurrentSubTransaction();
-                        MemoryContextSwitchTo(subxact_saved_context);
-                        CurrentResourceOwner = subxact_saved_owner;
-                    });
-            } catch (...) {
-                subxact_error = std::current_exception();
-            }
-            if (subxact_error != nullptr) {
-                std::rethrow_exception(subxact_error);
+                subtransaction.rollback();
             }
 
             bioseq::pg_utils::invoke_pg_as_cpp(
@@ -6973,8 +6989,8 @@ inspect_ready_minimizer_format6_generation_impl(
             ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
             "bioseq Format-6 inspection query key exceeds BIGINT");
     }
-    if (bioseq_aligner_kmer_size != 15
-        || bioseq_aligner_window_size != 10) {
+    if (bioseq::aligner::settings::kmer_size != 15
+        || bioseq::aligner::settings::window_size != 10) {
         ready_minimizer_error_as_cpp(
             ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             "bioseq Format-6 inspection requires the registered k=15,w=10 profile");
@@ -7244,8 +7260,8 @@ format6_parallel_scan_probe_impl(
                 "sequence_rowno={} requested_workers={}",
                 sequence_rowno, requested_workers));
     }
-    if (bioseq_aligner_kmer_size != 15
-        || bioseq_aligner_window_size != 10) {
+    if (bioseq::aligner::settings::kmer_size != 15
+        || bioseq::aligner::settings::window_size != 10) {
         ready_minimizer_error_as_cpp(
             ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
             "bioseq Format-6 parallel scan probe requires the registered k=15,w=10 profile");
@@ -7355,11 +7371,11 @@ inspect_ready_minimizer_generation_impl(
             ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE,
             "bioseq minimizer generation inspection query key exceeds BIGINT");
     }
-    if (bioseq_aligner_kmer_size <= 0
-        || bioseq_aligner_kmer_size
+    if (bioseq::aligner::settings::kmer_size <= 0
+        || bioseq::aligner::settings::kmer_size
             > static_cast<int>((std::numeric_limits<std::uint16_t>::max)())
-        || bioseq_aligner_window_size <= 0
-        || bioseq_aligner_window_size
+        || bioseq::aligner::settings::window_size <= 0
+        || bioseq::aligner::settings::window_size
             > static_cast<int>((std::numeric_limits<std::uint16_t>::max)())) {
         ready_minimizer_error_as_cpp(
             ERRCODE_INVALID_PARAMETER_VALUE,
@@ -7461,9 +7477,9 @@ inspect_ready_minimizer_generation_impl(
                 "bioseq minimizer generation inspection source row is not visible",
                 fmt::format("sequence_rowno={}", sequence_rowno));
         }
-        pgseq_t* header = bioseq::pg_utils::invoke_pg_as_cpp(
+        bioseq::pg_types::seq* header = bioseq::pg_utils::invoke_pg_as_cpp(
             [values, seq_attno] {
-                return reinterpret_cast<pgseq_t*>(
+                return reinterpret_cast<bioseq::pg_types::seq*>(
                     PG_DETOAST_DATUM(values[seq_attno - 1]));
             });
         if (!is_locator_stub(header)) {
@@ -7533,8 +7549,8 @@ inspect_ready_minimizer_generation_impl(
             resolve_index_sketch_backend_from_gucs(),
             result.source.alphabet_code,
             result.source.storage_unit_byte_width,
-            static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
-            static_cast<std::uint16_t>(bioseq_aligner_window_size));
+            static_cast<std::uint16_t>(bioseq::aligner::settings::kmer_size),
+            static_cast<std::uint16_t>(bioseq::aligner::settings::window_size));
         if (!discovery_expected) {
             ready_minimizer_error_as_cpp(
                 ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE,
@@ -7568,8 +7584,8 @@ inspect_ready_minimizer_generation_impl(
                 resolve_index_sketch_backend_from_gucs(),
                 result.source.alphabet_code,
                 result.source.storage_unit_byte_width,
-                static_cast<std::uint16_t>(bioseq_aligner_kmer_size),
-                static_cast<std::uint16_t>(bioseq_aligner_window_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::kmer_size),
+                static_cast<std::uint16_t>(bioseq::aligner::settings::window_size),
                 preliminary_head.wire_format
                         == bioseq::indexing::MinimizerGenerationWireFormat::
                             grouped_shape_soa_segment_local
@@ -7610,9 +7626,9 @@ inspect_ready_minimizer_generation_impl(
                 "bioseq minimizer generation inspection source identity is invalid");
         }
         if (result.manifest.kmer_size
-                != static_cast<std::uint16_t>(bioseq_aligner_kmer_size)
+                != static_cast<std::uint16_t>(bioseq::aligner::settings::kmer_size)
             || result.manifest.window_size
-                != static_cast<std::uint16_t>(bioseq_aligner_window_size)
+                != static_cast<std::uint16_t>(bioseq::aligner::settings::window_size)
             || result.manifest.alphabet_code != result.source.alphabet_code
             || result.manifest.storage_unit_byte_width
                 != result.source.storage_unit_byte_width
@@ -7631,7 +7647,7 @@ inspect_ready_minimizer_generation_impl(
                 fmt::format("manifest k={} w={} active k={} w={}",
                     static_cast<unsigned>(result.manifest.kmer_size),
                     static_cast<unsigned>(result.manifest.window_size),
-                    bioseq_aligner_kmer_size, bioseq_aligner_window_size));
+                    bioseq::aligner::settings::kmer_size, bioseq::aligner::settings::window_size));
         }
         result.identity = inspect_ready_minimizer_generation_identity_pg(
             admin_identity, sequence_rowno, state->registered_snapshot,
@@ -7894,12 +7910,43 @@ cold_no_index_absence_audit_impl(Oid rel_oid, std::string_view name) {
 }
 
 inline void drop_all_index_tables_impl() {
-    if (SPI_connect() != SPI_OK_CONNECT) return;
-    SPI_execute(
-        "DO $$ DECLARE r record; BEGIN FOR r IN SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
-        "WHERE n.nspname='bioseq_internal' AND c.relkind='r' AND (c.relname LIKE 'seqidx\\_%' ESCAPE '\\' OR c.relname LIKE 'seqidxtab\\_%' ESCAPE '\\') "
-        "LOOP EXECUTE format('DROP TABLE IF EXISTS bioseq_internal.%I CASCADE', r.relname); END LOOP; END $$;", false, 0);
-    SPI_finish();
+    ErrorData* postgres_error = nullptr;
+    std::array<char, 2048> cpp_error_detail{};
+    bool cpp_error = false;
+    bool unknown_cpp_error = false;
+    try {
+        drop_index_relations(
+            drop_index_relation_selector::all_index_tables());
+    } catch (bioseq::pg_utils::PostgresErrorAsCpp& error) {
+        postgres_error = error.release_error_data();
+    } catch (const std::exception& error) {
+        strlcpy(
+            cpp_error_detail.data(),
+            error.what() == nullptr
+                ? "std::exception without detail"
+                : error.what(),
+            cpp_error_detail.size());
+        cpp_error = true;
+    } catch (...) {
+        unknown_cpp_error = true;
+    }
+
+    // The SPI session and every owning C++ value have unwound before the
+    // PostgreSQL C ABI is re-entered.
+    if (postgres_error != nullptr)
+        ReThrowError(postgres_error);
+    if (cpp_error) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("bioseq index relation cleanup failed"),
+             errdetail_internal("%s", cpp_error_detail.data())));
+    }
+    if (unknown_cpp_error) {
+        ereport(ERROR,
+            (errcode(ERRCODE_INTERNAL_ERROR),
+             errmsg("bioseq index relation cleanup failed"),
+             errdetail_internal("unknown C++ exception")));
+    }
 }
 
 /// 0 ok, 1 unknown name, 2 ineligible.

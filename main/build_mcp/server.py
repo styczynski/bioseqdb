@@ -38,21 +38,28 @@ benefit. Logging goes to stderr; stdout is reserved for protocol output.
 
 from __future__ import annotations
 
-from typing import List, Dict, Set, Optional, Any
+from typing import List, Dict, Set, Optional, Any, Mapping
 
 import argparse
+import base64
 import contextlib
 import errno
 import fcntl
+import hashlib
 import json
+import math
 import os
+import re
 import select
+import secrets
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -72,10 +79,18 @@ from inspect_tool import (
 # never by the detached --run-build worker (which is stdlib-only).
 import bootstrap  # noqa: E402
 
+from postgres_error_safety_promotion import (  # noqa: E402
+    PromotionError as PostgresErrorSafetyPromotionError,
+    load_review_waiver as _load_postgres_error_safety_review_waiver,
+    promote_reviewed_evidence as _promote_safety_reviewed_evidence,
+    validate_review_waiver_snapshot as _validate_safety_waiver_snapshot,
+)
+
 # --------------------------- configuration ---------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # main/
 WORKSPACE_ROOT = PROJECT_ROOT.parent
+CMAKE_PRESETS_FILE = PROJECT_ROOT / "CMakePresets.json"
 _CMAKE_HELPER_DIR = PROJECT_ROOT / "cmake"
 if str(_CMAKE_HELPER_DIR) not in sys.path:
     sys.path.insert(0, str(_CMAKE_HELPER_DIR))
@@ -182,12 +197,52 @@ CACHE_BIOSEQ_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET")
 CACHE_BIOSEQ_DEBUG_BUILD_PRESET_OVERRIDE = os.environ.get(
     "BIOSEQ_CACHE_BIOSEQ_BUILD_PRESET_DEBUG")
-EXTERNAL_API_BUILD_PRESET = os.environ.get(
-    "BIOSEQ_EXTERNAL_API_BUILD_PRESET", "aws-x64-linux-gcc161")
+
+
+def _external_api_build_preset(
+        environment: Mapping[str, str], platform: str,
+        default_build_preset: str) -> str:
+    host_default = (
+        "aws-x64-linux-gcc161"
+        if platform.startswith("linux")
+        else default_build_preset
+    )
+    return environment.get("BIOSEQ_EXTERNAL_API_BUILD_PRESET", host_default)
+
+
+EXTERNAL_API_BUILD_PRESET = _external_api_build_preset(
+    os.environ, sys.platform, DEFAULT_BUILD_PRESET)
 WEBSITE_BUILD_PRESET = os.environ.get(
     "BIOSEQ_WEBSITE_BUILD_PRESET", "website-aws-x64-linux")
 WEBSITE_DEBUG_BUILD_PRESET = os.environ.get(
     "BIOSEQ_WEBSITE_DEBUG_BUILD_PRESET", "website-aws-x64-linux-debug")
+POSTGRES_ERROR_SAFETY_MODE = "postgres-error-safety"
+POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET = (
+    "postgres-error-safety-production")
+POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET = (
+    "postgres-error-safety-test-indexes")
+POSTGRES_ERROR_SAFETY_RUNTIME_PROFILES_TARGET = (
+    "bioseq_sql_postgres_error_safety_runtime_profiles")
+POSTGRES_ERROR_SAFETY_CANDIDATE_TARGET = (
+    "bioseq_sql_postgres_error_safety_candidate")
+POSTGRES_ERROR_SAFETY_EVIDENCE_TARGET = (
+    "bioseq_sql_postgres_error_safety_evidence")
+POSTGRES_ERROR_SAFETY_CANDIDATE_RELATIVE_ROOT = (
+    Path("bioseq")
+    / "generated"
+    / "sql"
+    / "safety"
+    / "runtime"
+    / "candidate"
+)
+POSTGRES_ERROR_SAFETY_CASE_TEMPLATE = (
+    PROJECT_ROOT
+    / "codegen"
+    / "safety"
+    / "fixtures"
+    / "doc0388_runtime_cases.json")
+POSTGRES_ERROR_SAFETY_PEER_BUILD_DIR_CACHE_KEY = (
+    "BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR")
 DEFAULT_BUILD_DIR = PROJECT_ROOT / "build" / DEFAULT_BUILD_PRESET
 DEBUG_BUILD_DIR = PROJECT_ROOT / "build" / DEBUG_BUILD_PRESET
 REPORTING_DIR = PROJECT_ROOT / "reporting"
@@ -263,6 +318,20 @@ def build_dir_for(mode: str, debug: bool) -> Path:
     return PROJECT_ROOT / "build" / preset_for(mode, debug)
 
 
+def build_dirs_for(mode: str, debug: bool) -> tuple[Path, ...]:
+    """Return every CMake tree a mode may configure or build.
+
+    Ordinary modes own one tree. PostgreSQL error-safety qualification owns
+    two fixed, isolated profile trees and must serialize against either one.
+    """
+    if mode == POSTGRES_ERROR_SAFETY_MODE:
+        return (
+            PROJECT_ROOT / "build" / POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+            PROJECT_ROOT / "build" / POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET,
+        )
+    return (build_dir_for(mode, debug),)
+
+
 def bin_dir_for(mode: str, debug: bool) -> Path:
     return build_dir_for(mode, debug) / MODES[mode].binary_subdir
 
@@ -276,6 +345,8 @@ BIN_DIR = BUILD_DIR / "bioseq"
 
 STATE_FILE = Path("/tmp/bioseq_build_mcp_state.json")
 LOCK_FILE = Path("/tmp/bioseq_build_mcp.lock")
+SQL_GUARDRAIL_PUBLICATION_LEDGER = Path(
+    "/tmp/bioseq_sql_guardrail_publications.json")
 LOG_DIR = Path("/tmp")
 
 # Local machine policy for compiler-only realtime scheduling.  The enablement
@@ -450,6 +521,190 @@ def _cmake_cache_contains(build_dir: Path, needle: str) -> bool:
         return needle in cache.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+
+
+def _resolved_cmake_preset_cache_variables(
+        preset: str,
+        *,
+        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, object]:
+    """Resolve configure-preset cache variables with CMake inheritance rules.
+
+    Earlier entries in an ``inherits`` array have priority, the selected
+    preset overrides every parent, and an explicit ``null`` remains a
+    tombstone so a later parent cannot restore the value.
+    """
+    try:
+        payload = json.loads(presets_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read CMake configure presets from {presets_file}: "
+            f"{exc}") from exc
+
+    raw_presets = payload.get("configurePresets")
+    if not isinstance(raw_presets, list):
+        raise RuntimeError(
+            f"{presets_file} does not contain a configurePresets array")
+
+    presets: dict[str, dict] = {}
+    for raw_preset in raw_presets:
+        if not isinstance(raw_preset, dict):
+            raise RuntimeError(
+                f"{presets_file} contains a non-object configure preset")
+        name = raw_preset.get("name")
+        if not isinstance(name, str) or not name:
+            raise RuntimeError(
+                f"{presets_file} contains a configure preset without a name")
+        if name in presets:
+            raise RuntimeError(
+                f"{presets_file} contains duplicate configure preset "
+                f"{name!r}")
+        presets[name] = raw_preset
+
+    resolved: dict[str, dict[str, object]] = {}
+
+    def resolve(name: str, stack: tuple[str, ...]) -> dict[str, object]:
+        cached = resolved.get(name)
+        if cached is not None:
+            return cached
+        if name in stack:
+            cycle = " -> ".join((*stack, name))
+            raise RuntimeError(
+                f"CMake configure preset inheritance cycle: {cycle}")
+        raw_preset = presets.get(name)
+        if raw_preset is None:
+            raise RuntimeError(
+                f"CMake configure preset {name!r} is not declared in "
+                f"{presets_file}")
+
+        raw_parents = raw_preset.get("inherits", [])
+        if isinstance(raw_parents, str):
+            parents = [raw_parents]
+        elif (
+            isinstance(raw_parents, list)
+            and all(isinstance(parent, str) and parent
+                    for parent in raw_parents)
+        ):
+            parents = raw_parents
+        else:
+            raise RuntimeError(
+                f"CMake configure preset {name!r} has invalid inherits")
+
+        variables: dict[str, object] = {}
+        # Later parents are merged first so the documented earlier-parent
+        # priority is preserved by the subsequent updates.
+        for parent in reversed(parents):
+            variables.update(resolve(parent, (*stack, name)))
+
+        own_variables = raw_preset.get("cacheVariables", {})
+        if not isinstance(own_variables, dict):
+            raise RuntimeError(
+                f"CMake configure preset {name!r} has invalid "
+                "cacheVariables")
+        for key, value in own_variables.items():
+            if not isinstance(key, str) or not key:
+                raise RuntimeError(
+                    f"CMake configure preset {name!r} has an invalid "
+                    "cache-variable name")
+            variables[key] = value
+
+        resolved[name] = variables
+        return variables
+
+    return dict(resolve(preset, ()))
+
+
+def _cmake_preset_cache_contract(
+        preset: str,
+        keys: tuple[str, ...],
+        *,
+        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, str]:
+    """Return exact, non-null values selected by a configure preset."""
+    variables = _resolved_cmake_preset_cache_variables(
+        preset, presets_file=presets_file)
+    contract: dict[str, str] = {}
+    for key in keys:
+        raw_value = variables.get(key)
+        if raw_value is None:
+            continue
+        if isinstance(raw_value, bool):
+            value = "TRUE" if raw_value else "FALSE"
+        elif isinstance(raw_value, str):
+            value = raw_value
+        elif isinstance(raw_value, dict):
+            value = raw_value.get("value")
+            if isinstance(value, bool):
+                value = "TRUE" if value else "FALSE"
+            elif not isinstance(value, str):
+                raise RuntimeError(
+                    f"CMake configure preset {preset!r} has invalid value "
+                    f"for cache variable {key}")
+        else:
+            raise RuntimeError(
+                f"CMake configure preset {preset!r} has invalid value for "
+                f"cache variable {key}")
+        contract[key] = value
+    return contract
+
+
+def _cmake_preset_cache_repairs(
+        build_dir: Path,
+        preset: str,
+        *,
+        keys: tuple[str, ...] = ("PostgreSQL_CONFIG",),
+        presets_file: Path = CMAKE_PRESETS_FILE) -> dict[str, str]:
+    """Plan exact repairs for preset-owned cache values in one build tree."""
+    contract = _cmake_preset_cache_contract(
+        preset, keys, presets_file=presets_file)
+    return {
+        key: expected
+        for key, expected in contract.items()
+        if _cmake_cache_value(build_dir, key) != expected
+    }
+
+
+_POSTGRESQL_DISCOVERY_CACHE_UNSET_ARGS = (
+    "-UPostgreSQL_*",
+    "-U_PostgreSQL_*",
+    "-UFIND_PACKAGE_MESSAGE_DETAILS_PostgreSQL",
+)
+
+
+def _postgresql_discovery_cache_reset_args(
+        build_dir: Path,
+        preset: str,
+        *,
+        presets_file: Path = CMAKE_PRESETS_FILE) -> tuple[str, ...]:
+    """Invalidate derived PostgreSQL discovery when its toolchain is stale."""
+    contract = _cmake_preset_cache_contract(
+        preset,
+        ("PostgreSQL_CONFIG",),
+        presets_file=presets_file,
+    )
+    expected_config = contract.get("PostgreSQL_CONFIG")
+    if expected_config is None:
+        return ()
+    cached_config = _cmake_cache_value(
+        build_dir,
+        "PostgreSQL_CONFIG",
+    )
+    cached_server = _cmake_cache_value(
+        build_dir,
+        "PostgreSQL_EXECUTABLE",
+    )
+    if cached_config != expected_config or cached_server is None:
+        return _POSTGRESQL_DISCOVERY_CACHE_UNSET_ARGS
+
+    expected_bin = Path(expected_config).parent
+    cached_bin = Path(cached_server).parent
+    try:
+        same_bin = (
+            cached_bin == expected_bin
+            or cached_bin.resolve(strict=False)
+                == expected_bin.resolve(strict=False)
+        )
+    except (OSError, RuntimeError):
+        same_bin = False
+    return () if same_bin else _POSTGRESQL_DISCOVERY_CACHE_UNSET_ARGS
 
 
 def _ensure_local_toolchain_environment(
@@ -701,16 +956,25 @@ class ModeDefinition:
 MODES: Dict[str, ModeDefinition] = {
     "external-api": ModeDefinition(
         lock_group="tests",
-        expected_duration_min=8.0,
-        build_only_expected_duration_min=5.0,
-        label="External API integration tests",
-        docs="Build and run generated external API clients without sequence or PostgreSQL targets",
+        expected_duration_min=120.0,
+        build_only_expected_duration_min=60.0,
+        label="External API and PostgreSQL integration tests",
+        docs=(
+            "Build and run generated external API clients, then install the "
+            "external-enabled generated extension package in a clean private "
+            "PostgreSQL 17 cluster and emit a hash-sealed catalog/behavior "
+            "acceptance receipt"),
         is_verb_plular=True,
-        targets=["bioseq_external_integration_tests_exec"],
+        targets=[
+            "bioseq_external_integration_tests_exec",
+            "postgresql_bioseq",
+        ],
         commands=[
             ["bioseq_external_integration_tests_exec",
              "--reporter", "console::out=-::colour-mode=ansi"],
         ],
+        post_build_targets=("bioseq_external_postgres_acceptance",),
+        uses_private_cluster=True,
         preset_override=EXTERNAL_API_BUILD_PRESET,
         required_cache_variables={
             "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "ON",
@@ -750,6 +1014,34 @@ MODES: Dict[str, ModeDefinition] = {
             "BIOSEQ_BUILD_WEBSITE": "ON",
             "BIOSEQ_WEBSITE_BROWSER_TESTS": "ON",
             "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+        },
+    ),
+    POSTGRES_ERROR_SAFETY_MODE: ModeDefinition(
+        lock_group=POSTGRES_ERROR_SAFETY_MODE,
+        expected_duration_min=180.0,
+        build_only_expected_duration_min=30.0,
+        label="PostgreSQL error-safety qualification",
+        docs=(
+            "Build isolated production and test-index extension profiles, "
+            "seal their runtime plans, and validate both in private "
+            "PostgreSQL clusters"),
+        is_verb_plular=False,
+        targets=[],
+        commands=[],
+        preset_override=POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+        uses_private_cluster=True,
+        required_cache_variables={
+            "BIOSEQ_BUILD_TESTS": "OFF",
+            "BIOSEQ_TEST_INDEXES": "OFF",
+            "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE":
+                str(POSTGRES_ERROR_SAFETY_CASE_TEMPLATE),
+            "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+            POSTGRES_ERROR_SAFETY_PEER_BUILD_DIR_CACHE_KEY: str(
+                PROJECT_ROOT
+                / "build"
+                / POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET),
+            "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+            "BIOSEQ_BUILD_WEBSITE": "OFF",
         },
     ),
     "unit+integration": ModeDefinition(
@@ -928,11 +1220,15 @@ MODES: Dict[str, ModeDefinition] = {
     ),
 }
 VALID_MODES: Set[str] = set(MODES.keys())
-# §17.5: the website pipeline is a local, build-tree-only target (Doxygen + a
-# private PostgreSQL cluster + pinned-browser acceptance) that never runs on the
-# remote build runner. remote-run must reject it explicitly rather than dispatch a
-# build that cannot succeed there.
-REMOTE_RUN_REJECTED_MODES: Set[str] = {"website"}
+# These modes intentionally depend on local-only build trees or host resources.
+# Keep them out of the remote schema and reject direct remote-run calls before
+# any provisioning, synchronization, or worker dispatch occurs.
+REMOTE_RUN_REJECTED_MODES: Set[str] = {
+    "website",
+    POSTGRES_ERROR_SAFETY_MODE,
+}
+REMOTE_RUN_BUILD_MODES: tuple[str, ...] = tuple(sorted(
+    VALID_MODES - REMOTE_RUN_REJECTED_MODES))
 BENCH_CLI_MODES: tuple[str, ...] = tuple(sorted(
     mode for mode, details in MODES.items()
     if details.is_bench_mode and details.commands
@@ -1622,6 +1918,2040 @@ def _newest_report(snapshot_paths: set[Path], mode: str) -> Path | None:
     )
 
 
+def _sql_guardrail_workflow_manifest(
+        active_build_dir: Path) -> dict[str, str]:
+    path = active_build_dir / "bioseq_sql_guardrail_workflow_paths.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot read CMake-owned SQL guardrail manifest {path}: {exc}")
+    if (
+        not isinstance(value, dict)
+        or value.get("schema_version") != 1
+        or value.get("artifact_kind")
+            != "doc0388_sql_codegen_guardrail_workflow_paths"
+    ):
+        raise RuntimeError(
+            f"invalid CMake-owned SQL guardrail manifest: {path}")
+    fields = {
+        "repository_root",
+        "cmake_source_dir",
+        "build_dir",
+        "tool",
+        "artifact_inventory",
+        "generator_output_inventory",
+        "benchmark_configuration",
+        "calibration_configuration",
+        "generator_executable",
+        "production_dso",
+        "installed_production_dso",
+        "benchmark_executable",
+        "comparator_dso",
+        "stage0_measurement",
+        "recovered_measurement",
+        "candidate_measurement",
+        "runtime_samples",
+        "qualification",
+    }
+    if set(value) != fields | {"schema_version", "artifact_kind"}:
+        raise RuntimeError(
+            "CMake-owned SQL guardrail manifest field set is not exact")
+    result: dict[str, str] = {}
+    workspace = WORKSPACE_ROOT.resolve(strict=True)
+    for field in fields:
+        raw = value.get(field)
+        if not isinstance(raw, str) or not raw:
+            raise RuntimeError(
+                f"SQL guardrail manifest field {field} is empty")
+        resolved = Path(raw).resolve(strict=False)
+        if field != "installed_production_dso":
+            try:
+                resolved.relative_to(workspace)
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"SQL guardrail manifest path escapes workspace: {field}"
+                ) from exc
+        elif not Path(raw).is_absolute():
+            raise RuntimeError(
+                "SQL guardrail installed production DSO path is not absolute")
+        result[field] = str(resolved)
+    if Path(result["repository_root"]) != workspace:
+        raise RuntimeError(
+            "SQL guardrail manifest repository_root is not the workspace")
+    if Path(result["cmake_source_dir"]) != PROJECT_ROOT.resolve(strict=True):
+        raise RuntimeError(
+            "SQL guardrail manifest CMake source is not main/")
+    if Path(result["build_dir"]) != active_build_dir.resolve(strict=True):
+        raise RuntimeError(
+            "SQL guardrail manifest build_dir is not the active MCP tree")
+    for field in (
+        "tool",
+        "artifact_inventory",
+        "generator_output_inventory",
+        "benchmark_configuration",
+        "calibration_configuration",
+        "generator_executable",
+        "production_dso",
+        "benchmark_executable",
+        "comparator_dso",
+    ):
+        if not Path(result[field]).is_file():
+            raise RuntimeError(
+                f"SQL guardrail manifest input is missing: {field}")
+    return result
+
+
+def _read_sql_guardrail_evidence(
+        path: Path,
+        *,
+        expected_sha256: str | None = None) -> bytes:
+    workspace = WORKSPACE_ROOT.resolve(strict=True)
+    resolved = path.resolve(strict=True)
+    resolved.relative_to(workspace)
+    metadata = resolved.lstat()
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_nlink != 1
+    ):
+        raise RuntimeError(
+            "SQL guardrail evidence must be a regular single-link file: "
+            f"{resolved}")
+    body = resolved.read_bytes()
+    digest = _sha256_bytes(body)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise RuntimeError(
+            f"SQL guardrail evidence hash changed for {resolved}: "
+            f"{digest} != {expected_sha256}")
+    return body
+
+
+def _write_sql_guardrail_evidence_exclusive(
+        path: Path, body: bytes) -> None:
+    workspace = WORKSPACE_ROOT.resolve(strict=True)
+    parent = path.parent.resolve(strict=True)
+    parent.relative_to(workspace)
+    resolved = path.resolve(strict=False)
+    resolved.relative_to(workspace)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(resolved, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as output:
+            output.write(body)
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def _sql_guardrail_artifact_record(path: Path) -> dict[str, object]:
+    body = _read_sql_guardrail_evidence(path)
+    return {
+        "path": str(path.resolve(strict=True).relative_to(
+            WORKSPACE_ROOT.resolve(strict=True))),
+        "bytes": len(body),
+        "sha256": _sha256_bytes(body),
+    }
+
+
+class _SqlGuardrailLiveAuthorityBroker:
+    """One-use live callback owned in memory by the running MCP worker.
+
+    This prevents an ordinary/direct CLI invocation from accidentally
+    publishing or consuming an authoritative DOC0388 qualification.  It is
+    intentionally not represented as authentication against arbitrary
+    same-UID process or workspace compromise: that stronger threat model
+    requires an external signer or permission-separated service.
+    """
+
+    def __init__(
+            self,
+            *,
+            path: Path,
+            run_nonce: int,
+            authority_file_sha256: str,
+            request_snapshot_sha256: str):
+        self.path = path
+        self.run_nonce = run_nonce
+        self.authority_file_sha256 = authority_file_sha256
+        self.request_snapshot_sha256 = request_snapshot_sha256
+        self.consumed = False
+        self.error: BaseException | None = None
+        self._stop = threading.Event()
+        self._socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if path.exists() or path.is_symlink():
+            raise RuntimeError(
+                f"live authority broker path already exists: {path}")
+        self._socket.bind(str(path))
+        os.chmod(path, 0o600)
+        self._socket.listen(1)
+        self._socket.settimeout(0.1)
+        self._thread = threading.Thread(
+            target=self._serve,
+            name="sql-guardrail-live-authority-broker",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def _serve(self) -> None:
+        try:
+            while not self._stop.is_set():
+                try:
+                    connection, _ = self._socket.accept()
+                except socket.timeout:
+                    continue
+                with connection:
+                    connection.settimeout(2.0)
+                    body = bytearray()
+                    while b"\n" not in body and len(body) <= 4096:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        body.extend(chunk)
+                    try:
+                        request = json.loads(
+                            bytes(body).split(b"\n", 1)[0])
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        request = None
+                    accepted = (
+                        not self.consumed
+                        and isinstance(request, dict)
+                        and set(request) == {
+                            "schema_version",
+                            "artifact_kind",
+                            "run_nonce",
+                            "authority_file_sha256",
+                            "request_snapshot_sha256",
+                        }
+                        and request.get("schema_version") == 1
+                        and request.get("artifact_kind")
+                            == "doc0388_sql_guardrail_authority_claim"
+                        and request.get("run_nonce") == self.run_nonce
+                        and request.get("authority_file_sha256")
+                            == self.authority_file_sha256
+                        and request.get("request_snapshot_sha256")
+                            == self.request_snapshot_sha256
+                    )
+                    if accepted:
+                        self.consumed = True
+                    response = {
+                        "schema_version": 1,
+                        "artifact_kind":
+                            "doc0388_sql_guardrail_authority_response",
+                        "accepted": accepted,
+                        "run_nonce": self.run_nonce,
+                        "authority_file_sha256":
+                            self.authority_file_sha256,
+                        "request_snapshot_sha256":
+                            self.request_snapshot_sha256,
+                        "broker_pid": os.getpid(),
+                        "broker_session_id": os.getsid(0),
+                    }
+                    connection.sendall(
+                        (json.dumps(
+                            response,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ) + "\n").encode("utf-8")
+                    )
+                    if accepted:
+                        return
+        except BaseException as exc:
+            self.error = exc
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=3.0)
+        try:
+            self._socket.close()
+        finally:
+            self.path.unlink(missing_ok=True)
+        if self._thread.is_alive():
+            raise RuntimeError(
+                "live SQL guardrail authority broker did not stop")
+        if self.error is not None:
+            raise RuntimeError(
+                "live SQL guardrail authority broker failed: "
+                f"{type(self.error).__name__}: {self.error}")
+
+
+def _create_sql_guardrail_live_authority(
+        *,
+        output: Path,
+        request: dict[str, object],
+        run_nonce: int,
+        qualification: Path,
+        baseline: Path,
+        measurement: Path,
+        broker_socket: Path) -> dict[str, object]:
+    """Seal one non-replayable authority owned by the running MCP worker."""
+    state = _load_state()
+    entry = state.get("bench-e2e")
+    worker_session_id = os.getsid(0)
+    request_snapshot_sha256 = _canonical_json_sha256(request)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("status") != "running"
+        or entry.get("pid") != os.getpid()
+        or entry.get("started_at") is None
+        or entry.get("sql_guardrail_request_sha256")
+            != request_snapshot_sha256
+        or os.getsid(os.getpid()) != worker_session_id
+    ):
+        raise RuntimeError(
+            "live SQL guardrail authority is not owned by the exact "
+            "running MCP worker/request/session")
+    receipt_path = Path(
+        str(request["baseline_publication_receipt"]))
+    receipt_body = _read_sql_guardrail_evidence(
+        receipt_path,
+        expected_sha256=str(
+            request["baseline_publication_receipt_sha256"]),
+    )
+    receipt = json.loads(receipt_body)
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("publication_id")
+            != request["baseline_publication_id"]
+    ):
+        raise RuntimeError(
+            "live SQL guardrail baseline publication join is invalid")
+
+    def artifact(path: Path) -> dict[str, object]:
+        body = _read_sql_guardrail_evidence(path)
+        try:
+            value = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"live SQL guardrail artifact is not JSON: {path}"
+            ) from exc
+        if (
+            not isinstance(value, dict)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(value.get("content_sha256")),
+            ) is None
+        ):
+            raise RuntimeError(
+                f"live SQL guardrail artifact has no content seal: {path}")
+        return {
+            "path": str(path.resolve(strict=True)),
+            "file_sha256": _sha256_bytes(body),
+            "content_sha256": value["content_sha256"],
+        }
+
+    qualification_record = artifact(qualification)
+    baseline_record = artifact(baseline)
+    measurement_record = artifact(measurement)
+    qualification_value = json.loads(
+        _read_sql_guardrail_evidence(qualification))
+    if (
+        qualification_value.get("measurement_sha256")
+            != measurement_record["file_sha256"]
+        or qualification_value.get("baseline_sha256")
+            != baseline_record["file_sha256"]
+        or qualification_value.get("qualification_request") != {
+            "file_sha256": request["request_file_sha256"],
+            "content_sha256": request["request_content_sha256"],
+            "normalized_sha256": request_snapshot_sha256,
+        }
+    ):
+        raise RuntimeError(
+            "live SQL guardrail qualification/request/artifact joins "
+            "are invalid")
+    authority: dict[str, object] = {
+        "schema_version": 1,
+        "artifact_kind":
+            "doc0388_sql_guardrail_live_mcp_authority",
+        "phase": "candidate_qualification",
+        "worker_mode": "bench-e2e",
+        "worker_pid": os.getpid(),
+        "worker_session_id": worker_session_id,
+        "worker_started_at": entry["started_at"],
+        "state_file": str(STATE_FILE),
+        "broker_socket": str(broker_socket),
+        "workflow_request": {
+            "file_sha256": request["request_file_sha256"],
+            "content_sha256": request["request_content_sha256"],
+            "normalized_sha256": request_snapshot_sha256,
+        },
+        "run_nonce": run_nonce,
+        "qualification": qualification_record,
+        "baseline": baseline_record,
+        "measurement": measurement_record,
+        "baseline_publication": {
+            "receipt_path": str(receipt_path.resolve(strict=True)),
+            "receipt_file_sha256": _sha256_bytes(receipt_body),
+            "publication_id": receipt["publication_id"],
+        },
+        "issued_monotonic_ns": time.monotonic_ns(),
+    }
+    authority["content_sha256"] = _canonical_json_sha256(authority)
+    _write_sql_guardrail_evidence_exclusive(
+        output,
+        (json.dumps(
+            authority, indent=2, sort_keys=True
+        ) + "\n").encode("utf-8"),
+    )
+    return authority
+
+
+def _sql_guardrail_capture_bundle_record(
+        value: object,
+        field: str) -> tuple[Path, bytes]:
+    if not isinstance(value, dict) or set(value) != {
+        "path", "bytes", "sha256"
+    }:
+        raise RuntimeError(
+            f"capture bundle artifact {field} is malformed")
+    relative = value.get("path")
+    digest = value.get("sha256")
+    size = value.get("bytes")
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or isinstance(size, bool)
+        or not isinstance(size, int)
+        or size < 0
+    ):
+        raise RuntimeError(
+            f"capture bundle artifact {field} has invalid fields")
+    path = WORKSPACE_ROOT / relative
+    body = _read_sql_guardrail_evidence(
+        path, expected_sha256=digest)
+    if len(body) != size:
+        raise RuntimeError(
+            f"capture bundle artifact {field} byte count changed")
+    return path.resolve(strict=True), body
+
+
+def _validate_sql_guardrail_host_state_capture(
+        body: bytes,
+        *,
+        expected_phase: str,
+        expected_run_nonce: int,
+        measurement: dict[str, object],
+        measurement_file_sha256: str,
+        field: str) -> dict[str, object]:
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"capture bundle {field} is not valid JSON") from exc
+    expected_fields = {
+        "schema_version",
+        "artifact_kind",
+        "phase",
+        "run_nonce",
+        "measurement_sha256",
+        "measurement_content_sha256",
+        "source",
+        "environment",
+        "snapshot",
+        "content_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("schema_version") != 1
+        or value.get("artifact_kind") != "runtime_host_state"
+        or value.get("phase") != expected_phase
+        or value.get("run_nonce") != expected_run_nonce
+        or value.get("measurement_sha256") != measurement_file_sha256
+        or value.get("measurement_content_sha256")
+            != measurement.get("content_sha256")
+        or value.get("source") != measurement.get("source")
+        or value.get("environment") != measurement.get("environment")
+    ):
+        raise RuntimeError(
+            f"capture bundle {field} identity/binding is invalid")
+    try:
+        _validate_json_content_seal(value, f"capture bundle {field}")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    snapshot = value.get("snapshot")
+    snapshot_fields = {
+        "captured_monotonic_ns",
+        "load_1",
+        "load_5",
+        "load_15",
+        "logical_cpu_count",
+        "normalized_load_1",
+        "available_memory_bytes",
+        "cpu_governor_states",
+    }
+    if not isinstance(snapshot, dict) or set(snapshot) != snapshot_fields:
+        raise RuntimeError(
+            f"capture bundle {field} snapshot fields are not exact")
+    captured = snapshot.get("captured_monotonic_ns")
+    logical_cpus = snapshot.get("logical_cpu_count")
+    memory = snapshot.get("available_memory_bytes")
+    if (
+        isinstance(captured, bool)
+        or not isinstance(captured, int)
+        or captured <= 0
+        or isinstance(logical_cpus, bool)
+        or not isinstance(logical_cpus, int)
+        or logical_cpus <= 0
+        or logical_cpus
+            != measurement.get("environment", {}).get(
+                "logical_cpu_count")
+        or isinstance(memory, bool)
+        or not isinstance(memory, int)
+        or memory <= 0
+    ):
+        raise RuntimeError(
+            f"capture bundle {field} snapshot integer fields are invalid")
+    numeric_loads: dict[str, float] = {}
+    for metric in ("load_1", "load_5", "load_15", "normalized_load_1"):
+        item = snapshot.get(metric)
+        if (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+            or float(item) < 0.0
+        ):
+            raise RuntimeError(
+                f"capture bundle {field} snapshot {metric} is invalid")
+        numeric_loads[metric] = float(item)
+    if not math.isclose(
+        numeric_loads["normalized_load_1"],
+        numeric_loads["load_1"] / logical_cpus,
+        rel_tol=1e-12,
+        abs_tol=1e-15,
+    ):
+        raise RuntimeError(
+            f"capture bundle {field} normalized load is inconsistent")
+    governors = snapshot.get("cpu_governor_states")
+    if (
+        not isinstance(governors, list)
+        or not governors
+        or len(set(governors)) != len(governors)
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in governors
+        )
+    ):
+        raise RuntimeError(
+            f"capture bundle {field} governor states are invalid")
+    return value
+
+
+def _validate_sql_guardrail_paired_capture(
+        body: bytes,
+        *,
+        expected_run_nonce: int,
+        expected_report_sha256: str,
+        measurement: dict[str, object],
+        measurement_file_sha256: str,
+        field: str) -> dict[str, object]:
+    """Validate the server-visible structure of one retained pair artifact."""
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"capture bundle {field} is not valid JSON") from exc
+    expected_fields = {
+        "schema_version",
+        "artifact_kind",
+        "run_nonce",
+        "measurement_sha256",
+        "measurement_content_sha256",
+        "report_sha256",
+        "raw_file_sha256",
+        "source",
+        "environment",
+        "algorithms",
+        "content_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("schema_version") != 1
+        or value.get("artifact_kind") != "paired_runtime_samples"
+        or value.get("run_nonce") != expected_run_nonce
+        or value.get("measurement_sha256") != measurement_file_sha256
+        or value.get("measurement_content_sha256")
+            != measurement.get("content_sha256")
+        or value.get("report_sha256") != expected_report_sha256
+        or value.get("source") != measurement.get("source")
+        or value.get("environment") != measurement.get("environment")
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(value.get("raw_file_sha256"))
+        ) is None
+    ):
+        raise RuntimeError(
+            f"capture bundle {field} identity/binding is invalid")
+    try:
+        _validate_json_content_seal(value, f"capture bundle {field}")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    algorithms = value.get("algorithms")
+    expected_algorithms = {
+        "typed_wrapper_generated_vs_handwritten",
+        "row_codec_generated_vs_handwritten",
+    }
+    if (
+        not isinstance(algorithms, dict)
+        or set(algorithms) != expected_algorithms
+    ):
+        raise RuntimeError(
+            f"capture bundle {field} algorithm set is not exact")
+    for algorithm in sorted(expected_algorithms):
+        records = algorithms.get(algorithm)
+        if (
+            not isinstance(records, list)
+            or len(records) != 15
+            or [record.get("sample_ordinal") for record in records]
+                != list(range(1, 16))
+        ):
+            raise RuntimeError(
+                f"capture bundle {field} sample IDs are not exact")
+        for index, record in enumerate(records):
+            if not isinstance(record, dict) or set(record) != {
+                "sample_ordinal",
+                "generated_query_ns",
+                "handwritten_query_ns",
+                "generated_to_handwritten_ratio",
+            }:
+                raise RuntimeError(
+                    f"capture bundle {field} record {index} is malformed")
+            generated = record.get("generated_query_ns")
+            handwritten = record.get("handwritten_query_ns")
+            ratio = record.get("generated_to_handwritten_ratio")
+            if (
+                isinstance(generated, bool)
+                or not isinstance(generated, int)
+                or generated <= 0
+                or generated >= (1 << 53)
+                or isinstance(handwritten, bool)
+                or not isinstance(handwritten, int)
+                or handwritten <= 0
+                or handwritten >= (1 << 53)
+                or isinstance(ratio, bool)
+                or not isinstance(ratio, (int, float))
+                or not math.isfinite(float(ratio))
+                or not math.isclose(
+                    float(ratio),
+                    generated / handwritten,
+                    rel_tol=1e-15,
+                    abs_tol=1e-15,
+                )
+            ):
+                raise RuntimeError(
+                    f"capture bundle {field} record {index} ratio "
+                    "does not recompute")
+    return value
+
+
+def _load_sql_guardrail_capture_bundle(
+        path: Path,
+        *,
+        expected_sha256: str) -> tuple[dict[str, object], dict[str, bytes]]:
+    body = _read_sql_guardrail_evidence(
+        path, expected_sha256=expected_sha256)
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"capture bundle is not valid JSON: {path}: {exc}") from exc
+    expected_fields = {
+        "schema_version",
+        "artifact_kind",
+        "status",
+        "baseline_eligibility",
+        "capture_request",
+        "canonical_environment_key",
+        "source",
+        "environment",
+        "measurement",
+        "runtime_samples",
+        "calibration_reports",
+        "benchmark_configuration",
+        "calibration_configuration",
+        "artifact_inventory",
+        "generator_output_inventory",
+        "tool",
+        "generator_executable",
+        "production_dso",
+        "generated_artifacts",
+        "benchmark_executable",
+        "comparator_dso",
+        "source_input_bindings",
+        "untracked_source_files",
+        "content_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_fields
+        or value.get("schema_version") != 1
+        or value.get("artifact_kind")
+            != "doc0388_sql_codegen_guardrail_capture_bundle"
+        or value.get("status") != "unreviewed_calibration"
+        or value.get("baseline_eligibility")
+            != "recovered_post_cutover_only"
+    ):
+        raise RuntimeError("SQL guardrail capture bundle schema is invalid")
+    try:
+        _validate_json_content_seal(value, "capture bundle")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    environment_key = value.get("canonical_environment_key")
+    if (
+        not isinstance(environment_key, str)
+        or re.fullmatch(r"[0-9a-f]{64}", environment_key) is None
+    ):
+        raise RuntimeError(
+            "capture bundle canonical environment key is invalid")
+    capture_request = value.get("capture_request")
+    if not isinstance(capture_request, dict) or set(capture_request) != {
+        "path",
+        "file_sha256",
+        "content_sha256",
+        "normalized_sha256",
+        "normalized_request",
+    }:
+        raise RuntimeError("capture bundle request provenance is invalid")
+    if (
+        not isinstance(capture_request.get("path"), str)
+        or any(
+            re.fullmatch(
+                r"[0-9a-f]{64}", str(capture_request.get(field))
+            ) is None
+            for field in (
+                "file_sha256",
+                "content_sha256",
+                "normalized_sha256",
+            )
+        )
+    ):
+        raise RuntimeError("capture bundle request hashes are invalid")
+    normalized_request = capture_request.get("normalized_request")
+    if (
+        not isinstance(normalized_request, dict)
+        or _canonical_json_sha256(normalized_request)
+            != capture_request["normalized_sha256"]
+        or normalized_request.get("phase") != "calibration_capture"
+        or normalized_request.get("request_file_sha256")
+            != capture_request["file_sha256"]
+        or normalized_request.get("request_content_sha256")
+            != capture_request["content_sha256"]
+    ):
+        raise RuntimeError(
+            "capture bundle normalized request provenance is invalid")
+    artifact_bodies: dict[str, bytes] = {}
+    singleton_fields = (
+        "measurement",
+        "runtime_samples",
+        "benchmark_configuration",
+        "calibration_configuration",
+        "artifact_inventory",
+        "generator_output_inventory",
+        "tool",
+        "generator_executable",
+        "production_dso",
+        "benchmark_executable",
+        "comparator_dso",
+    )
+    resolved_paths: set[Path] = set()
+    for field in singleton_fields:
+        artifact_path, artifact_body = (
+            _sql_guardrail_capture_bundle_record(value[field], field)
+        )
+        if artifact_path in resolved_paths:
+            raise RuntimeError(
+                f"capture bundle reuses artifact path: {artifact_path}")
+        resolved_paths.add(artifact_path)
+        artifact_bodies[field] = artifact_body
+    reports = value.get("calibration_reports")
+    if not isinstance(reports, list) or len(reports) != 3:
+        raise RuntimeError(
+            "capture bundle must contain exactly three calibration reports")
+    report_nonces: set[int] = set()
+    for index, report in enumerate(reports):
+        if not isinstance(report, dict) or set(report) != {
+            "path",
+            "bytes",
+            "sha256",
+            "run_nonce",
+            "host_state_before",
+            "host_state_after",
+            "paired_runtime_samples",
+        }:
+            raise RuntimeError(
+                f"capture bundle report {index} is malformed")
+        nonce = report.get("run_nonce")
+        if (
+            isinstance(nonce, bool)
+            or not isinstance(nonce, int)
+            or nonce <= 0
+            or nonce >= (1 << 53)
+            or nonce in report_nonces
+        ):
+            raise RuntimeError(
+                "capture bundle report nonces are not independent")
+        report_nonces.add(nonce)
+        artifact_path, artifact_body = (
+            _sql_guardrail_capture_bundle_record(
+                {
+                    key: report[key]
+                    for key in ("path", "bytes", "sha256")
+                },
+                f"report[{index}]",
+            )
+        )
+        if artifact_path in resolved_paths:
+            raise RuntimeError(
+                f"capture bundle reuses report path: {artifact_path}")
+        resolved_paths.add(artifact_path)
+        artifact_bodies[f"report[{index}]"] = artifact_body
+        for boundary in ("before", "after"):
+            state_path, state_body = (
+                _sql_guardrail_capture_bundle_record(
+                    report[f"host_state_{boundary}"],
+                    f"report[{index}].host_state_{boundary}",
+                )
+            )
+            if state_path in resolved_paths:
+                raise RuntimeError(
+                    "capture bundle reuses runtime host-state path: "
+                    f"{state_path}")
+            resolved_paths.add(state_path)
+            artifact_bodies[
+                f"report[{index}].host_state_{boundary}"
+            ] = state_body
+        pair_path, pair_body = _sql_guardrail_capture_bundle_record(
+            report["paired_runtime_samples"],
+            f"report[{index}].paired_runtime_samples",
+        )
+        if pair_path in resolved_paths:
+            raise RuntimeError(
+                "capture bundle reuses paired runtime-sample path: "
+                f"{pair_path}")
+        resolved_paths.add(pair_path)
+        artifact_bodies[
+            f"report[{index}].paired_runtime_samples"
+        ] = pair_body
+    try:
+        measurement = json.loads(artifact_bodies["measurement"])
+        runtime_samples = json.loads(artifact_bodies["runtime_samples"])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "capture bundle measurement/runtime sample JSON is invalid"
+        ) from exc
+    if (
+        not isinstance(measurement, dict)
+        or not isinstance(runtime_samples, dict)
+        or measurement.get("role") != "candidate"
+        or measurement.get("environment", {}).get("sha256")
+            != environment_key
+        or runtime_samples.get("environment", {}).get("sha256")
+            != environment_key
+        or runtime_samples.get("measurement_sha256")
+            != value["measurement"]["sha256"]
+    ):
+        raise RuntimeError(
+            "capture bundle environment/measurement joins are invalid")
+    if (
+        value.get("source") != measurement.get("source")
+        or value.get("environment") != measurement.get("environment")
+        or runtime_samples.get("source") != measurement.get("source")
+        or runtime_samples.get("environment") != measurement.get("environment")
+    ):
+        raise RuntimeError(
+            "capture bundle source/environment records are inconsistent")
+    if (
+        measurement.get("measurement_context", {}).get(
+            "generator_boundary", {}
+        ).get("output_inventory_file_sha256")
+        != value["generator_output_inventory"]["sha256"]
+    ):
+        raise RuntimeError(
+            "capture bundle generator-output inventory is not joined "
+            "to the measured cold-generator boundary")
+    runtime_artifacts = measurement.get("runtime_artifacts", {})
+    for bundle_field, measurement_field in (
+        ("generator_executable", "generator_executable"),
+        ("production_dso", "production_dso"),
+        ("benchmark_executable", "benchmark_executable"),
+        ("comparator_dso", "comparator_dso"),
+    ):
+        measured = runtime_artifacts.get(measurement_field, {})
+        retained = value[bundle_field]
+        if (
+            retained.get("bytes") != measured.get("bytes")
+            or retained.get("sha256") != measured.get("sha256")
+        ):
+            raise RuntimeError(
+                f"capture bundle retained {bundle_field} differs from "
+                "the measured runtime artifact")
+    built_dso = runtime_artifacts.get("production_dso", {})
+    installed_dso = runtime_artifacts.get(
+        "installed_production_dso", {})
+    if (
+        built_dso.get("path") == installed_dso.get("path")
+        or built_dso.get("bytes") != installed_dso.get("bytes")
+        or built_dso.get("sha256") != installed_dso.get("sha256")
+    ):
+        raise RuntimeError(
+            "capture bundle measurement does not prove installed/built "
+            "production DSO equality")
+
+    source_value = measurement.get("source", {})
+    tracked_diff_text = source_value.get("tracked_diff_base64")
+    try:
+        tracked_diff = base64.b64decode(
+            str(tracked_diff_text).encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise RuntimeError(
+            "capture bundle tracked source diff is not valid base64"
+        ) from exc
+    if _sha256_bytes(tracked_diff) != source_value.get(
+        "tracked_diff_sha256"
+    ):
+        raise RuntimeError(
+            "capture bundle tracked source diff hash is invalid")
+    source_entries = {
+        entry.get("path"): entry
+        for entry in source_value.get("inventory_entries", [])
+        if isinstance(entry, dict)
+    }
+    expected_source_inputs = {
+        "tool": "main/bench/sql_codegen_guardrail.py",
+        "benchmark_configuration":
+            "main/bench/bench_sql_codegen_guardrail_configuration.json",
+        "calibration_configuration":
+            "main/bench/"
+            "bench_sql_codegen_guardrail_calibration_configuration.json",
+    }
+    source_bindings = value.get("source_input_bindings")
+    if source_bindings != expected_source_inputs:
+        raise RuntimeError(
+            "capture bundle source-input binding map is not exact")
+    for field, original_path in expected_source_inputs.items():
+        entry = source_entries.get(original_path, {})
+        retained = value[field]
+        if (
+            entry.get("bytes") != retained.get("bytes")
+            or entry.get("sha256") != retained.get("sha256")
+        ):
+            raise RuntimeError(
+                f"capture bundle {field} is not joined to the measured "
+                "source inventory")
+    untracked_records = value.get("untracked_source_files")
+    expected_untracked = source_value.get("untracked_files")
+    if (
+        not isinstance(untracked_records, list)
+        or not isinstance(expected_untracked, list)
+        or len(untracked_records) != len(expected_untracked)
+    ):
+        raise RuntimeError(
+            "capture bundle untracked-source retention is incomplete")
+    observed_untracked: list[str] = []
+    for index, record in enumerate(untracked_records):
+        if not isinstance(record, dict) or set(record) != {
+            "original_path", "path", "bytes", "sha256"
+        }:
+            raise RuntimeError(
+                f"capture bundle untracked source {index} is malformed")
+        original_path = record.get("original_path")
+        entry = source_entries.get(original_path, {})
+        if (
+            not isinstance(original_path, str)
+            or original_path not in expected_untracked
+            or entry.get("bytes") != record.get("bytes")
+            or entry.get("sha256") != record.get("sha256")
+        ):
+            raise RuntimeError(
+                f"capture bundle untracked source {index} is not joined "
+                "to the measured inventory")
+        artifact_path, artifact_body = (
+            _sql_guardrail_capture_bundle_record(
+                {
+                    key: record[key]
+                    for key in ("path", "bytes", "sha256")
+                },
+                f"untracked_source[{index}]",
+            )
+        )
+        if artifact_path in resolved_paths:
+            raise RuntimeError(
+                f"capture bundle reuses untracked path: {artifact_path}")
+        resolved_paths.add(artifact_path)
+        artifact_bodies[f"untracked_source[{index}]"] = artifact_body
+        observed_untracked.append(original_path)
+    if observed_untracked != expected_untracked:
+        raise RuntimeError(
+            "capture bundle untracked source ordering is not exact")
+    runtime_reports = runtime_samples.get(
+        "provenance", {}
+    ).get("reports", [])
+    if (
+        not isinstance(runtime_reports, list)
+        or [item.get("sha256") for item in runtime_reports]
+            != [item["sha256"] for item in reports]
+        or [item.get("run_nonce") for item in runtime_reports]
+            != [item["run_nonce"] for item in reports]
+    ):
+        raise RuntimeError(
+            "capture bundle runtime report joins are invalid")
+    previous_host_capture: int | None = None
+    for index, (report, runtime_report) in enumerate(zip(
+        reports, runtime_reports, strict=True
+    )):
+        runtime_host_state = runtime_report.get("host_state")
+        if not isinstance(runtime_host_state, dict) or set(
+            runtime_host_state
+        ) != {
+            "before_file_sha256",
+            "before_content_sha256",
+            "before",
+            "after_file_sha256",
+            "after_content_sha256",
+            "after",
+        }:
+            raise RuntimeError(
+                f"capture bundle runtime report {index} host state "
+                "is malformed")
+        runtime_pairs = runtime_report.get("paired_runtime_samples")
+        pair_record = report["paired_runtime_samples"]
+        pair_document = _validate_sql_guardrail_paired_capture(
+            artifact_bodies[
+                f"report[{index}].paired_runtime_samples"
+            ],
+            expected_run_nonce=report["run_nonce"],
+            expected_report_sha256=report["sha256"],
+            measurement=measurement,
+            measurement_file_sha256=value["measurement"]["sha256"],
+            field=f"report[{index}].paired_runtime_samples",
+        )
+        if (
+            not isinstance(runtime_pairs, dict)
+            or set(runtime_pairs) != {
+                "file_sha256", "content_sha256"
+            }
+            or runtime_pairs.get("file_sha256")
+                != pair_record["sha256"]
+            or runtime_pairs.get("content_sha256")
+                != pair_document["content_sha256"]
+        ):
+            raise RuntimeError(
+                f"capture bundle runtime report {index} paired "
+                "runtime-sample join is invalid")
+        for boundary in ("before", "after"):
+            record = report[f"host_state_{boundary}"]
+            document = _validate_sql_guardrail_host_state_capture(
+                artifact_bodies[
+                    f"report[{index}].host_state_{boundary}"
+                ],
+                expected_phase=boundary,
+                expected_run_nonce=report["run_nonce"],
+                measurement=measurement,
+                measurement_file_sha256=value["measurement"]["sha256"],
+                field=f"report[{index}].host_state_{boundary}",
+            )
+            if (
+                runtime_host_state[f"{boundary}_file_sha256"]
+                    != record["sha256"]
+                or runtime_host_state[f"{boundary}_content_sha256"]
+                    != document["content_sha256"]
+                or runtime_host_state[boundary] != document["snapshot"]
+            ):
+                raise RuntimeError(
+                    f"capture bundle runtime report {index} {boundary} "
+                    "host-state join is invalid")
+            captured = document["snapshot"]["captured_monotonic_ns"]
+            if (
+                previous_host_capture is not None
+                and captured <= previous_host_capture
+            ):
+                raise RuntimeError(
+                    "capture bundle runtime host-state captures are not "
+                    "strictly monotonic")
+            previous_host_capture = captured
+    generated_records = value.get("generated_artifacts")
+    if not isinstance(generated_records, list) or not generated_records:
+        raise RuntimeError(
+            "capture bundle generated artifact list is empty")
+    expected_generated = []
+    for group in ("sql", "json", "cpp"):
+        group_value = measurement.get("artifacts", {}).get(group, {})
+        entries = group_value.get("entries", [])
+        if not isinstance(entries, list):
+            raise RuntimeError(
+                "capture bundle measurement artifact inventory is invalid")
+        for entry in entries:
+            expected_generated.append((
+                group,
+                entry.get("path"),
+                entry.get("bytes"),
+                entry.get("sha256"),
+            ))
+    observed_generated = []
+    for index, record in enumerate(generated_records):
+        if not isinstance(record, dict) or set(record) != {
+            "group", "original_path", "path", "bytes", "sha256"
+        }:
+            raise RuntimeError(
+                f"capture bundle generated artifact {index} is malformed")
+        group = record.get("group")
+        original_path = record.get("original_path")
+        if (
+            group not in {"sql", "json", "cpp"}
+            or not isinstance(original_path, str)
+            or not original_path
+        ):
+            raise RuntimeError(
+                f"capture bundle generated artifact {index} identity is invalid")
+        artifact_path, artifact_body = (
+            _sql_guardrail_capture_bundle_record(
+                {
+                    key: record[key]
+                    for key in ("path", "bytes", "sha256")
+                },
+                f"generated_artifact[{index}]",
+            )
+        )
+        if artifact_path in resolved_paths:
+            raise RuntimeError(
+                f"capture bundle reuses generated path: {artifact_path}")
+        resolved_paths.add(artifact_path)
+        artifact_bodies[f"generated_artifact[{index}]"] = artifact_body
+        observed_generated.append((
+            group,
+            original_path,
+            record["bytes"],
+            record["sha256"],
+        ))
+    if observed_generated != expected_generated:
+        raise RuntimeError(
+            "capture bundle generated artifacts do not match measurement")
+    return value, artifact_bodies
+
+
+def _run_sql_guardrail_workflow(
+        *,
+        request: dict[str, object],
+        active_build_dir: Path,
+        active_preset: str,
+        env: dict[str, str],
+        log_handle,
+        deadline: float,
+) -> tuple[Path | None, dict[str, object]]:
+    """Execute DOC0388 capture/qualification inside the MCP lane."""
+    phase = str(request["phase"])
+    if phase == "baseline_promotion":
+        raise RuntimeError(
+            "baseline promotion must not enter the build workflow")
+    manifest = _sql_guardrail_workflow_manifest(active_build_dir)
+    tool_prefix = [sys.executable, manifest["tool"]]
+
+    def run_checked(
+            argv: list[str],
+            *,
+            child_env: dict[str, str] | None = None,
+            step: str) -> None:
+        _update_entry("bench-e2e", step=step)
+        rc = _stream_subprocess(
+            argv,
+            log_handle,
+            deadline,
+            cwd=active_build_dir,
+            env=child_env or env,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"SQL guardrail workflow step '{step}' exited with code {rc}")
+
+    benchmark_path = Path(manifest["benchmark_executable"]).resolve(
+        strict=True)
+    comparator_path = Path(manifest["comparator_dso"]).resolve(strict=True)
+    generator_path = Path(manifest["generator_executable"]).resolve(
+        strict=True)
+    production_path = Path(manifest["production_dso"]).resolve(strict=True)
+    active_tree = active_build_dir.resolve(strict=True)
+    benchmark_path.relative_to(active_tree)
+    comparator_path.relative_to(active_tree)
+    generator_path.relative_to(active_tree)
+    production_path.relative_to(active_tree)
+    if (
+        len({
+            benchmark_path,
+            comparator_path,
+            generator_path,
+            production_path,
+        }) != 4
+        or not os.access(benchmark_path, os.X_OK)
+        or not os.access(generator_path, os.X_OK)
+    ):
+        raise RuntimeError(
+            "SQL guardrail runtime target paths are invalid")
+    if (
+        "bioseq_sql_guardrail_comparators" not in comparator_path.name
+        or "postgresql_bioseq" in comparator_path.name
+    ):
+        raise RuntimeError(
+            "SQL guardrail comparator is not the exact test-only MODULE DSO")
+
+    output_anchor = Path(
+        request[
+            "capture_bundle_output"
+            if phase == "calibration_capture"
+            else "qualification_output"
+        ]
+    )
+    if output_anchor.exists():
+        raise RuntimeError(
+            f"SQL guardrail evidence output already exists: {output_anchor}")
+    artifact_directory = output_anchor.with_name(
+        output_anchor.name + ".artifacts")
+    artifact_directory.parent.resolve(strict=True).relative_to(
+        WORKSPACE_ROOT.resolve(strict=True))
+    artifact_directory.mkdir(mode=0o700, exist_ok=False)
+    measurement_preinstall = (
+        artifact_directory / "measurement_preinstall.json"
+    )
+    measurement = artifact_directory / "measurement.json"
+
+    baseline_snapshot: Path | None = None
+    if phase == "candidate_qualification":
+        baseline_body = _read_sql_guardrail_evidence(
+            Path(str(request["baseline"])),
+            expected_sha256=str(request["baseline_sha256"]),
+        )
+        try:
+            baseline_value = json.loads(baseline_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("candidate baseline is not valid JSON") from exc
+        if (
+            not isinstance(baseline_value, dict)
+            or baseline_value.get("artifact_kind") != "reviewed_baseline"
+            or baseline_value.get("canonical_environment_key")
+                != request["canonical_environment_key"]
+        ):
+            raise RuntimeError(
+                "candidate baseline canonical environment binding is invalid")
+        baseline_snapshot = artifact_directory / "reviewed_baseline.json"
+        _write_sql_guardrail_evidence_exclusive(
+            baseline_snapshot, baseline_body)
+        publication_path, publication = (
+            _validate_sql_guardrail_baseline_publication(
+                baseline=Path(str(request["baseline"])),
+                baseline_sha256=str(request["baseline_sha256"]),
+                canonical_environment_key=str(
+                    request["canonical_environment_key"]),
+            )
+        )
+        if (
+            str(publication_path)
+                != request["baseline_publication_receipt"]
+            or _sha256_path(publication_path)
+                != request["baseline_publication_receipt_sha256"]
+            or publication["publication_id"]
+                != request["baseline_publication_id"]
+        ):
+            raise RuntimeError(
+                "candidate baseline publication changed after scheduling")
+        promotion_request = publication["promotion_request"]
+        capture_bundle_path = Path(
+            str(promotion_request["capture_bundle"]))
+        capture_bundle, captured_bodies = (
+            _load_sql_guardrail_capture_bundle(
+                capture_bundle_path,
+                expected_sha256=str(
+                    promotion_request["capture_bundle_sha256"]),
+            )
+        )
+        limits_body = _read_sql_guardrail_evidence(
+            Path(str(promotion_request["limits"])),
+            expected_sha256=str(promotion_request["limits_sha256"]),
+        )
+        with tempfile.TemporaryDirectory(
+                prefix="bioseq-sql-baseline-rederive-") as temporary:
+            rederive_directory = Path(temporary)
+            captured_measurement = (
+                rederive_directory / "measurement.json")
+            captured_runtime = (
+                rederive_directory / "runtime_samples.json")
+            captured_limits = rederive_directory / "limits.json"
+            captured_tool = (
+                rederive_directory / "sql_codegen_guardrail.py")
+            rederived_baseline = (
+                rederive_directory / "reviewed_baseline.json")
+            captured_measurement.write_bytes(
+                captured_bodies["measurement"])
+            captured_runtime.write_bytes(
+                captured_bodies["runtime_samples"])
+            captured_limits.write_bytes(limits_body)
+            captured_tool.write_bytes(captured_bodies["tool"])
+            for index, report_record in enumerate(
+                    capture_bundle["calibration_reports"]):
+                captured_report = (
+                    rederive_directory / f"report_{index}.json")
+                captured_pairs = (
+                    rederive_directory / f"paired_{index}.json")
+                captured_report.write_bytes(
+                    captured_bodies[f"report[{index}]"])
+                captured_pairs.write_bytes(
+                    captured_bodies[
+                        f"report[{index}].paired_runtime_samples"
+                    ])
+                run_checked(
+                    [
+                        sys.executable,
+                        str(captured_tool),
+                        "validate-paired-runtime-samples",
+                        "--paired-runtime-samples",
+                        str(captured_pairs),
+                        "--report", str(captured_report),
+                        "--measurement", str(captured_measurement),
+                        "--expected-run-nonce",
+                        str(report_record["run_nonce"]),
+                    ],
+                    step=(
+                        "revalidating published baseline paired evidence "
+                        f"{index + 1}"
+                    ),
+                )
+            run_checked(
+                [
+                    sys.executable,
+                    str(captured_tool),
+                    "review",
+                    "--measurement", str(captured_measurement),
+                    "--runtime-samples", str(captured_runtime),
+                    "--limits", str(captured_limits),
+                    "--capture-bundle-sha256",
+                    str(promotion_request["capture_bundle_sha256"]),
+                    "--review-request-sha256",
+                    str(promotion_request["request_file_sha256"]),
+                    "--review-request-content-sha256",
+                    str(promotion_request[
+                        "request_content_sha256"]),
+                    "--baseline-kind", "recovered_post_cutover",
+                    "--reviewer", str(promotion_request["reviewer"]),
+                    "--evidence-reference",
+                    str(promotion_request["evidence_reference"]),
+                    "--spec-deviation",
+                    str(promotion_request["spec_deviation"]),
+                    "--approval-reference",
+                    str(promotion_request["approval_reference"]),
+                    "--output", str(rederived_baseline),
+                ],
+                step=(
+                    "independently rederiving published SQL guardrail "
+                    "baseline from immutable capture"
+                ),
+            )
+            run_checked(
+                [
+                    sys.executable,
+                    str(captured_tool),
+                    "validate-baseline",
+                    "--baseline", str(rederived_baseline),
+                ],
+                step="validating independently rederived SQL baseline",
+            )
+            if rederived_baseline.read_bytes() != baseline_body:
+                raise RuntimeError(
+                    "candidate baseline does not exactly rederive from its "
+                    "immutable capture, limits, request, and retained tool")
+
+    run_checked(
+        [
+            *tool_prefix,
+            "mark-build",
+            "--repository-root", manifest["repository_root"],
+            "--cmake-source-dir", manifest["cmake_source_dir"],
+            "--build-dir", manifest["build_dir"],
+        ],
+        step="marking dedicated SQL guardrail build tree",
+    )
+
+    run_checked(
+        [
+            *tool_prefix,
+            "measure",
+            "--repository-root", manifest["repository_root"],
+            "--cmake-source-dir", manifest["cmake_source_dir"],
+            "--build-dir", manifest["build_dir"],
+            "--role", "candidate",
+            "--affected-target", "postgresql_bioseq",
+            "--affected-target", "bioseq_bench_e2e",
+            "--artifact-inventory", manifest["artifact_inventory"],
+            "--generator-output-inventory",
+            manifest["generator_output_inventory"],
+            "--generator-executable", manifest["generator_executable"],
+            "--production-dso", manifest["production_dso"],
+            "--benchmark-executable", manifest["benchmark_executable"],
+            "--comparator-dso", manifest["comparator_dso"],
+            "--output", str(measurement_preinstall),
+        ],
+        step="measuring SQL guardrail candidate build evidence",
+    )
+
+    # Measurement deliberately cleans and rebuilds exact targets. Reinstall
+    # that final measured extension and restart PostgreSQL before any SQL
+    # sample, closing stale-installed-DSO and dyld/dlopen cache gaps.
+    run_checked(
+        _cmake_install_cmd(active_build_dir, active_preset),
+        step="installing measured SQL guardrail extension",
+    )
+    run_checked(
+        [
+            *tool_prefix,
+            "bind-installed-dso",
+            "--measurement", str(measurement_preinstall),
+            "--installed-production-dso",
+            manifest["installed_production_dso"],
+            "--output", str(measurement),
+        ],
+        step="binding installed SQL guardrail production DSO",
+    )
+    measurement_value = json.loads(
+        _read_sql_guardrail_evidence(measurement))
+    environment_key = (
+        measurement_value.get("environment", {}).get("sha256")
+        if isinstance(measurement_value, dict) else None
+    )
+    if (
+        not isinstance(environment_key, str)
+        or re.fullmatch(r"[0-9a-f]{64}", environment_key) is None
+    ):
+        raise RuntimeError(
+            "SQL guardrail measurement has no canonical environment key")
+    if (
+        phase == "candidate_qualification"
+        and environment_key != request["canonical_environment_key"]
+    ):
+        raise RuntimeError(
+            "candidate measurement canonical environment differs from request")
+    _restart_postgresql(
+        active_build_dir, active_preset, log_handle, deadline)
+    _prepare_aws_postgresql_test_database(
+        active_preset, log_handle, deadline)
+
+    exact_benchmark_args = [
+        manifest["benchmark_executable"],
+        "--filter",
+        "benchmark=bench_sql_codegen_guardrail",
+    ]
+    issued_run_nonces: set[int] = set()
+    live_authorities: dict[int, Path] = {}
+
+    def run_benchmark(
+            *, calibration: bool) -> tuple[Path, int, Path, Path, Path]:
+        reports_before = _report_paths(MODES["bench-e2e"].reporting_dir)
+        run_env = env.copy()
+        run_env["BIOSEQ_SQL_GUARDRAIL_BENCHMARK_EXECUTABLE"] = (
+            manifest["benchmark_executable"])
+        while True:
+            run_nonce = secrets.randbelow((1 << 53) - 1) + 1
+            if run_nonce not in issued_run_nonces:
+                issued_run_nonces.add(run_nonce)
+                break
+        run_env["BIOSEQ_SQL_GUARDRAIL_RUN_NONCE"] = str(run_nonce)
+        host_state_before = (
+            artifact_directory
+            / f"runtime_host_state_before_{run_nonce}.json"
+        )
+        host_state_after = (
+            artifact_directory
+            / f"runtime_host_state_after_{run_nonce}.json"
+        )
+        paired_samples_raw = (
+            artifact_directory
+            / f"paired_runtime_samples_raw_{run_nonce}.jsonl"
+        )
+        paired_samples = (
+            artifact_directory
+            / f"paired_runtime_samples_{run_nonce}.json"
+        )
+        run_env[
+            "BIOSEQ_SQL_GUARDRAIL_PAIRED_SAMPLES_RAW_PATH"
+        ] = str(paired_samples_raw)
+        authority_broker: (
+            _SqlGuardrailLiveAuthorityBroker | None
+        ) = None
+        if calibration:
+            run_env.pop(
+                "BIOSEQ_SQL_GUARDRAIL_MCP_AUTHORITY_PATH", None)
+            run_env.pop(
+                "BIOSEQ_SQL_GUARDRAIL_MCP_AUTHORITY_SOCKET", None)
+            run_env["BIOSEQ_SQL_GUARDRAIL_CALIBRATION"] = "1"
+            run_env["BIOSEQ_SQL_GUARDRAIL_CALIBRATION_MEASUREMENT"] = (
+                measurement)
+        else:
+            run_env.pop("BIOSEQ_SQL_GUARDRAIL_CALIBRATION", None)
+            run_env.pop(
+                "BIOSEQ_SQL_GUARDRAIL_CALIBRATION_MEASUREMENT", None)
+            if baseline_snapshot is None:
+                raise RuntimeError(
+                    "qualification benchmark has no immutable baseline snapshot")
+            run_env["BIOSEQ_SQL_GUARDRAIL_QUALIFICATION_PATH"] = str(
+                qualification_candidate)
+            run_env[
+                "BIOSEQ_SQL_GUARDRAIL_REVIEWED_BASELINE_PATH"
+            ] = str(baseline_snapshot)
+            authority_path = (
+                artifact_directory
+                / f"live_mcp_authority_{run_nonce}.json"
+            )
+            broker_path = (
+                artifact_directory
+                / f"live_mcp_authority_{run_nonce}.sock"
+            )
+            _create_sql_guardrail_live_authority(
+                output=authority_path,
+                request=request,
+                run_nonce=run_nonce,
+                qualification=qualification_candidate,
+                baseline=baseline_snapshot,
+                measurement=measurement,
+                broker_socket=broker_path,
+            )
+            authority_broker = _SqlGuardrailLiveAuthorityBroker(
+                path=broker_path,
+                run_nonce=run_nonce,
+                authority_file_sha256=_sha256_path(authority_path),
+                request_snapshot_sha256=_canonical_json_sha256(request),
+            )
+            run_env[
+                "BIOSEQ_SQL_GUARDRAIL_MCP_AUTHORITY_PATH"
+            ] = str(authority_path)
+            run_env[
+                "BIOSEQ_SQL_GUARDRAIL_MCP_AUTHORITY_SOCKET"
+            ] = str(broker_path)
+            live_authorities[run_nonce] = authority_path
+        run_checked(
+            [
+                *tool_prefix,
+                "capture-runtime-host-state",
+                "--measurement", str(measurement),
+                "--phase", "before",
+                "--run-nonce", str(run_nonce),
+                "--output", str(host_state_before),
+            ],
+            step="capturing pre-report SQL guardrail host state",
+        )
+        if authority_broker is not None:
+            authority_broker.start()
+        try:
+            run_checked(
+                exact_benchmark_args,
+                child_env=run_env,
+                step=(
+                    "running SQL guardrail calibration report"
+                    if calibration
+                    else "running SQL guardrail qualification report"
+                ),
+            )
+        finally:
+            if authority_broker is not None:
+                authority_broker.stop()
+        if (
+            authority_broker is not None
+            and not authority_broker.consumed
+        ):
+            raise RuntimeError(
+                "qualification benchmark did not consume its one-use "
+                "live MCP authority")
+        run_checked(
+            [
+                *tool_prefix,
+                "capture-runtime-host-state",
+                "--measurement", str(measurement),
+                "--phase", "after",
+                "--run-nonce", str(run_nonce),
+                "--output", str(host_state_after),
+            ],
+            step="capturing post-report SQL guardrail host state",
+        )
+        report = _newest_report(reports_before, "bench-e2e")
+        if report is None:
+            raise RuntimeError(
+                "SQL guardrail benchmark produced no final framework report")
+        run_checked(
+            [
+                *tool_prefix,
+                "seal-paired-runtime-samples",
+                "--raw-jsonl", str(paired_samples_raw),
+                "--report", str(report),
+                "--measurement", str(measurement),
+                "--run-nonce", str(run_nonce),
+                "--output", str(paired_samples),
+            ],
+            step="sealing exact paired SQL guardrail runtime samples",
+        )
+        return (
+            report,
+            run_nonce,
+            host_state_before,
+            host_state_after,
+            paired_samples,
+        )
+
+    evidence: dict[str, object] = {
+        "workflow_request": request["request_path"],
+        "workflow_request_sha256": request["request_file_sha256"],
+        "workflow_request_snapshot_sha256":
+            _canonical_json_sha256(request),
+        "measurement": str(measurement),
+        "measurement_sha256": _sha256_path(measurement),
+        "canonical_environment_key": environment_key,
+        "environment_specific": True,
+    }
+    if phase == "calibration_capture":
+        live_reports = [
+            run_benchmark(calibration=True)
+            for _ in range(3)
+        ]
+        reports: list[Path] = []
+        report_records: list[dict[str, object]] = []
+        for index, (
+            live_report,
+            run_nonce,
+            host_state_before,
+            host_state_after,
+            paired_samples,
+        ) in enumerate(
+                live_reports, start=1):
+            report_copy = (
+                artifact_directory / f"calibration_report_{index}.json"
+            )
+            _write_sql_guardrail_evidence_exclusive(
+                report_copy,
+                _read_sql_guardrail_evidence(live_report),
+            )
+            record = _sql_guardrail_artifact_record(report_copy)
+            record["run_nonce"] = run_nonce
+            record["host_state_before"] = (
+                _sql_guardrail_artifact_record(host_state_before)
+            )
+            record["host_state_after"] = (
+                _sql_guardrail_artifact_record(host_state_after)
+            )
+            record["paired_runtime_samples"] = (
+                _sql_guardrail_artifact_record(paired_samples)
+            )
+            reports.append(report_copy)
+            report_records.append(record)
+        runtime_samples = artifact_directory / "runtime_samples.json"
+        extract_args = [
+            *tool_prefix,
+            "extract-runtime-samples",
+            "--measurement", str(measurement),
+            "--output", str(runtime_samples),
+        ]
+        for report, live_report in zip(
+            reports, live_reports, strict=True
+        ):
+            extract_args.extend([
+                "--report", str(report),
+                "--host-state-before", str(live_report[2]),
+                "--host-state-after", str(live_report[3]),
+                "--paired-runtime-samples", str(live_report[4]),
+            ])
+        run_checked(
+            extract_args,
+            step="extracting independent SQL guardrail runtime samples",
+        )
+        retained_inputs: dict[str, Path] = {}
+        for field in (
+            "tool",
+            "benchmark_configuration",
+            "calibration_configuration",
+            "artifact_inventory",
+            "generator_output_inventory",
+            "generator_executable",
+            "production_dso",
+            "benchmark_executable",
+            "comparator_dso",
+        ):
+            source = Path(manifest[field])
+            retained = artifact_directory / (
+                f"retained_{field}{source.suffix}"
+            )
+            _write_sql_guardrail_evidence_exclusive(
+                retained, _read_sql_guardrail_evidence(source))
+            retained_inputs[field] = retained
+        source_input_bindings = {
+            "tool": "main/bench/sql_codegen_guardrail.py",
+            "benchmark_configuration":
+                "main/bench/"
+                "bench_sql_codegen_guardrail_configuration.json",
+            "calibration_configuration":
+                "main/bench/"
+                "bench_sql_codegen_guardrail_calibration_configuration.json",
+        }
+        source_entries = {
+            entry["path"]: entry
+            for entry in measurement_value["source"][
+                "inventory_entries"
+            ]
+        }
+        for field, original_path in source_input_bindings.items():
+            retained_record = _sql_guardrail_artifact_record(
+                retained_inputs[field])
+            source_entry = source_entries.get(original_path)
+            if (
+                source_entry is None
+                or source_entry.get("bytes")
+                    != retained_record["bytes"]
+                or source_entry.get("sha256")
+                    != retained_record["sha256"]
+            ):
+                raise RuntimeError(
+                    f"retained {field} differs from measured source "
+                    "inventory")
+        untracked_source_records: list[dict[str, object]] = []
+        for index, original_path in enumerate(
+            measurement_value["source"]["untracked_files"]
+        ):
+            source = WORKSPACE_ROOT / original_path
+            retained = artifact_directory / (
+                f"untracked_source_{index:04d}_{source.name}"
+            )
+            _write_sql_guardrail_evidence_exclusive(
+                retained, source.read_bytes())
+            record = _sql_guardrail_artifact_record(retained)
+            source_entry = source_entries.get(original_path)
+            if (
+                source_entry is None
+                or source_entry.get("bytes") != record["bytes"]
+                or source_entry.get("sha256") != record["sha256"]
+            ):
+                raise RuntimeError(
+                    f"untracked source changed after measurement: "
+                    f"{original_path}")
+            record["original_path"] = original_path
+            untracked_source_records.append(record)
+        generated_records: list[dict[str, object]] = []
+        for group in ("sql", "json", "cpp"):
+            entries = measurement_value["artifacts"][group]["entries"]
+            for index, entry in enumerate(entries):
+                source = Path(entry["path"])
+                retained = artifact_directory / (
+                    f"generated_{group}_{index:04d}_{source.name}"
+                )
+                _write_sql_guardrail_evidence_exclusive(
+                    retained, _read_sql_guardrail_evidence(source))
+                record = _sql_guardrail_artifact_record(retained)
+                record.update({
+                    "group": group,
+                    "original_path": entry["path"],
+                })
+                generated_records.append(record)
+        capture_bundle = {
+            "schema_version": 1,
+            "artifact_kind":
+                "doc0388_sql_codegen_guardrail_capture_bundle",
+            "status": "unreviewed_calibration",
+            "baseline_eligibility": "recovered_post_cutover_only",
+            "capture_request": {
+                "path": str(request["request_path"]),
+                "file_sha256": str(request["request_file_sha256"]),
+                "content_sha256":
+                    str(request["request_content_sha256"]),
+                "normalized_sha256":
+                    _canonical_json_sha256(request),
+                "normalized_request": request,
+            },
+            "canonical_environment_key": environment_key,
+            "source": measurement_value["source"],
+            "environment": measurement_value["environment"],
+            "measurement":
+                _sql_guardrail_artifact_record(measurement),
+            "runtime_samples":
+                _sql_guardrail_artifact_record(runtime_samples),
+            "calibration_reports": report_records,
+            "generated_artifacts": generated_records,
+            "source_input_bindings": source_input_bindings,
+            "untracked_source_files": untracked_source_records,
+            **{
+                field: _sql_guardrail_artifact_record(path)
+                for field, path in retained_inputs.items()
+            },
+        }
+        capture_bundle["content_sha256"] = _canonical_json_sha256(
+            capture_bundle)
+        capture_output = Path(str(request["capture_bundle_output"]))
+        _write_sql_guardrail_evidence_exclusive(
+            capture_output,
+            (json.dumps(
+                capture_bundle, indent=2, sort_keys=True
+            ) + "\n").encode("utf-8"),
+        )
+        _load_sql_guardrail_capture_bundle(
+            capture_output,
+            expected_sha256=_sha256_path(capture_output),
+        )
+        evidence.update({
+            "calibration_reports": [str(report) for report in reports],
+            "runtime_samples": str(runtime_samples),
+            "capture_bundle": str(capture_output),
+            "capture_bundle_sha256": _sha256_path(capture_output),
+            "baseline_eligibility": "recovered_post_cutover_only",
+            "reviewed_baseline": None,
+            "qualification": None,
+        })
+        return live_reports[-1][0], evidence
+
+    qualification_candidate = artifact_directory / "qualification.json"
+    if baseline_snapshot is None:
+        raise RuntimeError("candidate qualification baseline snapshot is absent")
+    run_checked(
+        [
+            *tool_prefix,
+            "qualify",
+            "--baseline", str(baseline_snapshot),
+            "--measurement", str(measurement),
+            "--qualification-request-sha256",
+            str(request["request_file_sha256"]),
+            "--qualification-request-content-sha256",
+            str(request["request_content_sha256"]),
+            "--qualification-request-normalized-sha256",
+            _canonical_json_sha256(request),
+            "--output", str(qualification_candidate),
+        ],
+        step="sealing SQL guardrail candidate qualification",
+    )
+    qualification_body = _read_sql_guardrail_evidence(
+        qualification_candidate)
+    (
+        live_report,
+        report_nonce,
+        report_host_state_before,
+        report_host_state_after,
+        report_paired_runtime_samples,
+    ) = run_benchmark(calibration=False)
+    report = artifact_directory / "qualification_report.json"
+    _write_sql_guardrail_evidence_exclusive(
+        report, _read_sql_guardrail_evidence(live_report))
+    run_checked(
+        [
+            *tool_prefix,
+            "validate-qualification-report",
+            "--report", str(report),
+            "--measurement", str(measurement),
+            "--qualification", str(qualification_candidate),
+            "--baseline", str(baseline_snapshot),
+            "--host-state-before", str(report_host_state_before),
+            "--host-state-after", str(report_host_state_after),
+            "--paired-runtime-samples",
+            str(report_paired_runtime_samples),
+            "--expected-run-nonce", str(report_nonce),
+            "--qualification-request-sha256",
+            str(request["request_file_sha256"]),
+            "--qualification-request-content-sha256",
+            str(request["request_content_sha256"]),
+            "--qualification-request-normalized-sha256",
+            _canonical_json_sha256(request),
+        ],
+        step="independently validating final SQL guardrail report",
+    )
+    # Publish the qualification only after the nonce-bound final report and
+    # its content-sealed host-state boundaries have independently passed.
+    # A failed candidate run must never leave a pass-looking public artifact.
+    _write_sql_guardrail_evidence_exclusive(
+        output_anchor, qualification_body)
+    qualification = output_anchor
+    active_qualification = Path(manifest["qualification"])
+    temporary_active = active_qualification.with_name(
+        active_qualification.name + f".tmp-{os.getpid()}")
+    _write_sql_guardrail_evidence_exclusive(
+        temporary_active, qualification_body)
+    os.replace(temporary_active, active_qualification)
+    evidence.update({
+        "reviewed_baseline": str(baseline_snapshot),
+        "reviewed_baseline_sha256": request["baseline_sha256"],
+        "qualification": str(qualification),
+        "qualification_sha256": _sha256_path(qualification),
+        "qualification_report": str(report),
+        "qualification_report_sha256": _sha256_path(report),
+        "qualification_report_host_state_before":
+            str(report_host_state_before),
+        "qualification_report_host_state_before_sha256":
+            _sha256_path(report_host_state_before),
+        "qualification_report_host_state_after":
+            str(report_host_state_after),
+        "qualification_report_host_state_after_sha256":
+            _sha256_path(report_host_state_after),
+        "qualification_report_paired_runtime_samples":
+            str(report_paired_runtime_samples),
+        "qualification_report_paired_runtime_samples_sha256":
+            _sha256_path(report_paired_runtime_samples),
+        "qualification_live_mcp_authority":
+            str(live_authorities[report_nonce]),
+        "qualification_live_mcp_authority_sha256":
+            _sha256_path(live_authorities[report_nonce]),
+        "baseline_publication_receipt":
+            request["baseline_publication_receipt"],
+        "baseline_publication_receipt_sha256":
+            request["baseline_publication_receipt_sha256"],
+        "baseline_publication_id":
+            request["baseline_publication_id"],
+    })
+    return report, evidence
+
+
+def _run_sql_guardrail_promotion(
+        *,
+        request: dict[str, object],
+        log_handle,
+        deadline: float,
+) -> tuple[None, dict[str, object]]:
+    """Promote one immutable capture in a build-free reviewer-owned call."""
+    if request.get("phase") != "baseline_promotion":
+        raise RuntimeError("invalid SQL guardrail promotion phase")
+    bundle_path = Path(str(request["capture_bundle"]))
+    bundle, artifact_bodies = _load_sql_guardrail_capture_bundle(
+        bundle_path,
+        expected_sha256=str(request["capture_bundle_sha256"]),
+    )
+    limits_body = _read_sql_guardrail_evidence(
+        Path(str(request["limits"])),
+        expected_sha256=str(request["limits_sha256"]),
+    )
+    output = Path(str(request["baseline_output"]))
+    if output.exists():
+        raise RuntimeError(
+            f"reviewed baseline output already exists: {output}")
+
+    def run_checked(argv: list[str], step: str) -> None:
+        _update_entry("bench-e2e", step=step)
+        rc = _stream_subprocess(
+            argv,
+            log_handle,
+            deadline,
+            cwd=WORKSPACE_ROOT,
+            env=_build_worker_descendant_environment(),
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"SQL guardrail promotion step '{step}' exited with code {rc}")
+
+    with tempfile.TemporaryDirectory(
+            prefix="bioseq-sql-guardrail-promotion-") as temporary:
+        directory = Path(temporary)
+        measurement = directory / "measurement.json"
+        runtime_samples = directory / "runtime_samples.json"
+        limits = directory / "limits.json"
+        tool = directory / "sql_codegen_guardrail.py"
+        candidate = directory / "reviewed_baseline.json"
+        measurement.write_bytes(artifact_bodies["measurement"])
+        runtime_samples.write_bytes(artifact_bodies["runtime_samples"])
+        limits.write_bytes(limits_body)
+        # Promotion is an interpretation of the immutable capture. Execute
+        # the exact tool bytes measured and retained by that capture, never
+        # a mutable workspace copy that may have drifted after calibration.
+        tool.write_bytes(artifact_bodies["tool"])
+        for index, report_record in enumerate(
+                bundle["calibration_reports"]):
+            retained_report = directory / f"report_{index}.json"
+            retained_pairs = directory / f"paired_{index}.json"
+            retained_report.write_bytes(
+                artifact_bodies[f"report[{index}]"])
+            retained_pairs.write_bytes(
+                artifact_bodies[
+                    f"report[{index}].paired_runtime_samples"
+                ])
+            run_checked(
+                [
+                    sys.executable,
+                    str(tool),
+                    "validate-paired-runtime-samples",
+                    "--paired-runtime-samples", str(retained_pairs),
+                    "--report", str(retained_report),
+                    "--measurement", str(measurement),
+                    "--expected-run-nonce",
+                    str(report_record["run_nonce"]),
+                ],
+                (
+                    "independently validating retained paired SQL "
+                    f"runtime samples {index + 1}"
+                ),
+            )
+        run_checked(
+            [
+                sys.executable,
+                str(tool),
+                "review",
+                "--measurement", str(measurement),
+                "--runtime-samples", str(runtime_samples),
+                "--limits", str(limits),
+                "--capture-bundle-sha256",
+                str(request["capture_bundle_sha256"]),
+                "--review-request-sha256",
+                str(request["request_file_sha256"]),
+                "--review-request-content-sha256",
+                str(request["request_content_sha256"]),
+                "--baseline-kind", "recovered_post_cutover",
+                "--reviewer", str(request["reviewer"]),
+                "--evidence-reference",
+                str(request["evidence_reference"]),
+                "--spec-deviation", str(request["spec_deviation"]),
+                "--approval-reference",
+                str(request["approval_reference"]),
+                "--output", str(candidate),
+            ],
+            "validating and sealing reviewed SQL guardrail baseline",
+        )
+        run_checked(
+            [
+                sys.executable,
+                str(tool),
+                "validate-baseline",
+                "--baseline", str(candidate),
+            ],
+            "independently validating reviewed SQL guardrail baseline",
+        )
+        candidate_body = candidate.read_bytes()
+        candidate_value = json.loads(candidate_body)
+        if (
+            candidate_value.get("canonical_environment_key")
+                != bundle["canonical_environment_key"]
+            or candidate_value.get("capture_bundle_sha256")
+                != request["capture_bundle_sha256"]
+        ):
+            raise RuntimeError(
+                "promoted baseline does not bind the capture environment/bundle")
+        _write_sql_guardrail_evidence_exclusive(output, candidate_body)
+
+    publication_path, publication = _publish_sql_guardrail_baseline(
+        baseline=output,
+        baseline_value=candidate_value,
+        request=request,
+    )
+    evidence = {
+        "workflow_request": request["request_path"],
+        "workflow_request_sha256": request["request_file_sha256"],
+        "workflow_request_snapshot_sha256":
+            _canonical_json_sha256(request),
+        "capture_bundle": str(bundle_path),
+        "capture_bundle_sha256": request["capture_bundle_sha256"],
+        "canonical_environment_key":
+            bundle["canonical_environment_key"],
+        "reviewed_baseline": str(output),
+        "reviewed_baseline_sha256": _sha256_path(output),
+        "baseline_publication_receipt": str(publication_path),
+        "baseline_publication_receipt_sha256":
+            _sha256_path(publication_path),
+        "baseline_publication_id": publication["publication_id"],
+        "qualification": None,
+        "environment_specific": True,
+    }
+    return None, evidence
+
+
 def _run_command_argv(mode: str, active_bin_dir: Path,
                       command: List[str], bench_flags=None,
                       test_flags=None) -> List[str]:
@@ -1638,9 +3968,591 @@ def _run_command_argv(mode: str, active_bin_dir: Path,
     return full_command
 
 
+_POSTGRES_ERROR_SAFETY_BOOLEAN_CACHE_KEYS = frozenset({
+    "BIOSEQ_BUILD_TESTS",
+    "BIOSEQ_TEST_INDEXES",
+    "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS",
+    "BIOSEQ_BUILD_WEBSITE",
+})
+_POSTGRES_ERROR_SAFETY_PATH_CACHE_KEYS = frozenset({
+    "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE",
+    POSTGRES_ERROR_SAFETY_PEER_BUILD_DIR_CACHE_KEY,
+})
+
+
+def _postgres_error_safety_cache_contract(
+        preset: str) -> dict[str, str]:
+    common = {
+        "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE":
+            str(POSTGRES_ERROR_SAFETY_CASE_TEMPLATE),
+        "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+        "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+        "BIOSEQ_BUILD_WEBSITE": "OFF",
+    }
+    common.update(_cmake_preset_cache_contract(
+        preset, ("PostgreSQL_CONFIG",)))
+    if preset == POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET:
+        return {
+            "BIOSEQ_BUILD_TESTS": "ON",
+            "BIOSEQ_TEST_INDEXES": "ON",
+            **common,
+        }
+    if preset == POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET:
+        return {
+            "BIOSEQ_BUILD_TESTS": "OFF",
+            "BIOSEQ_TEST_INDEXES": "OFF",
+            **common,
+            POSTGRES_ERROR_SAFETY_PEER_BUILD_DIR_CACHE_KEY: str(
+                PROJECT_ROOT
+                / "build"
+                / POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET),
+        }
+    raise ValueError(
+        f"unsupported PostgreSQL error-safety preset {preset!r}")
+
+
+def _postgres_error_safety_build_sequence(
+        build_only: bool) -> tuple[tuple[str, str], ...]:
+    sequence = [
+        (
+            POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET,
+            POSTGRES_ERROR_SAFETY_RUNTIME_PROFILES_TARGET,
+        ),
+        (
+            POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+            POSTGRES_ERROR_SAFETY_RUNTIME_PROFILES_TARGET,
+        ),
+    ]
+    if not build_only:
+        sequence.extend((
+            (
+                POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+                POSTGRES_ERROR_SAFETY_CANDIDATE_TARGET,
+            ),
+            (
+                POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+                POSTGRES_ERROR_SAFETY_EVIDENCE_TARGET,
+            ),
+        ))
+    return tuple(sequence)
+
+
+def _postgres_error_safety_cache_matches(
+        build_dir: Path, key: str, expected: str) -> bool:
+    if key in _POSTGRES_ERROR_SAFETY_BOOLEAN_CACHE_KEYS:
+        expected_bool = expected == "ON"
+        return _cmake_cache_bool(build_dir, key) is expected_bool
+
+    cached = _cmake_cache_value(build_dir, key)
+    if cached is None:
+        return False
+    if key in _POSTGRES_ERROR_SAFETY_PATH_CACHE_KEYS:
+        try:
+            return (
+                Path(cached).resolve(strict=False)
+                == Path(expected).resolve(strict=False)
+            )
+        except (OSError, RuntimeError):
+            return False
+    return cached == expected
+
+
+def _checked_postgres_error_safety_case_template() -> Path:
+    template = POSTGRES_ERROR_SAFETY_CASE_TEMPLATE
+    try:
+        metadata = template.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            "checked PostgreSQL error-safety runtime case template is "
+            f"missing: {template}") from exc
+    if template.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(
+            "checked PostgreSQL error-safety runtime case template must be "
+            f"a regular non-symlink file: {template}")
+    return template.resolve(strict=True)
+
+
+def _configure_postgres_error_safety_tree(
+        preset: str, build_dir: Path, log_handle, deadline: float,
+        env: dict[str, str], rt_priority: int | None) -> None:
+    expected_cache = _postgres_error_safety_cache_contract(preset)
+    build_ninja = build_dir / "build.ninja"
+    if not build_ninja.exists() and (build_dir / "CMakeCache.txt").exists():
+        _clear_cmake_configure_cache(
+            build_dir,
+            log_handle,
+            "previous PostgreSQL error-safety configure did not produce "
+            "build.ninja",
+        )
+
+    repairs = {
+        key: expected
+        for key, expected in expected_cache.items()
+        if not _postgres_error_safety_cache_matches(
+            build_dir, key, expected)
+    }
+    postgresql_reset_args = _postgresql_discovery_cache_reset_args(
+        build_dir,
+        preset,
+    )
+    clang_rt_repairs, clang_rt_reasons = _clang_rt_cmake_cache_repairs(
+        build_dir, preset, rt_priority)
+    if (
+        not build_ninja.exists()
+        or repairs
+        or postgresql_reset_args
+        or clang_rt_repairs
+    ):
+        if repairs:
+            log_handle.write(
+                "# PostgreSQL error-safety cache repair: "
+                + ", ".join(
+                    f"{key}={value}" for key, value in repairs.items())
+                + ".\n")
+        if clang_rt_reasons:
+            log_handle.write(
+                "# clang RT cache repair: "
+                + "; ".join(clang_rt_reasons)
+                + ".\n")
+        log_handle.flush()
+        configure_cache = (
+            dict(expected_cache)
+            if not build_ninja.exists()
+            else dict(repairs)
+        )
+        if postgresql_reset_args:
+            configure_cache["PostgreSQL_CONFIG"] = expected_cache[
+                "PostgreSQL_CONFIG"
+            ]
+        rc = _stream_subprocess(
+            [
+                "cmake",
+                "--preset",
+                preset,
+                *postgresql_reset_args,
+                *(f"-D{key}={value}"
+                  for key, value in configure_cache.items()),
+                *_initial_clang_rt_cmake_args(preset, rt_priority),
+                *clang_rt_repairs,
+            ],
+            log_handle,
+            deadline,
+            cwd=PROJECT_ROOT,
+            env=env,
+        )
+        if rc != 0:
+            raise RuntimeError(
+                f"configure of preset {preset!r} exited with code {rc}")
+    else:
+        log_handle.write(
+            f"# build tree already configured ({build_ninja}); all "
+            "PostgreSQL error-safety cache invariants are correct.\n")
+        log_handle.flush()
+
+    if not build_ninja.is_file():
+        raise RuntimeError(
+            f"preset {preset!r} did not produce {build_ninja}")
+    failed_invariants = [
+        f"{key}={expected}"
+        for key, expected in expected_cache.items()
+        if not _postgres_error_safety_cache_matches(
+            build_dir, key, expected)
+    ]
+    if failed_invariants:
+        raise RuntimeError(
+            "PostgreSQL error-safety cache invariant failed closed for "
+            f"preset {preset!r}: {', '.join(failed_invariants)}")
+
+
+def _resolve_postgres_error_safety_dso(build_dir: Path) -> Path:
+    artifact_dir = build_dir / "bioseq"
+    candidates = tuple(
+        artifact_dir / name
+        for name in ("bioseq.dylib", "bioseq.so", "bioseq.dll")
+    )
+    symlinks = [path for path in candidates if path.is_symlink()]
+    matches = [
+        path.resolve(strict=True)
+        for path in candidates
+        if path.is_file() and not path.is_symlink()
+    ]
+    if symlinks:
+        raise RuntimeError(
+            "PostgreSQL error-safety DSO candidates must not be symlinks: "
+            + ", ".join(str(path) for path in symlinks))
+    if len(matches) != 1:
+        raise RuntimeError(
+            "expected exactly one PostgreSQL error-safety DSO in "
+            f"{artifact_dir}; found {len(matches)} among "
+            + ", ".join(path.name for path in candidates))
+    return matches[0]
+
+
+def _checked_postgres_error_safety_review_waiver_snapshot(
+        entry: dict, build_only: bool,
+        review_waiver_json: str | None) -> dict[str, object] | None:
+    if build_only:
+        if review_waiver_json:
+            raise RuntimeError(
+                "postgres-error-safety build_only does not accept a review "
+                "waiver")
+        if entry.get(
+                "postgres_error_safety_review_waiver_sha256") is not None:
+            raise RuntimeError(
+                "postgres-error-safety build_only state unexpectedly contains "
+                "review-waiver authority")
+        return None
+    if not review_waiver_json:
+        raise RuntimeError(
+            "full postgres-error-safety qualification requires the explicit "
+            "postgres_error_safety_review_waiver input")
+    expected_sha256 = entry.get(
+        "postgres_error_safety_review_waiver_sha256")
+    actual_sha256 = _sha256_bytes(review_waiver_json.encode("utf-8"))
+    if expected_sha256 != actual_sha256:
+        raise RuntimeError(
+            "PostgreSQL error-safety review-waiver snapshot does not match "
+            "the scheduling state")
+    try:
+        value = json.loads(review_waiver_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"invalid immutable review-waiver snapshot: {exc}") from exc
+    try:
+        normalized = _validate_safety_waiver_snapshot(
+            value,
+            WORKSPACE_ROOT,
+        )
+    except PostgresErrorSafetyPromotionError as exc:
+        raise RuntimeError(
+            f"invalid immutable review-waiver snapshot: {exc}") from exc
+    canonical = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if canonical != review_waiver_json:
+        raise RuntimeError(
+            "PostgreSQL error-safety review-waiver snapshot is not canonical")
+    return normalized
+
+
+def _run_postgres_error_safety_worker(
+        entry: dict, build_only: bool, debug: bool,
+        bench_flags: list[str], test_flags: list[str],
+        bench_e2e_config: str | None,
+        review_waiver_json: str | None) -> int:
+    mode = POSTGRES_ERROR_SAFETY_MODE
+    started_at = float(entry["started_at"])
+    deadline = started_at + HARD_TIMEOUT_SEC
+    log_path = Path(entry["log_file"])
+    production_build_dir = (
+        PROJECT_ROOT / "build" / POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET)
+    test_indexes_build_dir = (
+        PROJECT_ROOT / "build" / POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET)
+    qualification_report: Path | None = None
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("w", buffering=1)
+    log_handle.write(
+        f"# bioseq build worker — mode={mode} pid={os.getpid()} "
+        f"started={time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(started_at))}\n"
+        f"# project_root={PROJECT_ROOT}\n"
+        f"# production_preset={POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET}\n"
+        f"# production_build_dir={production_build_dir}\n"
+        f"# test_indexes_preset={POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET}\n"
+        f"# test_indexes_build_dir={test_indexes_build_dir}\n"
+        f"# build_only={build_only}\n"
+        "# postgres_error_safety_review_waiver_snapshot="
+        f"{_sha256_bytes((review_waiver_json or '').encode('utf-8'))}\n"
+        f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
+    )
+    log_handle.flush()
+
+    try:
+        if debug:
+            raise RuntimeError(
+                "postgres-error-safety does not support debug build input")
+        if bench_flags or test_flags:
+            raise RuntimeError(
+                "postgres-error-safety does not support filter or CLI inputs")
+        if bench_e2e_config is not None:
+            raise RuntimeError(
+                "postgres-error-safety does not support bench_e2e_config")
+        review_waiver = (
+            _checked_postgres_error_safety_review_waiver_snapshot(
+                entry,
+                build_only,
+                review_waiver_json,
+            )
+        )
+
+        case_template = _checked_postgres_error_safety_case_template()
+        env = _build_worker_descendant_environment()
+        env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
+        env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
+        _ensure_local_toolchain_environment(env, test_indexes_build_dir)
+
+        machine_rt_priority = _configured_local_build_rt_priority()
+        effective_rt_priority = (
+            machine_rt_priority
+            if _local_clang_rt_is_enabled(
+                POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+                machine_rt_priority)
+            else None
+        )
+        if entry.get("rt_priority") != effective_rt_priority:
+            raise RuntimeError(
+                "clang realtime machine policy changed between scheduling "
+                "and worker start "
+                f"(scheduled={entry.get('rt_priority')}, "
+                f"current={effective_rt_priority}); refusing to build")
+
+        _update_entry(
+            mode,
+            step="configuring test-index profile",
+            build_only=build_only,
+            debug=False,
+            preset=POSTGRES_ERROR_SAFETY_PRODUCTION_PRESET,
+            build_dir=str(production_build_dir),
+            build_dirs=[
+                str(production_build_dir),
+                str(test_indexes_build_dir),
+            ],
+            secondary_preset=POSTGRES_ERROR_SAFETY_TEST_INDEXES_PRESET,
+            secondary_build_dir=str(test_indexes_build_dir),
+            runtime_case_template=str(case_template),
+            uses_private_cluster=True,
+        )
+
+        build_sequence = _postgres_error_safety_build_sequence(build_only)
+        profile_dsos: dict[str, Path] = {}
+        profile_trees = (
+            (
+                "test_indexes",
+                build_sequence[0][0],
+                test_indexes_build_dir,
+                build_sequence[0][1],
+            ),
+            (
+                "production",
+                build_sequence[1][0],
+                production_build_dir,
+                build_sequence[1][1],
+            ),
+        )
+        for profile, preset, build_dir, build_target in profile_trees:
+            _update_entry(mode, step=f"configuring {profile} profile")
+            _configure_postgres_error_safety_tree(
+                preset,
+                build_dir,
+                log_handle,
+                deadline,
+                env,
+                machine_rt_priority,
+            )
+            _update_entry(
+                mode,
+                step=f"building sealed {profile} profile",
+            )
+            rc = _stream_subprocess(
+                [
+                    "cmake",
+                    "--build",
+                    str(build_dir),
+                    "--target",
+                    build_target,
+                    "--parallel",
+                    str(CMAKE_PARALLEL_JOBS),
+                ],
+                log_handle,
+                deadline,
+                cwd=PROJECT_ROOT,
+                env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    "build of target "
+                    f"{build_target!r} "
+                    f"for {profile} exited with code {rc}")
+            profile_dsos[profile] = _resolve_postgres_error_safety_dso(
+                build_dir)
+            _update_entry(
+                mode,
+                **{f"{profile}_dso": str(profile_dsos[profile])},
+            )
+
+        if not build_only:
+            candidate_target = build_sequence[2][1]
+            _update_entry(
+                mode,
+                step=(
+                    "generating private PostgreSQL error-safety evidence "
+                    f"candidate with target {candidate_target}"),
+            )
+            rc = _stream_subprocess(
+                [
+                    "cmake",
+                    "--build",
+                    str(production_build_dir),
+                    "--target",
+                    candidate_target,
+                    "--parallel",
+                    str(CMAKE_PARALLEL_JOBS),
+                ],
+                log_handle,
+                deadline,
+                cwd=PROJECT_ROOT,
+                env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    "private-cluster candidate target "
+                    f"{candidate_target!r} exited with code {rc}")
+            if review_waiver is None:
+                raise RuntimeError(
+                    "full PostgreSQL error-safety qualification lost its "
+                    "validated review-waiver snapshot")
+            candidate_root = (
+                production_build_dir
+                / POSTGRES_ERROR_SAFETY_CANDIDATE_RELATIVE_ROOT
+            )
+            _update_entry(
+                mode,
+                step=(
+                    "promoting byte-identical PostgreSQL error-safety "
+                    "evidence under explicit user review waiver"),
+            )
+            try:
+                promotion_receipt, promotion = (
+                    _promote_safety_reviewed_evidence(
+                        candidate_root,
+                        review_waiver,
+                        WORKSPACE_ROOT,
+                    )
+                )
+            except PostgresErrorSafetyPromotionError as exc:
+                raise RuntimeError(
+                    "PostgreSQL error-safety candidate promotion failed "
+                    f"closed: {exc}") from exc
+            log_handle.write(
+                "# promoted PostgreSQL error-safety candidate as an atomic "
+                "byte copy under explicit user waiver\n"
+                f"# promotion_receipt={promotion_receipt}\n"
+                "# independent_review_performed=false\n"
+            )
+            log_handle.flush()
+            _update_entry(
+                mode,
+                postgres_error_safety_candidate_root=str(candidate_root),
+                postgres_error_safety_promotion_receipt=str(
+                    promotion_receipt),
+                postgres_error_safety_independent_review_performed=(
+                    promotion["independent_review_performed"]),
+            )
+
+            evidence_target = build_sequence[3][1]
+            _update_entry(
+                mode,
+                step=(
+                    "running private PostgreSQL error-safety evidence "
+                    f"target {evidence_target}"),
+            )
+            rc = _stream_subprocess(
+                [
+                    "cmake",
+                    "--build",
+                    str(production_build_dir),
+                    "--target",
+                    evidence_target,
+                    "--parallel",
+                    str(CMAKE_PARALLEL_JOBS),
+                ],
+                log_handle,
+                deadline,
+                cwd=PROJECT_ROOT,
+                env=env,
+            )
+            if rc != 0:
+                raise RuntimeError(
+                    "private-cluster evidence target "
+                    f"{evidence_target!r} exited "
+                    f"with code {rc}")
+            qualification_report = (
+                candidate_root / "evidence-validation.json")
+            try:
+                report_metadata = qualification_report.lstat()
+            except OSError as exc:
+                raise RuntimeError(
+                    "PostgreSQL error-safety evidence target published no "
+                    f"validation report: {qualification_report}") from exc
+            if (
+                qualification_report.is_symlink()
+                or not stat.S_ISREG(report_metadata.st_mode)
+                or report_metadata.st_nlink != 1
+            ):
+                raise RuntimeError(
+                    "PostgreSQL error-safety validation report must be a "
+                    "regular single-link non-symlink file: "
+                    f"{qualification_report}")
+
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="completed",
+            step="completed",
+            completed_at=completed_at,
+            exit_code=0,
+            report_file=(
+                str(qualification_report)
+                if qualification_report is not None else None
+            ),
+            build_only=build_only,
+            debug=False,
+        )
+        log_handle.write(
+            "\n# worker exiting cleanly at "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
+        )
+        return 0
+    except TimeoutError as exc:
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="killed_timeout",
+            step="killed_timeout",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(exc),
+            build_only=build_only,
+            debug=False,
+        )
+        log_handle.write(
+            f"\n# killed by {HARD_TIMEOUT_MIN}-min hard timeout: {exc}\n")
+        return 124
+    except Exception as exc:
+        completed_at = time.time()
+        _update_entry(
+            mode,
+            status="failed",
+            step="failed",
+            completed_at=completed_at,
+            exit_code=None,
+            notes=str(exc),
+            build_only=build_only,
+            debug=False,
+        )
+        log_handle.write(f"\n# worker failed: {exc}\n")
+        return 1
+    finally:
+        log_handle.close()
+
+
 def _run_build_worker(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
-                      test_flags=None, bench_e2e_config=None) -> int:
+                      test_flags=None, bench_e2e_config=None,
+                      sql_guardrail_request_json=None,
+                      postgres_error_safety_review_waiver_json=None) -> int:
     """Worker entry point — runs detached from the MCP server.
 
     Reads the slot the server reserved in state, walks configure → build →
@@ -1659,9 +4571,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
     the unit+integration qualification for a focused test run.
 
     `bench_e2e_config` is an absolute, server-validated path inside this
-    workspace. It is exposed only to the bench-e2e executable's environment;
-    configure, compilation, installation and every other mode remain immune to
-    a caller's configuration override.
+    workspace. Ordinary configurations are exposed to the bench-e2e
+    executable. DOC0388 workflow requests arrive separately as one immutable
+    canonical JSON snapshot so the detached worker never rereads mutable
+    request intent.
     """
     identity_error = _refuse_root_build_identity("detached build worker")
     if identity_error is not None:
@@ -1678,6 +4591,21 @@ def _run_build_worker(mode: str, build_only: bool = False,
     entry = state.get(mode)
     if not entry:
         _log(f"worker for {mode}: no state entry, exiting")
+        return 1
+    if mode == POSTGRES_ERROR_SAFETY_MODE:
+        return _run_postgres_error_safety_worker(
+            entry,
+            build_only,
+            debug,
+            bench_flags,
+            test_flags,
+            bench_e2e_config,
+            postgres_error_safety_review_waiver_json,
+        )
+    if postgres_error_safety_review_waiver_json:
+        _log(
+            "review-waiver snapshot was supplied outside "
+            "postgres-error-safety mode")
         return 1
 
     started_at = float(entry["started_at"])
@@ -1700,6 +4628,10 @@ def _run_build_worker(mode: str, build_only: bool = False,
         f"# bench_flags={json.dumps(bench_flags, ensure_ascii=True)}\n"
         f"# focused_test_args={json.dumps(test_flags, ensure_ascii=True)}\n"
         f"# bench_e2e_config={bench_e2e_config or ''}\n"
+        f"# sql_guardrail_request_snapshot="
+        f"{_sha256_bytes((sql_guardrail_request_json or '').encode())}\n"
+        f"# postgres_error_safety_review_waiver_snapshot="
+        f"{_sha256_bytes((postgres_error_safety_review_waiver_json or '').encode())}\n"
         f"# clang_rt_priority={entry.get('rt_priority')}\n"
         f"# hard_timeout_min={HARD_TIMEOUT_MIN}\n"
     )
@@ -1715,11 +4647,51 @@ def _run_build_worker(mode: str, build_only: bool = False,
         pre_reports = _report_paths(mode_details.reporting_dir)
 
     try:
+        sql_guardrail_workflow = None
+        if sql_guardrail_request_json:
+            try:
+                sql_guardrail_workflow = json.loads(
+                    sql_guardrail_request_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(
+                    f"invalid immutable SQL guardrail request snapshot: {exc}"
+                ) from exc
+            if (
+                not isinstance(sql_guardrail_workflow, dict)
+                or sql_guardrail_workflow.get("artifact_kind")
+                    != _SQL_GUARDRAIL_WORKFLOW_KIND
+                or sql_guardrail_workflow.get("phase")
+                    not in _SQL_GUARDRAIL_WORKFLOW_PHASES
+            ):
+                raise RuntimeError(
+                    "immutable SQL guardrail request snapshot is malformed")
         env = _build_worker_descendant_environment()
         # Never let ambient MCP-server state select an E2E configuration. The
         # explicit start_build argument below is the sole supported override.
         env.pop("BIOSEQ_E2E_CONFIG_OVERRIDE", None)
         env["CMAKE_EXPORT_COMPILE_COMMANDS"] = "1"
+        if (
+            sql_guardrail_workflow is not None
+            and sql_guardrail_workflow["phase"] == "baseline_promotion"
+        ):
+            report_path, workflow_evidence = _run_sql_guardrail_promotion(
+                request=sql_guardrail_workflow,
+                log_handle=log_handle,
+                deadline=deadline,
+            )
+            completed_at = time.time()
+            _update_entry(
+                mode,
+                status="completed",
+                step="completed",
+                completed_at=completed_at,
+                exit_code=0,
+                report_file=None,
+                sql_guardrail_workflow=workflow_evidence,
+                build_only=False,
+                debug=debug,
+            )
+            return 0
         # The local MCP may itself run on the provisioned Linux build host.
         # Keep the provisioned environment when present, but also recover
         # VCPKG_ROOT from an existing configured tree for a fresh sibling
@@ -1765,8 +4737,15 @@ def _run_build_worker(mode: str, build_only: bool = False,
         # when CMakeLists / cache / vcpkg manifest actually change, so a later
         # `cmake --build` still picks up genuine configuration changes.
         required_cache = mode_details.required_cache_variables or {}
+        preset_cache_contract = _cmake_preset_cache_contract(
+            active_preset, ("PostgreSQL_CONFIG",))
+        configure_cache_contract = {
+            **required_cache,
+            **preset_cache_contract,
+        }
         required_cache_args = [
-            f"-D{name}={value}" for name, value in required_cache.items()
+            f"-D{name}={value}"
+            for name, value in configure_cache_contract.items()
         ]
         initial_clang_rt_args = _initial_clang_rt_cmake_args(
             active_preset, machine_rt_priority)
@@ -1823,14 +4802,29 @@ def _run_build_worker(mode: str, build_only: bool = False,
             for name, value in required_cache.items()
             if _cmake_cache_value(active_build_dir, name) != value
         }
-        if cache_repairs:
+        cache_repairs.update(_cmake_preset_cache_repairs(
+            active_build_dir, active_preset))
+        postgresql_reset_args = _postgresql_discovery_cache_reset_args(
+            active_build_dir,
+            active_preset,
+        )
+        if postgresql_reset_args:
+            cache_repairs.update(preset_cache_contract)
+        if cache_repairs or postgresql_reset_args:
             repair_description = ", ".join(
                 f"{name}={value}" for name, value in cache_repairs.items())
             log_handle.write(
-                f"# mode cache repair: setting {repair_description}.\n")
+                "# mode cache repair: "
+                + (
+                    "resetting derived PostgreSQL discovery; "
+                    if postgresql_reset_args
+                    else ""
+                )
+                + f"setting {repair_description}.\n")
             log_handle.flush()
             rc = _stream_subprocess(
                 ["cmake", "--preset", active_preset,
+                 *postgresql_reset_args,
                  *(f"-D{name}={value}" for name, value in cache_repairs.items())],
                 log_handle, deadline, cwd=PROJECT_ROOT, env=env,
             )
@@ -1981,6 +4975,17 @@ def _run_build_worker(mode: str, build_only: bool = False,
                     "clang RT compiler-launcher cache repair exited with "
                     f"code {rc}")
 
+        postgresql_config_repairs = _cmake_preset_cache_repairs(
+            active_build_dir, active_preset)
+        if postgresql_config_repairs:
+            expected = postgresql_config_repairs["PostgreSQL_CONFIG"]
+            observed = _cmake_cache_value(
+                active_build_dir, "PostgreSQL_CONFIG")
+            raise RuntimeError(
+                "PostgreSQL_CONFIG cache invariant failed closed: "
+                f"preset={active_preset} expected={expected!r} "
+                f"observed={observed!r}")
+
         configured_test_indexes = _cmake_cache_bool(
             active_build_dir, "BIOSEQ_TEST_INDEXES")
         if configured_test_indexes != expected_test_indexes:
@@ -2078,6 +5083,41 @@ def _run_build_worker(mode: str, build_only: bool = False,
                 if rc != 0:
                     raise RuntimeError(
                         f"post-build target '{post_target}' exited with code {rc}")
+
+            if sql_guardrail_workflow is not None:
+                env.setdefault(
+                    "BIOSEQ_E2E_PG_RESTART_CMD",
+                    _postgresql_e2e_restart_shell_command(
+                        active_build_dir, active_preset),
+                )
+                report_path, workflow_evidence = (
+                    _run_sql_guardrail_workflow(
+                        request=sql_guardrail_workflow,
+                        active_build_dir=active_build_dir,
+                        active_preset=active_preset,
+                        env=env,
+                        log_handle=log_handle,
+                        deadline=deadline,
+                    )
+                )
+                completed_at = time.time()
+                _update_entry(
+                    mode,
+                    status="completed",
+                    step="completed",
+                    completed_at=completed_at,
+                    exit_code=0,
+                    report_file=(
+                        str(report_path) if report_path else None),
+                    build_only=False,
+                    debug=debug,
+                    sql_guardrail_workflow=workflow_evidence,
+                )
+                log_handle.write(
+                    "\n# SQL guardrail workflow exiting cleanly at "
+                    f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(completed_at))}\n"
+                )
+                return 0
 
             _update_entry(
                 mode,
@@ -2196,18 +5236,27 @@ def _running_in_same_group(
     """Find any currently-running run that conflicts with `mode`.
 
     Returns (running_mode, entry) or (None, None). Conflicts are decided by
-    lock groups, the resolved CMake build directory, and the shared PostgreSQL
-    install/restart resource. Build-directory comparison uses the path recorded
-    when a worker was reserved; legacy entries fall back to their recorded
-    debug selection. An unreadable or malformed running path fails closed.
+    lock groups, every resolved CMake build directory, and the shared
+    PostgreSQL install/restart resource. Build-directory comparison uses all
+    paths recorded when a worker was reserved; legacy entries fall back to
+    their recorded debug selection. An unreadable or malformed running path
+    fails closed.
     """
     mode_details = MODES[mode]
     try:
-        resolved_requested_build_dir = requested_build_dir.resolve(strict=False)
-    except (OSError, RuntimeError):
+        requested_build_dirs = (
+            build_dirs_for(mode, debug=False)
+            if mode == POSTGRES_ERROR_SAFETY_MODE
+            else (requested_build_dir,)
+        )
+        resolved_requested_build_dirs = {
+            path.resolve(strict=False)
+            for path in requested_build_dirs
+        }
+    except (OSError, RuntimeError, TypeError):
         # If any worker is live below, an indeterminate requested tree must
         # conflict rather than risk racing that worker's configure.
-        resolved_requested_build_dir = None
+        resolved_requested_build_dirs = None
     for other_mode in VALID_MODES:
         entry = _refresh(state, other_mode)
         if not entry:
@@ -2216,20 +5265,39 @@ def _running_in_same_group(
             continue
         other_details = MODES[other_mode]
         same_lock_group = other_details.lock_group == mode_details.lock_group
-        recorded_build_dir = entry.get("build_dir")
         try:
-            if resolved_requested_build_dir is None:
+            if resolved_requested_build_dirs is None:
                 same_build_dir = True
             else:
-                if recorded_build_dir is None:
-                    recorded_build_dir = build_dir_for(
-                        other_mode, bool(entry.get("debug", False)))
-                elif (not isinstance(recorded_build_dir, (str, os.PathLike))
-                        or not os.fspath(recorded_build_dir)):
-                    raise TypeError("running build directory is malformed")
-                other_build_dir = Path(recorded_build_dir).resolve(strict=False)
-                same_build_dir = (
-                    other_build_dir == resolved_requested_build_dir)
+                recorded_build_dirs = entry.get("build_dirs")
+                if recorded_build_dirs is None:
+                    recorded_build_dir = entry.get("build_dir")
+                    if recorded_build_dir is None:
+                        recorded_build_dirs = build_dirs_for(
+                            other_mode,
+                            bool(entry.get("debug", False)),
+                        )
+                    else:
+                        recorded_build_dirs = (recorded_build_dir,)
+                if (
+                    not isinstance(recorded_build_dirs, (list, tuple))
+                    or not recorded_build_dirs
+                ):
+                    raise TypeError(
+                        "running build directories are malformed")
+                resolved_other_build_dirs: set[Path] = set()
+                for path in recorded_build_dirs:
+                    if (
+                        not isinstance(path, (str, os.PathLike))
+                        or not os.fspath(path)
+                    ):
+                        raise TypeError(
+                            "running build directory is malformed")
+                    resolved_other_build_dirs.add(
+                        Path(path).resolve(strict=False))
+                same_build_dir = bool(
+                    resolved_other_build_dirs
+                    & resolved_requested_build_dirs)
         except (OSError, RuntimeError, TypeError):
             # A live worker with an indeterminate tree must block scheduling;
             # allowing it through could race a configure in that same tree.
@@ -2250,6 +5318,19 @@ def _running_in_same_group(
 # FilterConditions.benchmarks) but the bench CLI key is the singular `benchmark`.
 _FILTER_AXES = (("tags", "tags"), ("benchmarks", "benchmark"), ("cases", "cases"))
 
+# The SQL-codegen guardrail is a workflow-only sixth E2E benchmark.  Its
+# calibration and qualification runs receive a nonce and one-use authority
+# from a sealed bench-e2e request.  An ordinary unfiltered E2E run retains the
+# five pre-existing benchmarks instead of entering that privileged lane
+# without its required authority.  Explicit caller filters remain untouched.
+_ORDINARY_BENCH_E2E_BENCHMARKS = (
+    "bench_e2e",
+    "bench_e2e_signoff",
+    "bench_e2e_gpu_batch_proof",
+    "bench_e2e_routing_poc",
+    "bench_sort_scan",
+)
+
 # Focused unit/integration runs use Catch2's positional test-spec syntax, not
 # the benchmark runner's repeatable ``--filter`` option.  Keep the limits here
 # as well as in the MCP JSON schemas because the remote/CLI entry points can be
@@ -2257,6 +5338,29 @@ _FILTER_AXES = (("tags", "tags"), ("benchmarks", "benchmark"), ("cases", "cases"
 _MAX_CATCH2_TEST_SPECS = 32
 _MAX_CATCH2_TEST_SPEC_LENGTH = 512
 _MAX_CATCH2_COMBINED_TEST_SPEC_LENGTH = 4096
+
+
+def _ordinary_bench_e2e_default_filter(
+        mode: str,
+        bench_filter,
+        *,
+        build_only: bool,
+        debug_report: bool,
+        filter_supplied: bool,
+        sql_guardrail_workflow):
+    """Keep ordinary E2E runs out of the sealed guardrail-only lane."""
+    if (
+        mode == "bench-e2e"
+        and not build_only
+        and not debug_report
+        and sql_guardrail_workflow is None
+        and not filter_supplied
+        and bench_filter is None
+    ):
+        return {
+            "benchmarks": list(_ORDINARY_BENCH_E2E_BENCHMARKS),
+        }
+    return bench_filter
 
 
 def _filter_to_cli_args(bench_filter):
@@ -2398,6 +5502,505 @@ def _validate_bench_e2e_config_override(mode: str, requested_path):
     return str(resolved), None
 
 
+_SQL_GUARDRAIL_WORKFLOW_KIND = (
+    "doc0388_sql_codegen_guardrail_workflow_request"
+)
+_SQL_GUARDRAIL_WORKFLOW_PHASES = {
+    "calibration_capture",
+    "baseline_promotion",
+    "candidate_qualification",
+}
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_json_sha256(value: dict[str, object]) -> str:
+    return _sha256_bytes(json.dumps(
+        value, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8"))
+
+
+def _validate_json_content_seal(
+        value: dict[str, object], context: str) -> str:
+    seal = value.get("content_sha256")
+    if (
+        not isinstance(seal, str)
+        or re.fullmatch(r"[0-9a-f]{64}", seal) is None
+    ):
+        raise ValueError(f"{context} content_sha256 is invalid")
+    unsealed = dict(value)
+    del unsealed["content_sha256"]
+    if _canonical_json_sha256(unsealed) != seal:
+        raise ValueError(f"{context} content seal does not match")
+    return seal
+
+
+def _sql_guardrail_baseline_receipt_path(
+        baseline: Path) -> Path:
+    return baseline.with_name(
+        baseline.name + ".mcp-publication.json")
+
+
+def _load_sql_guardrail_publication_ledger(
+        *, required: bool) -> dict[str, object]:
+    if not SQL_GUARDRAIL_PUBLICATION_LEDGER.exists():
+        if required:
+            raise RuntimeError(
+                "SQL guardrail MCP publication ledger is missing")
+        value: dict[str, object] = {
+            "schema_version": 1,
+            "artifact_kind":
+                "doc0388_sql_guardrail_publication_ledger",
+            "publications": {},
+        }
+        value["content_sha256"] = _canonical_json_sha256(value)
+        return value
+    try:
+        value = json.loads(
+            SQL_GUARDRAIL_PUBLICATION_LEDGER.read_text(
+                encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "SQL guardrail MCP publication ledger is unreadable") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "schema_version",
+            "artifact_kind",
+            "publications",
+            "content_sha256",
+        }
+        or value.get("schema_version") != 1
+        or value.get("artifact_kind")
+            != "doc0388_sql_guardrail_publication_ledger"
+        or not isinstance(value.get("publications"), dict)
+    ):
+        raise RuntimeError(
+            "SQL guardrail MCP publication ledger schema is invalid")
+    try:
+        _validate_json_content_seal(
+            value, "SQL guardrail MCP publication ledger")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return value
+
+
+def _save_sql_guardrail_publication_ledger(
+        value: dict[str, object]) -> None:
+    unsealed = {
+        key: item
+        for key, item in value.items()
+        if key != "content_sha256"
+    }
+    unsealed["content_sha256"] = _canonical_json_sha256(unsealed)
+    temporary = SQL_GUARDRAIL_PUBLICATION_LEDGER.with_name(
+        SQL_GUARDRAIL_PUBLICATION_LEDGER.name
+        + f".tmp-{os.getpid()}")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8",
+                       closefd=False) as output:
+            json.dump(unsealed, output, indent=2, sort_keys=True)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, SQL_GUARDRAIL_PUBLICATION_LEDGER)
+
+
+def _publish_sql_guardrail_baseline(
+        *,
+        baseline: Path,
+        baseline_value: dict[str, object],
+        request: dict[str, object]) -> tuple[Path, dict[str, object]]:
+    """Publish the only server-recognized authority for one baseline."""
+    state = _load_state()
+    entry = state.get("bench-e2e")
+    request_snapshot_sha256 = _canonical_json_sha256(request)
+    worker_session_id = os.getsid(0)
+    if (
+        not isinstance(entry, dict)
+        or entry.get("status") != "running"
+        or entry.get("pid") != os.getpid()
+        or entry.get("started_at") is None
+        or entry.get("sql_guardrail_request_sha256")
+            != request_snapshot_sha256
+        or os.getsid(os.getpid()) != worker_session_id
+    ):
+        raise RuntimeError(
+            "baseline publication is not owned by the exact running MCP "
+            "worker/request/session")
+    publication_id = secrets.token_hex(32)
+    receipt_path = _sql_guardrail_baseline_receipt_path(baseline)
+    if receipt_path.exists():
+        raise RuntimeError(
+            f"baseline publication receipt already exists: {receipt_path}")
+    receipt: dict[str, object] = {
+        "schema_version": 1,
+        "artifact_kind":
+            "doc0388_sql_guardrail_baseline_publication",
+        "publication_id": publication_id,
+        "baseline_path": str(baseline.resolve(strict=True)),
+        "baseline_file_sha256": _sha256_path(baseline),
+        "baseline_content_sha256":
+            baseline_value["content_sha256"],
+        "capture_bundle_sha256":
+            request["capture_bundle_sha256"],
+        "canonical_environment_key":
+            baseline_value["canonical_environment_key"],
+        "promotion_request_file_sha256":
+            request["request_file_sha256"],
+        "promotion_request_content_sha256":
+            request["request_content_sha256"],
+        "promotion_request_snapshot_sha256":
+            request_snapshot_sha256,
+        "promotion_request": request,
+        "worker_pid": os.getpid(),
+        "worker_session_id": worker_session_id,
+        "worker_started_at": entry["started_at"],
+        "published_monotonic_ns": time.monotonic_ns(),
+    }
+    receipt["content_sha256"] = _canonical_json_sha256(receipt)
+    receipt_body = (
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    _write_sql_guardrail_evidence_exclusive(
+        receipt_path, receipt_body)
+    receipt_sha256 = _sha256_path(receipt_path)
+    with _global_lock():
+        ledger = _load_sql_guardrail_publication_ledger(
+            required=False)
+        publications = dict(ledger["publications"])
+        if publication_id in publications:
+            raise RuntimeError(
+                "SQL guardrail publication identifier collision")
+        publications[publication_id] = {
+            "receipt_path": str(receipt_path.resolve(strict=True)),
+            "receipt_file_sha256": receipt_sha256,
+            "baseline_path": str(baseline.resolve(strict=True)),
+            "baseline_file_sha256": _sha256_path(baseline),
+            "canonical_environment_key":
+                baseline_value["canonical_environment_key"],
+            "promotion_request_snapshot_sha256":
+                request_snapshot_sha256,
+        }
+        ledger["publications"] = publications
+        _save_sql_guardrail_publication_ledger(ledger)
+    return receipt_path, receipt
+
+
+def _validate_sql_guardrail_baseline_publication(
+        *,
+        baseline: Path,
+        baseline_sha256: str,
+        canonical_environment_key: str,
+) -> tuple[Path, dict[str, object]]:
+    """Require a receipt+ledger join that no direct guardrail CLI emits."""
+    receipt_path = _sql_guardrail_baseline_receipt_path(baseline)
+    try:
+        receipt_body = _read_sql_guardrail_evidence(receipt_path)
+        receipt = json.loads(receipt_body)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "candidate baseline has no valid MCP publication receipt"
+        ) from exc
+    expected_fields = {
+        "schema_version",
+        "artifact_kind",
+        "publication_id",
+        "baseline_path",
+        "baseline_file_sha256",
+        "baseline_content_sha256",
+        "capture_bundle_sha256",
+        "canonical_environment_key",
+        "promotion_request_file_sha256",
+        "promotion_request_content_sha256",
+        "promotion_request_snapshot_sha256",
+        "promotion_request",
+        "worker_pid",
+        "worker_session_id",
+        "worker_started_at",
+        "published_monotonic_ns",
+        "content_sha256",
+    }
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != expected_fields
+        or receipt.get("schema_version") != 1
+        or receipt.get("artifact_kind")
+            != "doc0388_sql_guardrail_baseline_publication"
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(receipt.get("publication_id"))
+        ) is None
+        or receipt.get("baseline_path")
+            != str(baseline.resolve(strict=True))
+        or receipt.get("baseline_file_sha256") != baseline_sha256
+        or receipt.get("canonical_environment_key")
+            != canonical_environment_key
+        or not isinstance(receipt.get("promotion_request"), dict)
+        or _canonical_json_sha256(receipt["promotion_request"])
+            != receipt.get("promotion_request_snapshot_sha256")
+        or receipt["promotion_request"].get("phase")
+            != "baseline_promotion"
+    ):
+        raise RuntimeError(
+            "candidate baseline MCP publication receipt binding is invalid")
+    try:
+        _validate_json_content_seal(
+            receipt, "candidate baseline MCP publication receipt")
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    baseline_value = json.loads(
+        _read_sql_guardrail_evidence(
+            baseline, expected_sha256=baseline_sha256))
+    if (
+        not isinstance(baseline_value, dict)
+        or baseline_value.get("content_sha256")
+            != receipt["baseline_content_sha256"]
+    ):
+        raise RuntimeError(
+            "candidate baseline differs from its MCP publication receipt")
+    ledger = _load_sql_guardrail_publication_ledger(required=True)
+    expected_record = {
+        "receipt_path": str(receipt_path.resolve(strict=True)),
+        "receipt_file_sha256": _sha256_path(receipt_path),
+        "baseline_path": str(baseline.resolve(strict=True)),
+        "baseline_file_sha256": baseline_sha256,
+        "canonical_environment_key": canonical_environment_key,
+        "promotion_request_snapshot_sha256":
+            receipt["promotion_request_snapshot_sha256"],
+    }
+    if ledger["publications"].get(
+            receipt["publication_id"]) != expected_record:
+        raise RuntimeError(
+            "candidate baseline publication receipt is absent from the "
+            "MCP ledger")
+    return receipt_path, receipt
+
+
+def _workspace_input_json(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty path")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = WORKSPACE_ROOT / candidate
+    resolved = candidate.resolve(strict=True)
+    resolved.relative_to(WORKSPACE_ROOT.resolve(strict=True))
+    if not resolved.is_file() or resolved.suffix.lower() != ".json":
+        raise ValueError(
+            f"{field} must be an existing workspace-contained JSON file")
+    return str(resolved)
+
+
+def _workspace_hashed_input_json(
+        path_value: object,
+        digest_value: object,
+        field: str) -> tuple[str, str]:
+    path = _workspace_input_json(path_value, field)
+    if (
+        not isinstance(digest_value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest_value) is None
+    ):
+        raise ValueError(f"{field}_sha256 must be a lowercase SHA-256")
+    actual = _sha256_path(Path(path))
+    if actual != digest_value:
+        raise ValueError(
+            f"{field}_sha256 does not match {path}: "
+            f"{digest_value} != {actual}")
+    return path, digest_value
+
+
+def _workspace_output_json(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field} must be a non-empty path")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = WORKSPACE_ROOT / candidate
+    if candidate.suffix.lower() != ".json":
+        raise ValueError(f"{field} must name a JSON file")
+    ancestor = candidate.parent
+    while not ancestor.exists():
+        if ancestor == ancestor.parent:
+            raise ValueError(f"{field} has no existing parent")
+        ancestor = ancestor.parent
+    ancestor.resolve(strict=True).relative_to(
+        WORKSPACE_ROOT.resolve(strict=True))
+    resolved = candidate.resolve(strict=False)
+    resolved.relative_to(WORKSPACE_ROOT.resolve(strict=True))
+    if resolved.exists():
+        raise ValueError(
+            f"{field} refuses to overwrite existing evidence: {resolved}")
+    return str(resolved)
+
+
+def _sql_guardrail_workflow_request(
+        config_path: str | None) -> dict[str, object] | None:
+    """Return one validated DOC0388 workflow request, or ``None``.
+
+    Ordinary benchmark configurations remain opaque to the worker. A file
+    opts into orchestration only with the exact artifact kind, after which
+    unknown/missing fields fail closed before any build is scheduled.
+    """
+    if config_path is None:
+        return None
+    try:
+        request_bytes = Path(config_path).read_bytes()
+        value = json.loads(request_bytes)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read bench_e2e_config JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError("bench_e2e_config root must be an object")
+    if value.get("artifact_kind") != _SQL_GUARDRAIL_WORKFLOW_KIND:
+        return None
+    phase = value.get("phase")
+    if value.get("schema_version") != 1:
+        raise ValueError("SQL guardrail workflow schema_version must be 1")
+    if phase not in _SQL_GUARDRAIL_WORKFLOW_PHASES:
+        raise ValueError("SQL guardrail workflow phase is invalid")
+    _validate_json_content_seal(value, "SQL guardrail workflow request")
+    common = {
+        "schema_version", "artifact_kind", "phase", "content_sha256"
+    }
+    result: dict[str, object] = {
+        "schema_version": 1,
+        "artifact_kind": _SQL_GUARDRAIL_WORKFLOW_KIND,
+        "phase": phase,
+        "request_path": str(Path(config_path).resolve(strict=True)),
+        "request_file_sha256": _sha256_bytes(request_bytes),
+        "request_content_sha256": value["content_sha256"],
+    }
+    if phase == "calibration_capture":
+        allowed = common | {"capture_bundle_output"}
+        if set(value) != allowed:
+            raise ValueError(
+                "calibration_capture request fields must be exactly: "
+                + ", ".join(sorted(allowed)))
+        result["capture_bundle_output"] = _workspace_output_json(
+            value.get("capture_bundle_output"),
+            "capture_bundle_output",
+        )
+        return result
+
+    if phase == "candidate_qualification":
+        allowed = common | {
+            "baseline",
+            "baseline_sha256",
+            "canonical_environment_key",
+            "qualification_output",
+        }
+        if set(value) != allowed:
+            raise ValueError(
+                "candidate_qualification request fields must be exactly: "
+                + ", ".join(sorted(allowed)))
+        baseline, baseline_sha = _workspace_hashed_input_json(
+            value.get("baseline"),
+            value.get("baseline_sha256"),
+            "baseline",
+        )
+        environment_key = value.get("canonical_environment_key")
+        if (
+            not isinstance(environment_key, str)
+            or re.fullmatch(r"[0-9a-f]{64}", environment_key) is None
+        ):
+            raise ValueError(
+                "canonical_environment_key must be a lowercase SHA-256")
+        try:
+            publication_path, publication = (
+                _validate_sql_guardrail_baseline_publication(
+                    baseline=Path(baseline),
+                    baseline_sha256=baseline_sha,
+                    canonical_environment_key=environment_key,
+                )
+            )
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+        result.update({
+            "baseline": baseline,
+            "baseline_sha256": baseline_sha,
+            "canonical_environment_key": environment_key,
+            "baseline_publication_receipt":
+                str(publication_path),
+            "baseline_publication_receipt_sha256":
+                _sha256_path(publication_path),
+            "baseline_publication_id":
+                publication["publication_id"],
+            "qualification_output": _workspace_output_json(
+                value.get("qualification_output"),
+                "qualification_output",
+            ),
+        })
+        return result
+
+    allowed = common | {
+        "capture_bundle",
+        "capture_bundle_sha256",
+        "limits",
+        "limits_sha256",
+        "baseline_output",
+        "baseline_kind",
+        "reviewer",
+        "evidence_reference",
+        "spec_deviation",
+        "approval_reference",
+    }
+    if set(value) != allowed:
+        raise ValueError(
+            f"{phase} request fields must be exactly: "
+            + ", ".join(sorted(allowed)))
+    if value.get("baseline_kind") != "recovered_post_cutover":
+        raise ValueError(
+            "baseline_promotion accepts only recovered_post_cutover; "
+            "the required pre-cutover Stage-0 evidence is absent")
+    for field in (
+        "reviewer",
+        "evidence_reference",
+        "spec_deviation",
+        "approval_reference",
+    ):
+        text = value.get(field)
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in text)
+        ):
+            raise ValueError(f"{field} must be a non-empty string")
+        result[field] = text.strip()
+    capture_bundle, capture_sha = _workspace_hashed_input_json(
+        value.get("capture_bundle"),
+        value.get("capture_bundle_sha256"),
+        "capture_bundle",
+    )
+    limits, limits_sha = _workspace_hashed_input_json(
+        value.get("limits"),
+        value.get("limits_sha256"),
+        "limits",
+    )
+    result.update({
+        "baseline_kind": "recovered_post_cutover",
+        "capture_bundle": capture_bundle,
+        "capture_bundle_sha256": capture_sha,
+        "limits": limits,
+        "limits_sha256": limits_sha,
+    })
+    result["baseline_output"] = _workspace_output_json(
+        value.get("baseline_output"), "baseline_output")
+    return result
+
+
 def _configured_local_build_rt_priority() -> int | None:
     """Return the root-owned machine opt-in for compiler-only SCHED_RR/1.
 
@@ -2523,7 +6126,10 @@ def tool_start_build(mode: str, build_only: bool = False,
                      debug: bool = False, bench_filter=None,
                      debug_report: bool = False,
                      debug_report_supplied: bool = False,
-                     bench_e2e_config=None) -> str:
+                     debug_supplied: bool = False,
+                     filter_supplied: bool = False,
+                     bench_e2e_config=None,
+                     postgres_error_safety_review_waiver=None) -> str:
     identity_error = _refuse_root_build_identity("start_build")
     if identity_error is not None:
         return f"Build worker identity error: {identity_error}"
@@ -2544,6 +6150,81 @@ def tool_start_build(mode: str, build_only: bool = False,
         mode, bench_e2e_config)
     if config_error is not None:
         return f"Invalid bench_e2e_config: {config_error}"
+    try:
+        sql_guardrail_workflow = _sql_guardrail_workflow_request(
+            resolved_e2e_config)
+    except ValueError as exc:
+        return f"Invalid SQL guardrail workflow request: {exc}"
+    if sql_guardrail_workflow is not None:
+        if build_only:
+            return (
+                "SQL guardrail workflows own capture/promotion/qualification "
+                "semantics and do not accept build_only=true.")
+        if debug_report_supplied or debug_report:
+            return (
+                "SQL guardrail workflows own final framework reports and do "
+                "not accept debug_report.")
+        if filter_supplied or bench_filter is not None:
+            return (
+                "SQL guardrail workflows pin the exact guardrail benchmark "
+                "matrix and do not accept filter.")
+    bench_filter = _ordinary_bench_e2e_default_filter(
+        mode,
+        bench_filter,
+        build_only=build_only,
+        debug_report=debug_report,
+        filter_supplied=filter_supplied,
+        sql_guardrail_workflow=sql_guardrail_workflow,
+    )
+    postgres_error_safety_review_waiver_snapshot: (
+        dict[str, object] | None
+    ) = None
+    if mode == POSTGRES_ERROR_SAFETY_MODE:
+        if debug_supplied or debug:
+            return (
+                "postgres-error-safety owns two fixed isolated presets and "
+                "does not accept the `debug` input.")
+        if filter_supplied or bench_filter is not None:
+            return (
+                "postgres-error-safety is a complete CMake-owned evidence "
+                "run and does not accept the `filter` input.")
+        if debug_report_supplied or debug_report:
+            return (
+                "postgres-error-safety does not execute a benchmark CLI and "
+                "does not accept the `debug_report` input.")
+        try:
+            _checked_postgres_error_safety_case_template()
+        except RuntimeError as exc:
+            return (
+                "PostgreSQL error-safety configuration error: "
+                f"{exc}")
+        if build_only:
+            if postgres_error_safety_review_waiver is not None:
+                return (
+                    "postgres-error-safety build_only generates no runtime "
+                    "candidate and does not accept "
+                    "postgres_error_safety_review_waiver.")
+        else:
+            if postgres_error_safety_review_waiver is None:
+                return (
+                    "Full postgres-error-safety qualification requires "
+                    "postgres_error_safety_review_waiver naming an explicit "
+                    "content-sealed user waiver.")
+            try:
+                postgres_error_safety_review_waiver_snapshot = (
+                    _load_postgres_error_safety_review_waiver(
+                        postgres_error_safety_review_waiver,
+                        WORKSPACE_ROOT,
+                    )
+                )
+            except PostgresErrorSafetyPromotionError as exc:
+                return (
+                    "Invalid PostgreSQL error-safety review waiver: "
+                    f"{exc}")
+    elif postgres_error_safety_review_waiver is not None:
+        return (
+            "postgres_error_safety_review_waiver is accepted only for mode "
+            f"{POSTGRES_ERROR_SAFETY_MODE!r}.")
     try:
         selected_preset = preset_for(mode, debug)
     except RuntimeError as exc:
@@ -2603,18 +6284,25 @@ def tool_start_build(mode: str, build_only: bool = False,
         # validation and conflict detection.  The preflight creates one
         # short-lived unprivileged RR/1 probe; it never changes this persistent
         # MCP server's scheduling policy.
-        try:
-            machine_rt_priority = _configured_local_build_rt_priority()
-            _preflight_local_clang_rt_launcher(
-                selected_preset, machine_rt_priority)
-        except (RuntimeError, ValueError) as exc:
-            return f"Build worker scheduling configuration error: {exc}"
-        configured_rt_priority = (
-            machine_rt_priority
-            if _local_clang_rt_is_enabled(
-                selected_preset, machine_rt_priority)
-            else None
+        promotion_only = (
+            sql_guardrail_workflow is not None
+            and sql_guardrail_workflow["phase"] == "baseline_promotion"
         )
+        if promotion_only:
+            configured_rt_priority = None
+        else:
+            try:
+                machine_rt_priority = _configured_local_build_rt_priority()
+                _preflight_local_clang_rt_launcher(
+                    selected_preset, machine_rt_priority)
+            except (RuntimeError, ValueError) as exc:
+                return f"Build worker scheduling configuration error: {exc}"
+            configured_rt_priority = (
+                machine_rt_priority
+                if _local_clang_rt_is_enabled(
+                    selected_preset, machine_rt_priority)
+                else None
+            )
 
         # Reserve the slot atomically before spawning the worker so a
         # concurrent start_build observes "running" immediately and
@@ -2626,6 +6314,70 @@ def tool_start_build(mode: str, build_only: bool = False,
             f"{'debug_' if debug else ''}{timestamp}.log"
         )
 
+        sql_guardrail_snapshot = (
+            json.dumps(
+                sql_guardrail_workflow,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if sql_guardrail_workflow is not None else ""
+        )
+        postgres_error_safety_review_waiver_json = (
+            json.dumps(
+                postgres_error_safety_review_waiver_snapshot,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if postgres_error_safety_review_waiver_snapshot is not None
+            else ""
+        )
+        worker_e2e_config = (
+            None
+            if sql_guardrail_workflow is not None
+            else resolved_e2e_config
+        )
+        state[mode] = {
+            "mode": mode,
+            "status": "running",
+            "step": "spawning",
+            "started_at": started_at,
+            "completed_at": None,
+            # Reserve with this live server PID before spawn. The global lock
+            # prevents observers and the worker from seeing an absent slot;
+            # the exact detached PID replaces it below before lock release.
+            "pid": os.getpid(),
+            "log_file": str(log_path),
+            "exit_code": None,
+            "report_file": None,
+            "notes": None,
+            "debug": debug,
+            "build_only": build_only,
+            "preset": selected_preset,
+            "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
+            "build_dirs": [
+                str(path) for path in build_dirs_for(mode, debug)
+            ],
+            "preset_family": mode_details.preset_family,
+            "binary_subdir": mode_details.binary_subdir,
+            "uses_private_cluster": mode_details.uses_private_cluster,
+            "bench_flags": bench_flags,
+            "focused_test_args": test_flags,
+            "bench_e2e_config": worker_e2e_config,
+            "sql_guardrail_request_sha256": (
+                _sha256_bytes(sql_guardrail_snapshot.encode("utf-8"))
+                if sql_guardrail_snapshot else None
+            ),
+            "postgres_error_safety_review_waiver_sha256": (
+                _sha256_bytes(
+                    postgres_error_safety_review_waiver_json.encode("utf-8"))
+                if postgres_error_safety_review_waiver_json else None
+            ),
+            "rt_priority": configured_rt_priority,
+            "effective_run_args":
+                test_flags if mode == "unit+integration" else bench_flags,
+        }
+        _save_state(state)
+
         server_path = Path(__file__).resolve()
         try:
             proc = subprocess.Popen(
@@ -2635,7 +6387,10 @@ def tool_start_build(mode: str, build_only: bool = False,
                  "--debug", ("true" if debug else "false"),
                  "--bench-flags", json.dumps(bench_flags),
                  "--test-flags", json.dumps(test_flags),
-                 "--bench-e2e-config", resolved_e2e_config or ""],
+                 "--bench-e2e-config", worker_e2e_config or "",
+                 "--sql-guardrail-request", sql_guardrail_snapshot,
+                 "--postgres-error-safety-review-waiver-snapshot",
+                 postgres_error_safety_review_waiver_json],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -2644,37 +6399,20 @@ def tool_start_build(mode: str, build_only: bool = False,
                 env=worker_env,
             )
         except OSError as exc:
+            current = _load_state()
+            current.pop(mode, None)
+            _save_state(current)
             return f"Build worker spawn error: {exc}"
 
-        state[mode] = {
-            "mode": mode,
-            "status": "running",
-            "step": "spawning",
-            "started_at": started_at,
-            "completed_at": None,
-            "pid": proc.pid,
-            "log_file": str(log_path),
-            "exit_code": None,
-            "report_file": None,
-            "notes": None,
-            "debug": debug,
-            "build_only": build_only,
-            "preset": selected_preset,
-            "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
-            "preset_family": mode_details.preset_family,
-            "binary_subdir": mode_details.binary_subdir,
-            "uses_private_cluster": mode_details.uses_private_cluster,
-            "bench_flags": bench_flags,
-            "focused_test_args": test_flags,
-            "bench_e2e_config": resolved_e2e_config,
-            "rt_priority": configured_rt_priority,
-            "effective_run_args": test_flags if mode == "unit+integration" else bench_flags,
-        }
+        state = _load_state()
+        state[mode]["pid"] = proc.pid
         _save_state(state)
         _log(f"started worker pid={proc.pid} mode={mode} debug={debug} "
              f"rt_priority={configured_rt_priority} "
              f"bench_flags={bench_flags} focused_test_args={test_flags} "
              f"bench_e2e_config={resolved_e2e_config} "
+             "postgres_error_safety_review_waiver_sha256="
+             f"{state[mode].get('postgres_error_safety_review_waiver_sha256')} "
              f"log={log_path}")
 
     return (f"{mode_details.label} {mode_details.verb_is} scheduled "
@@ -2689,7 +6427,8 @@ def tool_start_build(mode: str, build_only: bool = False,
 
 def _run_build_inline(mode: str, build_only: bool = False,
                       debug: bool = False, bench_flags=None,
-                      test_flags=None) -> int:
+                      test_flags=None, bench_e2e_config=None,
+                      postgres_error_safety_review_waiver_json=None) -> int:
     """Reserve the per-mode state slot and run the build worker INLINE
     (synchronously, in this very process) instead of detaching it.
 
@@ -2723,6 +6462,86 @@ def _run_build_inline(mode: str, build_only: bool = False,
     if mode not in VALID_MODES:
         _log(f"--run-build-sync: invalid mode '{mode}'")
         return 2
+    resolved_e2e_config, config_error = _validate_bench_e2e_config_override(
+        mode, bench_e2e_config)
+    if config_error is not None:
+        _log(f"--run-build-sync: invalid bench_e2e_config: {config_error}")
+        return 2
+    try:
+        sql_guardrail_workflow = _sql_guardrail_workflow_request(
+            resolved_e2e_config)
+    except ValueError as exc:
+        _log(
+            "--run-build-sync: invalid SQL guardrail workflow request: "
+            f"{exc}")
+        return 2
+    sql_guardrail_snapshot = (
+        json.dumps(
+            sql_guardrail_workflow,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if sql_guardrail_workflow is not None else None
+    )
+    worker_e2e_config = (
+        None if sql_guardrail_workflow is not None
+        else resolved_e2e_config
+    )
+    if sql_guardrail_workflow is not None and (
+        build_only or bench_flags or test_flags
+    ):
+        _log(
+            "--run-build-sync: SQL guardrail workflows reject build-only "
+            "and focused runtime flags")
+        return 2
+    if mode == POSTGRES_ERROR_SAFETY_MODE:
+        if build_only:
+            if postgres_error_safety_review_waiver_json:
+                _log(
+                    "--run-build-sync: postgres-error-safety build_only "
+                    "rejects review-waiver authority")
+                return 2
+        else:
+            if not postgres_error_safety_review_waiver_json:
+                _log(
+                    "--run-build-sync: full postgres-error-safety requires "
+                    "an immutable review-waiver snapshot")
+                return 2
+            try:
+                review_waiver_value = json.loads(
+                    postgres_error_safety_review_waiver_json)
+                review_waiver_normalized = (
+                    _validate_safety_waiver_snapshot(
+                        review_waiver_value,
+                        WORKSPACE_ROOT,
+                    )
+                )
+            except (
+                json.JSONDecodeError,
+                PostgresErrorSafetyPromotionError,
+            ) as exc:
+                _log(
+                    "--run-build-sync: invalid PostgreSQL error-safety "
+                    f"review-waiver snapshot: {exc}")
+                return 2
+            canonical_review_waiver = json.dumps(
+                review_waiver_normalized,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if (
+                canonical_review_waiver
+                != postgres_error_safety_review_waiver_json
+            ):
+                _log(
+                    "--run-build-sync: PostgreSQL error-safety "
+                    "review-waiver snapshot is not canonical")
+                return 2
+    elif postgres_error_safety_review_waiver_json:
+        _log(
+            "--run-build-sync: review-waiver authority is valid only for "
+            "postgres-error-safety")
+        return 2
     try:
         selected_preset = preset_for(mode, debug)
     except RuntimeError as exc:
@@ -2740,19 +6559,28 @@ def _run_build_inline(mode: str, build_only: bool = False,
                  f"refusing to start {mode}")
             return 3
 
-        try:
-            machine_rt_priority = _configured_local_build_rt_priority()
-            _preflight_local_clang_rt_launcher(
-                selected_preset, machine_rt_priority)
-        except (RuntimeError, ValueError) as exc:
-            _log(f"--run-build-sync: scheduling configuration error: {exc}")
-            return 2
-        configured_rt_priority = (
-            machine_rt_priority
-            if _local_clang_rt_is_enabled(
-                selected_preset, machine_rt_priority)
-            else None
+        promotion_only = (
+            sql_guardrail_workflow is not None
+            and sql_guardrail_workflow["phase"] == "baseline_promotion"
         )
+        if promotion_only:
+            configured_rt_priority = None
+        else:
+            try:
+                machine_rt_priority = _configured_local_build_rt_priority()
+                _preflight_local_clang_rt_launcher(
+                    selected_preset, machine_rt_priority)
+            except (RuntimeError, ValueError) as exc:
+                _log(
+                    "--run-build-sync: scheduling configuration error: "
+                    f"{exc}")
+                return 2
+            configured_rt_priority = (
+                machine_rt_priority
+                if _local_clang_rt_is_enabled(
+                    selected_preset, machine_rt_priority)
+                else None
+            )
 
         started_at = time.time()
         timestamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(started_at))
@@ -2775,11 +6603,24 @@ def _run_build_inline(mode: str, build_only: bool = False,
             "build_only": build_only,
             "preset": selected_preset,
             "build_dir": str(PROJECT_ROOT / "build" / selected_preset),
+            "build_dirs": [
+                str(path) for path in build_dirs_for(mode, debug)
+            ],
             "preset_family": MODES[mode].preset_family,
             "binary_subdir": MODES[mode].binary_subdir,
             "uses_private_cluster": MODES[mode].uses_private_cluster,
             "bench_flags": list(bench_flags or []),
             "focused_test_args": list(test_flags or []),
+            "bench_e2e_config": worker_e2e_config,
+            "sql_guardrail_request_sha256": (
+                _sha256_bytes(sql_guardrail_snapshot.encode("utf-8"))
+                if sql_guardrail_snapshot else None
+            ),
+            "postgres_error_safety_review_waiver_sha256": (
+                _sha256_bytes(
+                    postgres_error_safety_review_waiver_json.encode("utf-8"))
+                if postgres_error_safety_review_waiver_json else None
+            ),
             "rt_priority": configured_rt_priority,
             "effective_run_args": (
                 list(test_flags or []) if mode == "unit+integration"
@@ -2794,7 +6635,12 @@ def _run_build_inline(mode: str, build_only: bool = False,
              f"focused_test_args={test_flags or []}, log={log_path})")
 
     return _run_build_worker(mode, build_only=build_only, debug=debug,
-                             bench_flags=bench_flags, test_flags=test_flags)
+                             bench_flags=bench_flags, test_flags=test_flags,
+                             bench_e2e_config=worker_e2e_config,
+                             sql_guardrail_request_json=
+                             sql_guardrail_snapshot,
+                             postgres_error_safety_review_waiver_json=
+                             postgres_error_safety_review_waiver_json)
 
 
 def tool_inspect(arguments: dict) -> str:
@@ -2949,6 +6795,25 @@ def tool_status(mode: str) -> str:
                f"Log: {log_path}")
         if entry.get("report_file"):
             msg += f". Report: {entry['report_file']}"
+        workflow_evidence = entry.get("sql_guardrail_workflow")
+        if isinstance(workflow_evidence, dict):
+            surfaced = {
+                key: workflow_evidence[key]
+                for key in (
+                    "capture_bundle",
+                    "capture_bundle_sha256",
+                    "canonical_environment_key",
+                    "reviewed_baseline",
+                    "reviewed_baseline_sha256",
+                    "qualification",
+                    "qualification_sha256",
+                )
+                if workflow_evidence.get(key) is not None
+            }
+            msg += (
+                ". SQL guardrail evidence: "
+                + json.dumps(surfaced, sort_keys=True)
+            )
         if entry.get("build_only", False):
             msg += (". This was a build-only job, so compile targets were built "
                     "but commands and post-build/private-cluster targets were not run.")
@@ -3732,13 +7597,15 @@ def _drive_remote_run(payload: dict, log_handle, deadline: float) -> int:
         debug = bool(payload.get("debug", False))
         bench_flags = payload.get("bench_flags") or []   # parity with local path
         test_flags = payload.get("focused_test_args") or []
+        bench_e2e_config = payload.get("bench_e2e_config") or ""
         remote_cmd = (
             f"cd {server_dir} && {env_prefix}python3 server.py "
             f"--run-build-sync {shlex.quote(mode)} "
             f"--build-only {'true' if build_only else 'false'} "
             f"--debug {'true' if debug else 'false'} "
             f"--bench-flags {shlex.quote(json.dumps(bench_flags))} "
-            f"--test-flags {shlex.quote(json.dumps(test_flags))}"
+            f"--test-flags {shlex.quote(json.dumps(test_flags))} "
+            f"--bench-e2e-config {shlex.quote(bench_e2e_config)}"
         )
     elif operation == "inspect":
         inspect_args = payload.get("inspect_args") or {}
@@ -4399,15 +8266,36 @@ def tool_remote_run(arguments: dict) -> str:
             return (f"Invalid mode '{mode}'. remote-run build modes: "
                     f"{', '.join(sorted(VALID_MODES))}.")
         if mode in REMOTE_RUN_REJECTED_MODES:
-            return (f"Mode '{mode}' is not supported by remote-run: the website "
-                    "pipeline is a local build-tree-only target (Doxygen + a private "
-                    "PostgreSQL cluster + pinned-browser acceptance). Build it locally "
-                    "with start_build mode=website.")
+            return (
+                f"Mode '{mode}' is local-only and is not supported by "
+                "remote-run. Use the local start_build tool instead.")
         build_only = parse_bool("build_only", arguments.get("build_only", False))
         debug = parse_bool("debug", arguments.get("debug", False))
         bench_filter = arguments.get("filter")
         debug_report = parse_bool("debug_report",
                                   arguments.get("debug_report", False))
+        bench_e2e_config = arguments.get("bench_e2e_config")
+        if bench_e2e_config is not None:
+            if mode != "bench-e2e":
+                return (
+                    "remote bench_e2e_config is accepted only for "
+                    "mode='bench-e2e'.")
+            if (
+                not isinstance(bench_e2e_config, str)
+                or not bench_e2e_config.strip()
+                or bench_e2e_config != bench_e2e_config.strip()
+                or Path(bench_e2e_config).is_absolute()
+                or ".." in Path(bench_e2e_config).parts
+                or Path(bench_e2e_config).suffix.lower() != ".json"
+                or any(
+                    ord(ch) < 0x20 or ord(ch) == 0x7f
+                    for ch in bench_e2e_config
+                )
+            ):
+                return (
+                    "remote bench_e2e_config must be a clean "
+                    "workspace-relative .json path available in the pushed "
+                    "branch/on-box checkout.")
         bench_flags: list[str] = []
         test_flags: list[str] = []
         if mode == "unit+integration":
@@ -4436,7 +8324,9 @@ def tool_remote_run(arguments: dict) -> str:
                    "auto_provision": auto_provision,
                    "from_scratch": from_scratch,
                    "bench_flags": bench_flags,
-                   "focused_test_args": test_flags, "preset": preset}
+                   "focused_test_args": test_flags,
+                   "bench_e2e_config": bench_e2e_config,
+                   "preset": preset}
         label = (f"remote build mode={mode} build_only={build_only} debug={debug} "
                  f"(branch={branch}, preset={preset}, from_scratch={from_scratch})")
         if bench_flags:
@@ -4561,9 +8451,26 @@ TOOL_DEFINITIONS = [
                     "description": (
                         "Local bench-e2e only. Workspace-root-relative or "
                         "absolute path to an existing workspace-contained .json "
-                        "configuration. The canonical path is passed only as "
-                        "BIOSEQ_E2E_CONFIG_OVERRIDE to the bench-e2e executable; "
-                        "it does not affect configure/build/install or other modes."
+                        "configuration. Ordinary benchmark configurations become "
+                        "BIOSEQ_E2E_CONFIG_OVERRIDE. A content-sealed "
+                        "doc0388_sql_codegen_guardrail_workflow_request instead "
+                        "selects the MCP-owned calibration-capture, independent "
+                        "baseline-promotion, or candidate-qualification workflow; "
+                        "those requests pin their own build/install/report behavior."
+                    ),
+                },
+                "postgres_error_safety_review_waiver": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Full postgres-error-safety runs only. "
+                        "Workspace-root-relative or absolute path to an "
+                        "existing workspace-contained, content-sealed "
+                        "doc0388_postgres_error_safety_review_waiver JSON "
+                        "document. The waiver must explicitly state "
+                        "independent_review_performed=false. It authorizes a "
+                        "mechanical byte-copy promotion and never creates an "
+                        "independent-review claim. build_only rejects it."
                     ),
                 },
                 "debug_report": {
@@ -4608,7 +8515,64 @@ TOOL_DEFINITIONS = [
                             }
                         },
                     },
-                }
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {
+                                "const": POSTGRES_ERROR_SAFETY_MODE,
+                            },
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "not": {
+                            "anyOf": [
+                                {"required": ["debug"]},
+                                {"required": ["filter"]},
+                                {"required": ["debug_report"]},
+                                {"required": ["bench_e2e_config"]},
+                            ],
+                        },
+                    },
+                },
+                {
+                    "if": {
+                        "properties": {
+                            "mode": {
+                                "const": POSTGRES_ERROR_SAFETY_MODE,
+                            },
+                        },
+                        "required": ["mode"],
+                    },
+                    "then": {
+                        "if": {
+                            "properties": {
+                                "build_only": {"const": True},
+                            },
+                            "required": ["build_only"],
+                        },
+                        "then": {
+                            "not": {
+                                "required": [
+                                    "postgres_error_safety_review_waiver",
+                                ],
+                            },
+                        },
+                        "else": {
+                            "required": [
+                                "postgres_error_safety_review_waiver",
+                            ],
+                        },
+                    },
+                    "else": {
+                        "not": {
+                            "required": [
+                                "postgres_error_safety_review_waiver",
+                            ],
+                        },
+                    },
+                },
             ],
             "required": ["mode"],
         },
@@ -5160,8 +9124,8 @@ TOOL_DEFINITIONS += [
             "commit (unless sync=false), then runs the operation on the box using "
             "the box-side server.py with the aws-x64-linux preset. " + _FROM_SCRATCH_WARNING + "\n\n"
             "Two operation shapes (oneOf):\n"
-            "  operation='build' — runs any local start_build mode "
-            f"({', '.join(sorted(VALID_MODES))}) with the same build_only/debug/"
+            "  operation='build' — runs any remote-compatible start_build mode "
+            f"({', '.join(REMOTE_RUN_BUILD_MODES)}) with the same build_only/debug/"
             "filter/debug_report semantics as the local start_build tool, including "
             "focused Catch2 filter.tags for unit+integration and CMake-owned "
             "private-cluster execution for cache modes.\n"
@@ -5187,9 +9151,10 @@ TOOL_DEFINITIONS += [
                                       "description": "Run a build/test/benchmark mode."},
                         "mode": {
                             "type": "string",
-                            "enum": sorted(VALID_MODES),
+                            "enum": list(REMOTE_RUN_BUILD_MODES),
                             "description": ("Which run to build/execute — same modes "
-                                            "as the local start_build tool."),
+                                            "as the remote-compatible subset of "
+                                            "the local start_build tool."),
                         },
                         "build_only": {
                             "type": "boolean", "default": False,
@@ -5245,6 +9210,19 @@ TOOL_DEFINITIONS += [
                                 "stream report_debug_<N>.jsonl next to report_<N>.json. "
                                 "Requires a non-empty filter. Supplying this property is "
                                 "rejected for unit+integration mode."
+                            ),
+                        },
+                        "bench_e2e_config": {
+                            "type": "string",
+                            "minLength": 1,
+                            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.json$",
+                            "description": (
+                                "bench-e2e only. Workspace-relative JSON path "
+                                "present in the pushed branch/on-box checkout. "
+                                "Supports ordinary E2E configurations and the "
+                                "same content-sealed DOC0388 capture, promotion, "
+                                "and environment-specific qualification requests "
+                                "as local start_build."
                             ),
                         },
                         **_REMOTE_RUN_COMMON_PROPS,
@@ -5557,11 +9535,17 @@ def _handle_tools_call(params: dict) -> dict:
         bench_filter = args.get("filter")                       # dict | None
         debug_report: bool = parse_bool("debug_report", args.get("debug_report", False))
         bench_e2e_config = args.get("bench_e2e_config")
+        postgres_error_safety_review_waiver = args.get(
+            "postgres_error_safety_review_waiver")
         text = tool_start_build(mode, build_only=build_only, debug=debug,
                                 bench_filter=bench_filter,
                                 debug_report=debug_report,
                                 debug_report_supplied="debug_report" in args,
-                                bench_e2e_config=bench_e2e_config)
+                                debug_supplied="debug" in args,
+                                filter_supplied="filter" in args,
+                                bench_e2e_config=bench_e2e_config,
+                                postgres_error_safety_review_waiver=(
+                                    postgres_error_safety_review_waiver))
     elif name == "status":
         mode = args.get("mode", "")
         text = tool_status(mode)
@@ -5737,6 +9721,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--sql-guardrail-request",
+        default="",
+        help=(
+            "(internal) immutable canonical JSON snapshot of a validated "
+            "DOC0388 SQL guardrail workflow request."
+        ),
+    )
+    parser.add_argument(
+        "--postgres-error-safety-review-waiver-snapshot",
+        default="",
+        help=(
+            "(internal) immutable canonical JSON snapshot of a validated "
+            "DOC0388 PostgreSQL error-safety user review waiver."
+        ),
+    )
+    parser.add_argument(
         "--run-subagent",
         action="store_true",
         default=False,
@@ -5767,7 +9767,13 @@ def main() -> int:
                                  debug=debug, bench_flags=bench_flags,
                                  test_flags=test_flags,
                                  bench_e2e_config=(
-                                     args.bench_e2e_config or None))
+                                     args.bench_e2e_config or None),
+                                 sql_guardrail_request_json=(
+                                     args.sql_guardrail_request or None),
+                                 postgres_error_safety_review_waiver_json=(
+                                     args
+                                     .postgres_error_safety_review_waiver_snapshot
+                                     or None))
     if args.run_build_sync is not None:
         build_only: bool = parse_bool("build_only", args.build_only)
         debug: bool = parse_bool("debug", args.debug)
@@ -5783,7 +9789,13 @@ def main() -> int:
             return 2
         return _run_build_inline(args.run_build_sync, build_only=build_only,
                                  debug=debug, bench_flags=bench_flags,
-                                 test_flags=test_flags)
+                                 test_flags=test_flags,
+                                 bench_e2e_config=(
+                                     args.bench_e2e_config or None),
+                                 postgres_error_safety_review_waiver_json=(
+                                     args
+                                     .postgres_error_safety_review_waiver_snapshot
+                                     or None))
     if args.run_inspect is not None:
         try:
             inspect_args = json.loads(args.run_inspect)

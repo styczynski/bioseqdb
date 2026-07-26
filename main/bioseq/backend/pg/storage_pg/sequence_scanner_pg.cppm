@@ -48,6 +48,7 @@ extern "C" {
 export module bioseq.storage.scanner_pg;
 
 import bioseq.common.mlogging;
+import bioseq.sql_guc_settings;
 import bioseq.pg_utils;
 import bioseq.common.sequan_compat;              // seq::dna4 in static_assert below
 import bioseq.storage.manager;             // DOC0264 §7.9 — seq_caches + open_sub_table_for_locator
@@ -529,7 +530,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
             ScannerPgLeafFailure::interrupt_after);
 #endif
     });
-    if (enable_logging) {
+    if (bioseq::settings::logging) {
         static thread_local std::uint64_t cold_read_count = 0;
         if ((cold_read_count++ % 4000) == 0) {
             bioseq_log_progress<DBG>("[scanner_pg] cold fragment read #{} (fragment {}/{})",
@@ -663,10 +664,10 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
                 row_no, fragment_no, num_fragments_);
         });
     }
-    pgseq_t* raw = bioseq::pg_utils::invoke_pg_as_cpp([&vals] {
-        return reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(vals[0]));
+    bioseq::pg_types::seq* raw = bioseq::pg_utils::invoke_pg_as_cpp([&vals] {
+        return reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(vals[0]));
     });
-    if (static_cast<std::size_t>(VARSIZE(raw)) < pgseq_t::header_bytes()) {
+    if (static_cast<std::size_t>(VARSIZE(raw)) < bioseq::pg_types::seq::header_bytes()) {
         bioseq::pg_utils::invoke_pg_as_cpp([row_no] {
             ereport(ERROR,
                 (errcode(ERRCODE_DATA_CORRUPTED),
@@ -693,7 +694,7 @@ inline auto sequence_scanner_pg<StdcInstance>::read_fragment(std::size_t fragmen
             typename StdcInstance::alphabet_type>();
     const bool is_last_fragment = fragment_no + 1u == num_fragments_;
     const std::size_t raw_payload_bytes =
-        static_cast<std::size_t>(VARSIZE(raw)) - pgseq_t::header_bytes();
+        static_cast<std::size_t>(VARSIZE(raw)) - bioseq::pg_types::seq::header_bytes();
     const std::uint64_t fragment_from =
         static_cast<std::uint64_t>(fragment_no) * letters_per_fragment;
     const bool fragment_geometry_valid = fragment_from < total_bp_size_
@@ -890,7 +891,7 @@ inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
                 break;
             }
 
-            pgseq_t* raw = reinterpret_cast<pgseq_t*>(
+            bioseq::pg_types::seq* raw = reinterpret_cast<bioseq::pg_types::seq*>(
                 PG_DETOAST_DATUM(values[0]));
             if (is_locator_stub(raw)) {
                 state.status = bulk_copy_status::stub_fragment;
@@ -898,13 +899,13 @@ inline void sequence_scanner_pg<StdcInstance>::copy_packed_to(
             }
             const std::size_t raw_total_bytes =
                 static_cast<std::size_t>(VARSIZE(raw));
-            if (raw_total_bytes < pgseq_t::header_bytes()) {
+            if (raw_total_bytes < bioseq::pg_types::seq::header_bytes()) {
                 state.status =
                     bulk_copy_status::payload_header_invalid;
                 break;
             }
             const std::size_t raw_payload_bytes =
-                raw_total_bytes - pgseq_t::header_bytes();
+                raw_total_bytes - bioseq::pg_types::seq::header_bytes();
             state.observed_payload_bytes = raw_payload_bytes;
             if (raw_payload_bytes > fragment_bytes) {
                 state.status = bulk_copy_status::payload_too_large;
@@ -1051,9 +1052,9 @@ inline void sequence_scanner_pg<StdcInstance>::abandon_pg_resources_noexcept() c
 // Concept conformance checks — fail at module load if Phase B's concept
 // changes without us catching it.
 static_assert(is_valid_sequence_scanner<sequence_scanner_pg<
-    compact_sequence_stdc_instance<pgseq_t, seq::dna4, std::size_t{8}>>>);
+    compact_sequence_stdc_instance<bioseq::pg_types::seq, seq::dna4, std::size_t{8}>>>);
 static_assert(is_active_sequence_scanner<sequence_scanner_pg<
-    compact_sequence_stdc_instance<pgseq_t, seq::dna4, std::size_t{8}>>>);
+    compact_sequence_stdc_instance<bioseq::pg_types::seq, seq::dna4, std::size_t{8}>>>);
 
 /**
  * Immutable proof of the exact PostgreSQL relation, locator and lifetime
@@ -2943,7 +2944,7 @@ template <class Instance>
         bool validate_padding = true) {
     bool dispatched = false;
     bool valid = false;
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         stored_type.alphabet_code,
         stored_type.storage_unit_byte_width,
         [&dispatched, &valid, locator,
@@ -3153,7 +3154,7 @@ inline void finish_source_scanner_entry(void* opaque, bool) {
     bool unknown_cpp_error = false;
     char detail[512] = "std::exception without detail";
     try {
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             factory.stored_type.alphabet_code,
             factory.stored_type.storage_unit_byte_width,
             [entry, payload_context, locator = factory.locator,
@@ -3934,7 +3935,7 @@ inline void release_pg_sequence_source_routes_noexcept(
     }
     auto& registry = *lease.registry;
     auto* header = bioseq::pg_utils::invoke_pg_as_cpp([locator_datum] {
-        return reinterpret_cast<pgseq_t*>(
+        return reinterpret_cast<bioseq::pg_types::seq*>(
             PG_DETOAST_DATUM(locator_datum));
     });
     const pg_sequence_descriptor descriptor =

@@ -7,6 +7,7 @@ module;
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -72,6 +73,279 @@ namespace bioseq::codegen::website {
     options.allow_comments = false;
     options.allow_trailing_commas = false;
     return boost::json::parse(text, {}, options);
+}
+
+/// @brief One website-public SQL entity projected from the generated SQL
+/// manifest.
+///
+/// `stable_identity` remains relocation-stable for provenance and cross-schema
+/// tests. `installed_identity` is the exact live-catalog/page identity for the
+/// selected extension schema.
+struct sql_manifest_public_entity {
+    std::string stable_identity;
+    std::string installed_identity;
+    std::string kind;
+    std::string name;
+    std::string source_module;
+    std::string source_path;
+    std::size_t source_line{};
+    std::string brief;
+    std::string details;
+    std::string result_sql_type;
+    std::vector<parameter_documentation> parameters;
+};
+
+/// @brief Website-facing projection of the generated SQL manifest.
+struct sql_manifest_public_projection {
+    std::string extension_schema;
+    std::string script_sha256;
+    std::vector<sql_manifest_public_entity> entities;
+    std::vector<std::string> catalog_schemas;
+    std::vector<std::string> restricted_sequence_names;
+};
+
+/// @brief Reads the website-public set from a generated SQL manifest.
+///
+/// Visibility comes only from `public_documentation`. Transitional install
+/// owners are rejected if they claim visibility: only natural annotated
+/// declarations may publish SQL documentation.
+[[nodiscard]] sql_manifest_public_projection
+parse_sql_manifest_public_projection(
+        std::string_view text,
+        std::string_view path) {
+    const auto fail = [path](std::string_view detail) -> void {
+        throw std::runtime_error(
+            "invalid SQL manifest " + std::string(path) + ": "
+            + std::string(detail));
+    };
+    const auto require_member =
+        [&fail](const boost::json::object& object,
+                std::string_view key) -> const boost::json::value& {
+            const boost::json::value* value = object.if_contains(key);
+            if (value == nullptr) {
+                fail("missing field '" + std::string(key) + "'");
+            }
+            return *value;
+        };
+    const auto require_string =
+        [&fail, &require_member](const boost::json::object& object,
+                                std::string_view key) -> std::string {
+            const boost::json::value& value = require_member(object, key);
+            if (!value.is_string()) {
+                fail("field '" + std::string(key) + "' must be a string");
+            }
+            const boost::json::string& raw = value.as_string();
+            return std::string(raw.data(), raw.size());
+        };
+    const auto require_bool =
+        [&fail, &require_member](const boost::json::object& object,
+                                std::string_view key) -> bool {
+            const boost::json::value& value = require_member(object, key);
+            if (!value.is_bool()) {
+                fail("field '" + std::string(key) + "' must be a boolean");
+            }
+            return value.as_bool();
+        };
+    const auto require_size =
+        [&fail, &require_member](const boost::json::object& object,
+                                std::string_view key) -> std::size_t {
+            const boost::json::value& value = require_member(object, key);
+            if (!value.is_int64() || value.as_int64() <= 0) {
+                fail("field '" + std::string(key)
+                     + "' must be a positive integer");
+            }
+            return static_cast<std::size_t>(value.as_int64());
+        };
+
+    const boost::json::value document = parse_json(text);
+    if (!document.is_object()) {
+        fail("root must be an object");
+    }
+    const boost::json::object& root = document.as_object();
+    const boost::json::value& version =
+        require_member(root, "manifest_version");
+    if (!version.is_int64() || version.as_int64() != 1) {
+        fail("manifest_version must be 1");
+    }
+    const std::string authority_mode =
+        require_string(root, "authority_mode");
+    if (authority_mode != "annotated_cpp") {
+        fail("authority_mode must be 'annotated_cpp'");
+    }
+    const std::string extension_schema =
+        require_string(root, "extension_schema");
+    if (extension_schema.empty()) {
+        fail("extension_schema must not be empty");
+    }
+    const std::string script_sha256 =
+        require_string(root, "script_sha256");
+    if (script_sha256.size() != 64) {
+        fail("script_sha256 must contain 64 hexadecimal characters");
+    }
+    for (const char value : script_sha256) {
+        const bool hexadecimal =
+            (value >= '0' && value <= '9')
+            || (value >= 'a' && value <= 'f');
+        if (!hexadecimal) {
+            fail("script_sha256 must be lowercase hexadecimal");
+        }
+    }
+    const boost::json::value& entities_value =
+        require_member(root, "entities");
+    if (!entities_value.is_array()) {
+        fail("entities must be an array");
+    }
+
+    sql_manifest_public_projection projection{
+        .extension_schema = extension_schema,
+        .script_sha256 = script_sha256,
+    };
+    std::set<std::string, std::less<>> stable_identities;
+    std::set<std::string, std::less<>> installed_identities;
+    std::set<std::string, std::less<>> catalog_schemas;
+    std::set<std::string, std::less<>> restricted_sequence_names;
+    const auto resolve_extension_identity =
+        [&extension_schema](std::string identity) {
+            constexpr std::string_view marker = "$extension";
+            std::size_t position = 0;
+            while ((position = identity.find(marker, position))
+                   != std::string::npos) {
+                identity.replace(position, marker.size(), extension_schema);
+                position += extension_schema.size();
+            }
+            return identity;
+        };
+    const auto identity_body =
+        [&fail](std::string_view identity,
+                std::string_view expected_kind) -> std::string_view {
+            const std::string prefix =
+                "sql:" + std::string(expected_kind) + ":";
+            if (!identity.starts_with(prefix)) {
+                fail("identity '" + std::string(identity)
+                     + "' does not match kind '" + std::string(expected_kind)
+                     + "'");
+            }
+            return identity.substr(prefix.size());
+        };
+    const auto qualified_name =
+        [](std::string_view body) -> std::string_view {
+            const std::size_t signature = body.find('(');
+            return body.substr(0, signature);
+        };
+    const auto schema_name =
+        [&fail](std::string_view name) -> std::string_view {
+            const std::size_t dot = name.find('.');
+            if (dot == std::string_view::npos || dot == 0) {
+                fail("installed identity has no qualified schema: "
+                     + std::string(name));
+            }
+            return name.substr(0, dot);
+        };
+    for (const boost::json::value& value : entities_value.as_array()) {
+        if (!value.is_object()) {
+            fail("every entities entry must be an object");
+        }
+        const boost::json::object& entity = value.as_object();
+        std::string stable_identity = require_string(entity, "identity");
+        std::string installed_identity =
+            require_string(entity, "installed_identity");
+        if (stable_identity.empty() || installed_identity.empty()) {
+            fail("entity identities must not be empty");
+        }
+        if (!stable_identities.insert(stable_identity).second) {
+            fail("duplicate stable identity '" + stable_identity + "'");
+        }
+        if (!installed_identities.insert(installed_identity).second) {
+            fail("duplicate installed identity '" + installed_identity + "'");
+        }
+        if (resolve_extension_identity(stable_identity)
+            != installed_identity) {
+            fail("installed identity '" + installed_identity
+                 + "' is not the extension-schema resolution of '"
+                 + stable_identity + "'");
+        }
+
+        const bool typed_install_owner =
+            require_bool(entity, "typed_install_owner");
+        const bool public_documentation =
+            require_bool(entity, "public_documentation");
+        const std::string kind = require_string(entity, "kind");
+        if (typed_install_owner) {
+            if (public_documentation) {
+                fail("transitional install owner '" + stable_identity
+                     + "' cannot be website-public");
+            }
+            continue;
+        }
+        const std::string_view installed_body =
+            identity_body(installed_identity, kind);
+        const std::string_view installed_name =
+            qualified_name(installed_body);
+        if (kind == "sequence"
+            && schema_name(installed_name) == "bioseq_internal") {
+            restricted_sequence_names.emplace(installed_name);
+        }
+        if (!public_documentation) {
+            continue;
+        }
+        std::string brief = require_string(entity, "brief");
+        if (brief.empty()) {
+            fail("website-public entity '" + stable_identity
+                 + "' has no Doxygen brief");
+        }
+        if (kind != "type" && kind != "function"
+            && kind != "sql_function") {
+            fail("website-public entity '" + stable_identity
+                 + "' has unsupported website kind '" + kind + "'");
+        }
+        catalog_schemas.emplace(schema_name(installed_name));
+        std::vector<parameter_documentation> parameters;
+        const boost::json::value& parameters_value =
+            require_member(entity, "parameters");
+        if (!parameters_value.is_array()) {
+            fail("parameters must be an array for '" + stable_identity + "'");
+        }
+        for (const boost::json::value& parameter_value :
+             parameters_value.as_array()) {
+            if (!parameter_value.is_object()) {
+                fail("parameter entries must be objects for '"
+                     + stable_identity + "'");
+            }
+            const boost::json::object& parameter =
+                parameter_value.as_object();
+            parameter_documentation documentation{
+                .name = require_string(parameter, "name"),
+                .type = require_string(parameter, "sql_type"),
+            };
+            (void)require_bool(parameter, "has_default");
+            parameters.push_back(std::move(documentation));
+        }
+        projection.entities.push_back(sql_manifest_public_entity{
+            .stable_identity = std::move(stable_identity),
+            .installed_identity = std::move(installed_identity),
+            .kind = kind,
+            .name = require_string(entity, "name"),
+            .source_module = require_string(entity, "source_module"),
+            .source_path = require_string(entity, "source_path"),
+            .source_line = require_size(entity, "source_line"),
+            .brief = std::move(brief),
+            .details = require_string(entity, "details"),
+            .result_sql_type = require_string(entity, "result_sql_type"),
+            .parameters = std::move(parameters),
+        });
+    }
+    if (projection.entities.empty()) {
+        fail("no entity is marked public_documentation");
+    }
+    projection.catalog_schemas.assign(
+        catalog_schemas.begin(), catalog_schemas.end());
+    projection.restricted_sequence_names.assign(
+        restricted_sequence_names.begin(),
+        restricted_sequence_names.end());
+    if (projection.restricted_sequence_names.empty()) {
+        fail("manifest has no internal sequence for generic ACL validation");
+    }
+    return projection;
 }
 
 namespace {

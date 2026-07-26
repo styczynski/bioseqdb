@@ -143,7 +143,7 @@ namespace hn = hwy::HWY_NAMESPACE;
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET> query_view,
     std::optional<bioseq::storage::basic_lazy_sequence_view<
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET>> target_recipe_view,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     std::size_t i,
     sequence_size_t target_bp_size,
     std::size_t min_bp,
@@ -166,8 +166,8 @@ namespace hn = hwy::HWY_NAMESPACE;
 #error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION must name the concrete in-memory helper"
 #endif
 [[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     sequence_size_t target_bp_size,
     const Minimap2Params& params,
     bool chunked_scanner_forced);
@@ -187,20 +187,20 @@ namespace hn = hwy::HWY_NAMESPACE;
 #error "BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION must name the concrete chunked segmented in-memory helper"
 #endif
 [[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params);
 [[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params);
 [[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params);
 [[nodiscard]] MatchResultCollection BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params);
 #endif
 
@@ -2425,8 +2425,9 @@ struct AsyncPersistFileFragmentStorage {
     }
 
     [[nodiscard]] std::size_t run_buffer_bytes() const noexcept {
-        if (bioseq_index_run_buffer_bytes > 0) {
-            return static_cast<std::size_t>(bioseq_index_run_buffer_bytes);
+        if (bioseq::settings::index_run_buffer_bytes > 0) {
+            return static_cast<std::size_t>(
+                bioseq::settings::index_run_buffer_bytes);
         }
         constexpr std::uint64_t desired = std::uint64_t{512} << 20;
         constexpr std::uint64_t floor = std::uint64_t{64} << 20;
@@ -2656,8 +2657,9 @@ template <sequence_alphabet Alphabet>
 	// segment results unwind normally on PostgresErrorAsCpp.
 	OpportunisticSequenceIndexStorage mps_store;
         mps_store.run_buffer_bytes_value =
-            bioseq_index_run_buffer_bytes > 0
-                ? static_cast<std::size_t>(bioseq_index_run_buffer_bytes)
+            bioseq::settings::index_run_buffer_bytes > 0
+                ? static_cast<std::size_t>(
+                    bioseq::settings::index_run_buffer_bytes)
                 : (std::size_t{256} << 20);
 
         // MinimizerSequenceMergedIndex::build is pinned to w=10,k=15. The
@@ -2877,7 +2879,8 @@ template <sequence_alphabet Alphabet>
     // boundary validates this raw stable-ABI value and carries it through the
     // queue and metadata-only DSM; the background worker never rereads a GUC.
     const int requested_provider_wire_value =
-        bioseq_index_payload_storage_backend;
+        static_cast<int>(
+            bioseq::settings::index_payload_storage_backend.value());
     const bool staged = bioseq::parallelism::pg::stage_async_mps_build(
         persist_target,
         loc,
@@ -2886,9 +2889,10 @@ template <sequence_alphabet Alphabet>
         last_fragment_padding,
         static_cast<std::int32_t>(
             bioseq::indexing::detail::pair_run_sort_impl()),
-        bioseq_scheduler_pipeline_concurrency_mode,
-        bioseq_scheduler_max_concurrency,
-        bioseq_index_memory_cap_mb,
+        static_cast<int>(
+            bioseq::scheduler::settings::pipeline_concurrency_mode.value()),
+        bioseq::scheduler::settings::max_concurrency,
+        bioseq::settings::index_memory_cap_mb,
         static_cast<std::int32_t>(  // DOC0345 Patch K — thread backend into the async worker
             target_backend_from_params_for_recompute(params)),
         requested_provider_wire_value);
@@ -3328,7 +3332,7 @@ inline void with_source_provider_pg_locator(
             "locator sequence has no exact statement source-provider route");
     }
 
-    pgseq_t* locator_stub = bioseq::pg_utils::invoke_pg_as_cpp(
+    bioseq::pg_types::seq* locator_stub = bioseq::pg_utils::invoke_pg_as_cpp(
         [&context, &locator, alphabet_code, storage_unit_byte_width,
          last_padding_letters] {
             return bioseq::storage::alloc_locator_stub_in(
@@ -3477,7 +3481,7 @@ template <class S>
     std::optional<bioseq::storage::basic_lazy_sequence_view<
         typename compact_sequence_range<S>::traits::alphabet_type>>
         target_recipe_view,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const std::size_t i,
     const sequence_size_t target_bp_size,
     const std::size_t min_bp,
@@ -4946,8 +4950,8 @@ template <class S>
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_ONLY)
 template <class S>
 [[nodiscard]] MatchResultCollection process_inmemory_standard_row_typed(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
@@ -4964,8 +4968,8 @@ template <class S>
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_ONLY)
 template <class S>
 [[nodiscard]] MatchResultCollection process_inmemory_segmented_row_typed(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
@@ -4982,8 +4986,8 @@ template <class S>
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_ONLY)
 template <class S>
 [[nodiscard]] MatchResultCollection process_inmemory_chunked_row_typed(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
@@ -5002,8 +5006,8 @@ template <class S>
 #if defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_ONLY)
 template <class S>
 [[nodiscard]] MatchResultCollection process_inmemory_chunked_segmented_row_typed(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     compact_sequence_range<S> query_seq{*row_query_hdr};
@@ -5024,8 +5028,8 @@ template <class S>
         && !defined(BIOSEQ_DISPATCH_PROCESSOR_TYPED_HELPER_ONLY))
 template <class S>
 [[nodiscard]] MatchResultCollection process_inmemory_row_typed(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const sequence_size_t target_bp_size,
     const Minimap2Params& params,
     const bool chunked_scanner_forced)
@@ -5080,9 +5084,9 @@ template <class S>
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     const BatchInvocationRole invocation_role,
@@ -5310,7 +5314,7 @@ template <class S>
                     sequence_size_t query_len = 0;
                 };
                 struct GpuBatchTargetSidecar {
-                    const pgseq_t* hdr = nullptr;
+                    const bioseq::pg_types::seq* hdr = nullptr;
                     std::optional<gpu_row_view> recipe_view{};
                     Datum recipe_datum = Datum{0};
                     std::size_t source_row_index = 0u;
@@ -5406,7 +5410,7 @@ template <class S>
                                         VulkanRuntimeError(
                                             "Vulkan locator padding exceeds ABI");
                                 }
-                                pgseq_t* stub =
+                                bioseq::pg_types::seq* stub =
                                     bioseq::pg_utils::invoke_pg_as_cpp(
                                         [scanner_pg_ctx, source_alphabet,
                                          source_width, padding,
@@ -5556,7 +5560,7 @@ template <class S>
                     query_sidecars.reserve(batch_size);
                     batch_query_uploads.reserve(batch_size);
                     for (std::size_t i = 0; i < batch_size; ++i) {
-                        const pgseq_t* row_query_hdr =
+                        const bioseq::pg_types::seq* row_query_hdr =
                             per_row_query_mode ? (*per_row_query_hdrs)[i] : query_hdr;
                         const bool recipe_query =
                             gpu_query_resident[i].has_value();
@@ -6293,7 +6297,7 @@ template <class S>
                         std::numeric_limits<std::uint32_t>::max());
                     targets.reserve(batch_size);
                     const auto target_storage_bytes =
-                        [] (const pgseq_t* hdr) -> std::string_view {
+                        [] (const bioseq::pg_types::seq* hdr) -> std::string_view {
                         compact_sequence_range<S> seq{*hdr};
                         using StorageUnit =
                             typename compact_sequence_range<S>::traits::storage_unit;
@@ -6305,7 +6309,7 @@ template <class S>
                     };
                     const auto target_fingerprint =
                         [target_storage_bytes] (
-                            const pgseq_t* hdr) -> std::uint64_t {
+                            const bioseq::pg_types::seq* hdr) -> std::uint64_t {
                         std::uint64_t hash = 14695981039346656037ull;
                         hash = bioseq::common::hash_combine_64(
                             hash, static_cast<std::uint64_t>(hdr->alphabet_code));
@@ -6322,7 +6326,7 @@ template <class S>
 	                            == std::numeric_limits<std::uint32_t>::max()) {
 	                            continue;
 	                        }
-	                        const pgseq_t* target_hdr = target_hdrs[i];
+	                        const bioseq::pg_types::seq* target_hdr = target_hdrs[i];
 	                        const bool recipe_target =
 	                            gpu_target_recipe_views[i].has_value();
 	                        const Datum target_recipe_datum = recipe_target
@@ -6870,7 +6874,7 @@ template <class S>
                             continue;
                         }
 
-                        const pgseq_t* row_query_hdr =
+                        const bioseq::pg_types::seq* row_query_hdr =
                             per_row_query_mode
                                 ? (*per_row_query_hdrs)[owner.row_index]
                                 : query_hdr;
@@ -7294,9 +7298,9 @@ template <class S>
                 for (std::size_t row = 0;
                      batch_identity_valid && row < batch_size;
                      ++row) {
-                    const pgseq_t* const row_query_hdr =
+                    const bioseq::pg_types::seq* const row_query_hdr =
                         (*per_row_query_hdrs)[row];
-                    const pgseq_t* const target_hdr = target_hdrs[row];
+                    const bioseq::pg_types::seq* const target_hdr = target_hdrs[row];
                     const auto& locator =
                         scanner_pg_ctx->target_locators[row];
                     if (row_query_hdr == nullptr
@@ -7884,9 +7888,9 @@ template <class S>
                      &parallel_collections, &parallel_params](
                             std::size_t lo, std::size_t hi) {
                         for (std::size_t i = lo; i < hi && i < batch_size; ++i) {
-                            const pgseq_t* row_query_hdr =
+                            const bioseq::pg_types::seq* row_query_hdr =
                                 per_row_query_mode ? (*per_row_query_hdrs)[i] : query_hdr;
-                            const pgseq_t* target_hdr = target_hdrs[i];
+                            const bioseq::pg_types::seq* target_hdr = target_hdrs[i];
                             if (row_query_hdr == nullptr || target_hdr == nullptr) {
                                 continue;
                             }
@@ -7977,7 +7981,7 @@ template <class S>
                     }
                     continue;
                 }
-                const pgseq_t* row_query_hdr =
+                const bioseq::pg_types::seq* row_query_hdr =
                     per_row_query_mode ? (*per_row_query_hdrs)[i] : query_hdr;
                 const auto* query_locator = use_scanner_pg
                     && per_row_query_mode
@@ -8047,7 +8051,7 @@ template <class S>
                             "per-row query recipe metadata is invalid");
                     }
                 }
-                const pgseq_t* target_hdr = target_hdrs[i];
+                const bioseq::pg_types::seq* target_hdr = target_hdrs[i];
                 // DOC0274 — when use_scanner_pg=true AND a locator was captured
                 // for this row (e.g. a stub whose materialised varlena would
                 // exceed MaxAllocSize, so hydration was skipped), we still have
@@ -8424,7 +8428,7 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET> query_view,
     std::optional<bioseq::storage::basic_lazy_sequence_view<
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET>> target_recipe_view,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const std::size_t i,
     const sequence_size_t target_bp_size,
     const std::size_t min_bp,
@@ -8442,7 +8446,7 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
     pg_sequence_read_session* active_read_session)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_scanner_pg_row_typed<S>(
@@ -8471,14 +8475,14 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_SCANNER_FUNCTION(
 
 [[nodiscard]] MatchResultCollection
 BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const sequence_size_t target_bp_size,
     const Minimap2Params& params,
     const bool chunked_scanner_forced)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_inmemory_row_typed<S>(
@@ -8495,12 +8499,12 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_FUNCTION(
 
 [[nodiscard]] MatchResultCollection
 BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_inmemory_standard_row_typed<S>(
@@ -8515,12 +8519,12 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_STANDARD_FUNCTION(
 
 [[nodiscard]] MatchResultCollection
 BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_inmemory_segmented_row_typed<S>(
@@ -8535,12 +8539,12 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_SEGMENTED_FUNCTION(
 
 [[nodiscard]] MatchResultCollection
 BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_inmemory_chunked_row_typed<S>(
@@ -8555,12 +8559,12 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_FUNCTION(
 
 [[nodiscard]] MatchResultCollection
 BIOSEQ_DISPATCH_PROCESSOR_TYPED_INMEMORY_CHUNKED_SEGMENTED_FUNCTION(
-    const pgseq_t* row_query_hdr,
-    const pgseq_t* target_hdr,
+    const bioseq::pg_types::seq* row_query_hdr,
+    const bioseq::pg_types::seq* target_hdr,
     const Minimap2Params& params)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_inmemory_chunked_segmented_row_typed<S>(
@@ -8578,9 +8582,9 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     const BatchInvocationRole invocation_role,
@@ -8589,7 +8593,7 @@ BIOSEQ_DISPATCH_PROCESSOR_TYPED_FUNCTION(
     BatchProcessor::ScannerPgContext* scanner_pg_ctx)
 {
     using S = compact_sequence_stdc_instance<
-        pgseq_t,
+        bioseq::pg_types::seq,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_ALPHABET,
         BIOSEQ_DISPATCH_PROCESSOR_TYPED_WIDTH>;
     return process_sequences_typed<S>(

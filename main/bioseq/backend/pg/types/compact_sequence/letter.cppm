@@ -6,10 +6,10 @@ module;
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <type_traits>
 
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 extern "C" {
 #include "catalog/pg_attribute.h"
 #include "common/hashfn.h"
@@ -28,16 +28,233 @@ extern "C" {
 
 export module bioseq.types.pg_compact_sequence:letter;
 
+import bioseq.codegen.sql.annotation_model;
+import bioseq.pg_utils.sql_boundary;
 import :flat_abi;
 import :io;
 
-export struct pg_letter {
+export namespace bioseq::pg_types {
+struct letter;
+}
+
+[[nodiscard]] int compare_letters(
+    bioseq::pg_types::letter left,
+    bioseq::pg_types::letter right) noexcept;
+[[nodiscard]] std::array<unsigned char, 2> letter_hash_bytes(
+    bioseq::pg_types::letter value) noexcept;
+
+export namespace bioseq::pg_types {
+
+struct [[bioseq_sql::type({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .internal_length = 2,
+    .passed_by_value = true,
+    .alignment = bioseq::sql::type_alignment::int2,
+})]] letter {
     std::uint8_t alphabet_code;
     std::uint8_t rank;
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    [[bioseq_sql::operator_({
+        .symbol = "<",
+        .commutator = bioseq::pg_types::letter::letter_gt,
+        .negator = bioseq::pg_types::letter::letter_ge,
+        .restrict = bioseq::sql::pg_catalog_reference::scalarltsel,
+        .join = bioseq::sql::pg_catalog_reference::scalarltjoinsel,
+    })]]
+    static bool letter_lt(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return ::compare_letters(left, right) < 0;
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    [[bioseq_sql::operator_({
+        .symbol = "<=",
+        .commutator = bioseq::pg_types::letter::letter_ge,
+        .negator = bioseq::pg_types::letter::letter_gt,
+        .restrict = bioseq::sql::pg_catalog_reference::scalarlesel,
+        .join = bioseq::sql::pg_catalog_reference::scalarlejoinsel,
+    })]]
+    static bool letter_le(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return ::compare_letters(left, right) <= 0;
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    [[bioseq_sql::operator_({
+        .symbol = "=",
+        .commutator = bioseq::pg_types::letter::letter_eq,
+        .negator = bioseq::pg_types::letter::letter_ne,
+        .restrict = bioseq::sql::pg_catalog_reference::eqsel,
+        .join = bioseq::sql::pg_catalog_reference::eqjoinsel,
+        .hashes = true,
+        .merges = true,
+    })]]
+    static bool letter_eq(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return ::compare_letters(left, right) == 0;
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    [[bioseq_sql::operator_({
+        .symbol = "<>",
+        .commutator = bioseq::pg_types::letter::letter_ne,
+        .negator = bioseq::pg_types::letter::letter_eq,
+        .restrict = bioseq::sql::pg_catalog_reference::neqsel,
+        .join = bioseq::sql::pg_catalog_reference::neqjoinsel,
+    })]]
+    static bool letter_ne(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return ::compare_letters(left, right) != 0;
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    [[bioseq_sql::operator_({
+        .symbol = ">=",
+        .commutator = bioseq::pg_types::letter::letter_le,
+        .negator = bioseq::pg_types::letter::letter_lt,
+        .restrict = bioseq::sql::pg_catalog_reference::scalargesel,
+        .join = bioseq::sql::pg_catalog_reference::scalargejoinsel,
+    })]]
+    static bool letter_ge(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return ::compare_letters(left, right) >= 0;
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    [[bioseq_sql::operator_({
+        .symbol = ">",
+        .commutator = bioseq::pg_types::letter::letter_lt,
+        .negator = bioseq::pg_types::letter::letter_le,
+        .restrict = bioseq::sql::pg_catalog_reference::scalargtsel,
+        .join = bioseq::sql::pg_catalog_reference::scalargtjoinsel,
+    })]]
+    static bool letter_gt(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return ::compare_letters(left, right) > 0;
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    static std::int32_t letter_cmp(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter left,
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter right) {
+        return static_cast<std::int32_t>(
+            ::compare_letters(left, right));
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    static std::int32_t letter_hash(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter value) {
+        const auto bytes = ::letter_hash_bytes(value);
+        return static_cast<std::int32_t>(
+            hash_bytes(bytes.data(), bytes.size()));
+    }
+
+    [[bioseq_sql::function({
+        .schema = bioseq::sql::fixed_schema<"bioseq">,
+        .volatility = bioseq::sql::volatility::immutable,
+        .parallel = bioseq::sql::parallel_safety::safe,
+    })]]
+    static std::int64_t letter_hash_extended(
+        [[bioseq_sql::param({
+            .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+        })]]
+        letter value,
+        std::int64_t seed) {
+        const auto bytes = ::letter_hash_bytes(value);
+        return static_cast<std::int64_t>(hash_bytes_extended(
+            bytes.data(), bytes.size(),
+            static_cast<std::uint64_t>(seed)));
+    }
 };
 
-static_assert(sizeof(pg_letter) == 2u);
-static_assert(std::is_trivially_copyable_v<pg_letter>);
+}  // namespace bioseq::pg_types
+
+static_assert(sizeof(bioseq::pg_types::letter) == 2u);
+static_assert(std::is_trivially_copyable_v<bioseq::pg_types::letter>);
 
 export [[nodiscard]] inline Datum make_letter_datum(
     std::uint8_t alphabet_code,
@@ -48,7 +265,7 @@ export [[nodiscard]] inline Datum make_letter_datum(
     return UInt16GetDatum(bits);
 }
 
-export [[nodiscard]] inline pg_letter datum_get_letter(Datum datum) noexcept
+export [[nodiscard]] inline bioseq::pg_types::letter datum_get_letter(Datum datum) noexcept
 {
     const std::uint16_t bits = DatumGetUInt16(datum);
     return {
@@ -419,11 +636,21 @@ export void install_letter_literal_validation_hook() noexcept
     post_parse_analyze_hook = &bioseq_letter_post_parse_analyze;
 }
 
-extern "C" PGDLLEXPORT Datum letter_hook_chain_calls_impl(FunctionCallInfo)
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+std::int64_t letter_hook_chain_calls() noexcept
 {
-    PG_RETURN_INT64(static_cast<std::int64_t>(
-        letter_hook_call_count));
+    return static_cast<std::int64_t>(letter_hook_call_count);
 }
+
+}  // namespace bioseq::pg_types::sql_routines
 
 export [[nodiscard]] inline int32_t encode_letter_typmod(
     std::uint8_t alphabet_code)
@@ -471,9 +698,9 @@ export [[nodiscard]] inline Oid bioseq_letter_oid()
     return oid;
 }
 
-export [[nodiscard]] inline pg_letter validate_letter_datum(Datum datum)
+export [[nodiscard]] inline bioseq::pg_types::letter validate_letter_datum(Datum datum)
 {
-    const pg_letter value = datum_get_letter(datum);
+    const bioseq::pg_types::letter value = datum_get_letter(datum);
     if (value.alphabet_code == unresolved_letter_alphabet_code) {
         unresolved_letter_input_error();
     }
@@ -491,28 +718,46 @@ export [[nodiscard]] inline pg_letter validate_letter_datum(Datum datum)
     return value;
 }
 
-namespace {
+export namespace bioseq::pg_utils::detail {
 
-[[nodiscard]] inline std::uint16_t letter_key(pg_letter value) noexcept
+template<>
+struct sql_scalar_conversion<bioseq::pg_types::letter> final {
+    static constexpr const char* key = "bioseq.letter/by_value";
+
+    [[nodiscard]] static bioseq::pg_types::letter read(Datum value) {
+        return bioseq::pg_utils::invoke_pg_as_cpp([value] {
+            return ::validate_letter_datum(value);
+        });
+    }
+
+    [[nodiscard]] static Datum write(
+        bioseq::pg_types::letter value) noexcept {
+        return ::make_letter_datum(
+            value.alphabet_code, value.rank);
+    }
+};
+
+}  // namespace bioseq::pg_utils::detail
+
+[[nodiscard]] inline std::uint16_t letter_key(bioseq::pg_types::letter value) noexcept
 {
     return static_cast<std::uint16_t>(
         (std::uint16_t{value.alphabet_code} << 8u)
         | std::uint16_t{value.rank});
 }
 
-[[nodiscard]] inline int compare_letters(Datum left, Datum right)
+[[nodiscard]] int compare_letters(
+    bioseq::pg_types::letter left,
+    bioseq::pg_types::letter right) noexcept
 {
-    const auto left_value = validate_letter_datum(left);
-    const auto right_value = validate_letter_datum(right);
-    const std::uint16_t left_key = letter_key(left_value);
-    const std::uint16_t right_key = letter_key(right_value);
+    const std::uint16_t left_key = letter_key(left);
+    const std::uint16_t right_key = letter_key(right);
     return left_key < right_key ? -1 : left_key > right_key ? 1 : 0;
 }
 
-[[nodiscard]] inline std::array<unsigned char, 2>
-letter_hash_bytes(Datum datum)
+[[nodiscard]] std::array<unsigned char, 2>
+letter_hash_bytes(bioseq::pg_types::letter value) noexcept
 {
-    const auto value = validate_letter_datum(datum);
     return {value.alphabet_code, value.rank};
 }
 
@@ -531,11 +776,22 @@ letter_hash_bytes(Datum datum)
     return rank;
 }
 
-} // namespace
+export namespace bioseq::pg_types::sql_routines {
 
-extern "C" PGDLLEXPORT Datum letter_typmod_in_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_typmod_in({
+    .for_type = bioseq::sql::type_of<bioseq::pg_types::letter>,
+})]]
+std::int32_t letter_typmod_in(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::custom_type<"cstring[]">,
+    })]]
+    ArrayType* array)
 {
-    ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     if (ARR_NDIM(array) != 1) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -554,59 +810,99 @@ extern "C" PGDLLEXPORT Datum letter_typmod_in_impl(FunctionCallInfo fcinfo)
     }
     const auto alphabet = parse_alphabet_name_checked(
         DatumGetCString(values[0]), "bioseq.letter");
-    PG_RETURN_INT32(encode_letter_typmod(alphabet));
+    return encode_letter_typmod(alphabet);
 }
 
-extern "C" PGDLLEXPORT Datum letter_typmod_out_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_typmod_out({
+    .for_type = bioseq::sql::type_of<bioseq::pg_types::letter>,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::cstring,
+})]]
+char* letter_typmod_out(std::int32_t typmod)
 {
-    const int32_t typmod = PG_GETARG_INT32(0);
     if (typmod < 0) {
-        PG_RETURN_CSTRING(pstrdup(""));
+        return pstrdup("");
     }
     const auto alphabet = decode_letter_typmod_checked(typmod);
     const auto name = supported_alphabet_name(alphabet);
     auto* result = static_cast<char*>(palloc(name.size() + 5u));
     std::snprintf(result, name.size() + 5u, "('%.*s')",
                   static_cast<int>(name.size()), name.data());
-    PG_RETURN_CSTRING(result);
+    return result;
 }
 
-extern "C" PGDLLEXPORT Datum letter_in_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_input]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+})]]
+bioseq::pg_types::letter letter_in(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::cstring,
+    })]]
+    const char* input,
+    Oid type_oid,
+    std::int32_t typmod)
 {
-    const char* input = PG_GETARG_CSTRING(0);
-    const int32_t typmod = PG_GETARG_INT32(2);
+    static_cast<void>(type_oid);
     if (std::strlen(input) != 1u) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
                  errmsg("bioseq.letter input must contain exactly one symbol")));
     }
     if (typmod < 0) {
-        PG_RETURN_DATUM(make_letter_datum(
-            unresolved_letter_alphabet_code,
-            static_cast<std::uint8_t>(
-                static_cast<unsigned char>(input[0]))));
+        return {
+            .alphabet_code = unresolved_letter_alphabet_code,
+            .rank = static_cast<std::uint8_t>(
+                static_cast<unsigned char>(input[0])),
+        };
     }
     const auto alphabet = decode_letter_typmod_checked(typmod);
     const auto rank = rank_for_letter_symbol_checked(
         alphabet, static_cast<unsigned char>(input[0]));
-    PG_RETURN_DATUM(make_letter_datum(alphabet, rank));
+    return {.alphabet_code = alphabet, .rank = rank};
 }
 
-extern "C" PGDLLEXPORT Datum letter_out_impl(FunctionCallInfo fcinfo) {
-  const auto value = validate_letter_datum(PG_GETARG_DATUM(0));
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_output]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::cstring,
+})]]
+char* letter_out(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+    })]]
+    bioseq::pg_types::letter value) {
   char symbol = '\0';
   (void)pgseq_symbol_for_rank_out_of_line(
       value.alphabet_code, value.rank, symbol);
   auto *result = static_cast<char *>(palloc(2u));
   result[0] = symbol;
   result[1] = '\0';
-  PG_RETURN_CSTRING(result);
+  return result;
 }
+
+}  // namespace bioseq::pg_types::sql_routines
 
 namespace {
 
-[[nodiscard]] inline Datum decode_letter_wire(StringInfo buffer,
-                                              int32_t typmod) {
+[[nodiscard]] inline bioseq::pg_types::letter decode_letter_wire(
+    StringInfo buffer,
+    int32_t typmod) {
   const auto version = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
   const auto alphabet = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
   const auto rank = static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
@@ -633,7 +929,7 @@ namespace {
          errmsg(
              "bioseq.letter wire alphabet does not match destination typmod")));
   }
-  return make_letter_datum(alphabet, rank);
+  return {.alphabet_code = alphabet, .rank = rank};
 }
 
 [[nodiscard]] inline bool letter_wire_error_probe(std::array<char, 3> payload,
@@ -663,24 +959,60 @@ namespace {
 
 } // namespace
 
-extern "C" PGDLLEXPORT Datum letter_recv_impl(FunctionCallInfo fcinfo) {
-  auto *buffer = reinterpret_cast<StringInfo>(PG_GETARG_POINTER(0));
-  PG_RETURN_DATUM(decode_letter_wire(buffer, PG_GETARG_INT32(2)));
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_receive]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+})]]
+bioseq::pg_types::letter letter_recv(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    StringInfo buffer,
+    Oid type_oid,
+    std::int32_t typmod) {
+  static_cast<void>(type_oid);
+  return decode_letter_wire(buffer, typmod);
 }
 
-extern "C" PGDLLEXPORT Datum letter_send_impl(FunctionCallInfo fcinfo) {
-  const auto value = validate_letter_datum(PG_GETARG_DATUM(0));
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_send]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::bytea,
+})]]
+text* letter_send(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+    })]]
+    bioseq::pg_types::letter value) {
   StringInfoData buffer;
   pq_begintypsend(&buffer);
   pq_sendint8(&buffer, 1u);
   pq_sendint8(&buffer, value.alphabet_code);
   pq_sendint8(&buffer, value.rank);
-  PG_RETURN_BYTEA_P(pq_endtypsend(&buffer));
+  return pq_endtypsend(&buffer);
 }
 
-extern "C" PGDLLEXPORT Datum letter_wire_self_test_impl(FunctionCallInfo) {
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+bool letter_wire_self_test() {
   constexpr std::uint8_t dna4_code =
-      pgseq_supported_alphabets::index_of<seq::dna4>();
+      pgseq_supported_alphabets::index_of<::seq::dna4>();
   const bool unknown_version =
       letter_wire_error_probe({char{2}, static_cast<char>(dna4_code), char{0}},
                               -1, ERRCODE_INVALID_BINARY_REPRESENTATION);
@@ -690,98 +1022,69 @@ extern "C" PGDLLEXPORT Datum letter_wire_self_test_impl(FunctionCallInfo) {
   bool typmod_mismatch = true;
 #if BIOSEQ_OPTTIMIZATION_LEVEL > 0
   constexpr std::uint8_t dna5_code =
-      pgseq_supported_alphabets::index_of<seq::dna5>();
+      pgseq_supported_alphabets::index_of<::seq::dna5>();
   typmod_mismatch = letter_wire_error_probe(
       {char{1}, static_cast<char>(dna4_code), char{0}},
       encode_letter_typmod(dna5_code), ERRCODE_DATATYPE_MISMATCH);
 #endif
-  PG_RETURN_BOOL(unknown_version && bad_rank && typmod_mismatch);
+  return unknown_version && bad_rank && typmod_mismatch;
 }
 
-extern "C" PGDLLEXPORT Datum letter_typmod_cast_impl(FunctionCallInfo fcinfo) {
-  const Datum input = PG_GETARG_DATUM(0);
-  const int32_t target_typmod = PG_GETARG_INT32(1);
-  const auto unresolved = datum_get_letter(input);
-  if (unresolved.alphabet_code == unresolved_letter_alphabet_code) {
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::cast({
+    .assignment = true,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+})]]
+bioseq::pg_types::letter letter(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+    })]]
+    bioseq::pg_types::letter input,
+    std::int32_t target_typmod,
+    bool explicit_cast) {
+  static_cast<void>(explicit_cast);
+  if (input.alphabet_code == unresolved_letter_alphabet_code) {
     if (target_typmod < 0) {
       unresolved_letter_input_error();
     }
     const auto alphabet = decode_letter_typmod_checked(target_typmod);
     const auto rank = rank_for_letter_symbol_checked(
-        alphabet, unresolved.rank);
-    PG_RETURN_DATUM(make_letter_datum(alphabet, rank));
+        alphabet, input.rank);
+    return {.alphabet_code = alphabet, .rank = rank};
   }
-  const auto value = validate_letter_datum(input);
   if (target_typmod >= 0 &&
-      decode_letter_typmod_checked(target_typmod) != value.alphabet_code) {
+      decode_letter_typmod_checked(target_typmod) != input.alphabet_code) {
     ereport(ERROR,
             (errcode(ERRCODE_DATATYPE_MISMATCH),
              errmsg("cannot relabel bioseq.letter to a different alphabet")));
   }
-  PG_RETURN_DATUM(input);
+  return input;
 }
 
-extern "C" PGDLLEXPORT Datum letter_to_text_impl(FunctionCallInfo fcinfo) {
-  const auto value = validate_letter_datum(PG_GETARG_DATUM(0));
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::cast]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::text,
+})]]
+text* letter_to_text(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
+    })]]
+    bioseq::pg_types::letter value) {
   char symbol = '\0';
   (void)pgseq_symbol_for_rank_out_of_line(
       value.alphabet_code, value.rank, symbol);
-  PG_RETURN_TEXT_P(cstring_to_text_with_len(&symbol, 1));
+  return cstring_to_text_with_len(&symbol, 1);
 }
 
-extern "C" PGDLLEXPORT Datum letter_cmp_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_INT32(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)));
-}
-
-extern "C" PGDLLEXPORT Datum letter_eq_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_BOOL(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) == 0);
-}
-
-extern "C" PGDLLEXPORT Datum letter_ne_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_BOOL(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) != 0);
-}
-
-extern "C" PGDLLEXPORT Datum letter_lt_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_BOOL(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) < 0);
-}
-
-extern "C" PGDLLEXPORT Datum letter_le_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_BOOL(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) <= 0);
-}
-
-extern "C" PGDLLEXPORT Datum letter_gt_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_BOOL(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) > 0);
-}
-
-extern "C" PGDLLEXPORT Datum letter_ge_impl(FunctionCallInfo fcinfo)
-{
-    PG_RETURN_BOOL(compare_letters(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)) >= 0);
-}
-
-extern "C" PGDLLEXPORT Datum letter_hash_impl(FunctionCallInfo fcinfo)
-{
-    const auto bytes = letter_hash_bytes(PG_GETARG_DATUM(0));
-    PG_RETURN_INT32(static_cast<std::int32_t>(hash_bytes(
-        bytes.data(), bytes.size())));
-}
-
-extern "C" PGDLLEXPORT Datum letter_hash_extended_impl(FunctionCallInfo fcinfo)
-{
-    const auto bytes = letter_hash_bytes(PG_GETARG_DATUM(0));
-    const auto seed = static_cast<std::uint64_t>(PG_GETARG_INT64(1));
-    PG_RETURN_INT64(static_cast<std::int64_t>(hash_bytes_extended(
-        bytes.data(), bytes.size(), seed)));
-}
+}  // namespace bioseq::pg_types::sql_routines

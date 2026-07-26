@@ -2,9 +2,8 @@
  *
  * external/row_writer.cppm
  *
- * DOC0372 — "PostgreSQL logical tables". Materialize a normalized owning
- * provider message into a virtual TupleTableSlot for one of the six logical
- * bioseq_external relations.
+ * Materialize a normalized owning provider message into a virtual
+ * TupleTableSlot for one of the six logical bioseq_external relations.
  *
  * The CustomScan (scan_state.cppm) drives a stream of owning_provider_message
  * values out of provider core. Each message can "explode" into 0..N output
@@ -17,13 +16,12 @@
  *   - bioseq_external_fill_slot(): fill slot->tts_values[]/tts_isnull[] for one
  *     sub-row.
  *
- * The column order for each relation is authoritative in
- * bioseq/sql/bioseq_external--1.0.sql; the per-entity fillers below fill
- * tts_values in exactly that 0-based order and Assert() the expected natts to
- * catch column drift in assert-enabled builds. Every palloc'd value (text,
- * jsonb, arrays) is allocated in CurrentMemoryContext — the executor's
- * per-tuple context — because ExecStoreVirtualTuple (done by the caller) keeps
- * the pointers; nothing is freed here.
+ * The natural SQL catalog descriptors in external/sql_catalog.cppm own the column
+ * order. The per-entity fillers below use that same 0-based order and Assert()
+ * the expected natts to catch drift in assert-enabled builds. Every palloc'd
+ * value (text, jsonb, arrays) is allocated in CurrentMemoryContext — the
+ * executor's per-tuple context — because ExecStoreVirtualTuple (done by the
+ * caller) keeps the pointers; nothing is freed here.
  *
  * The sequence / sequence_chunk relations materialize an owning_sequence_payload
  * (the retrieved nucleotide letters + region metadata) into the bioseq.seq
@@ -61,7 +59,7 @@ import bioseq.external.provider.model;
 import bioseq.external.provider.messages;
 import bioseq.common.sequan_compat;   /* seq::dna5 */
 import bioseq.sequences.simd;         /* ::bioseq::simd::active_target::stdc_convert_from_cstr */
-import bioseq.types.pg_compact_sequence; /* pgseq_t, pg_alloc — the bioseq.seq varlena */
+import bioseq.types.pg_compact_sequence; /* bioseq::pg_types::seq, pg_alloc — the bioseq.seq varlena */
 
 namespace prov = bioseq::external::provider;
 
@@ -89,7 +87,7 @@ export bool bioseq_external_fill_slot(
 	std::size_t sub_index, TupleTableSlot* slot);
 
 /* ======================================================================== */
-/* Column counts (authoritative: bioseq_external--1.0.sql)                   */
+/* Column counts (authoritative: external/sql_catalog.cppm)                 */
 /* ======================================================================== */
 
 namespace {
@@ -491,7 +489,7 @@ set_locations_jsonb(TupleTableSlot* slot, std::size_t i,
 }
 
 /* ======================================================================== */
-/* Per-entity fillers. Column order mirrors bioseq_external--1.0.sql exactly. */
+/* Per-entity fillers. Column order mirrors external/sql_catalog.cppm.      */
 /* ======================================================================== */
 
 /* taxonomy (13). */
@@ -528,7 +526,7 @@ fill_catalog(const prov::owning_catalog_row& row, TupleTableSlot* slot)
 		set_text(slot, 3, prov::to_string(*row.molecule));
 	else
 		set_null(slot, 3);
-	set_text_opt(slot, 4, row.key.name_space);                      /* namespace */
+	set_text_opt(slot, 4, row.key.name_space);                      /* namespace_name */
 	set_text(slot, 5, row.key.original_identifier.view());          /* original_identifier */
 	set_text(slot, 6, row.key.accession.view());                    /* accession */
 	set_uint32_opt_as_int32(slot, 7, row.key.version);              /* accession_version */
@@ -571,7 +569,7 @@ fill_record_gene(const prov::owning_catalog_row& row, std::size_t sub_index,
 
 	set_text(slot, 0, row.provider.value);                          /* provider */
 	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace */
+	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
 	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
 	set_text(slot, 4, row.key.accession.view());                    /* accession */
 	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
@@ -598,7 +596,7 @@ fill_record_location(const prov::owning_catalog_row& row, std::size_t sub_index,
 
 	set_text(slot, 0, row.provider.value);                          /* provider */
 	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace */
+	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
 	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
 	set_text(slot, 4, row.key.accession.view());                    /* accession */
 	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
@@ -622,11 +620,11 @@ fill_record_location(const prov::owning_catalog_row& row, std::size_t sub_index,
 inline void
 set_seq(TupleTableSlot* slot, std::size_t i, std::string_view bases)
 {
-	pgseq_t* header =
+	bioseq::pg_types::seq* header =
 		::bioseq::simd::active_target::stdc_convert_from_cstr<
-			pgseq_t, pgseq_unconstrained_input_alphabet>(
+			bioseq::pg_types::seq, pgseq_unconstrained_input_alphabet>(
 			pgseq_normalize_storage_unit_byte_width(1u),
-			static_cast<pgseq_t::bp_size_t>(bases.size()),
+			static_cast<bioseq::pg_types::seq::bp_size_t>(bases.size()),
 			bases.empty() ? "" : bases.data(),
 			pg_alloc);
 	if (header == nullptr)
@@ -645,7 +643,7 @@ fill_sequence(const prov::owning_sequence_payload& row, TupleTableSlot* slot)
 
 	set_text(slot, 0, row.provider.value);                          /* provider */
 	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace */
+	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
 	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
 	set_text(slot, 4, row.key.accession.view());                    /* accession */
 	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */
@@ -672,7 +670,7 @@ fill_sequence_chunk(const prov::owning_sequence_payload& row,
 
 	set_text(slot, 0, row.provider.value);                          /* provider */
 	set_text(slot, 1, row.key.domain.view());                       /* domain */
-	set_text_opt(slot, 2, row.key.name_space);                      /* namespace */
+	set_text_opt(slot, 2, row.key.name_space);                      /* namespace_name */
 	set_text(slot, 3, row.key.original_identifier.view());          /* original_identifier */
 	set_text(slot, 4, row.key.accession.view());                    /* accession */
 	set_uint32_opt_as_int32(slot, 5, row.key.version);              /* accession_version */

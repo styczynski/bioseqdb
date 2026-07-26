@@ -39,6 +39,8 @@ import bioseq.scheduler.supervisor_pg;
 import bioseq.storage.metadata;
 import bioseq.storage.manager;
 import bioseq.column.tam;
+import bioseq.codegen.sql.annotation_model;
+import bioseq.table.sql_rows;
 import :access_identity;
 
 namespace {
@@ -802,34 +804,40 @@ InstallBioseqColumnTableHooks()
 	ProcessUtility_hook = BioseqColumnProcessUtility;
 }
 
-/*
- * Integration-only proof that a fresh backend used the lazy-load lock
- * fallback without manufacturing stale relation/OID revisits. This function
- * is diagnostic only: it snapshots the two counters and cannot reset or
- * influence teardown state.
+export namespace bioseq::table {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::volatile_,
+    .parallel = bioseq::sql::parallel_safety::unsafe,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+/**
+ * @brief Returns backend-local DROP EXTENSION lock-fallback and missing-relation
+ * counters.
  */
-POSTGRES_FN(bioseq_internal_teardown_diagnostics)
-{
-	TupleDesc tupdesc = nullptr;
-	if (get_call_result_type(fcinfo, nullptr, &tupdesc) != TYPEFUNC_COMPOSITE)
-	{
-		ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("bioseq_internal.teardown_diagnostics() must be called as a composite-returning function")));
-	}
-	tupdesc = BlessTupleDesc(tupdesc);
-
-	Datum values[2]{};
-	bool nulls[2]{};
-	values[0] = Int64GetDatum(static_cast<std::int64_t>(
-		std::min<std::uint64_t>(
-			BioseqExtensionDropLockFallbackClassifications,
-			static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))));
-	values[1] = Int64GetDatum(static_cast<std::int64_t>(
-		std::min<std::uint64_t>(
-			BioseqExtensionMissingRelationObservations,
-			static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))));
-
-	HeapTuple tuple = heap_form_tuple(tupdesc, values, nulls);
-	PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+[[nodiscard]] bioseq::pg_utils::named_out<teardown_diagnostics_row>
+teardown_diagnostics() noexcept {
+    const auto clamp_counter = [](std::uint64_t value) noexcept {
+        return static_cast<std::int64_t>(
+            std::min<std::uint64_t>(
+                value,
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max())));
+    };
+    return bioseq::pg_utils::named_out<teardown_diagnostics_row>{
+        teardown_diagnostics_row{
+            .lock_fallback_classifications =
+                clamp_counter(
+                    BioseqExtensionDropLockFallbackClassifications),
+            .missing_relation_observations =
+                clamp_counter(
+                    BioseqExtensionMissingRelationObservations),
+        }};
 }
+
+}  // namespace bioseq::table

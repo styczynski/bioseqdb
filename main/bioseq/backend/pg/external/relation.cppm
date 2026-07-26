@@ -2,8 +2,7 @@
  *
  * external/relation.cppm
  *
- * DOC0372 — "PostgreSQL logical tables". The bioseq_external table access
- * method (TAM) and its relation-option surface.
+ * The bioseq_external table access method and its relation-option surface.
  *
  * This is the read-only, storage-free counterpart of the columnar TAM in
  * backend/pg/table/access_method.cppm. Its TableAmRoutine advertises a
@@ -17,9 +16,7 @@
  * CustomScan bridges to provider core; see scan_state.cppm).
  *
  * It also owns the `entity` / `alphabet` / `storage_width` / `chunk_bases`
- * relation options and the two marker predicate functions
- * (bioseq_external.taxon_matches / bioseq_external.native_query), which are
- * dummies that raise if they ever reach a physical executor.
+ * relation options.
  *
  *-------------------------------------------------------------------------
  */
@@ -36,11 +33,36 @@ extern "C" {
 
 export module bioseq.pg.external.relation;
 
+#if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
+import bioseq.codegen.sql.annotation_model;
+
+namespace bioseq::external::sql_routines {
+
+/** @brief Returns the table access-method handler for external relations. */
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+})]]
+[[bioseq_sql::access_method]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::all,
+    .from = bioseq::sql::public_role,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::table_am_handler,
+})]]
+extern "C" PGDLLEXPORT Datum bioseq_external_handler(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    FunctionCallInfo fcinfo);
+
+}  // namespace bioseq::external::sql_routines
+#endif
+
 /*
- * DOC0372 §"table access method". The required `entity` option selects one
- * of the six logical relation shapes. UNSPECIFIED is the sentinel used as the
- * enum-reloption default so a missing `entity` is detectable (and rejected)
- * rather than silently defaulting to a real entity.
+ * The required `entity` option selects one of the six logical relation
+ * shapes. UNSPECIFIED is the sentinel used as the enum-reloption default so a
+ * missing `entity` is rejected rather than defaulting to a real entity.
  */
 export enum BioseqExternalEntityKind : int
 {
@@ -139,8 +161,7 @@ validate_bioseq_external_alphabet(const char *value)
 	 * value. A NULL/empty value is the unset default and must be accepted, or
 	 * add_string_reloption() in bioseq_external_tableam_init() would raise during
 	 * _PG_init and break CREATE EXTENSION. The concrete alphabet set is enforced
-	 * later, when the sequence data plane (DOC0372 stretch) is implemented; until
-	 * then any provided value is accepted as-is.
+	 * by the sequence data plane; this layer accepts any non-null value.
 	 */
 	(void) value;
 }
@@ -690,45 +711,17 @@ bioseq_external_tableam_init(void)
 }
 
 /* ======================================================================== */
-/* C-ABI entry points called by bioseq_external--1.0.sql                     */
+/* C-ABI table access-method handler                                         */
 /* ======================================================================== */
 
 /*
- * bioseq_external_handler — the real table_am_handler. Returns the distinct
- * external TAM identity (DOC0372 §"table access method").
+ * Return the table access-method routine for external logical relations.
  */
+namespace bioseq::external::sql_routines {
+
 POSTGRES_FN(bioseq_external_handler)
 {
-	PG_RETURN_POINTER(GetBioseqExternalTableAmRoutine());
+	PG_RETURN_POINTER(::GetBioseqExternalTableAmRoutine());
 }
 
-/*
- * Marker predicate functions. They carry semantics that are not row fields
- * (descendant-taxon matching; provider-native query) and are consumed by the
- * CustomScan at plan time. If one ever reaches a physical executor — i.e. the
- * custom path was not chosen — it raises rather than silently evaluating with
- * invented semantics. Same shape as the mmsearch stub in mod.cppm.
- */
-extern "C" {
-
-CXX_PG_FUNCTION_INFO_V1(bioseq_external_taxon_matches);
-Datum
-bioseq_external_taxon_matches(PG_FUNCTION_ARGS)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("bioseq_external.taxon_matches is only valid inside a bioseq_external Custom Scan")));
-	pg_unreachable();
-}
-
-CXX_PG_FUNCTION_INFO_V1(bioseq_external_native_query);
-Datum
-bioseq_external_native_query(PG_FUNCTION_ARGS)
-{
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("bioseq_external.native_query is only valid inside a bioseq_external Custom Scan")));
-	pg_unreachable();
-}
-
-} // extern "C"
+}  // namespace bioseq::external::sql_routines

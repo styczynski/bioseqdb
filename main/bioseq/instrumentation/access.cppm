@@ -17,7 +17,7 @@ module;
 
 export module bioseq.instr.access;
 
-import bioseq.common.mlogging;   // brings `enable_logging` and the fmtlog wrapper into scope for bioseq_log<DBG>
+import bioseq.common.mlogging;   // brings `bioseq::settings::logging` and the fmtlog wrapper into scope for bioseq_log<DBG>
 
 import bioseq.instr.config;
 import bioseq.instr.descriptor;

@@ -3,9 +3,9 @@ module;
 
 #include <cstdint>
 #include <exception>
+#include <optional>
 
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 extern "C" {
 #include "catalog/pg_type_d.h"
 #include "executor/execExpr.h"
@@ -21,6 +21,7 @@ extern "C" {
 
 export module bioseq.types.pg_compact_sequence:subscript;
 
+import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :tree_types;
 import :view_session;
@@ -248,8 +249,26 @@ void seq_subscript_exec_setup(
 
 } // namespace
 
-extern "C" PGDLLEXPORT Datum seq_subscript_handler_impl(FunctionCallInfo)
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_subscript({
+    .for_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::internal,
+})]]
+void* seq_subscript_handler(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<Datum> input)
 {
+    static_cast<void>(input);
     static const SubscriptRoutines routines = {
         seq_subscript_transform,
         seq_subscript_exec_setup,
@@ -257,5 +276,7 @@ extern "C" PGDLLEXPORT Datum seq_subscript_handler_impl(FunctionCallInfo)
         false,
         false,
     };
-    PG_RETURN_POINTER(&routines);
+    return const_cast<SubscriptRoutines*>(&routines);
 }
+
+}  // namespace bioseq::pg_types::sql_routines

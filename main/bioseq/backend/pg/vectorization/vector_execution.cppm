@@ -18,7 +18,17 @@ module;
 
 #include "common.h"
 
+#include "commands/extension.h"
+#include "parser/parse_func.h"
+#include "utils/syscache.h"
+
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <optional>
 #include <span>
+#include <string_view>
 
 export module bioseq.vector.execution;
 
@@ -26,63 +36,287 @@ import bioseq.pg_utils;
 import bioseq.vector.types;
 import bioseq.column.vector_compare;
 import bioseq.pg_utils.nodes;          // DOC0333 — pg_node_try_as_op_expr_family, pg_node_try_as, pg_is_const_var_binary_args
+#if defined(BIOSEQ_TEST_INDEXES)
+import bioseq.sql.generated.test_indexes.vector_aggregate_registry;
+import bioseq.sql.generated.test_indexes.vector_comparison_registry;
+#else
+import bioseq.sql.generated.production.vector_aggregate_registry;
+import bioseq.sql.generated.production.vector_comparison_registry;
+#endif
 
 using namespace bioseq::pg_utils;      // DOC0333 — node view helpers live in bioseq::pg_utils
 
-/*
- * GetVectorizedProcedureOid resolves the vectorised implementation of
- * procedureOid by prepending 'v' to its name and looking up a match with
- * identical argument types. Returns true when a unique matching function
- * is found and writes the Oid to vectorizedProcedureOid.
- */
-export bool
-GetVectorizedProcedureOid(Oid procedure_oid, Oid* vectorized_procedure_oid)
+namespace {
+
+struct scalar_procedure_signature final
 {
-	HeapTuple procedure_tuple = SearchSysCache1(PROCOID, ObjectIdGetDatum(procedure_oid));
-	Form_pg_proc procedure_form = reinterpret_cast<Form_pg_proc>(GETSTRUCT(procedure_tuple));
+	std::array<char, NAMEDATALEN> name{};
+	Oid namespace_oid = InvalidOid;
+	std::array<Oid, 2> argument_types{InvalidOid, InvalidOid};
+	Oid result_type = InvalidOid;
+	std::int16_t argument_count = 0;
+	char procedure_kind = PROKIND_FUNCTION;
+};
 
-	const int original_procedure_name_length = strlen(NameStr(procedure_form->proname));
+[[nodiscard]] std::optional<scalar_procedure_signature>
+read_scalar_procedure_signature(Oid procedure_oid)
+{
+	HeapTuple procedure_tuple =
+		SearchSysCache1(PROCOID, ObjectIdGetDatum(procedure_oid));
+	if (!HeapTupleIsValid(procedure_tuple))
+		return std::nullopt;
 
-	char* vectorized_procedure_name = make_array<char>(original_procedure_name_length + 2);
-
-	vectorized_procedure_name[0] = 'v';
-
-	memcpy(vectorized_procedure_name + 1,
-		NameStr(procedure_form->proname),
-		original_procedure_name_length);
-
-	ReleaseSysCache(procedure_tuple);
-
-	auto function_names = PList<void>::of(makeString(vectorized_procedure_name));
-
-	Oid* argument_types = make_array<Oid>(procedure_form->pronargs);
-
-	for (int argument_index = 0; argument_index < procedure_form->pronargs; argument_index++)
-		argument_types[argument_index] = procedure_form->proargtypes.values[argument_index];
-
-	bool returns_set;
-	Oid return_type;
-	int variadic_args_count;
-	Oid variadic_array_type;
-	Oid* resolved_argument_types;
-
-	FuncDetailCode func_detail_result = func_get_detail(function_names, NIL, NIL,
-								procedure_form->pronargs, argument_types,
-								false, true, false,
-								vectorized_procedure_oid,
-								&return_type, &returns_set,
-								&variadic_args_count, &variadic_array_type,
-								&resolved_argument_types, NULL);
-
-	if ((func_detail_result == FUNCDETAIL_NOTFOUND || func_detail_result == FUNCDETAIL_MULTIPLE) ||
-		!OidIsValid(*vectorized_procedure_oid) ||
-		(procedure_form->pronargs != 0 &&
-		 memcmp(argument_types, resolved_argument_types, procedure_form->pronargs * sizeof(Oid)) != 0))
+	Form_pg_proc procedure_form =
+		reinterpret_cast<Form_pg_proc>(GETSTRUCT(procedure_tuple));
+	if (procedure_form->pronargs > 2)
 	{
-		return false;
+		ReleaseSysCache(procedure_tuple);
+		return std::nullopt;
 	}
 
-	return true;
+	scalar_procedure_signature signature{
+		.namespace_oid = procedure_form->pronamespace,
+		.argument_types = {
+			procedure_form->pronargs >= 1
+				? procedure_form->proargtypes.values[0]
+				: InvalidOid,
+			procedure_form->pronargs >= 2
+				? procedure_form->proargtypes.values[1]
+				: InvalidOid},
+		.result_type = procedure_form->prorettype,
+		.argument_count = procedure_form->pronargs,
+		.procedure_kind = procedure_form->prokind,
+	};
+	strlcpy(
+		signature.name.data(),
+		NameStr(procedure_form->proname),
+		signature.name.size());
+	ReleaseSysCache(procedure_tuple);
+	return signature;
+}
+
+[[nodiscard]] std::optional<Oid>
+installed_extension_namespace()
+{
+	const Oid extension_oid = get_extension_oid("bioseq", true);
+	if (!OidIsValid(extension_oid))
+		return std::nullopt;
+
+	const Oid namespace_oid = get_extension_schema(extension_oid);
+	if (!OidIsValid(namespace_oid))
+		return std::nullopt;
+	return namespace_oid;
+}
+
+[[nodiscard]] std::optional<Oid>
+lookup_vector_owner(
+	Oid namespace_oid,
+	std::string_view vector_name,
+	const std::array<Oid, 2>& argument_types,
+	Oid expected_result_type)
+{
+	const char* const vector_name_data = vector_name.data();
+	const Oid left_type = argument_types[0];
+	const Oid right_type = argument_types[1];
+	const Oid vector_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+		[namespace_oid, vector_name_data, left_type, right_type]
+		{
+			char* namespace_name = get_namespace_name(namespace_oid);
+			if (namespace_name == nullptr)
+				return InvalidOid;
+			List* qualified_name = list_make2(
+				makeString(namespace_name),
+				makeString(pstrdup(vector_name_data)));
+			Oid exact_argument_types[2]{left_type, right_type};
+			const Oid result = LookupFuncName(
+				qualified_name,
+				2,
+				exact_argument_types,
+				true);
+			list_free_deep(qualified_name);
+			return result;
+		});
+	if (!OidIsValid(vector_oid)
+		|| get_func_rettype(vector_oid) != expected_result_type)
+		return std::nullopt;
+	return vector_oid;
+}
+
+[[nodiscard]] bool
+routine_matches(
+	Oid procedure_oid,
+	Oid namespace_oid,
+	std::string_view expected_name)
+{
+	if (!OidIsValid(procedure_oid))
+		return expected_name.empty();
+	if (expected_name.empty())
+		return false;
+
+	HeapTuple procedure_tuple =
+		SearchSysCache1(PROCOID, ObjectIdGetDatum(procedure_oid));
+	if (!HeapTupleIsValid(procedure_tuple))
+		return false;
+	Form_pg_proc procedure_form =
+		reinterpret_cast<Form_pg_proc>(GETSTRUCT(procedure_tuple));
+	const bool matches =
+		procedure_form->pronamespace == namespace_oid
+		&& expected_name == NameStr(procedure_form->proname);
+	ReleaseSysCache(procedure_tuple);
+	return matches;
+}
+
+[[nodiscard]] std::optional<Oid>
+lookup_vector_aggregate_owner(
+	Oid namespace_oid,
+	const bioseq::sql::generated::vector_aggregate_registry::
+		association& association)
+{
+	const char* const vector_name_data = association.vector_name.data();
+	const int argument_count =
+		OidIsValid(association.input_type) ? 1 : 0;
+	const Oid input_type = association.input_type;
+	const Oid vector_oid = bioseq::pg_utils::invoke_pg_as_cpp(
+		[namespace_oid, vector_name_data, argument_count, input_type]
+		{
+			char* namespace_name = get_namespace_name(namespace_oid);
+			if (namespace_name == nullptr)
+				return InvalidOid;
+			List* qualified_name = list_make2(
+				makeString(namespace_name),
+				makeString(pstrdup(vector_name_data)));
+			Oid exact_argument_types[1]{input_type};
+			const Oid result = LookupFuncName(
+				qualified_name,
+				argument_count,
+				argument_count == 0 ? nullptr : exact_argument_types,
+				true);
+			list_free_deep(qualified_name);
+			return result;
+		});
+	if (!OidIsValid(vector_oid))
+		return std::nullopt;
+
+	const std::optional<scalar_procedure_signature> vector_signature =
+		read_scalar_procedure_signature(vector_oid);
+	if (!vector_signature
+		|| vector_signature->procedure_kind != PROKIND_AGGREGATE
+		|| vector_signature->argument_count != argument_count
+		|| vector_signature->argument_types[0]
+			!= association.input_type
+		|| vector_signature->result_type != association.result_type)
+		return std::nullopt;
+
+	HeapTuple aggregate_tuple =
+		SearchSysCache1(AGGFNOID, ObjectIdGetDatum(vector_oid));
+	if (!HeapTupleIsValid(aggregate_tuple))
+		return std::nullopt;
+	Form_pg_aggregate aggregate_form =
+		reinterpret_cast<Form_pg_aggregate>(GETSTRUCT(aggregate_tuple));
+	const bool matches =
+		aggregate_form->aggtranstype == association.state_type
+		&& routine_matches(
+			aggregate_form->aggtransfn,
+			namespace_oid,
+			association.transition_name)
+		&& routine_matches(
+			aggregate_form->aggfinalfn,
+			namespace_oid,
+			association.final_name);
+	ReleaseSysCache(aggregate_tuple);
+	if (!matches)
+		return std::nullopt;
+	return vector_oid;
+}
+
+[[nodiscard]] bool
+contains_null_constant(List* arguments) noexcept
+{
+	for (Expr* argument : PList<Expr>{arguments})
+	{
+		if (Const* constant =
+				pg_node_try_as<Const>(pg_as_node(argument));
+			constant != nullptr && constant->constisnull)
+			return true;
+	}
+	return false;
+}
+
+}  // namespace
+
+/*
+ * Resolve a built-in scalar comparison through the generated closed
+ * scalar/vector association table and the extension's installed namespace.
+ */
+export [[nodiscard]] std::optional<Oid>
+GetVectorizedProcedureOid(Oid procedure_oid)
+{
+	const std::optional<scalar_procedure_signature> signature =
+		read_scalar_procedure_signature(procedure_oid);
+	if (!signature)
+		return std::nullopt;
+
+	if (signature->argument_count == 2
+		&& signature->procedure_kind != PROKIND_AGGREGATE)
+	{
+		using namespace
+			bioseq::sql::generated::vector_comparison_registry;
+		const auto association = std::ranges::find_if(
+			all(),
+			[signature](const auto& candidate)
+			{
+				return candidate.scalar_namespace
+						== signature->namespace_oid
+					&& candidate.scalar_name
+						== signature->name.data()
+					&& candidate.left_type
+						== signature->argument_types[0]
+					&& candidate.right_type
+						== signature->argument_types[1]
+					&& candidate.result_type
+						== signature->result_type;
+			});
+		if (association != all().end())
+		{
+			const std::optional<Oid> namespace_oid =
+				installed_extension_namespace();
+			if (!namespace_oid)
+				return std::nullopt;
+			return lookup_vector_owner(
+				*namespace_oid,
+				association->vector_name,
+				signature->argument_types,
+				association->result_type);
+		}
+	}
+
+	if (signature->procedure_kind != PROKIND_AGGREGATE
+		|| signature->argument_count > 1)
+		return std::nullopt;
+	using namespace
+		bioseq::sql::generated::vector_aggregate_registry;
+	const Oid input_type =
+		signature->argument_count == 0
+			? InvalidOid
+			: signature->argument_types[0];
+	const auto association = std::ranges::find_if(
+		all(),
+		[signature, input_type](const auto& candidate)
+		{
+			return candidate.scalar_namespace
+					== signature->namespace_oid
+				&& candidate.scalar_name == signature->name.data()
+				&& candidate.input_type == input_type
+				&& candidate.result_type == signature->result_type;
+		});
+	if (association == all().end())
+		return std::nullopt;
+	const std::optional<Oid> namespace_oid =
+		installed_extension_namespace();
+	if (!namespace_oid)
+		return std::nullopt;
+	return lookup_vector_aggregate_owner(
+		*namespace_oid, *association);
 }
 
 /*
@@ -123,21 +357,27 @@ CreateVectorizedExprList(List* expression_list)
 				new_qual_list = lappend(new_qual_list, op_expr_node);
 				continue;
 			}
+			if (contains_null_constant(op_expr_node->args))
+			{
+				new_qual_list = lappend(new_qual_list, op_expr_node);
+				continue;
+			}
 
 			HeapTuple operator_tuple = SearchSysCache1(OPEROID, ObjectIdGetDatum(op_expr_node->opno));
 			Form_pg_operator operator_form = reinterpret_cast<Form_pg_operator>(GETSTRUCT(operator_tuple));
 			Oid procedure_oid = operator_form->oprcode;
 			ReleaseSysCache(operator_tuple);
 
-			Oid vectorized_oid;
-			if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_oid))
+			const std::optional<Oid> vectorized_oid =
+				GetVectorizedProcedureOid(procedure_oid);
+			if (!vectorized_oid)
 			{
 				new_qual_list = lappend(new_qual_list, op_expr_node);
 				continue;
 			}
 
 			OpExpr* vectorized_op_expr_node = reinterpret_cast<OpExpr*>(copyObject(op_expr_node));
-			vectorized_op_expr_node->opfuncid = vectorized_oid;
+			vectorized_op_expr_node->opfuncid = *vectorized_oid;
 			new_qual_list = lappend(new_qual_list, vectorized_op_expr_node);
 
 			continue;

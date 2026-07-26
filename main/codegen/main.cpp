@@ -1,3 +1,5 @@
+// Anchor libc++ filesystem definitions before importing component BMIs.
+#include <filesystem>
 #include <span>
 #include <string_view>
 #include <vector>

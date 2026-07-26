@@ -3,15 +3,17 @@ module;
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 extern "C" {
 #include "utils/builtins.h"
 }
 
 export module bioseq.types.pg_compact_sequence:concat_reverse;
 
+import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :io;
 import :tree_types;
@@ -22,15 +24,14 @@ import bioseq.storage.lazy;
 
 namespace {
 
-[[nodiscard]] inline Datum text_sequence_literal(text const* value)
+[[nodiscard]] inline Datum text_sequence_literal(std::string_view value)
 {
     return make_unbound_sequence_from_ascii(
-        VARDATA_ANY(value),
-        static_cast<std::size_t>(VARSIZE_ANY_EXHDR(value)));
+        value.data(), value.size());
 }
 
 [[nodiscard]] inline Datum concat_text_and_sequence(
-    text const* value,
+    std::string_view value,
     Datum sequence,
     bool text_on_left)
 {
@@ -44,54 +45,158 @@ namespace {
 
 } // namespace
 
-extern "C" PGDLLEXPORT Datum seq_concat_impl(FunctionCallInfo fcinfo)
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "||",
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum seq_concat(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
 {
-    PG_RETURN_DATUM(concat_pg_sequences(
-        PG_GETARG_DATUM(0), PG_GETARG_DATUM(1)));
+    return concat_pg_sequences(left, right);
 }
 
-extern "C" PGDLLEXPORT Datum seq_concat_text_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "||",
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum seq_concat_text(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum sequence,
+    const std::string& value)
 {
-    text* value = PG_GETARG_TEXT_PP(1);
-    const Datum result = concat_text_and_sequence(
-        value, PG_GETARG_DATUM(0), false);
-    PG_FREE_IF_COPY(value, 1);
-    PG_RETURN_DATUM(result);
+    return concat_text_and_sequence(value, sequence, false);
 }
 
-extern "C" PGDLLEXPORT Datum text_concat_seq_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "||",
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum text_concat_seq(
+    const std::string& value,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum sequence)
 {
-    text* value = PG_GETARG_TEXT_PP(0);
-    const Datum result = concat_text_and_sequence(
-        value, PG_GETARG_DATUM(1), true);
-    PG_FREE_IF_COPY(value, 0);
-    PG_RETURN_DATUM(result);
+    return concat_text_and_sequence(value, sequence, true);
 }
 
-extern "C" PGDLLEXPORT Datum seq_concat_varchar_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "||",
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum seq_concat_varchar(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum sequence,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::varchar,
+    })]]
+    const std::string& value)
 {
-    return seq_concat_text_impl(fcinfo);
+    return concat_text_and_sequence(value, sequence, false);
 }
 
-extern "C" PGDLLEXPORT Datum varchar_concat_seq_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::operator_({
+    .symbol = "||",
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum varchar_concat_seq(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::varchar,
+    })]]
+    const std::string& value,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum sequence)
 {
-    return text_concat_seq_impl(fcinfo);
+    return concat_text_and_sequence(value, sequence, true);
 }
 
-extern "C" PGDLLEXPORT Datum seq_reverse_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum reverse(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
-    PG_RETURN_DATUM(transform_pg_sequence(
-        PG_GETARG_DATUM(0),
-        bioseq::storage::sequence_transform::reversed));
+    return transform_pg_sequence(
+        input, bioseq::storage::sequence_transform::reversed);
 }
 
-extern "C" PGDLLEXPORT Datum seq_reverse_complement_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum reverse_complement(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
-    Datum input = PG_GETARG_DATUM(0);
     Datum dispatch = input;
-    pgseq_t* flat = nullptr;
+    bioseq::pg_types::seq* flat = nullptr;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+        flat = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
         dispatch = PointerGetDatum(flat);
     }
     const auto descriptor = classify_and_describe_sequence(dispatch);
@@ -110,6 +215,29 @@ extern "C" PGDLLEXPORT Datum seq_reverse_complement_impl(FunctionCallInfo fcinfo
         && reinterpret_cast<Pointer>(flat) != DatumGetPointer(input)) {
         pfree(flat);
     }
-    PG_RETURN_DATUM(transform_pg_sequence(
-        input, bioseq::storage::sequence_transform::reverse_complement));
+    return transform_pg_sequence(
+        input, bioseq::storage::sequence_transform::reverse_complement);
 }
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum array_cat(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum left,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum right)
+{
+    return concat_pg_sequences(left, right);
+}
+
+}  // namespace bioseq::pg_types::sql_routines

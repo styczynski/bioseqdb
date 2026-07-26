@@ -12,7 +12,7 @@
  * `import bioseq_storage` consumer (access_method, dispatch_buffer, …) still
  * sees `bioseq::storage::seq_locator` and the bucket-math helpers unchanged.
  *
- * The pgseq_t-varlena framing of the stub (is_locator_stub /
+ * The bioseq::pg_types::seq-varlena framing of the stub (is_locator_stub /
  * encode_locator_into_stub / decode_locator_from_stub) stays in
  * sequence_storage_manager because it touches the Postgres varlena layout.
  */
@@ -36,7 +36,7 @@ export namespace bioseq::storage {
 // ---------------------------------------------------------------------------
 // DOC0371 — Phase C v3 locator POD. Replaces the Phase C v2 32-byte
 // (version, bucket_idx, _pad_2, shard_idx, total_bp_size, sub_row_no) layout.
-// Standard-layout so it can be memcpy'd in and out of the pgseq_t stub `data[]`
+// Standard-layout so it can be memcpy'd in and out of the bioseq::pg_types::seq stub `data[]`
 // region by the encode/decode helpers (which live in sequence_storage_manager).
 //
 // Layout (40 bytes):
@@ -73,7 +73,7 @@ struct seq_locator {
 static_assert(sizeof(seq_locator) == 40,
               "DOC0371: seq_locator v3 layout must stay 40 bytes.");
 static_assert(std::is_standard_layout_v<seq_locator>,
-              "seq_locator must be standard-layout (memcpy'd in/out of pgseq_t).");
+              "seq_locator must be standard-layout (memcpy'd in/out of bioseq::pg_types::seq).");
 static_assert(std::is_trivially_copyable_v<seq_locator>,
               "seq_locator must remain trivially copyable for its frozen v3 payload.");
 static_assert(offsetof(seq_locator, num_fragments) == 8,
@@ -129,7 +129,7 @@ static_assert((static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::ma
 }
 
 // A locator may come from a raw on-disk stub, so every consumer that intends
-// to rebuild one contiguous pgseq_t must validate the complete narrowing and
+// to rebuild one contiguous bioseq::pg_types::seq must validate the complete narrowing and
 // row-range contract before opening a shard or doing allocation arithmetic.
 // Keep the classification PostgreSQL-free so the exact corrupt boundaries are
 // exhaustively testable without manufacturing unsafe varlena values.

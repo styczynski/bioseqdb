@@ -2,10 +2,7 @@
  *
  * vectorization/types/aggregates.cppm
  *
- * Vectorised aggregate functions for integer/date types. Each SQL function
- * walks the single VectorColumn argument, skipping null lanes, and folds
- * the lane values into a scalar result. These are the transitions used by
- * sum(), count(), min()/max() and the int8 avg() state machine.
+ * Typed owners for the vector aggregate transition and final functions.
  *
  *-------------------------------------------------------------------------
  */
@@ -13,477 +10,887 @@ module;
 
 #include "common.h"
 
+extern "C" {
+#include "nodes/execnodes.h"
+#include "utils/fmgroids.h"
+}
+
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
 
 export module bioseq.vector.types.aggregates;
 
-import bioseq.common.mlogging;
+import bioseq.codegen.sql.annotation_model;
 import bioseq.pg_utils;
-import bioseq.vector.types;           // Int128AggState, Int64AggState
-import bioseq.vector.types.numeric;   // int128_to_numeric
+import bioseq.pg_utils.sql_boundary;
+import bioseq.vector.types;
+import bioseq.vector.types.numeric;
 
-extern "C" {
+namespace {
 
-/* count */
+#if defined(BIOSEQ_TEST_INDEXES)
+enum class aggregate_owner_runtime_id : std::size_t {
+    vemptycount,
+    vanycount,
+    vint2sum,
+    vint2acc,
+    vint2larger,
+    vint2smaller,
+    vint4sum,
+    vint4acc,
+    vint4larger,
+    vint4smaller,
+    vint2int4avg,
+    vint8acc,
+    vint8sum,
+    vint8avg,
+    vint8larger,
+    vint8smaller,
+    vdatelarger,
+    vdatesmaller,
+    count,
+};
 
-/*
- * vemptycount is the trivial transition for count() when all rows in a
- * batch are guaranteed non-null -- returns the running count unchanged.
+inline thread_local std::array<
+    std::uint64_t,
+    static_cast<std::size_t>(
+        aggregate_owner_runtime_id::count)>
+    aggregate_owner_runtime_visits{};
+
+inline void note_aggregate_owner_visit(
+        aggregate_owner_runtime_id owner) noexcept {
+    ++aggregate_owner_runtime_visits[
+        static_cast<std::size_t>(owner)];
+}
+#else
+enum class aggregate_owner_runtime_id : std::size_t {};
+inline void note_aggregate_owner_visit(
+        aggregate_owner_runtime_id) noexcept {}
+#endif
+
+template<class State, class Column, class Fold>
+[[nodiscard]] std::optional<State> fold_vector(
+        std::optional<State> state,
+        const std::optional<Column>& input,
+        Fold&& fold) {
+    if (!state.has_value() || !input.has_value()) {
+        return state;
+    }
+    for (std::size_t lane = 0; lane < input->size(); ++lane) {
+        if (!input->is_null(lane)) {
+            std::invoke(fold, *state, input->value(lane));
+        }
+    }
+    return state;
+}
+
+[[nodiscard]] bioseq::pg_utils::numeric_result numeric_average(
+        std::int64_t count,
+        std::int64_t sum) {
+    Numeric count_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
+        [count] { return int64_to_numeric(count); });
+    Numeric sum_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
+        [sum] { return int64_to_numeric(sum); });
+    Numeric result = bioseq::pg_utils::invoke_pg_as_cpp(
+        [sum_numeric, count_numeric] {
+            return numeric_div_opt_error(
+                sum_numeric, count_numeric, nullptr);
+        });
+    return bioseq::pg_utils::numeric_result::from_numeric(result);
+}
+
+[[nodiscard]] bioseq::pg_utils::numeric_result numeric_average(
+        const Int128AggState& state) {
+    Numeric sum_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
+        [sum = state.sumX] {
+            return int128_to_numeric(sum);
+        });
+    Numeric count_numeric = bioseq::pg_utils::invoke_pg_as_cpp(
+        [count = state.N] {
+            return int128_to_numeric(count);
+        });
+    Numeric result = bioseq::pg_utils::invoke_pg_as_cpp(
+        [sum_numeric, count_numeric] {
+            return numeric_div_opt_error(
+                sum_numeric, count_numeric, nullptr);
+        });
+    return bioseq::pg_utils::numeric_result::from_numeric(result);
+}
+
+}  // namespace
+
+export namespace bioseq::vector::aggregate_sql_routines {
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int64_t> vemptycount(
+    std::optional<std::int64_t> running_count) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vemptycount);
+#endif
+    return running_count;
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int64_t> vanycount(
+    std::optional<std::int64_t> running_count,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::quoted_any,
+    })]]
+    std::optional<bioseq::pg_utils::vector_null_mask> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vanycount);
+#endif
+    if (!running_count.has_value() || !input.has_value()) {
+        return running_count;
+    }
+    *running_count += static_cast<std::int64_t>(
+        input->non_null_count());
+    return running_count;
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int64_t> vint2sum(
+    std::optional<std::int64_t> running_sum,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::smallint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::smallint, std::int16_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint2sum);
+#endif
+    return fold_vector(
+        std::move(running_sum), input,
+        [](std::int64_t& sum, std::int16_t value) {
+            sum += static_cast<std::int64_t>(value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::internal,
+})]]
+std::optional<bioseq::pg_utils::int64_array_aggregate_state>
+vint2acc(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<
+        bioseq::pg_utils::int64_array_aggregate_state> state,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::smallint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::smallint, std::int16_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint2acc);
+#endif
+    if (!state.has_value() || !input.has_value()) {
+        return state;
+    }
+    Int64AggState& value = state->value();
+    for (std::size_t lane = 0; lane < input->size(); ++lane) {
+        if (!input->is_null(lane)) {
+            ++value.N;
+            value.sumX += static_cast<std::int64_t>(
+                input->value(lane));
+        }
+    }
+    return state;
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int16_t> vint2larger(
+    std::optional<std::int16_t> running_max,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::smallint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::smallint, std::int16_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint2larger);
+#endif
+    return fold_vector(
+        std::move(running_max), input,
+        [](std::int16_t& maximum, std::int16_t value) {
+            maximum = std::max(maximum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int16_t> vint2smaller(
+    std::optional<std::int16_t> running_min,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::smallint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::smallint, std::int16_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint2smaller);
+#endif
+    return fold_vector(
+        std::move(running_min), input,
+        [](std::int16_t& minimum, std::int16_t value) {
+            minimum = std::min(minimum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int64_t> vint4sum(
+    std::optional<std::int64_t> running_sum,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::integer,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::integer, std::int32_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint4sum);
+#endif
+    return fold_vector(
+        std::move(running_sum), input,
+        [](std::int64_t& sum, std::int32_t value) {
+            sum += static_cast<std::int64_t>(value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::internal,
+})]]
+std::optional<bioseq::pg_utils::int64_array_aggregate_state>
+vint4acc(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<
+        bioseq::pg_utils::int64_array_aggregate_state> state,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::integer,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::integer, std::int32_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint4acc);
+#endif
+    if (!state.has_value() || !input.has_value()) {
+        return state;
+    }
+    Int64AggState& value = state->value();
+    for (std::size_t lane = 0; lane < input->size(); ++lane) {
+        if (!input->is_null(lane)) {
+            ++value.N;
+            value.sumX += static_cast<std::int64_t>(
+                input->value(lane));
+        }
+    }
+    return state;
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int32_t> vint4larger(
+    std::optional<std::int32_t> running_max,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::integer,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::integer, std::int32_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint4larger);
+#endif
+    return fold_vector(
+        std::move(running_max), input,
+        [](std::int32_t& maximum, std::int32_t value) {
+            maximum = std::max(maximum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int32_t> vint4smaller(
+    std::optional<std::int32_t> running_min,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::integer,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::integer, std::int32_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint4smaller);
+#endif
+    return fold_vector(
+        std::move(running_min), input,
+        [](std::int32_t& minimum, std::int32_t value) {
+            minimum = std::min(minimum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::numeric,
+})]]
+std::optional<bioseq::pg_utils::numeric_result>
+vint2int4avg(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<
+        bioseq::pg_utils::int64_array_aggregate_state> state) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint2int4avg);
+#endif
+    if (!state.has_value() || state->value().N == 0) {
+        return std::nullopt;
+    }
+    return numeric_average(
+        state->value().N, state->value().sumX);
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::internal,
+})]]
+std::optional<bioseq::pg_utils::int128_aggregate_state>
+vint8acc(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<bioseq::pg_utils::int128_aggregate_state> state,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::bigint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::bigint, std::int64_t>> input,
+    bioseq::pg_utils::sql_call_context context) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint8acc);
+#endif
+    if (!input.has_value()) {
+        return state;
+    }
+    if (!state.has_value()) {
+        const MemoryContext aggregate_context =
+            context.aggregate_memory_context();
+        Int128AggState* const allocated =
+            bioseq::pg_utils::invoke_pg_as_cpp(
+                [aggregate_context] {
+                    MemoryContext previous =
+                        MemoryContextSwitchTo(aggregate_context);
+                    Int128AggState* const result =
+                        make0<Int128AggState>();
+                    MemoryContextSwitchTo(previous);
+                    return result;
+                });
+        allocated->calcSumX2 = false;
+        state = bioseq::pg_utils::int128_aggregate_state::from_new(
+            allocated);
+    }
+    Int128AggState& value = state->value();
+    for (std::size_t lane = 0; lane < input->size(); ++lane) {
+        if (!input->is_null(lane)) {
+            ++value.N;
+            value.sumX += static_cast<int128>(
+                input->value(lane));
+        }
+    }
+    return state;
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::numeric,
+})]]
+std::optional<bioseq::pg_utils::numeric_result>
+vint8sum(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<bioseq::pg_utils::int128_aggregate_state> state) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint8sum);
+#endif
+    if (!state.has_value() || state->value().N == 0) {
+        return std::nullopt;
+    }
+    Numeric numeric = bioseq::pg_utils::invoke_pg_as_cpp(
+        [sum = state->value().sumX] {
+            return int128_to_numeric(sum);
+        });
+    return bioseq::pg_utils::numeric_result::from_numeric(numeric);
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::numeric,
+})]]
+std::optional<bioseq::pg_utils::numeric_result>
+vint8avg(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    std::optional<bioseq::pg_utils::int128_aggregate_state> state) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint8avg);
+#endif
+    if (!state.has_value() || state->value().N == 0) {
+        return std::nullopt;
+    }
+    return numeric_average(state->value());
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int64_t> vint8larger(
+    std::optional<std::int64_t> running_max,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::bigint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::bigint, std::int64_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint8larger);
+#endif
+    return fold_vector(
+        std::move(running_max), input,
+        [](std::int64_t& maximum, std::int64_t value) {
+            maximum = std::max(maximum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+std::optional<std::int64_t> vint8smaller(
+    std::optional<std::int64_t> running_min,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::bigint,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::bigint, std::int64_t>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vint8smaller);
+#endif
+    return fold_vector(
+        std::move(running_min), input,
+        [](std::int64_t& minimum, std::int64_t value) {
+            minimum = std::min(minimum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::date,
+})]]
+std::optional<DateADT> vdatelarger(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::date,
+    })]]
+    std::optional<DateADT> running_max,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::date,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::date, DateADT>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vdatelarger);
+#endif
+    return fold_vector(
+        std::move(running_max), input,
+        [](DateADT& maximum, DateADT value) {
+            maximum = std::max(maximum, value);
+        });
+}
+
+[[bioseq_sql::function({
+    .volatility = bioseq::sql::volatility::immutable,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::date,
+})]]
+std::optional<DateADT> vdatesmaller(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::date,
+    })]]
+    std::optional<DateADT> running_min,
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::date,
+    })]]
+    std::optional<bioseq::pg_utils::vector_column<
+        bioseq::sql::pg::date, DateADT>> input) {
+#if defined(BIOSEQ_TEST_INDEXES)
+    note_aggregate_owner_visit(
+        aggregate_owner_runtime_id::vdatesmaller);
+#endif
+    return fold_vector(
+        std::move(running_min), input,
+        [](DateADT& minimum, DateADT value) {
+            minimum = std::min(minimum, value);
+        });
+}
+
+#if defined(BIOSEQ_TEST_INDEXES)
+void reset_runtime_owner_visits() noexcept {
+    aggregate_owner_runtime_visits.fill(0);
+}
+
+void validate_runtime_owner_visits() {
+    static constexpr std::array<std::string_view, 18> names{
+        "vemptycount",
+        "vanycount",
+        "vint2sum",
+        "vint2acc",
+        "vint2larger",
+        "vint2smaller",
+        "vint4sum",
+        "vint4acc",
+        "vint4larger",
+        "vint4smaller",
+        "vint2int4avg",
+        "vint8acc",
+        "vint8sum",
+        "vint8avg",
+        "vint8larger",
+        "vint8smaller",
+        "vdatelarger",
+        "vdatesmaller",
+    };
+    static_assert(
+        names.size() == aggregate_owner_runtime_visits.size());
+    std::string missing;
+    for (std::size_t index = 0; index != names.size(); ++index) {
+        if (aggregate_owner_runtime_visits[index] != 0)
+            continue;
+        if (!missing.empty())
+            missing.append(", ");
+        missing.append(names[index]);
+    }
+    if (!missing.empty()) {
+        throw std::runtime_error{
+            "aggregate owners were not executed: " + missing};
+    }
+}
+
+/**
+ * Execute PostgreSQL's exact int8 aggregate serialization pair with an
+ * aggregate call context and verify the full-width state round trip.
  */
-CXX_PG_FUNCTION_INFO_V1(vemptycount);
-Datum vemptycount(PG_FUNCTION_ARGS)
-{
-	int64_t running_count = PG_GETARG_INT64(0);
-	PG_RETURN_INT64(running_count);
+void validate_int8_serial_roundtrip() {
+    ExprContext expression_context{};
+    NodeSetTag(&expression_context, T_ExprContext);
+    expression_context.ecxt_per_tuple_memory =
+        CurrentMemoryContext;
+    AggState aggregate_context{};
+    NodeSetTag(&aggregate_context, T_AggState);
+    aggregate_context.curaggcontext = &expression_context;
+
+    Int128AggState source{};
+    source.calcSumX2 = false;
+    source.N = 3;
+    source.sumX =
+        (static_cast<int128>(1) << 80)
+        + static_cast<int128>(388);
+
+    const Datum serialized =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [&aggregate_context, &source] {
+                FmgrInfo function{};
+                fmgr_info(
+                    F_INT8_AVG_SERIALIZE, &function);
+                LOCAL_FCINFO(call, 1);
+                InitFunctionCallInfoData(
+                    *call,
+                    &function,
+                    1,
+                    InvalidOid,
+                    reinterpret_cast<Node*>(
+                        &aggregate_context),
+                    nullptr);
+                call->args[0].value =
+                    PointerGetDatum(&source);
+                call->args[0].isnull = false;
+                const Datum result =
+                    FunctionCallInvoke(call);
+                if (call->isnull) {
+                    ereport(
+                        ERROR,
+                        (errcode(
+                             ERRCODE_DATA_EXCEPTION),
+                         errmsg_internal(
+                             "int8_avg_serialize returned "
+                             "NULL")));
+                }
+                return result;
+            });
+    Int128AggState* const decoded =
+        bioseq::pg_utils::invoke_pg_as_cpp(
+            [&aggregate_context, serialized] {
+                FmgrInfo function{};
+                fmgr_info(
+                    F_INT8_AVG_DESERIALIZE,
+                    &function);
+                LOCAL_FCINFO(call, 2);
+                InitFunctionCallInfoData(
+                    *call,
+                    &function,
+                    2,
+                    InvalidOid,
+                    reinterpret_cast<Node*>(
+                        &aggregate_context),
+                    nullptr);
+                call->args[0].value = serialized;
+                call->args[0].isnull = false;
+                call->args[1].value =
+                    PointerGetDatum(nullptr);
+                call->args[1].isnull = true;
+                const Datum result =
+                    FunctionCallInvoke(call);
+                if (call->isnull) {
+                    ereport(
+                        ERROR,
+                        (errcode(
+                             ERRCODE_DATA_EXCEPTION),
+                         errmsg_internal(
+                             "int8_avg_deserialize returned "
+                             "NULL")));
+                }
+                return reinterpret_cast<Int128AggState*>(
+                    DatumGetPointer(result));
+            });
+
+    const bool matches =
+        decoded != nullptr
+        && decoded->calcSumX2 == source.calcSumX2
+        && decoded->N == source.N
+        && decoded->sumX == source.sumX;
+    bioseq::pg_utils::invoke_pg_as_cpp(
+        [serialized, decoded] {
+            if (decoded != nullptr)
+                pfree(decoded);
+            pfree(DatumGetPointer(serialized));
+        });
+    if (!matches) {
+        throw std::runtime_error{
+            "int8 aggregate serialization state changed"};
+    }
+}
+#endif
+
+}  // namespace bioseq::vector::aggregate_sql_routines
+
+namespace bioseq::vector::aggregate_sql_owners {
+
+namespace count_all {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vemptycount,
+    .initial_condition = std::int64_t{0},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vcount{};
 }
 
-/*
- * vanycount is the count() transition that handles nullable inputs. Adds
- * the number of non-null lanes in the VectorColumn to the running count.
- */
-CXX_PG_FUNCTION_INFO_V1(vanycount);
-Datum
-vanycount(PG_FUNCTION_ARGS)
-{
-	int64_t running_count = PG_GETARG_INT64(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		running_count++;
-	}
-
-	PG_RETURN_INT64(running_count);
+namespace count_any {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vanycount,
+    .initial_condition = std::int64_t{0},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vcount{};
 }
 
-/* int2 */
-
-/*
- * vint2sum folds a VectorColumn of int16 values into a running int64 sum.
- * Null lanes are skipped.
- */
-CXX_PG_FUNCTION_INFO_V1(vint2sum);
-Datum
-vint2sum(PG_FUNCTION_ARGS)
-{
-	int64_t running_sum = PG_GETARG_INT64(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-
-	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (!input_column->isnull[lane_index])
-			running_sum += static_cast<int64_t>(lane_values[lane_index]);
-	}
-
-	PG_RETURN_INT64(running_sum);
+namespace smallint_sum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint2sum,
+    .initial_condition = std::int64_t{0},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
-/*
- * vint2acc is the int16 avg() transition. It updates an Int64AggState
- * (N, sumX) held in a PostgreSQL array, potentially copying the array when
- * we're not invoked in an aggregate context.
- */
-CXX_PG_FUNCTION_INFO_V1(vint2acc);
-Datum
-vint2acc(PG_FUNCTION_ARGS)
-{
-	ArrayType* transition_array;
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-
-	if (AggCheckCallContext(fcinfo, NULL))
-		transition_array = PG_GETARG_ARRAYTYPE_P(0);
-	else
-		transition_array = PG_GETARG_ARRAYTYPE_P_COPY(0);
-
-	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
-
-	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (!input_column->isnull[lane_index])
-		{
-			transition_data->N++;
-			transition_data->sumX += static_cast<int64_t>(lane_values[lane_index]);
-		}
-	}
-
-	PG_RETURN_ARRAYTYPE_P(transition_array);
+namespace smallint_average {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint2acc,
+    .final =
+        bioseq::vector::aggregate_sql_routines::vint2int4avg,
+    .initial_condition =
+        bioseq::sql::pg_input_text{"{0,0}"},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
-/*
- * vint2larger is the int16 max() transition. Replaces maxValue with the
- * largest non-null lane value.
- */
-CXX_PG_FUNCTION_INFO_V1(vint2larger);
-Datum vint2larger(PG_FUNCTION_ARGS)
-{
-	int16_t running_max = PG_GETARG_INT16(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int16_t lane_max = running_max;
-
-	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_max = std::max(lane_max, lane_values[lane_index]);
-	}
-
-	running_max = std::max(running_max, lane_max);
-
-	PG_RETURN_INT16(running_max);
+namespace smallint_maximum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint2larger,
+    .initial_condition = std::int64_t{-32768},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
-/*
- * vint2smaller is the int16 min() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vint2smaller);
-Datum vint2smaller(PG_FUNCTION_ARGS)
-{
-	int16_t running_min = PG_GETARG_INT16(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int16_t lane_min = running_min;
-
-	int16_t* lane_values = reinterpret_cast<int16_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_min = std::min(lane_min, lane_values[lane_index]);
-	}
-
-	running_min = std::min(running_min, lane_min);
-
-	PG_RETURN_INT16(running_min);
+namespace smallint_minimum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint2smaller,
+    .initial_condition = std::int64_t{32767},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
-/* int4 */
-
-/*
- * vint4sum folds a VectorColumn of int32 values into a running int64 sum.
- */
-CXX_PG_FUNCTION_INFO_V1(vint4sum);
-Datum
-vint4sum(PG_FUNCTION_ARGS)
-{
-	int64_t running_sum = PG_GETARG_INT64(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-
-	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (!input_column->isnull[lane_index])
-			running_sum += static_cast<int64_t>(lane_values[lane_index]);
-	}
-
-	PG_RETURN_INT64(running_sum);
+namespace integer_sum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint4sum,
+    .initial_condition = std::int64_t{0},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
-/*
- * vint4acc is the int32 avg() transition, identical structure to vint2acc.
- */
-CXX_PG_FUNCTION_INFO_V1(vint4acc);
-Datum
-vint4acc(PG_FUNCTION_ARGS)
-{
-	ArrayType* transition_array;
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-
-	if (AggCheckCallContext(fcinfo, NULL))
-		transition_array = PG_GETARG_ARRAYTYPE_P(0);
-	else
-		transition_array = PG_GETARG_ARRAYTYPE_P_COPY(0);
-
-	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
-
-	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (!input_column->isnull[lane_index])
-		{
-			transition_data->N++;
-			transition_data->sumX += static_cast<int64_t>(lane_values[lane_index]);
-		}
-	}
-
-	PG_RETURN_ARRAYTYPE_P(transition_array);
+namespace integer_average {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint4acc,
+    .final =
+        bioseq::vector::aggregate_sql_routines::vint2int4avg,
+    .initial_condition =
+        bioseq::sql::pg_input_text{"{0,0}"},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
-/*
- * vint4larger is the int32 max() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vint4larger);
-Datum vint4larger(PG_FUNCTION_ARGS)
-{
-	int32_t running_max = PG_GETARG_INT32(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32_t lane_max = running_max;
-
-	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_max = std::max(lane_max, lane_values[lane_index]);
-	}
-
-	running_max = std::max(running_max, lane_max);
-
-	PG_RETURN_INT32(running_max);
+namespace integer_maximum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint4larger,
+    .initial_condition = std::int64_t{-2147483648},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
-/*
- * vint4smaller is the int32 min() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vint4smaller);
-Datum vint4smaller(PG_FUNCTION_ARGS)
-{
-	int32_t running_min = PG_GETARG_INT32(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32_t lane_min = running_min;
-
-	int32_t* lane_values = reinterpret_cast<int32_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_min = std::min(lane_min, lane_values[lane_index]);
-	}
-
-	running_min = std::min(running_min, lane_min);
-
-	PG_RETURN_INT32(running_min);
+namespace integer_minimum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint4smaller,
+    .initial_condition = std::int64_t{2147483647},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
-/* int2 / int4 */
-
-/*
- * vint2int4avg is the finalfunc for int16/int32 avg(). It divides the
- * accumulated sum by N using PostgreSQL numeric arithmetic so the result
- * preserves precision.
- */
-CXX_PG_FUNCTION_INFO_V1(vint2int4avg);
-Datum
-vint2int4avg(PG_FUNCTION_ARGS)
-{
-	ArrayType* transition_array = PG_GETARG_ARRAYTYPE_P(0);
-
-	if (ARR_HASNULL(transition_array) ||
-		ARR_SIZE(transition_array) != ARR_OVERHEAD_NONULLS(1) + sizeof(Int64AggState))
-		bioseq_log<ERR, PG>( "expected 2-element int8 array");
-
-	Int64AggState* transition_data = reinterpret_cast<Int64AggState*>(ARR_DATA_PTR(transition_array));
-
-	/* SQL defines AVG of no values to be NULL */
-	if (transition_data->N == 0)
-		PG_RETURN_NULL();
-
-	Numeric count_numeric = int64_to_numeric(transition_data->N);
-	Numeric sum_numeric = int64_to_numeric(transition_data->sumX);
-	Numeric average_numeric = numeric_div_opt_error(sum_numeric, count_numeric, NULL);
-	PG_RETURN_NUMERIC(average_numeric);
+namespace bigint_sum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint8acc,
+    .final =
+        bioseq::vector::aggregate_sql_routines::vint8sum,
+    .serial =
+        bioseq::sql::pg_catalog_reference::int8_avg_serialize,
+    .deserial =
+        bioseq::sql::pg_catalog_reference::int8_avg_deserialize,
+})]]
+inline constexpr bioseq::sql::aggregate_tag vsum{};
 }
 
-
-/* int8 */
-
-/*
- * vint8acc is the int64 avg() transition. It maintains an Int128AggState
- * created lazily on first call so overflow can't happen for reasonable
- * row counts.
- */
-CXX_PG_FUNCTION_INFO_V1(vint8acc);
-Datum
-vint8acc(PG_FUNCTION_ARGS)
-{
-	Int128AggState* state = PG_ARGISNULL(0) ? NULL : reinterpret_cast<Int128AggState*>(PG_GETARG_POINTER(0));
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-
-	MemoryContext aggregate_context;
-
-	if (!AggCheckCallContext(fcinfo, &aggregate_context))
-		bioseq_log<ERR, PG>( "aggregate function called in non-aggregate context");
-
-	{
-		MemoryContextScope ctx_guard{aggregate_context};
-
-		/* Create the state data on the first call */
-		if (state == NULL)
-		{
-			state = make0<Int128AggState>();
-			state->calcSumX2 = false;
-		}
-
-		int64_t* lane_values = reinterpret_cast<int64_t*>(input_column->value);
-
-		for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-		{
-			if (!input_column->isnull[lane_index])
-			{
-				state->N++;
-				state->sumX += static_cast<int128>(lane_values[lane_index]);
-			}
-		}
-	}
-
-	PG_RETURN_POINTER(state);
+namespace bigint_average {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint8acc,
+    .final =
+        bioseq::vector::aggregate_sql_routines::vint8avg,
+    .serial =
+        bioseq::sql::pg_catalog_reference::int8_avg_serialize,
+    .deserial =
+        bioseq::sql::pg_catalog_reference::int8_avg_deserialize,
+})]]
+inline constexpr bioseq::sql::aggregate_tag vavg{};
 }
 
-/*
- * vint8sum finalizes int64 sum() on an Int128AggState. Returns NULL when
- * no non-null inputs were seen; otherwise materialises the int128 sum as
- * a PostgreSQL Numeric.
- */
-CXX_PG_FUNCTION_INFO_V1(vint8sum);
-Datum
-vint8sum(PG_FUNCTION_ARGS)
-{
-	Int128AggState* state = PG_ARGISNULL(0) ? NULL : reinterpret_cast<Int128AggState*>(PG_GETARG_POINTER(0));
-
-	if (state == NULL || state->N == 0)
-		PG_RETURN_NULL();
-
-	Numeric packed_sum = int128_to_numeric(state->sumX);
-
-	PG_RETURN_NUMERIC(packed_sum);
+namespace bigint_maximum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint8larger,
+    .initial_condition =
+        std::int64_t{-9223372036854775807LL - 1},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
-/*
- * vint8avg finalizes int64 avg(). Divides the int128 running sum by the
- * row count via numeric_div_opt_error to maintain precision.
- */
-CXX_PG_FUNCTION_INFO_V1(vint8avg);
-Datum
-vint8avg(PG_FUNCTION_ARGS)
-{
-	Int128AggState* state = PG_ARGISNULL(0) ? NULL : reinterpret_cast<Int128AggState*>(PG_GETARG_POINTER(0));
-
-	if (state == NULL || state->N == 0)
-		PG_RETURN_NULL();
-
-	Numeric sum_numeric = int128_to_numeric(state->sumX);
-	Numeric count_numeric = int128_to_numeric(state->N);
-	Numeric average_numeric = numeric_div_opt_error(sum_numeric, count_numeric, NULL);
-
-	PG_RETURN_NUMERIC(average_numeric);
+namespace bigint_minimum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vint8smaller,
+    .initial_condition =
+        std::int64_t{9223372036854775807LL},
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
-/*
- * vint8larger is the int64 max() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vint8larger);
-Datum vint8larger(PG_FUNCTION_ARGS)
-{
-	int64_t running_max = PG_GETARG_INT64(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int64_t lane_max = running_max;
-
-	int64_t* lane_values = reinterpret_cast<int64_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_max = std::max(lane_max, lane_values[lane_index]);
-	}
-
-	running_max = std::max(running_max, lane_max);
-
-	PG_RETURN_INT64(running_max);
+namespace date_maximum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vdatelarger,
+    .initial_condition = bioseq::sql::pg_infinity::negative,
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmax{};
 }
 
-/*
- * vint8smaller is the int64 min() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vint8smaller);
-Datum vint8smaller(PG_FUNCTION_ARGS)
-{
-	int64_t running_min = PG_GETARG_INT64(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int64_t lane_min = running_min;
-
-	int64_t* lane_values = reinterpret_cast<int64_t*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_min = std::min(lane_min, lane_values[lane_index]);
-	}
-
-	running_min = std::min(running_min, lane_min);
-
-	PG_RETURN_INT64(running_min);
+namespace date_minimum {
+[[bioseq_sql::aggregate({
+    .transition =
+        bioseq::vector::aggregate_sql_routines::vdatesmaller,
+    .initial_condition = bioseq::sql::pg_infinity::positive,
+})]]
+inline constexpr bioseq::sql::aggregate_tag vmin{};
 }
 
-// date
-
-/*
- * vdatelarger is the date max() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vdatelarger);
-Datum vdatelarger(PG_FUNCTION_ARGS)
-{
-	int32_t running_max = PG_GETARG_INT32(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32_t lane_max = running_max;
-
-	DateADT* lane_values = reinterpret_cast<DateADT*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_max = std::max(lane_max, lane_values[lane_index]);
-	}
-
-	running_max = std::max(running_max, lane_max);
-
-	PG_RETURN_INT32(running_max);
-}
-
-/*
- * vdatesmaller is the date min() transition.
- */
-CXX_PG_FUNCTION_INFO_V1(vdatesmaller);
-Datum vdatesmaller(PG_FUNCTION_ARGS)
-{
-	int32_t running_min = PG_GETARG_INT32(0);
-	VectorColumn* input_column = reinterpret_cast<VectorColumn*>(PG_GETARG_POINTER(1));
-	int32_t lane_min = running_min;
-
-	DateADT* lane_values = reinterpret_cast<DateADT*>(input_column->value);
-
-	for (int lane_index = 0; lane_index < input_column->dimension; lane_index++)
-	{
-		if (input_column->isnull[lane_index])
-			continue;
-
-		lane_min = std::min(lane_min, lane_values[lane_index]);
-	}
-
-	running_min = std::min(running_min, lane_min);
-
-	PG_RETURN_INT32(running_min);
-}
-
-}
+}  // namespace bioseq::vector::aggregate_sql_owners

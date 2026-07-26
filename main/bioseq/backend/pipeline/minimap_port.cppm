@@ -56,6 +56,7 @@ module;
 export module bioseq.sequences.minimap_port;
 
 import bioseq.common.mlogging;
+import bioseq.sql_guc_settings;
 import bioseq.common.sequan_compat;
 import bioseq.sequences;
 import bioseq.sequences.kmers;
@@ -3039,7 +3040,7 @@ void align_regions(
         // Per-region diagnostic logs were previously emitted on every region
         // boundary (left-extension skipped, gap-fill skipped, right-extension
         // skipped, "determine actions" entry). Each fmtlog enqueue + format
-        // is ~1-5us, and the bench harness installs `enable_logging = true`
+        // is ~1-5us, and the bench harness installs `bioseq::settings::logging = true`
         // via `log_configure(true)` so they fire during measurement runs.
         // For very-long pairs with many regions this stacks up to ~ms of
         // overhead per timed sample. Removed — the same information can be
@@ -3129,13 +3130,13 @@ void align_regions(
         // multi-Mbp seed span) can dominate wall-clock; the per-phase milestones
         // alone would show a long silence with no sign of progress. Emit (and flush)
         // a heartbeat at most ~once/second so `tail -f` of the log shows which
-        // region index is in flight and the live footprint. Gated on enable_logging
+        // region index is in flight and the live footprint. Gated on bioseq::settings::logging
         // so production pays only the loop counter.
-        std::int64_t hb_last_ns = enable_logging ? bioseq::instr::clock::now_ns() : 0;
+        std::int64_t hb_last_ns = bioseq::settings::logging ? bioseq::instr::clock::now_ns() : 0;
         std::size_t hb_region_idx = 0;
         for (std::size_t region_index = 0; region_index < regions.size(); ++region_index) {
             ++hb_region_idx;
-            if (enable_logging) {
+            if (bioseq::settings::logging) {
                 const std::int64_t hb_now_ns = bioseq::instr::clock::now_ns();
                 if (hb_now_ns - hb_last_ns > 1'000'000'000LL) {
                     hb_last_ns = hb_now_ns;

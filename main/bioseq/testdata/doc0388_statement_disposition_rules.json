@@ -1,0 +1,159 @@
+{
+  "schema": "bioseq_doc0388_statement_disposition_rules/v1",
+  "legacy_sql": {
+    "git_revision": "e5e8a939a9e007c5640fc29da4302a9c92701dcf",
+    "repository_path": "main/bioseq/sql/bioseq--1.0.sql",
+    "sha256": "0eb3aa6da75d80fc07c92dc1f6213ef27ddf1da7f4eaed33e6c69e6c8a7dfa71"
+  },
+  "default": {
+    "disposition": "retain",
+    "reason": "retained catalog or install-script authority",
+    "approved_delta_categories": []
+  },
+  "disposition_rules": [
+    {
+      "source_ids": ["P000"],
+      "disposition": "retain",
+      "reason": "retain the canonical psql direct-load guard"
+    },
+    {
+      "source_ids": ["S002", "S038"],
+      "disposition": "fold",
+      "reason": "fold the staging and rename sequence into direct creation of bioseq_internal",
+      "approved_delta_categories": ["fixed-internal-schema"]
+    },
+    {
+      "source_ids": ["S003"],
+      "disposition": "remove",
+      "reason": "remove ambient search_path dependency",
+      "approved_delta_categories": ["ambient-search-path-removal"],
+      "evidence_refs": ["DOC0388#10:S003"]
+    },
+    {
+      "source_ids": ["S008", "S024"],
+      "disposition": "fold",
+      "reason": "absorb intermediate ACL state into the final schema/table revokes",
+      "replacement_or_absorbing_source_ids": ["S037"],
+      "approved_delta_categories": ["intermediate-acl-fold"]
+    },
+    {
+      "source_ids": ["S019"],
+      "disposition": "replace",
+      "reason": "replace the compatibility block with a direct C handler, comment, and access method",
+      "replacement_or_absorbing_source_ids": ["S025", "S026", "S027", "S028"],
+      "approved_delta_categories": ["access-method-compatibility-replacement"]
+    },
+    {
+      "source_ids": ["S020"],
+      "disposition": "remove",
+      "reason": "remove obsolete RESET search_path",
+      "approved_delta_categories": ["obsolete-search-path-reset-removal"],
+      "evidence_refs": ["DOC0388#10:S020"]
+    },
+    {
+      "source_ids": ["S021", "S022"],
+      "disposition": "remove",
+      "reason": "remove staging grants undone by the final ACL",
+      "approved_delta_categories": ["staging-acl-removal"],
+      "evidence_refs": ["DOC0388#10:S021-S022"]
+    },
+    {
+      "source_ids": ["S023"],
+      "disposition": "remove",
+      "reason": "remove fresh-install migration backfill",
+      "approved_delta_categories": ["fresh-install-backfill-removal"],
+      "evidence_refs": ["DOC0388#10:S023"]
+    },
+    {
+      "source_ids": ["S025", "S027"],
+      "disposition": "replace",
+      "reason": "replace unreachable PL dynamic-DDL bodies with native table-option owners",
+      "approved_delta_categories": [
+        "native-routine-replacement",
+        "native-table-option-path",
+        "required-table-name-error-normalization"
+      ]
+    },
+    {
+      "source_ids": ["S061-S063"],
+      "disposition": "remove",
+      "reason": "remove dead add_to_extension_secdef and its ACL statements",
+      "approved_delta_categories": ["dead-routine-removal"],
+      "evidence_refs": ["DOC0388#10:S061-S063"]
+    },
+    {
+      "source_ids": ["S075"],
+      "disposition": "replace",
+      "reason": "replace the PL procedure body with its native C owner",
+      "approved_delta_categories": [
+        "native-routine-replacement",
+        "vacuum-error-isolation-fix",
+        "vacuum-private-temp-removal"
+      ]
+    },
+    {
+      "source_ids": ["S077"],
+      "disposition": "replace",
+      "reason": "replace the PL set-returning body with its native C owner",
+      "approved_delta_categories": ["native-routine-replacement"]
+    },
+    {
+      "source_ids": ["S083", "S085"],
+      "disposition": "replace",
+      "reason": "replace the dependency helper and call with one typed terminal action",
+      "approved_delta_categories": ["am-dependency-action-replacement"]
+    },
+    {
+      "source_ids": ["S084"],
+      "disposition": "remove",
+      "reason": "remove the retired AM-dependency helper comment",
+      "approved_delta_categories": ["dead-routine-removal"],
+      "evidence_refs": ["DOC0388#10:S084"]
+    },
+    {
+      "source_ids": ["S377-S378", "S396"],
+      "disposition": "remove",
+      "reason": "remove historical DROP FUNCTION migration statements from fresh installs",
+      "approved_delta_categories": ["historical-drop-removal"],
+      "evidence_refs": ["DOC0388#10:S377-S378,S396"]
+    }
+  ],
+  "category_rules": [
+    {
+      "source_ids": [
+        "S102", "S103", "S106", "S107", "S109", "S111", "S113", "S115",
+        "S117", "S119", "S121", "S123", "S124", "S126", "S128", "S130",
+        "S132", "S134"
+      ],
+      "approved_delta_categories": ["vector-null-boundary-hardening"]
+    },
+    {
+      "source_ids": ["S136-S141"],
+      "approved_delta_categories": ["bpchar-vector-repair"]
+    },
+    {
+      "source_ids": [
+        "S086", "S222-S225", "S227", "S229-S230", "S232", "S234-S246",
+        "S249-S254", "S263", "S287", "S289-S295", "S312-S321", "S341",
+        "S358", "S360", "S362", "S364", "S366", "S368", "S370", "S372",
+        "S374", "S379", "S381", "S383", "S392", "S394", "S397",
+        "S399-S411", "S413", "S415-S417", "S419", "S421", "S423-S425",
+        "S427-S434", "S437", "S440", "S443", "S446", "S449", "S452",
+        "S455", "S458", "S461", "S464", "S467", "S470", "S473", "S476",
+        "S479", "S482", "S485", "S488", "S491-S494", "S496", "S498-S499"
+      ],
+      "approved_delta_categories": ["derived-routine-symbol"]
+    },
+    {
+      "source_ids": [
+        "S019", "S086", "S102-S103", "S106-S107", "S109", "S111", "S113",
+        "S115", "S117", "S119", "S121", "S123-S124", "S126", "S128",
+        "S130", "S132", "S134", "S136-S221", "S249-S254", "S256-S261",
+        "S263", "S265", "S267-S275", "S284", "S287", "S289-S295",
+        "S303-S321", "S333-S334", "S337", "S339", "S341", "S344", "S346",
+        "S358", "S372", "S379", "S381-S382"
+      ],
+      "approved_delta_categories": ["derived-input-name"]
+    }
+  ]
+}

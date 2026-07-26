@@ -24,7 +24,7 @@ import bioseq.common.mlogging;
 import bioseq.vector.types;
 import bioseq.storage.metadata;
 import bioseq.pg_utils;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq_enable_dml, bioseq_enable_page_cache GUCs
+import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::enable_dml, bioseq::settings::enable_column_cache GUCs
 import :cache;
 import :pruning;
 import :read_chunk;
@@ -489,14 +489,16 @@ ReadStripeRowByRowNumber(BioseqColumnReadState *readState,
 			stripeMetadata->firstRowNumber +
 			stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
 
-		if (bioseq_enable_dml)
+		if (bioseq::settings::enable_dml)
 		{
-			RowMaskWriteStateEntry *rowMaskEntry = 
+			row_mask_row *rowMaskEntry =
 				RowMaskFindWriteState(stripeReadState->relation->rd_locator.relNumber,
 									  GetCurrentSubTransactionId(), rowNumber);
 			if (rowMaskEntry != NULL)
 			{
-				stripeReadState->chunkGroupReadState->rowMask = rowMaskEntry->mask;
+				Assert(rowMaskEntry->mask.has_value());
+				stripeReadState->chunkGroupReadState->rowMask =
+					*rowMaskEntry->mask;
 				stripeReadState->chunkGroupReadState->rowMaskCached = true;
 			}
 			else if (stripeReadState->chunkGroupReadState->chunkGroupDeletedRows > 0)
@@ -868,7 +870,7 @@ ReadStripeNextRow(StripeReadState *stripeReadState, Datum *columnValues,
 				stripeId
 				);
 			
-			if (bioseq_enable_dml &&
+			if (bioseq::settings::enable_dml &&
 				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
 			{
 				uint64_t chunkFirstRowNumber = 
@@ -1011,7 +1013,7 @@ ReadStripeNextVector(StripeReadState *stripeReadState, Datum *columnValues,
 			chunkFirstRowNumber = stripeFirstRowNumber +
 								  stripeReadState->chunkGroupReadState->chunkStripeRowOffset;
 
-			if (bioseq_enable_dml &&
+			if (bioseq::settings::enable_dml &&
 				stripeReadState->chunkGroupReadState->chunkGroupDeletedRows != 0)
 			{
 				stripeReadState->chunkGroupReadState->rowMask =

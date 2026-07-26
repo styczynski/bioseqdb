@@ -108,14 +108,14 @@ TEST_CASE("DOC0371 revision-3 full-generation payload uses one ordered scan",
         "'doc0371_full_generation'::regclass, ctid) "
         "FROM doc0371_full_generation");
     const auto built = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_full_generation'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint);", rowno));
     connection_test_context reader;
     const auto read = query_one(reader, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_read_full_generation_fixture("
+        "bioseq_internal.scan_minimizer_generation_fixture("
         "'doc0371_full_generation'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint, 'scalar');", rowno));
@@ -144,7 +144,7 @@ TEST_CASE("DOC0371 revision-3 full-generation payload uses one ordered scan",
     // cannot consume the scalar/exact/vulkan legacy-scheme generation.
     const auto paper_mismatch = sql_error(reader, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_read_full_generation_fixture("
+        "bioseq_internal.scan_minimizer_generation_fixture("
         "'doc0371_full_generation'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint, 'paper');", rowno));
@@ -162,13 +162,13 @@ TEST_CASE("DOC0371 revision-3 full-generation payload uses one ordered scan",
     };
     for (const auto& [requested, canonical] : backend_cases) {
         const auto backend_build = query_one(ctx, fmt::format(
-            "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+            "SELECT * FROM bioseq_internal.build_minimizer_fixture("
             "'doc0371_full_generation'::regclass, "
             "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
             "4::smallint, '{}');", rowno, requested));
         const auto backend_read = query_one(reader, fmt::format(
             "SELECT * FROM "
-            "bioseq_internal.rev3_test_read_full_generation_fixture("
+            "bioseq_internal.scan_minimizer_generation_fixture("
             "'doc0371_full_generation'::regclass, "
             "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
             "4::smallint, '{}');", rowno, requested));
@@ -187,7 +187,7 @@ TEST_CASE("DOC0371 revision-3 full-generation payload uses one ordered scan",
         const auto incompatible_read = sql_error(
             reader, fmt::format(
                 "SELECT * FROM "
-                "bioseq_internal.rev3_test_read_full_generation_fixture("
+                "bioseq_internal.scan_minimizer_generation_fixture("
                 "'doc0371_full_generation'::regclass, "
                 "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
                 "4::smallint, '{}');", rowno, incompatible_backend));
@@ -211,7 +211,7 @@ TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
         "'doc0371_full_generation_corrupt'::regclass, ctid) "
         "FROM doc0371_full_generation_corrupt");
     const auto built = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_full_generation_corrupt'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint);", rowno));
@@ -227,7 +227,7 @@ TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
         reader, "SELECT pg_backend_pid();");
     const auto error = sql_error(reader, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_read_full_generation_fixture("
+        "bioseq_internal.scan_minimizer_generation_fixture("
         "'doc0371_full_generation_corrupt'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint, 'scalar');", rowno));
@@ -242,13 +242,13 @@ TEST_CASE("DOC0371 revision-3 full-generation payload rejects row corruption",
     // immutable generation in the same source relation must reopen and stream
     // successfully through the same backend connection.
     const auto rebuilt = query_one(ctx, fmt::format(
-        "SELECT * FROM bioseq_internal.rev3_test_build_fixture("
+        "SELECT * FROM bioseq_internal.build_minimizer_fixture("
         "'doc0371_full_generation_corrupt'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint);", rowno));
     const auto recovered = query_one(reader, fmt::format(
         "SELECT * FROM "
-        "bioseq_internal.rev3_test_read_full_generation_fixture("
+        "bioseq_internal.scan_minimizer_generation_fixture("
         "'doc0371_full_generation_corrupt'::regclass, "
         "'minimizers_per_fragment', {}, 15::smallint, 10::smallint, "
         "4::smallint, 'scalar');", rowno));
@@ -274,13 +274,13 @@ TEST_CASE("DOC0279 missing manifest forces recompute; reserved sentinels are ign
     // A reserved-band tuple (sub_key in the TEMP_RUN reserved range) must NOT be counted as a data fragment.
     const long long distinct_before = index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_cs_cor", rn);
     exec_sqlf(ctx,
-        "SELECT bioseq.test_write_index_chunk('doc0279_cs_cor'::regclass, 'minimizers_per_fragment', "
+        "SELECT bioseq_internal.write_index_chunk('doc0279_cs_cor'::regclass, 'minimizers_per_fragment', "
         "{}, (4611686018427387904)::bigint, 0, '\\x00'::bytea);", rn);   // sub_key = 1<<62 (TEMP_RUN_BASE)
     REQUIRE(index_distinct_sub_keys(ctx, "minimizers_per_fragment", "doc0279_cs_cor", rn) == distinct_before);
 
     // Deleting the completeness manifest makes the row read as "absent" -> recompute (still correct, non-empty).
     exec_sqlf(ctx,
-        "SELECT bioseq.test_delete_index_manifest('doc0279_cs_cor'::regclass, 'minimizers_per_fragment', {});", rn);
+        "SELECT bioseq_internal.delete_index_manifest('doc0279_cs_cor'::regclass, 'minimizers_per_fragment', {});", rn);
     guc_scope rsi_on(ctx, "bioseq.read_sequence_index", "on");
     REQUIRE(mmsearch_set(ctx, "doc0279_cs_cor").size() == 1);   // recompute fallback still finds the match
 }

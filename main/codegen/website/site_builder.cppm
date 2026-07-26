@@ -12,6 +12,7 @@ module;
 #include <fstream>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <print>
 #include <set>
@@ -74,6 +75,103 @@ void expect(bool condition, std::string_view detail) {
     if (!condition) {
         throw std::runtime_error("website self-test failed: " + std::string(detail));
     }
+}
+
+void bind_public_manifest_identity(
+    documented_entity& entity,
+    const sql_manifest_public_entity& manifest_entity) {
+    entity.attributes["stable_identity"] =
+        manifest_entity.stable_identity;
+    entity.attributes["installed_identity"] =
+        manifest_entity.installed_identity;
+    entity.canonical_id = manifest_entity.stable_identity;
+}
+
+[[nodiscard]] std::string stable_sql_qualified_name(
+    const documented_entity& entity) {
+    const auto stable = entity.attributes.find("stable_identity");
+    const std::string_view identity =
+        stable == entity.attributes.end()
+        ? std::string_view(entity.canonical_id)
+        : std::string_view(stable->second);
+    if (!identity.starts_with("sql:")) {
+        return entity.qualified_name;
+    }
+    const std::size_t body = identity.find(':', 4);
+    if (body == std::string_view::npos || body + 1 == identity.size()) {
+        throw std::runtime_error(
+            "invalid stable SQL identity for website route: "
+            + std::string(identity));
+    }
+    const std::string_view qualified = identity.substr(body + 1);
+    return std::string(qualified.substr(0, qualified.find('(')));
+}
+
+[[nodiscard]] std::string reference_entity_slug(
+    std::string_view qualified) {
+    const std::string_view name = qualified.substr(0, qualified.find('('));
+    std::vector<std::string> parts;
+    std::string current;
+    for (const char character : name) {
+        if (character == ':' || character == '.' || character == ' ') {
+            if (!current.empty()) {
+                parts.push_back(std::move(current));
+                current.clear();
+            }
+        } else {
+            current.push_back(character);
+        }
+    }
+    if (!current.empty()) {
+        parts.push_back(std::move(current));
+    }
+    std::string joined;
+    const std::size_t begin = parts.size() > 2 ? parts.size() - 2 : 0;
+    for (std::size_t index = begin; index < parts.size(); ++index) {
+        if (!joined.empty()) {
+            joined.push_back('-');
+        }
+        joined += parts[index];
+    }
+    std::string slug;
+    bool previous_dash = false;
+    for (const char character : joined) {
+        const char lowered = (character >= 'A' && character <= 'Z')
+            ? static_cast<char>(character - 'A' + 'a') : character;
+        const bool ok = (lowered >= 'a' && lowered <= 'z')
+            || (lowered >= '0' && lowered <= '9');
+        if (ok) {
+            slug.push_back(lowered);
+            previous_dash = false;
+        } else if (!previous_dash) {
+            slug.push_back('-');
+            previous_dash = true;
+        }
+    }
+    while (!slug.empty() && slug.back() == '-') {
+        slug.pop_back();
+    }
+    std::size_t lead = 0;
+    while (lead < slug.size() && slug[lead] == '-') {
+        ++lead;
+    }
+    slug.erase(0, lead);
+    return slug.empty() ? std::string("entity") : slug;
+}
+
+[[nodiscard]] std::string reference_entity_relative_route(
+    std::string_view version,
+    const documented_entity& entity) {
+    const std::string domain =
+        entity.domain == entity_domain::sql ? "sql" : "cpp";
+    const std::string route_name =
+        entity.domain == entity_domain::sql
+        ? stable_sql_qualified_name(entity)
+        : entity.qualified_name;
+    return std::string(version) + "/reference/" + domain + "/"
+        + entity_kind_token(entity.kind) + "/"
+        + reference_entity_slug(route_name) + "-"
+        + hex64(bioseq::common::fnv1a_64(entity.canonical_id)) + "/";
 }
 
 }  // namespace
@@ -255,35 +353,79 @@ void run_website_smoke() {
                && coverage.fatal_missing.size() == 1,
            "coverage flags required undocumented entity");
 
-    // sql_api.yaml allowlist parsing (§9/§12.2): a closed schema of unique nonempty
-    // sequences - unquoted identifiers and exact canonical IDs.
-    const sql_api_configuration api = parse_sql_api(
-        "schema: bioseq.website.sql_api/v1\n"
-        "include_schemas: [bioseq, public]\n"
-        "public_entities:\n"
-        "  - sql:type:bioseq.seq\n"
-        "  - sql:function:bioseq.len(bioseq.seq)\n",
-        "sql_api.yaml");
-    expect(api.include_schemas.size() == 2 && api.public_entities.size() == 2
-               && api.include_schemas.front() == "bioseq"
-               && api.public_entities.back() == "sql:function:bioseq.len(bioseq.seq)",
-           "sql_api.yaml parses include schemas and public entities");
-    const auto sql_api_rejects = [](std::string_view yaml) {
+    // The generated SQL manifest is the sole SQL-public visibility authority.
+    // Stable identities remain relocation-independent while installed identities
+    // are matched to the live catalog.
+    const sql_manifest_public_projection sql_manifest =
+        parse_sql_manifest_public_projection(
+            R"json({
+              "manifest_version": 1,
+              "authority_mode": "annotated_cpp",
+              "extension_schema": "public",
+              "script_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "entities": [
+                {
+                  "identity": "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
+                  "installed_identity": "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+                  "kind": "function",
+                  "name": "mmsearch",
+                  "source_module": "bioseq.pg",
+                  "source_path": "bioseq/backend/pg/mod.cppm",
+                  "source_line": 42,
+                  "typed_install_owner": false,
+                  "public_documentation": true,
+                  "brief": "Aligns a query sequence to a target sequence.",
+                  "details": "Returns the best alignment.",
+                  "parameters": [
+                    {"name":"query","sql_type":"bioseq.seq","has_default":false},
+                    {"name":"target","sql_type":"bioseq.seq","has_default":false}
+                  ],
+                  "result_sql_type": "double precision"
+                },
+                {
+                  "identity": "sql:sequence:bioseq_internal.sequence_source_epoch_seq",
+                  "installed_identity": "sql:sequence:bioseq_internal.sequence_source_epoch_seq",
+                  "kind": "sequence",
+                  "typed_install_owner": false,
+                  "public_documentation": false
+                },
+                {
+                  "identity": "sql:install-owner:bootstrap",
+                  "installed_identity": "sql:install-owner:bootstrap",
+                  "kind": "install_action",
+                  "typed_install_owner": true,
+                  "public_documentation": false
+                }
+              ]
+            })json",
+            "sql-manifest.json");
+    expect(sql_manifest.entities.size() == 1
+               && sql_manifest.entities.front().stable_identity
+                    == "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)"
+               && sql_manifest.entities.front().installed_identity
+                    == "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)"
+               && sql_manifest.catalog_schemas
+                    == std::vector<std::string>{"public"}
+               && sql_manifest.restricted_sequence_names
+                    == std::vector<std::string>{
+                        "bioseq_internal.sequence_source_epoch_seq"},
+           "SQL manifest derives public catalog and internal ACL identities");
+    const auto sql_manifest_rejects = [](std::string_view json) {
         try {
-            (void)parse_sql_api(yaml, "sql_api.yaml");
+            (void)parse_sql_manifest_public_projection(
+                json, "sql-manifest.json");
             return false;
         } catch (const std::exception&) {
             return true;
         }
     };
-    expect(sql_api_rejects("schema: s\ninclude_schemas: [bioseq]\n"
-                           "public_entities: [sql:type:bioseq.seq]\nsurprise: 1\n")
-               && sql_api_rejects("schema: s\ninclude_schemas: [bioseq]\n"
-                                  "public_entities: [sql:type:bioseq.seq, "
-                                  "sql:type:bioseq.seq]\n")
-               && sql_api_rejects("schema: s\ninclude_schemas: []\n"
-                                  "public_entities: [sql:type:bioseq.seq]\n"),
-           "sql_api.yaml rejects unknown keys, duplicates, and empty sequences");
+    expect(sql_manifest_rejects(
+               R"json({"manifest_version":2,"authority_mode":"annotated_cpp","extension_schema":"public","script_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entities":[]})json")
+               && sql_manifest_rejects(
+               R"json({"manifest_version":1,"authority_mode":"annotated_cpp","extension_schema":"public","script_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entities":[{"identity":"sql:type:$extension.t","installed_identity":"sql:type:public.t","kind":"type","typed_install_owner":true,"public_documentation":true,"brief":"T.","details":""}]})json")
+               && sql_manifest_rejects(
+               R"json({"manifest_version":1,"authority_mode":"annotated_cpp","extension_schema":"public","script_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","entities":[{"identity":"sql:type:bioseq.a","installed_identity":"sql:type:bioseq.a","kind":"type","typed_install_owner":false,"public_documentation":false},{"identity":"sql:type:bioseq.b","installed_identity":"sql:type:bioseq.a","kind":"type","typed_install_owner":false,"public_documentation":false}]})json"),
+           "SQL manifest rejects version drift, transitional public owners, and duplicate identities");
 
     // Overload-group routing/rendering is checked in run_website_reference_smoke,
     // defined after the reference index it exercises.
@@ -934,6 +1076,25 @@ void write_report_fragment(
     write_if_different(fs::path(found->second) / (std::string(phase) + ".json"), json_body);
 }
 
+void configure_manifest_acl_targets(
+    const std::map<std::string, std::string, std::less<>>& options,
+    isolation_settings& settings) {
+    if (!settings.require_extension) {
+        return;
+    }
+    const auto manifest = options.find("sql-manifest");
+    if (manifest == options.end()) {
+        throw std::runtime_error(
+            "extension-backed website isolation requires --sql-manifest "
+            "for ACL target discovery");
+    }
+    const sql_manifest_public_projection projection =
+        parse_sql_manifest_public_projection(
+            read_file(manifest->second), manifest->second);
+    settings.restricted_sequence_names =
+        projection.restricted_sequence_names;
+}
+
 // Executes the landing page's runnable slots (§15.2) into database-independent
 // views. The template slot name comes from the authoritative frontmatter `slots:`
 // mapping, and every §15.2 binding error is fatal: a slot referencing an unknown
@@ -997,6 +1158,7 @@ void write_report_fragment(
         settings.socket_directory = require_option(options, "socket-dir");
         settings.port = std::stoi(require_option(options, "port"));
         settings.template_database = require_option(options, "template-db");
+        configure_manifest_acl_targets(options, settings);
         isolation = std::move(settings);
     } else if (const auto found = options.find("conninfo"); found != options.end()) {
         conninfo = found->second;
@@ -1337,6 +1499,7 @@ struct execution_target {
         settings.socket_directory = require_option(options, "socket-dir");
         settings.port = std::stoi(require_option(options, "port"));
         settings.template_database = require_option(options, "template-db");
+        configure_manifest_acl_targets(options, settings);
         if (const auto found = options.find("conninfo"); found != options.end()) {
             target.probe_conninfo = found->second;
         } else {
@@ -1415,6 +1578,14 @@ struct entity_reference_index {
         index.add(domain, entity.canonical_id, entity.canonical_id);
         index.add(entity_query_domain::canonical_id, entity.canonical_id,
                   entity.canonical_id);
+        if (const auto installed =
+                entity.attributes.find("installed_identity");
+            installed != entity.attributes.end()
+            && !installed->second.empty()) {
+            index.add(domain, installed->second, entity.canonical_id);
+            index.add(entity_query_domain::canonical_id,
+                      installed->second, entity.canonical_id);
+        }
         const bool name_owned_by_group = entity.kind != entity_kind::overload_group
             && entity.domain == entity_domain::sql
             && grouped_names.contains(entity.qualified_name);
@@ -1660,47 +1831,163 @@ void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
         model.staged_extension_sha256 = found->second;
     }
 
-    // Apply the sql_api.yaml public-API allowlist (§11.4/§12.2): only the exact
-    // allowlisted canonical IDs that live in an included schema become SQL pages;
-    // every other captured extension member is recorded inventory-only. A listed ID
-    // that is unknown, in a non-included schema, or otherwise unmatched is fatal - the
-    // generator never rewrites canonical IDs to match an unexpected catalog (§13.2).
-    if (const auto found = options.find("sql-api"); found != options.end()) {
-        const std::string sql_api_yaml = read_file(found->second);
-        const sql_api_configuration api = parse_sql_api(sql_api_yaml, found->second);
-        const std::set<std::string, std::less<>> included_schemas(
-            api.include_schemas.begin(), api.include_schemas.end());
-        const std::set<std::string, std::less<>> allowlist(
-            api.public_entities.begin(), api.public_entities.end());
-        const auto schema_of = [](const documented_entity& entity) {
-            const std::size_t dot = entity.qualified_name.find('.');
-            return dot == std::string::npos
-                ? std::string() : entity.qualified_name.substr(0, dot);
-        };
-        std::vector<documented_entity> kept;
-        std::vector<documented_entity> omitted;
-        std::set<std::string, std::less<>> matched;
-        for (documented_entity& entity : model.sql_entities) {
-            if (allowlist.contains(entity.canonical_id)
-                && included_schemas.contains(schema_of(entity))) {
-                matched.insert(entity.canonical_id);
-                kept.push_back(std::move(entity));
-            } else {
-                omitted.push_back(std::move(entity));
-            }
-        }
-        for (const std::string& id : api.public_entities) {
-            if (!matched.contains(id)) {
-                throw std::runtime_error("sql_api.yaml public_entities lists '" + id
-                    + "', which is not a pg_depend member of extension bioseq in an "
-                    "included schema");
-            }
-        }
-        model.sql_entities = std::move(kept);
-        model.omitted_sql_entities = std::move(omitted);
+    // Apply the generated SQL manifest's Doxygen-derived public projection
+    // (§12). The live catalog remains the identity/property witness, while
+    // visibility and prose come from the normalized annotation model. The
+    // install-resolved identity is matched exactly; no schema/name heuristic
+    // may promote an inventory-only extension member.
+    const auto manifest_position = options.find("sql-manifest");
+    if (manifest_position == options.end()) {
+        throw std::runtime_error(
+            "website SQL projection requires the generated --sql-manifest");
+    }
+    const std::string sql_manifest_text =
+        read_file(manifest_position->second);
+    const sql_manifest_public_projection public_projection =
+        parse_sql_manifest_public_projection(
+            sql_manifest_text,
+            manifest_position->second);
+    model.inputs.push_back(plan_input{
+        .path = "generated/bioseq-sql-manifest.json",
+        .content_hash =
+            bioseq::codegen::sha256_hex(sql_manifest_text),
+    });
+    std::map<std::string, const sql_manifest_public_entity*, std::less<>>
+        public_by_installed_identity;
+    for (const sql_manifest_public_entity& entity :
+         public_projection.entities) {
+        public_by_installed_identity.emplace(
+            entity.installed_identity, std::addressof(entity));
     }
 
-    // Synthesize an overload-group page for every allowlisted SQL function name that
+    std::vector<documented_entity> kept;
+    std::vector<documented_entity> omitted;
+    std::set<std::string, std::less<>> matched;
+    const auto canonical_result_type = [](std::string value) {
+        if (value == "float8") return std::string{"double precision"};
+        if (value == "int8") return std::string{"bigint"};
+        if (value == "int4") return std::string{"integer"};
+        if (value == "int2") return std::string{"smallint"};
+        if (value == "bool") return std::string{"boolean"};
+        if (value == "varchar") return std::string{"character varying"};
+        if (value == "bpchar") return std::string{"character"};
+        return value;
+    };
+    for (documented_entity& entity : model.sql_entities) {
+        const auto selected =
+            public_by_installed_identity.find(entity.canonical_id);
+        if (selected == public_by_installed_identity.end()) {
+            omitted.push_back(std::move(entity));
+            continue;
+        }
+        const sql_manifest_public_entity& manifest_entity =
+            *selected->second;
+        const std::string identity_prefix =
+            "sql:" + manifest_entity.kind + ":";
+        if (!manifest_entity.installed_identity.starts_with(
+                identity_prefix)) {
+            throw std::runtime_error(
+                "SQL manifest identity/kind mismatch for '"
+                + manifest_entity.installed_identity + "'");
+        }
+        const std::string identity_body =
+            manifest_entity.installed_identity.substr(
+                identity_prefix.size());
+        const std::size_t signature_start =
+            identity_body.find('(');
+        const std::string manifest_qualified_name =
+            identity_body.substr(0, signature_start);
+        const entity_kind expected_kind =
+            manifest_entity.kind == "type"
+                ? entity_kind::sql_type
+                : entity_kind::sql_function;
+        if (entity.kind != expected_kind) {
+            throw std::runtime_error(
+                "SQL manifest/catalog kind mismatch for '"
+                + manifest_entity.installed_identity + "'");
+        }
+        if (entity.qualified_name != manifest_qualified_name
+            || (expected_kind == entity_kind::sql_function
+                && entity.normalized_signature != identity_body)) {
+            throw std::runtime_error(
+                "SQL manifest/catalog identity-shape mismatch for '"
+                + manifest_entity.installed_identity + "'");
+        }
+        const auto catalog_comment =
+            entity.attributes.find("catalog_comment");
+        if (catalog_comment == entity.attributes.end()
+            || catalog_comment->second != manifest_entity.brief) {
+            throw std::runtime_error(
+                "SQL manifest/catalog COMMENT mismatch for '"
+                + manifest_entity.installed_identity + "'");
+        }
+        if (!manifest_entity.result_sql_type.empty()
+            && entity.return_type
+            && canonical_result_type(*entity.return_type)
+                   != canonical_result_type(
+                       manifest_entity.result_sql_type)) {
+            throw std::runtime_error(
+                "SQL manifest/catalog result-type mismatch for '"
+                + manifest_entity.installed_identity
+                + "': manifest has '"
+                + manifest_entity.result_sql_type
+                + "', catalog has '" + *entity.return_type + "'");
+        }
+        matched.insert(entity.canonical_id);
+        entity.qualified_name = manifest_qualified_name;
+        entity.display_name = manifest_entity.name;
+        entity.normalized_signature =
+            expected_kind == entity_kind::sql_function
+                ? identity_body
+                : manifest_qualified_name;
+        entity.summary_text = manifest_entity.brief;
+        entity.documentation.clear();
+        if (!manifest_entity.details.empty()) {
+            entity.documentation.push_back(document_node{
+                .kind = document_node_kind::paragraph,
+                .children = {
+                    document_node{
+                        .kind = document_node_kind::text,
+                        .text = manifest_entity.details,
+                    },
+                },
+            });
+        }
+        entity.parameters = manifest_entity.parameters;
+        if (!manifest_entity.result_sql_type.empty()) {
+            entity.return_type =
+                canonical_result_type(manifest_entity.result_sql_type);
+        }
+        entity.module_name = manifest_entity.source_module;
+        if (!manifest_entity.source_path.empty()
+            && manifest_entity.source_line != 0) {
+            source_span declaration;
+            declaration.path = manifest_entity.source_path;
+            declaration.first_line = manifest_entity.source_line;
+            entity.declaration = std::move(declaration);
+        }
+        entity.attributes["documentation_authority"] =
+            "generated_sql_manifest";
+        entity.attributes["sql_manifest_script_sha256"] =
+            public_projection.script_sha256;
+        bind_public_manifest_identity(entity, manifest_entity);
+        entity.attributes.erase("catalog_comment");
+        kept.push_back(std::move(entity));
+    }
+    for (const sql_manifest_public_entity& entity :
+         public_projection.entities) {
+        if (!matched.contains(entity.installed_identity)) {
+            throw std::runtime_error(
+                "SQL manifest public entity '" + entity.stable_identity
+                + "' resolves to '" + entity.installed_identity
+                + "', which is not a pg_depend member of extension bioseq "
+                  "captured from the live catalog");
+        }
+    }
+    model.sql_entities = std::move(kept);
+    model.omitted_sql_entities = std::move(omitted);
+
+    // Synthesize an overload-group page for every public SQL function name that
     // carries more than one signature (§12.1/§12.3): the group owns the bare-name
     // reference and lists each member's identity signature. Grouping runs on the
     // post-allowlist kept set, so an inventory-only overload never creates a page.
@@ -1722,7 +2009,20 @@ void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
             group.qualified_name = name;
             const std::size_t dot = name.rfind('.');
             group.display_name = dot == std::string::npos ? name : name.substr(dot + 1);
-            group.canonical_id = "sql:overload_group:" + name;
+            const std::string stable_name =
+                stable_sql_qualified_name(*members.front());
+            for (const documented_entity* member : members) {
+                if (stable_sql_qualified_name(*member) != stable_name) {
+                    throw std::runtime_error(
+                        "SQL overload group '" + name
+                        + "' has inconsistent stable member identities");
+                }
+            }
+            group.canonical_id =
+                "sql:overload_group:" + stable_name;
+            group.attributes["stable_identity"] = group.canonical_id;
+            group.attributes["installed_identity"] =
+                "sql:overload_group:" + name;
             group.summary_text = "Overloaded SQL function with "
                 + std::to_string(members.size()) + " signatures.";
             for (const documented_entity* member : members) {
@@ -1846,21 +2146,43 @@ void collect_referenced_entity_ids(const std::vector<document_node>& nodes,
 /// stays addressable by its canonical id; the group page view lists each member's
 /// identity signature with its route.
 void run_website_reference_smoke() {
+    const sql_manifest_public_entity public_manifest_a{
+        .stable_identity =
+            "sql:function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
+        .installed_identity =
+            "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
+    };
     documented_entity overload_a;
     overload_a.domain = entity_domain::sql;
     overload_a.kind = entity_kind::sql_function;
     overload_a.qualified_name = "public.mmsearch";
     overload_a.display_name = "mmsearch";
-    overload_a.canonical_id = "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)";
+    overload_a.canonical_id = public_manifest_a.installed_identity;
+    bind_public_manifest_identity(overload_a, public_manifest_a);
+
+    const sql_manifest_public_entity public_manifest_b{
+        .stable_identity =
+            "sql:function:$extension.mmsearch("
+            "bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
+        .installed_identity =
+            "sql:function:public.mmsearch("
+            "bioseq.seq,bioseq.seq,public.bioseq_aligner_options)",
+    };
     documented_entity overload_b = overload_a;
-    overload_b.canonical_id =
-        "sql:function:public.mmsearch(bioseq.seq,bioseq.seq,public.bioseq_aligner_options)";
+    bind_public_manifest_identity(overload_b, public_manifest_b);
+
     documented_entity mmsearch_group;
     mmsearch_group.domain = entity_domain::sql;
     mmsearch_group.kind = entity_kind::overload_group;
     mmsearch_group.qualified_name = "public.mmsearch";
     mmsearch_group.display_name = "mmsearch";
-    mmsearch_group.canonical_id = "sql:overload_group:public.mmsearch";
+    mmsearch_group.canonical_id =
+        "sql:overload_group:$extension.mmsearch";
+    mmsearch_group.attributes["stable_identity"] =
+        mmsearch_group.canonical_id;
+    mmsearch_group.attributes["installed_identity"] =
+        "sql:overload_group:public.mmsearch";
+
     const entity_reference_index grouped_index = build_entity_reference_index(
         {}, {overload_a, overload_b, mmsearch_group});
     const auto lookup = [&](entity_query_domain domain, std::string_view spelling) {
@@ -1869,21 +2191,68 @@ void run_website_reference_smoke() {
         return found == grouped_index.by_key.end() ? std::string() : found->second;
     };
     expect(lookup(entity_query_domain::sql, "public.mmsearch")
-               == "sql:overload_group:public.mmsearch"
+               == "sql:overload_group:$extension.mmsearch"
            && lookup(entity_query_domain::sql, "mmsearch")
-               == "sql:overload_group:public.mmsearch"
+               == "sql:overload_group:$extension.mmsearch"
            && lookup(entity_query_domain::canonical_id,
                      "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)")
-               == "sql:function:public.mmsearch(bioseq.seq,bioseq.seq)",
-           "overload-group name resolves to the group; members keep canonical ids");
+               == public_manifest_a.stable_identity
+           && lookup(entity_query_domain::canonical_id,
+                     public_manifest_a.stable_identity)
+               == public_manifest_a.stable_identity,
+           "installed aliases resolve to stable overload/member identities");
 
     // §10.5 shorthand resolves name-only against the `any` domain, and the
     // extension-qualified `bioseq.<name>` alias resolves to the same target.
     expect(lookup(entity_query_domain::any, "mmsearch")
-               == "sql:overload_group:public.mmsearch"
+               == "sql:overload_group:$extension.mmsearch"
            && lookup(entity_query_domain::any, "bioseq.mmsearch")
-               == "sql:overload_group:public.mmsearch",
+               == "sql:overload_group:$extension.mmsearch",
            "#mmsearch shorthand and the bioseq.mmsearch alias resolve to the group");
+
+    const sql_manifest_public_entity relocated_manifest_a{
+        .stable_identity = public_manifest_a.stable_identity,
+        .installed_identity =
+            "sql:function:unusual_schema.mmsearch(bioseq.seq,bioseq.seq)",
+    };
+    documented_entity relocated_a = overload_a;
+    relocated_a.qualified_name = "unusual_schema.mmsearch";
+    bind_public_manifest_identity(relocated_a, relocated_manifest_a);
+    documented_entity relocated_group = mmsearch_group;
+    relocated_group.qualified_name = "unusual_schema.mmsearch";
+    relocated_group.attributes["installed_identity"] =
+        "sql:overload_group:unusual_schema.mmsearch";
+    const entity_reference_index relocated_index =
+        build_entity_reference_index({}, {relocated_a, relocated_group});
+    const auto relocated_lookup =
+        [&](entity_query_domain domain, std::string_view spelling) {
+            const auto found = relocated_index.by_key.find(
+                entity_reference_index::domain_key(domain)
+                + std::string(spelling));
+            return found == relocated_index.by_key.end()
+                ? std::string()
+                : found->second;
+        };
+    expect(relocated_lookup(
+               entity_query_domain::canonical_id,
+               relocated_manifest_a.installed_identity)
+               == public_manifest_a.stable_identity,
+           "unusual-schema installed identity aliases to the stable member");
+
+    overload_a.route_path =
+        "/" + reference_entity_relative_route("v0.1", overload_a);
+    relocated_a.route_path =
+        "/" + reference_entity_relative_route("v0.1", relocated_a);
+    const search_entry public_search =
+        search_entry_from_entity(overload_a);
+    const search_entry relocated_search =
+        search_entry_from_entity(relocated_a);
+    expect(overload_a.canonical_id == relocated_a.canonical_id
+               && overload_a.route_path == relocated_a.route_path
+               && public_search.id == relocated_search.id
+               && public_search.route == relocated_search.route,
+           "public and unusual schemas keep identical website IDs, routes, and search keys");
+
     std::vector<document_node> shorthand_split;
     split_shorthand_text("see #bioseq.mmsearch and ##notshorthand", shorthand_split);
     int shorthand_links = 0;
@@ -2240,7 +2609,8 @@ namespace {
 [[nodiscard]] int run_execute_sql(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "conninfo", "setup", "visible", "teardown", "expect-sqlstate",
-        "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms"};
+        "admin-conninfo", "socket-dir", "port", "template-db", "timeout-ms",
+        "sql-manifest"};
     static constexpr std::string_view flag_keys[] = {
         "isolated", "allow-plain-template"};
     const auto options = parse_options(args, value_keys, flag_keys);
@@ -2275,6 +2645,7 @@ namespace {
         settings.port = std::stoi(require_option(options, "port"));
         settings.template_database = require_option(options, "template-db");
         settings.require_extension = !options.contains("allow-plain-template");
+        configure_manifest_acl_targets(options, settings);
         private_cluster_executor executor("");
         outcome = executor.execute_isolated(example, settings);
     } else {
@@ -2329,38 +2700,37 @@ namespace {
 
 /// @brief Runs `website catalog`: captures live SQL entities to an artifact.
 ///
-/// Connects to the private cluster, reads schema-scoped type and function
-/// entities with their COMMENT documentation (§12.2), and writes the canonical
-/// sql_entities/v1 artifact. A focused live catalog-capture entrypoint.
+/// Connects to the private cluster, derives the schema set from the generated
+/// manifest, and captures type/function identities, properties, and catalog
+/// comments as parity witnesses (§12.2). Page visibility and documentation
+/// remain manifest-owned.
 /// @param args Options after the `catalog` token.
 /// @return Zero on success; two on usage errors; three on capture failure.
 [[nodiscard]] int run_catalog(std::span<std::string_view const> args) try {
-    static constexpr std::string_view value_keys[] = {"conninfo", "schemas", "output"};
+    static constexpr std::string_view value_keys[] = {
+        "conninfo", "sql-manifest", "output"};
     const auto options = parse_options(args, value_keys, {});
     const std::string conninfo = require_option(options, "conninfo");
-    const std::string schemas_csv = require_option(options, "schemas");
+    const fs::path manifest_path =
+        require_option(options, "sql-manifest");
     const fs::path output = require_option(options, "output");
 
-    std::vector<std::string> schemas;
-    std::size_t begin = 0;
-    while (begin <= schemas_csv.size()) {
-        const std::size_t end = schemas_csv.find(',', begin);
-        const std::size_t stop = end == std::string::npos ? schemas_csv.size() : end;
-        std::string schema = trim(schemas_csv.substr(begin, stop - begin));
-        if (!schema.empty()) {
-            schemas.push_back(std::move(schema));
-        }
-        if (end == std::string::npos) {
-            break;
-        }
-        begin = end + 1;
+    const sql_manifest_public_projection manifest =
+        parse_sql_manifest_public_projection(
+            read_file(manifest_path),
+            manifest_path.generic_string());
+    if (manifest.catalog_schemas.empty()) {
+        throw std::runtime_error(
+            "SQL manifest public projection has no installed catalog schemas");
     }
 
     std::vector<documented_entity> entities;
-    for (documented_entity& entity : read_sql_type_catalog(conninfo, schemas)) {
+    for (documented_entity& entity :
+         read_sql_type_catalog(conninfo, manifest.catalog_schemas)) {
         entities.push_back(std::move(entity));
     }
-    for (documented_entity& entity : read_sql_function_catalog(conninfo, schemas)) {
+    for (documented_entity& entity :
+         read_sql_function_catalog(conninfo, manifest.catalog_schemas)) {
         entities.push_back(std::move(entity));
     }
     std::ranges::sort(entities, [](const documented_entity& lhs,
@@ -2824,65 +3194,8 @@ void decorate_code_entity_ranges(
     // Assign each entity a readable, collision-checked route (§12.1). Routes are
     // recomputed here (not carried in the model) so a base-independent model renders
     // at any base path; the canonical ID and output path collision checks stay.
-    // Route segments reuse the centralized §12.1 canonical-ID kind token so the
-    // path kind and the canonical-ID kind can never drift apart.
-    const auto kind_token = [](entity_kind kind) { return entity_kind_token(kind); };
-    const auto slugify = [](std::string_view qualified) -> std::string {
-        const std::string_view name = qualified.substr(0, qualified.find('('));
-        std::vector<std::string> parts;
-        std::string current;
-        for (const char character : name) {
-            if (character == ':' || character == '.' || character == ' ') {
-                if (!current.empty()) {
-                    parts.push_back(std::move(current));
-                    current.clear();
-                }
-            } else {
-                current.push_back(character);
-            }
-        }
-        if (!current.empty()) {
-            parts.push_back(std::move(current));
-        }
-        std::string joined;
-        const std::size_t begin = parts.size() > 2 ? parts.size() - 2 : 0;
-        for (std::size_t index = begin; index < parts.size(); ++index) {
-            if (!joined.empty()) {
-                joined.push_back('-');
-            }
-            joined += parts[index];
-        }
-        std::string slug;
-        bool previous_dash = false;
-        for (const char character : joined) {
-            const char lowered = (character >= 'A' && character <= 'Z')
-                ? static_cast<char>(character - 'A' + 'a') : character;
-            const bool ok = (lowered >= 'a' && lowered <= 'z')
-                || (lowered >= '0' && lowered <= '9');
-            if (ok) {
-                slug.push_back(lowered);
-                previous_dash = false;
-            } else if (!previous_dash) {
-                slug.push_back('-');
-                previous_dash = true;
-            }
-        }
-        while (!slug.empty() && slug.back() == '-') {
-            slug.pop_back();
-        }
-        std::size_t lead = 0;
-        while (lead < slug.size() && slug[lead] == '-') {
-            ++lead;
-        }
-        slug.erase(0, lead);
-        return slug.empty() ? std::string("entity") : slug;
-    };
-    const auto entity_rel = [&](const documented_entity& entity) {
-        const std::string domain = entity.domain == entity_domain::sql ? "sql" : "cpp";
-        return version + "/reference/" + domain + "/" + kind_token(entity.kind) + "/"
-            + slugify(entity.qualified_name) + "-"
-            + hex64(bioseq::common::fnv1a_64(entity.canonical_id)) + "/";
-    };
+    // SQL route names and hashes use relocation-stable manifest identities.
+    // The live installed qualified name remains the page title/catalog witness.
     std::vector<documented_entity> cpp_entities = model.cpp_entities;
     std::vector<documented_entity> sql_entities = model.sql_entities;
     std::set<std::string> seen_routes;
@@ -2892,7 +3205,8 @@ void decorate_code_entity_ranges(
             if (!seen_ids.insert(entity.canonical_id).second) {
                 throw std::runtime_error("duplicate canonical id: " + entity.canonical_id);
             }
-            const std::string rel = entity_rel(entity);
+            const std::string rel =
+                reference_entity_relative_route(version, entity);
             if (!seen_routes.insert(rel).second) {
                 throw std::runtime_error("entity route collision at " + rel);
             }
@@ -3476,8 +3790,8 @@ void decorate_code_entity_ranges(
                           + ".json"),
                 tooltip_json);
     // catalog-inventory.json records the extension-owned candidates that the
-    // sql_api.yaml allowlist did NOT promote to pages (§11.4) - the inverse of the
-    // published SQL surface - so a reviewer can audit what stays inventory-only.
+    // generated manifest did not mark public - the inverse of the published SQL
+    // surface - so a reviewer can audit what stays inventory-only.
     if (!model.omitted_sql_entities.empty()) {
         writer.emit(route(version + "/catalog-inventory.json"),
                     serialize_sql_entities(model.omitted_sql_entities));
@@ -3582,12 +3896,15 @@ void decorate_code_entity_ranges(
         "source", "version", "site-config", "cpp-entities", "sql-entities",
         "templates", "static", "output", "base-path", "source-revision",
         "conninfo", "admin-conninfo", "socket-dir", "port", "template-db",
-        "staged-extension-sha256", "cpp-signature",
+        "staged-extension-sha256", "cpp-signature", "sql-manifest",
         "staging", "model-validation-stamp", "html-validation-stamp", "report-dir"};
     static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
     const auto options = parse_options(args, value_keys, flag_keys);
     const fs::path output = require_option(options, "output");
     const bool swap_only = options.contains("staging");
+    if (!swap_only) {
+        (void)require_option(options, "sql-manifest");
+    }
     const fs::path staging = swap_only
         ? fs::path(require_option(options, "staging"))
         : fs::path(output.string() + ".staging");
@@ -3812,7 +4129,7 @@ void decorate_code_entity_ranges(
 [[nodiscard]] int run_execute(std::span<std::string_view const> args) try {
     static constexpr std::string_view value_keys[] = {
         "source", "version", "site-config", "cpp-entities", "sql-entities",
-        "sql-api", "base-path", "source-revision", "output-model", "cpp-signature",
+        "sql-manifest", "base-path", "source-revision", "output-model", "cpp-signature",
         "staged-extension-sha256", "conninfo", "admin-conninfo", "socket-dir",
         "port", "template-db", "report-dir"};
     static constexpr std::string_view flag_keys[] = {"include-drafts", "isolated"};
@@ -3821,6 +4138,7 @@ void decorate_code_entity_ranges(
     const std::string version_string = require_option(options, "version");
     const fs::path site_config_path = require_option(options, "site-config");
     const fs::path output_model = require_option(options, "output-model");
+    (void)require_option(options, "sql-manifest");
 
     const std::string site_yaml = read_file(site_config_path);
     const site_configuration config =

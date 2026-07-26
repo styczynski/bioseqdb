@@ -248,8 +248,15 @@ BioseqColumnWriteRowPgLeaf(
 
 			if (datumLengthAligned >= (256UL << 20))
 			{
-				bioseq_log<ERR, PG>( "Error with insert on column \'{}\'. Inserting {} bytes, exceeding 256MB",
-							 attributeForm->attname.data, datumLength);
+				bioseq::pg_utils::raise_sql_error(
+					ERRCODE_INTERNAL_ERROR,
+					{
+						.message = fmt::format(
+							"Error with insert on column '{}'. Inserting "
+							"{} bytes, exceeding 256MB",
+							attributeForm->attname.data,
+							datumLength),
+					});
 			}
 
 			bioseq::pg_utils::pg_datum::from_raw(columnValues[columnIndex])
@@ -648,8 +655,8 @@ SerializeChunkData(BioseqColumnWriteState *writeState, uint32_t chunkIndex, uint
 
 		StringInfo serializedValueBuffer = chunkData->valueBufferArray[columnIndex];
 
-		Assert(requestedCompressionType >= 0 &&
-			   requestedCompressionType < COMPRESSION_COUNT);
+		Assert(static_cast<int>(requestedCompressionType) >= 0 &&
+			   static_cast<int>(requestedCompressionType) < COMPRESSION_COUNT);
 
 		chunkBuffers->decompressedValueSize =
 			chunkData->valueBufferArray[columnIndex]->len;

@@ -59,6 +59,7 @@ import bioseq.storage.lazy;                  // canonical lazy sequence facade
 import bioseq.sequences.kmers;               // sketch_collector / MinimapSketchData
 import bioseq.sequences.chaining.utils;      // Anchor exact-final-byte equation
 import bioseq.sequences.pipe;                // canonical execution-stage matrix
+import bioseq.bench.sql_codegen_guardrail;
 
 #ifndef BIOSEQ_E2E_REPORT_DIR
 #error "BIOSEQ_E2E_REPORT_DIR must be defined by the build system"
@@ -11738,6 +11739,7 @@ int main(int argc, char** argv) {
             routing_est, routing_inp, routing_run, routing_evl, routing_cln),
         bioseq::bench_framework::create_benchmark<SortScanInput, SortScanOutput>(
             "SQL ORDER BY bioseq.seq sort-scan GPU vs stdc_compare",
-            "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln));
+            "bench_sort_scan", cfg, sort_est, sort_inp, sort_run, sort_evl, sort_cln),
+        bioseq::bench::make_sql_codegen_guardrail_benchmark());
 }
 #endif

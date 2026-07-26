@@ -1,0 +1,719 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "alter_set_boundary_tail",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "pg_catalog.alter_bioseq_table_set(regclass,integer,integer,name,integer)",
+      "invocation_key": "alter/set/noop",
+      "fault_key": "generated_boundary_tail.std_exception",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["generated_boundary_callable"],
+        "cleanup_events": [],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the backend remains usable after the generated boundary exception"
+      },
+      "execution": {
+        "target_regprocedure": "pg_catalog.alter_bioseq_table_set(regclass,integer,integer,name,integer)",
+        "setup_sql": [],
+        "invocation_sql": "SELECT pg_catalog.alter_bioseq_table_set(NULL::regclass, NULL::integer, NULL::integer, NULL::name, NULL::integer);",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "alter_reset_boundary_tail",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "pg_catalog.alter_bioseq_table_reset(regclass,boolean,boolean,boolean,boolean)",
+      "invocation_key": "alter/reset/noop",
+      "fault_key": "generated_boundary_tail.std_exception",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["generated_boundary_callable"],
+        "cleanup_events": [],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the backend remains usable after the generated boundary exception"
+      },
+      "execution": {
+        "target_regprocedure": "pg_catalog.alter_bioseq_table_reset(regclass,boolean,boolean,boolean,boolean)",
+        "setup_sql": [],
+        "invocation_sql": "SELECT pg_catalog.alter_bioseq_table_reset(NULL::regclass, FALSE, FALSE, FALSE, FALSE);",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "reaper_subtransaction_begin_abort",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/subtransaction-begin-abort",
+      "fault_key": "sql_subtransaction.begin_abort",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["spi.connect", "spi.finish", "sql_subtransaction.begin", "sql_subtransaction.rollback"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected a subtransaction begin error",
+        "recovery_postcondition": "the orphan relation remains present after subtransaction rollback"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_probe (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": ["SELECT 'bioseq_internal.seq_sub_safety_runtime_probe'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_probe') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;"]
+      }
+    },
+    {
+      "case_id": "reaper_query_canceled",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/query-canceled",
+      "fault_key": "orphan_reaper.query_canceled",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "orphan_reaper_object", "postgres_error_as_cpp", "scoped_spi_session", "sql_subtransaction"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish", "sql_subtransaction.begin", "sql_subtransaction.rollback"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "57014",
+        "message": "bioseq safety runtime injected reaper query cancellation",
+        "recovery_postcondition": "the orphan relation remains present after query cancellation rolls back its per-object subtransaction"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_probe (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": ["SELECT 'bioseq_internal.seq_sub_safety_runtime_probe'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_probe') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;"]
+      }
+    },
+    {
+      "case_id": "reaper_assertion_failure",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/assertion-failure",
+      "fault_key": "orphan_reaper.assertion_failure",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "orphan_reaper_object", "postgres_error_as_cpp", "scoped_spi_session", "sql_subtransaction"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish", "sql_subtransaction.begin", "sql_subtransaction.rollback"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "P0004",
+        "message": "bioseq safety runtime injected reaper assertion failure",
+        "recovery_postcondition": "the orphan relation remains present after assertion failure rolls back its per-object subtransaction"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_probe (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": ["SELECT 'bioseq_internal.seq_sub_safety_runtime_probe'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_probe') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;"]
+      }
+    },
+    {
+      "case_id": "reaper_std_exception",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/std-exception",
+      "fault_key": "orphan_reaper.std_exception",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "orphan_reaper_object", "scoped_spi_session", "sql_subtransaction"],
+        "cleanup_events": ["spi.connect", "spi.finish", "sql_subtransaction.begin", "sql_subtransaction.rollback"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the orphan relation remains present after a standard C++ exception rolls back its per-object subtransaction"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_probe (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": ["SELECT 'bioseq_internal.seq_sub_safety_runtime_probe'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_probe') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;"]
+      }
+    },
+    {
+      "case_id": "reaper_unknown_exception",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/unknown-exception",
+      "fault_key": "orphan_reaper.unknown_exception",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "orphan_reaper_object", "scoped_spi_session", "sql_subtransaction"],
+        "cleanup_events": ["spi.connect", "spi.finish", "sql_subtransaction.begin", "sql_subtransaction.rollback"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the orphan relation remains present after an unknown C++ exception rolls back its per-object subtransaction"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_probe (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": ["SELECT 'bioseq_internal.seq_sub_safety_runtime_probe'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_probe') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_probe;"]
+      }
+    },
+    {
+      "case_id": "reaper_invoke_error_capture_failure",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/invoke-error-capture-failure",
+      "fault_key": "invoke_pg_as_cpp.error_capture",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_capture_failure", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the backend remains usable after secondary PostgreSQL error capture fails"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "vacuum_call_context_commit",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.vacuum_seq_storage(regclass)",
+      "invocation_key": "vacuum/call-context-commit",
+      "fault_key": "sql_call_context.commit",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "spi.connect", "spi.finish", "sql_call_context.commit"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected a transaction commit error",
+        "recovery_postcondition": "the vacuum target remains present after the committed transaction fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.vacuum_seq_storage(regclass)",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS public.bioseq_safety_runtime_vacuum CASCADE;",
+          "SET bioseq.update_index_on_insert = on;",
+          "SET bioseq.enable_vectorization = on;",
+          "CREATE TABLE public.bioseq_safety_runtime_vacuum (pk integer PRIMARY KEY, seq0 bioseq.seq('dna4', 32)) USING bioseq;",
+          "INSERT INTO public.bioseq_safety_runtime_vacuum VALUES (1, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32)), (2, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32)), (3, 'AAAAAAAAAAAAAAAA'::bioseq.seq('dna4', 32));"
+        ],
+        "invocation_sql": "CALL bioseq.vacuum_seq_storage('public.bioseq_safety_runtime_vacuum'::regclass);",
+        "post_error_sql": ["SELECT 'public.bioseq_safety_runtime_vacuum'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('public.bioseq_safety_runtime_vacuum') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS public.bioseq_safety_runtime_vacuum CASCADE;"]
+      }
+    },
+    {
+      "case_id": "vacuum_across_transactions_error_capture_failure",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.vacuum_seq_storage(regclass)",
+      "invocation_key": "vacuum/across-transactions-error-capture-failure",
+      "fault_key": "invoke_pg_across_transactions_as_cpp.error_capture",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["postgres_error_capture_failure", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the vacuum target remains present after transaction-crossing PostgreSQL error capture fails"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.vacuum_seq_storage(regclass)",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS public.bioseq_safety_runtime_capture_vacuum CASCADE;",
+          "SET bioseq.update_index_on_insert = on;",
+          "SET bioseq.enable_vectorization = on;",
+          "CREATE TABLE public.bioseq_safety_runtime_capture_vacuum (pk integer PRIMARY KEY, seq0 bioseq.seq('dna4', 32)) USING bioseq;",
+          "INSERT INTO public.bioseq_safety_runtime_capture_vacuum VALUES (1, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32)), (2, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32)), (3, 'AAAAAAAAAAAAAAAA'::bioseq.seq('dna4', 32));"
+        ],
+        "invocation_sql": "CALL bioseq.vacuum_seq_storage('public.bioseq_safety_runtime_capture_vacuum'::regclass);",
+        "post_error_sql": ["SELECT 'public.bioseq_safety_runtime_capture_vacuum'::regclass;"],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('public.bioseq_safety_runtime_capture_vacuum') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS public.bioseq_safety_runtime_capture_vacuum CASCADE;"]
+      }
+    },
+    {
+      "case_id": "tableam_vacuum_page_cache_restore",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.vacuum_seq_storage(regclass)",
+      "invocation_key": "tableam/vacuum-page-cache-restore",
+      "fault_key": "invoke_pg_as_cpp.vacuum_cleanup_restore",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["postgres_error_as_cpp"],
+        "cleanup_events": ["memory_context.restore", "page_cache.restore", "resource_owner.restore"],
+        "postgres_cleanup_events": [],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected a VACUUM bridge error",
+        "recovery_postcondition": "the same backend is idle and the page-cache setting is restored after the TableAM VACUUM error"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.vacuum_seq_storage(regclass)",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS public.bioseq_safety_runtime_tableam_vacuum CASCADE;",
+          "SET bioseq.enable_column_cache = on;",
+          "CREATE TABLE public.bioseq_safety_runtime_tableam_vacuum (pk integer PRIMARY KEY, seq0 bioseq.seq('dna4', 32)) USING bioseq;",
+          "INSERT INTO public.bioseq_safety_runtime_tableam_vacuum VALUES (1, 'ACGTACGTACGTACGT'::bioseq.seq('dna4', 32)), (2, 'TTTTAAAAGGGGCCCC'::bioseq.seq('dna4', 32));"
+        ],
+        "pre_fault_control_sql": ["VACUUM public.bioseq_safety_runtime_tableam_vacuum;"],
+        "pre_fault_control_recovery_sql": "SHOW bioseq.enable_column_cache;",
+        "pre_fault_control_recovery_expected_rows": [["on"]],
+        "invocation_sql": "VACUUM public.bioseq_safety_runtime_tableam_vacuum;",
+        "post_error_sql": ["SELECT 'public.bioseq_safety_runtime_tableam_vacuum'::regclass;"],
+        "recovery_sql": "SHOW bioseq.enable_column_cache;",
+        "recovery_expected_rows": [["on"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS public.bioseq_safety_runtime_tableam_vacuum CASCADE;"]
+      }
+    },
+    {
+      "case_id": "reaper_spi_connect",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/spi-connect",
+      "fault_key": "scoped_spi_session.connect",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected an SPI connect error",
+        "recovery_postcondition": "the backend remains usable after the SPI connection fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "reaper_direction_a_select",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/direction-a-select",
+      "fault_key": "orphan_reaper.direction_a_select",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected reaper Direction-A SELECT error",
+        "recovery_postcondition": "the stale catalog row remains after the Direction-A SELECT fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901001'::oid;",
+          "INSERT INTO bioseq_internal.seq_sub_table (database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx, shard_idx, sub_table_relid, sidecar_relid, bytes_written, is_full, total_payload_bytes) SELECT oid, 'pg_default'::regtablespace::oid, '388901001'::oid, 1::smallint, 0::smallint, 388901001, '4294967294'::oid, '4294967294'::oid, 0::bigint, false, 0::bigint FROM pg_catalog.pg_database WHERE datname = current_database();"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT count(*)::text FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901001'::oid;",
+        "recovery_expected_rows": [["1"]],
+        "cleanup_sql": ["DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901001'::oid;"]
+      }
+    },
+    {
+      "case_id": "reaper_direction_a_tuple_copy",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/direction-a-tuple-copy",
+      "fault_key": "orphan_reaper.direction_a_tuple_copy",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected reaper Direction-A tuple-copy error",
+        "recovery_postcondition": "the stale catalog row remains after the Direction-A tuple-copy fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901002'::oid;",
+          "INSERT INTO bioseq_internal.seq_sub_table (database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx, shard_idx, sub_table_relid, sidecar_relid, bytes_written, is_full, total_payload_bytes) SELECT oid, 'pg_default'::regtablespace::oid, '388901002'::oid, 1::smallint, 0::smallint, 388901002, '4294967294'::oid, '4294967294'::oid, 0::bigint, false, 0::bigint FROM pg_catalog.pg_database WHERE datname = current_database();"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT count(*)::text FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901002'::oid;",
+        "recovery_expected_rows": [["1"]],
+        "cleanup_sql": ["DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901002'::oid;"]
+      }
+    },
+    {
+      "case_id": "reaper_direction_a_delete",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/direction-a-delete",
+      "fault_key": "orphan_reaper.direction_a_delete",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected reaper Direction-A DELETE error",
+        "recovery_postcondition": "the stale catalog row remains after the Direction-A DELETE fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901003'::oid;",
+          "INSERT INTO bioseq_internal.seq_sub_table (database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx, shard_idx, sub_table_relid, sidecar_relid, bytes_written, is_full, total_payload_bytes) SELECT oid, 'pg_default'::regtablespace::oid, '388901003'::oid, 1::smallint, 0::smallint, 388901003, '4294967294'::oid, '4294967294'::oid, 0::bigint, false, 0::bigint FROM pg_catalog.pg_database WHERE datname = current_database();"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT count(*)::text FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901003'::oid;",
+        "recovery_expected_rows": [["1"]],
+        "cleanup_sql": ["DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901003'::oid;"]
+      }
+    },
+    {
+      "case_id": "reaper_direction_b_select",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/direction-b-select",
+      "fault_key": "orphan_reaper.direction_b_select",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected reaper Direction-B SELECT error",
+        "recovery_postcondition": "the backend remains usable after the Direction-B SELECT fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "reaper_direction_b_tuple_copy",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/direction-b-tuple-copy",
+      "fault_key": "orphan_reaper.direction_b_tuple_copy",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected reaper Direction-B tuple-copy error",
+        "recovery_postcondition": "the orphan relation remains after the Direction-B tuple-copy fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_b_tuple;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_b_tuple (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_b_tuple') IS NOT NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_b_tuple;"]
+      }
+    },
+    {
+      "case_id": "reaper_direction_b_drop_catchable",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/direction-b-drop-catchable",
+      "fault_key": "orphan_reaper.direction_b_drop_catchable",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "orphan_reaper_object", "postgres_error_as_cpp", "scoped_spi_session", "sql_subtransaction"],
+        "cleanup_events": ["memory_context.restore", "orphan_reaper.catchable_drop.continued", "orphan_reaper.catchable_drop.rollback", "resource_owner.restore", "spi.connect", "spi.finish", "sql_subtransaction.begin", "sql_subtransaction.rollback"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "both orphan relations remain after catchable DROP rollback and continuation"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_drop_a;",
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_drop_b;",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_drop_a (id integer);",
+          "CREATE TABLE bioseq_internal.seq_sub_safety_runtime_drop_b (id integer);"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT ((pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_drop_a') IS NOT NULL)::integer + (pg_catalog.to_regclass('bioseq_internal.seq_sub_safety_runtime_drop_b') IS NOT NULL)::integer)::text;",
+        "recovery_expected_rows": [["2"]],
+        "cleanup_sql": [
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_drop_a;",
+          "DROP TABLE IF EXISTS bioseq_internal.seq_sub_safety_runtime_drop_b;"
+        ]
+      }
+    },
+    {
+      "case_id": "reaper_event_allocation",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/event-allocation",
+      "fault_key": "orphan_reaper.event_allocation",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "scoped_spi_session"],
+        "cleanup_events": ["spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the stale catalog row remains after event allocation fails"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901004'::oid;",
+          "INSERT INTO bioseq_internal.seq_sub_table (database_oid, tablespace_oid, main_relfilenode, column_attno, bucket_idx, shard_idx, sub_table_relid, sidecar_relid, bytes_written, is_full, total_payload_bytes) SELECT oid, 'pg_default'::regtablespace::oid, '388901004'::oid, 1::smallint, 0::smallint, 388901004, '4294967294'::oid, '4294967294'::oid, 0::bigint, false, 0::bigint FROM pg_catalog.pg_database WHERE datname = current_database();"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT count(*)::text FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901004'::oid;",
+        "recovery_expected_rows": [["1"]],
+        "cleanup_sql": ["DELETE FROM bioseq_internal.seq_sub_table WHERE main_relfilenode = '388901004'::oid;"]
+      }
+    },
+    {
+      "case_id": "reaper_spi_finish",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/spi-finish",
+      "fault_key": "scoped_spi_session.finish",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["orphan_reaper_call", "postgres_error_as_cpp", "scoped_spi_session"],
+        "cleanup_events": ["memory_context.restore", "resource_owner.restore", "spi.connect", "spi.finish"],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq safety runtime injected an SPI finish error",
+        "recovery_postcondition": "the backend remains usable after the explicit SPI finish fault"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "reaper_spi_emergency_finish_error",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/spi-emergency-finish-error",
+      "fault_key": "scoped_spi_session.emergency_finish_error",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "backend_exit",
+        "destructor_sentinels": [],
+        "cleanup_events": [],
+        "postgres_cleanup_events": [],
+        "sqlstate": null,
+        "message": null,
+        "recovery_postcondition": "a distinct backend observes the rolled-back catalog rename after the emergency-finish ERROR guard"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "BEGIN;",
+          "ALTER TABLE bioseq_internal.seq_sub_table RENAME TO seq_sub_table_safety_runtime_terminal;"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_table') IS NOT NULL AND pg_catalog.to_regclass('bioseq_internal.seq_sub_table_safety_runtime_terminal') IS NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "reaper_spi_emergency_finish_non_ok",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.reap_orphan_seq_sub_tables()",
+      "invocation_key": "reaper/spi-emergency-finish-non-ok",
+      "fault_key": "scoped_spi_session.emergency_finish_non_ok",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "backend_exit",
+        "destructor_sentinels": [],
+        "cleanup_events": [],
+        "postgres_cleanup_events": [],
+        "sqlstate": null,
+        "message": null,
+        "recovery_postcondition": "a distinct backend observes the rolled-back catalog rename after the non-OK emergency-finish guard"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.reap_orphan_seq_sub_tables()",
+        "setup_sql": [
+          "BEGIN;",
+          "ALTER TABLE bioseq_internal.seq_sub_table RENAME TO seq_sub_table_safety_runtime_terminal;"
+        ],
+        "invocation_sql": "SELECT * FROM bioseq.reap_orphan_seq_sub_tables();",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT pg_catalog.to_regclass('bioseq_internal.seq_sub_table') IS NOT NULL AND pg_catalog.to_regclass('bioseq_internal.seq_sub_table_safety_runtime_terminal') IS NULL;",
+        "recovery_expected_rows": [["t"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "seq_input_invalid_symbol",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "bioseq.seq_in(cstring,oid,integer)",
+      "invocation_key": "seq/input-invalid-symbol",
+      "fault_key": "seq_in.invalid_symbol",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": [],
+        "cleanup_events": [],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "22P02",
+        "message": "invalid symbol 'X' for bioseq alphabet dna4",
+        "recovery_postcondition": "valid bound sequence input succeeds after the invalid input"
+      },
+      "execution": {
+        "target_regprocedure": "bioseq.seq_in(cstring,oid,integer)",
+        "setup_sql": ["CREATE TEMP TABLE bioseq_safety_runtime_seq_typmod (value bioseq.seq('dna4', 32));"],
+        "invocation_sql": "SELECT bioseq.seq_in('X', 'bioseq.seq'::regtype::oid, (SELECT a.atttypmod FROM pg_catalog.pg_attribute AS a WHERE a.attrelid = 'bioseq_safety_runtime_seq_typmod'::regclass AND a.attname = 'value' AND NOT a.attisdropped));",
+        "post_error_sql": ["SELECT 'bioseq_safety_runtime_seq_typmod'::regclass;"],
+        "recovery_sql": "SELECT bioseq.seq_in('ACGT', 'bioseq.seq'::regtype::oid, (SELECT a.atttypmod FROM pg_catalog.pg_attribute AS a WHERE a.attrelid = 'bioseq_safety_runtime_seq_typmod'::regclass AND a.attname = 'value' AND NOT a.attisdropped))::text;",
+        "recovery_expected_rows": [["ACGT"]],
+        "cleanup_sql": ["DROP TABLE IF EXISTS bioseq_safety_runtime_seq_typmod;"]
+      }
+    },
+    {
+      "case_id": "vavg_smallint_boundary_tail",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "vint2acc(internal,smallint)",
+      "invocation_key": "aggregate/vavg-smallint-null",
+      "fault_key": "generated_boundary_tail.std_exception",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["generated_boundary_callable"],
+        "cleanup_events": [],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the backend remains usable after the nullable vector transition fault"
+      },
+      "execution": {
+        "target_regprocedure": "vint2acc(internal,smallint)",
+        "setup_sql": [],
+        "invocation_sql": "SELECT public.vavg(x) FROM (VALUES (NULL::smallint)) AS values_table(x);",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    },
+    {
+      "case_id": "vcount_any_boundary_tail",
+      "profiles": ["production", "test_indexes"],
+      "sql_identity": "vanycount(bigint,\"any\")",
+      "invocation_key": "aggregate/vcount-any-null",
+      "fault_key": "generated_boundary_tail.std_exception",
+      "postgres_severity": "error",
+      "expected": {
+        "backend_outcome": "recoverable_error",
+        "destructor_sentinels": ["generated_boundary_callable"],
+        "cleanup_events": [],
+        "postgres_cleanup_events": ["fmgr_abort_observed"],
+        "sqlstate": "XX000",
+        "message": "bioseq SQL callback raised a C++ exception",
+        "recovery_postcondition": "the backend remains usable after the nullable vector transition fault"
+      },
+      "execution": {
+        "target_regprocedure": "vanycount(bigint,\"any\")",
+        "setup_sql": [],
+        "invocation_sql": "SELECT public.vcount(x) FROM (VALUES (NULL::integer)) AS values_table(x);",
+        "post_error_sql": [],
+        "recovery_sql": "SELECT 'ok'::text;",
+        "recovery_expected_rows": [["ok"]],
+        "cleanup_sql": []
+      }
+    }
+  ]
+}

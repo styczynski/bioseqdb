@@ -151,7 +151,7 @@ import bioseq.common.mlogging;
 import bioseq.common.hashing;
 import bioseq.common.sequan_compat;
 import bioseq.pg_utils;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
+import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::index_run_buffer_bytes, bioseq_scheduler_*, bioseq::settings::index_memory_cap_mb GUCs
 import bioseq.indexing.type;
 import bioseq.indexing.storage;
 import bioseq.indexing.traits;
@@ -194,9 +194,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -208,9 +208,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -222,9 +222,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -237,9 +237,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -252,9 +252,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -266,9 +266,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -280,9 +280,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -296,9 +296,9 @@ namespace hn = hwy::HWY_NAMESPACE;
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -312,9 +312,9 @@ dispatch_process_sequences_typed(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -468,9 +468,9 @@ dispatch_process_sequences_typed(
     const size_t batch_size,
     const uint8_t alphabet_code,
     const uint8_t storage_unit_byte_width,
-    const pgseq_t* query_hdr,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-    const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+    const bioseq::pg_types::seq* query_hdr,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+    const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
     const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
     const Minimap2Params& base_params,
     BatchInvocationRole invocation_role,
@@ -1250,7 +1250,7 @@ void append_cpu_prepared_query_sketch_view(
 
 template <class Alphabet, std::size_t Width, class DestinationValue>
 void append_cpu_prepared_query_sketch(
-		const pgseq_t& header,
+		const bioseq::pg_types::seq& header,
 		const std::uint64_t query_ordinal,
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
@@ -1262,7 +1262,7 @@ void append_cpu_prepared_query_sketch(
 		bioseq::parallelism::MemoryPermit* retained_query_permit,
 		std::uint64_t* retained_query_bytes) {
 	using sequence_t = compact_sequence_stdc_instance<
-		pgseq_t, Alphabet, Width>;
+		bioseq::pg_types::seq, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
 	append_cpu_prepared_query_sketch_view<Alphabet, DestinationValue>(
 		bioseq::storage::as_lazy_sequence_view(query),
@@ -1275,7 +1275,7 @@ template <class DestinationValue>
 void dispatch_append_cpu_prepared_query_sketch(
 		const std::uint8_t alphabet_code,
 		const std::uint8_t storage_unit_byte_width,
-		const pgseq_t& header,
+		const bioseq::pg_types::seq& header,
 		const std::uint64_t query_ordinal,
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
@@ -1409,14 +1409,14 @@ enum class ParallelPreparedQuerySketchStatus : std::uint8_t {
 template <class Alphabet, std::size_t Width>
 [[nodiscard]] ParallelPreparedQuerySketchStatus
 prepare_independently_admitted_query_sketch(
-		const pgseq_t& header,
+		const bioseq::pg_types::seq& header,
 		const std::uint64_t query_ordinal,
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
 		const MinimizerSketchBackend sketch_backend,
 		BatchProcessor::CpuPreparedQuerySketch& destination) {
 	using sequence_t = compact_sequence_stdc_instance<
-		pgseq_t, Alphabet, Width>;
+		bioseq::pg_types::seq, Alphabet, Width>;
 	compact_sequence_range<sequence_t> query{header};
 	auto query_owner = bioseq::storage::make_lazy_in_memory(query);
 	const auto query_view =
@@ -1478,7 +1478,7 @@ prepare_independently_admitted_query_sketch(
 dispatch_prepare_independently_admitted_query_sketch(
 		const std::uint8_t alphabet_code,
 		const std::uint8_t storage_unit_byte_width,
-		const pgseq_t& header,
+		const bioseq::pg_types::seq& header,
 		const std::uint64_t query_ordinal,
 		const std::int32_t kmer_size,
 		const std::int32_t window_size,
@@ -1718,7 +1718,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		const std::uint8_t alphabet_code,
 		const std::uint8_t storage_unit_byte_width,
 		const std::uint64_t target_bp_size,
-		const std::span<const pgseq_t* const> query_headers,
+		const std::span<const bioseq::pg_types::seq* const> query_headers,
 		const std::span<const Datum> query_recipe_datums,
 		const std::span<const pg_sequence_descriptor>
 			query_recipe_descriptors,
@@ -1759,7 +1759,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 	bool has_recipe_query = false;
 	for (std::size_t query_index = 0u;
 		 query_index < query_headers.size(); ++query_index) {
-		const pgseq_t* query_header = query_headers[query_index];
+		const bioseq::pg_types::seq* query_header = query_headers[query_index];
 		const Datum recipe = query_recipe_datums[query_index];
 		if (static_cast<unsigned>(query_header != nullptr)
 				+ static_cast<unsigned>(recipe != Datum{0}) != 1u) {
@@ -2131,7 +2131,7 @@ void BatchProcessor::prepare_cpu_shared_query_unions(
 		for (std::size_t query_index = 0u;
 			 query_index < query_headers.size();
 			 ++query_index) {
-			const pgseq_t* const query_header = query_headers[query_index];
+			const bioseq::pg_types::seq* const query_header = query_headers[query_index];
 			const std::uint64_t query_ordinal = query_ordinals[query_index];
 			const Minimap2Params effective = effective_params_for_pair(
 				base_params,
@@ -2730,7 +2730,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 		const std::uint64_t target_bp_size,
 		const std::uint8_t alphabet_code,
 		const std::uint8_t storage_unit_byte_width,
-		const std::span<const pgseq_t* const> query_headers,
+		const std::span<const bioseq::pg_types::seq* const> query_headers,
 		const std::span<const Datum> query_recipe_datums,
 		const std::span<const pg_sequence_descriptor>
 			query_recipe_descriptors,
@@ -3177,7 +3177,7 @@ void BatchProcessor::prepare_cpu_persisted_native_target(
 	}
 	const auto configured_mpf_format5_lookup_route =
 		decode_mpf_format5_lookup_route(
-			bioseq_aligner_mpf_format5_lookup_route);
+			static_cast<int>(bioseq::aligner::settings::mpf_format5_lookup_route.value()));
 	if (!configured_mpf_format5_lookup_route) {
 		fail("MPF Format-5 lookup-route GUC has an invalid wire value");
 		return;

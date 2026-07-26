@@ -580,24 +580,20 @@ export inline void reset_extension(const connection_test_context& ctx,
         connection_test_context create_ctx;
         exec_sql(create_ctx, "CREATE EXTENSION bioseq;");
     }
-    // GUC reset: a previous test may have left bioseq.enable_vectorization
-    // off etc.; the explicit names cover everything reachable from the
-    // option matrix tests. RESET ALL would be cheaper but resets system GUCs
-    // we may not own (e.g. work_mem) — be specific to our own.
-    static constexpr auto kGucsToReset = std::to_array<std::string_view>({
-        "bioseq.enable_vectorization",
-        "bioseq.enable_column_cache",
-        "bioseq.enable_bioseq_index_scan",
-        "bioseq.aligner.enable_profiling",
-        "bioseq.update_index_on_insert",
-        "bioseq.read_sequence_index",         // DOC0279 §13 — assemble-vs-recompute routing
-        "bioseq.index_run_buffer_bytes",      // DOC0279 §13 — test-only spill run buffer
-        "bioseq.index_payload_storage_backend", // DOC0383 P5 — provider captured per job
-    });
-    for (const auto guc : kGucsToReset) {
-        // Best-effort: GUCs not yet set by anyone are silently fine.
+    // Reset every Bioseq setting registered in this backend. Querying the
+    // catalog keeps the fixture complete when the generated GUC profile grows
+    // and avoids resetting unrelated PostgreSQL settings.
+    const auto bioseq_gucs = query_single_column(
+        ctx,
+        "SELECT quote_ident(name) FROM pg_settings "
+        "WHERE name LIKE 'bioseq.%' ORDER BY name;");
+    for (const auto& guc : bioseq_gucs) {
+        if (!guc.has_value())
+            continue;
         detail::pg_result reset_result(
-            PQexec(ctx.raw(), fmt::format("RESET {};", guc).c_str()));
+            PQexec(
+                ctx.raw(),
+                fmt::format("RESET {};", *guc).c_str()));
     }
 }
 

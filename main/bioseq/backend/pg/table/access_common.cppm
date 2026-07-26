@@ -193,7 +193,7 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 		const int idx = attno - 1;
 		if (idx < 0 || idx >= slot->tts_tupleDescriptor->natts) continue;
 		if (slot->tts_isnull[idx]) continue;
-		auto* hdr = reinterpret_cast<const pgseq_t*>(
+		auto* hdr = reinterpret_cast<const bioseq::pg_types::seq*>(
 			DatumGetPointer(slot->tts_values[idx]));
 		if (!bioseq::storage::is_locator_stub(hdr)) continue;
 		const auto loc_decoded = bioseq::storage::decode_locator_from_stub(hdr);
@@ -204,9 +204,9 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 		const std::uint64_t projected_payload_bytes = checked_ceil_div(
 			loc_decoded.total_bp_size, /*maximum letters per byte=*/4u);
 		(void) checked_materialization_allocation_size(
-			projected_payload_bytes, pgseq_t::header_bytes(),
+			projected_payload_bytes, bioseq::pg_types::seq::header_bytes(),
 			"flat sequence");
-		pgseq_t* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
+		bioseq::pg_types::seq* real = bioseq::storage::bioseq_default_storage_manager::fetch_payload(
 			loc.dbOid, loc.spcOid, loc.relNumber,
 			attno, loc_decoded, snapshot, payload_mctx, cache);
 		slot->tts_values[idx] = PointerGetDatum(real);

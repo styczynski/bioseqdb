@@ -97,23 +97,99 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
   # /usr/lib/llvm-22; the official tarball fallback uses /opt/llvm-22, exported
   # as BIOSEQ_LLVM_ROOT. CMake is pinned to 4.2.1, whose import-std experimental
   # UUID is the same value the "H" box uses.
+  set(_BIOSEQ_REQUESTED_LLVM_ROOT "")
   if(DEFINED ENV{BIOSEQ_LLVM_ROOT})
-    set(BIOSEQ_LLVM_ROOT "$ENV{BIOSEQ_LLVM_ROOT}")
-  else()
-    set(BIOSEQ_LLVM_ROOT /usr/lib/llvm-22)
+    set(_BIOSEQ_REQUESTED_LLVM_ROOT "$ENV{BIOSEQ_LLVM_ROOT}")
+  elseif(BIOSEQ_LLVM_ROOT)
+    set(_BIOSEQ_REQUESTED_LLVM_ROOT "${BIOSEQ_LLVM_ROOT}")
   endif()
-  set(CMAKE_C_COMPILER ${BIOSEQ_LLVM_ROOT}/bin/clang)
-  set(CMAKE_CXX_COMPILER ${BIOSEQ_LLVM_ROOT}/bin/clang++)
+  set(_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON "")
+  if(DEFINED ENV{BIOSEQ_LIBCXX_MODULES_JSON}
+      AND EXISTS "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}")
+    file(REAL_PATH "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}"
+      _BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON)
+    get_filename_component(_BIOSEQ_REQUESTED_LIBCXX_MODULES_NAME
+      "${_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON}" NAME)
+    if(NOT "${_BIOSEQ_REQUESTED_LIBCXX_MODULES_NAME}"
+        STREQUAL "libc++.modules.json")
+      set(_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON "")
+    endif()
+  endif()
+  set(BIOSEQ_LLVM_ROOT "")
+  set(BIOSEQ_LLVM_ROOT "" CACHE PATH
+    "LLVM/Clang prefix for the AWS-compatible Clang toolchain"
+    FORCE)
+  set(_BIOSEQ_SELECTED_LIBCXX_MODULES_JSON "")
+  foreach(_BIOSEQ_LLVM_ROOT_CANDIDATE IN ITEMS
+      "${_BIOSEQ_REQUESTED_LLVM_ROOT}"
+      "/usr/lib/llvm-22"
+      "/opt/llvm-22"
+      "/opt/homebrew/opt/llvm@22"
+      "/usr/local/opt/llvm")
+    if(_BIOSEQ_LLVM_ROOT_CANDIDATE
+        AND EXISTS "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/bin/clang"
+        AND EXISTS "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/bin/clang++"
+        AND (EXISTS
+               "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/bin/llvm-config"
+             OR EXISTS
+               "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/bin/llvm-config-22"))
+      file(REAL_PATH "${_BIOSEQ_LLVM_ROOT_CANDIDATE}"
+        _BIOSEQ_LLVM_ROOT_CANDIDATE_REAL)
+      set(_BIOSEQ_REQUESTED_MODULES_UNDER_CANDIDATE OFF)
+      if(_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON)
+        string(FIND
+          "${_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON}/"
+          "${_BIOSEQ_LLVM_ROOT_CANDIDATE_REAL}/"
+          _BIOSEQ_REQUESTED_MODULES_PREFIX)
+        if(_BIOSEQ_REQUESTED_MODULES_PREFIX EQUAL 0)
+          set(_BIOSEQ_REQUESTED_MODULES_UNDER_CANDIDATE ON)
+        endif()
+      endif()
+      if(_BIOSEQ_REQUESTED_MODULES_UNDER_CANDIDATE
+          OR EXISTS
+            "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+          OR EXISTS
+            "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/c++/libc++.modules.json"
+          OR EXISTS
+            "${_BIOSEQ_LLVM_ROOT_CANDIDATE}/lib/libc++.modules.json")
+        get_filename_component(BIOSEQ_LLVM_ROOT
+          "${_BIOSEQ_LLVM_ROOT_CANDIDATE}" ABSOLUTE)
+        if(_BIOSEQ_REQUESTED_MODULES_UNDER_CANDIDATE)
+          set(_BIOSEQ_SELECTED_LIBCXX_MODULES_JSON
+            "${_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON}")
+        endif()
+        break()
+      endif()
+    endif()
+  endforeach()
+  if(NOT BIOSEQ_LLVM_ROOT)
+    message(FATAL_ERROR
+      "a complete LLVM 22 prefix was not found in BIOSEQ_LLVM_ROOT or "
+      "the supported Linux/macOS installation locations")
+  endif()
+  set(BIOSEQ_LLVM_ROOT "${BIOSEQ_LLVM_ROOT}" CACHE PATH
+    "LLVM/Clang prefix for the AWS-compatible Clang toolchain"
+    FORCE)
+  set(CMAKE_C_COMPILER "${BIOSEQ_LLVM_ROOT}/bin/clang"
+    CACHE FILEPATH "Selected C compiler" FORCE)
+  set(CMAKE_CXX_COMPILER "${BIOSEQ_LLVM_ROOT}/bin/clang++"
+    CACHE FILEPATH "Selected C++ compiler" FORCE)
   set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
-  if(DEFINED ENV{BIOSEQ_LIBCXX_MODULES_JSON})
-    set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBCXX_MODULES_JSON}")
+  set(CMAKE_CXX_STDLIB_MODULES_JSON "")
+  set(CMAKE_CXX_STDLIB_MODULES_JSON "" CACHE FILEPATH
+    "C++ standard-library module metadata" FORCE)
+  if(_BIOSEQ_SELECTED_LIBCXX_MODULES_JSON)
+    set(CMAKE_CXX_STDLIB_MODULES_JSON
+      "${_BIOSEQ_SELECTED_LIBCXX_MODULES_JSON}")
   else()
     # The official LLVM tarball and apt.llvm.org packages install this file in
-    # different locations.  Detached build workers do not necessarily inherit
-    # bootstrap.sh's BIOSEQ_LIBCXX_MODULES_JSON profile export, so discover the
-    # two supported layouts directly from the selected LLVM root.
+    # different locations. Detached build workers do not necessarily inherit
+    # bootstrap.sh's BIOSEQ_LIBCXX_MODULES_JSON profile export, and an
+    # AWS-named configuration can run on a macOS worker, so discover every
+    # supported layout from the validated selected LLVM root.
     set(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES
       "${BIOSEQ_LLVM_ROOT}/lib/x86_64-unknown-linux-gnu/c++/libc++.modules.json"
+      "${BIOSEQ_LLVM_ROOT}/lib/c++/libc++.modules.json"
       "${BIOSEQ_LLVM_ROOT}/lib/libc++.modules.json")
     foreach(_BIOSEQ_LIBCXX_MODULES_JSON
         IN LISTS _BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES)
@@ -129,35 +205,122 @@ elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64")
     unset(_BIOSEQ_LIBCXX_MODULES_JSON)
     unset(_BIOSEQ_LIBCXX_MODULES_JSON_CANDIDATES)
   endif()
+  file(REAL_PATH "${BIOSEQ_LLVM_ROOT}"
+    _BIOSEQ_SELECTED_LLVM_ROOT_REAL)
+  file(REAL_PATH "${CMAKE_CXX_STDLIB_MODULES_JSON}"
+    _BIOSEQ_SELECTED_LIBCXX_MODULES_REAL)
+  get_filename_component(_BIOSEQ_SELECTED_LIBCXX_MODULES_NAME
+    "${_BIOSEQ_SELECTED_LIBCXX_MODULES_REAL}" NAME)
+  string(FIND "${_BIOSEQ_SELECTED_LIBCXX_MODULES_REAL}/"
+    "${_BIOSEQ_SELECTED_LLVM_ROOT_REAL}/"
+    _BIOSEQ_SELECTED_LIBCXX_MODULES_PREFIX)
+  if(NOT "${_BIOSEQ_SELECTED_LIBCXX_MODULES_NAME}"
+        STREQUAL "libc++.modules.json"
+      OR NOT _BIOSEQ_SELECTED_LIBCXX_MODULES_PREFIX EQUAL 0)
+    message(FATAL_ERROR
+      "selected libc++.modules.json is outside the selected LLVM prefix")
+  endif()
+  set(CMAKE_CXX_STDLIB_MODULES_JSON
+    "${_BIOSEQ_SELECTED_LIBCXX_MODULES_REAL}")
+  set(CMAKE_CXX_STDLIB_MODULES_JSON
+    "${CMAKE_CXX_STDLIB_MODULES_JSON}" CACHE FILEPATH
+    "C++ standard-library module metadata" FORCE)
+  unset(_BIOSEQ_LLVM_ROOT_CANDIDATE)
+  unset(_BIOSEQ_LLVM_ROOT_CANDIDATE_REAL)
+  unset(_BIOSEQ_REQUESTED_LLVM_ROOT)
+  unset(_BIOSEQ_REQUESTED_LIBCXX_MODULES_JSON)
+  unset(_BIOSEQ_REQUESTED_LIBCXX_MODULES_NAME)
+  unset(_BIOSEQ_REQUESTED_MODULES_PREFIX)
+  unset(_BIOSEQ_REQUESTED_MODULES_UNDER_CANDIDATE)
+  unset(_BIOSEQ_SELECTED_LIBCXX_MODULES_JSON)
+  unset(_BIOSEQ_SELECTED_LIBCXX_MODULES_NAME)
+  unset(_BIOSEQ_SELECTED_LIBCXX_MODULES_PREFIX)
+  unset(_BIOSEQ_SELECTED_LIBCXX_MODULES_REAL)
+  unset(_BIOSEQ_SELECTED_LLVM_ROOT_REAL)
   # CMake 4.2 + Ninja on the AWS box cannot relink the PostgreSQL extension to
   # swap from build-tree rpaths to install rpaths during `install(TARGETS ...)`.
   # Build directly with the install rpath instead; the preset is disposable and
   # always runs from the vcpkg-installed tree paths.
   set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 elseif(${CMAKE_NAMED_ENV_TYPE} STREQUAL "AWS_MACHINE_X64_GCC16")
-  # Experimental GCC 16 build for the AWS x86_64 box. This keeps the production
-  # AWS Clang/libc++ preset intact while letting us test whether GCC's C++26
-  # module implementation compiles the template-heavy PostgreSQL target faster.
+  # GCC-only C++26 build. Select one paired compiler prefix and authenticate
+  # libstdc++'s std/std.compat module inventory before project() can cache a
+  # mixed toolchain. The ordinary macOS environment remains Clang; Homebrew GCC
+  # is considered only when this GCC-only environment is explicitly selected.
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/BioseqGccToolchain.cmake")
+  set(_BIOSEQ_REQUESTED_GCC16_ROOT "")
   if(DEFINED ENV{BIOSEQ_GCC16_ROOT})
-    set(BIOSEQ_GCC16_ROOT "$ENV{BIOSEQ_GCC16_ROOT}")
-  elseif(EXISTS /opt/gcc-16.1.0/bin/g++-16)
-    set(BIOSEQ_GCC16_ROOT /opt/gcc-16.1.0)
-  else()
-    set(BIOSEQ_GCC16_ROOT /usr)
+    set(_BIOSEQ_REQUESTED_GCC16_ROOT "$ENV{BIOSEQ_GCC16_ROOT}")
+  elseif(BIOSEQ_GCC16_ROOT)
+    set(_BIOSEQ_REQUESTED_GCC16_ROOT "${BIOSEQ_GCC16_ROOT}")
   endif()
-  set(CMAKE_C_COMPILER ${BIOSEQ_GCC16_ROOT}/bin/gcc-16)
-  set(CMAKE_CXX_COMPILER ${BIOSEQ_GCC16_ROOT}/bin/g++-16)
-  set(CMAKE_CXX_COMPILER_LAUNCHER ${CMAKE_SOURCE_DIR}/cmake/gcc_hwy_header_unit_launcher.py)
-  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+  set(_BIOSEQ_REQUESTED_LIBSTDCXX_MODULES "")
   if(DEFINED ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON})
-    set(CMAKE_CXX_STDLIB_MODULES_JSON "$ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON}")
-  elseif(EXISTS ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-pc-linux-gnu/16.1.0/libstdc++.modules.json)
-    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-pc-linux-gnu/16.1.0/libstdc++.modules.json)
-  elseif(EXISTS ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
-    set(CMAKE_CXX_STDLIB_MODULES_JSON ${BIOSEQ_GCC16_ROOT}/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
-  else()
-    set(CMAKE_CXX_STDLIB_MODULES_JSON /usr/lib/gcc/x86_64-linux-gnu/16/libstdc++.modules.json)
+    set(_BIOSEQ_REQUESTED_LIBSTDCXX_MODULES
+      "$ENV{BIOSEQ_LIBSTDCXX_MODULES_JSON}")
+  elseif(CMAKE_CXX_STDLIB_MODULES_JSON)
+    set(_BIOSEQ_REQUESTED_LIBSTDCXX_MODULES
+      "${CMAKE_CXX_STDLIB_MODULES_JSON}")
   endif()
+
+  bioseq_select_gcc16_toolchain(
+    REQUESTED_ROOT "${_BIOSEQ_REQUESTED_GCC16_ROOT}"
+    REQUESTED_MODULES "${_BIOSEQ_REQUESTED_LIBSTDCXX_MODULES}"
+    OUTPUT_ROOT _BIOSEQ_AUTHENTICATED_GCC16_ROOT
+    OUTPUT_C _BIOSEQ_AUTHENTICATED_GCC16_C
+    OUTPUT_CXX _BIOSEQ_AUTHENTICATED_GCC16_CXX
+    OUTPUT_MODULES _BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES
+    OUTPUT_VERSION _BIOSEQ_AUTHENTICATED_GCC16_VERSION
+    OUTPUT_C_SHA256 _BIOSEQ_AUTHENTICATED_GCC16_C_SHA256
+    OUTPUT_CXX_SHA256 _BIOSEQ_AUTHENTICATED_GCC16_CXX_SHA256
+    OUTPUT_MODULES_SHA256
+      _BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES_SHA256
+    OUTPUT_MODULE_SOURCE_CLOSURE_SHA256
+      _BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULE_SOURCE_CLOSURE_SHA256)
+  set(BIOSEQ_GCC16_ROOT "${_BIOSEQ_AUTHENTICATED_GCC16_ROOT}"
+    CACHE PATH "Authenticated GCC 16.1+ prefix" FORCE)
+  set(BIOSEQ_GCC16_VERSION "${_BIOSEQ_AUTHENTICATED_GCC16_VERSION}"
+    CACHE INTERNAL "Authenticated GCC C/C++ version" FORCE)
+  set(BIOSEQ_GCC16_C_SHA256
+    "${_BIOSEQ_AUTHENTICATED_GCC16_C_SHA256}"
+    CACHE INTERNAL "Authenticated GCC C compiler identity" FORCE)
+  set(BIOSEQ_GCC16_CXX_SHA256
+    "${_BIOSEQ_AUTHENTICATED_GCC16_CXX_SHA256}"
+    CACHE INTERNAL "Authenticated GCC C++ compiler identity" FORCE)
+  set(BIOSEQ_GCC16_MODULES_SHA256
+    "${_BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES_SHA256}"
+    CACHE INTERNAL "Authenticated libstdc++ module inventory identity" FORCE)
+  set(BIOSEQ_GCC16_MODULE_SOURCE_CLOSURE_SHA256
+    "${_BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULE_SOURCE_CLOSURE_SHA256}"
+    CACHE INTERNAL "Authenticated libstdc++ module source closure" FORCE)
+  set(CMAKE_C_COMPILER "${_BIOSEQ_AUTHENTICATED_GCC16_C}"
+    CACHE FILEPATH "Selected GCC C compiler" FORCE)
+  set(CMAKE_CXX_COMPILER "${_BIOSEQ_AUTHENTICATED_GCC16_CXX}"
+    CACHE FILEPATH "Selected GCC C++ compiler" FORCE)
+  set(BIOSEQ_GCC16_C_COMPILER_LAUNCHER
+    "${CMAKE_SOURCE_DIR}/cmake/gcc_hwy_header_unit_launcher.py"
+    "--bioseq-expected-compiler-sha256=${BIOSEQ_GCC16_C_SHA256}"
+    "--bioseq-gcc-root=${BIOSEQ_GCC16_ROOT}"
+    "--bioseq-gcc-module-inventory=${_BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES}"
+    "--bioseq-expected-module-inventory-sha256=${BIOSEQ_GCC16_MODULES_SHA256}"
+    "--bioseq-expected-module-source-closure-sha256=${BIOSEQ_GCC16_MODULE_SOURCE_CLOSURE_SHA256}")
+  set(BIOSEQ_GCC16_CXX_COMPILER_LAUNCHER
+    "${CMAKE_SOURCE_DIR}/cmake/gcc_hwy_header_unit_launcher.py"
+    "--bioseq-expected-compiler-sha256=${BIOSEQ_GCC16_CXX_SHA256}"
+    "--bioseq-gcc-root=${BIOSEQ_GCC16_ROOT}"
+    "--bioseq-gcc-module-inventory=${_BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES}"
+    "--bioseq-expected-module-inventory-sha256=${BIOSEQ_GCC16_MODULES_SHA256}"
+    "--bioseq-expected-module-source-closure-sha256=${BIOSEQ_GCC16_MODULE_SOURCE_CLOSURE_SHA256}")
+  set(CMAKE_C_COMPILER_LAUNCHER
+    "${BIOSEQ_GCC16_C_COMPILER_LAUNCHER}"
+    CACHE STRING "Authenticated GCC C compiler launcher" FORCE)
+  set(CMAKE_CXX_COMPILER_LAUNCHER
+    "${BIOSEQ_GCC16_CXX_COMPILER_LAUNCHER}"
+    CACHE STRING "Authenticated GCC C++ compiler launcher" FORCE)
+  set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD "d0edc3af-4c50-42ea-a356-e2862fe7a444")
+  set(CMAKE_CXX_STDLIB_MODULES_JSON
+    "${_BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES}"
+    CACHE FILEPATH "Authenticated libstdc++ module inventory" FORCE)
   set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 else()
   message(FATAL_ERROR "SET CMAKE_NAMED_ENV_TYPE to valid value!")
@@ -242,11 +405,37 @@ if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64"
     "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}. "
     "Re-run main/infra/testing_infra/scripts/bootstrap.sh.")
 endif()
-if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16"
-    AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "16.1")
-  message(FATAL_ERROR
-    "AWS_MACHINE_X64_GCC16 requires g++ >= 16.1; found "
-    "${CMAKE_CXX_COMPILER_VERSION} at ${CMAKE_CXX_COMPILER}.")
+if(CMAKE_NAMED_ENV_TYPE STREQUAL "AWS_MACHINE_X64_GCC16")
+  file(REAL_PATH "${CMAKE_C_COMPILER}" _BIOSEQ_CONFIGURED_GCC_C_REAL)
+  file(REAL_PATH "${CMAKE_CXX_COMPILER}" _BIOSEQ_CONFIGURED_GCC_CXX_REAL)
+  file(REAL_PATH "${CMAKE_CXX_STDLIB_MODULES_JSON}"
+    _BIOSEQ_CONFIGURED_LIBSTDCXX_MODULES_REAL)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+      OR CMAKE_CXX_COMPILER_VERSION VERSION_LESS "16.1"
+      OR NOT _BIOSEQ_CONFIGURED_GCC_C_REAL
+        STREQUAL _BIOSEQ_AUTHENTICATED_GCC16_C
+      OR NOT _BIOSEQ_CONFIGURED_GCC_CXX_REAL
+        STREQUAL _BIOSEQ_AUTHENTICATED_GCC16_CXX
+      OR NOT _BIOSEQ_CONFIGURED_LIBSTDCXX_MODULES_REAL
+        STREQUAL _BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES)
+    message(FATAL_ERROR
+      "AWS_MACHINE_X64_GCC16 requires the authenticated GNU >= 16.1 "
+      "compiler/inventory pair selected before project(); configured "
+      "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} at "
+      "${CMAKE_CXX_COMPILER} with "
+      "${CMAKE_CXX_STDLIB_MODULES_JSON}.")
+  endif()
+  bioseq_verify_gcc16_toolchain_identity(
+    ROOT "${_BIOSEQ_AUTHENTICATED_GCC16_ROOT}"
+    C "${_BIOSEQ_AUTHENTICATED_GCC16_C}"
+    CXX "${_BIOSEQ_AUTHENTICATED_GCC16_CXX}"
+    MODULES "${_BIOSEQ_AUTHENTICATED_LIBSTDCXX_MODULES}"
+    VERSION "${BIOSEQ_GCC16_VERSION}"
+    C_SHA256 "${BIOSEQ_GCC16_C_SHA256}"
+    CXX_SHA256 "${BIOSEQ_GCC16_CXX_SHA256}"
+    MODULES_SHA256 "${BIOSEQ_GCC16_MODULES_SHA256}"
+    MODULE_SOURCE_CLOSURE_SHA256
+      "${BIOSEQ_GCC16_MODULE_SOURCE_CLOSURE_SHA256}")
 endif()
 
 # --- Build-speed: Reduced BMI for C++ modules -------------------------------
@@ -282,6 +471,12 @@ endif()
 # Recommended heuristic: 1 heavy compile per ~6 GB of host RAM (so 2 on a
 # 16 GB box, 4 on a 32 GB box, leave empty/unset on >=64 GB).
 if(BIOSEQ_BUILD_CORE)
+  # SQL boundary proofs launch full Clang AST/PCM closures outside ordinary
+  # target compilation. Keep those proof processes mutually exclusive while
+  # leaving the remaining Ninja jobs available to extension compiles.
+  set_property(GLOBAL APPEND PROPERTY JOB_POOLS
+    sql_codegen_ast_proof=1)
+
   set(BIOSEQ_HEAVY_JOBS "" CACHE STRING
     "Cap on concurrent C++ module compiles for the module-heavy targets. \
 Empty/0 = unlimited; set to e.g. 2 on a 16 GB host.")
@@ -360,11 +555,14 @@ if(BIOSEQ_BUILD_WEBSITE)
 endif()
 
 # Provision the reusable isolated code generator once for the enabled component
-# union (external API clients + website). The external/website consumers depend
-# on the returned bioseq_codegen / bioseq_codegen_project targets and never
-# create another ExternalProject.
+# union (extension SQL + external API clients + website). Consumers depend on
+# the returned bioseq_codegen / bioseq_codegen_project targets and never create
+# another ExternalProject.
 include(BioseqCodegen)
 set(_bioseq_codegen_components)
+if(BIOSEQ_BUILD_CORE)
+  list(APPEND _bioseq_codegen_components sql)
+endif()
 if(BIOSEQ_BUILD_EXTERNAL_API_CLIENTS)
   list(APPEND _bioseq_codegen_components external)
 endif()
@@ -393,6 +591,7 @@ endif()
 
 if(BIOSEQ_BUILD_CORE)
   add_subdirectory(bioseq)
+  include(BioseqExternalPostgresAcceptance)
   add_subdirectory(vendor)
 endif()
 

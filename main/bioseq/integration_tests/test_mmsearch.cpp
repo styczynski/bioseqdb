@@ -2564,7 +2564,7 @@ TEST_CASE("ordinal-2 BatchJoin executes MPF mmap and MPS full-read Format-5 rout
 					kBatchJoinTarget, index_name);
 			}
 			const row_t publication = query_one(ctx, fmt::format(
-				"SELECT * FROM bioseq_internal.rev3_test_build_ready_{}_generation("
+				"SELECT * FROM bioseq_internal.build_ready_{}_generation("
 				"'{}'::regclass, '{}', {}, 'exact_simd');",
 				index_name == "minimizers_per_fragment" ? "mpf" : "mps",
 				kBatchJoinTarget, index_name, rowno));
@@ -3440,7 +3440,7 @@ TEST_CASE("DOC0373 P1 releases cold sidecar/catalog locks before later work",
 			"FROM {} ORDER BY pk LIMIT 1;",
 			kBatchJoinTarget, kBatchJoinTarget)));
 	const row_t publication = query_one(reader, fmt::format(
-		"SELECT * FROM bioseq_internal.rev3_test_build_ready_mpf_generation("
+		"SELECT * FROM bioseq_internal.build_ready_mpf_generation("
 		"'{}'::regclass, 'minimizers_per_fragment', {}, 'exact_simd');",
 		kBatchJoinTarget, rowno));
 	REQUIRE(publication.size() >= 10u);
@@ -3708,7 +3708,7 @@ TEST_CASE("ordinal-2 BatchJoin rejects a malformed revision-3 relation without f
 			"FROM {} ORDER BY pk LIMIT 1;",
 			kBatchJoinTarget, kBatchJoinTarget)));
 	const row_t publication = query_one(ctx, fmt::format(
-		"SELECT * FROM bioseq_internal.rev3_test_build_ready_mpf_generation("
+		"SELECT * FROM bioseq_internal.build_ready_mpf_generation("
 		"'{}'::regclass, 'minimizers_per_fragment', {}, 'exact_simd');",
 		kBatchJoinTarget, rowno));
 	REQUIRE_FALSE(publication.empty());
@@ -3748,7 +3748,7 @@ TEST_CASE("ordinal-2 BatchJoin LIMIT cleans up an undrained 8193-query reader",
 			"FROM {} ORDER BY pk LIMIT 1;",
 			kBatchJoinTarget, kBatchJoinTarget)));
 	const row_t publication = query_one(ctx, fmt::format(
-		"SELECT * FROM bioseq_internal.rev3_test_build_ready_mpf_generation("
+		"SELECT * FROM bioseq_internal.build_ready_mpf_generation("
 		"'{}'::regclass, 'minimizers_per_fragment', {}, 'exact_simd');",
 		kBatchJoinTarget, rowno));
 	REQUIRE(publication[8].value_or("") == "t");

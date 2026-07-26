@@ -3,7 +3,7 @@
  * @brief DOC0279 §12.5 — `tally_symbol_counts` + the `SymbolCountsIndex`
  *        INLINE_PER_SEQUENCE index. Real per-rank histogram (NOT the 49 stub).
  *
- * NO_POSTGRES. `letter_to_rank` (which needs pgseq_t::dispatch_instance) lives
+ * NO_POSTGRES. `letter_to_rank` (which needs bioseq::pg_types::seq::dispatch_instance) lives
  * on the pg side (index_admin_pg.cppm) — pg_compact_sequence is not a NO_POSTGRES
  * module, so it cannot be named here.
  */

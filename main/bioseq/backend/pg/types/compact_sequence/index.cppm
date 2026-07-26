@@ -14,4 +14,4 @@ export import :letter;
 import :subscript;
 import :concat_reverse;
 import :array_string;
-import :sql_entrypoints;
+import :sql_catalog;

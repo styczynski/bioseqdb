@@ -37,6 +37,7 @@ struct isolation_settings {
     int port{};
     std::string template_database;
     bool require_extension{true};
+    std::vector<std::string> restricted_sequence_names;
 };
 
 /// @brief Executes tutorial SQL against a private Unix-socket cluster.
@@ -158,7 +159,7 @@ public:
                                 settings, role, clone, peer_role)) {
                             preflight_violation = std::move(*violation);
                         } else if (auto violation = assert_extension_clone_acl(
-                                       probe_connection, settings.require_extension)) {
+                                       probe_connection, settings)) {
                             preflight_violation = std::move(*violation);
                         } else if (auto violation = assert_no_privilege_escalation(
                                        probe_connection, admin, admin_role,
@@ -663,9 +664,26 @@ private:
     // needed by runnable examples. The focused plain-SQL harness opts out
     // explicitly; absence can therefore never make a production check pass.
     [[nodiscard]] static std::optional<diagnostic> assert_extension_clone_acl(
-        bioseq::libpq::connection& role_connection, bool require_extension) {
-        if (!require_extension) {
+        bioseq::libpq::connection& role_connection,
+        isolation_settings const& settings) {
+        if (!settings.require_extension) {
             return std::nullopt;
+        }
+        if (settings.restricted_sequence_names.empty()) {
+            return isolation_violation(
+                "generated SQL manifest supplied no internal sequence ACL targets");
+        }
+        std::string sequence_acl_checks;
+        for (const std::string& qualified_name :
+             settings.restricted_sequence_names) {
+            const std::string literal =
+                role_connection.escape_literal(qualified_name);
+            sequence_acl_checks +=
+                "AND pg_catalog.to_regclass(" + literal
+                + ") IS NOT NULL "
+                  "AND NOT COALESCE(pg_catalog.has_sequence_privilege("
+                  "current_user, pg_catalog.to_regclass(" + literal
+                + "), 'USAGE'), false) ";
         }
         const bioseq::libpq::result acl = role_connection.exec(
             "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_extension e "
@@ -674,10 +692,7 @@ private:
             "AND pg_catalog.to_regclass('bioseq_internal.index_policy') IS NOT NULL "
             "AND pg_catalog.to_regclass('bioseq_internal.metadata_age_log') IS NOT NULL "
             "AND pg_catalog.to_regclass('bioseq_internal.seq_sub_table') IS NOT NULL "
-            "AND pg_catalog.to_regclass("
-                "'bioseq_internal.sequence_source_epoch_seq') IS NOT NULL "
-            "AND pg_catalog.to_regprocedure("
-                "'bioseq_internal.add_to_extension_secdef(text,text)') IS NOT NULL "
+                + sequence_acl_checks +
             "AND NOT pg_catalog.pg_has_role(current_user, e.extowner, 'USAGE') "
             "AND current_user = (SELECT pg_catalog.pg_get_userbyid(d.datdba) "
                 "FROM pg_catalog.pg_database d "
@@ -702,13 +717,6 @@ private:
                 "pg_catalog.to_regclass('bioseq_internal.metadata_age_log'), 'DELETE'), false) "
             "AND NOT COALESCE(pg_catalog.has_table_privilege(current_user, "
                 "pg_catalog.to_regclass('bioseq_internal.seq_sub_table'), 'SELECT'), false) "
-            "AND NOT COALESCE(pg_catalog.has_sequence_privilege(current_user, "
-                "pg_catalog.to_regclass('bioseq_internal.sequence_source_epoch_seq'), "
-                "'USAGE'), false) "
-            "AND NOT COALESCE(pg_catalog.has_function_privilege(current_user, "
-                "pg_catalog.to_regprocedure("
-                    "'bioseq_internal.add_to_extension_secdef(text,text)'), "
-                "'EXECUTE'), false) "
             "AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p "
                 "JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace "
                 "WHERE n.nspname = 'bioseq_internal' "

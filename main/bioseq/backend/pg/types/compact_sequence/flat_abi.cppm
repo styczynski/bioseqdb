@@ -21,6 +21,8 @@ extern "C" {
 export module bioseq.types.pg_compact_sequence:flat_abi;
 
 import bioseq.common.sequan_compat;
+import bioseq.codegen.sql.annotation_model;
+import bioseq.pg_utils.sql_boundary;
 import bioseq.sequences;
 import bioseq.storage.bucket_math;
 
@@ -51,11 +53,45 @@ export using pgseq_unconstrained_input_alphabet =
     seq::dna5;
 #endif
 
-export using pgseq_t = compact_sequence_stdc<
+export namespace bioseq::pg_types {
+
+/**
+ * @brief Compact, alphabet-aware biological sequence stored as a variable-length,
+ * TOASTable PostgreSQL value for indexing, similarity search, and analysis.
+ * @ingroup bioseq_sql_public_api
+ */
+using seq [[bioseq_sql::type({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .internal_length = bioseq::sql::variable_length,
+    .alignment = bioseq::sql::type_alignment::double_,
+    .storage = bioseq::sql::type_storage::extended,
+})]] = compact_sequence_stdc<
     pgseq_supported_alphabets,
     std::uint32_t,
     std::int32_t,
     pgseq_supported_storage_unit_byte_widths>;
+
+}  // namespace bioseq::pg_types
+
+export namespace bioseq::pg_utils::detail {
+
+template<>
+struct sql_scalar_conversion<bioseq::pg_types::seq*> final {
+    static constexpr const char* key = "bioseq.seq/opaque_pointer";
+
+    [[nodiscard]] static bioseq::pg_types::seq* read(
+        Datum value) noexcept {
+        return reinterpret_cast<bioseq::pg_types::seq*>(
+            DatumGetPointer(value));
+    }
+
+    [[nodiscard]] static Datum write(
+        bioseq::pg_types::seq* value) noexcept {
+        return PointerGetDatum(value);
+    }
+};
+
+}  // namespace bioseq::pg_utils::detail
 
 export inline constexpr std::uint8_t pgseq_unbound_alphabet_code = 0xffu;
 export inline constexpr std::uint8_t pgseq_unbound_width_tag = 0x40u;
@@ -119,7 +155,7 @@ export enum class pg_sequence_flat_kind : std::uint8_t {
 };
 
 export [[nodiscard]] inline pg_sequence_flat_kind
-classify_pg_sequence_flat(pgseq_t const* value) noexcept
+classify_pg_sequence_flat(bioseq::pg_types::seq const* value) noexcept
 {
     if (value == nullptr) {
         return pg_sequence_flat_kind::invalid;
@@ -145,7 +181,7 @@ classify_pg_sequence_flat(pgseq_t const* value) noexcept
 }
 
 export [[nodiscard]] inline std::span<std::byte const>
-pgseq_unbound_ascii(pgseq_t const& value) noexcept
+pgseq_unbound_ascii(bioseq::pg_types::seq const& value) noexcept
 {
     return {
         reinterpret_cast<std::byte const*>(value.data),
@@ -154,7 +190,7 @@ pgseq_unbound_ascii(pgseq_t const& value) noexcept
 }
 
 export [[nodiscard]] inline std::span<std::byte>
-pgseq_unbound_ascii(pgseq_t& value) noexcept
+pgseq_unbound_ascii(bioseq::pg_types::seq& value) noexcept
 {
     return {
         reinterpret_cast<std::byte*>(value.data),
@@ -265,25 +301,16 @@ export [[nodiscard]] inline bool pgseq_symbol_for_rank(
 }
 
 export inline constexpr auto pg_alloc =
-    [](std::size_t byte_count) -> pgseq_t* {
+    [](std::size_t byte_count) -> bioseq::pg_types::seq* {
         if (byte_count > static_cast<std::size_t>(MaxAllocSize)) {
             return nullptr;
         }
-        return static_cast<pgseq_t*>(
+        return static_cast<bioseq::pg_types::seq*>(
             palloc_extended(byte_count,
                             MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO));
     };
 
-static_assert(stdc_allocator<decltype(pg_alloc), pgseq_t>);
-
-/* Legacy flat-only extraction remains available to intentionally unaware
- * consumers.  Slice-aware code classifies the original Datum first. */
-export template<class S = pgseq_t>
-[[nodiscard]] inline S* pg_seq_arg(FunctionCallInfo fcinfo, int argument)
-{
-    return reinterpret_cast<S*>(
-        PG_DETOAST_DATUM(PG_GETARG_DATUM(argument)));
-}
+static_assert(stdc_allocator<decltype(pg_alloc), bioseq::pg_types::seq>);
 
 /* Missing-ok and deliberately uncached: integration tests DROP/CREATE the
  * extension in one backend and PostgreSQL assigns fresh type OIDs. */

@@ -171,9 +171,14 @@ ReadFromBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 
 	if (BLCKSZ < offset + len || (!force && (phdr->pd_lower < offset + len)))
 	{
-		bioseq_log<ERR, PG>(
-			 "attempt to read columnar data of length {} from offset {} of block {} of relation {}",
-			 len, offset, blockno, rel->rd_id);
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"attempt to read columnar data of length {} from offset "
+					"{} of block {} of relation {}",
+					len, offset, blockno, rel->rd_id),
+			});
 	}
 
 	memcpy_s(buf, len, page + offset, len);
@@ -206,9 +211,14 @@ WriteToBlock(Relation rel, BlockNumber blockno, uint32_t offset, char *buf,
 
 	if (phdr->pd_lower < offset || phdr->pd_upper - offset < len)
 	{
-		bioseq_log<ERR, PG>(
-			 "attempt to write columnar data of length {} to offset {} of block {} of relation {}",
-			 len, offset, blockno, rel->rd_id);
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"attempt to write columnar data of length {} to offset "
+					"{} of block {} of relation {}",
+					len, offset, blockno, rel->rd_id),
+			});
 	}
 
 	/*
@@ -305,15 +315,25 @@ BioseqColumnMetapageCheckVersion(Relation rel, BioseqColumnMetapage *metapage)
 {
 	if (!BioseqColumnMetapageIsCurrent(metapage))
 	{
-		bioseq_report<ERR, PG>()
-			.code(ERRCODE_FEATURE_NOT_SUPPORTED)
-			.msg("attempted to access relation \"{}\", which uses an older columnar format",
-				RelationGetRelationName(rel))
-			.detail("BioseqColumn format version {}.{} is required, \"{}\" has version {}.{}.",
-				BIOSEQ_COLUMN_VERSION_MAJOR, BIOSEQ_COLUMN_VERSION_MINOR,
-				RelationGetRelationName(rel),
-				metapage->versionMajor, metapage->versionMinor)
-			.hint("{}", OLD_METAPAGE_VERSION_HINT);
+		const char* const relation_name =
+			RelationGetRelationName(rel);
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_FEATURE_NOT_SUPPORTED,
+			{
+				.message = fmt::format(
+					"attempted to access relation \"{}\", which uses an "
+					"older columnar format",
+					relation_name),
+				.detail = fmt::format(
+					"BioseqColumn format version {}.{} is required, \"{}\" "
+					"has version {}.{}.",
+					BIOSEQ_COLUMN_VERSION_MAJOR,
+					BIOSEQ_COLUMN_VERSION_MINOR,
+					relation_name,
+					metapage->versionMajor,
+					metapage->versionMinor),
+				.hint = OLD_METAPAGE_VERSION_HINT,
+			});
 	}
 }
 
@@ -341,10 +361,16 @@ BioseqColumnMetapageRead(Relation rel, bool force)
 		 * However in older versions, we were creating metapages lazily, i.e
 		 * when ingesting data to columnar table.
 		 */
-		bioseq_report<ERR, PG>()
-			.msg("columnar metapage for relation \"{}\" does not exist",
-				RelationGetRelationName(rel))
-			.hint("{}", OLD_METAPAGE_VERSION_HINT);
+		const char* const relation_name =
+			RelationGetRelationName(rel);
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"columnar metapage for relation \"{}\" does not exist",
+					relation_name),
+				.hint = OLD_METAPAGE_VERSION_HINT,
+			});
 	}
 
 	/*
@@ -744,9 +770,15 @@ BioseqColumnStorageWrite(Relation rel, uint64_t logicalOffset, char *data, uint3
 
 	if (!BioseqColumnLogicalOffsetIsValid(logicalOffset))
 	{
-		bioseq_log<ERR, PG>(
-			 "attempted columnar write on relation {} to invalid logical offset: {}",
-			 rel->rd_id, logicalOffset);
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message = fmt::format(
+					"attempted columnar write on relation {} to invalid "
+					"logical offset: {}",
+					rel->rd_id,
+					logicalOffset),
+			});
 	}
 
 	uint64_t written = 0;
@@ -830,36 +862,4 @@ BioseqColumnStorageTruncate(Relation rel, uint64_t newDataReservation)
 	}
 
 	return false;
-}
-
-
-/*
- * test_bioseq_storage_write_new_page is a UDF only used for testing
- * purposes. It could make more sense to define this in bioseq_debug.c,
- * but the storage layer doesn't expose BioseqColumnMetapage to any other files,
- * so we define it here.
- */
-POSTGRES_FN(test_bioseq_storage_write_new_page)
-{
-	Oid relationId = PG_GETARG_OID(0);
-
-	Relation relation = safe_relation_open(relationId, AccessShareLock);
-
-	/*
-	 * Allocate a new page, write some data to there, and set reserved offset
-	 * to the start of that page. That way, for a subsequent write operation,
-	 * storage layer would try to overwrite the page that we allocated here.
-	 */
-	uint64_t newPageOffset = BioseqColumnStorageGetReservedOffset(relation, false);
-
-	BioseqColumnStorageReserveData(relation, 100);
-	BioseqColumnStorageWrite(relation, newPageOffset, "foo_bar", 8);
-
-	BioseqColumnMetapage metapage = BioseqColumnMetapageRead(relation, false);
-	metapage.reservedOffset = newPageOffset;
-	BioseqColumnOverwriteMetapage(relation, metapage);
-
-	relation_close(relation, AccessShareLock);
-
-	PG_RETURN_VOID();
 }

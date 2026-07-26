@@ -1955,7 +1955,9 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
         " (id int, value bioseq.seq('dna4',8)) USING bioseq; "
         "INSERT INTO doc0377_total_key_source VALUES "
         " (1,'A'::bioseq.seq('dna4',8)), "
-        " (2,'C'::bioseq.seq('dna4',8));");
+        " (2,'C'::bioseq.seq('dna4',8)); "
+        "CREATE INDEX doc0377_total_key_source_length_idx "
+        " ON doc0377_total_key_source ((bioseq.len(value)));");
 
 #if BIOSEQ_OPTTIMIZATION_LEVEL > 0
     constexpr auto expected_order = "ua,uc,d4a64,d4a8,d4c,d5a";
@@ -2002,6 +2004,21 @@ TEST_CASE("DOC0377 total sequence key agrees across states layouts and indexes",
             ctx,
             "SELECT label FROM doc0377_total_key_hash "
             "WHERE value = 'A'::bioseq.seq;") == "ua");
+
+        // Building this expression index reads locator stubs through the
+        // standalone provider and promotion boundary.  A usable plan proves
+        // that the post-catch error tail did not alter the success path.
+        const auto source_expression_plan = explain_text<false>(
+            ctx,
+            "SELECT id FROM doc0377_total_key_source "
+            "WHERE bioseq.len(value)=1;");
+        REQUIRE(plan_contains(
+            source_expression_plan,
+            "doc0377_total_key_source_length_idx"));
+        REQUIRE(query_scalar_int(
+            ctx,
+            "SELECT count(*) FROM doc0377_total_key_source "
+            "WHERE bioseq.len(value)=1;") == 2);
     }
 
     exec_sql(ctx,

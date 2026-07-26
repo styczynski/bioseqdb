@@ -1,4 +1,4 @@
-/* Expanded-object ownership and the sole pgseq_t flattening boundary. */
+/* Expanded-object ownership and the sole bioseq::pg_types::seq flattening boundary. */
 module;
 
 #include <algorithm>
@@ -17,7 +17,6 @@ module;
 #include <utility>
 
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 extern "C" {
 #include "storage/shmem.h"
 #include "utils/datum.h"
@@ -26,6 +25,7 @@ extern "C" {
 
 export module bioseq.types.pg_compact_sequence:packed_output;
 
+import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :source_abi;
 import :tree_types;
@@ -2204,39 +2204,54 @@ export [[nodiscard]] inline bool slice_trace_self_test_noexcept() noexcept {
   return valid;
 }
 
-extern "C" PGDLLEXPORT Datum slice_trace_self_test_impl(FunctionCallInfo) {
-  PG_RETURN_BOOL(slice_trace_self_test_noexcept());
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+bool slice_trace_self_test() noexcept {
+  return slice_trace_self_test_noexcept();
 }
 
-extern "C" PGDLLEXPORT Datum slice_payload_allocation_probe_impl(
-    FunctionCallInfo fcinfo) {
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+std::int64_t slice_payload_allocation_probe(std::int32_t action) {
 #ifdef BIOSEQ_TEST_INDEXES
-  const int32 action = PG_GETARG_INT32(0);
   auto& counters = slice_payload_allocation_test_storage_noexcept();
   switch (action) {
     case 0:
       counters = {};
-      PG_RETURN_INT64(0);
+      return 0;
     case 1:
-      PG_RETURN_INT64(static_cast<int64>(std::min(
+      return static_cast<std::int64_t>(std::min(
           counters.packed_full,
           static_cast<std::uint64_t>(
-              (std::numeric_limits<int64>::max)()))));
+              (std::numeric_limits<std::int64_t>::max)())));
     case 2:
-      PG_RETURN_INT64(static_cast<int64>(std::min(
+      return static_cast<std::int64_t>(std::min(
           counters.executor_copy,
           static_cast<std::uint64_t>(
-              (std::numeric_limits<int64>::max)()))));
+              (std::numeric_limits<std::int64_t>::max)())));
     case 3:
-      PG_RETURN_INT64(static_cast<int64>(std::min(
+      return static_cast<std::int64_t>(std::min(
           counters.publication_packed_full,
           static_cast<std::uint64_t>(
-              (std::numeric_limits<int64>::max)()))));
+              (std::numeric_limits<std::int64_t>::max)())));
     case 4:
-      PG_RETURN_INT64(static_cast<int64>(std::min(
+      return static_cast<std::int64_t>(std::min(
           counters.publication_executor_copy,
           static_cast<std::uint64_t>(
-              (std::numeric_limits<int64>::max)()))));
+              (std::numeric_limits<std::int64_t>::max)())));
     default:
       ereport(ERROR,
               (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -2251,28 +2266,39 @@ extern "C" PGDLLEXPORT Datum slice_payload_allocation_probe_impl(
            errmsg("slice payload-allocation probe is unavailable"),
            errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
 #endif
-  PG_RETURN_NULL();
+  pg_unreachable();
 }
 
-extern "C" PGDLLEXPORT Datum slice_trace_worker_failure_probe_impl(
-    FunctionCallInfo fcinfo) {
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+bool slice_trace_worker_failure_probe(std::int32_t action) {
 #ifdef BIOSEQ_TEST_INDEXES
-  (void)PG_GETARG_INT32(0);
+  static_cast<void>(action);
   if (IsParallelWorker()) {
     ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("injected DOC0377 SliceProject parallel worker failure"),
+             errmsg("injected SliceProject parallel worker failure"),
              errdetail("the original worker ERROR must survive DSM cleanup")));
   }
-  PG_RETURN_BOOL(true);
+  return true;
 #else
+  static_cast<void>(action);
   ereport(ERROR,
           (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
            errmsg("SliceProject worker failure probe is unavailable"),
            errdetail("The extension was built without BIOSEQ_TEST_INDEXES.")));
 #endif
-  PG_RETURN_NULL();
+  pg_unreachable();
 }
+
+}  // namespace bioseq::pg_types::sql_routines
 
 export [[nodiscard]] inline std::uint64_t checked_ceil_div(
     std::uint64_t numerator,
@@ -2344,7 +2370,7 @@ export template<class Instance>
 {
     using range = compact_sequence_range<Instance>;
     using traits = typename range::traits;
-    if (bp_length > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
+    if (bp_length > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to flatten")));
@@ -2359,7 +2385,7 @@ export template<class Instance>
     const Size payload = checked_mul_size(
         checked_size_cast(units), sizeof(typename traits::storage_unit));
     const Size total = checked_materialization_allocation_size(
-        checked_round_up_to_uint64(payload), pgseq_t::header_bytes(),
+        checked_round_up_to_uint64(payload), bioseq::pg_types::seq::header_bytes(),
         "flat sequence");
     return total;
 }
@@ -2404,7 +2430,7 @@ enum class materialization_size_probe : std::uint8_t {
             static_cast<Size>(VARHDRSZ + 1u), "self-test framed output");
         break;
       case materialization_size_probe::bound_flat_bp_overflow:
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
             []<class Instance>() {
               (void)bound_flat_size<Instance>(
@@ -2430,7 +2456,7 @@ enum class materialization_size_probe : std::uint8_t {
 
 [[nodiscard]] bool run_materialization_size_guardrail_matrix() {
   Size zero_flat_size = 0u;
-  pgseq_t::dispatch_instance(
+  bioseq::pg_types::seq::dispatch_instance(
       pgseq_supported_alphabets::index_of<seq::dna4>(), 8u,
       [&zero_flat_size]<class Instance>() {
         zero_flat_size = bound_flat_size<Instance>(0u);
@@ -2450,7 +2476,7 @@ enum class materialization_size_probe : std::uint8_t {
              static_cast<std::uint64_t>(MaxAllocSize) - framed_overhead,
              framed_overhead, "self-test exact framed MaxAlloc")
           == MaxAllocSize
-      && zero_flat_size >= pgseq_t::header_bytes()
+      && zero_flat_size >= bioseq::pg_types::seq::header_bytes()
       && materialization_size_probe_raises_program_limit(
           materialization_size_probe::round_overflow)
       && materialization_size_probe_raises_program_limit(
@@ -2469,18 +2495,18 @@ enum class materialization_size_probe : std::uint8_t {
 {
     if (!value.alphabet_bound) {
         if (value.bp_length
-            > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
+            > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
             ereport(ERROR,
                     (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("unbound bioseq sequence is too long to flatten")));
         }
         const Size total = checked_materialization_allocation_size(
             checked_round_up_to_uint64(checked_size_cast(value.bp_length)),
-            pgseq_t::header_bytes(), "flat unbound sequence");
+            bioseq::pg_types::seq::header_bytes(), "flat unbound sequence");
         return total;
     }
     Size size = 0u;
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         value.type_params.alphabet_code,
         value.type_params.storage_unit_byte_width,
         [&size, &value]<class Instance>() {
@@ -2581,7 +2607,7 @@ enum class materialization_size_probe : std::uint8_t {
 }
 
 template<class Instance, class View>
-void pack_view_into(pgseq_t& destination, View view, std::uint64_t length)
+void pack_view_into(bioseq::pg_types::seq& destination, View view, std::uint64_t length)
 {
     using range = compact_sequence_range<Instance>;
     using traits = typename range::traits;
@@ -2610,7 +2636,7 @@ void pack_view_into(pgseq_t& destination, View view, std::uint64_t length)
             typename Instance::alphabet_type>();
     destination.storage_unit_byte_width = Instance::byte_width;
     destination.padding_letters = result.padding_letters;
-    destination.bp_size = static_cast<pgseq_t::bp_size_t>(length);
+    destination.bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(length);
 }
 
 inline void pg_sequence_expanded_reset(void* argument) noexcept
@@ -2664,14 +2690,14 @@ export inline void pg_sequence_flatten_into(
                  errmsg("bioseq EOH flatten size changed between callbacks")));
     }
     std::memset(result, 0, allocated_size);
-    auto& destination = *static_cast<pgseq_t*>(result);
+    auto& destination = *static_cast<bioseq::pg_types::seq*>(result);
     SET_VARSIZE(&destination, allocated_size);
 
     if (!value.alphabet_bound) {
         destination.alphabet_code = pgseq_unbound_alphabet_code;
         destination.storage_unit_byte_width = pgseq_unbound_width_tag;
         destination.padding_letters = 0u;
-        destination.bp_size = static_cast<pgseq_t::bp_size_t>(value.bp_length);
+        destination.bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(value.bp_length);
         if (!emit_unbound_ascii(
                 value.root, 0u, value.bp_length,
                 std::span<std::byte>{
@@ -2717,7 +2743,7 @@ export inline void pg_sequence_flatten_into(
             CurrentMemoryContext);
         session = local_session;
         try {
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 value.type_params.alphabet_code,
                 value.type_params.storage_unit_byte_width,
                 [&destination, &value, local_session, header,
@@ -3007,7 +3033,7 @@ namespace {
 
 [[nodiscard]] inline literal_piece copy_flat_literal(
     piece_tree_arena& arena,
-    pgseq_t const& flat,
+    bioseq::pg_types::seq const& flat,
     pg_sequence_descriptor descriptor,
     slice_trace_attachment* trace,
     std::uint32_t producer_value_id)
@@ -3015,7 +3041,7 @@ namespace {
     const bool unbound = !descriptor.alphabet_bound;
     const std::size_t count = unbound
         ? static_cast<std::size_t>(descriptor.bp_length)
-        : static_cast<std::size_t>(VARSIZE(&flat)) - pgseq_t::header_bytes();
+        : static_cast<std::size_t>(VARSIZE(&flat)) - bioseq::pg_types::seq::header_bytes();
     const std::size_t allocation_bytes = std::max<std::size_t>(count, 1u);
     auto* bytes = allocate_piece_literal_storage(
         arena, allocation_bytes);
@@ -3125,7 +3151,7 @@ export [[nodiscard]] inline acquired_sequence acquire_writable_pg_sequence(
         return {copy, false};
     }
 
-    auto* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+    auto* flat = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
     const Datum flat_datum = PointerGetDatum(flat);
     const auto descriptor = classify_and_describe_sequence(flat_datum);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
@@ -3844,18 +3870,31 @@ synthetic_lazy_source_handle() noexcept {
 /* Internal acceptance seam for logical-length guardrails. Its immutable
  * process-lifetime source synthesizes DNA4 rank zero on demand, so tests can
  * exercise bigint metadata without allocating the logical payload. */
-extern "C" PGDLLEXPORT Datum synthetic_lazy_sequence_impl(FunctionCallInfo fcinfo) {
-  const std::int64_t requested = PG_GETARG_INT64(0);
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum synthetic_lazy_sequence(std::int64_t requested) {
   if (requested < 0) {
     ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                     errmsg("synthetic bioseq length must be nonnegative")));
   }
   constexpr compact_sequence_stdc_type_params type{
-      .alphabet_code = pgseq_supported_alphabets::index_of<seq::dna4>(),
+      .alphabet_code = pgseq_supported_alphabets::index_of<::seq::dna4>(),
       .storage_unit_byte_width = 8u,
   };
   const auto length = static_cast<std::uint64_t>(requested);
-  PG_RETURN_DATUM(make_source_backed_pg_sequence(
+  return make_source_backed_pg_sequence(
       synthetic_lazy_source_handle(),
       bioseq::storage::seq_locator{
           .version = bioseq::storage::kLocatorVersion,
@@ -3868,24 +3907,51 @@ extern "C" PGDLLEXPORT Datum synthetic_lazy_sequence_impl(FunctionCallInfo fcinf
           .first_sub_row_no = 0u,
           .source_epoch = 1u,
       },
-      type, 0u));
+      type, 0u);
 }
 
-extern "C" PGDLLEXPORT Datum materialization_size_self_test_impl(FunctionCallInfo) {
-  PG_RETURN_BOOL(run_materialization_size_guardrail_matrix());
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+bool materialization_size_self_test() {
+  return run_materialization_size_guardrail_matrix();
 }
 
-extern "C" PGDLLEXPORT Datum sequence_piece_count_impl(FunctionCallInfo fcinfo) {
-  const auto value = acquire_sequence_for_read(PG_GETARG_DATUM(0));
-  PG_RETURN_INT64(
-      value.root() ? static_cast<std::int64_t>(value.root().node->piece_count)
-                   : 0);
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::restricted,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+std::int64_t sequence_piece_count(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input) {
+  const auto value = acquire_sequence_for_read(input);
+  return value.root()
+      ? static_cast<std::int64_t>(value.root().node->piece_count)
+      : 0;
 }
 
 /* Direct PostgreSQL ownership-protocol seam: RW datumTransfer reparents the
  * EOH, while RO datumCopy produces an independent flat value.  Both must
  * survive reset/deletion of the context that originally owned the EOH. */
-extern "C" PGDLLEXPORT Datum expanded_ownership_self_test_impl(FunctionCallInfo) {
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+bool expanded_ownership_self_test() {
   MemoryContext saved = CurrentMemoryContext;
   MemoryContext volatile transfer_input = nullptr;
   MemoryContext volatile transfer_parent = nullptr;
@@ -3977,11 +4043,11 @@ extern "C" PGDLLEXPORT Datum expanded_ownership_self_test_impl(FunctionCallInfo)
     MemoryContextSwitchTo(saved);
     MemoryContextReset(const_cast<MemoryContext>(copy_input));
     auto const *copied_flat =
-        reinterpret_cast<pgseq_t const *>(DatumGetPointer(copied));
+        reinterpret_cast<bioseq::pg_types::seq const *>(DatumGetPointer(copied));
     const bool copy_survived =
         !VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(copied)) &&
         VARSIZE(copied_flat) >=
-            pgseq_t::header_bytes() + transferred_text.size() &&
+            bioseq::pg_types::seq::header_bytes() + transferred_text.size() &&
         copied_flat->alphabet_code == pgseq_unbound_alphabet_code &&
         copied_flat->storage_unit_byte_width == pgseq_unbound_width_tag &&
         copied_flat->bp_size == transferred_text.size() &&
@@ -4020,8 +4086,10 @@ extern "C" PGDLLEXPORT Datum expanded_ownership_self_test_impl(FunctionCallInfo)
   }
   PG_END_TRY();
   MemoryContextSwitchTo(saved);
-  PG_RETURN_BOOL(valid);
+  return valid;
 }
+
+}  // namespace bioseq::pg_types::sql_routines
 
 /* Trace metadata is observational and may be installed on an otherwise
  * read-only EOH wrapper without changing its logical sequence value. */

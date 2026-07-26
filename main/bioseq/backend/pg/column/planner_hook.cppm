@@ -16,13 +16,14 @@ module;
 
 #include "common.h"
 
+#include <optional>
 
 export module bioseq.column.planner_hook;
 
 import bioseq.common.mlogging;
 import bioseq.table;                      // custom/index scan planner API
 import bioseq.pg_utils;
-import bioseq.config;                    // DOC0322 §9.3 — bioseq_enable_vectorization, bioseq_index_scan GUCs
+import bioseq.config;                    // DOC0322 §9.3 — bioseq::settings::enable_vectorization, bioseq::settings::enable_bioseq_index_scan GUCs
 import bioseq.vector.execution;   // GetVectorizedProcedureOid
 import bioseq.vector.aggregator_node;    // bioseq_create_aggregator_node, bioseq_register_aggregator_node
 import bioseq.pg_utils.nodes;            // DOC0333 — node views, expression+plan mutator adapters, op-expr-family helper
@@ -165,11 +166,12 @@ struct aggref_args_mutator {
 			Oid procedure_oid = operator_form->oprcode;
 			ReleaseSysCache(operator_tuple);
 
-			Oid vectorized_procedure_oid;
-			if (!GetVectorizedProcedureOid(procedure_oid, &vectorized_procedure_oid))
+			const std::optional<Oid> vectorized_procedure_oid =
+				GetVectorizedProcedureOid(procedure_oid);
+			if (!vectorized_procedure_oid)
 				bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
 
-			op_expr_node->opfuncid = vectorized_procedure_oid;
+			op_expr_node->opfuncid = *vectorized_procedure_oid;
 
 			return pg_node_mutation::with(pg_as_node(op_expr_node));
 		}
@@ -216,13 +218,15 @@ struct expr_mutator {
 			new_aggref_node->args = reinterpret_cast<List*>(
 				pg_mutate_expression(pg_as_node(old_aggref_node->args), args_state, args_mutator));
 
-			Oid vectorized_procedure_oid = 0;
-			if (!GetVectorizedProcedureOid(new_aggref_node->aggfnoid, &vectorized_procedure_oid))
+			const std::optional<Oid> vectorized_procedure_oid =
+				GetVectorizedProcedureOid(
+					new_aggref_node->aggfnoid);
+			if (!vectorized_procedure_oid)
 			{
 				bioseq_log<ERR, PG>( "Vectorized aggregate not found.");
 			}
 
-			new_aggref_node->aggfnoid = vectorized_procedure_oid;
+			new_aggref_node->aggfnoid = *vectorized_procedure_oid;
 
 			return pg_node_mutation::with(pg_as_node(new_aggref_node));
 		}
@@ -283,7 +287,7 @@ struct plan_tree_mutator {
 		{
 			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered Agg");
 
-			if (!bioseq_enable_vectorization)
+			if (!bioseq::settings::enable_vectorization)
 				return pg_plan_mutation::descend();
 
 			/* SliceProject owns lazy sequence expressions but deliberately
@@ -389,8 +393,8 @@ struct plan_tree_mutator {
 
 		if (IndexScan* index_scan_node = node.try_as<IndexScan>())
 		{
-			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered IndexScan; bioseq_index_scan={}", bioseq_index_scan);
-			if (!bioseq_index_scan)
+			bioseq_log<DBG>("[bioseq] pg: plan_tree_mutator() encountered IndexScan; bioseq::settings::enable_bioseq_index_scan={}", bioseq::settings::enable_bioseq_index_scan);
+			if (!bioseq::settings::enable_bioseq_index_scan)
 				return pg_plan_mutation::skip();
 
 			if (!bioseq_index_table(index_scan_node->indexid, bioseq_tableam_oid)) {
@@ -519,13 +523,13 @@ BioseqColumnPlannerHook(Query* parse,
 	}
 
 	bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() checking vectorization preconditions");
-	if (!(bioseq_enable_vectorization			/* Vectorization should be enabled */
-			|| bioseq_index_scan)				/* or BioseqColumn Index Scan */
+	if (!(bioseq::settings::enable_vectorization			/* Vectorization should be enabled */
+			|| bioseq::settings::enable_bioseq_index_scan)				/* or BioseqColumn Index Scan */
 		|| stmt->commandType != CMD_SELECT		/* only SELECTS are supported  */
 		|| list_length(stmt->rtable) != 1)		/* JOINs are not yet supported */
 		{
 			bioseq_log<DBG>("[bioseq] pg: BioseqColumnPlannerHook() fast-return; vec={} idx={} cmd_not_select={} rtable_not_one={}",
-				bioseq_enable_vectorization, bioseq_index_scan,
+				bioseq::settings::enable_vectorization, bioseq::settings::enable_bioseq_index_scan,
 				(stmt->commandType != CMD_SELECT), (list_length(stmt->rtable) != 1));
 			return stmt;
 		}

@@ -48,6 +48,7 @@ import bioseq.parallelism.pool;
 import bioseq.parallelism.memory_admission;
 import bioseq.parallelism.pipeline_ops;
 import bioseq.common.hashing;                        // sha256_hasher / sha256_digest (§6 shared digest)
+import bioseq.sql_guc_settings;
 static_assert(__cplusplus >= 202302L, "C++23-or-later");
 
 extern "C" void bioseq_sort_pair_run_u128_keys(
@@ -518,33 +519,27 @@ inline void serialize_v2_blob(char* out, sequence_size_t target_len_val,
     if (!poss.empty()) std::memcpy(out + HDR + REC * bkts.size(), poss.data(), sizeof(std::uint64_t) * poss.size());
 }
 
-enum class PairRunSortImpl : std::uint8_t {
-    std_sort = 0,
-    simd_u128_vqsort = 1,
-    simd_u128_vec_stream_1 = 2,
-    simd_u128_vec_stream_2 = 3,
-    simd_u128_vec_stream_4 = 4,
-};
+using PairRunSortImpl = bioseq::PairRunSortImpl;
 
-inline int bioseq_pair_run_sort_impl = static_cast<int>(PairRunSortImpl::std_sort);
+inline std::optional<PairRunSortImpl> pair_run_sort_override{};
 
 [[nodiscard]] inline PairRunSortImpl pair_run_sort_impl() noexcept {
-    switch (bioseq_pair_run_sort_impl) {
-    case static_cast<int>(PairRunSortImpl::simd_u128_vqsort):
-        return PairRunSortImpl::simd_u128_vqsort;
-    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_1):
-        return PairRunSortImpl::simd_u128_vec_stream_1;
-    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_2):
-        return PairRunSortImpl::simd_u128_vec_stream_2;
-    case static_cast<int>(PairRunSortImpl::simd_u128_vec_stream_4):
-        return PairRunSortImpl::simd_u128_vec_stream_4;
-    default:
-        return PairRunSortImpl::std_sort;
-    }
+    return pair_run_sort_override.value_or(
+        bioseq::settings::mps_pair_sort_impl.value());
+}
+
+[[nodiscard]] inline std::optional<PairRunSortImpl>
+current_pair_run_sort_override() noexcept {
+    return pair_run_sort_override;
 }
 
 inline void set_pair_run_sort_impl(PairRunSortImpl impl) noexcept {
-    bioseq_pair_run_sort_impl = static_cast<int>(impl);
+    pair_run_sort_override = impl;
+}
+
+inline void restore_pair_run_sort_override(
+        std::optional<PairRunSortImpl> impl) noexcept {
+    pair_run_sort_override = impl;
 }
 
 [[nodiscard]] inline const char* pair_run_sort_impl_name() noexcept {

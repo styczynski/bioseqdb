@@ -65,6 +65,8 @@
           "CMAKE_CXX_FLAGS_DEBUG": "",
           "CMAKE_C_FLAGS_DEBUG": "",
           "BIOSEQ_TEST_INDEXES": "OFF",
+          "PostgreSQL_CONFIG": "/opt/homebrew/opt/postgresql@17/bin/pg_config",
+          "CMAKE_PREFIX_PATH": "/opt/homebrew/opt/gettext",
           "VCPKG_TARGET_TRIPLET": "arm64-osx",
           "CMAKE_OSX_ARCHITECTURES": "arm64",
           "VCPKG_TARGET_ARCHITECTURE": "arm64",
@@ -80,6 +82,37 @@
         "binaryDir": "${sourceDir}/build/${presetName}",
         "cacheVariables": {
           "BIOSEQ_TEST_INDEXES": "ON"
+        }
+      },
+      {
+        "name": "postgres-error-safety-production",
+        "inherits": "bench-opt",
+        "displayName": "PostgreSQL error-safety production profile",
+        "description": "Isolated local production-profile tree for sealed PostgreSQL error-safety runtime evidence.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_TESTS": "OFF",
+          "BIOSEQ_TEST_INDEXES": "OFF",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/fixtures/doc0388_runtime_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_PEER_BUILD_DIR": "${sourceDir}/build/postgres-error-safety-test-indexes",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF"
+        }
+      },
+      {
+        "name": "postgres-error-safety-test-indexes",
+        "inherits": "test-opt",
+        "displayName": "PostgreSQL error-safety test-index profile",
+        "description": "Isolated local test-index-profile tree for sealed PostgreSQL error-safety runtime evidence.",
+        "binaryDir": "${sourceDir}/build/${presetName}",
+        "cacheVariables": {
+          "BIOSEQ_BUILD_TESTS": "ON",
+          "BIOSEQ_TEST_INDEXES": "ON",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CASE_TEMPLATE": "${sourceDir}/codegen/safety/fixtures/doc0388_runtime_cases.json",
+          "BIOSEQ_SQL_SAFETY_RUNTIME_CLUSTER_MODE": "isolated",
+          "BIOSEQ_BUILD_EXTERNAL_API_CLIENTS": "OFF",
+          "BIOSEQ_BUILD_WEBSITE": "OFF"
         }
       },
       {

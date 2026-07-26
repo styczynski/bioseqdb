@@ -35,7 +35,7 @@ module;
 #include <vector>
 #include <utility>
 export module bioseq.indexing.minimizer_hashmap;
-import bioseq.common.mlogging;                                     // bioseq_log_progress<DBG>(enable_logging)
+import bioseq.common.mlogging;                                     // bioseq_log_progress<DBG>(bioseq::settings::logging)
 import bioseq.common.sequan_compat;                                // nucleotide alphabet dispatch for the non-HWY ExactSimd bridge contract
 import bioseq.indexing.type;
 import bioseq.indexing.storage;

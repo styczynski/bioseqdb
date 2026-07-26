@@ -42,7 +42,7 @@ AddCommonTargetX(
     "${BIOSEQ_DIR}/backend"
     "${BENCH_V10_DIR}/tool_minimap2"
     "${BENCH_V10_DIR}/tool_sneakysnake/SneakySnake"
-    "${BIOSEQ_DIR}/../safestringlib/include"
+    "${BIOSEQ_DIR}/../vendor/safestringlib/include"
     "${BIOSEQ_DIR}/../vendor/fmtlog"
     "${BIOSEQ_DIR}/../vendor/fmt"
     "${BIOSEQ_DIR}/../vendor/seqan3/include"

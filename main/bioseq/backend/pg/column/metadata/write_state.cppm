@@ -19,7 +19,7 @@ module;
 
 export module bioseq.storage.metadata:write_state;
 
-import :core;           // FormDataBioseqOptions::read_options
+import :core;
 import bioseq.pg_utils;
 import bioseq.common.mlogging;
 
@@ -185,10 +185,13 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 	 * relation id of the source tuple slot. For normal writes this is the
 	 * same as the target relation.
 	 */
-	bioseq_column_options = FormDataBioseqOptions::read_options(tuple_slot_relation_id).value_or(BioseqColumnOptions{});
+	bioseq_column_options =
+		read_bioseq_column_options(tuple_slot_relation_id)
+			.value_or(BioseqColumnOptions{});
 
 	BioseqColumnWriteState* fresh_write_state = nullptr;
-	fresh_write_state = bioseq::pg_utils::invoke_pg_as_cpp([&] {
+	fresh_write_state = bioseq::pg_utils::invoke_pg_as_cpp(
+		[relation, bioseq_column_options, tuple_descriptor] {
 		const MemoryContext previous =
 			MemoryContextSwitchTo(WriteStateCache.context());
 		BioseqColumnWriteState* result = g_begin_write(
@@ -196,8 +199,7 @@ bioseq_init_write_state(Relation relation, TupleDesc tuple_descriptor,
 		MemoryContextSwitchTo(previous);
 		return result;
 	});
-	// DOC0260 Phase A — seq_caches is initialised lazily by the TAM-side
-	// rewrite helper (rewrite_seq_columns_to_stubs in access_method.cppm).
+	// Sequence caches are initialised lazily by the tuple rewrite path.
 	fresh_write_state->seq_caches = nullptr;
 
 	BioseqColumnSubXidWriteFrame* stack_entry = WriteStateCache.alloc_in_context<BioseqColumnSubXidWriteFrame>();
@@ -244,9 +246,12 @@ BioseqColumnPopWriteStateForAllRels(SubTransactionId current_sub_xid,
 								SubTransactionId parent_sub_xid,
 								bool commit)
 {
-	WriteStateCache.for_each([&](WriteStateMapEntry* entry) {
-		PopWriteStateEntryIfCurrent(entry, current_sub_xid, parent_sub_xid, commit);
-	});
+	WriteStateCache.for_each(
+		[current_sub_xid, parent_sub_xid, commit](
+				WriteStateMapEntry* entry) {
+			PopWriteStateEntryIfCurrent(
+				entry, current_sub_xid, parent_sub_xid, commit);
+		});
 }
 
 export void

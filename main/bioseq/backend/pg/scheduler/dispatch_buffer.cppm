@@ -66,7 +66,7 @@ export module bioseq.scheduler.dispatch_buffer;
 
 import bioseq.common.mlogging;
 import bioseq.pg_utils;
-import bioseq.config;                               // DOC0322 §9.3 — bioseq_index_async_persist, bioseq_recompute_async_persist GUCs
+import bioseq.config;                               // DOC0322 §9.3 — bioseq::settings::index_async_persist, bioseq::settings::recompute_async_persist GUCs
 import bioseq.indexing.type;                 // DOC0279 — DIRECTORY_SUB_KEY
 import bioseq.storage.indexing_pg.handles;      // DOC0279 §8.7/§12.3 — lightweight storage handles + active index
 import bioseq.storage.indexing_pg.chunked_storage;
@@ -769,7 +769,7 @@ public:
          * query is dna4/64), the bytes in the query header carry the
          * larger width. The bioseq pipeline templates on
          * (alphabet_code, storage_unit_byte_width) and dispatches via
-         * pgseq_t::dispatch_instance, so the query and target MUST
+         * bioseq::pg_types::seq::dispatch_instance, so the query and target MUST
          * agree on both.
          * `coalesced_query_varlena` holds the query bytes re-encoded
          * at the COLUMN's (alphabet, width). The non-coalesced
@@ -780,13 +780,13 @@ public:
          */
         std::vector<char> coalesced_query_varlena;
         bool       coalesce_active          = false;
-        [[nodiscard]] const pgseq_t* query_hdr() const {
+        [[nodiscard]] const bioseq::pg_types::seq* query_hdr() const {
             const std::vector<char>& bytes =
                 coalesce_active ? coalesced_query_varlena : query_varlena;
             if (!active || bytes.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const pgseq_t*>(bytes.data());
+            return reinterpret_cast<const bioseq::pg_types::seq*>(bytes.data());
         }
     };
 
@@ -845,7 +845,7 @@ public:
         std::optional<bioseq::storage::seq_locator> per_row_query_loc;
         /*
          * A SliceProject result is an expanded piece-tree Datum, not a flat
-         * pgseq_t.  Keep a tiny read-only wrapper in the batch arena instead
+         * bioseq::pg_types::seq.  Keep a tiny read-only wrapper in the batch arena instead
          * of asking PG_DETOAST_DATUM to invoke the EOH flatten callback while
          * the row is merely being admitted.  The copied wrapper retains every
          * source-domain edge and remains valid until clear_slots() resets the
@@ -856,8 +856,8 @@ public:
         pg_sequence_descriptor seq_recipe_descriptor{};
         pg_sequence_descriptor per_row_query_recipe_descriptor{};
         std::vector<RetainedExpandedAttribute> expanded_sequence_attributes{};
-        const pgseq_t* hydrated_seq_hdr           = nullptr;
-        const pgseq_t* hydrated_per_row_query_hdr = nullptr;
+        const bioseq::pg_types::seq* hydrated_seq_hdr           = nullptr;
+        const bioseq::pg_types::seq* hydrated_per_row_query_hdr = nullptr;
 
         [[nodiscard]] bool has_seq_recipe() const noexcept {
             return seq_recipe_datum != Datum{0};
@@ -868,7 +868,7 @@ public:
         }
 
         [[nodiscard]] std::uint64_t seq_bp_size() const noexcept {
-            if (const pgseq_t* header = seq_hdr(); header != nullptr) {
+            if (const bioseq::pg_types::seq* header = seq_hdr(); header != nullptr) {
                 return header->bp_size;
             }
             if (has_seq_recipe()) {
@@ -880,24 +880,24 @@ public:
             return 0u;
         }
 
-        [[nodiscard]] const pgseq_t* seq_hdr() const {
+        [[nodiscard]] const bioseq::pg_types::seq* seq_hdr() const {
             if (hydrated_seq_hdr != nullptr) {
                 return hydrated_seq_hdr;
             }
             if (seq_is_null || seq_varlena.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const pgseq_t*>(seq_varlena.data());
+            return reinterpret_cast<const bioseq::pg_types::seq*>(seq_varlena.data());
         }
 
-        [[nodiscard]] const pgseq_t* per_row_query_hdr() const {
+        [[nodiscard]] const bioseq::pg_types::seq* per_row_query_hdr() const {
             if (hydrated_per_row_query_hdr != nullptr) {
                 return hydrated_per_row_query_hdr;
             }
             if (per_row_query_is_null || per_row_query_varlena.empty()) {
                 return nullptr;
             }
-            return reinterpret_cast<const pgseq_t*>(
+            return reinterpret_cast<const bioseq::pg_types::seq*>(
                 per_row_query_varlena.data());
         }
     };
@@ -994,10 +994,10 @@ private:
 		join_cpu_prepared_target{};
 	::bioseq::simd::HWY_NAMESPACE::BatchProcessor::GpuPreparedShapeV5Target
 		join_gpu_prepared_shape_v5_target{};
-    std::array<const pgseq_t*, kDispatchBatchCapacity> join_target_hdrs{};
-    std::array<const pgseq_t*, kDispatchBatchCapacity> join_query_hdrs{};
+    std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity> join_target_hdrs{};
+    std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity> join_query_hdrs{};
     std::array<int32_t, kDispatchBatchCapacity> join_query_ids{};
-    std::array<pgseq_t*, kDispatchBatchCapacity> join_query_detoast_copies{};
+    std::array<bioseq::pg_types::seq*, kDispatchBatchCapacity> join_query_detoast_copies{};
     std::vector<std::vector<char>> join_query_rewidth_varlenas{};
     std::unique_ptr<
         ::bioseq::simd::HWY_NAMESPACE::BatchProcessor::ScannerPgContext>
@@ -1070,8 +1070,8 @@ private:
     std::array<std::vector<SM::fetch_request>, SM::bucket_count>
         per_bucket_query_requests{};
     std::vector<SM::fetch_request> fetch_bulk_sort_scratch{};
-    std::vector<pgseq_t*>          hydrated_target_payloads{};
-    std::vector<pgseq_t*>          hydrated_query_payloads{};
+    std::vector<bioseq::pg_types::seq*>          hydrated_target_payloads{};
+    std::vector<bioseq::pg_types::seq*>          hydrated_query_payloads{};
     pg_sequence_read_session* active_wave_read_session = nullptr;
     // Member storage is intentional: PG_TRY/PG_CATCH uses setjmp/longjmp, so
     // a modified automatic optional would have an indeterminate catch value.
@@ -1180,9 +1180,9 @@ private:
             return;
         }
 
-        auto source = bioseq::pg_utils::detoast_as<pgseq_t>(
+        auto source = bioseq::pg_utils::detoast_as<bioseq::pg_types::seq>(
             bioseq::pg_utils::pg_datum::from_raw(datum));
-        pgseq_t* header = source.ptr;
+        bioseq::pg_types::seq* header = source.ptr;
         if (bioseq::storage::is_locator_stub(header)) {
             entry.seq_loc = bioseq::storage::decode_locator_from_stub(header);
         } else {
@@ -1219,9 +1219,9 @@ private:
             return;
         }
 
-        auto source = bioseq::pg_utils::detoast_as<pgseq_t>(
+        auto source = bioseq::pg_utils::detoast_as<bioseq::pg_types::seq>(
             bioseq::pg_utils::pg_datum::from_raw(datum));
-        pgseq_t* header = source.ptr;
+        bioseq::pg_types::seq* header = source.ptr;
         if (bioseq::storage::is_locator_stub(header)) {
             entry.per_row_query_loc =
                 bioseq::storage::decode_locator_from_stub(header);
@@ -1237,8 +1237,8 @@ private:
                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                  errmsg("bioseq mmsearch query payload typmod changed after planning")));
         }
-        const pgseq_t* dispatch_header = header;
-        pgseq_t* rewidth = nullptr;
+        const bioseq::pg_types::seq* dispatch_header = header;
+        bioseq::pg_types::seq* rewidth = nullptr;
         if (header->storage_unit_byte_width
                 != mmsearch_context.storage_unit_byte_width) {
             rewidth = ::bioseq::simd::active_target::
@@ -1504,7 +1504,7 @@ public:
         /*
          * DOC0260 §9.4 — the payload arena is parented on CurrentMemoryContext
          * at BeginCustomScan time (the executor per-query context), so the
-         * bulk-fetched pgseq_t* survive the full scan, not just one tuple.
+         * bulk-fetched bioseq::pg_types::seq* survive the full scan, not just one tuple.
          */
         if (batch_payload_ctx == nullptr) {
             batch_payload_ctx = AllocSetContextCreate(executor_query_mctx,
@@ -1754,7 +1754,7 @@ public:
                 (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
                  errmsg("BioseqBatchJoin locator target sequence is NULL")));
         }
-        auto target_sequence = bioseq::pg_utils::detoast_as<pgseq_t>(
+        auto target_sequence = bioseq::pg_utils::detoast_as<bioseq::pg_types::seq>(
             bioseq::pg_utils::pg_datum::from_raw(sequence_datum));
         const bool is_locator =
             bioseq::storage::is_locator_stub(target_sequence.ptr);
@@ -1835,11 +1835,11 @@ public:
 		const bool vulkan_requested =
 			::bioseq::simd::HWY_NAMESPACE::pipe::vulkan_components_requested(
 				base_params);
-		std::vector<const pgseq_t*> query_headers;
+		std::vector<const bioseq::pg_types::seq*> query_headers;
 		std::vector<Datum> query_recipe_datums;
 		std::vector<pg_sequence_descriptor> query_recipe_descriptors;
 		std::vector<std::uint64_t> query_ordinals;
-		std::vector<pgseq_t*> detoast_copies;
+		std::vector<bioseq::pg_types::seq*> detoast_copies;
 		std::vector<std::vector<char>> rewidthed_query_varlenas(
 			all_queries.size());
 		query_headers.reserve(all_queries.size());
@@ -1883,7 +1883,7 @@ public:
 				first = false;
 				continue;
 			}
-			pgseq_t* query_header = reinterpret_cast<pgseq_t*>(
+			bioseq::pg_types::seq* query_header = reinterpret_cast<bioseq::pg_types::seq*>(
 				PG_DETOAST_DATUM(query_datum));
 			if (bioseq::storage::is_locator_stub(query_header)) {
 				if (reinterpret_cast<void*>(query_header)
@@ -1906,10 +1906,10 @@ public:
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("BioseqBatchJoin query typmod changed during preparation")));
 			}
-			const pgseq_t* preparation_query_header = query_header;
+			const bioseq::pg_types::seq* preparation_query_header = query_header;
 			if (query_header->storage_unit_byte_width
 					!= mmsearch_context.storage_unit_byte_width) {
-				pgseq_t* rewidthed = ::bioseq::simd::active_target::
+				bioseq::pg_types::seq* rewidthed = ::bioseq::simd::active_target::
 					stdc_rewidth_to_type_params(
 						*query_header,
 						compact_sequence_stdc_type_params{
@@ -1935,7 +1935,7 @@ public:
 						+ rewidthed_bytes);
 				pfree(rewidthed);
 				preparation_query_header =
-					reinterpret_cast<const pgseq_t*>(owned.data());
+					reinterpret_cast<const bioseq::pg_types::seq*>(owned.data());
 			}
 			query_headers.push_back(preparation_query_header);
 			query_recipe_datums.push_back(Datum{0});
@@ -2063,7 +2063,7 @@ public:
 			if (cpp_error != nullptr) {
 				::abort_pg_sequence_read_session_noexcept(
 					std::exchange(active_wave_read_session, nullptr));
-				for (pgseq_t* copy : detoast_copies) {
+				for (bioseq::pg_types::seq* copy : detoast_copies) {
 					bioseq::pg_utils::invoke_pg_as_cpp(
 						[copy] { pfree(copy); });
 				}
@@ -2083,7 +2083,7 @@ public:
 				"[bioseq] pg: BatchJoin no_index retains no prepared target; "
 				"the selected backend must use its authentic transient index route");
 		}
-		for (pgseq_t* copy : detoast_copies) {
+		for (bioseq::pg_types::seq* copy : detoast_copies) {
 			bioseq::pg_utils::invoke_pg_as_cpp(
 				[copy] { pfree(copy); });
 		}
@@ -2123,8 +2123,8 @@ public:
     void apply_typmod_coalesce(std::vector<char> coalesced_bytes) {
         mmsearch_context.coalesced_query_varlena = std::move(coalesced_bytes);
         mmsearch_context.coalesce_active = true;
-        const pgseq_t* raw_query = mmsearch_context.query_varlena.empty()
-            ? nullptr : reinterpret_cast<const pgseq_t*>(
+        const bioseq::pg_types::seq* raw_query = mmsearch_context.query_varlena.empty()
+            ? nullptr : reinterpret_cast<const bioseq::pg_types::seq*>(
                 mmsearch_context.query_varlena.data());
         bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer::apply_typmod_coalesce() raw=({},{}) coalesced=({},{}) raw_bytes={} coalesced_bytes={}",
                 static_cast<unsigned>(raw_query == nullptr
@@ -2210,8 +2210,8 @@ public:
      * (seq, alphabet, width) and produce nonsense matches.
      */
     void add_extra_const_query(std::vector<char> query_varlena_bytes) {
-        const pgseq_t* hdr =
-            reinterpret_cast<const pgseq_t*>(
+        const bioseq::pg_types::seq* hdr =
+            reinterpret_cast<const bioseq::pg_types::seq*>(
                 query_varlena_bytes.data());
         const uint32_t bp_size = (query_varlena_bytes.empty() || hdr == nullptr)
             ? 0u : hdr->bp_size;
@@ -2516,7 +2516,7 @@ public:
             bioseq::storage::seq_caches* cache,
             std::int16_t column_attno,
             std::array<std::vector<SM::fetch_request>, SM::bucket_count>& per_bucket,
-            std::vector<pgseq_t*>& out_payloads,
+            std::vector<bioseq::pg_types::seq*>& out_payloads,
             bool is_query) {
         for (auto& v : per_bucket) {
             v.clear();
@@ -2537,7 +2537,7 @@ public:
         const std::uint8_t column_storage_unit_byte_width = is_query
             ? mmsearch_context.query_storage_unit_byte_width
             : mmsearch_context.storage_unit_byte_width;
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             column_alphabet_code,
             column_storage_unit_byte_width,
             [&lpu_for_column, &bytes_per_unit_for_col]<class S>() noexcept {
@@ -2581,7 +2581,7 @@ public:
             const std::uint64_t projected_payload_bytes =
                 total_units * static_cast<std::uint64_t>(bytes_per_unit_for_col);
             const std::uint64_t projected_varlena =
-                static_cast<std::uint64_t>(pgseq_t::header_bytes())
+                static_cast<std::uint64_t>(bioseq::pg_types::seq::header_bytes())
                 + projected_payload_bytes;
             if (projected_varlena > static_cast<std::uint64_t>(MaxAllocSize)) {
                 bioseq_log<DBG>("[bioseq] pg: hydrate_one_column row={} attno={} too large "
@@ -2608,7 +2608,7 @@ public:
                 user_main_database_oid, user_main_tablespace_oid,
                 user_main_relfilenode, column_attno, static_cast<std::int16_t>(b),
                 std::span<const SM::fetch_request>{reqs.data(), reqs.size()},
-                std::span<pgseq_t*>{out_payloads.data(), out_payloads.size()},
+                std::span<bioseq::pg_types::seq*>{out_payloads.data(), out_payloads.size()},
                 std::span<SM::fetch_request>{fetch_bulk_sort_scratch.data(),
                                              fetch_bulk_sort_scratch.size()},
                 scan_snapshot, batch_payload_ctx, cache);
@@ -2623,7 +2623,7 @@ public:
                 continue;
             }
             if (is_query) {
-                pgseq_t* source_query = out_payloads[i];
+                bioseq::pg_types::seq* source_query = out_payloads[i];
                 if (source_query->alphabet_code
                         != mmsearch_context.query_alphabet_code
                     || source_query->storage_unit_byte_width
@@ -2632,7 +2632,7 @@ public:
                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                          errmsg("bioseq mmsearch hydrated query typmod changed after planning")));
                 }
-                pgseq_t* dispatch_query = source_query;
+                bioseq::pg_types::seq* dispatch_query = source_query;
                 if (source_query->storage_unit_byte_width
                         != mmsearch_context.storage_unit_byte_width) {
                     MemoryContext old_context = MemoryContextSwitchTo(
@@ -2821,7 +2821,7 @@ public:
 					join_query_ids[i] = static_cast<std::int32_t>(query.ordinal);
 					continue;
 				}
-                pgseq_t* query_hdr = reinterpret_cast<pgseq_t*>(
+                bioseq::pg_types::seq* query_hdr = reinterpret_cast<bioseq::pg_types::seq*>(
                     PG_DETOAST_DATUM(query_datum));
                 if (bioseq::storage::is_locator_stub(query_hdr)) {
                     ereport(ERROR,
@@ -2841,10 +2841,10 @@ public:
                     != reinterpret_cast<void*>(DatumGetPointer(query_datum))) {
                     join_query_detoast_copies[i] = query_hdr;
                 }
-                const pgseq_t* dispatch_query_hdr = query_hdr;
+                const bioseq::pg_types::seq* dispatch_query_hdr = query_hdr;
                 if (query_hdr->storage_unit_byte_width
                         != mmsearch_context.storage_unit_byte_width) {
-                    pgseq_t* rewidth = ::bioseq::simd::active_target::
+                    bioseq::pg_types::seq* rewidth = ::bioseq::simd::active_target::
                         stdc_rewidth_to_type_params(
                             *query_hdr,
                             compact_sequence_stdc_type_params{
@@ -2863,7 +2863,7 @@ public:
                         reinterpret_cast<const char*>(rewidth)
                             + rewidth_bytes);
                     pfree(rewidth);
-                    dispatch_query_hdr = reinterpret_cast<const pgseq_t*>(
+                    dispatch_query_hdr = reinterpret_cast<const bioseq::pg_types::seq*>(
                         join_query_rewidth_varlenas[i].data());
                 }
                 join_query_hdrs[i] = dispatch_query_hdr;
@@ -2918,9 +2918,9 @@ public:
             scanner_pg_ctx.index_read_requirement = index_read_requirement;
             scanner_pg_ctx.read_index_active = read_sequence_index_active;
             scanner_pg_ctx.index_async_persist_active =
-                bioseq_index_async_persist;
+                bioseq::settings::index_async_persist;
             scanner_pg_ctx.recompute_async_persist_active =
-                bioseq_recompute_async_persist;
+                bioseq::settings::recompute_async_persist;
 			if (!join_active_read_policy.has_value()) {
 				ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -3525,7 +3525,7 @@ public:
      * the returned MatchResult map; builds output_cursors in insertion
      * order (one per MatchResult per row, skipping rows whose PK is
      * absent from the map). The query/target type dispatch happens
-     * inside process_sequences via pgseq_t::dispatch_instance.
+     * inside process_sequences via bioseq::pg_types::seq::dispatch_instance.
      */
     [[nodiscard]] bool run_batch_and_build_cursors() {
         bioseq::parallelism::pg::backend_sync();
@@ -3590,8 +3590,8 @@ public:
          * the dispatch phase does not force materialisation of rows that are
          * not active in the current wave.
          */
-        std::array<const pgseq_t*, kDispatchBatchCapacity> target_hdrs{};
-        std::array<const pgseq_t*, kDispatchBatchCapacity> per_row_query_hdrs{};
+        std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity> target_hdrs{};
+        std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity> per_row_query_hdrs{};
         std::array<int32_t,                      kDispatchBatchCapacity> query_ids{};
 
         const size_t batch_size = buffered_entries.size();
@@ -3627,8 +3627,8 @@ public:
                     || entry.has_per_row_query_recipe();
             });
         const bool forced_flat_baseline =
-            (bioseq_test_force_inmemory_scanner
-                || bioseq_test_force_chunked_scanner)
+            (bioseq::settings::test_force_inmemory_scanner
+                || bioseq::settings::test_force_chunked_scanner)
             && !batch_has_recipe;
         const bool vulkan_requested =
             ::bioseq::simd::HWY_NAMESPACE::pipe::
@@ -3649,7 +3649,7 @@ public:
 
         std::size_t lpu_for_hydration = 0;
         std::size_t bytes_per_unit_for_hydration = 0;
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             mmsearch_context.alphabet_code,
             mmsearch_context.storage_unit_byte_width,
             [&lpu_for_hydration, &bytes_per_unit_for_hydration]<class S>() noexcept {
@@ -3662,7 +3662,7 @@ public:
         std::size_t query_bytes_per_unit_for_hydration =
             bytes_per_unit_for_hydration;
         if (per_row_mode()) {
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 mmsearch_context.query_alphabet_code,
                 mmsearch_context.query_storage_unit_byte_width,
                 [&query_lpu_for_hydration,
@@ -3696,11 +3696,11 @@ public:
                 * static_cast<std::uint64_t>(bytes_per_unit);
             if (payload_bytes
                 > (std::numeric_limits<std::uint64_t>::max)()
-                    - static_cast<std::uint64_t>(pgseq_t::header_bytes())) {
+                    - static_cast<std::uint64_t>(bioseq::pg_types::seq::header_bytes())) {
                 return 0;
             }
             const std::uint64_t varlena_bytes =
-                static_cast<std::uint64_t>(pgseq_t::header_bytes())
+                static_cast<std::uint64_t>(bioseq::pg_types::seq::header_bytes())
                 + payload_bytes;
             if (varlena_bytes > static_cast<std::uint64_t>(MaxAllocSize)) {
                 return 0;
@@ -3807,7 +3807,7 @@ public:
             waves.emplace_back(wave_begin, batch_size);
         }
 
-        const pgseq_t* query_hdr = mmsearch_context.query_hdr();
+        const bioseq::pg_types::seq* query_hdr = mmsearch_context.query_hdr();
         const uint32_t query_bp_size = query_hdr != nullptr ? query_hdr->bp_size : 0;
         bioseq_log<DBG>("[bioseq] pg: TupleDispatchBuffer calling BatchProcessor::process_sequences batch_size={} typmod=({},{}) query_bp_size={} read_index={} per_row_mode={}",
                 batch_size,
@@ -3890,9 +3890,9 @@ public:
         scanner_pg_ctx.user_relid        = user_relid;
         scanner_pg_ctx.index_read_requirement = index_read_requirement;
         scanner_pg_ctx.read_index_active = read_sequence_index_active;
-        scanner_pg_ctx.index_async_persist_active = bioseq_index_async_persist;
+        scanner_pg_ctx.index_async_persist_active = bioseq::settings::index_async_persist;
         scanner_pg_ctx.recompute_async_persist_active =
-            bioseq_recompute_async_persist;
+            bioseq::settings::recompute_async_persist;
 		// DOC0279 §11.3/§12.3 — resolve the target column's active minimizer
 		// policy ONCE per batch. Stored-index reads use it when
 		// read_index_active is true; no-index recompute also uses it to select
@@ -4132,8 +4132,8 @@ public:
                     if (extra_bytes.empty()) {
                         continue;
                     }
-                    const pgseq_t* extra_hdr =
-                        reinterpret_cast<const pgseq_t*>(extra_bytes.data());
+                    const bioseq::pg_types::seq* extra_hdr =
+                        reinterpret_cast<const bioseq::pg_types::seq*>(extra_bytes.data());
                     ::bioseq::pipeline_stats::PipelineExecutionStats extra_stats{};
                     auto extra_match_map =
                         processor.process_sequences(

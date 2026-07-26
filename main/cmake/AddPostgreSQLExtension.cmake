@@ -27,8 +27,13 @@ find_package(PostgreSQL ${POSTGRESQL_VERSION} REQUIRED)
 # Helper command to add extensions
 function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   message("%%%% PREPARSE CXX_MODULES FOR '${LIBRARY_NAME}' is <${EXTENSION_CXX_MOD_FILES}>")
-  set(options RELOCATABLE SUPPORT_CXX_MODULES)
-  set(oneValueArgs NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN SCHEMA)
+  set(options
+    RELOCATABLE
+    SUPPORT_CXX_MODULES
+    REQUIRE_COMPLETE_CODEGEN)
+  set(oneValueArgs
+    NAME TYPE COMMENT VERSION COMPONENT CXX HWY MAIN SCHEMA
+    GENERATED_INSTALL SQL_MANIFEST)
   # SHARED_MODULE_LIBS: object/static libraries that export FILE_SET
   # CXX_MODULES PUBLIC. Linking them into the consumer makes the BMIs they
   # produced visible without rebuilding the module sources for every target —
@@ -326,14 +331,111 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
       "${EXTENSION_NAME}.control"
     )
 
-    # Generate .sql install file
-    set(EXTENSION_INSTALL ${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}--${EXTENSION_VERSION}.sql)
-    file(WRITE "${EXTENSION_INSTALL}.in" "")
-    foreach(file ${EXTENSION_INSTALLS})
-      file(READ ${file} CONTENTS)
-      file(APPEND "${EXTENSION_INSTALL}.in" "${CONTENTS}")
-    endforeach()
-    configure_file("${EXTENSION_INSTALL}.in" "${EXTENSION_INSTALL}" COPYONLY)
+    # Select the extension install script authority. Authored fragments retain
+    # the legacy configure-time concatenation path. Code-generated extensions
+    # publish one build-time artifact directly; CMake must never copy the
+    # checked source golden into a second package-authoritative file.
+    if(EXTENSION_GENERATED_INSTALL)
+      if(EXTENSION_INSTALLS)
+        message(FATAL_ERROR
+          "${LIBRARY_NAME}: GENERATED_INSTALL and INSTALLS are mutually exclusive")
+      endif()
+      if(NOT IS_ABSOLUTE "${EXTENSION_GENERATED_INSTALL}")
+        message(FATAL_ERROR
+          "${LIBRARY_NAME}: GENERATED_INSTALL must be an absolute build-tree path")
+      endif()
+      get_filename_component(
+        EXTENSION_GENERATED_INSTALL_NAME
+        "${EXTENSION_GENERATED_INSTALL}" NAME)
+      if(NOT EXTENSION_GENERATED_INSTALL_NAME STREQUAL
+          "${EXTENSION_NAME}--${EXTENSION_VERSION}.sql")
+        message(FATAL_ERROR
+          "${LIBRARY_NAME}: generated install script must be named "
+          "${EXTENSION_NAME}--${EXTENSION_VERSION}.sql, got "
+          "${EXTENSION_GENERATED_INSTALL_NAME}")
+      endif()
+      set(EXTENSION_INSTALL "${EXTENSION_GENERATED_INSTALL}")
+      set_source_files_properties(
+        "${EXTENSION_INSTALL}" PROPERTIES GENERATED TRUE)
+    else()
+      set(EXTENSION_INSTALL
+        ${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}--${EXTENSION_VERSION}.sql)
+      file(WRITE "${EXTENSION_INSTALL}.in" "")
+      foreach(file ${EXTENSION_INSTALLS})
+        file(READ ${file} CONTENTS)
+        file(APPEND "${EXTENSION_INSTALL}.in" "${CONTENTS}")
+      endforeach()
+      configure_file("${EXTENSION_INSTALL}.in" "${EXTENSION_INSTALL}" COPYONLY)
+    endif()
+
+    if(EXTENSION_SQL_MANIFEST)
+      if(NOT IS_ABSOLUTE "${EXTENSION_SQL_MANIFEST}")
+        message(FATAL_ERROR
+          "${LIBRARY_NAME}: SQL_MANIFEST must be an absolute build-tree path")
+      endif()
+      set_source_files_properties(
+        "${EXTENSION_SQL_MANIFEST}" PROPERTIES GENERATED TRUE)
+
+      # Validate the real linked DSO against the generated fmgr ownership
+      # manifest. Making the manifest and validator link dependencies ensures
+      # an explicit build of the extension relinks and runs POST_BUILD when
+      # either input changes; a failed validation therefore fails the actual
+      # extension target rather than an optional sibling target.
+      set(_extension_dso_validator
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../codegen/safety/validate_evidence.py")
+      if(NOT EXISTS "${_extension_dso_validator}")
+        message(FATAL_ERROR
+          "${LIBRARY_NAME}: missing DSO validator ${_extension_dso_validator}")
+      endif()
+      find_package(Python3 REQUIRED COMPONENTS Interpreter)
+      set(_extension_dso_report
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/sql/${EXTENSION_NAME}-dso-closure.json")
+      set(_extension_dso_completion_args)
+      if(EXTENSION_REQUIRE_COMPLETE_CODEGEN)
+        list(APPEND _extension_dso_completion_args
+          --require-complete-codegen)
+      endif()
+      set(_extension_safety_validator_args --dso-only)
+      set(_extension_safety_dependencies)
+      set(_extension_safety_validation_description "fmgr ownership")
+      set_property(TARGET ${LIBRARY_NAME} APPEND PROPERTY LINK_DEPENDS
+        "${EXTENSION_SQL_MANIFEST}"
+        "${_extension_dso_validator}"
+        ${_extension_safety_dependencies})
+      add_custom_command(
+        TARGET ${LIBRARY_NAME}
+        POST_BUILD
+        BYPRODUCTS "${_extension_dso_report}"
+        COMMAND "${Python3_EXECUTABLE}"
+          "${_extension_dso_validator}"
+          ${_extension_safety_validator_args}
+          --sql-manifest "${EXTENSION_SQL_MANIFEST}"
+          --dso "$<TARGET_FILE:${LIBRARY_NAME}>"
+          ${_extension_dso_completion_args}
+          --report "${_extension_dso_report}"
+        COMMENT
+          "Validating ${EXTENSION_NAME} ${_extension_safety_validation_description} against the linked DSO"
+        VERBATIM)
+      add_custom_target("${LIBRARY_NAME}_dso_closure"
+        COMMAND "${Python3_EXECUTABLE}"
+          "${_extension_dso_validator}"
+          ${_extension_safety_validator_args}
+          --sql-manifest "${EXTENSION_SQL_MANIFEST}"
+          --dso "$<TARGET_FILE:${LIBRARY_NAME}>"
+          ${_extension_dso_completion_args}
+          --report "${_extension_dso_report}"
+        DEPENDS
+          ${LIBRARY_NAME}
+          "${EXTENSION_SQL_MANIFEST}"
+          "${_extension_dso_validator}"
+          ${_extension_safety_dependencies}
+        COMMENT
+          "Revalidating ${EXTENSION_NAME} ${_extension_safety_validation_description} report"
+        VERBATIM)
+      set_target_properties(${LIBRARY_NAME} PROPERTIES
+        BIOSEQ_EXTENSION_DSO_CLOSURE_REPORT
+          "${_extension_dso_report}")
+    endif()
 
     # Install everything else into share-dir
     install(
@@ -356,6 +458,8 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
           "${CMAKE_CURRENT_BINARY_DIR}/${EXTENSION_NAME}.control"
         BIOSEQ_EXTENSION_INSTALL_SQL
           "${EXTENSION_INSTALL}"
+        BIOSEQ_EXTENSION_SQL_MANIFEST
+          "${EXTENSION_SQL_MANIFEST}"
         BIOSEQ_EXTENSION_LIBRARY_FILENAME
           "$<TARGET_FILE_NAME:${LIBRARY_NAME}>"
         BIOSEQ_EXTENSION_PG_ENTRYPOINT_SOURCES

@@ -57,7 +57,7 @@ void AbortCurrentTransaction(void);
 
 export module bioseq.scheduler.supervisor_pg;
 import bioseq.common.mlogging;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq_index_async_persist, bioseq_index_memory_cap_mb GUCs
+import bioseq.config;                  // DOC0322 §9.3 — bioseq_scheduler_*, bioseq::settings::index_async_persist, bioseq::settings::index_memory_cap_mb GUCs
 import bioseq.instr;
 import bioseq.parallelism.mode;
 import bioseq.parallelism.concepts;
@@ -457,7 +457,7 @@ void supervisor_sighup(SIGNAL_ARGS) {
     unsigned concurrency = configured == 0
         ? bioseq::parallelism::default_concurrency()
         : configured;
-    if (IsParallelWorker() && !bioseq_scheduler_allow_pg_parallel_composition) {
+    if (IsParallelWorker() && !bioseq::scheduler::settings::allow_pg_parallel_composition) {
         concurrency = 1;
     }
     return std::max(1u, concurrency);
@@ -1002,7 +1002,7 @@ void ensure_persist_xact_callback_registered() {
 #if 0  // Deleted with the identity-queue replacement; retained only for archaeology.
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    if (!bioseq_index_async_persist || chunks.empty() || target.index_name.empty()) {
+    if (!bioseq::settings::index_async_persist || chunks.empty() || target.index_name.empty()) {
         return false;
     }
     if (!async_persist_queue_available()) {
@@ -1109,7 +1109,7 @@ void ensure_persist_xact_callback_registered() {
 #if 0  // Deleted with the identity-queue replacement; retained only for archaeology.
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    if (!bioseq_index_async_persist
+    if (!bioseq::settings::index_async_persist
         || target.index_name.empty()
         || temp_file_path.empty()
         || chunk_count == 0) {
@@ -1229,7 +1229,7 @@ void ensure_persist_xact_callback_registered() {
     }
     const std::uint64_t stage_start_ns =
         static_cast<std::uint64_t>(bioseq::instr::clock::now_ns());
-    if (!bioseq_index_async_persist
+    if (!bioseq::settings::index_async_persist
         || !OidIsValid(target.db_oid)
         || !OidIsValid(target.user_relid)
         || !OidIsValid(target.main_relfilenode)
@@ -1494,7 +1494,7 @@ publish_runtime_cache_env(const std::filesystem::path& cache_dir) {
     inputs.variants.max_workgroup_invocations = 256u;
     inputs.variants.max_shared_memory_bytes = 32u * 1024u;
     inputs.variants.default_window_size =
-        static_cast<std::uint32_t>(std::max(1, bioseq_aligner_window_size));
+        static_cast<std::uint32_t>(std::max(1, bioseq::aligner::settings::window_size));
     inputs.msl = bioseq::gpu::vulkan::MslVersion{3u, 2u, 0u};
     inputs.moltenvk_build = "conservative-no-device-probe";
     inputs.device_uuid = "conservative-no-device-probe";
@@ -1610,9 +1610,9 @@ install_verified_runtime_archive_configuration(
     bioseq::parallelism::GlobalPool::instance().configure(
         bioseq::parallelism::PoolConfig{
             .max_concurrency = effective_max_concurrency(
-                static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency))),
+                static_cast<unsigned>(std::max(0, bioseq::scheduler::settings::max_concurrency))),
             .mode = bioseq::parallelism::mode_from_int(
-                bioseq_scheduler_pipeline_concurrency_mode),
+                static_cast<int>(bioseq::scheduler::settings::pipeline_concurrency_mode.value())),
         });
 
     constexpr std::uint64_t kPeakCompileBytes = 256ull << 20;
@@ -2454,9 +2454,9 @@ void backend_sync() {
         : 0;
     const unsigned configured = g_shared != nullptr
         ? pg_atomic_read_u32(&g_shared->cfg_max_concurrency)
-        : static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency));
+        : static_cast<unsigned>(std::max(0, bioseq::scheduler::settings::max_concurrency));
     const auto mode = bioseq::parallelism::mode_from_int(
-        bioseq_scheduler_pipeline_concurrency_mode);
+        static_cast<int>(bioseq::scheduler::settings::pipeline_concurrency_mode.value()));
 
     if (!pool.active() || pool.adopted_generation() != generation) {
         pool.configure(bioseq::parallelism::PoolConfig{
@@ -2468,8 +2468,8 @@ void backend_sync() {
         pool.set_mode(mode);
     }
 
-    const std::uint64_t index_cap = bioseq_index_memory_cap_mb > 0
-        ? (static_cast<std::uint64_t>(bioseq_index_memory_cap_mb) << 20)
+    const std::uint64_t index_cap = bioseq::settings::index_memory_cap_mb > 0
+        ? (static_cast<std::uint64_t>(bioseq::settings::index_memory_cap_mb) << 20)
         : 0;
     bioseq::parallelism::MemoryAdmissionController::instance()
         .set_index_memory_cap_bytes(index_cap);
@@ -2534,16 +2534,16 @@ void restart_cluster() {
     if (g_shared != nullptr) {
         pg_atomic_write_u32(
             &g_shared->cfg_max_concurrency,
-            static_cast<std::uint32_t>(std::max(0, bioseq_scheduler_max_concurrency)));
+            static_cast<std::uint32_t>(std::max(0, bioseq::scheduler::settings::max_concurrency)));
         pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
         reset_shared_stats(g_shared->stats, now);
     }
     auto& pool = bioseq::parallelism::GlobalPool::instance();
     pool.restart(bioseq::parallelism::PoolConfig{
         .max_concurrency = effective_max_concurrency(
-            static_cast<unsigned>(std::max(0, bioseq_scheduler_max_concurrency))),
+            static_cast<unsigned>(std::max(0, bioseq::scheduler::settings::max_concurrency))),
         .mode = bioseq::parallelism::mode_from_int(
-            bioseq_scheduler_pipeline_concurrency_mode),
+            static_cast<int>(bioseq::scheduler::settings::pipeline_concurrency_mode.value())),
     });
     pool.reset_stats(now);
 }
@@ -3262,8 +3262,8 @@ void process_mps_build_claim_cpp(
     MemoryContext work = nullptr;
     bioseq::storage::seq_caches* caches = nullptr;
 
-    const auto previous_sort_impl =
-        bioseq::indexing::detail::pair_run_sort_impl();
+    const auto previous_sort_override =
+        bioseq::indexing::detail::current_pair_run_sort_override();
     bool sort_impl_changed = false;
     const auto worker_mode =
         bioseq::parallelism::mode_from_int(meta->pipeline_mode);
@@ -3351,7 +3351,7 @@ void process_mps_build_claim_cpp(
                      errdetail("legacy MPS payloads do not record a minimizer-scheme identity; the queued build is rejected without fallback")));
             });
         }
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             meta->alphabet_code,
             meta->storage_unit_byte_width,
             [&]<class S>() {
@@ -3444,20 +3444,21 @@ void process_mps_build_claim_cpp(
         MemoryContext finished_work = std::exchange(work, nullptr);
         bioseq::pg_utils::invoke_pg_as_cpp(
             [finished_work] { MemoryContextDelete(finished_work); });
-        bioseq::indexing::detail::set_pair_run_sort_impl(previous_sort_impl);
+        bioseq::indexing::detail::restore_pair_run_sort_override(
+            previous_sort_override);
         sort_impl_changed = false;
     } catch (const bioseq::pg_utils::PostgresErrorAsCpp&) {
         if (sort_impl_changed) {
-            bioseq::indexing::detail::set_pair_run_sort_impl(
-                previous_sort_impl);
+            bioseq::indexing::detail::restore_pair_run_sort_override(
+                previous_sort_override);
             sort_impl_changed = false;
         }
         abandon_pg_resources_noexcept();
         throw;
     } catch (...) {
         if (sort_impl_changed) {
-            bioseq::indexing::detail::set_pair_run_sort_impl(
-                previous_sort_impl);
+            bioseq::indexing::detail::restore_pair_run_sort_override(
+                previous_sort_override);
             sort_impl_changed = false;
         }
         abandon_pg_resources_noexcept();
@@ -3877,7 +3878,7 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
 
     pg_atomic_write_u32(
         &g_shared->cfg_max_concurrency,
-        static_cast<std::uint32_t>(std::max(0, bioseq_scheduler_max_concurrency)));
+        static_cast<std::uint32_t>(std::max(0, bioseq::scheduler::settings::max_concurrency)));
     pg_atomic_write_u32(&g_shared->state, 1);
     pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
     reset_shared_stats(
@@ -3900,7 +3901,7 @@ extern "C" PGDLLEXPORT void bioseq_scheduler_supervisor_main(Datum) {
             pg_atomic_write_u32(
                 &g_shared->cfg_max_concurrency,
                 static_cast<std::uint32_t>(
-                    std::max(0, bioseq_scheduler_max_concurrency)));
+                    std::max(0, bioseq::scheduler::settings::max_concurrency)));
             pg_atomic_fetch_add_u32(&g_shared->cfg_generation, 1);
         }
 

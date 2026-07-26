@@ -14,10 +14,10 @@ module;
 #include <utility>
 
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 
 export module bioseq.types.pg_compact_sequence:tree_ops;
 
+import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :source_abi;
 import :tree_types;
@@ -35,10 +35,92 @@ piece_tree_failure_storage_noexcept() noexcept
     return storage;
 }
 
+export enum class piece_tree_quarantine_reason : std::uint8_t {
+    none,
+    arena_refcount,
+    arena_dependency,
+    arena_live_counter,
+    cleanup_ledger,
+    retired_join_root,
+};
+
+export struct piece_tree_quarantine_snapshot {
+    std::uint64_t invariant_failures;
+    std::uint64_t quarantined_arenas;
+    piece_tree_quarantine_reason first_reason;
+    piece_tree_quarantine_reason last_reason;
+    char const* first_detail;
+    char const* last_detail;
+    std::uint64_t last_arena_generation;
+};
+
+/* Exported inline release paths can be emitted by an importing translation
+ * unit.  Keep their no-throw diagnostic state in one module-owned object. */
+export [[nodiscard, gnu::noinline]] piece_tree_quarantine_snapshot&
+piece_tree_quarantine_storage_noexcept() noexcept
+{
+    static thread_local piece_tree_quarantine_snapshot storage{};
+    return storage;
+}
+
+export [[nodiscard]] inline piece_tree_quarantine_snapshot
+read_piece_tree_quarantine_noexcept() noexcept
+{
+    return piece_tree_quarantine_storage_noexcept();
+}
+
 namespace {
 
 std::uint64_t next_piece_tree_generation = 1u;
 std::uint64_t live_piece_tree_arenas = 0u;
+
+inline void mark_piece_tree_arena_quarantined_noexcept(
+    piece_tree_quarantine_snapshot& state,
+    piece_tree_arena* arena) noexcept
+{
+    if (arena == nullptr) return;
+    state.last_arena_generation = arena->generation;
+    if (arena->refcount == UINT32_MAX) return;
+    arena->refcount = UINT32_MAX;
+    arena->release_next = nullptr;
+    if (state.quarantined_arenas != UINT64_MAX) {
+        ++state.quarantined_arenas;
+    }
+}
+
+inline void record_piece_tree_quarantine_noexcept(
+    piece_tree_quarantine_snapshot& state,
+    piece_tree_quarantine_reason reason,
+    char const* detail,
+    piece_tree_arena* first_arena = nullptr,
+    piece_tree_arena* second_arena = nullptr) noexcept
+{
+    if (state.invariant_failures == 0u) {
+        state.first_reason = reason;
+        state.first_detail = detail;
+    }
+    if (state.invariant_failures != UINT64_MAX) {
+        ++state.invariant_failures;
+    }
+    state.last_reason = reason;
+    state.last_detail = detail;
+    mark_piece_tree_arena_quarantined_noexcept(state, first_arena);
+    mark_piece_tree_arena_quarantined_noexcept(state, second_arena);
+}
+
+inline void quarantine_piece_tree_invariant_noexcept(
+    piece_tree_quarantine_reason reason,
+    char const* detail,
+    piece_tree_arena* first_arena = nullptr,
+    piece_tree_arena* second_arena = nullptr) noexcept
+{
+    record_piece_tree_quarantine_noexcept(
+        piece_tree_quarantine_storage_noexcept(),
+        reason,
+        detail,
+        first_arena,
+        second_arena);
+}
 
 /* Backend-local acceptance seam.  Production calls leave this disarmed; the
  * internal SQL self-test arms one dependency-registration point at a time so
@@ -108,16 +190,6 @@ inline void inject_piece_tree_failure(
              errmsg("injected bioseq piece-tree factory failure"),
              errdetail("failure_point=%u",
                        static_cast<unsigned>(point))));
-}
-
-constexpr int postgres_panic_level = ERROR + 2;
-
-[[noreturn]] inline void
-arena_release_invariant_panic(char const *detail) noexcept {
-  ereport(postgres_panic_level,
-          (errmsg_internal("bioseq piece arena release invariant failed: %s",
-                           detail)));
-  pg_unreachable();
 }
 
 [[nodiscard]] inline std::uint16_t edge_height(piece_edge edge) noexcept {
@@ -262,7 +334,11 @@ export inline void release_arena(piece_tree_arena *arena) noexcept {
     return;
   }
   if (arena->refcount == 0u || arena->refcount == UINT32_MAX) {
-    arena_release_invariant_panic("invalid root refcount");
+    quarantine_piece_tree_invariant_noexcept(
+        piece_tree_quarantine_reason::arena_refcount,
+        "invalid root refcount",
+        arena);
+    return;
   }
   if (--arena->refcount != 0u) {
     return;
@@ -281,11 +357,20 @@ export inline void release_arena(piece_tree_arena *arena) noexcept {
            dependency != nullptr; dependency = dependency->next) {
         piece_tree_arena *child = dependency->child;
         if (child == nullptr || child->generation >= current->generation) {
-          arena_release_invariant_panic(
-              "dependency is null, cyclic, or newer than its parent");
+          quarantine_piece_tree_invariant_noexcept(
+              piece_tree_quarantine_reason::arena_dependency,
+              "dependency is null, cyclic, or newer than its parent",
+              current,
+              child);
+          return;
         }
         if (child->refcount == 0u || child->refcount == UINT32_MAX) {
-          arena_release_invariant_panic("dependency refcount is invalid");
+          quarantine_piece_tree_invariant_noexcept(
+              piece_tree_quarantine_reason::arena_dependency,
+              "dependency refcount is invalid",
+              current,
+              child);
+          return;
         }
         if (--child->refcount == 0u) {
           child->release_next = work;
@@ -293,10 +378,17 @@ export inline void release_arena(piece_tree_arena *arena) noexcept {
         }
       }
     }
-    MemoryContextDelete(current->payload_context);
     if (live_piece_tree_arenas == 0u) {
-      arena_release_invariant_panic("live-arena counter underflow");
+      quarantine_piece_tree_invariant_noexcept(
+          piece_tree_quarantine_reason::arena_live_counter,
+          "live-arena counter underflow",
+          current);
+      return;
     }
+    MemoryContextDelete(current->payload_context);
+    // Exactly one decrement corresponds to the one arena allocation freed
+    // below.  Keeping it adjacent to pfree prevents a partial cleanup path
+    // from manufacturing the next release's underflow.
     --live_piece_tree_arenas;
     pfree(current);
   }
@@ -325,9 +417,13 @@ export [[nodiscard]] inline bool piece_edge_cleanup_ledger_empty_noexcept(
             && ledger.active_head != invalid_piece_edge_cleanup_slot)
         || (ledger.token_count != 0u
             && (!ledger.initialized
-                || ledger.active_head == invalid_piece_edge_cleanup_slot))) {
-        arena_release_invariant_panic(
+                || ledger.active_head == invalid_piece_edge_cleanup_slot))
+        || (!ledger.initialized
+            && ledger.next_unused == invalid_piece_edge_cleanup_slot)) {
+        quarantine_piece_tree_invariant_noexcept(
+            piece_tree_quarantine_reason::cleanup_ledger,
             "concat construction active-token summary is corrupt");
+        return false;
     }
     return ledger.token_count == 0u;
 }
@@ -348,24 +444,46 @@ namespace {
         && handle.generation != 0u;
 }
 
-inline void initialize_piece_edge_cleanup_ledger_noexcept(
+inline void quarantine_piece_edge_cleanup_ledger_noexcept(
+    piece_edge_cleanup_ledger& ledger,
+    char const* detail,
+    piece_tree_arena* suspect_arena = nullptr) noexcept
+{
+    quarantine_piece_tree_invariant_noexcept(
+        piece_tree_quarantine_reason::cleanup_ledger,
+        detail,
+        suspect_arena);
+    // Preserve every owning token in place, but poison the summary so this
+    // ledger can neither be reused nor mistaken for a successful drain.
+    ledger.initialized = false;
+    ledger.next_unused = invalid_piece_edge_cleanup_slot;
+    ledger.active_head = invalid_piece_edge_cleanup_slot;
+    ledger.free_head = invalid_piece_edge_cleanup_slot;
+}
+
+[[nodiscard]] inline bool initialize_piece_edge_cleanup_ledger_noexcept(
     piece_edge_cleanup_ledger& ledger) noexcept
 {
-    if (ledger.initialized) return;
+    if (ledger.initialized) return true;
     if (ledger.token_count != 0u || ledger.next_unused != 0u) {
-        arena_release_invariant_panic(
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
             "concat construction token ledger was not zero-initialized");
+        return false;
     }
     ledger.active_head = invalid_piece_edge_cleanup_slot;
     ledger.free_head = invalid_piece_edge_cleanup_slot;
     ledger.initialized = true;
     note_piece_tree_cleanup_ledger_step_noexcept();
+    return true;
 }
 
-inline void ensure_piece_edge_cleanup_capacity(
+[[nodiscard]] inline bool ensure_piece_edge_cleanup_capacity(
     piece_edge_cleanup_ledger& ledger, std::uint16_t additional)
 {
-    initialize_piece_edge_cleanup_ledger_noexcept(ledger);
+    if (!initialize_piece_edge_cleanup_ledger_noexcept(ledger)) {
+        return false;
+    }
     note_piece_tree_cleanup_ledger_step_noexcept();
     if (additional > ledger.slots.size()
         || ledger.token_count > ledger.slots.size() - additional) {
@@ -373,6 +491,7 @@ inline void ensure_piece_edge_cleanup_capacity(
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq concat construction token bound was exceeded")));
     }
+    return true;
 }
 
 [[nodiscard]] inline piece_edge_cleanup_handle
@@ -380,26 +499,54 @@ adopt_piece_edge_cleanup_token_noexcept(
     piece_edge_cleanup_ledger& ledger, piece_edge token) noexcept
 {
     if (!token) return {};
-    initialize_piece_edge_cleanup_ledger_noexcept(ledger);
+    if (!initialize_piece_edge_cleanup_ledger_noexcept(ledger)) {
+        mark_piece_tree_arena_quarantined_noexcept(
+            piece_tree_quarantine_storage_noexcept(), token.arena);
+        return {};
+    }
     if (ledger.token_count >= ledger.slots.size()) {
-        arena_release_invariant_panic(
-            "concat construction token ledger overflow");
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
+            "concat construction token ledger overflow",
+            token.arena);
+        return {};
     }
     std::uint16_t index = invalid_piece_edge_cleanup_slot;
     if (ledger.free_head != invalid_piece_edge_cleanup_slot) {
+        if (ledger.free_head >= ledger.slots.size()) {
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
+                "concat construction free-token head is corrupt",
+                token.arena);
+            return {};
+        }
         index = ledger.free_head;
         ledger.free_head = ledger.slots[index].next_free;
     } else {
         if (ledger.next_unused >= ledger.slots.size()) {
-            arena_release_invariant_panic(
-                "concat construction token slots were exhausted");
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
+                "concat construction token slots were exhausted",
+                token.arena);
+            return {};
         }
         index = ledger.next_unused++;
     }
     auto& slot = ledger.slots[index];
     if (slot.active || slot.generation == UINT32_MAX) {
-        arena_release_invariant_panic(
-            "concat construction token slot state is invalid");
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
+            "concat construction token slot state is invalid",
+            token.arena);
+        return {};
+    }
+    if (ledger.active_head != invalid_piece_edge_cleanup_slot
+        && ledger.active_head >= ledger.slots.size()) {
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
+            "concat construction active-token head is corrupt",
+            token.arena);
+        return {};
     }
     ++slot.generation;
     slot.token = token;
@@ -416,28 +563,76 @@ adopt_piece_edge_cleanup_token_noexcept(
     return {.slot = index, .generation = slot.generation};
 }
 
-[[nodiscard]] inline piece_edge detach_piece_edge_cleanup_token_noexcept(
+struct detached_piece_edge {
+    piece_edge token;
+    bool detached;
+};
+
+[[nodiscard]] inline detached_piece_edge
+detach_piece_edge_cleanup_token_noexcept(
     piece_edge_cleanup_ledger& ledger,
     piece_edge_cleanup_handle handle,
     piece_edge expected) noexcept
 {
     if (!piece_edge_cleanup_handle_valid_noexcept(handle)
         || handle.slot >= ledger.slots.size()) {
-        arena_release_invariant_panic(
-            "concat construction token handle is invalid");
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
+            "concat construction token handle is invalid",
+            expected.arena);
+        return {};
     }
     auto& slot = ledger.slots[handle.slot];
-    if (!ledger.initialized || !slot.active
+    if (!ledger.initialized || ledger.token_count == 0u || !slot.active
         || slot.generation != handle.generation
         || !same_owned_edge_token(slot.token, expected)) {
-        arena_release_invariant_panic(
-            "concat construction token handle is stale or mismatched");
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
+            "concat construction token handle is stale or mismatched",
+            expected.arena);
+        return {};
+    }
+    const auto valid_link = [&ledger](std::uint16_t index) noexcept {
+        return index == invalid_piece_edge_cleanup_slot
+            || index < ledger.slots.size();
+    };
+    if (!valid_link(slot.previous_active) || !valid_link(slot.next_active)) {
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
+            "concat construction active-token links are corrupt",
+            expected.arena);
+        return {};
     }
     if (slot.previous_active == invalid_piece_edge_cleanup_slot) {
         if (ledger.active_head != handle.slot) {
-            arena_release_invariant_panic(
-                "concat construction active-token head is corrupt");
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
+                "concat construction active-token head is corrupt",
+                expected.arena);
+            return {};
         }
+    } else {
+        const auto& previous = ledger.slots[slot.previous_active];
+        if (!previous.active || previous.next_active != handle.slot) {
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
+                "concat construction previous-token link is corrupt",
+                expected.arena);
+            return {};
+        }
+    }
+    if (slot.next_active != invalid_piece_edge_cleanup_slot) {
+        const auto& next = ledger.slots[slot.next_active];
+        if (!next.active || next.previous_active != handle.slot) {
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
+                "concat construction next-token link is corrupt",
+                expected.arena);
+            return {};
+        }
+    }
+
+    if (slot.previous_active == invalid_piece_edge_cleanup_slot) {
         ledger.active_head = slot.next_active;
     } else {
         ledger.slots[slot.previous_active].next_active = slot.next_active;
@@ -453,13 +648,9 @@ adopt_piece_edge_cleanup_token_noexcept(
     slot.next_free = ledger.free_head;
     slot.active = false;
     ledger.free_head = handle.slot;
-    if (ledger.token_count == 0u) {
-        arena_release_invariant_panic(
-            "concat construction token count underflow");
-    }
     --ledger.token_count;
     note_piece_tree_cleanup_ledger_step_noexcept();
-    return token;
+    return {.token = token, .detached = true};
 }
 
 [[nodiscard]] inline tracked_piece_edge retain_tracked_edge(
@@ -467,11 +658,14 @@ adopt_piece_edge_cleanup_token_noexcept(
 {
     if (ledger == nullptr) return {.edge = retain_edge(edge)};
     if (!edge) return {};
-    ensure_piece_edge_cleanup_capacity(*ledger, 1u);
+    if (!ensure_piece_edge_cleanup_capacity(*ledger, 1u)) return {};
     const piece_edge owned = retain_edge(edge);
+    const auto cleanup =
+        adopt_piece_edge_cleanup_token_noexcept(*ledger, owned);
+    if (!piece_edge_cleanup_handle_valid_noexcept(cleanup)) return {};
     return {
         .edge = owned,
-        .cleanup = adopt_piece_edge_cleanup_token_noexcept(*ledger, owned),
+        .cleanup = cleanup,
     };
 }
 
@@ -479,8 +673,9 @@ inline void release_tracked_edge(
     piece_edge_cleanup_ledger* ledger, tracked_piece_edge edge) noexcept
 {
     if (ledger != nullptr && edge) {
-        (void)detach_piece_edge_cleanup_token_noexcept(
+        const auto detached = detach_piece_edge_cleanup_token_noexcept(
             *ledger, edge.cleanup, edge.edge);
+        if (!detached.detached) return;
     }
     release_edge(edge.edge);
 }
@@ -494,16 +689,21 @@ transition_consumed_edges_to_result_noexcept(
 {
     if (ledger == nullptr) return {.edge = result};
     if (first) {
-        (void)detach_piece_edge_cleanup_token_noexcept(
+        const auto detached = detach_piece_edge_cleanup_token_noexcept(
             *ledger, first.cleanup, first.edge);
+        if (!detached.detached) return {};
     }
     if (second) {
-        (void)detach_piece_edge_cleanup_token_noexcept(
+        const auto detached = detach_piece_edge_cleanup_token_noexcept(
             *ledger, second.cleanup, second.edge);
+        if (!detached.detached) return {};
     }
+    const auto cleanup =
+        adopt_piece_edge_cleanup_token_noexcept(*ledger, result);
+    if (!piece_edge_cleanup_handle_valid_noexcept(cleanup)) return {};
     return {
         .edge = result,
-        .cleanup = adopt_piece_edge_cleanup_token_noexcept(*ledger, result),
+        .cleanup = cleanup,
     };
 }
 
@@ -518,14 +718,22 @@ inline void transition_piece_edge_cleanup_identity_noexcept(
         || before.cleanup.slot != after.cleanup.slot
         || before.cleanup.generation != after.cleanup.generation
         || before.cleanup.slot >= ledger->slots.size()) {
-        arena_release_invariant_panic(
-            "concat construction changed an owning edge target");
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            *ledger,
+            "concat construction changed an owning edge target",
+            before.edge.arena != nullptr
+                ? before.edge.arena
+                : after.edge.arena);
+        return;
     }
     auto& slot = ledger->slots[before.cleanup.slot];
     if (!slot.active || slot.generation != before.cleanup.generation
         || !same_owned_edge_token(slot.token, before.edge)) {
-        arena_release_invariant_panic(
-            "concat construction changed an untracked edge identity");
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            *ledger,
+            "concat construction changed an untracked edge identity",
+            before.edge.arena);
+        return;
     }
     slot.token = after.edge;
     note_piece_tree_cleanup_ledger_step_noexcept();
@@ -537,28 +745,35 @@ export inline void release_piece_edge_cleanup_ledger_noexcept(
     piece_edge_cleanup_ledger& ledger) noexcept
 {
     if (!ledger.initialized) {
-        if (ledger.token_count != 0u) {
-            arena_release_invariant_panic(
+        if (ledger.token_count != 0u
+            || ledger.next_unused == invalid_piece_edge_cleanup_slot) {
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
                 "uninitialized concat token ledger is nonempty");
         }
         return;
     }
     while (ledger.token_count != 0u) {
-        if (ledger.active_head == invalid_piece_edge_cleanup_slot) {
-            arena_release_invariant_panic(
+        if (ledger.active_head == invalid_piece_edge_cleanup_slot
+            || ledger.active_head >= ledger.slots.size()) {
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
                 "concat construction active-token list ended early");
+            return;
         }
         const auto& slot = ledger.slots[ledger.active_head];
         const piece_edge_cleanup_handle handle{
             .slot = ledger.active_head,
             .generation = slot.generation,
         };
-        const piece_edge token = detach_piece_edge_cleanup_token_noexcept(
+        const auto detached = detach_piece_edge_cleanup_token_noexcept(
             ledger, handle, slot.token);
-        release_edge(token);
+        if (!detached.detached) return;
+        release_edge(detached.token);
     }
     if (ledger.active_head != invalid_piece_edge_cleanup_slot) {
-        arena_release_invariant_panic(
+        quarantine_piece_edge_cleanup_ledger_noexcept(
+            ledger,
             "concat construction active-token list was not drained");
     }
 }
@@ -570,13 +785,15 @@ export inline void transfer_piece_edge_cleanup_root_noexcept(
 {
     if (!root) {
         if (piece_edge_cleanup_handle_valid_noexcept(handle)) {
-            arena_release_invariant_panic(
+            quarantine_piece_edge_cleanup_ledger_noexcept(
+                ledger,
                 "empty concat root retained a cleanup handle");
         }
         return;
     }
-    (void)detach_piece_edge_cleanup_token_noexcept(
+    const auto detached = detach_piece_edge_cleanup_token_noexcept(
         ledger, handle, root);
+    (void)detached;
 }
 
 export [[nodiscard]] inline std::uint64_t
@@ -917,11 +1134,14 @@ make_source_node_error_atomic(
     bioseq::storage::sequence_transform transform =
         bioseq::storage::sequence_transform::identity)
 {
-    ensure_piece_edge_cleanup_capacity(ledger, 1u);
+    if (!ensure_piece_edge_cleanup_capacity(ledger, 1u)) return {};
     const piece_edge built = make_source_node(destination, piece, transform);
+    const auto cleanup =
+        adopt_piece_edge_cleanup_token_noexcept(ledger, built);
+    if (!piece_edge_cleanup_handle_valid_noexcept(cleanup)) return {};
     return {
         .edge = built,
-        .cleanup = adopt_piece_edge_cleanup_token_noexcept(ledger, built),
+        .cleanup = cleanup,
     };
 }
 
@@ -933,11 +1153,14 @@ make_literal_node_error_atomic(
     bioseq::storage::sequence_transform transform =
         bioseq::storage::sequence_transform::identity)
 {
-    ensure_piece_edge_cleanup_capacity(ledger, 1u);
+    if (!ensure_piece_edge_cleanup_capacity(ledger, 1u)) return {};
     const piece_edge built = make_literal_node(destination, piece, transform);
+    const auto cleanup =
+        adopt_piece_edge_cleanup_token_noexcept(ledger, built);
+    if (!piece_edge_cleanup_handle_valid_noexcept(cleanup)) return {};
     return {
         .edge = built,
-        .cleanup = adopt_piece_edge_cleanup_token_noexcept(ledger, built),
+        .cleanup = cleanup,
     };
 }
 
@@ -1059,7 +1282,7 @@ template<class Instance>
     }
 
     piece_edge merged{};
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         left.stored_type_params.alphabet_code,
         left.stored_type_params.storage_unit_byte_width,
         [&destination, &physical_first, &physical_second, &left,
@@ -1196,7 +1419,7 @@ enum class retired_join_root_policy : std::uint8_t {
     proportional_binding,
 };
 
-inline void record_retired_join_root(
+[[nodiscard]] inline bool record_retired_join_root(
     piece_tree_arena& destination,
     piece_edge edge,
     retired_join_root_policy policy);
@@ -1243,7 +1466,7 @@ inline void record_retired_join_root(
     return make_branch_tracked(destination, ledger, left, right);
 }
 
-inline void record_retired_join_root(
+[[nodiscard]] inline bool record_retired_join_root(
     piece_tree_arena& destination,
     piece_edge edge,
     retired_join_root_policy policy)
@@ -1258,6 +1481,13 @@ inline void record_retired_join_root(
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq join retirement count overflow")));
+    }
+    if (destination.retired_join_rotation_count == UINT32_MAX) {
+        quarantine_piece_tree_invariant_noexcept(
+            piece_tree_quarantine_reason::retired_join_root,
+            "retired join rotation count overflow",
+            std::addressof(destination));
+        return false;
     }
 
     const std::uint32_t index = destination.retired_join_root_count;
@@ -1282,8 +1512,11 @@ inline void record_retired_join_root(
                     sizeof(retired_join_root_block)));
             if (destination.retired_join_root_overflow_tail == nullptr) {
                 if (destination.retired_join_root_overflow != nullptr) {
-                    arena_release_invariant_panic(
-                        "retired join-root overflow head has no tail");
+                    quarantine_piece_tree_invariant_noexcept(
+                        piece_tree_quarantine_reason::retired_join_root,
+                        "retired join-root overflow head has no tail",
+                        std::addressof(destination));
+                    return false;
                 }
                 destination.retired_join_root_overflow = block;
             } else {
@@ -1296,18 +1529,18 @@ inline void record_retired_join_root(
         }
         auto* block = destination.retired_join_root_overflow_tail;
         if (block == nullptr || block->count >= block->roots.size()) {
-            arena_release_invariant_panic(
-                "retired join-root overflow block is unavailable");
+            quarantine_piece_tree_invariant_noexcept(
+                piece_tree_quarantine_reason::retired_join_root,
+                "retired join-root overflow block is unavailable",
+                std::addressof(destination));
+            return false;
         }
         block->roots[block->count++] = edge;
     }
     ++destination.retired_join_root_count;
-    if (destination.retired_join_rotation_count == UINT32_MAX) {
-        arena_release_invariant_panic(
-            "retired join rotation count overflow");
-    }
     ++destination.retired_join_rotation_count;
     note_piece_tree_retired_root_step_noexcept();
+    return true;
 }
 
 /**
@@ -1359,8 +1592,10 @@ inline void record_retired_join_root(
                 destination, ledger, rotated_left, rotated_right);
         }
         if (left.edge.arena == std::addressof(destination)) {
-            record_retired_join_root(
-                destination, left.edge, retirement_policy);
+            if (!record_retired_join_root(
+                    destination, left.edge, retirement_policy)) {
+                return {};
+            }
             if (ledger != nullptr) {
                 inject_piece_tree_failure(
                     piece_tree_injected_failure_point::
@@ -1398,8 +1633,10 @@ inline void record_retired_join_root(
                 destination, ledger, rotated_left, rotated_right);
         }
         if (right.edge.arena == std::addressof(destination)) {
-            record_retired_join_root(
-                destination, right.edge, retirement_policy);
+            if (!record_retired_join_root(
+                    destination, right.edge, retirement_policy)) {
+                return {};
+            }
             if (ledger != nullptr) {
                 inject_piece_tree_failure(
                     piece_tree_injected_failure_point::
@@ -1726,16 +1963,16 @@ namespace {
     const auto length = literal.symbol_to - literal.symbol_from;
     const auto* ascii = reinterpret_cast<char const*>(literal.bytes)
         + literal.symbol_from;
-    if (length > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
+    if (length > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq literal is too long to bind")));
     }
     if (ledger != nullptr) {
-        ensure_piece_edge_cleanup_capacity(*ledger, 1u);
+        if (!ensure_piece_edge_cleanup_capacity(*ledger, 1u)) return {};
     }
     tracked_piece_edge bound_edge{};
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         result_type.alphabet_code,
         result_type.storage_unit_byte_width,
         [&destination, &bound_edge, result_type,
@@ -1808,10 +2045,14 @@ namespace {
                 },
                 edge.transform);
             if (ledger != nullptr) {
+                const auto cleanup =
+                    adopt_piece_edge_cleanup_token_noexcept(*ledger, built);
+                if (!piece_edge_cleanup_handle_valid_noexcept(cleanup)) {
+                    return;
+                }
                 bound_edge = {
                     .edge = built,
-                    .cleanup = adopt_piece_edge_cleanup_token_noexcept(
-                        *ledger, built),
+                    .cleanup = cleanup,
                 };
                 inject_piece_tree_failure(
                     piece_tree_injected_failure_point::
@@ -3704,9 +3945,43 @@ inline void tracked_join_failure_reset(void *argument) noexcept {
   return passed && live_piece_tree_arenas == live_baseline;
 }
 
+[[nodiscard]] inline bool run_piece_tree_quarantine_contract_noexcept()
+    noexcept
+{
+  piece_tree_quarantine_snapshot observed{};
+  piece_tree_arena suspect{};
+  suspect.refcount = 1u;
+  suspect.generation = 77u;
+  suspect.release_next = std::addressof(suspect);
+  record_piece_tree_quarantine_noexcept(
+      observed,
+      piece_tree_quarantine_reason::arena_refcount,
+      "negative arena quarantine",
+      std::addressof(suspect));
+  record_piece_tree_quarantine_noexcept(
+      observed,
+      piece_tree_quarantine_reason::cleanup_ledger,
+      "negative ledger quarantine",
+      std::addressof(suspect));
+  return observed.invariant_failures == 2u
+      && observed.quarantined_arenas == 1u
+      && observed.first_reason
+          == piece_tree_quarantine_reason::arena_refcount
+      && observed.last_reason
+          == piece_tree_quarantine_reason::cleanup_ledger
+      && std::strcmp(observed.first_detail,
+                     "negative arena quarantine") == 0
+      && std::strcmp(observed.last_detail,
+                     "negative ledger quarantine") == 0
+      && observed.last_arena_generation == 77u
+      && suspect.refcount == UINT32_MAX
+      && suspect.release_next == nullptr;
+}
+
 [[nodiscard]] inline bool run_piece_tree_error_atomic_matrix()
 {
-  return run_tracked_slice_failure_matrix()
+  return run_piece_tree_quarantine_contract_noexcept()
+      && run_tracked_slice_failure_matrix()
       && run_invalid_later_literal_binding_matrix();
 }
 
@@ -3831,7 +4106,7 @@ audit_binding_output(piece_edge edge, std::uint8_t expected_rank) {
   validate_tree_and_limits(
       tracked.edge, bound_type, fixture.length, true);
   binding_output_audit output{};
-  pgseq_t::dispatch_instance(
+  bioseq::pg_types::seq::dispatch_instance(
       bound_type.alphabet_code, bound_type.storage_unit_byte_width,
       [&output, tracked, expected_rank]<class Instance>() {
         output = audit_binding_output<Instance>(tracked.edge, expected_rank);
@@ -4648,16 +4923,27 @@ emit_rotation_regression_edge(piece_edge edge) {
 } // namespace
 
 /* Internal lifetime acceptance seam. It deliberately catches recoverable
- * construction errors; impossible release underflow remains a PANIC and is
- * therefore covered by static invariants rather than executed in-process. */
-extern "C" PGDLLEXPORT Datum piece_tree_self_test_impl(FunctionCallInfo) {
+ * construction errors and exercises cleanup-quarantine state on local POD
+ * fixtures, without poisoning the backend-global production state. */
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq_internal">,
+})]]
+[[bioseq_sql::revoke({
+    .privileges = bioseq::sql::privileges::execute,
+    .from = bioseq::sql::public_role,
+})]]
+bool piece_tree_self_test() {
   bool volatile saturation_caught = false;
   bool volatile budget_caught = false;
   bool volatile generation_caught = false;
   bool volatile million_piece_balanced = false;
   bool volatile deep_release_iterative = false;
   const std::uint64_t arena_baseline = live_piece_tree_arenas;
-  const bool clean_entry = arena_baseline == 0u;
+  const auto quarantine_baseline = read_piece_tree_quarantine_noexcept();
+  const bool clean_entry = arena_baseline == 0u
+      && quarantine_baseline.invariant_failures == 0u;
   const bool factory_failure_matrix =
       run_piece_tree_factory_failure_matrix();
   const bool tracked_join_failure_matrix =
@@ -4854,7 +5140,9 @@ extern "C" PGDLLEXPORT Datum piece_tree_self_test_impl(FunctionCallInfo) {
       trusted_join_corruption_guardrail_matrix &&
       transformed_join_rotation &&
       million_piece_balanced && deep_release_iterative &&
-      live_piece_tree_arenas == arena_baseline;
+      live_piece_tree_arenas == arena_baseline &&
+      read_piece_tree_quarantine_noexcept().invariant_failures
+          == quarantine_baseline.invariant_failures;
   if (!all_checks_passed) {
     ereport(WARNING,
             (errmsg_internal(
@@ -4876,5 +5164,7 @@ extern "C" PGDLLEXPORT Datum piece_tree_self_test_impl(FunctionCallInfo) {
                 deep_release_iterative ? 1 : 0,
                 live_piece_tree_arenas == arena_baseline ? 1 : 0)));
   }
-  PG_RETURN_BOOL(all_checks_passed);
+  return all_checks_passed;
 }
+
+}  // namespace bioseq::pg_types::sql_routines

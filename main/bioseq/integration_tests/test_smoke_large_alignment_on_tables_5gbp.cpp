@@ -40,13 +40,13 @@ namespace {
 //   1. `MaxAllocSize` (`utils/memutils.h`, ~1.07 GiB). Phase B baseline
 //      (`bioseq.test_force_inmemory_scanner=on`) hydrates every fragment
 //      via `SM::fetch_payload_bulk` → `fetch_payload` and assembles them
-//      into ONE contiguous `palloc`'d `pgseq_t` before passing the
+//      into ONE contiguous `palloc`'d `bioseq::pg_types::seq` before passing the
 //      buffer through `sequence_scanner_none` (the no-fragment wrapper)
 //      to `minimap_port`. The hydrated varlena MUST fit in `MaxAllocSize`;
 //      at dna4/uint64 the bp ceiling is ~4.29 Gbp (4 Gbp packs to ~1.0e9
 //      bytes, ~70 MiB under the cap).
 //
-//   2. `pgseq_t::bp_size` is `uint32_t` (`sequences.cppm:1980` declares
+//   2. `bioseq::pg_types::seq::bp_size` is `uint32_t` (`sequences.cppm:1980` declares
 //      the template default). Any reference > `UINT32_MAX` bp (~4.29 Gbp)
 //      silently truncates the `bp_size` field, after which
 //      `compact_sequence_range::bp_size()` returns the wrong total and
@@ -96,7 +96,7 @@ constexpr long long kInt32Max = 2'147'483'647;  // INT32_MAX
 
 // DOC0275: the second case pushes the reference to 6 Gbp — PAST `UINT32_MAX`
 // (~4.29 Gbp). This is strictly larger than the int8-projection boundary
-// (INT32_MAX): it also clears the columnar `pgseq_t::bp_size` uint32 cap and
+// (INT32_MAX): it also clears the columnar `bioseq::pg_types::seq::bp_size` uint32 cap and
 // the `MaxAllocSize` hydration cap, so ONLY the production streaming path
 // (`bioseq.test_force_inmemory_scanner = off`, `sequence_scanner_pg<S>`)
 // can serve it — the in-memory baseline would truncate `bp_size` and/or
@@ -409,7 +409,7 @@ TEST_CASE("DOC0275 — 6 Gbp sample table: scanner_pg (test_force_inmemory_scann
     // 6 Gbp is past `UINT32_MAX` (~4.29 Gbp), so — unlike the 4 Gbp case — the
     // in-memory baseline (`test_force_inmemory_scanner = on`) CANNOT serve it:
     // assembling the whole target into one varlena would exceed `MaxAllocSize`
-    // and `pgseq_t::bp_size` (uint32) would truncate the reported length. We
+    // and `bioseq::pg_types::seq::bp_size` (uint32) would truncate the reported length. We
     // therefore exercise ONLY the production streaming path
     // (`test_force_inmemory_scanner = off`, `sequence_scanner_pg<S>`), which
     // uses the locator's uint64 `total_bp_size` and reads fragment-by-fragment.

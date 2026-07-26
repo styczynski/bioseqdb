@@ -147,7 +147,7 @@ import bioseq.common.hashing;
 import bioseq.common.radix_sort;
 import bioseq.common.sequan_compat;
 import bioseq.pg_utils;
-import bioseq.config;                  // DOC0322 §9.3 — bioseq_index_run_buffer_bytes, bioseq_scheduler_*, bioseq_index_memory_cap_mb GUCs
+import bioseq.config;                  // DOC0322 §9.3 — bioseq::settings::index_run_buffer_bytes, bioseq_scheduler_*, bioseq::settings::index_memory_cap_mb GUCs
 import bioseq.indexing.type;
 import bioseq.indexing.traits;
 import bioseq.indexing.storage;
@@ -736,7 +736,7 @@ public:
 		std::uint8_t alphabet_code,
 		std::uint8_t storage_unit_byte_width,
 		std::uint64_t target_bp_size,
-		std::span<const pgseq_t* const> query_headers,
+		std::span<const bioseq::pg_types::seq* const> query_headers,
 		std::span<const Datum> query_recipe_datums,
 		std::span<const pg_sequence_descriptor> query_recipe_descriptors,
 		pg_sequence_read_session* query_read_session,
@@ -759,7 +759,7 @@ public:
 		std::uint64_t target_bp_size,
 		std::uint8_t alphabet_code,
 		std::uint8_t storage_unit_byte_width,
-		std::span<const pgseq_t* const> query_headers,
+		std::span<const bioseq::pg_types::seq* const> query_headers,
 		std::span<const Datum> query_recipe_datums,
 		std::span<const pg_sequence_descriptor> query_recipe_descriptors,
 		pg_sequence_read_session* query_read_session,
@@ -838,7 +838,7 @@ public:
         // persisted Shape-V5 Vulkan route and never owns through hot stats.
         ::bioseq::pipeline_stats::PersistedGpuOperationEvidenceLedger*
             persisted_gpu_operation_evidence_sink = nullptr;
-        // Per-row optional locator. nullopt means "use the inline pgseq_t at
+        // Per-row optional locator. nullopt means "use the inline bioseq::pg_types::seq at
         // target_hdrs[i]" — the target then uses an in-memory facade.
         std::array<std::optional<bioseq::storage::seq_locator>,
             kDispatchBatchCapacity>                       target_locators{};
@@ -922,9 +922,9 @@ public:
         size_t batch_size,
         uint8_t alphabet_code,
         uint8_t storage_unit_byte_width,
-        const pgseq_t* query_hdr,
-        const std::array<const pgseq_t*, kDispatchBatchCapacity>* per_row_query_hdrs,
-        const std::array<const pgseq_t*, kDispatchBatchCapacity>& target_hdrs,
+        const bioseq::pg_types::seq* query_hdr,
+        const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>* per_row_query_hdrs,
+        const std::array<const bioseq::pg_types::seq*, kDispatchBatchCapacity>& target_hdrs,
         const std::array<int32_t, kDispatchBatchCapacity>& query_ids,
         const Minimap2Params& base_params,
         BatchInvocationRole invocation_role,

@@ -191,7 +191,23 @@ set(OATPP_INSTALL OFF CACHE BOOL "" FORCE)
 set(OATPP_LINK_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
 set(OATPP_LINK_ATOMIC ON CACHE BOOL "" FORCE)
 
+# Every static archive that reaches the extension shared object must be PIC.
+# Seed the directory default before either the repo-local or fetched Oat++
+# source is added.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 set(_bioseq_oatpp_root "${BIOSEQ_REPOSITORY_ROOT}/oatpp-master")
+if(NOT EXISTS "${_bioseq_oatpp_root}/src/oatpp/Environment.hpp")
+  include(FetchContent)
+  FetchContent_Declare(bioseq_oatpp
+    GIT_REPOSITORY "https://github.com/oatpp/oatpp.git"
+    GIT_TAG "f83d648fd82dc222ef88aabbafb68efbd7d7bf50"
+    GIT_SHALLOW FALSE
+    EXCLUDE_FROM_ALL)
+  FetchContent_MakeAvailable(bioseq_oatpp)
+  set(_bioseq_oatpp_root "${bioseq_oatpp_SOURCE_DIR}")
+endif()
+
 file(STRINGS "${_bioseq_oatpp_root}/src/oatpp/Environment.hpp"
   _bioseq_oatpp_version_line
   REGEX "^#define OATPP_VERSION \"1\\.4\\.[0-9]+\"$")
@@ -200,14 +216,6 @@ if(NOT _bioseq_oatpp_version_line)
     "The repo-local oatpp-master dependency must provide Oat++ 1.4.x")
 endif()
 
-# DOC0372 — the postgresql_bioseq extension is a shared object, so every static
-# archive that reaches its link (oatpp, via the provider adapters ->
-# bioseq_external_https) must be position-independent. oatpp's own CMake does not
-# force PIC, and its thread-local members emit R_X86_64_TPOFF32 relocations that a
-# shared object rejects ("recompile with -fPIC"). Force PIC on the whole oatpp
-# subtree by seeding the directory default before add_subdirectory; the standalone
-# external test exec (a PIE executable) is unaffected.
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT TARGET oatpp)
   add_subdirectory("${_bioseq_oatpp_root}"
     "${CMAKE_CURRENT_BINARY_DIR}/oatpp" EXCLUDE_FROM_ALL)

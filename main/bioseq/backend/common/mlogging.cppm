@@ -1705,8 +1705,6 @@ struct formatter<T>: formatter<std::string> {
 }
 }
 
-export bool enable_logging = false;
-
 export enum class LoggingLevel : std::uint8_t {
   DBG = 0,
   INF = 1,
@@ -1762,6 +1760,8 @@ export struct BioseqReportView {
 };
 
 export struct BioseqPostgresLoggingSink {
+  const bool* debug_logging_enabled = nullptr;
+
   bool (*should_log_level)(LoggingLevel level) = nullptr;
 
   void (*log_level)(
@@ -1846,6 +1846,8 @@ inline std::unordered_map<
 
 inline std::mutex postgres_sink_mutex;
 inline BioseqPostgresLoggingSink postgres_sink;
+inline std::atomic<const bool*> postgres_debug_logging_enabled{nullptr};
+inline std::atomic<bool> fallback_debug_logging_enabled{false};
 
 inline std::size_t LogSiteKeyHash::operator()(
     const LogSiteKey& key) const noexcept
@@ -1959,6 +1961,15 @@ inline BioseqPostgresLoggingSink current_postgres_sink() noexcept
   return postgres_sink;
 }
 
+[[nodiscard]] inline bool debug_logging_is_enabled() noexcept
+{
+  const bool* postgres_flag =
+      postgres_debug_logging_enabled.load(std::memory_order_acquire);
+  return postgres_flag != nullptr
+      ? *postgres_flag
+      : fallback_debug_logging_enabled.load(std::memory_order_relaxed);
+}
+
 template<typename Emit>
 [[gnu::always_inline]] inline void emit_fmtlog_for_site(
     LogSiteEntry& site,
@@ -2048,7 +2059,7 @@ inline void file_log_preformatted(
       file_log_preformatted_impl<LoggingLevel::INF>(location, message);
       break;
     case LoggingLevel::DBG:
-      if (enable_logging) {
+      if (debug_logging_is_enabled()) {
         file_log_preformatted_impl<LoggingLevel::DBG>(location, message);
       }
       break;
@@ -2098,12 +2109,32 @@ export inline void bioseq_register_postgres_logging_sink(
 {
   std::lock_guard lock(bioseq_logging_detail::postgres_sink_mutex);
   bioseq_logging_detail::postgres_sink = sink;
+  bioseq_logging_detail::postgres_debug_logging_enabled.store(
+      sink.debug_logging_enabled,
+      std::memory_order_release);
 }
 
 export inline void bioseq_clear_postgres_logging_sink() noexcept
 {
   std::lock_guard lock(bioseq_logging_detail::postgres_sink_mutex);
   bioseq_logging_detail::postgres_sink = {};
+  bioseq_logging_detail::postgres_debug_logging_enabled.store(
+      nullptr,
+      std::memory_order_release);
+}
+
+export [[nodiscard]] inline bool
+bioseq_debug_logging_enabled() noexcept
+{
+  return bioseq_logging_detail::debug_logging_is_enabled();
+}
+
+export inline void bioseq_set_fallback_debug_logging_enabled(
+    bool enabled) noexcept
+{
+  bioseq_logging_detail::fallback_debug_logging_enabled.store(
+      enabled,
+      std::memory_order_relaxed);
 }
 
 export template<
@@ -2116,7 +2147,7 @@ export template<
   }
 
   if constexpr (level == LoggingLevel::DBG) {
-    if (!enable_logging) {
+    if (!bioseq_logging_detail::debug_logging_is_enabled()) {
       return false;
     }
   }
@@ -2146,7 +2177,7 @@ export template<
   }
 
   if constexpr (level == LoggingLevel::DBG) {
-    if (!enable_logging) {
+    if (!bioseq_logging_detail::debug_logging_is_enabled()) {
       return;
     }
   }
@@ -2217,7 +2248,7 @@ export template<typename... Args>
       break;
     case LoggingLevel::DBG:
     case LoggingLevel::OFF:
-      if (enable_logging) {
+      if (bioseq_logging_detail::debug_logging_is_enabled()) {
         bioseq_logging_detail::file_log_impl<LoggingLevel::DBG>(
             fmt_loc, std::forward<Args>(args)...);
       }
@@ -2272,7 +2303,8 @@ inline bool bioseq_report_enabled_runtime(
   if (level == LoggingLevel::OFF) {
     return false;
   }
-  if (level == LoggingLevel::DBG && !enable_logging) {
+  if (level == LoggingLevel::DBG
+      && !bioseq_logging_detail::debug_logging_is_enabled()) {
     return false;
   }
   if (target == LoggingTarget::PG) {
@@ -2507,7 +2539,7 @@ export inline void log_configure(const bool is_testing_mode = false) {
      * caller-location failures are visible without touching extension fallback
      * files.
      */
-    enable_logging = true;
+    bioseq_set_fallback_debug_logging_enabled(true);
     fmtlog::setLogLevel(fmtlog::DBG);
     fmtlog::setThreadName("test-main");
     fmtlog::setFlushDelay(0);

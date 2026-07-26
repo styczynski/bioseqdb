@@ -1,6 +1,7 @@
 # Relocatable private PostgreSQL extension stage (§13.2).
 #
-# Run with: cmake -DPG_CONFIG=... -DSTAGE_ROOT=... -DCONTROL_FILE=... \
+# Run with: cmake -DPG_CONFIG=... -DSTAGE_ROOT=... -DSTAGE_PARENT=... \
+#                 -DCONTROL_FILE=... \
 #                 -DINSTALL_SQL=... -DLIBRARY_FILE=... -DEXTENSION_VERSION=... \
 #                 -DMANIFEST_OUT=... -DHASH_OUT=... -P stage_private_postgres.cmake
 #
@@ -13,8 +14,8 @@
 
 cmake_minimum_required(VERSION 3.24)
 
-foreach(_required PG_CONFIG STAGE_ROOT CONTROL_FILE INSTALL_SQL LIBRARY_FILE
-                  EXTENSION_VERSION MANIFEST_OUT HASH_OUT)
+foreach(_required PG_CONFIG STAGE_ROOT STAGE_PARENT CONTROL_FILE INSTALL_SQL
+                  LIBRARY_FILE EXTENSION_VERSION MANIFEST_OUT HASH_OUT)
   if(NOT DEFINED ${_required} OR "${${_required}}" STREQUAL "")
     message(FATAL_ERROR "stage_private_postgres: -D${_required} is required")
   endif()
@@ -65,6 +66,49 @@ _staged_path("${PG_PKGLIBDIR}" STAGED_PKGLIBDIR)
 set(_tools postgres initdb pg_ctl createdb dropdb psql)
 
 # Fresh stage on every run — the prefix is an incremental build artifact.
+# This guard is intentionally adjacent to the destructive operation. The
+# Python lifecycle prevalidates the same parent, but this script also fails
+# closed when invoked directly or when a path is replaced between layers.
+cmake_path(
+  ABSOLUTE_PATH STAGE_PARENT
+  NORMALIZE
+  OUTPUT_VARIABLE _stage_parent_normal)
+cmake_path(
+  ABSOLUTE_PATH STAGE_ROOT
+  NORMALIZE
+  OUTPUT_VARIABLE _stage_root_normal)
+get_filename_component(_stage_root_parent "${_stage_root_normal}" DIRECTORY)
+if(NOT "${_stage_root_parent}" STREQUAL "${_stage_parent_normal}")
+  message(FATAL_ERROR
+    "stage_private_postgres: STAGE_ROOT must be a direct child of "
+    "STAGE_PARENT: ${_stage_root_normal}")
+endif()
+if(NOT IS_DIRECTORY "${_stage_parent_normal}"
+   OR IS_SYMLINK "${_stage_parent_normal}")
+  message(FATAL_ERROR
+    "stage_private_postgres: STAGE_PARENT must be a real directory: "
+    "${_stage_parent_normal}")
+endif()
+file(REAL_PATH "${_stage_parent_normal}" _stage_parent_real)
+if(NOT "${_stage_parent_real}" STREQUAL "${_stage_parent_normal}")
+  message(FATAL_ERROR
+    "stage_private_postgres: STAGE_PARENT contains a symbolic-link "
+    "component: ${_stage_parent_normal}")
+endif()
+if(EXISTS "${_stage_root_normal}" OR IS_SYMLINK "${_stage_root_normal}")
+  if(NOT IS_DIRECTORY "${_stage_root_normal}"
+     OR IS_SYMLINK "${_stage_root_normal}")
+    message(FATAL_ERROR
+      "stage_private_postgres: STAGE_ROOT must be a real directory when "
+      "it exists: ${_stage_root_normal}")
+  endif()
+  file(REAL_PATH "${_stage_root_normal}" _stage_root_real)
+  if(NOT "${_stage_root_real}" STREQUAL "${_stage_root_normal}")
+    message(FATAL_ERROR
+      "stage_private_postgres: STAGE_ROOT contains a symbolic-link "
+      "component: ${_stage_root_normal}")
+  endif()
+endif()
 file(REMOVE_RECURSE "${STAGE_ROOT}")
 
 # Copy the built-in program/share/library trees so bundled languages and

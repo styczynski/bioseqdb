@@ -1,5 +1,5 @@
-// DOC0264 Phase C — integration tests for `bioseq.create_sample_table`,
-// `bioseq.locator_inspect`, and the per-fragment row layout.
+// Integration tests for `bioseq.create_sample_table`,
+// `bioseq.inspect_locator`, and the per-fragment row layout.
 //
 // USING bioseq tables emit zero rows for SELECT-without-mmsearch by design
 // (the columnar custom scan only fires when mmsearch is in the qual list —
@@ -8,9 +8,9 @@
 //   1. `bioseq_internal.seq_sub_table` catalog row count + sub_table_relid.
 //   2. `pg_relation_size(sub_table_relid)` to confirm fragment bytes were
 //      written (positive size proves data exists on disk).
-//   3. `bioseq.locator_inspect` on inline literals to prove the locator layout
-//      is wired (the stub path is exercised by the hoe-fixture INSERT
-//      path which writes stubs into the parent — see test_phase_c_mmsearch.cpp).
+//   3. `bioseq.inspect_locator` on inline literals to prove the locator layout
+//      is wired. The insertion fixture exercises the stub path by writing
+//      locator stubs into the parent relation.
 
 #include "common_tests_integration.h"
 import bioseq.integration_tests.common;
@@ -19,13 +19,13 @@ using namespace bioseq_int_tests;
 
 namespace {
 
-constexpr std::string_view kSampleTable = "phase_c_sample_t";
+constexpr std::string_view kSampleTable = "sample_table_fixture_t";
 
 }  // namespace
 
-TEST_CASE("DOC0264 — bioseq.create_sample_table writes one catalog row + a "
+TEST_CASE("bioseq.create_sample_table writes one catalog row and a "
           "non-empty sub-table",
-          "[integration][phase-c][sample-table]") {
+          "[integration][sample-table]") {
     auto ctx = fresh_context({kSampleTable});
     exec_sqlf(ctx,
               "SELECT bioseq.create_sample_table('{}', 100, 1024, 'dna4', 42);",
@@ -55,17 +55,73 @@ TEST_CASE("DOC0264 — bioseq.create_sample_table writes one catalog row + a "
     REQUIRE(sub_size > 0);
 }
 
-TEST_CASE("DOC0264 — bioseq.create_sample_table alphabet other than dna4 is rejected",
-          "[integration][phase-c][sample-table]") {
+TEST_CASE("bioseq.create_sample_table rejects alphabets other than dna4",
+          "[integration][sample-table]") {
     auto ctx = fresh_context({kSampleTable});
     REQUIRE(sql_fails(ctx,
         fmt::format("SELECT bioseq.create_sample_table('{}', 1, 1024, 'dna5', 42);",
                     kSampleTable)));
 }
 
-TEST_CASE("DOC0264 — empty sequence (num_fragments=0) creates a catalog row "
+TEST_CASE("sample table generators resolve the active creation namespace",
+          "[integration][sample-table][doc0388][relocatable]") {
+    constexpr std::string_view schema = "doc0388_sample_namespace";
+    constexpr std::string_view sequence_table = "doc0388_sequence_sample";
+    constexpr std::string_view pair_table = "doc0388_pair_sample";
+
+    auto ctx = fresh_context({sequence_table, pair_table});
+    exec_sqlf(ctx, "DROP SCHEMA IF EXISTS {} CASCADE;", schema);
+    exec_sql(ctx, "BEGIN;");
+    exec_sqlf(ctx, "CREATE SCHEMA {};", schema);
+    exec_sqlf(ctx, "SET LOCAL search_path = {}, public;", schema);
+
+    const long long sequence_oid = query_scalar_int(
+        ctx,
+        fmt::format(
+            "SELECT bioseq.create_sample_table("
+            "'{}', 1, 32, 'dna4', 42);",
+            sequence_table));
+    const long long pair_oid = query_scalar_int(
+        ctx,
+        fmt::format(
+            "SELECT bioseq.create_query_target_sample_table("
+            "'{}', 1, 32, 0.0, 128, "
+            "0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 42);",
+            pair_table));
+
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format(
+                    "SELECT count(*)::bigint "
+                    "FROM pg_catalog.pg_class AS c "
+                    "JOIN pg_catalog.pg_namespace AS n "
+                    "  ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = '{}' "
+                    "  AND c.relname IN ('{}', '{}') "
+                    "  AND c.oid IN ({}, {});",
+                    schema,
+                    sequence_table,
+                    pair_table,
+                    sequence_oid,
+                    pair_oid)) == 2);
+    REQUIRE(query_scalar_int(
+                ctx,
+                fmt::format(
+                    "SELECT count(*)::bigint "
+                    "FROM pg_catalog.pg_class AS c "
+                    "JOIN pg_catalog.pg_namespace AS n "
+                    "  ON n.oid = c.relnamespace "
+                    "WHERE n.nspname = 'public' "
+                    "  AND c.relname IN ('{}', '{}');",
+                    sequence_table,
+                    pair_table)) == 0);
+
+    exec_sql(ctx, "ROLLBACK;");
+}
+
+TEST_CASE("an empty sequence creates a catalog row "
           "without allocating an empty fragment relation",
-          "[integration][phase-c][sample-table]") {
+          "[integration][sample-table]") {
     auto ctx = fresh_context({kSampleTable});
     exec_sqlf(ctx,
               "SELECT bioseq.create_sample_table('{}', 1, 0, 'dna4', 42);",
@@ -84,18 +140,17 @@ TEST_CASE("DOC0264 — empty sequence (num_fragments=0) creates a catalog row "
                     "AND v.fragment_storage_id=0;", kSampleTable)) == 1);
 }
 
-TEST_CASE("DOC0264 — locator_inspect on inline non-stub value returns inline fields",
+TEST_CASE("inspect_locator on an inline value returns inline fields",
           "[integration][phase-c][locator-inspect]") {
     auto ctx = fresh_context();
-    // Test locator_inspect on a literal (inline, non-stub) bioseq.seq value.
-    // Phase C's locator_inspect returns zeros for the locator-only fields and
+    // Inline values return zeros for locator-only fields and
     // the inline bp_size + padding for non-stub inputs.
     const long long version = query_scalar_int(ctx,
-        "SELECT version FROM bioseq.locator_inspect("
+        "SELECT version FROM bioseq.inspect_locator("
         "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));");
     REQUIRE(version == 0);
     const long long bp_size = query_scalar_int(ctx,
-        "SELECT total_bp_size FROM bioseq.locator_inspect("
+        "SELECT total_bp_size FROM bioseq.inspect_locator("
         "  'ACGTACGTACGTACGTACGTACGTACGTACGT'::bioseq.seq('dna4', 32));");
     REQUIRE(bp_size == 32);
 }

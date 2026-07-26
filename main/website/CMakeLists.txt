@@ -111,7 +111,6 @@ if(_revision STREQUAL "")
 endif()
 
 set(_site_config "${_source_dir}/site.yaml")
-set(_sql_api "${_source_dir}/sql_api.yaml")
 set(_templates_dir "${_source_dir}/templates")
 set(_static_dir "${_source_dir}/static")
 
@@ -199,7 +198,7 @@ find_package(Python3 3.12 COMPONENTS Interpreter REQUIRED)
 # design CSS and copied assets must be the byte-for-byte output of the mechanical
 # translator before any plan/render/publish step may consume them.  --check
 # regenerates only in a temporary directory and never mutates the source tree.
-set(_design_reference_dir "${CMAKE_SOURCE_DIR}/../website_design")
+set(_design_reference_dir "${_source_dir}/design_source")
 set(_design_translator "${_source_dir}/tools/translate_reference_design.py")
 if(NOT EXISTS "${_design_reference_dir}/index.html"
    OR NOT EXISTS "${_design_reference_dir}/docs.html")
@@ -338,7 +337,7 @@ add_custom_command(
           --output "${_plan_json}"
           --report-dir "${_report_dir}"
   DEPENDS ${_gen_dep} "${_selftest_stamp}" "${_design_translation_stamp}"
-          "${_site_config}" "${_sql_api}"
+          "${_site_config}"
           ${_tutorial_md} ${_template_files} ${_static_files}
   COMMENT "website: plan (config/template/frontmatter validation)"
   VERBATIM)
@@ -422,15 +421,52 @@ get_target_property(
   _extension_control_file postgresql_bioseq BIOSEQ_EXTENSION_CONTROL_FILE)
 get_target_property(
   _extension_install_sql postgresql_bioseq BIOSEQ_EXTENSION_INSTALL_SQL)
-if(NOT _extension_control_file OR NOT _extension_install_sql)
+get_target_property(
+  _extension_sql_manifest postgresql_bioseq BIOSEQ_EXTENSION_SQL_MANIFEST)
+if(NOT _extension_control_file
+   OR NOT _extension_install_sql
+   OR NOT _extension_sql_manifest)
   message(FATAL_ERROR
-    "postgresql_bioseq must publish its generated control and install-SQL paths")
+    "postgresql_bioseq must publish its generated control, install-SQL, "
+    "and SQL-manifest paths")
 endif()
+
+# The website stage is also the packaging acceptance seam: prove that the
+# extension publishes the generated install artifact (not the checked source
+# golden), that its bytes match the manifest digest, and that the
+# Doxygen-derived public projection remains the approved 11-identity set.
+set(_sql_package_verifier
+  "${_source_dir}/tests/verify_generated_sql_package.py")
+set(_sql_public_identity_golden
+  "${_source_dir}/tests/fixtures/sql_public_identities.json")
+set(_sql_package_verification_stamp
+  "${_output_root}/generated-sql-package-tests.stamp")
+add_custom_command(
+  OUTPUT "${_sql_package_verification_stamp}"
+  COMMAND "${Python3_EXECUTABLE}" "${_sql_package_verifier}"
+          --install-sql "${_extension_install_sql}"
+          --manifest "${_extension_sql_manifest}"
+          --source-golden
+            "${CMAKE_SOURCE_DIR}/bioseq/sql/bioseq--1.0.sql"
+          --public-identities "${_sql_public_identity_golden}"
+          --stamp "${_sql_package_verification_stamp}"
+  DEPENDS postgresql_bioseq
+          "${_extension_install_sql}"
+          "${_extension_sql_manifest}"
+          "${CMAKE_SOURCE_DIR}/bioseq/sql/bioseq--1.0.sql"
+          "${_sql_package_verifier}"
+          "${_sql_public_identity_golden}"
+  COMMENT "website: verify generated SQL packaging and public manifest identity set"
+  VERBATIM)
+add_custom_target(bioseq_generated_sql_package_tests
+  DEPENDS "${_sql_package_verification_stamp}")
+
 add_custom_command(
   OUTPUT "${_stage_manifest}" "${_stage_extension_hash}"
   COMMAND "${CMAKE_COMMAND}"
           -DPG_CONFIG=${PostgreSQL_CONFIG}
           -DSTAGE_ROOT=${_stage_root}
+          -DSTAGE_PARENT=${_output_root}
           "-DCONTROL_FILE=${_extension_control_file}"
           "-DINSTALL_SQL=${_extension_install_sql}"
           "-DLIBRARY_FILE=$<TARGET_FILE:postgresql_bioseq>"
@@ -439,6 +475,7 @@ add_custom_command(
           -DHASH_OUT=${_stage_extension_hash}
           -P "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
   DEPENDS postgresql_bioseq
+          "${_sql_package_verification_stamp}"
           "${_extension_control_file}"
           "${_extension_install_sql}"
           "${CMAKE_SOURCE_DIR}/cmake/stage_private_postgres.cmake"
@@ -520,10 +557,10 @@ file(WRITE "${_cluster_child}"
 "fi\n"
 "\"${CMAKE_COMMAND}\" -E copy_if_different '${_landing_fasta}' \"$BIOSEQ_TEST_PG_DATA_DIR/landing_reads.fasta\"\n"
 "\"${_gen}\" website catalog --conninfo \"$CONN\" \\\n"
-"  --schemas 'public,bioseq' --output '${_sql_entities}'\n"
+"  --sql-manifest '${_extension_sql_manifest}' --output '${_sql_entities}'\n"
 "\"${_gen}\" website execute \\\n"
 "  --source '${_source_dir}' --version '${_version}' \\\n"
-"  --site-config '${_site_config}' --sql-api '${_sql_api}' \\\n"
+"  --site-config '${_site_config}' --sql-manifest '${_extension_sql_manifest}' \\\n"
 "  --cpp-entities '${_cpp_entities}' --sql-entities '${_sql_entities}' \\\n"
 "  --base-path '${_base_path}' --source-revision '${_revision}' \\\n"
 "  --staged-extension-sha256 \"$STAGED_EXTENSION_SHA256\" \\\n"
@@ -555,7 +592,8 @@ add_custom_command(
           --bootstrap "${_output_root}/create-extension.sql"
           -- bash "${_cluster_child}"
   DEPENDS ${_gen_dep} "${_stage_manifest}" "${_stage_extension_hash}" "${_cluster_child}"
-          "${_cpp_entities}" "${_plan_json}" "${_sql_api}" "${_landing_fasta}"
+          "${_cpp_entities}" "${_plan_json}" "${_extension_sql_manifest}"
+          "${_landing_fasta}"
           ${_tutorial_md} ${_template_files} ${_static_files}
           bioseq_private_postgres_tests bioseq_website_isolation_tests
   COMMENT "website: catalog + execute runnable SQL into the resolved site model"

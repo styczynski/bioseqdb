@@ -138,14 +138,14 @@ namespace {
     if (length > std::numeric_limits<std::size_t>::max() - 7u) {
         invalid_flat_sequence("unbound length overflows size_t");
     }
-    return pgseq_t::header_bytes()
+    return bioseq::pg_types::seq::header_bytes()
         + round_up_to_uint64(static_cast<std::size_t>(length));
 }
 
-inline void validate_bound_flat(pgseq_t const& value)
+inline void validate_bound_flat(bioseq::pg_types::seq const& value)
 {
     bool valid = false;
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         static_cast<std::uint8_t>(value.alphabet_code),
         static_cast<std::uint8_t>(value.storage_unit_byte_width),
         [&valid, &value]<class Instance>() {
@@ -164,7 +164,7 @@ inline void validate_bound_flat(pgseq_t const& value)
             }
             const std::size_t payload = static_cast<std::size_t>(units)
                 * sizeof(typename traits::storage_unit);
-            const std::size_t expected = pgseq_t::header_bytes()
+            const std::size_t expected = bioseq::pg_types::seq::header_bytes()
                 + round_up_to_uint64(payload);
             valid = VARSIZE(&value) == expected;
         });
@@ -226,9 +226,9 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
         };
     }
 
-    auto const* flat = reinterpret_cast<pgseq_t const*>(
+    auto const* flat = reinterpret_cast<bioseq::pg_types::seq const*>(
         DatumGetPointer(detoasted_or_expanded));
-    if (flat == nullptr || VARSIZE(flat) < pgseq_t::header_bytes()) {
+    if (flat == nullptr || VARSIZE(flat) < bioseq::pg_types::seq::header_bytes()) {
         invalid_flat_sequence("value is shorter than the pgseq header");
     }
     switch (classify_pg_sequence_flat(flat)) {
@@ -267,7 +267,7 @@ classify_and_describe_sequence(Datum detoasted_or_expanded)
         }
         case pg_sequence_flat_kind::locator: {
             if (VARSIZE(flat)
-                != pgseq_t::header_bytes()
+                != bioseq::pg_types::seq::header_bytes()
                     + sizeof(bioseq::storage::seq_locator)) {
                 invalid_flat_sequence("locator framing size mismatch");
             }
@@ -312,16 +312,16 @@ classify_and_describe_sequence_header(Datum input)
         return classify_and_describe_sequence(input);
     }
     const Size raw_size = toast_raw_datum_size(input);
-    if (raw_size < pgseq_t::header_bytes()) {
+    if (raw_size < bioseq::pg_types::seq::header_bytes()) {
         invalid_flat_sequence("value is shorter than the pgseq header");
     }
-    auto* original = reinterpret_cast<pgseq_t*>(DatumGetPointer(input));
-    pgseq_t* header = original;
+    auto* original = reinterpret_cast<bioseq::pg_types::seq*>(DatumGetPointer(input));
+    bioseq::pg_types::seq* header = original;
     bool free_header = false;
     if (!VARATT_IS_4B_U(DatumGetPointer(input))) {
-        header = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM_SLICE(
+        header = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM_SLICE(
             input, 0,
-            static_cast<int32>(pgseq_t::header_bytes() - VARHDRSZ)));
+            static_cast<int32>(bioseq::pg_types::seq::header_bytes() - VARHDRSZ)));
         free_header = true;
     }
 
@@ -330,7 +330,7 @@ classify_and_describe_sequence_header(Datum input)
     switch (kind) {
         case pg_sequence_flat_kind::bound: {
             bool metadata_ok = false;
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 static_cast<std::uint8_t>(header->alphabet_code),
                 static_cast<std::uint8_t>(header->storage_unit_byte_width),
                 [header, raw_size, &metadata_ok]<class Instance>() {
@@ -344,7 +344,7 @@ classify_and_describe_sequence_header(Datum input)
                         : units * traits::letters_per_unit - header->bp_size;
                     const std::uint64_t payload = units
                         * sizeof(typename traits::storage_unit);
-                    const std::uint64_t expected = pgseq_t::header_bytes()
+                    const std::uint64_t expected = bioseq::pg_types::seq::header_bytes()
                         + round_up_to_uint64(
                             static_cast<std::size_t>(payload));
                     metadata_ok = padding == header->padding_letters
@@ -369,7 +369,7 @@ classify_and_describe_sequence_header(Datum input)
             break;
         }
         case pg_sequence_flat_kind::unbound: {
-            const std::uint64_t expected = pgseq_t::header_bytes()
+            const std::uint64_t expected = bioseq::pg_types::seq::header_bytes()
                 + round_up_to_uint64(
                     static_cast<std::size_t>(header->bp_size));
             if (header->padding_letters != 0u || expected != raw_size) {
@@ -392,7 +392,7 @@ classify_and_describe_sequence_header(Datum input)
                 static_cast<std::uint8_t>(
                     header->storage_unit_byte_width)
                 & pgseq_physical_width_mask;
-            if (raw_size != pgseq_t::header_bytes()
+            if (raw_size != bioseq::pg_types::seq::header_bytes()
                     + sizeof(bioseq::storage::seq_locator)
                 || !is_supported_alphabet_code(
                     static_cast<std::uint8_t>(header->alphabet_code))
@@ -430,7 +430,7 @@ namespace {
 struct pg_sequence_facade_state {
     pg_sequence_read_session* session;
     pg_sequence_descriptor descriptor;
-    pgseq_t const* flat;
+    bioseq::pg_types::seq const* flat;
     piece_edge tree;
 };
 
@@ -454,7 +454,7 @@ template<class Alphabet>
         return false;
     }
     bool ok = false;
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         literal.stored_type_params.alphabet_code,
         literal.stored_type_params.storage_unit_byte_width,
         [&ok, &literal, edge, from, to, output]<class Instance>() {
@@ -547,13 +547,13 @@ template<class Alphabet>
 
 template<class Alphabet>
 [[nodiscard]] bool emit_flat_range(
-    pgseq_t const& flat,
+    bioseq::pg_types::seq const& flat,
     std::uint64_t from,
     std::uint64_t to,
     std::span<std::uint8_t> output)
 {
     bool ok = false;
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         static_cast<std::uint8_t>(flat.alphabet_code),
         static_cast<std::uint8_t>(flat.storage_unit_byte_width),
         [&ok, &flat, from, to, output]<class Instance>() {
@@ -750,9 +750,9 @@ consteval bool facade_adapter_profile_contract()
                std::add_const_t<typename view::backend_ops>>;
 }
 
-// DOC0377 genericity gate: the piece-tree/flat PostgreSQL callback adapter is
-// specialized only by alphabet. Repeating the enabled physical-width matrix
-// must resolve to that same view type rather than creating a width dimension.
+// The piece-tree/flat PostgreSQL callback adapter is specialized only by
+// alphabet. Repeating the enabled physical-width matrix must resolve to that
+// same view type rather than creating a width dimension.
 static_assert(facade_adapter_profile_contract<seq::dna4, 8u>());
 #if BIOSEQ_OPTTIMIZATION_LEVEL >= 1
 static_assert(facade_adapter_profile_contract<seq::dna5, 8u>());
@@ -847,7 +847,7 @@ make_pg_sequence_call_owner(
     state->session = std::addressof(session);
     state->descriptor = descriptor;
     if (descriptor.kind == pg_sequence_datum_kind::flat_bound) {
-        state->flat = reinterpret_cast<pgseq_t const*>(
+        state->flat = reinterpret_cast<bioseq::pg_types::seq const*>(
             DatumGetPointer(detoasted_or_expanded));
     } else {
         state->tree = get_pg_sequence_expanded_ro(
@@ -900,7 +900,7 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
 
   ExpandedObjectHeader* expanded_header = DatumGetEOHP(input);
   const Size flat_size = EOH_get_flat_size(expanded_header);
-  auto* flat = static_cast<pgseq_t*>(palloc0(flat_size));
+  auto* flat = static_cast<bioseq::pg_types::seq*>(palloc0(flat_size));
   EOH_flatten_into(expanded_header, flat, flat_size);
   const Datum flat_datum = PointerGetDatum(flat);
   const auto flat_descriptor = classify_and_describe_sequence(flat_datum);
@@ -924,7 +924,7 @@ export [[nodiscard]] bool pg_sequence_facade_orientation_contract_probe(
     auto* local_session = begin_pg_sequence_read_session(CurrentMemoryContext);
     session = local_session;
     try {
-      pgseq_t::dispatch_instance(
+      bioseq::pg_types::seq::dispatch_instance(
           source_descriptor.alphabet_code,
           source_descriptor.storage_unit_byte_width,
           [local_session, input, source_descriptor, flat_datum,
@@ -994,19 +994,17 @@ inline constexpr bool is_borrowed_view_result_v =
 
 export template <typename Result, typename Fn>
 Result with_pg_sequence_view(
-    FunctionCallInfo fcinfo,
-    int argument_index,
+    Datum datum,
     Fn&& view_callback)
 {
     static_assert(!std::is_reference_v<Result> && !std::is_pointer_v<Result>);
     static_assert(!is_borrowed_view_result_v<Result>);
     static_assert(std::is_trivially_destructible_v<Result>);
 
-    Datum datum = PG_GETARG_DATUM(argument_index);
-    pgseq_t* flat_copy = nullptr;
+    bioseq::pg_types::seq* flat_copy = nullptr;
     Datum dispatch_datum = datum;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(datum))) {
-        flat_copy = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(datum));
+        flat_copy = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(datum));
         dispatch_datum = PointerGetDatum(flat_copy);
     }
     const auto descriptor = classify_and_describe_sequence(dispatch_datum);
@@ -1028,7 +1026,7 @@ Result with_pg_sequence_view(
             CurrentMemoryContext);
         session = local_session;
         try {
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, &view_callback, dispatch_datum, descriptor,
@@ -1054,8 +1052,10 @@ Result with_pg_sequence_view(
         PG_RE_THROW();
     }
     PG_END_TRY();
-    if (flat_copy != nullptr) {
-        PG_FREE_IF_COPY(flat_copy, argument_index);
+    if (flat_copy != nullptr
+        && reinterpret_cast<Pointer>(flat_copy)
+            != DatumGetPointer(datum)) {
+        pfree(flat_copy);
     }
     if (callback_failure != nullptr) {
         std::rethrow_exception(std::move(callback_failure));
@@ -1065,21 +1065,20 @@ Result with_pg_sequence_view(
 
 export template <typename Result, typename Fn>
 Result with_pg_sequence_views(
-    FunctionCallInfo fcinfo,
-    int left_index,
-    int right_index,
+    Datum left_datum,
+    Datum right_datum,
     Fn&& callback)
 {
     static_assert(!std::is_reference_v<Result> && !std::is_pointer_v<Result>);
     static_assert(!is_borrowed_view_result_v<Result>);
     static_assert(std::is_trivially_destructible_v<Result>);
 
-    Datum datums[2]{PG_GETARG_DATUM(left_index), PG_GETARG_DATUM(right_index)};
-    pgseq_t* flat[2]{};
+    Datum datums[2]{left_datum, right_datum};
+    bioseq::pg_types::seq* flat[2]{};
     Datum dispatch[2]{datums[0], datums[1]};
     for (int side = 0; side < 2; ++side) {
         if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(datums[side]))) {
-            flat[side] = reinterpret_cast<pgseq_t*>(
+            flat[side] = reinterpret_cast<bioseq::pg_types::seq*>(
                 PG_DETOAST_DATUM(datums[side]));
             dispatch[side] = PointerGetDatum(flat[side]);
         }
@@ -1106,7 +1105,7 @@ Result with_pg_sequence_views(
             CurrentMemoryContext);
         session = local_session;
         try {
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 left.alphabet_code,
                 left.storage_unit_byte_width,
                 [&result, &callback, local_session,
@@ -1180,7 +1179,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
             .alphabet_code = descriptor.alphabet_code,
             .rank = 0u,
         };
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
             [input, index, &result]<class Instance>() {
@@ -1194,7 +1193,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
                     * traits::bits_per_char;
                 unit packed{};
                 if (VARATT_IS_4B_U(DatumGetPointer(input))) {
-                    auto const* flat = reinterpret_cast<pgseq_t const*>(
+                    auto const* flat = reinterpret_cast<bioseq::pg_types::seq const*>(
                         DatumGetPointer(input));
                     std::memcpy(
                         std::addressof(packed),
@@ -1202,7 +1201,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
                         sizeof(unit));
                 } else {
                     const std::uint64_t slice_offset =
-                        pgseq_t::header_bytes() - VARHDRSZ
+                        bioseq::pg_types::seq::header_bytes() - VARHDRSZ
                         + unit_index * sizeof(unit);
                     if (slice_offset
                         > static_cast<std::uint64_t>(INT32_MAX)) {
@@ -1266,7 +1265,7 @@ read_pg_sequence_rank_at(Datum input, std::uint64_t index)
             CurrentMemoryContext);
         session = local_session;
         try {
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [&result, dispatch, descriptor, index,

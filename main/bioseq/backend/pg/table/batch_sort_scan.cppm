@@ -61,8 +61,9 @@ import bioseq.storage.lazy;             // canonical lazy sequence facade
 import bioseq.storage.scanner;          // sequence_access_requirement
 import bioseq.storage.manager;          // is_locator_stub
 import bioseq.sequences;                // compact_sequence_range
-import bioseq.types.pg_compact_sequence;// pgseq_t, dispatch_instance
-import bioseq.config;                   // DOC0346 — bioseq_aligner_vulkan_enabled
+import bioseq.types.pg_compact_sequence;// bioseq::pg_types::seq, dispatch_instance
+import bioseq.config;                   // DOC0346 — bioseq::aligner::settings::vulkan_enabled
+import bioseq.sql_guc_settings;
 import bioseq.parallelism.pool;         // GlobalPool::parallel_sort
 import bioseq.gpu.vulkan.runtime;       // Runtime counters for EXPLAIN proof
 import bioseq.scheduler.supervisor_pg;  // readiness-first PG Runtime entry
@@ -79,10 +80,6 @@ export using BioseqBatchSortSourceRouteProvider = bool (*)(
 
 namespace {
 
-/* GUC backing var: opt-in switch for the prototype sort node. Default OFF so
- * PostgreSQL keeps sorting sequences itself (existing ORDER BY seq behavior +
- * tests are preserved); experiments SET it on. Registered in init below. */
-bool bioseq_enable_sequence_sort_scan = false;
 BioseqBatchSortSourcePathProvider BioseqBatchSortSourcePathTagger = nullptr;
 BioseqBatchSortSourceRouteProvider BatchSortSourceRouteProvider = nullptr;
 
@@ -343,7 +340,7 @@ void BioseqBatchSort_SourceRoutesCleanup(void* arg) {
 				const std::uint8_t alphabet = descriptors.front().alphabet_code;
 				const std::uint8_t width =
 					descriptors.front().storage_unit_byte_width;
-				pgseq_t::dispatch_instance(
+				bioseq::pg_types::seq::dispatch_instance(
 					alphabet, width,
 					[rt, session, &datums, &descriptors,
 					 &value_order, width, async_observer]<class Instance>() {
@@ -556,7 +553,7 @@ BioseqBatchSort_BeginCustomScanImpl(CustomScanState* node, EState* estate, int e
             (errcode(ERRCODE_DATA_CORRUPTED),
              errmsg("BioseqBatchSort private plan ABI is invalid")));
     }
-    rt->spec.vulkan_enabled = bioseq_aligner_vulkan_enabled;
+    rt->spec.vulkan_enabled = bioseq::aligner::settings::vulkan_enabled;
 
     /* Initialise the single child only after the upper callbacks exist. */
     auto* child_plan = reinterpret_cast<Plan*>(linitial(cscan->custom_plans));
@@ -742,7 +739,7 @@ BioseqBatchSort_ExecCustomScanImpl(CustomScanState* node)
     if (!rt->sortslot->tts_isnull[rt->seq_attno - 1]) {
         Datum sequence = rt->sortslot->tts_values[rt->seq_attno - 1];
         if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(sequence))) {
-            auto* flat = reinterpret_cast<pgseq_t*>(DatumGetPointer(sequence));
+            auto* flat = reinterpret_cast<bioseq::pg_types::seq*>(DatumGetPointer(sequence));
             if (bioseq::storage::is_locator_stub(flat)) {
                 if (!OidIsValid(rt->source_relation_oid)
                     || rt->source_attno <= 0
@@ -1094,7 +1091,7 @@ BioseqBatchSort_CreateUpperPathsHook(PlannerInfo* root, UpperRelationKind stage,
     /* Opt-in (default OFF): leave PostgreSQL's own Sort in place unless the
      * operator turns this prototype on. Doubles as the A/B toggle (off => core
      * Sort sorts the sequence; on => this custom batch sort node). */
-    if (!bioseq_enable_sequence_sort_scan) {
+    if (!bioseq::settings::enable_sequence_sort_scan) {
         return;
     }
     Path* input_path = input_rel->cheapest_total_path;
@@ -1236,16 +1233,6 @@ bioseq_register_batch_sort_source_providers(
 export void
 bioseq_batch_sort_init()
 {
-    DefineCustomBoolVariable(
-        "bioseq.enable_sequence_sort_scan",
-        "Route ORDER BY on a bioseq.seq column through the BioseqBatchSortScan "
-        "outer custom scan instead of a core Sort. Prototype: OFF by default.",
-        NULL,
-        &bioseq_enable_sequence_sort_scan,
-        false,
-        PGC_USERSET,
-        GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-        NULL, NULL, NULL);
     PreviousCreateUpperPathsHook = create_upper_paths_hook;
     create_upper_paths_hook = BioseqBatchSort_CreateUpperPathsHook;
     RegisterCustomScanMethods(&BioseqBatchSortScanMethods);

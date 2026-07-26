@@ -16,7 +16,6 @@ module;
 
 #include "headers/pg_build_config.h"
 #include "headers/pg_compat.h"
-#include "fmgr_boundary.h"
 extern "C" {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wregister"
@@ -27,12 +26,14 @@ extern "C" {
 
 export module bioseq.types.pg_compact_sequence:io;
 
+import bioseq.codegen.sql.annotation_model;
 import :flat_abi;
 import :tree_types;
 import :tree_ops;
 import :view_session;
 import :packed_output;
 import bioseq.common.mlogging;
+import bioseq.pg_utils.safety_runtime_probe;
 import bioseq.sequences.rank_pack;
 import bioseq.sequences.simd;
 import bioseq.storage.coordinates;
@@ -103,13 +104,13 @@ export [[nodiscard]] bool pgseq_symbol_for_rank_out_of_line(
 
 namespace {
 
-[[nodiscard]] inline pgseq_t* allocate_unbound_ascii(
+[[nodiscard]] inline bioseq::pg_types::seq* allocate_unbound_ascii(
     char const* input,
     std::size_t length,
     bool require_already_canonical,
     int invalid_sqlstate = ERRCODE_INVALID_TEXT_REPRESENTATION)
 {
-    if (length > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
+    if (length > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq.seq input length %zu exceeds uint32", length)));
@@ -119,7 +120,7 @@ namespace {
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq.seq input size overflows size_t")));
     }
-    const std::size_t total = pgseq_t::header_bytes()
+    const std::size_t total = bioseq::pg_types::seq::header_bytes()
         + round_up_to_uint64(length);
     if (total > MaxAllocSize) {
         ereport(ERROR,
@@ -127,7 +128,7 @@ namespace {
                  errmsg("bioseq.seq input length %zu exceeds MaxAllocSize",
                         length)));
     }
-    pgseq_t* result = pg_alloc(total);
+    bioseq::pg_types::seq* result = pg_alloc(total);
     if (result == nullptr) {
         ereport(ERROR,
                 (errcode(ERRCODE_OUT_OF_MEMORY),
@@ -137,7 +138,7 @@ namespace {
     result->alphabet_code = pgseq_unbound_alphabet_code;
     result->storage_unit_byte_width = pgseq_unbound_width_tag;
     result->padding_letters = 0u;
-    result->bp_size = static_cast<pgseq_t::bp_size_t>(length);
+    result->bp_size = static_cast<bioseq::pg_types::seq::bp_size_t>(length);
     for (std::size_t index = 0; index < length; ++index) {
         const unsigned char raw = static_cast<unsigned char>(input[index]);
         const auto canonical = pgseq_canonical_unbound_symbol(raw);
@@ -156,7 +157,7 @@ namespace {
     return result;
 }
 
-[[nodiscard]] inline pgseq_t* pack_ascii_for_target(
+[[nodiscard]] inline bioseq::pg_types::seq* pack_ascii_for_target(
     char const* ascii,
     std::size_t length,
     compact_sequence_stdc_type_params target)
@@ -169,6 +170,8 @@ namespace {
             const auto alphabet =
                 pgseq_supported_alphabets::name_of_alphabet_code(
                     target.alphabet_code);
+            bioseq::pg_utils::safety_runtime_probe::
+                record_site_visit("seq_in.invalid_symbol");
             ereport(ERROR,
                     (errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
                      errmsg("invalid symbol '%c' for bioseq alphabet %.*s",
@@ -177,24 +180,24 @@ namespace {
                      errdetail("symbol offset=%zu", index)));
         }
     }
-    if (length > std::numeric_limits<pgseq_t::bp_size_t>::max()) {
+    if (length > std::numeric_limits<bioseq::pg_types::seq::bp_size_t>::max()) {
         ereport(ERROR,
                 (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                  errmsg("bioseq sequence is too long to pack")));
     }
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         target.alphabet_code, target.storage_unit_byte_width,
         [length]<class Instance>() {
             (void) bound_flat_size<Instance>(length);
         });
-    pgseq_t* result = nullptr;
+    bioseq::pg_types::seq* result = nullptr;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         target.alphabet_code,
         [&result, target, length, ascii]<class Alphabet>() {
             result = ::bioseq::simd::active_target::
-                stdc_convert_from_cstr<pgseq_t, Alphabet>(
+                stdc_convert_from_cstr<bioseq::pg_types::seq, Alphabet>(
                     target.storage_unit_byte_width,
-                    static_cast<pgseq_t::bp_size_t>(length),
+                    static_cast<bioseq::pg_types::seq::bp_size_t>(length),
                     ascii,
                     pg_alloc);
         });
@@ -206,19 +209,19 @@ namespace {
     return result;
 }
 
-[[nodiscard]] inline pgseq_t* flatten_sequence_datum(
+[[nodiscard]] inline bioseq::pg_types::seq* flatten_sequence_datum(
     Datum datum,
     bool& must_free)
 {
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(datum))) {
         ExpandedObjectHeader* header = DatumGetEOHP(datum);
         const Size size = EOH_get_flat_size(header);
-        auto* result = static_cast<pgseq_t*>(palloc0(size));
+        auto* result = static_cast<bioseq::pg_types::seq*>(palloc0(size));
         EOH_flatten_into(header, result, size);
         must_free = true;
         return result;
     }
-    auto* result = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(datum));
+    auto* result = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(datum));
     must_free = reinterpret_cast<Pointer>(result) != DatumGetPointer(datum);
     return result;
 }
@@ -389,9 +392,23 @@ export [[nodiscard]] inline Datum make_bound_sequence_from_ascii(
     return PointerGetDatum(pack_ascii_for_target(input, length, target));
 }
 
-extern "C" PGDLLEXPORT Datum seq_typmod_in_impl(FunctionCallInfo fcinfo)
+export namespace bioseq::pg_types::sql_routines {
+
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_typmod_in({
+    .for_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+std::int32_t seq_typmod_in(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::custom_type<"cstring[]">,
+    })]]
+    ArrayType* array)
 {
-    ArrayType* array = PG_GETARG_ARRAYTYPE_P(0);
     if (ARR_NDIM(array) != 1) {
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -433,15 +450,26 @@ extern "C" PGDLLEXPORT Datum seq_typmod_in_impl(FunctionCallInfo fcinfo)
         .storage_unit_byte_width = pgseq_normalize_storage_unit_byte_width(
             static_cast<std::uint8_t>(width_bits / 8)),
     };
-    PG_RETURN_INT32(params.encode());
+    return params.encode();
 }
 
 
-extern "C" PGDLLEXPORT Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_typmod_out({
+    .for_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::cstring,
+})]]
+char* seq_typmod_out(std::int32_t typmod)
 {
-    const int32_t typmod = PG_GETARG_INT32(0);
     if (typmod < 0) {
-        PG_RETURN_CSTRING(pstrdup(""));
+        return pstrdup("");
     }
     const auto params = decode_seq_typmod_checked(typmod);
     const auto name = pgseq_supported_alphabets::name_of_alphabet_code(
@@ -450,32 +478,60 @@ extern "C" PGDLLEXPORT Datum seq_typmod_out_impl(FunctionCallInfo fcinfo)
     std::snprintf(result, 64, "('%.*s',%u)",
                   static_cast<int>(name.size()), name.data(),
                   static_cast<unsigned>(params.storage_unit_byte_width) * 8u);
-    PG_RETURN_CSTRING(result);
+    return result;
 }
 
 
-extern "C" PGDLLEXPORT Datum seq_in_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_input]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+bioseq::pg_types::seq* seq_in(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::cstring,
+    })]]
+    const char* input,
+    Oid type_oid,
+    std::int32_t typmod)
 {
-    const char* input = PG_GETARG_CSTRING(0);
-    const int32_t typmod = PG_GETARG_INT32(2);
+    static_cast<void>(type_oid);
     const std::size_t length = std::strlen(input);
     if (typmod < 0) {
-        PG_RETURN_POINTER(allocate_unbound_ascii(input, length, false));
+        return allocate_unbound_ascii(input, length, false);
     }
     const auto target = decode_seq_typmod_checked(typmod);
-    PG_RETURN_POINTER(pack_ascii_for_target(input, length, target));
+    return pack_ascii_for_target(input, length, target);
 }
 
-extern "C" PGDLLEXPORT Datum seq_out_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_output]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::cstring,
+})]]
+char* seq_out(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
-    Datum input = PG_GETARG_DATUM(0);
     const auto provenance = trace_provenance_for(input);
     const std::uint64_t trace_started =
         begin_slice_materialization_timing(provenance.attachment);
     Datum dispatch = input;
-    pgseq_t* flat_copy = nullptr;
+    bioseq::pg_types::seq* flat_copy = nullptr;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat_copy = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+        flat_copy = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
         dispatch = PointerGetDatum(flat_copy);
     }
     const auto descriptor = classify_and_describe_sequence(dispatch);
@@ -503,15 +559,17 @@ extern "C" PGDLLEXPORT Datum seq_out_impl(FunctionCallInfo fcinfo)
         }
     } else {
         with_pg_sequence_view<std::monostate>(
-            fcinfo, 0,
+            input,
             [output](auto view) {
                 view_to_ascii(view, output);
                 return std::monostate{};
             });
     }
     output[descriptor.bp_length] = '\0';
-    if (flat_copy != nullptr) {
-        PG_FREE_IF_COPY(flat_copy, 0);
+    if (flat_copy != nullptr
+        && reinterpret_cast<Pointer>(flat_copy)
+            != DatumGetPointer(input)) {
+        pfree(flat_copy);
     }
     record_slice_materialization_success(
         provenance.attachment, provenance.producer_value_id,
@@ -520,21 +578,20 @@ extern "C" PGDLLEXPORT Datum seq_out_impl(FunctionCallInfo fcinfo)
         descriptor.bp_length, descriptor.bp_length,
         descriptor.bp_length + 1u, false,
         descriptor.bp_length + 1u, trace_started);
-    PG_RETURN_CSTRING(output);
+    return output;
 }
 
-export [[nodiscard]] inline text* materialize_pg_sequence_text(
-    FunctionCallInfo fcinfo,
+[[nodiscard]] inline text* materialize_pg_sequence_text(
+    Datum input,
     materialization_reason reason)
 {
-    Datum input = PG_GETARG_DATUM(0);
     const auto provenance = trace_provenance_for(input);
     const std::uint64_t trace_started =
         begin_slice_materialization_timing(provenance.attachment);
     Datum dispatch = input;
-    pgseq_t* flat_copy = nullptr;
+    bioseq::pg_types::seq* flat_copy = nullptr;
     if (!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))) {
-        flat_copy = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+        flat_copy = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
         dispatch = PointerGetDatum(flat_copy);
     }
     const auto descriptor = classify_and_describe_sequence(dispatch);
@@ -564,14 +621,16 @@ export [[nodiscard]] inline text* materialize_pg_sequence_text(
         }
     } else {
         with_pg_sequence_view<std::monostate>(
-            fcinfo, 0,
+            input,
             [output](auto view) {
                 view_to_ascii(view, output);
                 return std::monostate{};
             });
     }
-    if (flat_copy != nullptr) {
-        PG_FREE_IF_COPY(flat_copy, 0);
+    if (flat_copy != nullptr
+        && reinterpret_cast<Pointer>(flat_copy)
+            != DatumGetPointer(input)) {
+        pfree(flat_copy);
     }
     record_slice_materialization_success(
         provenance.attachment, provenance.producer_value_id,
@@ -582,10 +641,27 @@ export [[nodiscard]] inline text* materialize_pg_sequence_text(
     return result;
 }
 
-extern "C" PGDLLEXPORT Datum seq_cast_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::cast({
+    .assignment = true,
+})]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+Datum seq_cast(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input,
+    std::int32_t target_typmod,
+    bool explicit_cast)
 {
-    Datum input = PG_GETARG_DATUM(0);
-    const int32_t target_typmod = PG_GETARG_INT32(1);
+    static_cast<void>(explicit_cast);
     const auto descriptor = classify_and_describe_sequence_header(input);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
@@ -593,7 +669,7 @@ extern "C" PGDLLEXPORT Datum seq_cast_impl(FunctionCallInfo fcinfo)
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
     if (target_typmod < 0) {
-        PG_RETURN_DATUM(input);
+        return input;
     }
     const auto target = decode_seq_typmod_checked(target_typmod);
     if (descriptor.alphabet_bound
@@ -605,7 +681,7 @@ extern "C" PGDLLEXPORT Datum seq_cast_impl(FunctionCallInfo fcinfo)
     if (descriptor.alphabet_bound
         && descriptor.storage_unit_byte_width
             == target.storage_unit_byte_width) {
-        PG_RETURN_DATUM(input);
+        return input;
     }
 
     if (VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(input))
@@ -622,22 +698,37 @@ extern "C" PGDLLEXPORT Datum seq_cast_impl(FunctionCallInfo fcinfo)
                     : bind_literals_copy_error_atomic(
                         arena, acquired.value->root, target, ledger);
             });
-        PG_RETURN_DATUM(pg_sequence_rw_datum(acquired.value));
+        return pg_sequence_rw_datum(acquired.value);
     }
 
-    auto* flat = reinterpret_cast<pgseq_t*>(PG_DETOAST_DATUM(input));
+    auto* flat = reinterpret_cast<bioseq::pg_types::seq*>(PG_DETOAST_DATUM(input));
     (void) classify_and_describe_sequence(PointerGetDatum(flat));
 
-    pgseq_t* result = pack_ascii_for_target(
+    bioseq::pg_types::seq* result = pack_ascii_for_target(
         reinterpret_cast<char const*>(flat->data),
         static_cast<std::size_t>(flat->bp_size), target);
-    PG_FREE_IF_COPY(flat, 0);
-    PG_RETURN_POINTER(result);
+    if (reinterpret_cast<Pointer>(flat) != DatumGetPointer(input)) {
+        pfree(flat);
+    }
+    return PointerGetDatum(result);
 }
 
-extern "C" PGDLLEXPORT Datum seq_send_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_send]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::pg::bytea,
+})]]
+text* seq_send(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
-    const Datum input = PG_GETARG_DATUM(0);
     const auto provenance = trace_provenance_for(input);
     const std::uint64_t trace_started =
         begin_slice_materialization_timing(provenance.attachment);
@@ -657,7 +748,7 @@ extern "C" PGDLLEXPORT Datum seq_send_impl(FunctionCallInfo fcinfo)
         std::uint64_t unit_count = 0u;
         std::uint16_t padding = 0u;
         if (descriptor.alphabet_bound) {
-            pgseq_t::dispatch_instance(
+            bioseq::pg_types::seq::dispatch_instance(
                 descriptor.alphabet_code,
                 descriptor.storage_unit_byte_width,
                 [descriptor, &unit_count, &padding]<class Instance>() {
@@ -725,9 +816,9 @@ extern "C" PGDLLEXPORT Datum seq_send_impl(FunctionCallInfo fcinfo)
                 &buffer, static_cast<std::uint32_t>(descriptor.bp_length));
             pq_sendint32(&buffer, static_cast<std::uint32_t>(unit_count));
             with_pg_sequence_view<std::monostate>(
-                fcinfo, 0,
+                input,
                 [&buffer, descriptor, unit_count](auto view) {
-                    pgseq_t::dispatch_instance(
+                    bioseq::pg_types::seq::dispatch_instance(
                         descriptor.alphabet_code,
                         descriptor.storage_unit_byte_width,
                         [&view, &buffer, descriptor,
@@ -747,11 +838,11 @@ extern "C" PGDLLEXPORT Datum seq_send_impl(FunctionCallInfo fcinfo)
             descriptor.bp_length, descriptor.bp_length,
             static_cast<std::uint64_t>(VARSIZE_ANY_EXHDR(result)), false,
             static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
-        PG_RETURN_BYTEA_P(result);
+        return result;
     }
 
     bool must_free = false;
-    pgseq_t* value = flatten_sequence_datum(
+    bioseq::pg_types::seq* value = flatten_sequence_datum(
         input, must_free);
     const auto descriptor = classify_and_describe_sequence(
         PointerGetDatum(value));
@@ -799,13 +890,28 @@ extern "C" PGDLLEXPORT Datum seq_send_impl(FunctionCallInfo fcinfo)
         descriptor.bp_length, descriptor.bp_length,
         static_cast<std::uint64_t>(VARSIZE_ANY_EXHDR(result)), false,
         static_cast<std::uint64_t>(VARSIZE(result)), trace_started);
-    PG_RETURN_BYTEA_P(result);
+    return result;
 }
 
-extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+[[bioseq_sql::type_receive]]
+[[bioseq_sql::result({
+    .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+})]]
+bioseq::pg_types::seq* seq_recv(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::pg::internal,
+    })]]
+    StringInfo buffer,
+    Oid type_oid,
+    std::int32_t typmod)
 {
-    auto* buffer = reinterpret_cast<StringInfo>(PG_GETARG_POINTER(0));
-    const int32_t typmod = PG_GETARG_INT32(2);
+    static_cast<void>(type_oid);
     const std::uint8_t alphabet =
         static_cast<std::uint8_t>(pq_getmsgint(buffer, 1));
     if (alphabet == pgseq_unbound_alphabet_code) {
@@ -819,18 +925,18 @@ extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
                      errmsg("invalid unbound bioseq.seq wire framing")));
         }
         const char* ascii = pq_getmsgbytes(buffer, static_cast<int>(length));
-        pgseq_t* unbound = allocate_unbound_ascii(
+        bioseq::pg_types::seq* unbound = allocate_unbound_ascii(
             ascii, length, /* already canonical */ true,
             ERRCODE_INVALID_BINARY_REPRESENTATION);
         pq_getmsgend(buffer);
         if (typmod < 0) {
-            PG_RETURN_POINTER(unbound);
+            return unbound;
         }
         const auto target = decode_seq_typmod_checked(typmod);
-        pgseq_t* packed = pack_ascii_for_target(
+        bioseq::pg_types::seq* packed = pack_ascii_for_target(
             reinterpret_cast<char const*>(unbound->data), length, target);
         pfree(unbound);
-        PG_RETURN_POINTER(packed);
+        return packed;
     }
 
     const auto width_code =
@@ -861,7 +967,7 @@ extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
     const std::uint64_t required =
         static_cast<std::uint64_t>(unit_count) * width;
     if (required > static_cast<std::uint64_t>(buffer->len - buffer->cursor)
-        || pgseq_t::header_bytes()
+        || bioseq::pg_types::seq::header_bytes()
                 + round_up_to_uint64(static_cast<std::size_t>(required))
             > MaxAllocSize) {
         ereport(ERROR,
@@ -869,7 +975,7 @@ extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
                  errmsg("invalid or oversized bound bioseq wire payload")));
     }
     bool metadata_ok = false;
-    pgseq_t::dispatch_instance(
+    bioseq::pg_types::seq::dispatch_instance(
         alphabet, width,
         [&metadata_ok, unit_count, padding, bp_size]<class Instance>() {
         using traits = typename compact_sequence_range<Instance>::traits;
@@ -886,12 +992,12 @@ extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
                 (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
                  errmsg("inconsistent bound bioseq wire length/padding")));
     }
-    pgseq_t* result = nullptr;
+    bioseq::pg_types::seq* result = nullptr;
     pgseq_supported_alphabets::dispatch_alphabet_by_code(
         alphabet,
         [&result, width, padding, bp_size, unit_count,
          buffer]<class Alphabet>() {
-            result = pgseq_t::convert_from<Alphabet>(
+            result = bioseq::pg_types::seq::convert_from<Alphabet>(
                 width, padding, bp_size, unit_count,
                 *buffer, pg_recv_byte_reader, pg_alloc);
         });
@@ -901,25 +1007,49 @@ extern "C" PGDLLEXPORT Datum seq_recv_impl(FunctionCallInfo fcinfo)
                  errmsg("out of memory receiving bioseq.seq")));
     }
     pq_getmsgend(buffer);
-    PG_RETURN_POINTER(result);
+    return result;
 }
 
-extern "C" PGDLLEXPORT Datum seq_len_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+/**
+ * @brief Length of a bioseq.seq value in biological symbols (residues).
+ * @ingroup bioseq_sql_public_api
+ */
+std::int64_t len(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
     const auto descriptor = classify_and_describe_sequence_header(
-        PG_GETARG_DATUM(0));
+        input);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot resolve a bioseq locator outside its owning table scan")));
     }
-    PG_RETURN_INT64(static_cast<int64_t>(descriptor.bp_length));
+    return static_cast<std::int64_t>(descriptor.bp_length);
 }
 
-extern "C" PGDLLEXPORT Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
+[[bioseq_sql::function({
+    .schema = bioseq::sql::fixed_schema<"bioseq">,
+    .create = bioseq::sql::create_mode::or_replace,
+    .volatility = bioseq::sql::volatility::immutable,
+    .parallel = bioseq::sql::parallel_safety::safe,
+})]]
+std::int64_t unit_len(
+    [[bioseq_sql::param({
+        .sql_type = bioseq::sql::type_of<bioseq::pg_types::seq>,
+    })]]
+    Datum input)
 {
     const auto descriptor = classify_and_describe_sequence_header(
-        PG_GETARG_DATUM(0));
+        input);
     if (descriptor.kind == pg_sequence_datum_kind::locator) {
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -927,7 +1057,7 @@ extern "C" PGDLLEXPORT Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
     }
     std::uint64_t units = descriptor.bp_length;
     if (descriptor.alphabet_bound) {
-        pgseq_t::dispatch_instance(
+        bioseq::pg_types::seq::dispatch_instance(
             descriptor.alphabet_code,
             descriptor.storage_unit_byte_width,
             [&units, descriptor]<class Instance>() {
@@ -936,5 +1066,7 @@ extern "C" PGDLLEXPORT Datum seq_unit_len_impl(FunctionCallInfo fcinfo)
                     descriptor.bp_length, traits::letters_per_unit);
             });
     }
-    PG_RETURN_INT64(static_cast<int64_t>(units));
+    return static_cast<std::int64_t>(units);
 }
+
+}  // namespace bioseq::pg_types::sql_routines

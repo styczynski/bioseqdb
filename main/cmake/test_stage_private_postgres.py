@@ -35,11 +35,12 @@ def _run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[st
     )
 
 
-def _write(path: Path, text: str, *, executable: bool = False) -> None:
+def _write(path: Path, text: str, *, executable: bool = False) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     if executable:
         path.chmod(path.stat().st_mode | 0o755)
+    return path
 
 
 def _sha256(path: Path) -> str:
@@ -294,6 +295,7 @@ def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
         cmake,
         "-DPG_CONFIG=" + str(pg_config),
         "-DSTAGE_ROOT=" + str(stage_root),
+        "-DSTAGE_PARENT=" + str(case_root),
         "-DCONTROL_FILE=" + str(control),
         "-DINSTALL_SQL=" + str(install_sql),
         "-DLIBRARY_FILE=" + str(library),
@@ -335,6 +337,72 @@ def _run_layout_case(cmake: str, stage_script: Path, scratch: Path,
     assert loaded.stdout == "fixture-module 84\n"
 
 
+def _run_symlink_parent_guard_case(
+    cmake: str,
+    stage_script: Path,
+    scratch: Path,
+) -> None:
+    case_root = scratch / "symlink-parent-guard"
+    candidate = case_root / "candidate"
+    candidate.mkdir(parents=True)
+    outside = case_root / "outside"
+    outside_stage = outside / "production"
+    outside_stage.mkdir(parents=True)
+    sentinel = _write(
+        outside_stage / "must-survive.txt",
+        "outside stage must not be deleted\n",
+    )
+    stage_parent = candidate / "stages"
+    stage_parent.symlink_to(outside, target_is_directory=True)
+
+    pg_config = case_root / "pg_config"
+    _write(
+        pg_config,
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "values = {\n"
+        f"  '--bindir': {str(case_root / 'source' / 'bin')!r},\n"
+        f"  '--sharedir': {str(case_root / 'source' / 'share')!r},\n"
+        f"  '--pkglibdir': {str(case_root / 'source' / 'lib')!r},\n"
+        "  '--version': 'PostgreSQL 17.10',\n"
+        "  '--configure': 'fixture',\n"
+        "}\n"
+        "print(values[sys.argv[1]])\n",
+        executable=True,
+    )
+    artifact_dir = case_root / "artifacts"
+    control = artifact_dir / "bioseq.control"
+    install_sql = artifact_dir / "bioseq--1.0.sql"
+    library = artifact_dir / "bioseq.so"
+    _write(control, "default_version = '1.0'\n")
+    _write(install_sql, "SELECT 1;\n")
+    _write(library, "fixture dso\n")
+
+    result = subprocess.run(
+        [
+            cmake,
+            "-DPG_CONFIG=" + str(pg_config),
+            "-DSTAGE_ROOT=" + str(stage_parent / "production"),
+            "-DSTAGE_PARENT=" + str(stage_parent),
+            "-DCONTROL_FILE=" + str(control),
+            "-DINSTALL_SQL=" + str(install_sql),
+            "-DLIBRARY_FILE=" + str(library),
+            "-DEXTENSION_VERSION=1.0",
+            "-DMANIFEST_OUT=" + str(case_root / "manifest.json"),
+            "-DHASH_OUT=" + str(case_root / "hash.txt"),
+            "-P",
+            str(stage_script),
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert result.returncode != 0, "symlinked stage parent must be rejected"
+    assert "STAGE_PARENT" in result.stderr
+    assert sentinel.read_text() == "outside stage must not be deleted\n"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cmake", default=shutil.which("cmake"))
@@ -348,6 +416,15 @@ def main() -> int:
     scratch.mkdir(parents=True)
     stage_script = Path(__file__).resolve().parent / "stage_private_postgres.cmake"
     failures = 0
+    try:
+        _run_symlink_parent_guard_case(args.cmake, stage_script, scratch)
+        print("ok - symlink-parent-guard")
+    except Exception as error:  # noqa: BLE001
+        failures += 1
+        print(
+            "not ok - symlink-parent-guard: "
+            f"{type(error).__name__}: {error}"
+        )
     for layout in ("nested-runtime", "split-homebrew"):
         try:
             _run_layout_case(args.cmake, stage_script, scratch, args.cc, layout)
@@ -355,7 +432,7 @@ def main() -> int:
         except Exception as error:  # noqa: BLE001
             failures += 1
             print(f"not ok - {layout}: {type(error).__name__}: {error}")
-    print(f"{2 - failures}/2 private-stage relocation tests passed")
+    print(f"{3 - failures}/3 private-stage relocation tests passed")
     return 1 if failures else 0
 
 
