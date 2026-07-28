@@ -425,9 +425,10 @@ def cell_environment(
     postgres_major: int,
     signing_key: str,
     toolchain_cache_dir: Path,
+    cmake_cache_dir: Path,
 ) -> dict[str, str]:
-    if not toolchain_cache_dir.is_absolute():
-        raise PackageBuildError("toolchain cache directory must be absolute")
+    if not toolchain_cache_dir.is_absolute() or not cmake_cache_dir.is_absolute():
+        raise PackageBuildError("toolchain and CMake cache directories must be absolute")
     environment = dict(base)
     environment.update(
         {
@@ -439,6 +440,7 @@ def cell_environment(
             "BIOSEQ_S3_REGION": region,
             "BIOSEQ_S3_PREFIX": prefix,
             "BIOSEQ_TOOLCHAIN_CACHE_DIR": str(toolchain_cache_dir),
+            "BIOSEQ_CMAKE_CACHE_DIR": str(cmake_cache_dir),
             "BIOSEQ_DEB_POSTGRES_RUNTIME": f"postgresql-{postgres_major}",
             "BIOSEQ_FEDORA_POSTGRES_RUNTIME": f"postgresql{postgres_major}-server",
             "BIOSEQ_OPENSUSE_POSTGRES_RUNTIME": f"postgresql{postgres_major}-server",
@@ -1017,7 +1019,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                         / distro
                         / f"postgresql{postgres_major}"
                     )
+                    cmake_cache_dir = (
+                        workspace_root
+                        / "caches"
+                        / "package-cmake"
+                        / distro
+                        / f"postgresql{postgres_major}"
+                    )
                     toolchain_cache_dir.mkdir(parents=True, exist_ok=True)
+                    cmake_cache_dir.mkdir(parents=True, exist_ok=True)
                     environment = cell_environment(
                         dict(os.environ),
                         architecture=args.architecture,
@@ -1027,6 +1037,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         postgres_major=postgres_major,
                         signing_key=signing_key,
                         toolchain_cache_dir=toolchain_cache_dir,
+                        cmake_cache_dir=cmake_cache_dir,
                     )
                     build_command = omnipackage_command(
                         omnipackage,

@@ -39,6 +39,7 @@ common: &common
   container_capabilities: [SYS_NICE]
   container_mounts:
     ${BIOSEQ_TOOLCHAIN_CACHE_DIR}: /opt/bioseq-package-toolchain
+    ${BIOSEQ_CMAKE_CACHE_DIR}: /opt/bioseq-package-cmake-cache
   before_build_script: >-
     BIOSEQ_POSTGRES_MAJOR=${BIOSEQ_POSTGRES_MAJOR}
     BIOSEQ_OPTTIMIZATION_LEVEL=0

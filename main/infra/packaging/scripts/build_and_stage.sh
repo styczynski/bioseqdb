@@ -11,10 +11,11 @@ die() {
   || die "every package build must explicitly set BIOSEQ_OPTTIMIZATION_LEVEL=0"
 
 readonly action="${1:-}"
-readonly build_dir="${2:-}"
+readonly package_metadata_dir="${2:-}"
+readonly build_dir=/opt/bioseq-package-cmake-cache/build
 [[ "${action}" == "build" || "${action}" == "install" ]] \
   || die "usage: build_and_stage.sh {build BUILD_DIR PG_MAJOR|install BUILD_DIR DESTDIR PG_MAJOR}"
-[[ -n "${build_dir}" ]] || die "build directory is required"
+[[ -n "${package_metadata_dir}" ]] || die "package metadata directory is required"
 
 if [[ "${action}" == "build" ]]; then
   readonly postgres_major="${3:-}"
@@ -92,8 +93,7 @@ export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
 
 if [[ "${action}" == "build" ]]; then
-  rm -rf "${build_dir}"
-  mkdir -p "${build_dir}"
+  mkdir -p "${build_dir}" "${package_metadata_dir}"
 
   python3 infra/packaging/scripts/prove_static_runtime.py \
     --cxx "${llvm_root}/bin/clang++" \
@@ -181,6 +181,6 @@ python3 infra/packaging/scripts/validate_package.py \
   --architecture "${expected_arch}"
 
 find "${destdir}" -type f -printf '/%P\n' | LC_ALL=C sort \
-  > "${build_dir}/package-files.list"
-[[ "$(wc -l < "${build_dir}/package-files.list")" == "6" ]] \
+  > "${package_metadata_dir}/package-files.list"
+[[ "$(wc -l < "${package_metadata_dir}/package-files.list")" == "6" ]] \
   || die "staged package must contain exactly the six extension artifacts"

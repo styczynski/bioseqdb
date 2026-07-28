@@ -122,6 +122,7 @@ class InputAndSigningTests(unittest.TestCase):
             postgres_major=17,
             signing_key="secret",
             toolchain_cache_dir=Path("/cache/opensuse/postgresql17"),
+            cmake_cache_dir=Path("/cache-cmake/opensuse/postgresql17"),
         )
         self.assertEqual(environment["BIOSEQ_OPTTIMIZATION_LEVEL"], "0")
         self.assertEqual(environment["BIOSEQ_PACKAGE_NAME"], "bioseq-postgresql17")
@@ -129,6 +130,10 @@ class InputAndSigningTests(unittest.TestCase):
         self.assertEqual(
             environment["BIOSEQ_TOOLCHAIN_CACHE_DIR"],
             "/cache/opensuse/postgresql17",
+        )
+        self.assertEqual(
+            environment["BIOSEQ_CMAKE_CACHE_DIR"],
+            "/cache-cmake/opensuse/postgresql17",
         )
 
     def test_cli_path_overrides_and_main_source_default(self):
@@ -418,6 +423,7 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("retain_packages: 0", config)
         self.assertIn("optimization_level: 0", config)
         self.assertIn("container_capabilities: [SYS_NICE]", config)
+        self.assertIn("${BIOSEQ_CMAKE_CACHE_DIR}: /opt/bioseq-package-cmake-cache", config)
         for distro in runner.SUPPORTED_DISTROS:
             self.assertIn(f"distro: {distro}", config)
 

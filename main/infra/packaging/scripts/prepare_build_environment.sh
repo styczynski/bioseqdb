@@ -14,6 +14,7 @@ readonly llvm_root="${tool_root}/llvm-${llvm_major}"
 readonly cmake_root="${tool_root}/cmake"
 readonly vcpkg_root="${tool_root}/vcpkg"
 readonly vcpkg_cache="${tool_root}/vcpkg-binary-cache"
+readonly cmake_cache_root=/opt/bioseq-package-cmake-cache
 
 die() {
   echo "bioseq package preparation: $*" >&2
@@ -253,6 +254,12 @@ install_vcpkg() {
 install_cmake
 install_llvm
 install_vcpkg
+
+# This bind mount lives on the builder's persistent EBS volume. Package tools
+# later drop privileges, so make the cell-specific cache traversable and
+# writable before rpmbuild/dpkg-buildpackage/makepkg starts.
+mkdir -p "${cmake_cache_root}/build"
+chmod -R a+rwX "${cmake_cache_root}"
 
 pg_config_path="$(BIOSEQ_POSTGRES_MAJOR="${BIOSEQ_POSTGRES_MAJOR}" \
   python3 /source/infra/packaging/scripts/resolve_pg_config.py)"
