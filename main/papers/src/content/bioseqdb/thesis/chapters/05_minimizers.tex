@@ -108,28 +108,45 @@ event-history contract rather than a single value per window.
 
 \begin{figure}[ht]
 \centering
-\begin{tikzpicture}[x=0.58cm,y=0.62cm,>=Latex,font=\small]
+\begin{tikzpicture}[
+  x=0.58cm,
+  y=0.62cm,
+  >=Latex,
+  font=\small,
+  hash/.style={draw,fill=gray!7,minimum width=.52cm,minimum height=.48cm,
+               inner sep=0pt},
+  event/.style={draw,rounded corners,fill=gray!8,align=center}
+]
   \foreach \i/\b in {0/A,1/C,2/G,3/T,4/A,5/C,6/C,7/G,8/T,9/A,10/G,11/T}
     \node[draw,minimum width=.52cm,minimum height=.52cm,inner sep=0pt]
-      at (\i,0) {\ttfamily\b};
+      at (\i,2.65) {\ttfamily\b};
   \foreach \i/\v in {0/8,1/3,2/7,3/3,4/9,5/6,6/2,7/5}
-    \node[font=\scriptsize] at (\i+1.5,-1.05) {$h_{\i}=\v$};
+    \node[hash,font=\scriptsize] at (\i+1.5,1.35) {$h_{\i}=\v$};
   \draw[decorate,decoration={brace,mirror,amplitude=3pt}]
-      (0,-.48)--(3,-.48) node[midway,below=4pt,font=\scriptsize] {$k=4$};
-  \draw[very thick,ForestGreen,rounded corners]
-      (-.28,-1.45) rectangle (4.28,-.72);
-  \draw[very thick,orange!85!black,rounded corners]
-      (.72,-2.20) rectangle (5.28,-1.47);
-  \draw[very thick,blue!70!black,rounded corners]
-      (1.72,-2.95) rectangle (6.28,-2.22);
-  \node[anchor=west,font=\scriptsize,ForestGreen] at (4.5,-1.08)
-      {$W_0=(8,3,7,3)$, tied minimum};
-  \node[anchor=west,font=\scriptsize,orange!85!black] at (5.5,-1.83)
-      {$W_1=(3,7,3,9)$};
-  \node[anchor=west,font=\scriptsize,blue!70!black] at (6.5,-2.58)
-      {$W_2=(7,3,9,6)$};
-  \draw[->,thick] (2.5,-3.25)--(2.5,-3.75);
-  \node[draw,rounded corners,fill=gray!8,align=center] at (5.5,-4.35)
+      (0,2.17)--(3,2.17)
+      node[midway,below=4pt,font=\scriptsize] {$k=4$};
+  \node[anchor=east,font=\scriptsize] at (1.0,1.35) {candidate hashes};
+
+  \foreach \x/\v in {1.5/8,2.5/3,3.5/7,4.5/3}
+    \node[hash,draw=ForestGreen,text=ForestGreen,font=\scriptsize]
+      at (\x,.35) {\v};
+  \node[anchor=west,font=\scriptsize,ForestGreen] at (5.0,.35)
+      {$W_0$: minimum \(3\), two distinct identities};
+
+  \foreach \x/\v in {2.5/3,3.5/7,4.5/3,5.5/9}
+    \node[hash,draw=orange!85!black,text=orange!85!black,font=\scriptsize]
+      at (\x,-.55) {\v};
+  \node[anchor=west,font=\scriptsize,orange!85!black] at (6.0,-.55)
+      {$W_1$: minimum \(3\)};
+
+  \foreach \x/\v in {3.5/7,4.5/3,5.5/9,6.5/6}
+    \node[hash,draw=blue!70!black,text=blue!70!black,font=\scriptsize]
+      at (\x,-1.45) {\v};
+  \node[anchor=west,font=\scriptsize,blue!70!black] at (7.0,-1.45)
+      {$W_2$: minimum \(3\)};
+
+  \draw[->,thick] (5.0,-1.85)--(5.0,-2.35);
+  \node[event] at (5.0,-2.95)
       {event stream, not one row per window:\\
        emit identities according to entering, expiry, and tie chronology};
 \end{tikzpicture}
@@ -240,11 +257,21 @@ semantics of the four retained reference and implementation routes.
 
 \begin{table}[ht]
 \centering
-\small
-\begin{tabularx}{\linewidth}{p{.19\linewidth}XXXX}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\linewidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.15\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X}
 \toprule
-Property & minimap2 \texttt{mm\_sketch} & BioSeqDB scalar / ExactSimd &
-PaperNtHashSimd & Vulkan Phase C\\
+Property &
+\shortstack[l]{minimap2\\\texttt{mm\_sketch}} &
+\shortstack[l]{BioSeqDB scalar\\and ExactSimd} &
+\shortstack[l]{PaperNtHashSimd} &
+\shortstack[l]{Vulkan Phase C}\\
 \midrule
 Candidate hash & canonical two-bit integer, Wang scramble &
 same legacy scheme & 32-bit rolling ntHash, wrapping forward+reverse sum &
@@ -344,23 +371,37 @@ data-dependent rescan for every crossing window.
 
 \begin{figure}[ht]
 \centering
-\begin{tikzpicture}[x=.70cm,y=.64cm,>=Latex,font=\scriptsize]
+\begin{tikzpicture}[
+  x=.70cm,
+  y=.64cm,
+  >=Latex,
+  font=\scriptsize,
+  value/.style={draw,minimum width=.62cm,minimum height=.52cm},
+  minimum/.style={draw,minimum width=.62cm,minimum height=.52cm}
+]
   \foreach \i/\v in {0/8,1/5,2/7,3/2,4/9,5/6,6/3,7/4}
-    \node[draw,minimum width=.62cm,minimum height=.52cm] (a\i) at (\i,0) {\v};
+    \node[value] (a\i) at (\i,.55) {\v};
   \draw[thick,blue!70!black] (-.38,.42)--(3.38,.42);
   \draw[thick,orange!85!black] (3.62,.42)--(7.38,.42);
-  \node[blue!70!black] at (1.5,.85) {previous block};
-  \node[orange!85!black] at (5.5,.85) {current block};
+  \node[blue!70!black] at (1.5,1.35) {previous block};
+  \node[orange!85!black] at (5.5,1.35) {current block};
+  \draw[densely dashed,gray!75] (3.5,1.05)--(3.5,-1.22);
+  \draw[very thick,ForestGreen,rounded corners]
+    (.58,.18) rectangle (4.42,.92);
+
+  \node[blue!70!black] at (1.5,-.18) {suffix minima \(Q_i\)};
   \foreach \i/\v in {0/2,1/2,2/2,3/2}
-    \node[fill=blue!10,minimum width=.62cm] at (\i,-.85) {$Q=\v$};
+    \node[minimum,fill=blue!10] (q\i) at (\i,-.75) {\v};
+  \node[orange!85!black] at (5.5,-.18) {prefix minima \(P_i\)};
   \foreach \i/\v in {4/9,5/6,6/3,7/3}
-    \node[fill=orange!12,minimum width=.62cm] at (\i,-.85) {$P=\v$};
-  \draw[decorate,decoration={brace,mirror,amplitude=4pt},very thick,ForestGreen]
-    (1,-1.35)--(4,-1.35)
-    node[midway,below=5pt,align=center] {crossing window\\
-      $\min(Q_1,P_4)=\min(2,9)=2$};
-  \draw[->,dashed] (1,-.55)--(1,-1.12);
-  \draw[->,dashed] (4,-.55)--(4,-1.12);
+    \node[minimum,fill=orange!12] (p\i) at (\i,-.75) {\v};
+
+  \node[draw=ForestGreen,very thick,rounded corners,fill=green!5,
+        align=center] (combine) at (3.5,-2.05)
+    {crossing window \(j=1,\ e=4\)\\
+     \(\min(Q_1,P_4)=\min(2,9)=2\)};
+  \draw[->,thick,blue!70!black] (q1.south) |- (combine.west);
+  \draw[->,thick,orange!85!black] (p4.south) |- (combine.east);
 \end{tikzpicture}
 \caption{The two-stack sliding minimum reconstructed from the
 SIMD-Minimizers paper \cite{groot_koerkamp_simd_minimizers_2025}. A suffix
@@ -664,10 +705,16 @@ not because a table lookup was dropped into a legacy index.
 Table~\ref{tab:minimizer-history} condenses the heterogeneous intermediate
 experiments without treating them as one common benchmark series.
 
-\begin{table}[ht]
+\begin{table}[htbp]
 \centering
-\small
-\begin{tabularx}{\linewidth}{p{.12\linewidth}p{.20\linewidth}Xr}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\linewidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.10\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.22\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.23\linewidth}}
 \toprule
 Checkpoint & Change & What was learned & Reported evidence\\
 \midrule
@@ -679,6 +726,28 @@ V3 & packed storage, smaller state & conversion removal helped but SIMD still
 lost end to end & 170.7 vs 158.4 ms at 903 kbp\\
 V4 & first two-stack route & regular control flow is necessary, not sufficient
 & 28.02 vs 14.31 ms sketch\\
+\bottomrule
+\end{tabularx}
+\caption{Selected historical milestones from DOC0107--DOC0120 and DOC0118.
+Rows are deliberately heterogeneous: the table reports what each experiment
+measured, not a fabricated common benchmark series.}
+\label{tab:minimizer-history}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.15}
+\textit{Table~\ref{tab:minimizer-history}, continued.}\par\smallskip
+\begin{tabularx}{\linewidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.10\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.22\linewidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}p{.23\linewidth}}
+\toprule
+Checkpoint & Change & What was learned & Reported evidence\\
+\midrule
 V8--V12 & deferred work, two streams, forced inline & callback shape and
 independent streams materially affect NEON & inner phase $\sim9.23$ ms\\
 V13 & sort-free error estimate & a minimizer project can be dominated by the
@@ -687,10 +756,6 @@ V14 & true ntHash experiment & changing hash has both sketch and lookup costs &
 $+2.0$ ms sketch, $-0.38$ ms lookup\\
 \bottomrule
 \end{tabularx}
-\caption{Selected historical milestones from DOC0107--DOC0120 and DOC0118.
-Rows are deliberately heterogeneous: the table reports what each experiment
-measured, not a fabricated common benchmark series.}
-\label{tab:minimizer-history}
 \end{table}
 
 \section{Current BioSeqDB minimizer backends}
@@ -937,11 +1002,21 @@ optimization collapsed effective entropy to roughly 14 bits and was reverted.
 \centering
 \caption{Contracts of the paper-derived and compatibility collectors.}
 \label{tab:pnt1-contract}
-\small
-\begin{tabularx}{\textwidth}{p{0.19\textwidth}XXXX}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.12}
+\begin{tabularx}{\textwidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{0.15\textwidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X
+  >{\raggedright\arraybackslash\hspace{0pt}}X}
 \toprule
-Property & SIMD-Minimizers reference & BioSeqDB PNT1 & BioSeqDB ExactSimd &
-Historical resident V13 \\
+Property &
+\shortstack[l]{SIMD-Minimizers\\reference} &
+\shortstack[l]{BioSeqDB\\PNT1} &
+\shortstack[l]{BioSeqDB\\ExactSimd} &
+\shortstack[l]{Historical\\resident V13} \\
 \midrule
 Hash family & rolling ntHash, 16-bit packed key & rolling ntHash-derived,
 32-bit scheme key & minimap2 integer scramble & lexicographic/prefix
@@ -1148,8 +1223,9 @@ ownership.
           \item If this tile owns sequence end and the final minimum is live,
             count or emit that minimum.
         \end{enumerate}
-      \item If the pass is \textsc{count}, exclusive-scan tile counts and
-        allocate the counted output.
+      \vspace{0.25\baselineskip}
+      \item After all tiles have completed, if the pass is \textsc{count},
+        exclusive-scan tile counts and allocate the counted output.
     \end{enumerate}
 \end{enumerate}
 \end{algorithm}
@@ -1406,6 +1482,7 @@ precedes backend admission and fail-closed execution.
 
 \begin{figure}[htbp]
 \centering
+\resizebox{0.98\linewidth}{!}{%
 \begin{tikzpicture}[
   font=\small,
   >=Latex,
@@ -1442,6 +1519,7 @@ precedes backend admission and fail-closed execution.
   \draw[->,dashed,red!70!black] (exact.south) -- (runtimefail);
   \draw[->,dashed,red!70!black] (vk.south) |- (runtimefail.east);
 \end{tikzpicture}
+}
 \caption{Backend selection is subordinate to the persisted scheme and
 admission proofs. A planner may choose Scalar explicitly before selecting
 ExactSimd because both implement the minimap-compatible scheme. PNT1 proof
@@ -1497,61 +1575,86 @@ identifiers were used to decide what the implementation is now.
 \centering
 \caption{Primary implementation evidence for minimizer extraction.}
 \label{tab:minimizer-source-map}
-\footnotesize
-\begin{tabularx}{\textwidth}{p{0.32\textwidth}p{0.16\textwidth}X}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.14}
+\begin{tabularx}{\textwidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{0.34\textwidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}p{0.15\textwidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X}
 \toprule
 Source & Lines inspected & Evidence \\
 \midrule
-\texttt{main/bioseq/backend/sequences/kmers/index.cppm} &
+\path{main/bioseq/backend/sequences/kmers/index.cppm} &
 70--220 and 776--968 &
 layout widths, persisted sketch fields, backend enumeration, scalar oracle,
 ambiguity and tie/final-event rules \\
-\texttt{main/bioseq/backend/sequences/kmers/two\_stacks\_minimizers.cppm} &
+\path{main/bioseq/backend/sequences/kmers/two_stacks_minimizers.cppm} &
 557--629, 2367--3435, 4036--4085, and 5461--6020 &
 Exact continuation proofs, exact B8 path, bounded PNT1 execution, resident
 control, and current pipeline routing \\
-\texttt{main/bioseq/backend/pipeline/minimap\_port.cppm} &
+\path{main/bioseq/backend/pipeline/minimap_port.cppm} &
 168--176 and 672--676 &
 \texttt{TWO\_STACK\_NTHASH} production-role label and Scalar
 \texttt{Minimap2Params} initializer \\
-\texttt{main/bioseq/backend/config/aligner\_sql\_guc\_settings.cppm} and
-\texttt{main/bioseq/backend/pipeline/pipe.cppm} &
+\path{main/bioseq/backend/config/aligner_sql_guc_settings.cppm}\par
+\emph{and}\par
+\path{main/bioseq/backend/pipeline/pipe.cppm} &
 173--178 and 5224--5228 &
 Scalar PostgreSQL GUC initializer and explicit
 \texttt{TWO\_STACK\_NTHASH}-to-ExactSimd mapping \\
-\texttt{main/bench/bench\_e2e\_configuration.json} &
+\path{main/bench/bench_e2e_configuration.json} &
 14--23 and 120--121 &
 named benchmark configurations that select the two-stack route explicitly \\
-\texttt{main/bioseq/backend/sequences/indexing/minimizer\_hashmap\_index.cppm} &
+\path{main/bioseq/backend/sequences/indexing/minimizer_hashmap_index.cppm} &
 484--490, 689--785, 825--870, 21738--21921 &
 kernel proof magic, persisted scheme pair, contiguous PNT1 admission, MPF halo
 ownership, and canonical sort/unique \\
-\texttt{main/bioseq/backend/sequences/kmers/minimizers\_vulkan.cppm} &
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\renewcommand{\arraystretch}{1.14}
+\textit{Table~\ref{tab:minimizer-source-map}, continued.}\par\smallskip
+\begin{tabularx}{\textwidth}{
+  >{\raggedright\arraybackslash\hspace{0pt}}p{0.34\textwidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}p{0.15\textwidth}
+  >{\raggedright\arraybackslash\hspace{0pt}}X}
+\toprule
+Source & Lines inspected & Evidence \\
+\midrule
+\path{main/bioseq/backend/sequences/kmers/minimizers_vulkan.cppm} &
 planner and dispatch regions &
 tile preparation, buffer protocol, dispatch, and supported representation
 admission \\
-\texttt{main/bioseq/backend/sequences/kmers/minimizers\_vulkan\_test.cpp} &
+\path{main/bioseq/backend/sequences/kmers/minimizers_vulkan_test.cpp} &
 232--279, 1425--1560, 2971--2992, and 3045--3128 &
 exact dna4 oracle checks and subset with bounded-extra checks for dna5 and the
 tested dna5/u8-packing route, including the sorted-pair API \\
-\texttt{main/bioseq/backend/gpu/vulkan/phase\_c\_abi.cppm} &
+\path{main/bioseq/backend/gpu/vulkan/phase_c_abi.cppm} &
 1438--1584 &
 descriptor layout, replay/span bounds, and Phase C proof obligations \\
-\texttt{main/bioseq/backend/gpu/vulkan/shader\_compiler.cppm} &
+\path{main/bioseq/backend/gpu/vulkan/shader_compiler.cppm} &
 866--1268 &
 generated count/emit and atomic-append modes, rolling hash, sentinel reset
 logic, and ownership filter \\
-\texttt{main/bioseq/backend/gpu/vulkan/runtime.cppm} &
+\path{main/bioseq/backend/gpu/vulkan/runtime.cppm} &
 14232--14515 &
 independent sorted-pair API, global append capacity, and stable device sort \\
-\texttt{main/bench/tool\_minimap2/minimap2/sketch.c} &
+\path{main/bench/tool_minimap2/minimap2/sketch.c} &
 100--174 &
 upstream rolling state, palindrome handling, rightmost ties, duplicate events,
 ambiguity reset, and final flush \\
-\texttt{simd-minimizers-master/src/} &
-\texttt{canonical.rs}, \texttt{minimizers.rs}, \texttt{sliding\_min.rs} &
+\path{simd-minimizers-master/src/} &
+\path{canonical.rs}, \path{minimizers.rs}, \path{sliding_min.rs} &
 eight-stream canonical orientation and packed prefix/suffix minima \\
-\texttt{G3SA-main/minimap2/} and \texttt{G3SA-main/g3sa\_paper.pdf} &
+\path{G3SA-main/minimap2/}\par
+\emph{and}\par
+\path{G3SA-main/g3sa_paper.pdf} &
 sketch kernel and method &
 CUDA block/read mapping, 128-base tiling, character input, and resident GPU
 pipeline comparison \\
