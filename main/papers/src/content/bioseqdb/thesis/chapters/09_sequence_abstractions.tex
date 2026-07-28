@@ -599,7 +599,8 @@ The exact PostgreSQL profile is in
 \path{main/bioseq/backend/pg/types/compact_sequence/flat_abi.cppm}.
 At optimization profile 0, \texttt{pgseq\_supported\_alphabets} contains only
 DNA4.  Higher profiles add DNA5.  Profiles 0 and 1 enable only an eight-byte
-physical unit, while profile 2 enables \(\{1,2,4,8\}\).  SQL width requests
+physical unit, while every profile at level 2 or higher enables
+\(\{1,2,4,8\}\).  SQL width requests
 are validated and normalized through this policy.  Consequently the symbol
 named in some older design notes as \texttt{pg\_supported\_sequences<>} is not
 the implemented abstraction.  The current aliases are

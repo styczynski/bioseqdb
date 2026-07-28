@@ -925,26 +925,39 @@ The corrective design therefore attacks both axes:
 \label{sec:index-residency}
 
 Cold persistence does not imply that every query must reread every selected
-chunk. The PostgreSQL backend maintains two bounded LRU caches:
+chunk. The PostgreSQL residency module defines two bounded LRU container
+types:
 
 \begin{itemize}
-  \item a chunk cache of at most 256 entries and 2 GiB.
-  \item an assembled-index cache of at most 32 entries and 4 GiB.
+  \item a chunk cache of at most 256 entries and 2 GiB;
+  \item an assembled-index cache implementation of at most 32 entries and
+        4 GiB.
 \end{itemize}
 
-A chunk key includes the full relation and index identity, bucket, shard,
-query key, sub-key, and chunk number. An assembled key additionally includes
-backend/format shape, scheme, query signature, and clip interval. Values hold
-memory permits for their resident bytes. The key breadth is intentional: a
-cache entry must not survive a source generation or algorithm change merely
-because a short SQL name remains equal.
+Only the first container is wired into the current production relation reader,
+through \texttt{lookup\_cached\_chunk} and
+\texttt{store\_cached\_chunk}. The assembled-index lookup and store functions
+exist in \texttt{index\_residency\_pg.cppm}, but their only current callers are
+inside the explicitly revoked revision-3 generation-storage test fixture.
+Consequently this source snapshot does not provide a warm assembled-index hit
+to a production query.
 
-Transaction, subtransaction, and relcache callbacks maintain coherence. A
-write recorded in an aborted transaction is evicted. Commit marks eligible
-entries stable. Relation invalidation and explicit index-identity invalidation
-remove affected entries. This is a backend-local acceleration, not a
-cross-backend consistency mechanism: PostgreSQL snapshots and generation
-descriptors remain authoritative.
+A chunk key includes the full relation and index identity, bucket, shard,
+query key, sub-key, and chunk number. The dormant
+\texttt{AssembledIndexKey} contains relation identity and the index-name hash,
+sketch backend, minimizer-scheme identifier and version, query key and
+signature, and clip interval. It has no separate persisted-format or
+generation discriminator. Both value types hold memory permits for their
+resident bytes.
+
+Transaction and subtransaction callbacks manage chunk entries written in the
+current transaction: abort evicts them and commit clears their transient
+markers. Relcache and explicit index-identity invalidation remove affected
+entries from both containers. For production reads these coherence properties
+currently apply to the wired chunk cache; assembled-cache behavior remains a
+fixture-level proof. This is backend-local acceleration, not a cross-backend
+consistency mechanism: PostgreSQL snapshots and generation descriptors remain
+authoritative.
 
 GPU residency follows the same idea at a different boundary. The Phase-B
 implementation assembled a GPU view from existing serialized buckets and
@@ -1037,8 +1050,8 @@ usable. This distinction is essential to benchmarks. The \texttt{no\_index}
 case should prove that absence was required. The \texttt{just\_index} case
 should prove that a compatible persisted generation was used and that
 construction was outside the measured region. A fast row without these
-attestations can be a recomputation result, a warm assembled cache, or a
-different algorithm.
+attestations can instead reflect recomputation, a warm chunk or operating-system
+page cache, or a different algorithm.
 
 The default active read name is MPF. Stored MPF is assembled from fragment
 images under the checked-in legacy default. In grouped mode it is consumed

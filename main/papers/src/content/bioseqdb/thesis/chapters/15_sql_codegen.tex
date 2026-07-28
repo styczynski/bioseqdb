@@ -374,9 +374,13 @@ generator interface built under the prescribed GCC and libstdc++ configuration
 would not serialize Clang implementation types, while the Clang structural pass
 still has the AST and token information needed for exact collection.  The
 executed local qualification is narrower.  SQL structural collection uses the
-configured, pinned Clang path, and DOC0388 explicitly records no local GCC
-compilation proof.  GCC compatibility is therefore a design and sealed-toolchain
-requirement rather than a locally demonstrated build result.
+configured, pinned Clang path.  The 23 July 2026 direct-annotation review,
+\texttt{DOC0389}, explicitly records no local GCC compilation
+proof.\footnote{\texttt{DOC0389}, ``DOC0388 direct SQL annotation correction
+review,'' 23 July 2026,
+\path{main/DOCS/CURRENT/REPORTS/0389_DOC0388_DIRECT_SQL_ANNOTATION_CORRECTION_REVIEW.md}.}
+GCC compatibility is therefore a design and sealed-toolchain requirement
+rather than a locally demonstrated build result.
 
 \section{Collection and normalized identities}
 \label{sec:sql-codegen-ir}
@@ -806,20 +810,32 @@ they cannot establish a retrospective migration speedup.
 
 \subsection{What changed from the original boundary}
 
-The migration began from a 3,502-line handwritten SQL baseline.  The final
-checked script contains 3,504 lines.  Line count is not the success measure.
+The 23 July 2026 \texttt{DOC0389} direct-annotation review records the
+3,502-line handwritten SQL baseline.  The final 27 July 2026
+\texttt{DOC0390} implementation summary records a checked script containing
+3,504 lines.\footnote{\texttt{DOC0389}, ``DOC0388 direct SQL annotation
+correction review,'' 23 July 2026,
+\path{main/DOCS/CURRENT/REPORTS/0389_DOC0388_DIRECT_SQL_ANNOTATION_CORRECTION_REVIEW.md};
+\texttt{DOC0390}, ``DOC0388 C-Driven PostgreSQL Extension SQL and Boundary Code
+Generation Implementation Summary,'' 27 July 2026,
+\path{main/DOCS/CURRENT/REPORTS/0390_DOC0388_C_DRIVEN_POSTGRESQL_EXTENSION_SQL_AND_BOUNDARY_CODE_GENERATION_IMPLEMENTATION_SUMMARY.md}.}
+Line count is not the success measure.
 The important change is authority: the final SQL is a deterministic projection
 of typed owners, while its physical order and approved compatibility choices
 remain reviewable.  Table~\ref{tab:sql-codegen-migration} summarizes the
 transition.
 
-The lazy-sequence implementation summary recorded 64 centralized but still
-handwritten SQL wrappers and a retained non-module C ABI exception bridge.  The
-corrective SQL-generation inventory then enumerated 270 target C-language
-routine identities and required all 494 input parameters to use their C++
-identifiers, including 309 formerly anonymous inputs.  The migration therefore
-converted implicit signature and ownership facts into checked graph data
-rather than merely changing where wrapper text was printed.
+The 23 July 2026 lazy-sequence implementation summary recorded 64 centralized
+but still handwritten SQL wrappers and a retained non-module C ABI exception
+bridge.\footnote{``DOC0377 Final Implementation Summary: Lazy Sequence Slicing,
+Letters, Concatenation, Reversal, and Materialization,'' 23 July 2026,
+\path{main/DOCS/CURRENT/REPORTS/0388_DOC0377_LAZY_SEQUENCE_SLICING_IMPLEMENTATION_SUMMARY.md}.}
+The uniquely identified \texttt{DOC0389} direct-annotation review then
+enumerated 270 target C-language routine identities and required all 494 input
+parameters to use their C++ identifiers, including 309 formerly anonymous
+inputs.  The migration therefore converted implicit signature and ownership
+facts into checked graph data rather than merely changing where wrapper text
+was printed.
 
 \begin{table}[htbp]
 \centering
@@ -886,7 +902,9 @@ text.
 
 \subsection{Checked artifact and test evidence}
 
-The final \texttt{bioseq--1.0.sql} has SHA-256
+The following final qualification evidence is recorded by the dated
+\texttt{DOC0390} implementation summary cited above.  The final
+\texttt{bioseq--1.0.sql} has SHA-256
 \texttt{c0a26b78c00cb7db}\allowbreak
 \texttt{ec4ed4f5a8ccbd14}\allowbreak
 \texttt{8cf01f1edda1475c}\allowbreak
