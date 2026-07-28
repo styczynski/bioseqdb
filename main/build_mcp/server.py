@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """bioseq build MCP server.
 
-Speaks MCP (JSON-RPC 2.0 over stdio) with zero external dependencies — only
-the Python stdlib. Exposes two tools:
-
-    start_build(mode)    schedule a build/test/bench run
-    status(mode)         report progress, predicted finish, log + report paths
-
-For modes list see MODES dict.
+Speaks MCP (JSON-RPC 2.0 over stdio) with zero Python-package dependencies —
+only the stdlib. It exposes local and remote build/test/benchmark tools,
+binary inspection, project-document operations, subagent orchestration, and a
+paper-specific CMake/PDF review pipeline. For build modes, see ``MODES``.
 
 Concurrency rules:
     - At most one run per "lock group" at a time.
@@ -24,6 +21,7 @@ Architecture:
     - Run with no args → MCP server on stdin/stdout.
     - Run with `--run-build <mode>` → detached build worker (this is what the
       server spawns; the worker is *not* meant to be invoked manually).
+    - Run with `--run-papers-build` → detached thesis CMake worker.
     - Build state lives in /tmp/bioseq_build_mcp_state.json.
     - Per-run logs live in /tmp/bioseq_build_mcp_<mode>_<timestamp>.log.
     - Builds are detached via start_new_session=True so they survive Claude
@@ -62,6 +60,7 @@ import sys
 import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -348,6 +347,17 @@ LOCK_FILE = Path("/tmp/bioseq_build_mcp.lock")
 SQL_GUARDRAIL_PUBLICATION_LEDGER = Path(
     "/tmp/bioseq_sql_guardrail_publications.json")
 LOG_DIR = Path("/tmp")
+PAPERS_BUILD_STATE_KEY = "papers-build"
+PAPERS_DIR = PROJECT_ROOT / "papers"
+PAPERS_BUILD_DIR = PAPERS_DIR / "build"
+PAPERS_TARGET = "bioseqdb_thesis"
+PAPERS_PDF_PATH = PAPERS_DIR / "pdf" / f"{PAPERS_TARGET}.pdf"
+PAPERS_LATEX_LOG_PATH = (
+    PAPERS_BUILD_DIR / PAPERS_TARGET / "_assembly" / "main.log")
+PAPERS_INSPECT_ROOT = Path("/tmp/bioseq_papers_inspect")
+PAPERS_BUILD_HARD_TIMEOUT_SEC = 30 * 60.0
+PAPERS_INSPECT_MAX_OVERVIEW_PAGES = 80
+PAPERS_INSPECT_MAX_EMBED_BYTES = 8 * 1024 * 1024
 
 # Local machine policy for compiler-only realtime scheduling.  The enablement
 # key is read exclusively from the root-owned /etc/environment; an MCP process
@@ -6851,6 +6861,737 @@ def tool_status(mode: str) -> str:
             f"{focus_suffix} Log: {log_path}")
 
 
+def _sha256_file(path: Path) -> str:
+    """Return a streaming SHA-256 digest for a regular file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _papers_build_payload(entry: dict) -> dict:
+    """Create the stable JSON response shared by start and status actions."""
+    payload = {
+        "tool": "papers-build",
+        "status": entry.get("status", "unknown"),
+        "step": entry.get("step", "unknown"),
+        "target": PAPERS_TARGET,
+        "source_dir": str(PAPERS_DIR),
+        "build_dir": str(PAPERS_BUILD_DIR),
+        "pdf_path": str(PAPERS_PDF_PATH),
+        "log_path": entry.get("log_file"),
+        "pid": entry.get("pid"),
+        "started_at": entry.get("started_at"),
+        "completed_at": entry.get("completed_at"),
+        "exit_code": entry.get("exit_code"),
+        "notes": entry.get("notes"),
+        "configure_command": entry.get("configure_command"),
+        "build_command": entry.get("build_command"),
+    }
+    started_at = entry.get("started_at")
+    completed_at = entry.get("completed_at")
+    if isinstance(started_at, (int, float)):
+        payload["elapsed_seconds"] = round(
+            (completed_at or time.time()) - started_at, 3)
+    if PAPERS_PDF_PATH.is_file():
+        metadata = PAPERS_PDF_PATH.stat()
+        payload["pdf"] = {
+            "path": str(PAPERS_PDF_PATH),
+            "bytes": metadata.st_size,
+            "modified_at": metadata.st_mtime,
+            "sha256": _sha256_file(PAPERS_PDF_PATH),
+            "updated_during_current_run": (
+                not isinstance(started_at, (int, float))
+                or metadata.st_mtime >= started_at
+            ),
+            "validated_by_current_run": (
+                entry.get("status") == "completed"
+                and entry.get("exit_code") == 0
+            ),
+        }
+    if entry.get("status") in {
+            "completed", "failed", "aborted", "killed_timeout"}:
+        payload["log_tail"] = _tail_path(entry.get("log_file"), 80)
+    return payload
+
+
+def _run_papers_build_worker() -> int:
+    """Configure the papers CMake project and build only the thesis target."""
+    state = _load_state()
+    entry = state.get(PAPERS_BUILD_STATE_KEY)
+    if not entry:
+        _log("papers worker: no reserved state entry, exiting")
+        return 1
+
+    started_at = float(entry["started_at"])
+    deadline = started_at + PAPERS_BUILD_HARD_TIMEOUT_SEC
+    log_path = Path(entry["log_file"])
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("a", encoding="utf-8")
+    cmake = shutil.which("cmake")
+    try:
+        identity_error = _refuse_root_build_identity(
+            "detached papers build worker")
+        if identity_error is not None:
+            raise RuntimeError(identity_error)
+        _ensure_build_worker_timesharing_policy()
+        if cmake is None:
+            raise RuntimeError("cmake was not found on PATH")
+        if not (PAPERS_DIR / "CMakeLists.txt").is_file():
+            raise RuntimeError(
+                f"paper CMake project is missing: {PAPERS_DIR / 'CMakeLists.txt'}")
+
+        configure_command = [
+            cmake,
+            "-S", str(PAPERS_DIR),
+            "-B", str(PAPERS_BUILD_DIR),
+        ]
+        build_command = [
+            cmake,
+            "--build", str(PAPERS_BUILD_DIR),
+            "--target", PAPERS_TARGET,
+            "--parallel", str(CMAKE_PARALLEL_JOBS),
+        ]
+        log_handle.write(
+            f"# papers-build started_at={started_at}\n"
+            f"# source={PAPERS_DIR}\n"
+            f"# build={PAPERS_BUILD_DIR}\n"
+            f"# target={PAPERS_TARGET}\n"
+            f"# configure={shlex.join(configure_command)}\n"
+            f"# build_command={shlex.join(build_command)}\n")
+        log_handle.flush()
+
+        _update_entry(
+            PAPERS_BUILD_STATE_KEY,
+            status="running",
+            step="configuring",
+            configure_command=configure_command,
+            build_command=build_command,
+        )
+        configure_rc = _stream_subprocess(
+            configure_command, log_handle, deadline, cwd=PAPERS_DIR)
+        if configure_rc != 0:
+            raise RuntimeError(
+                f"CMake configure exited with code {configure_rc}")
+
+        _update_entry(
+            PAPERS_BUILD_STATE_KEY,
+            status="running",
+            step=f"building target {PAPERS_TARGET}",
+        )
+        build_rc = _stream_subprocess(
+            build_command, log_handle, deadline, cwd=PAPERS_DIR)
+        if build_rc != 0:
+            raise RuntimeError(
+                f"CMake target {PAPERS_TARGET!r} exited with code {build_rc}")
+        if not PAPERS_PDF_PATH.is_file():
+            raise RuntimeError(
+                f"CMake completed but did not produce {PAPERS_PDF_PATH}")
+        if PAPERS_PDF_PATH.stat().st_size == 0:
+            raise RuntimeError(
+                f"CMake produced an empty PDF: {PAPERS_PDF_PATH}")
+
+        completed_at = time.time()
+        _update_entry(
+            PAPERS_BUILD_STATE_KEY,
+            status="completed",
+            step="completed",
+            completed_at=completed_at,
+            exit_code=0,
+            notes=None,
+            pdf_sha256=_sha256_file(PAPERS_PDF_PATH),
+            pdf_bytes=PAPERS_PDF_PATH.stat().st_size,
+        )
+        log_handle.write(
+            f"\n# papers-build completed_at={completed_at}\n"
+            f"# pdf={PAPERS_PDF_PATH}\n")
+        return 0
+    except TimeoutError as exc:
+        completed_at = time.time()
+        _update_entry(
+            PAPERS_BUILD_STATE_KEY,
+            status="killed_timeout",
+            step="killed_timeout",
+            completed_at=completed_at,
+            exit_code=124,
+            notes=str(exc),
+        )
+        log_handle.write(f"\n# papers-build timed out: {exc}\n")
+        return 124
+    except Exception as exc:
+        completed_at = time.time()
+        _update_entry(
+            PAPERS_BUILD_STATE_KEY,
+            status="failed",
+            step="failed",
+            completed_at=completed_at,
+            exit_code=1,
+            notes=str(exc),
+        )
+        log_handle.write(f"\n# papers-build failed: {exc}\n")
+        return 1
+    finally:
+        log_handle.close()
+
+
+def tool_papers_build(arguments: dict) -> str:
+    """Start or poll the detached thesis CMake build."""
+    action = arguments.get("action", "start")
+    if action not in {"start", "status"}:
+        return json.dumps({
+            "tool": "papers-build",
+            "status": "error",
+            "error": "action must be 'start' or 'status'",
+        }, indent=2)
+
+    with _global_lock():
+        state = _load_state()
+        entry = _refresh(state, PAPERS_BUILD_STATE_KEY)
+        if action == "status":
+            if entry is None:
+                return json.dumps({
+                    "tool": "papers-build",
+                    "status": "never_scheduled",
+                    "hint": "Call papers-build with action='start'.",
+                }, indent=2)
+            return json.dumps(_papers_build_payload(entry), indent=2)
+
+        if entry is not None and entry.get("status") == "running":
+            return json.dumps(_papers_build_payload(entry), indent=2)
+
+        started_at = time.time()
+        timestamp = time.strftime(
+            "%Y%m%d-%H%M%S", time.localtime(started_at))
+        log_path = LOG_DIR / (
+            f"bioseq_build_mcp_papers_{timestamp}_"
+            f"{secrets.token_hex(3)}.log")
+        state[PAPERS_BUILD_STATE_KEY] = {
+            "mode": PAPERS_BUILD_STATE_KEY,
+            "status": "running",
+            "step": "spawning",
+            "started_at": started_at,
+            "completed_at": None,
+            "pid": os.getpid(),
+            "log_file": str(log_path),
+            "exit_code": None,
+            "notes": None,
+            "target": PAPERS_TARGET,
+            "source_dir": str(PAPERS_DIR),
+            "build_dir": str(PAPERS_BUILD_DIR),
+            "pdf_path": str(PAPERS_PDF_PATH),
+        }
+        _save_state(state)
+
+        server_path = Path(__file__).resolve()
+        worker_environment = dict(os.environ)
+        worker_environment["BIOSEQ_DOCS_AUTOSTART"] = "0"
+        try:
+            process = subprocess.Popen(
+                [sys.executable, str(server_path), "--run-papers-build"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+                env=worker_environment,
+            )
+        except OSError as exc:
+            current = _load_state()
+            current[PAPERS_BUILD_STATE_KEY] = {
+                **state[PAPERS_BUILD_STATE_KEY],
+                "status": "failed",
+                "step": "spawn_failed",
+                "completed_at": time.time(),
+                "exit_code": 1,
+                "notes": str(exc),
+            }
+            _save_state(current)
+            return json.dumps(
+                _papers_build_payload(current[PAPERS_BUILD_STATE_KEY]),
+                indent=2,
+            )
+
+        current = _load_state()
+        current[PAPERS_BUILD_STATE_KEY]["pid"] = process.pid
+        _save_state(current)
+        entry = current[PAPERS_BUILD_STATE_KEY]
+        _log(
+            f"started papers worker pid={process.pid} "
+            f"target={PAPERS_TARGET} log={log_path}")
+        return json.dumps(_papers_build_payload(entry), indent=2)
+
+
+def _run_capture(command: list[str], *, timeout: float = 60.0) -> dict:
+    """Run a bounded read-only PDF helper and retain its exact diagnostics."""
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "command": command,
+            "exit_code": None,
+            "stdout": "",
+            "stderr": str(exc),
+        }
+    return {
+        "command": command,
+        "exit_code": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def _papers_pdf_info(pdf_path: Path) -> tuple[dict, dict]:
+    """Return parsed `pdfinfo` fields and the underlying command result."""
+    executable = shutil.which("pdfinfo")
+    if executable is None:
+        return {}, {
+            "command": ["pdfinfo", str(pdf_path)],
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "pdfinfo was not found on PATH",
+        }
+    result = _run_capture([executable, str(pdf_path)])
+    fields = {}
+    if result["exit_code"] == 0:
+        for line in result["stdout"].splitlines():
+            key, separator, value = line.partition(":")
+            if separator:
+                fields[key.strip()] = value.strip()
+    return fields, result
+
+
+def _papers_log_diagnostics(log_path: Path) -> dict:
+    """Extract layout and reference warnings from the final LuaLaTeX log."""
+    if not log_path.is_file():
+        return {
+            "path": str(log_path),
+            "available": False,
+            "overfull_boxes": [],
+            "underfull_box_count": 0,
+            "undefined_reference_count": 0,
+            "latex_errors": [],
+            "warning_count": 0,
+        }
+    lines = log_path.read_text(
+        encoding="utf-8", errors="replace").splitlines()
+    overfull_pattern = re.compile(
+        r"Overfull \\([hv])box "
+        r"\(([-+]?\d+(?:\.\d+)?)pt too (wide|high)\)")
+    overfull_boxes = []
+    for line_number, line in enumerate(lines, 1):
+        match = overfull_pattern.search(line)
+        if match is not None:
+            overfull_boxes.append({
+                "log_line": line_number,
+                "axis": match.group(1),
+                "overflow_pt": float(match.group(2)),
+                "direction": match.group(3),
+                "message": line.strip(),
+                "context": lines[line_number:line_number + 2],
+            })
+    warnings = [
+        {"log_line": number, "message": line.strip()}
+        for number, line in enumerate(lines, 1)
+        if "Warning:" in line
+    ]
+    undefined_references = [
+        item for item in warnings
+        if "undefined" in item["message"].lower()
+    ]
+    latex_errors = [
+        {"log_line": number, "message": line.strip()}
+        for number, line in enumerate(lines, 1)
+        if line.startswith("!")
+    ]
+    return {
+        "path": str(log_path),
+        "available": True,
+        "overfull_boxes": overfull_boxes,
+        "underfull_box_count": sum(
+            "Underfull \\" in line and "box" in line for line in lines),
+        "undefined_reference_count": len(undefined_references),
+        "undefined_references": undefined_references[:50],
+        "latex_errors": latex_errors[:50],
+        "warning_count": len(warnings),
+        "warnings": warnings[:100],
+    }
+
+
+def _papers_source_freshness(pdf_path: Path) -> dict:
+    """Report source files newer than the generated PDF."""
+    if not pdf_path.is_file():
+        return {"stale": True, "newer_sources": []}
+    pdf_mtime = pdf_path.stat().st_mtime
+    candidates = [
+        PAPERS_DIR / "CMakeLists.txt",
+        PAPERS_DIR / "requirements.txt",
+    ]
+    source_root = PAPERS_DIR / "src"
+    if source_root.is_dir():
+        candidates.extend(
+            path for path in source_root.rglob("*") if path.is_file())
+    newer_sources = sorted(
+        str(path)
+        for path in candidates
+        if path.is_file() and path.stat().st_mtime > pdf_mtime
+    )
+    return {
+        "stale": bool(newer_sources),
+        "pdf_modified_at": pdf_mtime,
+        "newer_source_count": len(newer_sources),
+        "newer_sources": newer_sources[:100],
+    }
+
+
+def _papers_text_bounds(
+        pdf_path: Path, output_dir: Path) -> tuple[list[dict], dict]:
+    """Use Poppler's XHTML bounding boxes to detect text outside a page."""
+    executable = shutil.which("pdftotext")
+    bbox_path = output_dir / "text-bounds.html"
+    if executable is None:
+        return [], {
+            "command": ["pdftotext", "-bbox-layout", str(pdf_path),
+                        str(bbox_path)],
+            "exit_code": None,
+            "stdout": "",
+            "stderr": "pdftotext was not found on PATH",
+        }
+    if not bbox_path.is_file() or bbox_path.stat().st_mtime < pdf_path.stat().st_mtime:
+        result = _run_capture([
+            executable,
+            "-bbox-layout",
+            str(pdf_path),
+            str(bbox_path),
+        ])
+    else:
+        result = {
+            "command": [
+                executable, "-bbox-layout", str(pdf_path), str(bbox_path)],
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "",
+            "cached": True,
+        }
+    if result["exit_code"] != 0 or not bbox_path.is_file():
+        return [], result
+
+    try:
+        root = ElementTree.parse(bbox_path).getroot()
+    except (OSError, ElementTree.ParseError) as exc:
+        result["exit_code"] = None
+        result["stderr"] = f"could not parse bounding boxes: {exc}"
+        return [], result
+
+    pages = []
+    tolerance = 0.5
+    for page_number, page in enumerate(
+            (node for node in root.iter()
+             if node.tag.rsplit("}", 1)[-1] == "page"), 1):
+        width = float(page.attrib.get("width", 0.0))
+        height = float(page.attrib.get("height", 0.0))
+        word_count = 0
+        outside_words = []
+        for word in (
+                node for node in page.iter()
+                if node.tag.rsplit("}", 1)[-1] == "word"):
+            word_count += 1
+            try:
+                box = {
+                    key: float(word.attrib[key])
+                    for key in ("xMin", "yMin", "xMax", "yMax")
+                }
+            except (KeyError, ValueError):
+                continue
+            if (
+                box["xMin"] < -tolerance
+                or box["yMin"] < -tolerance
+                or box["xMax"] > width + tolerance
+                or box["yMax"] > height + tolerance
+            ):
+                outside_words.append({
+                    "text": "".join(word.itertext()),
+                    **box,
+                })
+        pages.append({
+            "page": page_number,
+            "width_pt": width,
+            "height_pt": height,
+            "word_count": word_count,
+            "outside_text_box_count": len(outside_words),
+            "outside_text_boxes": outside_words[:20],
+        })
+    return pages, result
+
+
+def _png_dimensions(path: Path) -> tuple[int, int] | None:
+    """Read PNG dimensions without adding an image-library dependency."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(24)
+    except OSError:
+        return None
+    if len(header) != 24 or header[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    return (
+        int.from_bytes(header[16:20], "big"),
+        int.from_bytes(header[20:24], "big"),
+    )
+
+
+def _render_papers_pages(
+        pdf_path: Path,
+        pages: list[int],
+        dpi: int,
+        output_dir: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Render requested PDF pages to deterministic PNG paths."""
+    executable = shutil.which("pdftoppm")
+    if executable is None:
+        return [], [{
+            "page": None,
+            "error": "pdftoppm was not found on PATH",
+        }]
+    render_dir = output_dir / f"dpi-{dpi}"
+    render_dir.mkdir(parents=True, exist_ok=True)
+    rendered = []
+    errors = []
+    for page in pages:
+        prefix = render_dir / f"page-{page:04d}"
+        image_path = prefix.with_suffix(".png")
+        if (
+            not image_path.is_file()
+            or image_path.stat().st_mtime < pdf_path.stat().st_mtime
+        ):
+            result = _run_capture([
+                executable,
+                "-png",
+                "-r", str(dpi),
+                "-f", str(page),
+                "-l", str(page),
+                "-singlefile",
+                str(pdf_path),
+                str(prefix),
+            ], timeout=120.0)
+            if result["exit_code"] != 0:
+                errors.append({
+                    "page": page,
+                    "error": (
+                        result["stderr"].strip()
+                        or f"pdftoppm exited with {result['exit_code']}"
+                    ),
+                    "command": result["command"],
+                })
+                continue
+        dimensions = _png_dimensions(image_path)
+        rendered.append({
+            "page": page,
+            "path": str(image_path),
+            "bytes": image_path.stat().st_size,
+            "width_px": dimensions[0] if dimensions else None,
+            "height_px": dimensions[1] if dimensions else None,
+            "dpi": dpi,
+        })
+    return rendered, errors
+
+
+def _papers_inspect_error(message: str, **details) -> dict:
+    payload = {
+        "tool": "papers-inspect",
+        "status": "error",
+        "error": message,
+        **details,
+    }
+    return {
+        "content": [{
+            "type": "text",
+            "text": json.dumps(payload, indent=2),
+        }],
+        "isError": True,
+    }
+
+
+def tool_papers_inspect(arguments: dict) -> dict:
+    """Render the thesis PDF and return diagnostics plus MCP image content."""
+    if not PAPERS_PDF_PATH.is_file():
+        return _papers_inspect_error(
+            "The thesis PDF does not exist. Run papers-build first.",
+            pdf_path=str(PAPERS_PDF_PATH),
+        )
+
+    raw_pages = arguments.get("pages")
+    if raw_pages is not None:
+        if (
+            not isinstance(raw_pages, list)
+            or not raw_pages
+            or len(raw_pages) > 20
+            or any(isinstance(page, bool) or not isinstance(page, int)
+                   for page in raw_pages)
+        ):
+            return _papers_inspect_error(
+                "pages must be a non-empty array of at most 20 integers")
+        requested_pages = list(dict.fromkeys(raw_pages))
+    else:
+        requested_pages = None
+
+    raw_dpi = arguments.get("dpi")
+    if raw_dpi is None:
+        dpi = 160 if requested_pages is not None else 48
+    elif isinstance(raw_dpi, bool) or not isinstance(raw_dpi, int):
+        return _papers_inspect_error("dpi must be an integer")
+    else:
+        dpi = raw_dpi
+    if dpi < 36 or dpi > 300:
+        return _papers_inspect_error("dpi must be between 36 and 300")
+
+    try:
+        include_images = parse_bool(
+            "include_images", arguments.get("include_images", True))
+    except RuntimeError as exc:
+        return _papers_inspect_error(str(exc))
+
+    pdf_sha256 = _sha256_file(PAPERS_PDF_PATH)
+    output_dir = PAPERS_INSPECT_ROOT / pdf_sha256[:16]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pdf_info, pdf_info_command = _papers_pdf_info(PAPERS_PDF_PATH)
+    try:
+        page_count = int(pdf_info.get("Pages", "0"))
+    except ValueError:
+        page_count = 0
+    if pdf_info_command["exit_code"] != 0 or page_count <= 0:
+        return _papers_inspect_error(
+            "pdfinfo could not read a positive page count",
+            pdf_path=str(PAPERS_PDF_PATH),
+            pdfinfo=pdf_info_command,
+        )
+
+    if requested_pages is None:
+        pages = list(range(
+            1, min(page_count, PAPERS_INSPECT_MAX_OVERVIEW_PAGES) + 1))
+        overview_truncated = page_count > PAPERS_INSPECT_MAX_OVERVIEW_PAGES
+    else:
+        invalid_pages = [
+            page for page in requested_pages
+            if page < 1 or page > page_count
+        ]
+        if invalid_pages:
+            return _papers_inspect_error(
+                "requested pages are outside the PDF page range",
+                page_count=page_count,
+                invalid_pages=invalid_pages,
+            )
+        pages = requested_pages
+        overview_truncated = False
+
+    text_bounds, bbox_command = _papers_text_bounds(
+        PAPERS_PDF_PATH, output_dir)
+    render_manifest, render_errors = _render_papers_pages(
+        PAPERS_PDF_PATH, pages, dpi, output_dir)
+    log_diagnostics = _papers_log_diagnostics(PAPERS_LATEX_LOG_PATH)
+    source_freshness = _papers_source_freshness(PAPERS_PDF_PATH)
+    outside_text_pages = [
+        page["page"] for page in text_bounds
+        if page["outside_text_box_count"] > 0
+    ]
+    empty_text_pages = [
+        page["page"] for page in text_bounds
+        if page["word_count"] == 0
+    ]
+    issue_count = (
+        len(log_diagnostics["overfull_boxes"])
+        + len(log_diagnostics["latex_errors"])
+        + len(outside_text_pages)
+        + len(render_errors)
+        + int(source_freshness["stale"])
+    )
+    payload = {
+        "tool": "papers-inspect",
+        "status": "completed" if not render_errors else "partial",
+        "automated_verdict": (
+            "issues_detected"
+            if issue_count else "no_automated_issues_detected"
+        ),
+        "visual_review_required": True,
+        "agent_instructions": [
+            (
+                "Inspect every returned overview image for clipping, overlaps, "
+                "unexpected blank areas, inconsistent margins, misplaced "
+                "figures/tables, and broken glyphs."
+            ),
+            (
+                "For anything suspicious, call papers-inspect again with "
+                "pages=[...] and a higher dpi (160-220)."
+            ),
+            (
+                "Automated checks cover LaTeX box warnings and text bounds; "
+                "they cannot prove that graphical elements are semantically "
+                "positioned correctly."
+            ),
+        ],
+        "pdf": {
+            "path": str(PAPERS_PDF_PATH),
+            "sha256": pdf_sha256,
+            "bytes": PAPERS_PDF_PATH.stat().st_size,
+            "page_count": page_count,
+            "metadata": pdf_info,
+            "source_freshness": source_freshness,
+        },
+        "render": {
+            "mode": "focused" if requested_pages is not None else "overview",
+            "dpi": dpi,
+            "pages_requested": pages,
+            "overview_truncated": overview_truncated,
+            "manifest": render_manifest,
+            "errors": render_errors,
+        },
+        "layout_diagnostics": {
+            "latex": log_diagnostics,
+            "text_bounds": text_bounds,
+            "outside_text_pages": outside_text_pages,
+            "empty_text_pages": empty_text_pages,
+            "bbox_command": bbox_command,
+        },
+        "pdfinfo_command": pdf_info_command,
+    }
+
+    content = [{
+        "type": "text",
+        "text": json.dumps(payload, indent=2),
+    }]
+    embedded_bytes = 0
+    embedded_pages = []
+    if include_images:
+        for page in render_manifest:
+            image_path = Path(page["path"])
+            image_bytes = image_path.read_bytes()
+            if (
+                embedded_bytes + len(image_bytes)
+                > PAPERS_INSPECT_MAX_EMBED_BYTES
+            ):
+                continue
+            content.append({
+                "type": "image",
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+                "mimeType": "image/png",
+            })
+            embedded_bytes += len(image_bytes)
+            embedded_pages.append(page["page"])
+    payload["render"]["embedded_pages"] = embedded_pages
+    payload["render"]["embedded_bytes"] = embedded_bytes
+    payload["render"]["image_content_order"] = embedded_pages
+    content[0]["text"] = json.dumps(payload, indent=2)
+    return {
+        "content": content,
+        "isError": bool(render_errors),
+    }
+
+
 # --------------------------- subagent worker ----------------------------------
 
 def _run_subagent_worker() -> int:
@@ -8746,6 +9487,87 @@ TOOL_DEFINITIONS = [
         },
     },
     {
+        "name": "papers-build",
+        "description": (
+            "Configure `main/papers/CMakeLists.txt` with CMake and build only "
+            "the `bioseqdb_thesis` target sourced from "
+            "`main/papers/src/content/bioseqdb/thesis`. The build runs in a "
+            "detached worker so a clean TeX environment can finish after the "
+            "MCP request returns. Call with action='start' to schedule a new "
+            "build (or get the currently-running build), then poll with "
+            "action='status'. A completed response includes the generated PDF "
+            "path, digest, size, exact CMake commands, log path, and log tail."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "status"],
+                    "default": "start",
+                    "description": (
+                        "Start a new thesis build, or poll the most recently "
+                        "scheduled build."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "papers-inspect",
+        "description": (
+            "Inspect the PDF produced by papers-build. With no `pages`, renders "
+            "up to 80 pages as lightweight overview PNGs and returns them "
+            "directly as MCP image content in page order. With `pages=[...]`, "
+            "renders up to 20 selected pages at higher resolution for focused "
+            "visual review. The leading JSON manifest includes stable local "
+            "image paths, PDF metadata, source-staleness detection, LaTeX "
+            "overfull/underfull-box and reference warnings, Poppler text "
+            "bounding-box checks, empty-text-page hints, and explicit agent "
+            "review instructions. Automated diagnostics supplement, but do "
+            "not replace, visual confirmation of clipping, overlap, margins, "
+            "figure/table placement, blank areas, and broken glyphs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "pages": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1},
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "uniqueItems": True,
+                    "description": (
+                        "Optional one-based page numbers for focused review. "
+                        "Omit to render the whole-document overview."
+                    ),
+                },
+                "dpi": {
+                    "type": "integer",
+                    "minimum": 36,
+                    "maximum": 300,
+                    "description": (
+                        "Raster resolution. Defaults to 48 for the overview "
+                        "and 160 when explicit pages are supplied."
+                    ),
+                },
+                "include_images": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "Return rendered PNGs as MCP image content. Stable "
+                        "image paths remain in the JSON manifest when false "
+                        "or when the 8 MiB response cap is reached."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "subagent",
         "description": (
             "CROSS-MODEL SUBAGENT ONLY — this tool is specifically for delegating work to a "
@@ -9551,6 +10373,10 @@ def _handle_tools_call(params: dict) -> dict:
         text = tool_status(mode)
     elif name == "inspect":
         text = tool_inspect(args)
+    elif name == "papers-build":
+        text = tool_papers_build(args)
+    elif name == "papers-inspect":
+        return tool_papers_inspect(args)
     elif name == "subagent":
         prompt_text = args.get("prompt", "")
         timeout_sec = int(args.get("timeout_sec", 3600))
@@ -9666,6 +10492,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--run-papers-build",
+        action="store_true",
+        default=False,
+        help=(
+            "(internal) run the detached CMake worker for the "
+            "main/papers bioseqdb_thesis target"
+        ),
+    )
+    parser.add_argument(
         "--run-remote",
         default=None,
         metavar="OP_ID",
@@ -9748,6 +10583,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.run_subagent:
         return _run_subagent_worker()
+    if args.run_papers_build:
+        return _run_papers_build_worker()
     if args.run_remote is not None:
         return _run_remote_worker(args.run_remote)
     if args.run_build is not None:
