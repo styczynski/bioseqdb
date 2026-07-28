@@ -457,7 +457,10 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("cmake_cache_root=/opt/bioseq-package-cmake-cache", build_script)
         self.assertIn('"${cmake_cache_root}/source"', build_script)
         self.assertIn('"${cmake_cache_root}/build-rooted"', build_script)
-        self.assertIn("rsync --archive --delete", build_script)
+        self.assertIn(
+            "rsync --archive --checksum --no-times --omit-dir-times --delete",
+            build_script,
+        )
         self.assertIn(
             "-DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF",
             build_script,

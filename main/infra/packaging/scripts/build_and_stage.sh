@@ -33,7 +33,7 @@ fi
 
 if [[ "${action}" == "build" ]]; then
   mkdir -p "${persistent_source_dir}" "${build_dir}" "${package_metadata_dir}"
-  rsync --archive --delete \
+  rsync --archive --checksum --no-times --omit-dir-times --delete \
     --exclude=/_bioseq-package-build/ \
     "${package_source_dir}/" "${persistent_source_dir}/"
 fi
