@@ -92,6 +92,15 @@
 %     description: answers the research questions, contrasts the final system with its minimap2-derived starting point, and identifies the principal limitations and next engineering steps.
 % xrenderonly: postgres
 
+% Keep thesis hyperlinks legible on a white page.  `breaklinks` also permits
+% linked bibliography fields (for example, long conference titles) to wrap.
+\hypersetup{
+  breaklinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue
+}
+
 \if\dataeq{renderonly}{??}
 
 % Keep the generated metadata while giving the visible front matter proper
@@ -284,5 +293,9 @@
 \fi
 
 \if\dataeq{hasbibliography}{true}
-  \printbibliography[heading=bibintoc,title={References}]
+  \begingroup
+    \sloppy
+    \setlength{\emergencystretch}{3em}
+    \printbibliography[heading=bibintoc,title={References}]
+  \endgroup
 \fi
