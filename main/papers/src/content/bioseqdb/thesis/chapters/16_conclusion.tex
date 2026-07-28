@@ -95,8 +95,9 @@ pairing, spliced alignment, rescue, and every command-line preset.
     each described with its actual predecessor and coordinate rules \\
     Extension &
     KSW2 in the CPU mapper &
-    Selectable KSW2, Block Aligner, batched CPU work, and Vulkan CIGAR or
-    gridded traceback routes for supported jobs \\
+    Selectable KSW2, Block Aligner, batched CPU work, and Vulkan GPU DP or
+    gridded traceback for supported jobs, followed by host result and CIGAR
+    object construction on the recomputed resident route \\
     Candidate filtering &
     Pipeline heuristics and alignment-stage rejection &
     Optional SneakySnake and GateKeeper processing of mandatory global gaps,
@@ -136,12 +137,14 @@ The retained designs share a pattern.  They move decisions to a boundary
 where enough information is available.  Runtime configuration is converted
 to a fixed pipeline specialization before the hot stages.  Accelerator work
 is grouped by compatible batch geometry.  Target identity is used to reuse
-resident state.  Mandatory and optional alignment regions are distinguished
-before prefiltering.  Persistent index generations are accepted only after
-format and compatibility validation.  PostgreSQL expression replacement is
-performed during planning, while per-row values are installed during custom
-scan execution.  Generated SQL is accepted only when the dependency and
-physical ledgers are complete.
+resident state.  Fragment-native preparation can construct canonical
+per-query anchors once and hand borrowed spans to the logical seed stage
+without another allocation, copy, or global sort.  Mandatory and optional
+alignment regions are distinguished before prefiltering.  Persistent index
+generations are accepted only after format and compatibility validation.
+PostgreSQL expression replacement is performed during planning, while per-row
+values are installed during custom scan execution.  Generated SQL is accepted
+only when the dependency and physical ledgers are complete.
 
 \section{Answers to the research questions}
 
@@ -164,6 +167,48 @@ GPU speedups appear when many compatible jobs reuse resident inputs and keep
 intermediate state on the device.  Small jobs and cold first submissions can
 remain slower.  The final system therefore makes CPU, SIMD, and Vulkan routes
 policy choices whose execution is observable.
+
+The measured evidence supports route-specific conclusions rather than one
+unqualified speedup claim.  The detailed receipts and benchmark conventions
+are presented in the pipeline and persistent-index chapters.  The compact
+summary in Table~\ref{tab:conclusion-performance-evidence} preserves the
+distinction between the final fragment-native CPU and SIMD path, historical
+recomputed Vulkan execution, and the current persisted GPU boundary.
+
+\begin{table}[htbp]
+  \centering
+  \scriptsize
+  \caption{Qualified performance and completion evidence for the final
+  architecture.  Ratios are comparator time divided by BioSeqDB time.}
+  \label{tab:conclusion-performance-evidence}
+  \begin{tabularx}{\linewidth}{p{0.20\linewidth}p{0.23\linewidth}X}
+    \toprule
+    Evidence & Measured result & Supported conclusion and qualification \\
+    \midrule
+    DOC0384 retained process-cold \texttt{just\_index} distribution &
+    5.368746 s versus minimap2 16.487527 s, \(3.071\times\) &
+    This is the newest retained result for the fragment-native CPU and SIMD
+    path.  It uses six retained samples and the report's lower-middle P50
+    convention.  The manually retained distribution and marginal target make
+    it configuration-specific rather than universal. \\
+    Report 154 same-run receipt &
+    6.080942 s versus minimap2 43.118771 s, \(7.091\times\) &
+    All 16 expected mappings were exact in that run.  A known wrapper and
+    configuration-scope artifact affects the minimap2 comparator, so the ratio
+    is an implementation receipt rather than a portable speedup estimate. \\
+    Historical Report 47 recomputed resident Vulkan route &
+    Coordinate case \(2.432\times\), many-gap CIGAR case \(2.493\times\) &
+    Both are dirty one-sample measurements.  The coordinate case did not
+    establish exact row-set parity.  The CIGAR case proves GPU DP and traceback
+    followed by host result construction, not persisted all-GPU CIGAR. \\
+    Current authenticated persisted Shape-V5 route &
+    No accepted fresh-postmaster performance ratio &
+    Direct coordinate execution and fail-closed proof machinery exist.
+    Persisted CIGAR is unsupported, and the evidence set does not establish an
+    accepted authentic persisted all-GPU timing result. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 \paragraph{Can a batch mapper retain an ordinary SQL surface?}
 Yes.  The ordinary function definition provides PostgreSQL types and a
@@ -192,10 +237,13 @@ minimap2 command-line mode or every graph mapper.  Graph and de Bruijn
 approaches are included to explain alternative representations, not because
 the extension currently performs full variation-graph alignment.
 
-The second limitation is heterogeneous completeness.  Implemented Vulkan
-sketching, seed processing, chaining, filtering, and CIGAR work are real.
-The strictly attested persisted-format route in which no host biological
-planning remains is not complete for every storage and extension shape.
+The second limitation is heterogeneous completeness.  Vulkan sketching, seed
+processing, chaining, filtering, and GPU DP with traceback are implemented for
+admitted recomputed resident shapes.  Their packed traceback data is decoded
+into host result and CIGAR objects.  The authenticated persisted Shape-V5
+route is currently coordinate-only.  Its direct-read and fail-closed proof
+machinery exists, but the evidence set contains no accepted fresh-postmaster
+persisted all-GPU performance result.  Persisted CIGAR is unsupported.
 Unsupported geometry must stay on a CPU-selected route or be accepted
 conservatively where the relevant algorithm permits it.
 
@@ -260,10 +308,12 @@ multiplicity, memory contexts, and schema ownership.
 
 The final system brings these concerns into one inspectable pipeline.  It
 keeps the successful algorithmic structure of minimap2, replaces process-local
-assumptions with explicit sequence and index abstractions, adds measured SIMD
-and Vulkan routes, and gives PostgreSQL a planner-visible batch executor.  The
-same emphasis on explicit ownership extends to IO, external providers, cache
-coordination, and generated SQL boundaries.  The result is not the end of the
-engineering path.  It is a sufficiently complete platform and a sufficiently
-candid record of its intermediate results to support the next round of
-scientific and systems work.
+assumptions with explicit sequence and index abstractions, adds a measured
+fragment-native CPU and SIMD route, and records the historical recomputed
+resident Vulkan results with their proof boundaries.  PostgreSQL receives a
+planner-visible batch executor.  The same emphasis on explicit ownership
+extends to IO, external providers, cache coordination, and generated SQL
+boundaries.  The result is not the end of the engineering path.  It is a
+sufficiently complete platform and a sufficiently candid record of its
+intermediate results to support the next round of scientific and systems
+work.

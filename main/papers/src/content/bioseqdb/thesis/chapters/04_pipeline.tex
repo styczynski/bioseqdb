@@ -83,7 +83,7 @@ disagree.
     \node[cpu] (cpualign) at (-2.4,-8.35)
       {regions, optional prefilter,\\KSW2 or Block Aligner};
     \node[gpu] (gpualign) at (2.4,-8.35)
-      {coordinate projection or\\GPU extension and CIGAR};
+      {coordinate projection or\\GPU DP and traceback};
 
     \node[proof,text width=7.6cm] (attest) at (0,-9.85)
       {validate requested backend, actual backend, index provenance,
@@ -245,14 +245,44 @@ proof becomes an error.  The scheduler may choose the CPU or SIMD route
 before entering the mandatory GPU path, but it may not silently change the
 meaning of a result labelled as GPU execution.
 
+July work separated three questions which earlier reports had treated
+together.  DOC0370 and DOC0371 hardened cold persisted-index identity,
+format compatibility and execution attestation.  The current direct
+Shape-V5 coordinate route can consume authenticated PostgreSQL index buffers
+without rebuilding target minimizers.  Persisted CIGAR projection remains
+unsupported because the corresponding GPU target-window reader is not wired.
+The implementation therefore rejects that request instead of hydrating the
+target or completing biological work on the CPU.
+
+DOC0384 then established the later fragment-native CPU and SIMD route.  A
+mapped generation provider exposes persisted postings without first rebuilding
+the conventional process-local map.  Preparation can construct an owning
+\texttt{PreparedFragmentAnchorBatch}, and each
+\texttt{PreparedFragmentAnchorQueryIndex} exposes the already canonical
+anchors for one query.  This moves occurrence decoding, anchor construction
+and ordering out of the per-query seed stage.  It is the final path measured by
+the newest qualified \texttt{just\_index} receipts.
+
+This chronology also changes how the older Vulkan results should be read.
+Report~47 demonstrates batching and residency for the recomputed resident
+route available in June.  It does not prove the later persisted
+\texttt{just\_index} route, a fresh-postmaster all-GPU result, or persisted
+CIGAR execution.  Those distinctions are retained in the evidence section
+below.
+
 \section{The logical alignment chain}
 \label{sec:pipeline-logical-chain}
 
-The complete generic chain is constructed in one function,
-\texttt{make\_minimap\_pipeline}, at
-\path{pipe.cppm:8573}.  This function is used by both execution and
-description, so adding a stage does not require a separate hand-maintained
-\texttt{EXPLAIN} pipeline.  Its current stage order is:
+Executable chains are constructed in one function,
+\texttt{make\_minimap\_pipeline}, at \path{pipe.cppm:8573}.  Runtime execution
+can select \texttt{EntryPoint::FromSequence} together with the requested
+minimizer trait, or begin from authenticated prebuilt minimizers.  The
+description path reuses the same composer for the common tail, but
+deliberately pins \texttt{EntryPoint::WithPrebuiltMinimizers} and the scalar
+minimizer trait.  Tail-stage order therefore cannot drift into a separate
+hand-maintained \texttt{EXPLAIN} pipeline.  The description does not claim to
+reproduce the runtime query-sketch head or its selected minimizer kernel.  The
+current executable order is:
 
 \begin{verbatim}
 [Minimizer] -> Index -> SeedHit -> Chain -> Region
@@ -322,6 +352,13 @@ develops this storage path in detail.  At the pipeline level, the invariant is
 simple: seed lookup must see a complete, well-formed occurrence count and
 position set for every minimizer it is allowed to consume.
 
+For fragment-native CPU and SIMD execution, preparation can also create an
+owning \texttt{PreparedFragmentAnchorBatch} for a compatible query and target
+work set.  Its per-query index objects borrow already ordered anchor spans from
+that owner.  The owner remains alive through pipeline consumption, so the
+later seed stage can be a checked zero-copy hand-off rather than another
+allocation and sorting point.
+
 \subsection{Minimizer and index hand-off}
 
 \texttt{MinimizerStage} reads the captured lazy query view.  It computes a
@@ -340,14 +377,24 @@ exactly when index provenance enters the mapper.
 
 \subsection{Seed-hit lookup}
 
-\texttt{SeedHitStage} turns each query minimizer into zero or more
-\texttt{Anchor} records.  The scalar operation is implemented by
-\texttt{collect\_seed\_hits} at
+\texttt{SeedHitStage} has two current input forms.  On the ordinary route it
+turns each query minimizer into zero or more \texttt{Anchor} records.  The
+scalar operation is implemented by \texttt{collect\_seed\_hits} at
 \path{minimap_port.cppm:1109}.  It asks the target index for the global
 occurrence count, discards absent or over-repetitive minimizers using
 \texttt{max\_occ}, rejects incomplete persisted postings, converts positions
 to a strand-consistent query coordinate, and finally establishes one
 canonical anchor order.
+
+On the fragment-native route the index wire is
+\texttt{PreparedFragmentAnchorQueryIndex}.  The stage obtains
+\texttt{ordered\_fragment\_seed\_anchors} from its owning
+\texttt{PreparedFragmentAnchorBatch} and emits that borrowed canonical span
+directly.  It does not allocate another arena slab, copy anchors, or repeat a
+global MPF sort.  Preparation has already applied the occurrence and
+completeness rules.  The logical stage remains visible because it establishes
+the same downstream contract even when its physical work is a zero-copy
+handoff.
 
 The ordering invariant is important.  Chaining algorithms may use different
 internal traversal or vectorisation schemes, but they all begin from the same
@@ -374,8 +421,10 @@ and each implementation are developed in the chaining chapter.
 \texttt{mm\_gen\_regs}.  It sorts chains by descending score, constructs one
 \texttt{AlignRegion} per chain and derives reference and strand-correct query
 coordinates from the first and last anchors.  It also computes the fuzzy
-seeded match length and block length used by later heuristics.  The output
-estimate is bounded by the chain estimate and \(\texttt{best\_n}+16\).
+seeded match length and block length used by later heuristics.  The active
+implementation emits exactly one region per chain and reserves storage for
+\texttt{chains.size()}.  It does not use \(\texttt{best\_n}+16\) as the
+\texttt{RegionStage} allocation bound.
 
 \subsection{Candidate reduction, divergence and prefiltering}
 
@@ -391,15 +440,17 @@ minimap2-derived manner.  The same principle controls mapping quality, CIGAR
 and edit-distance work: optional output fields should not force computation
 for a query that does not project them.
 
-\texttt{PrefilterStage} is a BioSeqDB-specific work-avoidance boundary.  It is
-active only when filtering is enabled and an exact edit predicate makes the
-rejection useful.  For every region it constructs mandatory seed-to-seed gap
-jobs.  SneakySnake or GateKeeper supplies a conservative lower bound on edits.
-Unsupported geometry is accepted for full alignment, not rejected.  A region
-is removed only when the accumulated lower bound already exceeds the exact
-threshold.  Thus, prefiltering may save extension work but cannot create a
-false negative under its supported contract.  The detailed bit-vector
-algorithms are reconstructed in the prefilter chapter.
+\texttt{PrefilterStage} is a BioSeqDB-specific work-avoidance boundary.  The
+generic stage executes when \texttt{prefilter\_enabled} and
+\texttt{compute\_edit\_distance} are both true.  The SQL custom-scan planner
+normally enables it only for an active exact edit predicate, where rejection
+can avoid extension work.  For every region it constructs mandatory
+seed-to-seed gap jobs.  SneakySnake or GateKeeper supplies a conservative
+lower bound on edits.  Unsupported geometry is accepted for full alignment,
+not rejected.  A region is removed only when the accumulated lower bound
+already exceeds the exact threshold.  Thus, prefiltering may save extension
+work but cannot create a false negative under its supported contract.  The
+detailed bit-vector algorithms are reconstructed in the prefilter chapter.
 
 \subsection{Extension, exact filtering and reclassification}
 
@@ -408,8 +459,9 @@ CPU choices are KSW2, Block Aligner and an inter-region batched KSW2 path.
 The batched path groups short fill problems into width buckets
 \(\leq 32,\leq 64,\leq 128,\leq 256\), while longer fills use the
 intra-sequence KSW2 kernel.  A selected Vulkan extension route uses GPU job
-records and returns coordinates or a packed CIGAR according to the admitted
-projection.
+records and performs admitted DP and traceback work on the device.  It returns
+coordinates or packed CIGAR wire data.  On the recomputed resident route the
+host decodes that packed data and constructs the result and CIGAR objects.
 
 After traceback, \texttt{ExactEditFilterStage} applies the authoritative edit
 predicate.  This position in the chain is intentional.  A prefilter can only
@@ -533,9 +585,10 @@ where \(\mathrm{Cep}\) is the compile-time window, \(k\)-mer and
 sequence-length bucket, \(\mathrm{BAA}\) is the base aligner,
 \(\mathrm{CA}\) is the chainer, \(\mathrm{MA}\) is the minimizer algorithm,
 and \(\mathrm{EP}\) is the entry point.  The concrete cascade is
-\texttt{dispatch\_pipeline} at \path{pipe.cppm:10321}.  The execution leaf
-uses a specialised \(w=10\) parameter object when the runtime values match a
-registered tuple and otherwise chooses a typed fallback.
+\texttt{dispatch\_pipeline} at \path{pipe.cppm:10321}.  At build optimisation
+level 5 or higher, the execution leaf uses a specialised \(w=10\) parameter
+object when the runtime values match a registered tuple.  Lower optimisation
+levels and unregistered tuples use the typed fallback.
 
 \begin{table}[ht]
   \centering
@@ -552,8 +605,9 @@ registered tuple and otherwise chooses a typed fallback.
     Chaining &
     scalar minimap2 DP, SIMD minimap2 DP, RMQ, and Vulkan tiled DP \\
     Final alignment &
-    KSW2, Block Aligner, and inter-region batched KSW2; the dedicated Vulkan
-    route also admits GPU coordinate or CIGAR extension shapes \\
+    KSW2, Block Aligner, and inter-region batched KSW2.  The dedicated Vulkan
+    route admits coordinate reduction or GPU DP and traceback for supported
+    CIGAR shapes, followed by host result-object construction \\
     Prefilter &
     SneakySnake on scalar or SIMD CPU, plus Vulkan SneakySnake or GateKeeper
     in their supported domains \\
@@ -620,13 +674,17 @@ target hydration or CPU/SIMD alignment fallback
 
 This is the most important qualification to the phrase ``all GPU''.  BioSeqDB
 has implemented Vulkan query sketching, seed lookup, tiled chaining,
-coordinate reduction and GPU CIGAR/gridded traceback for admitted in-memory
-or recomputed resident routes.  The newer DOC0371 cold-index specification
-uses a stricter statement-level definition which also forbids host biological
-planning and target-index rebuild.  DOC0374's authenticated Format-5
-streaming graph remains the target for that strongest definition.  A thesis
-claim must therefore name the index source and projected fields rather than
-saying only ``the GPU pipeline was enabled''.
+coordinate reduction and GPU DP with gridded traceback for admitted in-memory
+or recomputed resident routes.  Packed traceback data is still decoded into
+host result objects.  The DOC0371 statement-level definition is stricter.  It
+also forbids host biological planning and target-index rebuild.  The current
+authenticated Shape-V5 route can consume persisted PostgreSQL buffers directly
+for coordinate projection, with source identity and operation evidence checked
+fail-closed.  Persisted CIGAR projection is not supported, and the latest
+event log does not provide an accepted fresh-postmaster persisted all-GPU
+performance receipt.  A thesis claim must therefore name the index source,
+projected fields and proof level rather than saying only ``the GPU pipeline was
+enabled''.
 
 \section{Batching, memory and parallel execution}
 \label{sec:pipeline-batching}
@@ -737,16 +795,19 @@ by the deleted per-query KSW2 accumulator.
 Every stage can produce a \texttt{StageDescription} containing its name,
 algorithm, runtime parameters, computed properties and an optional reserve
 estimate.  \texttt{PipelineDescription} is the ordered vector of these
-records.  \texttt{describe\_pipeline\_for} uses the same dispatch chain and
-\texttt{make\_minimap\_pipeline} function as execution.  This removes a common
-source of misleading plans: an explanatory renderer cannot silently retain
-an obsolete stage order after the executable pipeline changes.
+records.  \texttt{describe\_pipeline\_for} reuses
+\texttt{make\_minimap\_pipeline} for the common tail.  It deliberately selects
+the prebuilt-minimizer entry point and scalar minimizer trait.  Changes to the
+shared tail order therefore appear in the description automatically.  The
+description is not a runtime-complete account of the query-sketch head or its
+selected minimizer algorithm.
 
 The estimates are explicitly allocation hints, not biological cardinality
 claims.  The sketch estimate is \(|Q|/w+64\).  The anchor estimate is the
 minimum of twice the sketch count and a shared \(k\)-mer ceiling.  Chain count
-uses the minimum seed count, region count is capped by
-\(\texttt{best\_n}+16\), and result count uses the larger of a
+uses the minimum seed count.  \texttt{RegionStage} intentionally has no
+description-time reserve estimate, and its active runtime allocation reserves
+for \texttt{chains.size()}.  Result count uses the larger of a
 \(\texttt{best\_n}\) margin and a coarse sequence-length floor.  Arena slabs
 grow geometrically when an estimate is low, so correctness is not contingent
 on the heuristic.
@@ -779,23 +840,28 @@ For every target--query job, the evidence records requested and actual
 backend, requested and actual target-index source, persisted generation and
 source identity, environment identity and a per-stage engine count.
 \texttt{expected\_execution\_engine} maps each combination to exactly one
-allowed engine or to an ineligible state.  The validator requires:
+allowed engine or to an ineligible state.  The per-job
+\texttt{validate\_job\_execution\_stats} check requires:
 
 \begin{enumerate}
-  \item requested and actual backend are equal;
-  \item requested and actual index source are equal;
-  \item a persisted source has a non-zero generation and source identity;
-  \item every eligible stage is credited to only its allowed engine;
-  \item every ineligible stage has zero work;
-  \item the unconditional front end executed once; and
-  \item every fallback counter is zero.
+  \item requested and actual backend are equal.
+  \item requested and actual index source are equal.
+  \item a persisted source has a non-zero generation and source identity.
+  \item every eligible stage is credited to only its allowed engine.
+  \item every ineligible stage has zero work.
+  \item the unconditional front end executed once.
 \end{enumerate}
 
-The check in \texttt{validate\_job\_execution\_stats} is deliberately
+Two further layers complete statement-level proof.  The aggregate
+full-attestation gate rejects retained proof when backend declines, backend
+fallbacks, identity mismatches or saturation conditions violate the selected
+contract.  Route-specific persisted-GPU and end-to-end gates then check the
+operation tokens and detailed host-construction, readback, window-I/O and
+fallback counters relevant to that route.  These checks are deliberately
 fail-closed.  Missing or mixed evidence does not become a successful proof.
 This makes benchmark comparisons stronger than comparing configuration
-labels.  A result row called \texttt{vulkan\_gpu} must contain the operation
-tokens, stage coverage and environment identity required for that label.
+labels.  A result row called \texttt{vulkan\_gpu} must satisfy all proof layers
+required for its named route.
 
 \section{Comparison with minimap2 and G3SA}
 \label{sec:pipeline-comparison}
@@ -889,8 +955,10 @@ BioSeqDB adopts the architectural lessons rather than copying the CUDA
 program.  Its Vulkan route batches query sketches into a device buffer,
 groups jobs by exact target identity, builds or reuses resident target segment
 indexes, performs seed count and emission, constructs sorted anchor ranges,
-applies tiled chain/coordinate work, and optionally executes GPU CIGAR jobs.
-The public source symbols include
+applies tiled chain and coordinate work, and optionally executes GPU DP with
+gridded traceback for admitted CIGAR jobs.  Packed path data is decoded into
+host CIGAR and result objects on the recomputed resident route.  The public
+source symbols include
 \path{run_phase_c_seed_to_coordinate_multi_query_batch_roundtrip}
 and the GPU alignment CIGAR wire records.  The route is written for
 Vulkan/SPIR-V rather than CUDA and therefore also targets MoltenVK and Apple
@@ -916,6 +984,12 @@ It contains no rule violation or regression, but it contains sanity warnings
 for constant metrics and only one sample per shown configuration.  The two
 rows below are therefore implementation evidence for the named cases, not a
 general claim that GPU execution is always faster.
+
+Report~47 predates the strict persisted-index route and measures a recomputed
+resident source configuration.  It is not a \texttt{just\_index} receipt and
+does not establish authentic persisted all-GPU execution.  Its CIGAR case
+proves GPU DP and traceback plus host result construction for that historical
+route.  It does not prove persisted all-GPU CIGAR.
 
 \begin{table}[ht]
   \centering
@@ -988,13 +1062,15 @@ reported exactly 4,096 matches and 4,096 correct CIGARs, executed 4,096
 gridded jobs, reused one resident index 4,095 times, and recorded zero CPU
 fallback rows, zero SIMD fallback rows and zero Vulkan declines.
 
-These results support the architectural story rather than an isolated kernel
-claim.  In the 300 Mbp source configuration, query sketching and the
-seed--chain kernel are a small part of the measured GPU region, while target
-deduplication and index build dominate.  Reusing residency across more queries
-is therefore as important as accelerating the recurrence.  This is why the
-final solution batches at the database scheduler and why a one-row mandatory
-GPU wave is rejected.
+These historical results support the architectural story rather than an
+isolated kernel claim.  In the 300 Mbp source configuration, query sketching
+and the seed--chain kernel are a small part of the measured GPU region, while
+target deduplication and index build dominate.  Reusing residency across more
+queries is therefore as important as accelerating the recurrence.  This is
+why the database scheduler batches resident GPU work and why a one-row
+mandatory GPU wave is rejected.  The later final CPU and SIMD path addresses a
+different bottleneck by handing fragment-native prepared anchors directly to
+the pipeline.
 
 \section{Final architecture, invariants and remaining boundaries}
 \label{sec:pipeline-final}
@@ -1002,9 +1078,10 @@ GPU wave is rejected.
 The final pipeline is best summarised by its invariants.
 
 \begin{enumerate}
-  \item \textbf{One executable stage order.}  Execution and description both
-  use \texttt{make\_minimap\_pipeline}.  The exact-edit survivor set is
-  reclassified before MAPQ.
+  \item \textbf{One common tail composer.}  Executable chains use
+  \texttt{make\_minimap\_pipeline}.  Description reuses its common tail while
+  deliberately omitting the runtime query-sketch head.  The exact-edit
+  survivor set is reclassified before MAPQ.
   \item \textbf{One top-level algorithm choice.}  Runtime selectors are
   consumed by a pinned dispatch chain.  Hot stages see fixed kernel traits,
   while uncommon shapes retain a typed fallback.
@@ -1013,16 +1090,17 @@ The final pipeline is best summarised by its invariants.
   Their owners outlive downstream use, and permits are released after
   storage.
   \item \textbf{Target work is batch-scoped.}  Prepared CPU or GPU targets,
-  persisted readers and resident indexes are reused across compatible query
-  waves.
+  persisted readers, fragment-native anchor batches and resident indexes are
+  reused across compatible query waves.
   \item \textbf{Parallelism is bounded twice.}  A single TBB arena controls
   worker concurrency, while memory admission controls the number and size of
   concurrent materialisations.
   \item \textbf{Accelerator selection is fail-closed.}  A selected mandatory
   Vulkan tuple cannot turn into CPU or SIMD biological work without being
   rejected.
-  \item \textbf{Backend claims are evidence, not names.}  Per-job validation
-  checks backend identity, index provenance, environment and exclusive
+  \item \textbf{Backend claims are evidence, not names.}  Per-job validation,
+  aggregate full-attestation gates and route-specific operation proof together
+  check backend identity, index provenance, environment and exclusive
   per-stage engine coverage.
 \end{enumerate}
 
@@ -1032,10 +1110,12 @@ The generic CPU stage chain and the dedicated resident GPU batch route share
 algorithms and result contracts but are not literally the same instruction
 graph.  Persisted Shape-V5 GPU execution is currently coordinate-only because
 a genuine GPU target-window reader for that storage form is not wired.
-The strongest authenticated, host-biological-work-free Format-5 graph
-specified in DOC0374 is not yet the universal production route.  Finally,
-small GPU batches can lose to fixed SQL and device overhead even when the
-kernel is faster.
+The direct coordinate proof machinery does not yet supply an accepted
+fresh-postmaster persisted all-GPU performance result, and persisted CIGAR is
+unsupported.  The newest demonstrated CPU and SIMD solution is the
+fragment-native prepared-anchor path described by DOC0384.  Finally, small
+GPU batches can lose to fixed SQL and device overhead even when the kernel is
+faster.
 
 These qualifications do not weaken the contribution.  They explain why the
 final solution differs from the original direct port.  BioSeqDB has turned a
