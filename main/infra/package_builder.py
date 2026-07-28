@@ -71,6 +71,7 @@ CACHE_TAGS = {
     "Component": "package-builder-cache",
     "ManagedBy": "bioseq-package-builder",
     "BaseOS": "ubuntu-24.04",
+    "CacheStage": "post-build",
 }
 
 BOOTSTRAP_SCHEMA = "1"
@@ -1059,11 +1060,12 @@ def create_cached_ami(
     matrix: Matrix,
     key_path: Path,
     user_data: str,
-) -> tuple[dict[str, Any], Builder]:
-    # Snapshot only a stopped, fully validated pre-source machine. Explicit
-    # --no-reboot prevents CreateImage from attempting its default reboot after
-    # we have already established the filesystem-consistent stopped state. The
-    # exact instance is restarted and revalidated before source is staged.
+    revision: str,
+) -> dict[str, Any]:
+    # This runs only after the complete native package matrix and its SQL/S3
+    # attestations succeed.  The stopped image therefore preserves the costly
+    # CMake/Cargo/Docker build state instead of caching only bootstrap tools.
+    # Explicit --no-reboot is correct because the instance is already stopped.
     ssh_run(
         builder,
         key_path,
@@ -1087,7 +1089,7 @@ def create_cached_ami(
         "--name",
         name,
         "--description",
-        f"BioSeq native package builder {architecture.name}, bootstrap schema {BOOTSTRAP_SCHEMA}",
+        f"BioSeq post-build package cache {architecture.name}, revision {revision}",
         "--no-reboot",
     )
     image_id = str(payload.get("ImageId", ""))
@@ -1098,6 +1100,7 @@ def create_cached_ami(
         "BuildArchitecture": architecture.name,
         "Architecture": architecture.aws_architecture,
         "BootstrapSchema": BOOTSTRAP_SCHEMA,
+        "SourceRevision": revision,
         "Name": name,
     }
     aws_no_output(
@@ -1109,16 +1112,9 @@ def create_cached_ami(
         "--tags",
         *(f"Key={key},Value={value}" for key, value in tags.items()),
     )
-    records = start_builders(
-        region, {architecture.name: builder}, matrix
-    )
-    refreshed = refreshed_builders(records, {architecture.name: builder})[
-        architecture.name
-    ]
-    wait_for_bootstrap(refreshed, key_path)
     image = wait_for_cached_ami(region, image_id)
-    info(f"created reusable {architecture.name} package-builder AMI {image_id}")
-    return image, refreshed
+    info(f"created reusable post-build {architecture.name} package-builder AMI {image_id}")
+    return image
 
 
 def rendered_builder_user_data(outputs: dict[str, Any], architecture: str) -> str:
@@ -1765,18 +1761,50 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
     key_path = ssh_key_path(outputs)
     for builder in builders.values():
         wait_for_bootstrap(builder, key_path)
-    if not args.no_snapshot:
-        for name, builder in builders.items():
-            if not cache_hits[name]:
-                _, builders[name] = create_cached_ami(
-                    args.region,
-                    builder,
-                    matrix.architectures[name],
-                    matrix,
-                    key_path,
-                    rendered_builder_user_data(outputs, name),
-                )
     return outputs, builders, records, cache_hits
+
+
+def create_post_build_amis(
+    *,
+    args: argparse.Namespace,
+    matrix: Matrix,
+    selection: Selection,
+    outputs: dict[str, Any],
+    builders: dict[str, Builder],
+    revision: str,
+) -> dict[str, dict[str, Any]]:
+    """Snapshot successful native builders concurrently after package delivery."""
+
+    key_path = ssh_key_path(outputs)
+    images: dict[str, dict[str, Any]] = {}
+    errors: list[str] = []
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(selection.architectures), thread_name_prefix="bioseq-cache"
+    ) as executor:
+        futures = {
+            executor.submit(
+                create_cached_ami,
+                args.region,
+                builders[name],
+                matrix.architectures[name],
+                matrix,
+                key_path,
+                rendered_builder_user_data(outputs, name),
+                revision,
+            ): name
+            for name in selection.architectures
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            try:
+                images[name] = future.result()
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+    if errors:
+        raise PackageBuilderError(
+            "post-build package cache creation failed: " + "; ".join(errors)
+        )
+    return images
 
 
 def execute_build(
@@ -1989,6 +2017,20 @@ def cmd_run(args: argparse.Namespace) -> None:
     try:
         outputs, builders, _, _ = provision_and_start(args, matrix)
         result = execute_build(args, matrix, selection, outputs, builders)
+        if not args.no_snapshot:
+            images = create_post_build_amis(
+                args=args,
+                matrix=matrix,
+                selection=selection,
+                outputs=outputs,
+                builders=builders,
+                revision=str(result["revision"]),
+            )
+            result["cache_images"] = {
+                name: str(image["ImageId"]) for name, image in images.items()
+            }
+            result["completed_at"] = utc_now()
+            write_last_run(result)
     except BaseException as error:
         failure = error
     finally:
