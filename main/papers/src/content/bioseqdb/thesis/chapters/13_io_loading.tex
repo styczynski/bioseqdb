@@ -3,7 +3,7 @@
 
 The alignment kernels described in the preceding chapters begin with compact
 sequences, but public biological archives normally deliver text.  A FASTA
-record contains a header and one or more sequence lines; a FASTQ record adds a
+record contains a header and one or more sequence lines. A FASTQ record adds a
 separator and a quality string whose length must agree with the sequence.
 Either format may be compressed, individual records may be much larger than a
 PostgreSQL allocation, and a header may itself encode several typed metadata
@@ -28,26 +28,27 @@ In this chapter, \emph{reliable loading} has five concrete meanings:
 
 \begin{enumerate}
     \item a finite input is framed into exactly the intended FASTA or FASTQ
-    records, including multiline records and compressed input;
+    records, including multiline records and compressed input.
     \item memory use is independent of the length of the largest sequence on
-    the path used by \texttt{bioseq.load};
+    the path used by \texttt{bioseq.load}.
     \item symbols are packed directly into the alphabet and storage-unit layout
-    declared by the destination \texttt{bioseq.seq} typmod;
+    declared by the destination \texttt{bioseq.seq} typmod.
     \item every diagnostic identifies the earliest terminal failure and, where
-    possible, the record and destination column; and
+    possible, the record and destination column.
     \item a failed SQL call does not expose a successfully committed prefix as
     though it were a completed load.
 \end{enumerate}
 
-These requirements differ from those of a standalone mapper.  Minimap2's
+These requirements differ from those of a standalone mapper. Minimap2's
 ordinary input route can parse a file into process-owned sequences and build an
-in-memory index.  BioSeqDB must additionally preserve relational defaults and
-constraints, stream sequence fragments into database-owned relations, publish
-locators in a safe order, and cooperate with PostgreSQL's transaction and
-resource-owner machinery.  Conversely, the reusable BioSeqDB batch reader and
-standalone FASTA/FASTQ writer do not automatically acquire database
-transactionality merely because the PostgreSQL loader uses them.  Keeping those
-guarantees separate is a recurring theme of the implementation.
+in-memory index~\cite{minimap2_paper}. BioSeqDB must additionally preserve
+relational defaults and constraints, stream sequence fragments into
+database-owned relations, publish locators in a safe order, and cooperate with
+PostgreSQL's transaction and resource-owner machinery.  Conversely, the
+reusable BioSeqDB batch reader and standalone FASTA/FASTQ writer do not
+automatically acquire database transactionality merely because the PostgreSQL
+loader uses them.  Keeping those guarantees separate is a recurring theme of
+the implementation.
 
 \section{Layered reader architecture}
 \label{sec:io-reader-architecture}
@@ -64,8 +65,10 @@ chapter, supply bytes without importing the sequence-alphabet or PostgreSQL
 graphs.
 
 The complete path used by the SQL loader is reconstructed in
-Figure~\ref{fig:io-load-pipeline}.  Solid boxes belong to the default path.
-The dashed queue is the optional overlap experiment retained behind a setting.
+Figure~\ref{fig:io-load-pipeline}. Solid boxes belong to the default path.
+The dashed queue is the optional overlap experiment retained behind
+\texttt{bioseq.load\_overlap}, which defaults to off. The record parser is an
+incremental finite-state machine (FSM).
 The diagram deliberately separates file-format selection from compression
 selection: FASTA versus FASTQ comes from the filename extension, while gzip is
 decided from the file's magic bytes.
@@ -112,14 +115,14 @@ decided from the file's magic bytes.
       (chunks.south) to[bend left=25] node[below,align=center]
       {default: direct\\single-backend call} (seqwriter.south);
 \end{tikzpicture}
-\caption{The BioSeqDB loading path.  The reusable I/O layer ends at native
-packed chunks.  PostgreSQL writes remain on the backend thread.  The bounded
+\caption{The BioSeqDB loading path. The reusable I/O layer ends at native
+packed chunks. PostgreSQL writes remain on the backend thread. The bounded
 capacity-16 queue is an optional overlap path. The default loader calls the
-sequence writer directly. Gzip input uses zlib on both SQL paths.}
+sequence writer directly.}
 \label{fig:io-load-pipeline}
 \end{figure}
 
-The principal reader layers and their ownership are summarised in
+The principal reader layers and their ownership are summarized in
 Table~\ref{tab:io-layer-contracts}.  This decomposition arose from several
 earlier designs that coupled reading, record objects, and consumers too
 tightly.  In the current version the same source and FSM can feed a compact
@@ -134,7 +137,7 @@ small decompressed prefix for header-format sampling.
 \textbf{Layer} & \textbf{Contract} & \textbf{Current implementation anchor}\\
 \midrule
 byte source &
-fill a caller-owned span; report EOF or first error &
+fill a caller-owned span. Report EOF or the first error &
 \texttt{\detokenize{io/source_core.cppm}} and
 \texttt{\detokenize{io/sources.cppm}}\\
 buffer &
@@ -170,10 +173,10 @@ It accepts \texttt{.fasta}, \texttt{.fa}, and \texttt{.fna} for FASTA and
 \texttt{.fastq}, \texttt{.fq}, and \texttt{.fnq} for FASTQ, case
 insensitively.  The optional suffixes \texttt{.gz}, \texttt{.bgz}, and
 \texttt{.bgzf} are stripped before that lookup.  The resulting gzip-suffix bit
-is informational.  The byte source independently checks for the RFC 1952 magic
-bytes \texttt{1f 8b}.  Thus a gzip-compressed file with a misleading plain
-suffix can still be decompressed, while a plain file named with a gzip suffix
-does not force decompression.
+is informational. The byte source independently checks for the RFC 1952 magic
+bytes \texttt{1f 8b}~\cite{rfc1952_gzip}. Thus a gzip-compressed file with a
+misleading plain suffix can still be decompressed, while a plain file named
+with a gzip suffix does not force decompression.
 
 The record grammar is not inferred from file contents.  This is intentional:
 the parser is instantiated once for either FASTA or FASTQ and does not branch
@@ -181,7 +184,7 @@ between grammars per record.  It also means that an incorrectly named file
 produces a precise grammar error rather than being heuristically reclassified.
 Compression and grammar therefore have different trust boundaries:
 compression is safely magic-sniffed, but the caller is responsible for a
-recognised format extension.
+recognized format extension.
 
 The PostgreSQL loader and its decompressed-prefix sampler use
 \texttt{stream\_sequences\_file} and the same source-selection helper. For a
@@ -215,9 +218,10 @@ source maps compressed bytes and divides DEFLATE work among workers. Its
 \texttt{chunk\_fetcher} owns eight reusable arena slots,
 delivers chunks to the consumer in logical order, carries a 32 KiB trailing
 window between dependent pieces, and rejects a chunk whose decompressed output
-would exceed 256 MiB.  The public option uses a 4 MiB chunk target when no
-override is supplied; the fetcher's internal default is 32 MiB, a later
-Apple-Silicon tuning.  Automatic worker selection reserves two hardware
+would exceed 256 MiB. The public option supplies a 4 MiB chunk target when no
+override is configured. The 32 MiB fetcher constructor default applies only
+when no caller-provided value reaches that lower layer. Automatic worker
+selection reserves two hardware
 threads and caps the common path at eight, while the fetcher itself enforces a
 hard maximum of twelve.
 
@@ -225,8 +229,8 @@ This is the surviving result of several compression experiments.  An archived
 design proposed direct integration with librapidarchive/rapidgzip and its
 marker-based independent-block technique.  The early implementation report
 showed that simply overlapping parsing with a single dependency chain could
-not escape the serial DEFLATE ceiling.  The current core I/O compression path
-no longer depends on that library; it contains BioSeqDB-owned gzip header,
+not escape the serial DEFLATE ceiling. The current core I/O compression path
+no longer depends on that library. It contains BioSeqDB-owned gzip header,
 Huffman, DEFLATE, block-finding, window, and chunk modules.  The
 external-provider subsystem uses libarchive separately for archive containers,
 but that is not the FASTA/FASTQ gzip backend described here.  The conceptual
@@ -234,21 +238,15 @@ inheritance remains:
 find independently decodable work, represent unresolved back-references when
 necessary, resolve them from preceding windows, and drain results in order.
 
-The historical subsystem benchmark in DOC0180 used a roughly 6 GiB
-uncompressed FASTQ corpus. It reported 69.4 MiB/s of compressed input and
-approximately 222 MiB/s of decompressed output for the then-current parallel
-path. Zlib produced about 174 MiB/s decompressed. These rounded values make the
-parallel result about \(1.28\times\), or 28\% higher than the zlib result.
-This is not the multi-gigabyte rate originally targeted. The DOC0181 forensic
-note is important. A notebook chart displayed approximately
-4315 MiB/s under a ``parallel gzip'' label because the same dispatcher had
-been run on a \emph{plain} corpus and fell through to mmap; the chart omitted
-the actual gzip bucket.  This is why Table~\ref{tab:io-evidence} retains the
-222 MiB/s decompressed value and does not repeat the mislabeled bar.
+Table~\ref{tab:io-evidence} summarizes the corrected gzip experiment. DOC0181
+establishes that the much larger notebook bar came from a plain-file mmap
+dispatch rather than the gzip bucket, so that bar is excluded from the
+evidence. The retained result did not meet the original multi-gigabyte target.
 
-There is also a current integrity limitation.  The compression tree contains a
-gzip-footer parser and state fields for expected CRC32 and ISIZE, and
-\texttt{parallel\_gzip\_verify\_crc} defaults to true.  In the inspected
+There is also a current integrity limitation. The compression tree contains a
+gzip-footer parser and state fields for the expected CRC32 checksum and the
+modulo-\(2^{32}\) uncompressed-size field, ISIZE. The setting
+\texttt{parallel\_gzip\_verify\_crc} defaults to true. In the inspected
 \texttt{parallel\_gzip\_decoder}, however, the emitted bytes only update a
 running CRC before the state is reset at a member boundary.  No current path
 compares that value or the observed size with the footer's expected CRC32 and
@@ -263,9 +261,9 @@ corrupted-member tests prove it.
 
 The parser never constructs a temporary ASCII sequence and then repacks it for
 the database.  Its state machines append headers to byte storage and send body
-spans to alphabet-specific packing kernels.  A \texttt{buffer\_slab} starts at
-1 MiB.  If a record crosses a refill boundary, \texttt{make\_room} moves only
-the unread suffix; if the unread record fills the slab, capacity grows
+spans to alphabet-specific packing kernels. A \texttt{buffer\_slab} starts at
+1 MiB. If a record crosses a refill boundary, \texttt{make\_room} moves only
+the unread suffix. If the unread record fills the slab, capacity grows
 geometrically, with smaller increments after 8 MiB, up to the configured 1 GiB
 hard limit.  This path supports general batch reading.  The PostgreSQL
 streaming path drains complete packed units during a record and therefore does
@@ -290,10 +288,10 @@ FASTQ cannot be parsed by searching every line that begins with
 multiple physical lines.  BioSeqDB therefore:
 
 \begin{enumerate}
-    \item consumes one \texttt{@}-prefixed header;
+    \item consumes one \texttt{@}-prefixed header.
     \item accumulates sequence lines until a line beginning with
-    \texttt{+};
-    \item skips the remainder of that separator line; and
+    \texttt{+}.
+    \item skips the remainder of that separator line.
     \item consumes quality bytes until their newline-stripped byte count equals
     the raw sequence byte count.
 \end{enumerate}
@@ -305,14 +303,14 @@ encoder, but it still occupies one quality position in the source file.
 \texttt{sequence\_byte\_count} separately from the encoder's accepted-letter
 count.  A truncated quality section and a quality section that overshoots this
 count are terminal data errors.  This distinction prevents alphabet
-normalisation from shifting the parser onto a later record boundary.
+normalization from shifting the parser onto a later record boundary.
 
 \subsection{Alphabet and storage-width dispatch}
 
 The destination table, rather than the input filename, defines the alphabet.
 \texttt{resolve\_load\_columns} requires exactly one
 \texttt{bioseq.seq} column, decodes the alphabet code and byte width from its
-typmod, and rejects an unparameterised sequence type.  The loader then performs
+typmod, and rejects an unparameterized sequence type. The loader then performs
 one runtime-to-compile-time fan-out:
 
 \[
@@ -324,8 +322,9 @@ one runtime-to-compile-time fan-out:
 The generic C++ templates are not the same as the compiled PostgreSQL surface.
 The checked-in \texttt{BIOSEQ\_OPTTIMIZATION\_LEVEL=0} profile registers DNA4
 with eight-byte storage units. Profile 1 registers DNA4 and DNA5, still with
-eight-byte units. Profile 2 registers DNA4 and DNA5 with one-, two-, four-, and
-eight-byte units. The loader dispatches only across this
+eight-byte units. Level 2 or above registers DNA4 and DNA5 with one-, two-,
+four-, and eight-byte units. Levels 3--5 change other template axes but retain
+these loading layouts. The loader dispatches only across this
 \texttt{pgseq\_supported\_alphabets} registry. RNA, amino-acid, and further
 alphabets are architectural extension possibilities, not current SQL-loader
 capabilities.
@@ -350,8 +349,10 @@ declared alphabet.
 \section{Bounded delivery and backpressure}
 \label{sec:io-bounds}
 
-The project contains three related delivery shapes, whose memory and ordering
+The project contains four related delivery shapes, whose memory and ordering
 properties must not be conflated.
+Table~\ref{tab:io-delivery-shapes} distinguishes their payload ownership,
+memory bounds, and scheduling contracts.
 
 \begin{table}[htbp]
 \centering
@@ -362,24 +363,25 @@ properties must not be conflated.
 \midrule
 general synchronous or mmap reader &
 \texttt{sequence\_batch} with shared header, word, and quality vectors &
-batch threshold; an exceptionally large record may enlarge storage &
+batch threshold. An exceptionally large record may enlarge storage &
 single parser, or record-boundary mmap shards for very large files\\
 general asynchronous reader &
 moved \texttt{sequence\_batch} tasks &
-slab and batch targets; no currently wired ring-capacity backpressure &
+slab and batch targets. No currently wired ring-capacity backpressure &
 producer/parser on caller, handlers in the global task pool\\
 PostgreSQL stream &
 header plus native packed windows &
-one slab, one header, one bounded packed window; no whole-sequence materialisation &
-single parser by contract; writes on backend thread\\
+one slab, one header, one bounded packed window. No whole-sequence materialization &
+single parser by contract. Writes on backend thread\\
 optional load overlap &
 owned begin/chunk/end events &
 FIFO capacity 16, producers block when full &
-PG-free producer task; PostgreSQL-only consumer, FIFO order\\
+PG-free producer task. PostgreSQL-only consumer, FIFO order\\
 \bottomrule
 \end{tabular}
 \caption{The four delivery shapes. Only the last row uses an explicit bounded
-reader-to-writer event queue. It is disabled by default. The general
+reader-to-writer event queue. It is disabled by default through
+\texttt{bioseq.load\_overlap}. The general
 parallel-gzip source has a separate bounded eight-slot arena.}
 \label{tab:io-delivery-shapes}
 \end{table}
@@ -391,7 +393,7 @@ parallel-gzip source has a separate bounded eight-slot arena.}
 prefix offsets, avoiding one heap allocation per header, body, and quality
 string.  For plain mmap inputs of at least 1 GiB, the reader may find valid
 record boundaries and divide the map among at most eight parser shards.  Each
-shard owns its batch storage; handler calls are serialised where required, and
+shard owns its batch storage. Handler calls are serialized where required, and
 cross-shard record delivery is not guaranteed to preserve file order.  This is
 acceptable for consumers whose semantics are set-like, but it is not used by
 the PostgreSQL loader.
@@ -417,7 +419,7 @@ end_record()
 \end{verbatim}
 
 Only full storage units are drained mid-record.  The last chunk subtracts the
-padding captured when the parser finalises the record.  The word span remains
+padding captured when the parser finalizes the record. The word span remains
 valid for the duration of the callback, so the default sink copies it straight
 into \texttt{sequence\_stream\_writer}.  If a sink implements
 \texttt{chunk\_owned}, ownership can instead cross an asynchronous boundary.
@@ -441,19 +443,15 @@ places owned begin, chunk, and end events in a mutex/condition-variable FIFO of
 capacity 16.  The PostgreSQL backend thread drains the queue and performs every
 relation, memory-context, constraint, and write-state operation.  A full queue
 blocks the producer.  A consumer exception closes the queue so the producer
-can stop rather than deadlock; after joining, the original consumer exception
+can stop rather than deadlock. After joining, the original consumer exception
 remains authoritative.
 
-This design obeys PostgreSQL's thread-affinity boundary, but it was not a
-performance win on the measured single-record 2 Gbp load. DOC0318
-reported 9.701 s for its optimistic split baseline, 12.691 s
-after adding an overlapped copying queue, and 13.023 s with owned chunk events.
-A later run with the setting defaulted off measured 13.744 s of task time and
-14.460 s wall time; the report also warns that post-restart non-overlapped
-loads settled near 13--14 s, making the 9.701 s baseline optimistic.  The
-defensible conclusion is qualitative: queue synchronisation and ownership
-traffic did not accelerate that workload.  The option remains available for
-other source/write ratios, but defaults off.
+Table~\ref{tab:io-evidence} shows that the queued variants did not outperform
+the direct loader in this experiment. The report later judged its earliest
+direct baseline optimistic. The defensible conclusion is therefore
+qualitative: queue synchronization and ownership traffic did not accelerate
+the measured workload. The \texttt{bioseq.load\_overlap} setting remains
+available for other source/write ratios but defaults to off.
 
 \section{Header dialects and typed relational mapping}
 \label{sec:io-header-mapping}
@@ -466,7 +464,7 @@ the whole header as one text column preserves bytes but loses the opportunity
 to index accession, organism, taxonomy identifier, dates, ranges, and numeric
 fields using PostgreSQL types.
 
-BioSeqDB's parser recognises AUTO and PLAIN modes plus UniProtKB, UniRef,
+BioSeqDB's parser recognizes AUTO and PLAIN modes plus UniProtKB, UniRef,
 UniParc, UniMes, SPD, NCBI generic, NCBI GI, NCBI PDB, RefSeq, GenBank,
 GISAID, and IMGT dialects.  Format definitions are constexpr tables in
 \path{io/identifier_parser/identifier_formats.cppm}.  They state
@@ -479,11 +477,11 @@ parser a second set of extraction rules.
 AUTO detection is a bounded, once-per-file operation.  The loader reads at most
 256 KiB of \emph{decompressed} prefix and samples at most 16 headers using the
 same source-selection helper as the main stream.  FASTQ sampling follows the
-logical sequence-plus-quality lengths instead of assuming four physical lines;
+logical sequence-plus-quality lengths instead of assuming four physical lines.
 it therefore does not mistake an \texttt{@} in quality data for the next
 header.  Known formats vote across all sampled headers, with deterministic
 enum-order tie breaking.  An unstructured sample becomes PLAIN, while
-unrecognised structured metadata remains in generic AUTO mode.
+unrecognized structured metadata remains in generic AUTO mode.
 
 \subsection{Mapping is resolved once}
 
@@ -492,17 +490,17 @@ PostgreSQL-free array of \texttt{column\_descriptor} values.  Its priority is:
 
 \begin{enumerate}
     \item explicit user mappings from
-    \texttt{bioseq.column\_mapping[]};
+    \texttt{bioseq.column\_mapping[]}.
     \item implicit matches between fixed-format fields and destination column
-    names;
+    names.
     \item selection of an identifier text column, preferring a unique primary
-    key or a conventional identifier alias;
-    \item generic metadata routes for AUTO; and
+    key or a conventional identifier alias.
+    \item generic metadata routes for AUTO.
     \item a decision whether mapped metadata should be stripped from the
     identifier value.
 \end{enumerate}
 
-The result is a compact routing table from positions or normalised keys to
+The result is a compact routing table from positions or normalized keys to
 destination slots.  Per-record parsing performs one SIMD-assisted scan for
 \texttt{|}, \texttt{=}, \texttt{[}, and \texttt{]}, stores common delimiter
 tokens in an inline small-vector, and reuses parse scratch across records.
@@ -512,8 +510,8 @@ The parser writes raw byte ranges through the
 instantiated again for every alphabet, storage width, and file format.
 
 The database implementation, \texttt{pg\_identifier\_writer}, caches each
-destination type's input function and typmod.  Plain unconstrained text can use
-a direct text construction; constrained character types and arbitrary scalar,
+destination type's input function and typmod. Plain unconstrained text can use
+a direct text construction. Constrained character types and arbitrary scalar,
 range, or multirange types use \texttt{OidInputFunctionCall}.  A convenient
 \texttt{lo..hi} header value is rewritten to PostgreSQL's inclusive range
 syntax before the type input function is invoked.  Date and timestamp
@@ -525,19 +523,19 @@ evaluated per row.  Volatile defaults are therefore not accidentally frozen at
 load start.  The completed virtual tuple passes through
 \texttt{ExecConstraints} before the columnar row write.  Per-tuple expression
 and write memory contexts are reset only after by-reference datums have been
-copied.  This final design addresses issues found during review of the first
-header-parser specification: metadata columns must be claimed before choosing
-an identifier column, AUTO sampling must precede mapping, multiline FASTQ must
-remain valid, direct column-store writes must explicitly restore constraints,
-and per-row memory cannot accumulate until end of file.
+copied. This ordering preserves five PostgreSQL obligations:
 
-The DOC0319 parser microbenchmark measured a small cost relative to sequence
-ingestion. On a 40,000-record, approximately 11.9 MiB corpus, the report
-measured 4.331 ms for a dumb header path and 33.375 ms for UniProt parsing and
-routing, or approximately 108 ns versus 834 ns per record.  The structured
-path was about 7.7 times the header-only micro-operation, but still below one
-microsecond per record while extracting six fields.  This is a parser
-microbenchmark, not an end-to-end SQL throughput claim.
+\begin{enumerate}
+    \item metadata columns are claimed before identifier-column selection.
+    \item AUTO sampling precedes mapping.
+    \item multiline FASTQ framing remains valid.
+    \item direct column-store writes enforce relation constraints.
+    \item per-row memory is reset instead of accumulating until end of file.
+\end{enumerate}
+
+Table~\ref{tab:io-evidence} reports the header-parser microbenchmark. The
+structured path includes six-field extraction and routing, but the measurement
+is not an end-to-end SQL throughput result.
 
 \section{SQL integration, failure propagation, and transaction semantics}
 \label{sec:io-sql}
@@ -564,7 +562,7 @@ The steady-state algorithm can be expressed as follows:
 
 \begin{verbatim}
 kind      = infer FASTA/FASTQ from extension
-columns   = inspect target; decode alphabet and storage width
+columns   = inspect target and decode alphabet and storage width
 format    = sample headers if AUTO
 routing   = resolve typed destinations once
 dispatch  = instantiate <alphabet, unit-width, record-format> once
@@ -594,7 +592,7 @@ return record count
 Non-PostgreSQL operations use \texttt{std::expected} or C++ exceptions carrying
 owned strings.  The PostgreSQL boundary maps them to an SQLSTATE and raises an
 ERROR through a checked C++ seam.  The reader captures only the first terminal
-diagnostic; later cleanup must not hide it.  PostgreSQL type input, default, or
+diagnostic. Later cleanup must not hide it. PostgreSQL type input, default, or
 constraint errors retain their native message and receive an
 \texttt{ErrorContextCallback} suffix containing the record number, optional
 column name, and at most 240 bytes of the header.  The bound prevents a corrupt
@@ -602,7 +600,7 @@ giant header from producing an unbounded error message.
 
 Cleanup is explicit even though the surrounding transaction remains the final
 atomicity authority.  The loader tears down its executor, slot, relation, and
-write-state resources at the appropriate boundary; successful execution
+write-state resources at the appropriate boundary. Successful execution
 flushes both parent and fragment write states, performs
 \texttt{CommandCounterIncrement}, and only then permits an optional index scan
 to observe the new locator-backed rows.  If an exception escapes,
@@ -611,13 +609,16 @@ separately committed successful prefix.  A caller that invokes
 \texttt{bioseq.load} inside a larger explicit transaction retains the usual
 PostgreSQL choice to roll back the transaction or recover at a savepoint.
 
-This is stronger than ``delete the output file on parser error''.  Sequence
-data spans fragment relations and a parent column-store row; PostgreSQL's
+This is stronger than ``delete the output file on parser error''. Sequence
+data spans fragment relations and a parent column-store row. PostgreSQL's
 write states, resource owners, locks, snapshots, command visibility, and WAL
 semantics are the mechanisms that define visibility and rollback.  The loader
 therefore avoids inventing a second transaction protocol inside the I/O module.
 
 \subsection{Comparison with a conventional mapper input path}
+
+Table~\ref{tab:io-minimap2-comparison} contrasts this database contract with a
+conventional mapper input path.
 
 \begin{table}[htbp]
 \centering
@@ -638,10 +639,10 @@ mapper's internal encoded buffers &
 destination alphabet and storage width selected from SQL typmod\\
 large record &
 bounded by process/index construction strategy &
-explicit packed-window stream; no whole-record database value\\
+explicit packed-window stream. No whole-record database value\\
 parallelism &
 reader/index threads may own process memory &
-all PostgreSQL calls remain on backend thread; optional PG-free producer only\\
+all PostgreSQL calls remain on backend thread. Optional PG-free producer only\\
 failure &
 command exits or returns an error &
 SQLSTATE, record/column context, and PostgreSQL transaction rollback\\
@@ -663,28 +664,28 @@ useful for corpus generation, benchmark round trips, and exporting compact
 sequences, but it is not the implementation of PostgreSQL atomicity.
 Each producer thread owns a 64 MiB output buffer by default.  At a flush point
 the sink reserves a disjoint file range through an atomic
-\texttt{fetch\_add}; \texttt{pwrite} then fills that range.  Before starting a
-new record, the writer flushes a threshold-crossing buffer so chunks from
-different threads cannot splice a header from one record onto the body of
+\texttt{fetch\_add}. The \texttt{pwrite} call then fills that range. Before
+starting a new record, the writer flushes a threshold-crossing buffer so chunks
+from different threads cannot splice a header from one record onto the body of
 another.  Concurrent producers may nevertheless change record order.
 
 The default \texttt{posix\_pwrite\_sink} opens with
 \texttt{O\_TRUNC}, retries interrupted writes, and reports the first failure.
 An optional mmap sink requires an upper-bound size hint and truncates the file
 to the number of reserved bytes on close.  A bounded streamed-record method
-decodes compact words into ASCII slices rather than materialising a
+decodes compact words into ASCII slices rather than materializing a
 multi-gigabase body. This method may flush in the middle of one record, so it
 is safe only at a quiescent single-producer point. Concurrent producer
 reservations could otherwise interleave record slices. The regular concurrent
 \texttt{write\_record} path keeps a whole record in a growable buffer to
 preserve record atomicity, so it does not provide the same record-size bound.
 FASTA defaults to no line wrapping for throughput.
-FASTQ quality-length checking is configurable; in its permissive mode the
+FASTQ quality-length checking is configurable. In its permissive mode the
 writer truncates an overlong quality or pads a short one with Phred-zero
 \texttt{!} bytes.
 
-Two limitations matter when interpreting the word ``reliable''.  First, the
-standalone writer deliberately omits \texttt{fsync}; successful close means the
+Two limitations matter when interpreting the word ``reliable''. First, the
+standalone writer deliberately omits \texttt{fsync}. Successful close means the
 kernel accepted and closed the file, not that stable storage has acknowledged
 it.  The mmap close path similarly unmaps and truncates but does not call the
 \texttt{msync} named in its stale comment.  Second, opening truncates an
@@ -695,28 +696,24 @@ durable atomic replacement must add that policy outside
 \texttt{bioseq.load}, whose sink is PostgreSQL storage rather than this file
 writer.
 
-The historical subsystem benchmark in DOC0172 illustrates why these choices
-were made. On the measured Apple-Silicon host, the best BioSeqDB
-configurations wrote about
-2.65 GiB/s for a 234 MiB FASTA cell and 1.50 GiB/s for a 6 GiB FASTQ cell,
-versus 311 and 491 MiB/s for a byte-oriented
-\texttt{std::ofstream} baseline.  The mmap sink was not selected as default:
-it regressed the same 234 MiB cell from approximately 2.54 to 1.75 GiB/s and
-the 6 GiB cell from 1.27 to 0.43 GiB/s because demand-zero page faults
-outweighed the avoided kernel copy on that machine.  These are historical
-page-cache throughput measurements with no \texttt{fsync}, not durability
-benchmarks.
+Table~\ref{tab:io-evidence} reports the archived writer throughput. On the
+measured Apple-Silicon host, buffered \texttt{pwrite} configurations
+substantially exceeded the byte-oriented \texttt{std::ofstream} comparator.
+The mmap sink was not retained because it regressed both tested cells. These
+page-cache measurements omitted \texttt{fsync} and therefore do not measure
+durability.
 
 \section{Measured evolution and current limits}
 \label{sec:io-evidence}
 
 Table~\ref{tab:io-evidence} collects only measurements whose interpretation
 could be established from the reports. The reader and writer rows are
-historical subsystem measurements on Apple Silicon from DOC0168 and DOC0172.
-The gzip rows come from DOC0180 and its DOC0181 forensic correction. The
-header row is a DOC0319 microbenchmark. The overlap rows are load-only times
-from the DOC0318 2 Gbp experiment. They should not be combined into a single
-speedup because the corpora and measured boundaries differ.
+historical subsystem measurements on Apple Silicon from DOC0168 and DOC0172,
+both dated 3 May 2026. The gzip rows come from DOC0180 and its DOC0181
+forensic correction, also dated 3 May 2026. The header row is the DOC0319
+microbenchmark dated 9 June 2026. The overlap rows are load-only times from the
+DOC0318 2 Gbp experiment dated 7 June 2026. They should not be combined into a
+single speedup because the corpora and measured boundaries differ.
 
 \begin{table}[htbp]
 \centering
@@ -730,26 +727,32 @@ speedup because the corpora and measured boundaries differ.
 \textbf{Experiment} & \textbf{Baseline} & \textbf{BioSeqDB/result} &
 \textbf{Interpretation}\\
 \midrule
-DOC0168: plain mmap FASTA reader, final archived v3 buckets &
--- & 2694--4586 MiB/s &
+DOC0168, 3 May 2026: plain mmap FASTA reader, final archived v3 buckets &
+not applicable & 2694--4586 MiB/s &
 page-cache reader throughput across synthetic and real buckets\\
-DOC0180/0181: 6 GiB gzip FASTQ, decompressed basis &
+DOC0180/0181, 3 May 2026: 6 GiB gzip FASTQ, decompressed basis &
 zlib 174 MiB/s & parallel 222 MiB/s &
 about \(1.28\times\), or 28\% higher than zlib. Actual gzip bucket, not the
 mislabeled plain mmap result\\
-DOC0172: 234 MiB FASTA writer &
+DOC0172, 3 May 2026: 234 MiB FASTA writer &
 \texttt{ofstream} 311 MiB/s & best 2649 MiB/s &
 page-cache output, no \texttt{fsync}\\
-DOC0172: 6 GiB FASTQ writer &
+DOC0172, 3 May 2026: 6 GiB FASTQ writer &
 \texttt{ofstream} 491 MiB/s & best 1502 MiB/s &
 large-cell writeback-limited result\\
-DOC0319: 40k header records &
+DOC0172, 3 May 2026: 234 MiB FASTA mmap sink &
+buffered \texttt{pwrite} about 2540 MiB/s & mmap about 1750 MiB/s &
+demand-zero page faults outweighed the avoided kernel copy on that host\\
+DOC0172, 3 May 2026: 6 GiB FASTQ mmap sink &
+buffered \texttt{pwrite} about 1270 MiB/s & mmap about 430 MiB/s &
+the mmap regression widened in the large cell\\
+DOC0319, 9 June 2026: 40k header records &
 dumb 108 ns/record & UniProt 834 ns/record &
 six-field parse/routing microbenchmark\\
-DOC0318: 2 Gbp load overlap, optimistic split &
+DOC0318, 7 June 2026: 2 Gbp load overlap, optimistic split &
 direct 9.701 s & copying queue 12.691 s, owned 13.023 s &
 overlap did not win. The baseline was later judged optimistic\\
-DOC0318: overlap setting default off, later run &
+DOC0318, 7 June 2026: overlap setting default off, later run &
 task 13.744 s & wall 14.460 s &
 supports keeping the optional path disabled by default\\
 \bottomrule
@@ -766,12 +769,12 @@ The development sequence behind these results is itself informative:
     \item The first reader established an \texttt{io\_source} abstraction,
     incremental FSMs, a recyclable slab, and shared batch storage.
     \item mmap direct parsing and large-file record-boundary sharding removed
-    copies and exposed parallel parsing where file size amortised shard setup.
+    copies and exposed parallel parsing where file size amortized shard setup.
     \item The writer introduced per-thread chunks and disjoint
     \texttt{pwrite} ranges, then retained pwrite after mmap output regressed on
     the measured host.
     \item gzip work progressed from zlib and overlap experiments toward the
-    current BioSeqDB-owned block/chunk decoder; the originally specified
+    current BioSeqDB-owned block/chunk decoder. The originally specified
     external rapidgzip integration was not retained.
     \item Database integration replaced whole-record batches with the
     storage-unit-parametric stream, so \texttt{bioseq.load} could ingest
@@ -785,10 +788,11 @@ The development sequence behind these results is itself informative:
 \end{enumerate}
 
 The current implementation is therefore not simply the fastest intermediate
-prototype.  It selects the paths whose guarantees compose at the SQL boundary:
+prototype. It selects the paths whose guarantees compose at the SQL boundary:
 single-backend database writes, bounded packed streaming, deterministic mapping
-setup, explicit publication order, and PostgreSQL-managed rollback.  At the
-same time, the evidence boundary must remain explicit. The
+setup, explicit publication order, and PostgreSQL-managed rollback. At the
+same time, the evidence boundary must remain explicit. In the source snapshot
+reviewed on 28 July 2026, the
 \path{bioseq/io/io_test.cpp} unit suite exercises small FASTQ records,
 multiline quality framing, and an ordinary zlib gzip round trip. The
 PostgreSQL \path{bioseq/integration_tests/test_load.cpp} suite is FASTA-centric
@@ -796,56 +800,34 @@ and does not currently prove a FASTQ or gzip
 \texttt{bioseq.load} end-to-end case. Custom parallel-gzip comparisons are
 hidden diagnostics that require an external corpus.
 
-Seven open limitations should remain visible in the thesis:
-
-\begin{enumerate}
-    \item File content does not auto-detect FASTA versus FASTQ. The extension
-    selects the grammar.
-    \item \texttt{strict\_alphabet} is not wired, and unknown alphabet bytes
-    are dropped.
-    \item The custom parallel gzip path accumulates CRC32 but does not compare
-    CRC32 or ISIZE with the member footer.
-    \item The custom parallel source does not strip a byte-order mark from
-    decompressed output.
-    \item Its construction-time zlib fallback is an intended dispatcher branch
-    rather than an operationally reachable error path.
-    \item The generic asynchronous batch reader does not currently realise the
-    ring-capacity backpressure described by its older comments.
-    \item SQL-loader FASTQ and gzip behavior lacks a dedicated end-to-end
-    integration test.
-\end{enumerate}
-
-These gaps are local and testable.  Content-based format probing can be added
-before template dispatch. Strict-symbol mode can select a rejecting encoder
-policy. Gzip member finalisation can parse and compare both footer fields.
-The custom source can strip one decompressed BOM and return construction
-errors through \texttt{std::expected}. The general asynchronous reader can
-either wire its SPSC queues or remove the unused option. Dedicated SQL
-integration fixtures can cover multiline FASTQ and gzip. None requires
-changing the central SQL loading contract.
+The implementation boundaries stated above do not alter the central
+SQL-loading contract. They concern format discovery, strict-symbol policy,
+optional parallel-gzip integrity and construction behavior, generic
+asynchronous backpressure, and missing SQL FASTQ/gzip integration coverage.
+Each can be addressed locally without changing locator publication or
+transaction semantics.
 
 \section{Conclusion}
 
 BioSeqDB's ingestion path turns a textual archive record into two coordinated
 database objects: compact sequence fragments and a typed parent row carrying
-their locator.  It does so without assembling a whole large sequence, without
+their locator. It does so without assembling a whole large sequence, without
 letting worker threads enter PostgreSQL, and while dispatching through a
-compile-time registry of supported layouts. The checked-in profile is
-DNA4 with eight-byte units. Profile 1 adds DNA5 with eight-byte units. Profile
-2 adds one-, two-, and four-byte units for both registered alphabets. The
-reader's reusable concepts isolate byte sources,
-incremental grammars, and compact packing. The identifier parser isolates
-repository dialects from SQL type conversion. The loader binds both to
-PostgreSQL locks, write states, constraints, visibility, and rollback.
+compile-time registry of supported layouts. The reader's reusable concepts
+isolate byte sources, incremental grammars, and compact packing. The identifier
+parser isolates repository dialects from SQL type conversion. The loader binds
+both to PostgreSQL locks, write states, constraints, visibility, and rollback.
 
-The intermediate results explain the final design.  mmap and fused packing
+The intermediate results explain the final design. Mmap and fused packing
 were retained because they removed data movement. Parallel gzip was retained
-as a distinct general batch-reader backend, not as the SQL loader's gzip
-route, and not presented as having met its original
-multi-gigabyte target.  mmap output and parser/writer overlap remained optional
-after measurement showed regressions.  The bounded streaming API replaced a
-batch-only database path because correctness on a multi-gigabase record matters
-more than an attractive small-record abstraction.  Reliable loading here is
-therefore not one defensive check. It is the composition of bounded state,
-precise framing, generic representation, typed relational materialisation, and
-transactional publication.
+as a distinct general batch-reader backend and is not presented as having met
+its original multi-gigabyte target. Mmap output and parser/writer overlap
+remained optional after measurement showed regressions. The bounded streaming
+API replaced a batch-only database path because correctness on a
+multi-gigabase record matters more than an attractive small-record abstraction.
+Reliable loading here is therefore not one defensive check. It is the
+composition of bounded state, precise framing, generic representation, typed
+relational materialization, and transactional publication.
+
+The following chapter reuses the \texttt{io\_source} boundary for validated
+remote-provider streams while preserving PostgreSQL thread ownership.
