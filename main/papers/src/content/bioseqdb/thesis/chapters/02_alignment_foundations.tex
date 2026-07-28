@@ -475,25 +475,34 @@ without depending on a concrete backend.
 \begin{algorithm}[ht]
   \caption{Conceptual bounded predecessor chaining}
   \label{alg:anchor-chaining}
-  \begin{algorithmic}[1]
-    \Require anchors \(a_1,\ldots,a_A\) in canonical coordinate order
-    \For{\(i=1,\ldots,A\)}
-      \State \(f[i]\gets \operatorname{span}(a_i)\)
-      \State \(p[i]\gets \bot\)
-      \For{candidate \(j<i\) in the active distance and iteration window}
-        \If{\(a_j\) and \(a_i\) have valid order, strand, gap and bandwidth}
-          \State \(v\gets f[j]+\operatorname{reward}(a_j,a_i)
-            -\operatorname{gapPenalty}(a_j,a_i)\)
-          \If{\(v>f[i]\)}
-            \State \(f[i]\gets v\), \(p[i]\gets j\)
-          \EndIf
-        \EndIf
-        \State optionally stop after the configured skip heuristic fires
-      \EndFor
-    \EndFor
-    \State backtrack from high-scoring endpoints through \(p\)
-    \State filter chains by score, seed count and overlap
-  \end{algorithmic}
+  \begin{enumerate}
+    \item \textbf{Input.} Anchors \(a_1,\ldots,a_A\) in canonical coordinate
+      order.
+    \item \textbf{Endpoint loop.} For each \(i=1,\ldots,A\), perform the
+      following steps:
+      \begin{enumerate}
+        \item Initialize \(f[i]\gets\operatorname{span}(a_i)\) and
+          \(p[i]\gets\bot\).
+        \item For each candidate \(j<i\) in the active distance and iteration
+          window, perform the following steps:
+          \begin{enumerate}
+            \item If \(a_j\) and \(a_i\) have valid order, strand, gap, and
+              bandwidth, compute
+              \[
+                v\gets f[j]+\operatorname{reward}(a_j,a_i)
+                  -\operatorname{gapPenalty}(a_j,a_i).
+              \]
+            \item If the candidate is valid and \(v>f[i]\), set
+              \(f[i]\gets v\) and \(p[i]\gets j\).
+            \item Optionally stop the predecessor loop after the configured
+              skip heuristic fires.
+          \end{enumerate}
+      \end{enumerate}
+    \item \textbf{Backtracking.} Backtrack from high-scoring endpoints through
+      \(p\).
+    \item \textbf{Result.} Return the chains that remain after filtering by
+      score, seed count, and overlap.
+  \end{enumerate}
 \end{algorithm}
 
 \subsection{From chains to base-level alignment}
