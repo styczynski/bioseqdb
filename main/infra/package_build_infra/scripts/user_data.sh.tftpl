@@ -40,6 +40,8 @@ chmod 0644 /etc/bioseq-package-builder.env
 # Compressing the separately versioned bootstrap keeps rendered EC2 user-data
 # comfortably below the 16 KiB API limit.
 BOOTSTRAP=/usr/local/sbin/bioseq-package-builder-bootstrap
+# OpenTofu template interpolation is intentionally single-quoted for the shell.
+# shellcheck disable=SC2016
 printf '%s' '${bootstrap_gzip_b64}' | base64 -d | gzip -d > "$BOOTSTRAP"
 chown root:root "$BOOTSTRAP"
 chmod 0755 "$BOOTSTRAP"
