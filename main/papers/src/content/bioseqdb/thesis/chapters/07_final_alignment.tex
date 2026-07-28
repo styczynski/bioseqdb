@@ -83,9 +83,7 @@ The \(I\) and \(D\) states remember whether the best partial path already ends
 in a gap. For global alignment the axes are initialized by cumulative gap
 costs. Local alignment additionally permits zero in the maximum. A full
 matrix costs \(O(nm)\) time and, if every trace decision is stored,
-\(O(nm)\) memory.\footnote{O. Gotoh, ``An improved algorithm for matching
-biological sequences'', \emph{Journal of Molecular Biology} 162(3), 1982,
-doi:10.1016/0022-2836(82)90398-9.}
+\(O(nm)\) memory \cite{gotoh_1982_affine}.
 
 BioSeqDB inherits minimap2's default nucleotide scores:
 \[
@@ -162,10 +160,8 @@ window, and any Block configuration remain part of the search contract.
 
 The current implementation follows the central shape of minimap2's
 \texttt{mm\_align1}: extend left of the first seed, fill between seeds, then
-extend right of the last seed.\footnote{H. Li, ``Minimap2: pairwise alignment
-for nucleotide sequences'', \emph{Bioinformatics} 34(18), 2018,
-doi:10.1093/bioinformatics/bty191.} These phases have different endpoint
-semantics:
+extend right of the last seed \cite{minimap2_paper}. These phases have
+different endpoint semantics:
 
 \begin{center}
 \begin{tabular}{p{0.18\textwidth}p{0.20\textwidth}p{0.23\textwidth}p{0.29\textwidth}}
@@ -330,10 +326,7 @@ KSW2 therefore represents quantities related to
 \]
 together with transformed gap offsets. The hot recurrence operates on signed
 8-bit partial values. An absolute 32-bit score row is reconstructed only for
-exact maximum tracking and endpoints.\footnote{H. Suzuki and M. Kasahara,
-``Introducing difference recurrence relations for faster semi-global
-alignment of long sequences'', \emph{BMC Bioinformatics} 19, 2018,
-doi:10.1186/s12859-018-2014-8.}
+exact maximum tracking and endpoints \cite{suzuki_kasahara_2018}.
 
 BioSeqDB ports that organization to Highway. A scalable byte tag supplies the
 partial-score lanes, while a scalable 32-bit tag reduces reconstructed maxima.
@@ -1059,9 +1052,10 @@ must therefore be reported separately.
 \subsection{Resident GPU evidence}
 
 The newest authoritative final-alignment discussion in DOC0356/DOC0357 is the
-2026-06-28 signoff addendum over \texttt{report\_47.json}. The report artifact
-itself was created on 2026-06-10 at commit
-\texttt{6f69eebe1ed8cbfbb126be278c7f0ffc821fdb72}. Its metadata records
+2026-06-28 signoff addendum over
+\path{main/reporting/bioseq_bench_e2e_batch_gpu_proof/report_47.json}.  The
+artifact was created at 2026-06-28T00:55:32Z from commit
+\texttt{ac58f88500d4ad8652e26e163d2840e5713346b4}. Its metadata records
 \texttt{dirty=true} and \texttt{fast=false}. Each displayed tuple and case had
 one sample, so the timings are scoped signoff observations rather than
 variability estimates. The report recorded no rule violations or regressions
@@ -1123,17 +1117,20 @@ be treated as one uniform equivalence test.
   \node[align=center] at (1.50,-0.28) {4096\\many-gap};
   \node[align=center] at (2.50,-0.28) {16 queries\\300\,Mbp target};
 \end{tikzpicture}
-\caption{Batch-size effect in the selected E2E evidence. The dashed line is
-break-even. A 512-job gridded CIGAR batch is tied, while larger or
-target-heavy batches amortize the PostgreSQL and Vulkan fixed costs.}
+\caption{Workload-size pattern in the selected E2E evidence. The dashed line
+is break-even. A 512-job gridded CIGAR batch is tied, while the two
+higher-work cases are consistent with amortization of PostgreSQL and Vulkan
+fixed costs. The one-sample cases do not isolate batch size or target size as
+the cause.}
 \label{fig:gpu-alignment-speedups}
 \end{figure}
 
 Figure~\ref{fig:gpu-alignment-speedups} plots the ratio of SIMD time to GPU
 time, not either raw duration. A value above one favors the GPU. The 512-job
 many-gap case sits at break-even, while the two larger-work cases exceed
-\(2.4\times\). The figure supports a fixed-cost amortization conclusion only
-for these scoped cases.
+\(2.4\times\). The figure is consistent with fixed-cost amortization in these
+scoped cases, but it does not establish that explanation causally because the
+routes and workloads differ and each case has one sample.
 
 The 4096-job CIGAR case executed 4096 gridded jobs in one extension dispatch
 and planned 327,069,696 traceback words. It reduced wall time by 59.891\%.
@@ -1335,3 +1332,11 @@ route only for a complete, fail-closed GPU statement shape. CIGAR, edit
 distance, score, route identity, and benchmark scope remain separate pieces
 of evidence. That separation is what allows a database-resident mapper to
 evolve without hiding algorithmic changes behind one SQL function name.
+
+The exposition now steps back by one runtime stage. Final alignment was
+described first so that its scoring semantics, cost, and exact edit result are
+available when judging a cheaper rejection procedure. In the executed
+pipeline, however, the prefilter in the next chapter lies between chaining and
+this alignment stage. It may eliminate work only within a proved safe domain.
+Every surviving region still follows the alignment and exact post-filter
+contracts established above.

@@ -297,10 +297,11 @@ Suzuki--Kasahara difference formulation stores bounded
 differences between neighboring scores, which makes narrow integer lanes
 practical and is the basis of KSW2
 \cite{suzuki_kasahara_2018}. BioSeqDB ports that
-formulation to Google Highway so one source can dispatch to Streaming SIMD
-Extensions (SSE), Advanced Vector Extensions (AVX), NEON, the Scalable Vector
-Extension (SVE), WebAssembly SIMD, and other supported targets. The Block
-Aligner backend
+formulation to Google Highway. Highway supplies target families such as
+Streaming SIMD Extensions (SSE), Advanced Vector Extensions (AVX), NEON, the
+Scalable Vector Extension (SVE), and WebAssembly SIMD; a particular BioSeqDB
+build enables a subset. This is not a claim that every experiment built and
+qualified every target family. The Block Aligner backend
 uses a different geometric optimization. It maintains a square block around
 the promising part of the matrix and slides, grows, or shrinks that block
 instead of visiting the full rectangle. The adaptive greedy band can return a
@@ -546,8 +547,10 @@ Table~\ref{tab:minimap2-bioseq-foundations} summarizes the correspondence.
     Sketch &
     \textbf{Minimap2:} scalar canonical minimizer sketching.
     \par\smallskip
-    \textbf{BioSeqDB:} scalar minimap-int, reference SIMD, production two-stack
-    ntHash, paper-compatible ntHash SIMD, and Vulkan minimap-int selectors.
+    \textbf{BioSeqDB:} scalar minimap-int, reference SIMD, the
+    production-targeted explicitly selected ExactSimd route historically
+    exposed as \texttt{two\_stack\_nthash}, versioned paper-derived PNT1, and
+    Vulkan minimap-int selectors.
     \par\smallskip
     \textbf{Retained meaning:} sparse representative seeds. \\[3pt]
     Seed lookup &

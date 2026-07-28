@@ -625,7 +625,9 @@ merge.  It also makes the selected algorithm visible in execution proof.
 Direct GateKeeper tests may exercise lengths through 128 and thresholds through
 8, but that larger correctness domain is not automatically promoted to
 production.  Performance evidence, not mere functional support, controls the
-AUTO domain.
+automatic Vulkan algorithm-selection domain.  This is distinct from
+\texttt{PrefilterBackendType::AUTO}, which the live stage resolves to SIMD
+rather than automatically selecting Vulkan.
 
 At the PostgreSQL boundary, the planner accepts exactly one top-level
 \texttt{bioseq.edit(sequence\_column) < integer\_constant} predicate using the
@@ -680,8 +682,10 @@ the papers.  A fast published filter can become slower after generic rank
 conversion, safe bounds checks, batching, runtime validation, and GPU
 synchronization are included.  The project benchmark records
 \texttt{backend\_batch\_ns} for upload, dispatch, synchronization, and result
-readback.  The later hardware-route comparisons use that field.  It also
-records \texttt{wall\_clock\_ns} for the complete benchmark callback.
+readback.  Later hardware-route comparisons generally use that field.  It also
+records \texttt{wall\_clock\_ns} for the complete benchmark callback; the
+report-138 aggregate reproduced below is an explicitly labelled exception that
+uses this complete-callback field.
 Table~\ref{tab:sneaky-intermediate} transcribes complete-callback wall-clock
 P50 from report 127, not \texttt{backend\_batch\_ns}.  Correctness preparation
 and the exact truth oracle remain outside the measured callback.
@@ -760,27 +764,32 @@ DOC0382 identifies report 138 as the final uncontended reproduction.
 \begin{table}[htbp]
 \centering
 \small
-\caption{Scoped aggregate comparisons from dirty report 138. Ratios below one
-indicate lower time than the bundled original CPU implementation.}
+\caption{Scoped complete-callback \texttt{wall\_clock\_ns} aggregates from
+dirty report 138. The Highway rows compare the same configured cells. The
+Vulkan row sums a different threshold matrix and is not an equal-work speedup
+comparison.}
 \label{tab:sneakysnake-report138}
 \begin{tabular}{p{0.30\textwidth}p{0.23\textwidth}p{0.35\textwidth}}
 \textbf{Comparison in report 138} & \textbf{Ratio to bundled original CPU} &
 \textbf{Interpretation}\\
 \hline
 production Highway, equal-weight mean over cells & 0.708 &
-29.2\% lower equal-weight mean time\\
+29.2\% lower equal-weight mean wall time\\
 production Highway, summed P50 & 0.482 &
-summed P50 was 48.2\% of the original\\
-Vulkan, summed P50 & 0.175 &
-summed P50 was 17.5\% of the original\\
+summed wall-clock P50 was 48.2\% of the original\\
+Vulkan, unequal-threshold summed P50 & 0.175 &
+configured-matrix sum only; not a direct speedup\\
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:sneakysnake-report138} reports two different aggregates. The
-equal-weight mean gives every configured cell the same influence. The summed
-P50 weights the total timed work represented by the matrix. The Vulkan ratio
-of 0.175 therefore states that its summed P50 was 17.5\% of the original. It
-does not state that Vulkan won every threshold cell.
+Table~\ref{tab:sneakysnake-report138} reports two different wall-clock
+aggregates. The equal-weight Highway mean gives every common configured cell
+the same influence, while its summed P50 weights the total timed work in that
+common matrix.  The Vulkan numerator instead uses
+\(E=\{2,8,16,31\}\), whereas the original-CPU denominator uses
+\(E=\{2,8,40,100\}\).  The ratio 0.175 therefore states only the relationship
+between two differently configured callback sums.  It is not equal-threshold
+throughput evidence and must not be interpreted as an 82.5\% GPU speedup.
 
 All final Vulkan cells reported an available backend, 1,024 evaluated jobs,
 valid result count, runtime validation, zero reference-decision mismatches, and
@@ -788,11 +797,13 @@ zero false rejects.  Command replay reduced summed GPU P50 by 9.1\% relative to
 the pre-cache hybrid in report 134, and reports 137 and 138 differed by only
 0.45\% in summed GPU P50.
 
-This aggregate result must not be read as ``GPU wins for every threshold''.
-In report 138 the synchronous Vulkan round trip was still
-\(4.94\)--\(11.81\times\) the original CPU at \(E=2\) and
-\(1.90\)--\(2.56\times\) at \(E=8\).  The \(E=16\) and \(E=31\) team paths
-supplied the aggregate gain.  The report metadata records commit
+Matched cells show the opposite small-threshold result. In report 138 the
+synchronous Vulkan complete-callback wall time was
+\(5.376\)--\(16.811\times\) the original CPU at \(E=2\) and
+\(1.822\)--\(2.483\times\) at \(E=8\).  The apparently small unequal-matrix
+sum is dominated by comparing the Vulkan \(E=16,31\) work budget with the
+original CPU \(E=40,100\) work budget; it cannot attribute a gain to the GPU
+team path.  The report metadata records commit
 \texttt{71fe8366555f682571c87005c3469a8e207307ab}, creation time
 2026-07-17T00:54:28Z, and \texttt{dirty=true}.  The result is therefore useful
 as the documented optimization decision but is not described here as a clean
@@ -807,7 +818,11 @@ performance win.
 \subsection{GateKeeper closes the small-window Vulkan gap}
 
 GateKeeper was historically accepted on 2026-07-17 against two complete,
-unfiltered, clean hardware reports.  Report 148 placed all eight
+unfiltered hardware reports from clean worktrees.  Here ``clean'' means
+\texttt{dirty=false}, not a globally green benchmark: report 148 carried eight
+global rule violations, while report 151 carried seven rule violations and
+four regressions.  None concerned the scoped small-seed GateKeeper cells.
+Report 148 placed all eight
 GateKeeper/SneakySnake ratios in
 \(0.540\ldots0.838\).  Report 151 independently placed them in
 \(0.492\ldots0.881\).  Table~\ref{tab:gatekeeper-report151} gives the second
@@ -877,9 +892,11 @@ The resulting production choice is deliberately piecewise:
 \end{itemize}
 
 This is the principal difference from choosing one paper as a universal
-winner.  BioSeqDB uses the algorithm whose measured backend cost is
-appropriate to the batch shape, and it keeps exact post-alignment semantics
-independent of that choice.
+winner.  BioSeqDB's implemented route encodes the choice supported by the
+scoped 2026-07-17 acceptance evidence, and it keeps exact post-alignment
+semantics independent of that choice.  The later blockers and P99 regression
+mean that current relative performance remains unconfirmed pending fresh,
+clean, same-head repetitions.
 
 \section{Failure modes, limitations, and what the filter does not prove}
 \label{sec:prefilter-limitations}

@@ -14,11 +14,15 @@ incompatible with the stored index.
 
 This observation explains an otherwise surprising property of the final
 implementation: BioSeqDB retains several minimizer backends instead of
-declaring one universally best algorithm.  The current public backend enum in
+declaring one universally best algorithm.  The exported lower-level
+sketch-backend enum in
 \path{main/bioseq/backend/sequences/kmers/index.cppm} contains
 \texttt{Scalar}, \texttt{ExactSimd}, \texttt{PaperNtHashSimd}, and
-\texttt{VulkanSegment}. Scalar and ExactSimd share the legacy minimap-style
-scheme. The initializer-level runtime default is Scalar in both
+\texttt{VulkanSegment}.  It is distinct from the higher-level runtime
+\texttt{MinimizerAlgorithmType}, which also retains the
+\texttt{SIMD\_MINIMAP2\_SLOW} reference selector. Scalar and ExactSimd share
+the legacy minimap-style scheme. The
+initializer-level runtime default is Scalar in both
 \texttt{Minimap2Params} and the PostgreSQL GUC. ExactSimd is the
 production-targeted all-SIMD alternative selected explicitly as
 \texttt{two\_stack\_nthash}, including by named benchmark configurations.
@@ -444,7 +448,10 @@ fundamentally from applying minimap2's integer scramble to
 $\min(F_i,R_i)$. The two schemes cannot share a persisted index.
 
 Table~\ref{tab:upstream-pnt-delta} separates the upstream
-SIMD-Minimizers contract from BioSeqDB's PNT1 contract.
+SIMD-Minimizers contract from BioSeqDB's PNT1 contract.  Both combine the
+forward and reverse-complement rolling states with the same wrapping sum.
+Their incompatibility instead comes from the compared hash width, endpoint
+selection, orientation evidence, event identity, and persisted scheme.
 
 \begin{table}[ht]
 \centering
@@ -453,7 +460,7 @@ SIMD-Minimizers contract from BioSeqDB's PNT1 contract.
 \toprule
 Contract element & SIMD-Minimizers reference & BioSeqDB PNT1\\
 \midrule
-Canonical hash & $H^F_i\oplus H^R_i$ &
+Canonical hash & $H^F_i+H^R_i\pmod{2^{32}}$ &
 $H^F_i+H^R_i\pmod{2^{32}}$\\
 Selection key & upper 16 hash bits &
 all 32 hash bits\\
@@ -617,14 +624,32 @@ NEON & packed canonical minimizers & 1.82--1.85 & --\\
 NEON & scalar/rescan comparison & 2.82--5.95 & --\\
 \bottomrule
 \end{tabular}
-\caption{Published SIMD-Minimizers measurements reproduced from the bundled
-paper and its source notes \cite{groot_koerkamp_simd_minimizers_2025}. These are
-upstream measurements on the paper's inputs and machines, not BioSeqDB
-benchmark results. They establish the potential of rolling hash plus
-data-independent minima. They do not prove compatibility with minimap2's hash
-or event stream.}
+\caption{Published SIMD-Minimizers measurements from the final SEA 2025
+publication and its benchmark artifacts
+\cite{groot_koerkamp_simd_minimizers_2025}. These are upstream measurements on
+the paper's inputs and machines, not BioSeqDB benchmark results. They establish
+the potential of rolling hash plus data-independent minima. They do not prove
+compatibility with minimap2's hash or event stream.}
 \label{tab:upstream-simd-minimizers}
 \end{table}
+
+The repository-bundled
+\path{RESEARCH/BENCHMARKING_SPEEDUP/simd_minimizers_paper.pdf} is the
+2025-01-27 bioRxiv full-version preprint.  It reports an earlier measurement
+set, including 4.1\,s forward and 6.0\,s canonical CHM13 times, rather than the
+final SEA values 5.19\,s and 6.71\,s shown above.  Both versions define the
+canonical ntHash key with the wrapping forward-plus-reverse sum; the
+measurement revision does not explain or justify an XOR contract.  The final
+publication archives the corresponding SIMD-Minimizers software as
+\path{swh:1:dir:d2fbef4c7750f02bc5cb084d0873078fef7f4e22}.  The workspace
+\path{simd-minimizers-master} declares version 2.3.1 and contains later APIs,
+so observations from that copied tree are bound to the reviewed workspace
+snapshot rather than treated as byte-identical publication source.  Its
+crate-level overview still says XOR, but \texttt{Cargo.lock} pins
+\texttt{seq-hash} 0.1.1, whose executable canonical path uses
+\texttt{wrapping\_add}; the overview sentence is stale.  The same
+comparison-only rule applies to the copied G3SA tree, for which this thesis
+does not claim an independently recorded upstream revision.
 
 \section{BioSeqDB's CPU implementation history}
 \label{sec:minimizer-cpu-history}
@@ -1373,13 +1398,17 @@ The later full-bench report 153 is also informative but narrower than a
 production sign-off. It is structurally complete, yet it has no
 \texttt{just\_index} cell and its B8 route counters are zero. Its two
 Paper-ntHash comparisons are unequal-work prototype diagnostics. Their raw
-ratios are approximately 1.46--1.48 relative to the exact-SIMD oracle, and
-normalization by recorded input volume gives approximately 1.397. The current
-evidence therefore supports ExactSimd as a qualified, explicitly selectable
-all-SIMD route, not as the ordinary runtime default. A decision to migrate the
-default to an all-SIMD collector remains open pending equal-work results. PNT1
-remains a versioned alternative whose future production use would require such
-an experiment. DOC0384 identifies winner-only or rare-tie recovery as the
+ratios are \(1.46538\)--\(1.46642\) relative to the exact-SIMD oracle.
+Normalizing those time ratios by the reported input-volume ratio of
+\(526{,}009{,}152\) PNT1 input symbols to \(500{,}000{,}000\) ExactSimd
+consumed base pairs gives \(1.39292\)--\(1.39391\).  That normalization mixes
+two differently named accounting fields and remains an unequal-work
+diagnostic, not a throughput sign-off. The current evidence therefore
+supports ExactSimd as a qualified, explicitly selectable all-SIMD route, not
+as the ordinary runtime default. A decision to migrate the default to an
+all-SIMD collector remains open pending equal-work results. PNT1 remains a
+versioned alternative whose future production use would require such an
+experiment. DOC0384 identifies winner-only or rare-tie recovery as the
 evidence-based direction if that prototype is pursued.
 
 \subsection{GPU kernel progression}

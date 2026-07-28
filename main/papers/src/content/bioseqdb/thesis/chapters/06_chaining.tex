@@ -129,10 +129,8 @@ The scalar implementation is the semantic reference when chaining is invoked
 through Structured Query Language (SQL).  It is derived from minimap2's
 single-segment, non-cDNA recurrence, where cDNA denotes complementary DNA,
 while specializing away branches that BioSeqDB does not need at this
-stage.\footnote{
-H.~Li, ``Minimap2: pairwise alignment for nucleotide sequences,''
-\emph{Bioinformatics} 34(18), 2018.  The exact code comparison in this chapter
-uses the bundled \texttt{main/bench/tool\_minimap2/minimap2/lchain.c}.}  Let
+stage \cite{minimap2_paper}.  The exact code comparison in this chapter uses
+the bundled \path{main/bench/tool_minimap2/minimap2/lchain.c}.  Let
 \[
   d_r(i,j)=r_i-r_j,\qquad
   d_q(i,j)=q_i-q_j,\qquad
@@ -713,10 +711,12 @@ counts to the host, and the paper allows exceptionally complex branching reads
 to be resent to the CPU.  On the paper's single RTX A6000 and Threadripper PRO
 7985WX system, the reported stage-wise chaining geometric mean was \(3.15\times\)
 relative to mm2-fast and \(1.24\times\) relative to mm2-gb.  The authors also
-reported 100\% agreement for their evaluated maximum-score and position metric
-\cite{g3sa_paper}.  Those measurements use different hardware, baselines,
-inputs, and pipeline boundaries from BioSeqDB's PostgreSQL experiments, so they
-are context for the design lineage rather than a direct performance comparison.
+reported 100\% chaining accuracy on their evaluated datasets under the
+same-chained-seeds metric \cite{g3sa_paper}.  Maximum-score and position
+agreement is the paper's extending metric, not its chaining metric.  Those
+measurements use different hardware, baselines, inputs, and pipeline boundaries
+from BioSeqDB's PostgreSQL experiments, so they are context for the design
+lineage rather than a direct performance comparison.
 
 Those choices target a CUDA program tuned to a fixed GPU.  They do not transfer
 directly to a PostgreSQL extension that may be called with different alphabets,
@@ -765,12 +765,13 @@ operation named \texttt{download\_locked} returns spans that alias those mapped
 buffers.  It is a logical host read, not a device-to-host copy.
 
 The standalone coordinate route still allocates and fills the complete device
-\(f\) and \(p\) arrays.  A GPU reducer ranks at most 16 endpoints and returns
-one selected trace, so the host does not run the shared CPU backtracker or
-consume the full arrays.  This removes host-side completion work rather than
-the device DP storage.  A valid seventeenth candidate can be missed after
-sixteen rejected starts.  The host also contains a coordinate-chain helper with
-equivalent intent, but it has no current caller.
+\(f\) and \(p\) arrays.  A GPU reducer probes the best currently unvisited
+start, marks an unsuccessful trace visited, and repeats for at most 16 starts.
+It returns one selected trace, so the host does not run the shared CPU
+backtracker or consume the full arrays.  This removes host-side completion
+work rather than the device DP storage.  A valid seventeenth start can be
+missed after sixteen rejected probes.  The host also contains a
+coordinate-chain helper with equivalent intent, but it has no current caller.
 
 Resident Phase~C has both single-query and batched paths.  Its strict eligibility
 gate requires Vulkan minimizer extraction, Vulkan seed-hit processing, the
@@ -829,8 +830,8 @@ Dedicated long-range CUDA path &
 Stride compaction toward 65536 anchors\\
 Backtracking &
 GPU RMQ, backtracking, and compaction, with exceptional CPU resend permitted &
-Standalone CPU for rich output, standalone top-16 GPU coordinate reducer, and
-resident Phase~C compact coordinate output\\
+Standalone CPU for rich output, standalone at-most-16 best-unvisited
+start-probe reducer, and resident Phase~C compact coordinate output\\
 Bulk residency &
 GPU intermediates reduce transfers, while count copies and exceptional host
 work remain &
@@ -1000,9 +1001,12 @@ report 192 &
 \end{tabular}
 \end{table}
 
-Report 112 records the exact-SIMD milestone, report 118 the first bounded-policy
-qualification, and report 192 the most recent focused snapshot in the audited
-evidence.  The absolute values
+Report 112 records the exact-SIMD milestone, report 118 the first
+bounded-policy measurement used in qualification work, and report 192 the most
+recent focused snapshot in the audited evidence.  Report 118 was
+\texttt{dirty=true} and its global report contained two rule violations and
+thirteen sanity warnings; it is therefore a scoped kernel snapshot rather than
+a repository-wide sign-off.  The absolute values
 in Table~\ref{tab:chaining-history} should not be compared as a time series
 without controlling the host, build, and worktree.  Within every displayed
 report, exact SIMD is lower than scalar.  Bounded SIMD is lower still in the
@@ -1094,7 +1098,7 @@ Vulkan &
 Explicit GPU approximation &
 Full-width shader checks and standalone or resident coordinate routes &
 Range thinning, 3000 cap, positive max-skip batch stop, no rescue, standalone
-top-16 reducer, no fallback\\
+at-most-16 best-unvisited start-probe reducer, no fallback\\
 \bottomrule
 \end{tabular}
 \end{table}
