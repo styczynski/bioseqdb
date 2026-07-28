@@ -446,26 +446,29 @@ Algorithm~\ref{alg:sql-codegen-order} gives the essential procedure.
 \begin{algorithm}[htbp]
 \caption{Deterministic ordering of collected SQL entities}
 \label{alg:sql-codegen-order}
-\begin{algorithmic}[1]
-\Require entities $E$ with resolved dependency sets $D(e)$
-\ForAll{$e \in E$}
-  \State assign \textsc{StableIdentity}$(e)$ from kind, schema, name, signature
-\EndFor
-\State $C \gets \textsc{TarjanSCC}(E,D)$
-\ForAll{components $c \in C$}
-  \If{$c$ is cyclic and contains a forbidden entity kind}
-    \State reject the graph with the first stable identity
-  \EndIf
-\EndFor
-\State build condensation DAG $G_C$
-\State $Q \gets$ zero-indegree components ordered by their smallest stable key
-\While{$Q$ is not empty}
-  \State remove the smallest component $c$
-  \State emit members of $c$ by entity-kind order, then stable key
-  \State decrement consumers and insert newly ready components into $Q$
-\EndWhile
-\State reject unless every entity was emitted exactly once
-\end{algorithmic}
+\small
+\noindent\textbf{Input:} entities $E$ with resolved dependency sets $D(e)$.
+\begin{enumerate}
+  \item For every $e \in E$, assign
+    \textsc{StableIdentity}$(e)$ from its kind, schema, name, and signature.
+  \item Set $C \gets \textsc{TarjanSCC}(E,D)$.
+  \item For every component $c \in C$:
+    \begin{enumerate}
+      \item If $c$ is cyclic and contains a forbidden entity kind, reject the
+        graph with the first stable identity.
+    \end{enumerate}
+  \item Build the condensation DAG $G_C$.
+  \item Set $Q$ to the zero-indegree components ordered by their smallest
+    stable key.
+  \item While $Q$ is not empty:
+    \begin{enumerate}
+      \item Remove the smallest component $c$.
+      \item Emit the members of $c$ by entity-kind order, then by stable key.
+      \item Decrement the consumers and insert newly ready components into
+        $Q$.
+    \end{enumerate}
+  \item Reject unless every entity was emitted exactly once.
+\end{enumerate}
 \end{algorithm}
 
 There are two different orders in the final design.  The graph order is
