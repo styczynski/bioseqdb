@@ -195,8 +195,8 @@ still exists.
 
 \begin{figure}[htbp]
   \centering
-  \resizebox{\linewidth}{!}{%
   \begin{tikzpicture}[
+      scale=.72,transform shape,
       x=1cm,y=1cm,>=Latex,font=\scriptsize,
       box/.style={draw,rounded corners,align=center,minimum height=.72cm},
       flow/.style={->,thick}
@@ -229,7 +229,6 @@ still exists.
     \draw[flow] (messages1) -- (writer);
     \draw[flow] (messages2) -- (writer);
   \end{tikzpicture}
-  }
   \caption{Implemented external-provider data flow.  Metadata and non-streaming
   retrieval are collected before tuple production.  NCBI accession retrieval
   can instead publish sequence payloads through a backpressured channel.}
