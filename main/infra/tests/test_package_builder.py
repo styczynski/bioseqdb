@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -187,6 +188,37 @@ class LifecycleSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(package_builder.PackageBuilderError, "partial apply"):
                 package_builder.cmd_run(args)
         stop.assert_called_once_with("us-east-1", recovered, self.matrix)
+
+    def test_state_recovery_failure_is_not_treated_as_no_resources(self) -> None:
+        failed = subprocess.CompletedProcess([], 1, "", "provider failure")
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            package_builder, "STACK_DIR", Path(tmp)
+        ), mock.patch.object(package_builder, "run_command", return_value=failed):
+            (Path(tmp) / "partial.tfstate").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(
+                package_builder.PackageBuilderError, "cannot inspect non-empty"
+            ):
+                package_builder.tofu_state_builders(self.matrix)
+
+    def test_cached_ami_uses_stopped_instance_not_no_reboot_snapshot(self) -> None:
+        source = inspect.getsource(package_builder.create_cached_ami)
+        self.assertIn("stop_builders", source)
+        self.assertIn("cloud-init clean", source)
+        self.assertNotIn("--no-reboot", source)
+
+    def test_large_cached_ami_has_explicit_long_polling(self) -> None:
+        pending = {"Images": [{"ImageId": "ami-0123456789abcdef0", "State": "pending"}]}
+        available = {
+            "Images": [{"ImageId": "ami-0123456789abcdef0", "State": "available"}]
+        }
+        with mock.patch.object(
+            package_builder, "aws_json", side_effect=[pending, available]
+        ), mock.patch.object(package_builder.time, "sleep") as sleep:
+            image = package_builder.wait_for_cached_ami(
+                "us-east-1", "ami-0123456789abcdef0"
+            )
+        self.assertEqual(image["State"], "available")
+        sleep.assert_called_once_with(15)
 
 
 class ManifestTests(unittest.TestCase):

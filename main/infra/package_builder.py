@@ -429,7 +429,19 @@ def tofu_state_builders(matrix: Matrix) -> dict[str, Builder]:
         capture=True,
         check=False,
     )
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        local_state_exists = any(
+            path.is_file() and path.stat().st_size > 0
+            for path in STACK_DIR.glob("*.tfstate*")
+        )
+        if not local_state_exists:
+            return {}
+        detail = (result.stderr or result.stdout or "").strip()
+        raise PackageBuilderError(
+            "cannot inspect non-empty OpenTofu state while recovering builders"
+            + (f": {detail}" if detail else "")
+        )
+    if not result.stdout.strip():
         return {}
     try:
         state = json.loads(result.stdout)
@@ -971,11 +983,21 @@ def wait_for_bootstrap(builder: Builder, key_path: Path) -> None:
 
 
 def create_cached_ami(
-    region: str, builder: Builder, architecture: Architecture
-) -> dict[str, Any]:
-    # Caller has already validated ownership, bootstrap completion, and that no
-    # project source/signing key has been staged. --no-reboot is safe here
-    # because cloud-init and apt/dpkg have reached a terminal state.
+    region: str,
+    builder: Builder,
+    architecture: Architecture,
+    matrix: Matrix,
+    key_path: Path,
+) -> tuple[dict[str, Any], Builder]:
+    # Snapshot only a stopped, fully validated pre-source machine. This avoids
+    # the crash-consistency hazard of EC2's no-reboot option. The exact instance
+    # is restarted and revalidated before any source/signing material is staged.
+    ssh_run(
+        builder,
+        key_path,
+        "sudo cloud-init clean --logs --machine-id",
+    )
+    stop_builders(region, {architecture.name: builder}, matrix)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = f"bioseq-package-builder-{architecture.name}-schema{BOOTSTRAP_SCHEMA}-{stamp}"
     payload = aws_json(
@@ -988,7 +1010,6 @@ def create_cached_ami(
         name,
         "--description",
         f"BioSeq native package builder {architecture.name}, bootstrap schema {BOOTSTRAP_SCHEMA}",
-        "--no-reboot",
     )
     image_id = str(payload.get("ImageId", ""))
     if not AMI_ID_RE.match(image_id):
@@ -1009,24 +1030,45 @@ def create_cached_ami(
         "--tags",
         *(f"Key={key},Value={value}" for key, value in tags.items()),
     )
-    run_command(
-        [
-            require_executable("aws"),
-            "--region",
-            region,
-            "ec2",
-            "wait",
-            "image-available",
-            "--image-ids",
-            image_id,
-        ]
+    records = start_builders(
+        region, {architecture.name: builder}, matrix
     )
-    result = aws_json(region, "ec2", "describe-images", "--image-ids", image_id)
-    images = result.get("Images", [])
-    if len(images) != 1 or images[0].get("State") != "available":
-        raise PackageBuilderError(f"cached AMI {image_id} did not become available")
+    refreshed = refreshed_builders(records, {architecture.name: builder})[
+        architecture.name
+    ]
+    wait_for_bootstrap(refreshed, key_path)
+    image = wait_for_cached_ami(region, image_id)
     info(f"created reusable {architecture.name} package-builder AMI {image_id}")
-    return images[0]
+    return image, refreshed
+
+
+def wait_for_cached_ami(
+    region: str, image_id: str, timeout_seconds: int = 7200
+) -> dict[str, Any]:
+    """Poll a large AMI beyond the AWS waiter's fixed ten-minute ceiling."""
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        result = aws_json(region, "ec2", "describe-images", "--image-ids", image_id)
+        images = result.get("Images", [])
+        if len(images) != 1:
+            raise PackageBuilderError(f"EC2 did not return cached AMI {image_id}")
+        image = images[0]
+        state = image.get("State")
+        if state == "available":
+            return image
+        if state == "failed":
+            reason = image.get("StateReason", {}).get("Message", "unknown reason")
+            raise PackageBuilderError(f"cached AMI {image_id} failed: {reason}")
+        if state != "pending":
+            raise PackageBuilderError(
+                f"cached AMI {image_id} entered unexpected state {state!r}"
+            )
+        time.sleep(15)
+    raise PackageBuilderError(
+        f"cached AMI {image_id} did not become available within "
+        f"{timeout_seconds // 60} minutes"
+    )
 
 
 def commit_id() -> str:
@@ -1422,7 +1464,13 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
     if not args.no_snapshot:
         for name, builder in builders.items():
             if not cache_hits[name]:
-                create_cached_ami(args.region, builder, matrix.architectures[name])
+                _, builders[name] = create_cached_ami(
+                    args.region,
+                    builder,
+                    matrix.architectures[name],
+                    matrix,
+                    key_path,
+                )
     return outputs, builders, records, cache_hits
 
 
@@ -1583,11 +1631,10 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 def cmd_stop(args: argparse.Namespace) -> None:
     matrix = load_matrix()
-    outputs = tofu_outputs()
-    if not outputs:
+    builders = recover_managed_builders(matrix)
+    if not builders:
         info("package-build stack is not applied; no builders to stop")
         return
-    builders = output_builders(outputs, matrix)
     stop_builders(args.region, builders, matrix)
     info("all exact managed package builders are stopped")
 
