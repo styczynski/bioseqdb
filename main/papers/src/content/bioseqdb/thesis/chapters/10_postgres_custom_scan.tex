@@ -1,0 +1,1235 @@
+\section{Alignment as a PostgreSQL execution primitive}
+\label{sec:postgres-custom-scan-scope}
+
+The alignment pipeline described in the preceding chapters is not naturally a
+scalar SQL function.  Its useful unit of work is a batch of sequence pairs,
+its result for one pair is a set of matches, and its implementation may need
+to retain an index, submit work to a scheduler, or materialize a query
+collection before it emits the first row.  PostgreSQL, in contrast, initially
+sees an SQL predicate as an expression that is evaluated once for each input
+tuple and returns one value.  The main purpose of the BioSeqDB PostgreSQL API
+is to reconcile these two execution models.
+
+The public expression is deliberately ordinary:
+
+\begin{lstlisting}[language=SQL]
+SELECT t.pk,
+       bioseq.score(t.pk),
+       bioseq.target_start(t.pk),
+       bioseq.target_end(t.pk),
+       bioseq.cigar(t.pk)
+FROM target_sequences AS t
+WHERE mmsearch(
+        t.sequence,
+        'ACGTACGT...'::bioseq.seq('dna4', 32));
+\end{lstlisting}
+
+The parser can resolve the types of this statement without learning a new SQL
+grammar.  It produces a normal \texttt{FuncExpr} for \texttt{mmsearch} and
+normal function expressions for the projected match fields.  Nevertheless,
+the executor must not call those expressions in the ordinary way.
+\texttt{mmsearch} is a \emph{rendezvous expression}: it marks the semantic
+location of sequence search so that a custom execution node can claim it.
+The projected helpers name fields of the match currently being emitted by
+that owner.  They do not each run another alignment.
+
+This distinction is visible in cardinality.  Let input row \(i\) produce
+\(m_i\) accepted alignments.  The custom scan emits
+
+\[
+    N_{\mathrm{out}} = \sum_{i=1}^{N_{\mathrm{in}}} m_i ,
+    \qquad m_i \in \{0,1,2,\ldots\}.
+\]
+
+Thus a source row with no match vanishes, one with one match behaves like an
+ordinary filter result, and one with several matches is repeated with
+different match-field values.  A Boolean function can say whether
+\(m_i>0\), but it cannot supply the \(m_i\) rows or ensure that score,
+coordinates, CIGAR, strand, and mapping quality all refer to the same member
+of that set.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{The semantic mismatch between an ordinary predicate and a
+BioSeqDB-owned search.}
+\label{tab:scalar-vs-owned-mmsearch}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.34\textwidth}p{0.34\textwidth}@{}}
+\toprule
+Property & Ordinary scalar expression & BioSeqDB executor owner \\
+\midrule
+Input granularity &
+One expression evaluation for one tuple &
+Several retained tuples or sequence pairs per dispatch \\
+Output cardinality &
+Exactly one Boolean or nullable Boolean &
+Zero, one, or many projected rows per input \\
+Expensive work &
+Repeated at every function call site &
+Performed once by the alignment owner; fields are projected afterwards \\
+Accelerator use &
+Submission overhead occurs at tuple granularity &
+The scheduler can choose SIMD, CPU-task, or accelerator routes for a batch \\
+Result consistency &
+Separate helpers have no shared match identity &
+All placeholders are populated from one \texttt{MatchResult} before projection \\
+Planner safety &
+A surviving function copy may execute anywhere it is placed &
+The exact restriction has one owner and no executable descendant copy \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The final design therefore treats SQL syntax, planner ownership, and executor
+cardinality as one contract.  A supported \texttt{mmsearch} must be consumed
+by exactly one BioSeqDB node.  A query shape that cannot satisfy this contract
+fails closed.  It is not permitted to fall through to a permissive Boolean
+implementation, because doing so would turn an unsupported alignment query
+into a query that silently accepts every row.
+
+\section{The SQL surface is a rendezvous, not a hidden mode switch}
+\label{sec:mmsearch-sql-rendezvous}
+
+\subsection{Two typed entry points}
+
+The current extension exposes a two-argument search with session defaults and
+a three-argument form with a typed options value.  In schematic form their
+signatures are
+
+\[
+\begin{aligned}
+  \operatorname{mmsearch} &: (\texttt{bioseq.seq},
+      \texttt{bioseq.seq}) \rightarrow \texttt{boolean},\\
+  \operatorname{mmsearch} &: (\texttt{bioseq.seq},
+      \texttt{bioseq.seq},
+      \texttt{bioseq\_aligner\_options}) \rightarrow
+      \texttt{boolean}.
+\end{aligned}
+\]
+
+Both are declared immutable and parallel safe at the SQL expression boundary
+and both name \texttt{mmsearch\_support} as their PostgreSQL support function.
+These declarations allow PostgreSQL to reason about typing and expression
+placement.  They are not a promise that the scalar C++ body implements the
+alignment.  The body raises \texttt{ERRCODE\_FEATURE\_NOT\_SUPPORTED} with the
+message \emph{``mmsearch qualifier has no Bioseq executor owner''}.  The
+three-argument entry point preserves SQL null behavior for null operands
+before reaching that error boundary.
+
+This fail-closed body is important for two reasons.  First, PostgreSQL can
+copy or move expression trees during planning.  If an unexpected copy
+survives as a filter, it produces a visible error rather than false-positive
+biological results.  Second, behavior does not depend on a thread-local flag
+set by the scan.  A hidden flag would make an immutable function return
+different values for the same arguments, would interact badly with constant
+folding, and could remain stale after PostgreSQL's non-local error unwinding.
+The owner is instead represented explicitly in the plan tree.
+
+\subsection{Match projections}
+
+The same SQL module defines typed match projections.  The current set includes
+the alignment and chain scores, query and target lengths and coordinates,
+number of matches, block length, edit distance, mapping quality, seed count,
+strand, primary status, divergence, CIGAR availability, and the CIGAR text
+itself.  A user can request only the fields needed by the query:
+
+\begin{lstlisting}[language=SQL]
+SELECT t.pk,
+       bioseq.mapq(t.pk),
+       bioseq.is_reverse(t.pk),
+       bioseq.edit_distance(t.pk)
+FROM targets AS t
+WHERE mmsearch(t.seq, $1::bioseq.seq('dna5', 64))
+  AND bioseq.edit_distance(t.pk) < 20;
+\end{lstlisting}
+
+The apparent argument \texttt{t.pk} is an ownership anchor.  It lets the
+planner and custom scan associate the helper with the row and target lineage
+that produced the match.  It is not the storage location of the score.  The
+executor later replaces an attributable helper expression with a typed
+placeholder node.  A helper that refers to the wrong target recipe is not
+silently populated from whichever alignment happened to run.
+
+The design also avoids computing optional data unnecessarily.  During
+\texttt{BeginCustomScan}, the owner examines which result fields survived
+planning.  It enables CIGAR, edit-distance, divergence, or mapping-quality
+work only when the selected expressions require those fields.  Per-call
+options are overlaid on a snapshot of the session alignment settings, after
+which the dispatcher records a structured description of the actual pipeline
+selected for this scan.  This connects SQL projection pruning to algorithmic
+work without changing the meaning of any requested field.
+
+\section{Planner support, costs, and exact ownership}
+\label{sec:planner-support-and-ownership}
+
+\subsection{Why the ordinary expression has a high cost}
+
+PostgreSQL calls \texttt{mmsearch\_support} with a
+\texttt{SupportRequestCost}.  The function reports a startup cost of
+\(100000\) and a per-tuple cost of zero for the ordinary expression.  This
+large value tells the planner that independently invoking the SQL expression
+is not comparable to a cheap Boolean predicate.  It also gives the custom
+path hook an unmistakable rendezvous in the normal PostgreSQL cost model.
+
+The meaning of this number changed during development.  In the first proof
+of concept the large ordinary cost was paired with a custom path cost near
+\(-100000\).  The desired path won an artificial race.  That experiment
+proved that a custom scan could be selected, but it did not prove that a
+different retained plan was semantically valid.\footnote{DOC0052,
+archived, records the true-returning stub, mutable score constant, and
+negative custom-path cost.}  The final implementation no longer assigns a
+negative sentinel.  The support cost describes only the non-owning scalar
+alternative; it is explicitly excluded from the cost tree of a real owner.
+
+For an owning base scan, the conceptual cost is
+
+\[
+\begin{split}
+ C_{\mathrm{owner}} ={}&
+ C_{\mathrm{storage}} +
+ C_{\mathrm{operands}} +
+ C_{\mathrm{alignment}}(L_t,L_q,B,I)\\
+ &+ C_{\mathrm{residual\ quals}} +
+ C_{\mathrm{projection}} ,
+\end{split}
+\]
+
+where \(L_t\) and \(L_q\) are estimated target and query symbols, \(B\) is
+the dispatch capacity, and \(I\) records whether a compatible persistent
+index may be read.  Join ownership additionally accounts for complete query
+child materialization, target-child scanning, residual join expressions, and
+estimated result rows.  Every component is clamped to a finite nonnegative
+PostgreSQL cost.  An incumbent path's cost may be retained as EXPLAIN
+evidence, but it is not used as a magic threshold.
+
+\subsection{A semantic operation cannot be selected by cost alone}
+
+A cost comparison is appropriate when two paths implement the same
+semantics.  It is not appropriate when one path owns an alignment and the
+other would call a forbidden rendezvous function.  The current planner
+therefore uses a two-step rule:
+
+\begin{enumerate}
+  \item construct and cost a path that proves it can own one exact
+  \texttt{RestrictInfo} containing the supported \texttt{mmsearch};
+  \item after that owner exists, remove alternatives that would execute the
+  same restriction without owning it.
+\end{enumerate}
+
+The pruning is narrow.  It does not clear the relation's entire path list and
+does not declare every BioSeqDB path cheap.  It follows pointer identity and
+the exact restriction carried in base restrictions, parameterized path
+information, or join restrictions.  Ordinary paths unrelated to the claimed
+expression remain planner choices.  This is the essential difference between
+\emph{cost preference} and \emph{semantic ownership}.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=0.55cm and 0.85cm,
+  box/.style={draw, rounded corners, align=center, minimum height=0.75cm,
+              text width=3.1cm, fill=blue!5},
+  decision/.style={draw, diamond, aspect=2.1, align=center,
+                   inner sep=1.5pt, fill=yellow!12},
+  owner/.style={draw, rounded corners, align=center, minimum height=0.8cm,
+                text width=3.1cm, fill=green!10},
+  unsafe/.style={draw, rounded corners, align=center, minimum height=0.8cm,
+                 text width=3.1cm, fill=red!8},
+  arrow/.style={-Latex, thick}
+]
+\node[box] (parse) {Parser creates ordinary\\\texttt{FuncExpr(mmsearch)}};
+\node[box, right=of parse] (support) {\texttt{mmsearch\_support}\\cost \(100000\) for the\\non-owning expression};
+\node[decision, right=of support] (shape) {one supported\\semantic call?};
+\node[owner, below=of shape] (path) {Build honest-cost\\\texttt{CustomPath} and attach\\exact \texttt{RestrictInfo}};
+\node[unsafe, above=of shape] (fallback) {No owner constructed:\\ordinary body fails closed\\if execution reaches it};
+\node[owner, left=of path] (prune) {Prune only paths that\\execute the same restriction\\without ownership};
+\node[owner, left=of prune] (plan) {\texttt{PlanCustomPath}: remove\\executable qualifier and keep\\owner expression in metadata};
+\draw[arrow] (parse) -- (support);
+\draw[arrow] (support) -- (shape);
+\draw[arrow] (shape) -- node[right]{yes} (path);
+\draw[arrow] (shape) -- node[right]{no} (fallback);
+\draw[arrow] (path) -- (prune);
+\draw[arrow] (prune) -- (plan);
+\end{tikzpicture}
+\caption{Current \texttt{mmsearch} planning.  The high support cost makes
+the scalar alternative visible as expensive, but correctness comes from
+exact ownership and structural pruning, not from a negative cost.}
+\label{fig:mmsearch-planner-ownership}
+\end{figure}
+
+\subsection{Relation and join hooks}
+
+BioSeqDB registers both a relation-path hook and a join-path hook.  For a
+\texttt{USING bioseq} relation, \texttt{BioseqColumnSetRelPathlistHook}
+first allows normal PostgreSQL and the columnar table access method to
+construct their paths.  \texttt{AddBioseqColumnScanPath} then builds a
+\texttt{CustomPath}, copies the relation's \texttt{PathTarget}, gathers the
+base and parameterized restrictions available at that path, and searches for
+an exactly ownable \texttt{mmsearch}.  The recursive path builder explores a
+bounded subset of parameterizations because join clauses may make an outer
+relation's value available as a \texttt{PARAM\_EXEC} input.
+
+For an INNER join whose restriction itself contains one semantic
+\texttt{mmsearch}, \texttt{BioseqBatchJoinSetJoinPathlistHook} can construct a
+join-level owner.  It either retains a proven parameterized base-scan owner or
+constructs a \texttt{BioseqBatchJoin} path with target and query children.
+Lazy slice or other evaluated operands may require a
+\texttt{BioseqSliceProject} provider and a per-row recipe.  These shapes are
+discussed in Section~\ref{sec:mmsearch-join-ownership}.
+
+The hooks are deliberately conservative.  They check extension presence,
+expression arity and OIDs, target/query lineage, parameterization, row
+security, volatile sibling restrictions, option foldability, typmods,
+parallel properties, and provider capabilities.  More than one semantic
+join-level call is rejected with guidance to split the predicates into
+separate query levels.  Failing an eligibility check means ``do not claim
+this expression'', not ``assume that the Boolean stub is close enough''.
+
+\section{From CustomPath to CustomScan}
+\label{sec:custom-path-plan-lifecycle}
+
+PostgreSQL separates planning data from executable state.  BioSeqDB follows
+that separation rather than putting C++ objects or process-local pointers in
+serialized plan metadata.  Table~\ref{tab:bioseq-customscan-lifecycle}
+summarizes the principal callbacks and their responsibilities.
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\caption{Planner and executor lifecycle of a base \texttt{BioseqScan}.}
+\label{tab:bioseq-customscan-lifecycle}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.25\textwidth}p{0.45\textwidth}@{}}
+\toprule
+Phase & Current symbol & Responsibility \\
+\midrule
+Relation path hook &
+\texttt{BioseqColumnSetRelPathlistHook} &
+Observe table paths, add supported BioSeqDB paths, and leave unrelated
+relations untouched. \\
+Path construction &
+\texttt{AddBioseqColumnScanPath} &
+Choose the exact owned restriction, establish target/query provenance,
+carry needed expressions, and assign an honest cost. \\
+Path-set finalization &
+\texttt{AddBioseqColumnScanPaths} &
+After an owner exists, prune alternatives that would execute the same
+\texttt{RestrictInfo} without ownership. \\
+Plan construction &
+\texttt{BioseqColumnScanPath\_PlanCustomPath} &
+Build \texttt{CustomScan}, remove the owned predicate from executable,
+vector, and storage qualifiers, and place setrefs-safe expressions and
+private tags in PostgreSQL node lists. \\
+State creation &
+\texttt{BioseqColumnScan\_CreateCustomScanState} &
+Allocate the PostgreSQL state shell and bind method tables; defer runtime
+resources so plain EXPLAIN does not execute the pipeline. \\
+Initialization &
+\texttt{BioseqColumnScan\_BeginCustomScan} &
+Create per-scan runtime, initialize expression states and source providers,
+bind constants or parameters, snapshot options, configure the dispatcher,
+and register cleanup. \\
+First execution &
+\texttt{CustomExecScan} &
+Allocate typed placeholder constants and rewrite attributable projection
+helpers in the finalized target list. \\
+Iteration &
+\texttt{Inner\_CustomExecScan} &
+Collect qualified inputs, dispatch full or terminal batches, drain match
+cursors, populate placeholders, and project one output row per match. \\
+Rescan &
+\texttt{BioseqColumnScan\_ReScanCustomScan} &
+Clear cursors and retained rows, reset source state, re-evaluate
+\texttt{PARAM\_EXEC} operands, and rescan the access method. \\
+Normal teardown &
+\texttt{BioseqColumnScan\_EndCustomScan} &
+Clear parent-visible slots, close providers while resource owners are live,
+and mark runtime cleanup as complete. \\
+Diagnostics &
+\texttt{BioseqColumnScan\_ExplainCustomScan} &
+Render ownership, storage, pipeline, batching, fallback, and runtime
+counters in PostgreSQL EXPLAIN formats. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{What crosses the planning boundary}
+
+PostgreSQL's \texttt{CustomPath} and \texttt{CustomScan} offer several lists
+for extension data.  BioSeqDB assigns them narrow roles:
+
+\begin{itemize}
+  \item \texttt{custom\_restrictinfo} identifies the exact restriction owned
+  by the path.  It supports planning proofs; the expression is not left in an
+  executor qualifier.
+  \item \texttt{custom\_paths} carries child paths, such as the locator-side
+  BioSeqDB scan and the query child of a batch join.
+  \item \texttt{custom\_private} stores versioned integer tags, relation and
+  attribute identities, typmod/layout data, source recipes, and diagnostic
+  costs.  It contains PostgreSQL nodes that can be copied and serialized, not
+  live C++ objects.
+  \item \texttt{custom\_exprs} stores expressions that must pass through
+  PostgreSQL's \emph{setrefs} machinery.  In the base scan, the fourth entry
+  carries the owned \texttt{mmsearch} expression as executor-only state.  An
+  outer \texttt{Var} can therefore become the correct \texttt{PARAM\_EXEC}
+  without making the expression an executable qualification.
+\end{itemize}
+
+\texttt{PlanCustomPath} removes the owned expression from
+\texttt{scan.plan.qual} and asserts that no \texttt{mmsearch} remains there.
+It also prevents the vectorized qualification list and the storage pushdown
+list from retaining a copy.  This is more than a cosmetic EXPLAIN cleanup:
+each of those lists corresponds to an execution site that otherwise could
+call the fail-closed SQL body.
+
+Hidden child outputs are installed in the \texttt{PathTarget} before plan
+construction.  This timing matters because PostgreSQL's setrefs pass can only
+replace expressions with child-output \texttt{Var} nodes when the child
+already promises to publish them.  Adding a target-list expression later in
+the executor would be too late for upper joins, results, aggregates, or
+\texttt{RETURNING} projections to bind to it reliably.
+
+\subsection{Plain EXPLAIN does not allocate the aligner}
+
+\texttt{CreateCustomScanState} constructs only the executor-state shell.
+Pipeline objects, query copies, sequence providers, buffer arenas, and
+accelerator resources are initialized in \texttt{BeginCustomScan}.  A plain
+\texttt{EXPLAIN} can therefore inspect the plan without opening an alignment
+session.  \texttt{EXPLAIN ANALYZE} follows the normal executor lifecycle and
+adds observed counters after the node runs.
+
+This separation also keeps plan serialization meaningful.  A prepared
+statement may outlive the memory in which it was planned; a parallel or
+cached plan cannot safely contain a pointer to a C++ scheduler object.
+Versioned PostgreSQL node metadata survives copying, while the runtime is
+rebuilt under the query's memory and resource owners.
+
+\section{Batch execution and zero--one--many output}
+\label{sec:customscan-batch-state-machine}
+
+\subsection{The write--process--read state machine}
+
+The base scan uses a two-phase state machine implemented by
+\texttt{Inner\_CustomExecScan} and the dispatch buffer.  ``Two phase'' does
+not mean that the entire relation must be retained.  The current buffer has a
+capacity of 8192 submissions.  Reaching capacity closes and processes the
+current batch, drains its cursors, releases its copied slots, and resumes the
+still-live access-method scan.  End of input performs the same transition for
+the terminal partial batch.
+
+\begin{algorithm}[htbp]
+\caption{Conceptual execution of a scan-owned \texttt{mmsearch}}
+\label{alg:customscan-write-read}
+\begin{algorithmic}[1]
+\State initialize an empty dispatch buffer and per-scan runtime
+\While{the source is not exhausted or buffered output remains}
+  \If{the buffer is in read mode}
+    \State \(o \gets\) next match cursor entry
+    \If{\(o\) exists}
+      \State populate all requested placeholder constants from \(o.match\)
+      \State temporarily promote lazy sources needed by the projection
+      \State emit \Call{Project}{\(o.input\_row\), placeholders}
+      \State restore the stable locator-backed input row
+    \ElsIf{the source is exhausted}
+      \State \Return end of scan
+    \Else
+      \State release the completed physical batch and return to write mode
+    \EndIf
+  \Else
+    \State \(r \gets\) next scalar row or next kept row from a vector batch
+    \If{\(r\) does not exist}
+      \State mark source exhausted and process the terminal batch
+    \Else
+      \State evaluate residual qualifications and owned operand expressions
+      \If{the residual frontier passes and operands are non-null}
+        \State copy stable row/source references into the dispatch arena
+        \If{the buffer reaches capacity}
+          \State process the batch and construct per-input match cursors
+        \EndIf
+      \EndIf
+    \EndIf
+  \EndIf
+\EndWhile
+\end{algorithmic}
+\end{algorithm}
+
+During the write phase PostgreSQL owns the active scan slot and is free to
+reuse it on the next access-method call.  The buffer therefore copies the
+tuple representation it needs and retains stable sequence-source
+descriptors.  During the process phase the selected mapper consumes the
+captured target/query inputs and builds an output map.  During the read phase
+each cursor entry pairs one copied input row with one
+\texttt{MatchResult}.  The scan installs that input as
+\texttt{ecxt\_scantuple}, updates the placeholders, calls
+\texttt{ExecProject}, and returns one virtual tuple to its parent.
+
+An input with zero matches has no cursor and produces no row.  An input with
+three matches is visited three times by the read phase, with the same stable
+input attributes and three different sets of placeholder values.  This
+provides set-valued behavior through PostgreSQL's pull executor without
+exposing a set-returning function in the SQL surface.
+
+\subsection{Scalar and vectorized access converge before alignment}
+
+The table access method can yield a scalar slot or a vector slot.  In the
+vectorized path, pushable ordinary qualifications produce a keep mask, after
+which the scan extracts each retained row into its scalar slot.  Both paths
+then reset the per-tuple expression context, establish
+\texttt{ecxt\_scantuple}, evaluate the residual frontier and any authoritative
+target/query \texttt{ExprState}, and call the same submission interface.
+Alignment itself is therefore not skipped merely because table filtering was
+vectorized.
+
+This convergence repairs an early defect in which the vectorized scan
+advanced through input without invoking the buffer's submission callback.
+The typed integration report later recorded byte-identical output with
+vectorization enabled and disabled.\footnote{DOC0058 records the intermediate
+five-input/nine-output run and the vectorization parity check.}  Current
+integration tests preserve the stronger invariant for base scans and joins:
+toggling \texttt{bioseq.enable\_vectorization} may change how ordinary
+qualifications are evaluated, but not the match set or its projected fields.
+
+\subsection{Lazy sequence sources and tuple lifetimes}
+
+Chapter~9 showed that a sequence value may be a compact inline value, a
+fragment locator, or a lazy recipe.  The custom scan is the point at which
+PostgreSQL tuple lifetime and sequence-source lifetime meet.  A deferred
+table scan can leave a stable locator in the buffered row instead of eagerly
+assembling every sequence.  The alignment provider bulk-acquires the
+fragments required for the current dispatch.  Output-only sequence
+expressions are promoted just before projection and then restored to the
+locator form.
+
+The restoration step is necessary when one row has several matches.
+PostgreSQL resets the per-tuple memory context between returned rows.  If the
+buffered slot were overwritten with a detoasted or assembled pointer owned by
+that context, the second match would dereference released memory.  Current
+code captures the source cells before promotion and restores them on normal
+return, C++ exception, and PostgreSQL \texttt{longjmp}.  Match objects and
+copied minimal tuples live in the batch arena; ephemeral expanded objects
+remain confined to the current projection.
+
+\subsection{A lower-bound prefilter does not become the SQL predicate}
+
+When a prefilter such as SneakySnake is enabled, it is permitted to reject a
+candidate only according to its proven lower-bound contract.  Every survivor
+still reaches exact alignment.  If SQL additionally requests a strict
+edit-distance condition, the read phase evaluates that exact boundary against
+the resulting \texttt{MatchResult}.  This ordering prevents an accelerator
+gate from becoming an approximate implementation of the user's SQL
+predicate.
+
+\section{Injecting match fields into planned expressions}
+\label{sec:match-placeholder-injection}
+
+\subsection{Mutable typed Const nodes}
+
+PostgreSQL evaluates a projection from an expression tree.  Rebuilding that
+tree for every match would be expensive, while calling each SQL helper would
+have no access to the scan's current match.  BioSeqDB instead rewrites each
+owned helper to a typed \texttt{Const}.  The node address remains stable for
+the executor lifetime and only its \texttt{constvalue} and
+\texttt{constisnull} fields change.
+
+On the first call to \texttt{CustomExecScan}, the scan allocates the
+placeholder family and runs \texttt{var\_injector\_mutator} over the finalized
+target list.  The mutator recognizes function OIDs, verifies that the helper
+belongs to this match-owner recipe, and substitutes the corresponding
+\texttt{Const}.  Unrelated functions are traversed normally.  A projected
+\texttt{bioseq.edit} whose target argument does not match the
+\texttt{mmsearch} target raises a diagnostic instead of receiving fields from
+the wrong sequence.
+
+Before each \texttt{ExecProject},
+\texttt{populate\_placeholder\_consts} copies one
+\texttt{MatchResult} into the requested nodes.  Coordinates and lengths use
+PostgreSQL \texttt{BIGINT}, because the C++ source values are unsigned
+64-bit sequence sizes.  Scores, map quality, and seed counters remain
+\texttt{INT4} because their source fields are 32-bit.  Strand and status use
+\texttt{BOOLEAN}, divergence uses a floating type, and CIGAR is formatted as
+PostgreSQL text only when a CIGAR placeholder exists.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Examples from the match projection ABI.}
+\label{tab:match-placeholder-types}
+\begin{tabular}{@{}p{0.26\textwidth}p{0.21\textwidth}p{0.43\textwidth}@{}}
+\toprule
+Projection family & Placeholder type & Source and update rule \\
+\midrule
+\texttt{score}, \texttt{dp\_score}, \texttt{mapq},
+\texttt{seed\_count} &
+\texttt{INT4} &
+Copied from 32-bit \texttt{MatchResult} score/counter fields. \\
+\texttt{query\_start}, \texttt{query\_end},
+\texttt{target\_start}, \texttt{target\_end}, lengths &
+\texttt{BIGINT} &
+Value-preserving conversion from unsigned sequence-size fields, with the
+project's supported size ceiling below \texttt{INT64\_MAX}. \\
+\texttt{is\_reverse}, \texttt{is\_primary},
+\texttt{has\_cigar} &
+\texttt{BOOLEAN} &
+Updated for every emitted match from the same result object. \\
+\texttt{divergence} &
+floating value &
+Written only when the query projects or otherwise requires divergence. \\
+\texttt{cigar} &
+\texttt{TEXT} &
+Formatted from traceback data; traceback generation can be disabled when no
+dependent field is required. \\
+\texttt{symbol\_count} &
+typed numeric placeholder &
+Not a \texttt{MatchResult} field; resolved from the row's metadata sidecar
+using relation and row identity. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The mutable constant is an executor-local data conduit, not a SQL constant in
+the semantic sense.  It is installed only after planning and setrefs have
+finished.  PostgreSQL never has an opportunity to fold its changing value
+during planning.  The target list is compiled against the stable node, and
+the scan mutates it immediately before projection.
+
+\subsection{Why joins need PlaceHolderVar}
+
+A bare helper such as \texttt{bioseq.cigar(t.pk)} can be copied or pushed into
+a join child's target list.  In an outer join, the result also carries
+null-extension semantics: the helper must become null when the originating
+side is null-extended.  Replacing every visible copy with an unqualified
+\texttt{Const} would lose that placement and nulling information.
+
+The support function \texttt{bioseq\_placeholder\_support} handles
+\texttt{SupportRequestSimplify}.  When the query contains joins or
+aggregates, it finds the originating \texttt{Var}, copies the helper, and
+wraps it with PostgreSQL's \texttt{PlaceHolderVar}.  The wrapper preserves
+\texttt{phlevelsup}, \texttt{phrels}, and \texttt{phnullingrels}.  PostgreSQL
+can then carry the value upward from the correct evaluation level without
+re-evaluating the helper in a sibling scan.  At executor rewrite time, the
+wrapper remains intact while its contained owned function is replaced.
+
+This mechanism was introduced after a LEFT JOIN plus CIGAR projection exposed
+a crash: the planner had pushed a helper into a child that had no current
+\texttt{MatchResult}.  It also solves aggregate placement, where a projected
+match field must be computed below the aggregate rather than invoked after
+the alignment owner has been drained.  The current helper support is
+deliberately a placement mechanism; exact ownership is still checked by the
+custom scan.
+
+\subsection{Stable identity is more precise than function OID}
+
+Function OID alone is insufficient when a query contains multiple sequence
+relations, aliases, slices, or nested owners.  Two
+\texttt{bioseq.target\_start(...)} calls have the same OID but may refer to
+different alignments.  Current owner descriptors therefore carry the target
+recipe, base lineage, relation/attribute identities, placeholder identity or
+\texttt{phid}, and stable match-site information.  A descendant owner may
+publish an already-computed helper to an upper result; the upper owner must
+pass it through rather than relabeling it as its own.
+
+This is the database analogue of keeping fields from one mapper record
+together.  The stable identity guarantees that coordinates, CIGAR, and score
+are not assembled from different match rows merely because their function
+names coincide.
+
+\section{Join ownership and expression-tree surgery}
+\label{sec:mmsearch-join-ownership}
+
+\subsection{Four plan shapes}
+
+The phrase ``mmsearch in a join'' covers several different data flows.
+BioSeqDB distinguishes them rather than applying one global rewrite.
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\caption{Principal current ownership shapes involving joins.}
+\label{tab:mmsearch-join-shapes}
+\begin{tabular}{@{}p{0.20\textwidth}p{0.22\textwidth}p{0.25\textwidth}p{0.25\textwidth}@{}}
+\toprule
+Shape & Owner & Operand supply & Key condition \\
+\midrule
+Base predicate below a join &
+\texttt{BioseqScan} &
+Target from its relation; query constant, same-row expression, or parameter &
+The base restriction is exactly attributable to the scan.  An upper LEFT
+JOIN is possible because the alignment itself remains base-owned. \\
+Parameterized nested execution &
+Inner \texttt{BioseqScan} &
+Outer value arrives as \texttt{PARAM\_EXEC} and is rebound on rescan &
+A retained or reconstructed nested path proves one exact inner owner. \\
+Raw two-child INNER search &
+\texttt{BioseqBatchJoin} &
+Query child is materialized; target child streams locator-backed rows &
+Exactly one secure semantic join restriction with supported base operands
+and no unsafe residual shape. \\
+Transformed/lazy INNER search &
+\texttt{BioseqBatchJoin} with
+\texttt{BioseqSliceProject} and, where required, a per-row recipe &
+Child providers publish evaluated slice/recipe outputs before ownership &
+The recipe and its base lineage are explicit; the join EXPLAIN identifies
+per-row ownership and contains no executable join filter. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The join-level hook currently claims only \texttt{JOIN\_INNER}.  This boundary
+does not mean that every query containing a LEFT JOIN is unsupported.  A
+literal search predicate on one base relation can be owned below a LEFT JOIN,
+with \texttt{PlaceHolderVar} preserving the projected helper's nulling rules.
+What is intentionally narrow is transformation of the \emph{join-level}
+\texttt{mmsearch} restriction itself.
+
+\subsection{Raw BioseqBatchJoin}
+
+For the raw two-child case, the query child is fully materialized before the
+first output.  The target child is a BioSeqDB locator scan and is read once.
+The batch join can then combine target rows with retained query references,
+dispatch the alignment work, and publish each match together with the
+corresponding child columns.  Its startup cost includes the entire query
+child and materialization work; its total cost adds the complete target scan,
+operand evaluation, alignment, residual qualifiers, and output rows.
+
+This plan is not equivalent to merely placing a custom node above an existing
+NestLoop, HashJoin, or MergeJoin.  The child join path may already contain the
+\texttt{mmsearch} as a join filter.  BioSeqDB reconstructs a private child
+path with the exact \texttt{RestrictInfo} removed, or declines the
+transformation.  It never wraps a descendant that would still call the SQL
+rendezvous function.
+
+\subsection{Parameterized scans and rescans}
+
+When PostgreSQL chooses a nested parameterized plan, the query operand may be
+a \texttt{PARAM\_EXEC} supplied by the outer row.  \texttt{BeginCustomScan}
+records the exact post-setrefs argument cell and initializes
+\texttt{MmsearchParamRebind}.  On \texttt{ReScanCustomScan}, the scan clears
+match cursors, retained slots, provider state, and source exhaustion, then
+re-evaluates the parameter from the owned expression before rescanning the
+table access method.
+
+This explicit rebind replaced an early approach that inspected only constants
+at initialization.  Without it, the first outer query could be reused for
+later outer rows, producing plausible but wrong join results.  ReScan is
+therefore not only a performance callback; it is part of the SQL correlation
+semantics.
+
+\subsection{Removing every executable copy}
+
+PostgreSQL may represent the same semantic restriction in several
+planner/executor locations.  The current EXPLAIN audit names five classes:
+
+\begin{enumerate}
+  \item owned \texttt{RestrictInfo} path copies;
+  \item executable \texttt{mmsearch} qualification copies;
+  \item vector-qualification copies;
+  \item storage-pushdown copies; and
+  \item descendant owner copies.
+\end{enumerate}
+
+For a join-level owner, each counter must be zero below the authoritative
+node and \texttt{Bioseq Residual Mmsearch Qual} must be
+\texttt{absent}.  The regression helper also searches the textual plan for
+\texttt{Filter}, \texttt{Join Filter}, \texttt{One-Time Filter},
+\texttt{Index Cond}, and \texttt{Recheck Cond} whose expression begins with
+\texttt{mmsearch}.  This audit is stronger than checking that a
+\texttt{BioseqBatchJoin} appears somewhere in the plan: it proves that the
+same semantic call has not survived at a second execution site.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=0.55cm and 1.0cm,
+  plan/.style={draw, rounded corners, align=center, minimum height=0.8cm,
+               text width=3.4cm, fill=green!9},
+  child/.style={draw, rounded corners, align=center, minimum height=0.75cm,
+                text width=3.2cm, fill=blue!6},
+  bad/.style={draw, dashed, rounded corners, align=center,
+              minimum height=0.65cm, text width=3.0cm, fill=red!7},
+  arrow/.style={-Latex, thick}
+]
+\node[plan] (join) {\texttt{BioseqBatchJoin}\\sole owner of join-level
+\texttt{mmsearch}};
+\node[child, below left=of join] (target) {Target provider\\locator-backed
+\texttt{BioseqScan}};
+\node[child, below right=of join] (query) {Query child\\materialized once};
+\node[child, below=of target] (slice) {optional\\\texttt{BioseqSliceProject}};
+\node[bad, right=of slice] (removed) {removed from children:\\
+\texttt{Filter}/\texttt{Join Filter}/\\vector/storage quals};
+\draw[arrow] (target) -- (join);
+\draw[arrow] (query) -- (join);
+\draw[arrow] (slice) -- (target);
+\draw[-Latex, dashed, red!70!black] (removed) -- node[below, sloped]{must not execute} (join);
+\end{tikzpicture}
+\caption{Join-level ownership.  Child providers publish operands and ordinary
+columns; only the parent alignment owner consumes the semantic
+\texttt{mmsearch} restriction.}
+\label{fig:batchjoin-ownership}
+\end{figure}
+
+\subsection{Security and evaluation order}
+
+Expression-tree surgery must respect PostgreSQL security and volatility
+rules.  The first join-level implementation declines row-security shapes,
+pseudoconstant or non-promotable restrictions, and volatile sibling
+qualifiers whose relative evaluation order it cannot preserve.  The optional
+third argument must fold to the expected typed constant form before the hook
+claims it.  Parallel child plans are rejected where the provider lifecycle
+cannot be transferred safely.
+
+These checks intentionally sacrifice some plan shapes.  A database extension
+cannot justify moving a volatile expression, bypassing a security barrier, or
+reusing a value across rows merely because doing so would produce a larger
+alignment batch.  Unsupported shapes remain visible through the fail-closed
+SQL boundary.
+
+\section{What BioSeqDB borrowed from ParadeDB}
+\label{sec:paradedb-customscan-comparison}
+
+The copied \texttt{paradedb-experiments} repository provided a concrete
+PostgreSQL extension example in which planned projection helpers are
+substituted by executor-owned values.  Its PDB scan recognizes score and
+snippet projections, injects typed placeholder constants, and updates
+\texttt{const\_score\_node} with the score of the current search hit.  Its
+\texttt{placeholder\_support} also wraps projection expressions in
+\texttt{PlaceHolderVar} for joins and aggregates, preserving
+\texttt{phlevelsup} and \texttt{phnullingrels}.
+
+These mechanisms answered an important feasibility question: an extension
+does not need custom SQL syntax for every result field.  It can allow
+PostgreSQL to parse an ordinary function call, preserve the expression's
+placement through planning, and replace the call with an executor-local
+value at the custom scan boundary.  The early BioSeqDB proof of concept copied
+this pattern for one synthetic score.
+
+The complete BioSeqDB problem is nevertheless different.  Text search
+commonly associates one score with one hit already enumerated by the search
+node.  Sequence search must itself create a variable number of match rows
+after batch processing.  Its target value may be a large lazy sequence
+locator rather than a value that can be held in a conventional tuple datum,
+and each match has a coordinated record of scores, coordinates, strand,
+traceback, and mapping-quality fields.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Relationship between the copied ParadeDB technique and the final
+BioSeqDB design.}
+\label{tab:paradedb-bioseq-comparison}
+\begin{tabular}{@{}p{0.23\textwidth}p{0.31\textwidth}p{0.36\textwidth}@{}}
+\toprule
+Concern & ParadeDB experiment & BioSeqDB adaptation \\
+\midrule
+SQL projection &
+Score/snippet helper recognized in a PDB custom scan &
+Family of match and metadata helpers bound to an exact alignment owner \\
+Injected node &
+Typed score/snippet \texttt{Const}; executor updates
+\texttt{const\_score\_node} &
+Typed constants for a multi-field \texttt{MatchResult}; coordinates are
+widened and CIGAR is produced conditionally \\
+Expression placement &
+\texttt{PlaceHolderVar} carries a helper across joins/aggregates &
+Same PostgreSQL mechanism, plus recipe/base-lineage checks and stable
+placeholder identities \\
+Cardinality &
+Projection decorates the current text-search hit &
+Owner creates zero, one, or many SQL rows for each sequence input \\
+Input lifetime &
+Search fields managed by the PDB scan &
+Copied tuple slots, fragment locators, lazy providers, per-output promotion,
+and restoration across memory-context resets \\
+Path forcing &
+Copied experiments include clearing paths or assigning extreme fallback
+costs &
+Final design uses honest nonnegative costs, then removes only paths that
+would execute the exact owned restriction \\
+Failure boundary &
+Specific to the PDB search interface &
+\texttt{mmsearch} is a fail-closed rendezvous; no unowned plan may execute it \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The resulting design should therefore be described as inspired by ParadeDB's
+projection-node technique, not as a port of its custom scan.  The mutable
+constant is the common mechanism.  Batch cardinality, alignment ownership,
+deferred sequence access, parameter rebinding, and the match-row ABI are
+BioSeqDB-specific extensions.
+
+\section{Evolution from proof of concept to the final owner protocol}
+\label{sec:customscan-design-evolution}
+
+The PostgreSQL integration changed repeatedly because each larger SQL shape
+exposed a different hidden assumption.  Table~\ref{tab:customscan-evolution}
+orders the important stages.  The rows are not simultaneous alternatives;
+later rows supersede earlier behavior.
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\caption{Design evolution of \texttt{mmsearch} planning and execution.}
+\label{tab:customscan-evolution}
+\begin{tabular}{@{}p{0.14\textwidth}p{0.23\textwidth}p{0.28\textwidth}p{0.27\textwidth}@{}}
+\toprule
+Evidence & Intermediate design & What it demonstrated & Why it changed \\
+\midrule
+DOC0052 &
+True-returning Boolean stub, one synthetic score \texttt{Const}, high scalar
+cost, negative custom cost &
+PostgreSQL could select a custom scan and an executor could mutate a planned
+projection node &
+No real alignment, no filtering, unsafe fallback semantics, artificial cost
+race, and only one output value \\
+DOC0054 &
+Write/batch/read buffer, full placeholder list, proposed multirow draining &
+A pull executor can expose post-batch zero/one/many cardinality &
+The first implementation still had global state, incomplete vector handling,
+and incomplete resource/rescan behavior \\
+DOC0058 &
+Typed \texttt{bioseq.seq} operands, real \texttt{minimap\_port}, detoast/copy
+ownership, vector parity &
+Real matches and CIGARs could flow through the same SQL projection interface;
+five inputs emitted nine rows &
+Join correlation and expression placement were not yet safe \\
+DOC0083 &
+Per-scan runtime, memory-context callback, parameter rebinding,
+ParadeDB-inspired PHV support &
+Repeated scans, cross joins, LEFT JOIN projections, and correlated inner
+execution exposed and repaired global-state assumptions &
+Join selection still used cost forcing and did not prove exact single
+ownership for every copied restriction \\
+DOC0321--DOC0334 &
+Planner-support/custom-scan contract, structured EXPLAIN, expanding
+integration coverage &
+Made plan shape, batch callbacks, and vector/scalar parity explicit workflow
+requirements &
+Complex slices, join reconstruction, and hidden target-list dependencies
+still required a stricter ABI \\
+DOC0377, DOC0388, current source &
+Base, parameterized, batch-join, and slice providers; fail-closed SQL;
+versioned owner descriptors; exact restriction removal; honest costs &
+One semantic operation has one executor owner, one stable match ABI, and
+auditable descendant state &
+This is the current first-release boundary; unsupported join/security shapes
+remain explicit limitations \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Why the true-returning stub was especially dangerous}
+
+Returning true looked convenient during the first experiment because it kept
+the predicate in the planned tree while the custom scan supplied synthetic
+scores.  It also meant that any planner path which did not perform the custom
+rewrite returned every row.  A cost estimate then became a correctness
+mechanism: if the custom path ever lost, SQL results changed.  The final
+erroring body reverses this default.  A new PostgreSQL transformation, a
+missed expression shape, or a disabled custom scan becomes an observable
+unsupported-query error and cannot masquerade as a successful search.
+
+\subsection{Why per-scan state was not optional}
+
+The original file-static buffer appeared to work for one scan node.  A cross
+join creates two scan nodes in the same backend, and repeated execution reuses
+the process.  One node could move the global state to read-mode EOF while the
+other still expected write mode.  An early EXPLAIN ANALYZE symptom was an
+outer scan reporting one row where the fixture contained five.  Moving the
+buffer, feature flags, output cursor, parameter state, placeholder nodes, and
+pipeline description into \texttt{BioseqScanRuntime} gave each
+\texttt{CustomScanState} an independent lifecycle.
+
+The cleanup design also changed.  PostgreSQL errors use non-local jumps, so
+ordinary C++ stack unwinding cannot be assumed at every boundary.  The
+current normal path clears slots and closes providers in
+\texttt{EndCustomScan}, while the registered \texttt{MemoryContextCallback}
+deletes the runtime on context teardown and covers abort paths.  The callback
+object itself lives inside the runtime whose lifetime it governs, so it is
+registered once and not left pointing at a moved object.
+
+\subsection{Why an owner needs a versioned ABI}
+
+As join and slice support expanded, a simple target relation number was no
+longer enough to identify the source of a helper.  Plan construction may
+introduce resjunk columns, \texttt{INDEX\_VAR} references, subquery outputs,
+or \texttt{PARAM\_EXEC} operands.  Current private tags carry a version and
+fixed field count, while expression-bearing metadata travels through
+\texttt{custom\_exprs}.  Plan finalization validates that the encoded
+descriptor, target list, helper sites, and child outputs agree.  A mismatch is
+reported as corrupted or unsupported plan state rather than decoded using an
+older layout.
+
+\section{SQL and EXPLAIN evidence}
+\label{sec:customscan-explain-evidence}
+
+\subsection{Intermediate cardinality evidence}
+
+The first typed real-aligner report supplied five stored target rows and
+observed nine emitted alignment rows.  The distribution was \(3,1,1,1,3\)
+matches for inputs one through five.  The first and fifth rows therefore
+demonstrated the critical multirow property rather than merely a Boolean
+filter.  The report included CIGARs such as \texttt{29M} and a gapped
+\texttt{9M3I13M}, and recorded identical output when vectorized table access
+was toggled.\footnote{DOC0058, archived integration report.  Its short-query
+parameter policy is historical; only the observed cardinality and parity are
+used here.}
+
+A later PostgreSQL/Vulkan report inserted two target rows and captured 12
+output alignment rows.  Its EXPLAIN fragment was:
+
+\begin{lstlisting}
+Custom Scan (BioseqScan) on doc0351_sql_dna5
+  (actual rows=12 loops=1)
+  Filter: mmsearch(target, query)
+  Bioseq Recomputed: minimizers 100%
+    (read_sequence_index disabled)
+  ChainStage: Vulkan tiled DP
+    vulkan_enabled: true
+    [accelerator: vulkan]
+  * Submit results
+    [targets=2 prebuilt_index=0 recomputed=2]
+\end{lstlisting}
+
+This is valuable evidence that the custom scan expanded two stored rows into
+12 match rows and surfaced the selected pipeline.  It is also visibly an
+\emph{intermediate} plan: the displayed \texttt{Filter: mmsearch} is forbidden
+by the current owner protocol.  Presenting the fragment without its date and
+status would confuse an old EXPLAIN rendering with the final executor
+invariant.\footnote{DOC0352, current report documenting an earlier
+implementation stage.}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Recorded intermediate SQL cardinality evidence.  These are
+integration receipts, not comparative throughput benchmarks.}
+\label{tab:customscan-cardinality-evidence}
+\begin{tabular}{@{}p{0.18\textwidth}p{0.18\textwidth}p{0.18\textwidth}p{0.36\textwidth}@{}}
+\toprule
+Evidence & Input target rows & Emitted match rows & Conclusion supported \\
+\midrule
+DOC0058 &
+5 &
+9 &
+The typed CPU path emitted several rows for inputs one and five; output was
+identical with vectorization on and off. \\
+DOC0352 &
+2 &
+12 &
+The PostgreSQL custom scan expanded both targets and reported the Vulkan
+chaining route and recomputed-index counters. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Neither row count is a biological sensitivity result by itself.  The
+fixtures, parameters, and sequence lengths differ, and a larger number of
+alignments is not automatically better.  Their purpose in this chapter is
+more precise: they prove that the SQL executor exposed a mapper's set-valued
+output rather than collapsing it to one Boolean row.
+
+\subsection{Current plan invariants}
+
+The current regression suite does not freeze one complete textual plan,
+because costs, formatting, and harmless plan details can change across
+PostgreSQL builds.  It freezes semantic properties:
+
+\begin{itemize}
+  \item a base search contains \texttt{Custom Scan (BioseqScan)};
+  \item the base node does not contain \texttt{Filter: mmsearch};
+  \item \texttt{EXPLAIN ANALYZE} reports actual execution for that custom
+  scan, and JSON EXPLAIN names both \texttt{Custom Scan} and
+  \texttt{BioseqScan};
+  \item a transformed slice INNER join contains
+  \texttt{Custom Scan (BioseqBatchJoin)}, reports
+  \texttt{Bioseq Mmsearch Ownership: per-row recipe}, contains
+  \texttt{BioseqSliceProject}, and has no
+  \texttt{Join Filter: mmsearch};
+  \item the five descendant-copy audit counters are zero and the residual
+  qualifier is reported as absent.
+\end{itemize}
+
+The latest implementation log adds a second current data point: an ordinary
+two-child ABI-v3 \texttt{BioseqBatchJoin} is covered by a regression that
+expects exactly one upper \texttt{BioseqSliceProject}, no per-row owner, and
+no residual \texttt{Join Filter: mmsearch}.  The same log records an
+\texttt{Aggregate + Custom Scan (BioseqScan)} path with no vector aggregate
+owner and invariant results under the vectorization toggle.\footnote{Latest
+successful entries in DOC0386; DOC0388 summarizes the final ownership
+implementation.}
+
+\subsection{Structured pipeline descriptions}
+
+The EXPLAIN output is not assembled from a parallel set of hard-coded names.
+The templated pipeline work introduced a runtime
+\texttt{PipelineDescription} composed of stage descriptions.  The same
+dispatch decision that selects minimizer, chaining, alignment, prefilter, and
+accelerator policies supplies their metadata.  A generic walker renders this
+structure to TEXT and the structured PostgreSQL formats.
+
+This design addresses a common observability failure: an execution path
+changes, but EXPLAIN continues to print the old algorithm name.  The
+dispatcher tests require runtime selection and description selection to
+agree.  The custom scan augments that algorithmic description with database
+facts such as owned-qual audit counters, projected columns, index
+read/recompute decisions, storage hydration, submission counts, and fallback
+reasons.
+
+\section{GUCs, prepared plans, and resource safety}
+\label{sec:customscan-safety}
+
+\subsection{GUC behavior}
+
+BioSeqDB has settings that change storage/index policy, vectorized
+qualification, column caching, mapper parameters, and custom-scan
+availability.  They do not all have the same semantic status.
+
+\begin{itemize}
+  \item \texttt{bioseq.enable\_vectorization} changes the table-qualification
+  route.  Current tests require identical match rows and require the custom
+  scan to remain the owner in both states.
+  \item \texttt{bioseq.enable\_column\_cache} changes a storage optimization,
+  not alignment semantics.  The custom owner persists with the cache on or
+  off.
+  \item \texttt{bioseq.enable\_bioseq\_index\_scan} changes index-use policy.
+  The owner may read a compatible index or recompute, but it remains a
+  \texttt{BioseqScan}.
+  \item Per-call aligner options override a snapshot of the session mapper
+  settings for one owned expression.  This snapshot prevents a batch from
+  observing a half-changed configuration.
+  \item The master custom-scan setting controls whether the extension offers
+  these owners.  Disabling the only supported owner does not authorize the
+  Boolean body to return approximate or universally true results; an
+  attempted execution reaches the fail-closed boundary.
+\end{itemize}
+
+The tests that keep \texttt{BioseqScan} selected across the first three
+toggles are specifically a regression against the old cost-race design.
+Changing a cache or vectorization setting may legitimately change the honest
+cost estimate, but it must not resurrect an unowned executable copy of
+\texttt{mmsearch}.
+
+\subsection{Prepared statements and once-only evaluation}
+
+Prepared and parameterized statements separate planning time from the values
+seen at execution.  BioSeqDB keeps expression trees, source recipes, and
+parameter coordinates in the plan, then evaluates operand \texttt{ExprState}
+objects in the scan's expression context.  A constant query can be prepared
+once, while a \texttt{PARAM\_EXEC} query is rebound for each rescan.  For a
+join-level batch owner, query-child expressions are materialized once into
+the query context before targets are streamed.
+
+The exact operand is evaluated once at its authoritative boundary.  A lazy
+slice is not recomputed separately for \texttt{mmsearch}, CIGAR, and
+coordinate helpers.  Hidden child outputs and recipe identifiers let upper
+nodes reuse the published value.  This is both a performance property and an
+SQL semantics property for expressions whose evaluation can fail or whose
+source lifetime is short.
+
+\subsection{Memory contexts and ResourceOwners}
+
+PostgreSQL uses memory contexts for bulk lifetime management and
+\texttt{ResourceOwner} objects for relations, snapshots, buffers, and similar
+resources.  A C++ destructor alone is insufficient because
+\texttt{ereport(ERROR)} leaves a protected region through \texttt{longjmp}.
+Conversely, deleting every C++ object only from a memory callback is too late
+for resources that should be closed while their owner is still active.
+
+The current scan uses a split protocol:
+
+\begin{enumerate}
+  \item \texttt{BeginCustomScan} constructs per-node runtime and registers one
+  callback in the query memory context.
+  \item \texttt{EndCustomScan} clears result and scan slots, removes
+  parent-visible expanded-object references, closes sequence providers and
+  access-method resources, and marks normal cleanup complete.
+  \item The memory-context callback deletes the C++ runtime after normal end
+  or performs abort-path deletion when execution did not reach
+  \texttt{EndCustomScan}.
+\end{enumerate}
+
+The batch join applies the same principle to materialized query slots,
+admission permits, locator providers, and both child plans.  It releases
+tuple-visible references before resetting the arena that owns them.  These
+details are necessary for repeated queries in one backend and for
+\texttt{EXPLAIN ANALYZE}, which executes and then formats the same plan.
+
+\subsection{Parallelism}
+
+SQL declarations can mark an expression parallel safe while a particular
+custom owner remains parallel unsafe.  The declaration says that the
+function's semantics do not depend on backend-local side effects; it does not
+make a stateful scheduler, provider, GPU queue, or materialized query child
+transferable between parallel workers.  BioSeqDB disables parallel ownership
+for plan shapes whose runtime state cannot be divided safely and rejects
+incompatible parallel children in the batch join.  This conservative
+boundary avoids sharing mutable placeholders or provider state between
+workers.
+
+\section{Limitations and engineering trade-offs}
+\label{sec:customscan-limitations}
+
+The final owner protocol is deliberately narrower than arbitrary SQL.
+
+\begin{enumerate}
+  \item Join-level transformation currently targets INNER joins.  Base-owned
+  searches can occur below other joins, but arbitrary outer-join
+  \texttt{ON mmsearch(...)} semantics are not claimed.
+
+  \item One semantic join-level \texttt{mmsearch} is accepted.  Stacked calls
+  must be separated into query levels so that each has an unambiguous owner
+  and match-row ABI.
+
+  \item Row-security, security-barrier, pseudoconstant, volatile-sibling, and
+  unsupported option-expression shapes are declined when the implementation
+  cannot prove equivalent evaluation placement.
+
+  \item Batch execution adds latency before the first row.  The base scan
+  bounds that latency and memory with an 8192-submission rollover.  A raw
+  batch join intentionally materializes its query child, so its cost and
+  admission policy must account for that complete collection.
+
+  \item Mutable placeholders are tightly coupled to PostgreSQL expression
+  planning.  Every new result helper needs an OID mapping, a correctly typed
+  placeholder, stable ownership metadata, population logic, EXPLAIN
+  coverage, and join/aggregate tests.
+
+  \item A custom scan is tied to BioSeqDB's table access and source-provider
+  contracts.  An ordinary heap value or arbitrary function wrapper cannot
+  automatically provide deferred fragment hydration, persistent-index
+  compatibility, or batch-source lifetimes.
+\end{enumerate}
+
+These restrictions are preferable to implicit fallbacks.  A standalone
+mapper can reject an unsupported command-line combination before processing
+a file.  A database extension must additionally consider planner copies,
+rescan, null extension, row security, volatility, and resource unwinding.
+Failing closed makes that boundary explicit to the SQL user.
+
+\section{Conclusion}
+\label{sec:customscan-conclusion}
+
+BioSeqDB's PostgreSQL API presents sequence search with familiar typed SQL,
+but its semantics are implemented by a plan node rather than by repeated
+scalar calls.  \texttt{mmsearch\_support} marks the ordinary expression as
+expensive; relation and join hooks prove that one custom path can own the
+exact restriction; plan construction removes every executable descendant
+copy; and the executor batches inputs and emits one projected row for each
+alignment.
+
+The result-injection mechanism began with ParadeDB's mutable score constant
+and grew into a stable, recipe-aware match ABI.  Typed placeholders let one
+alignment populate score, coordinates, strand, mapping quality, divergence,
+edit distance, and CIGAR without repeated mapper calls.
+\texttt{PlaceHolderVar} preserves placement and null-extension semantics
+across joins and aggregates, while hidden child outputs and setrefs-safe
+metadata support slices and parameterized execution.
+
+The most important difference from the original proof of concept is not a
+smaller cost number.  It is the removal of cost as a correctness mechanism.
+The current implementation uses finite nonnegative estimates and then makes
+ownership structural: if a supported owner exists, a path that would execute
+the same rendezvous restriction is not an alternative implementation of the
+query.  If no owner can be proven, the SQL body reports the unsupported shape
+instead of inventing alignment results.  This owner protocol is what turns
+the seed--chain--extend pipeline from a library called by PostgreSQL into a
+database execution primitive.
