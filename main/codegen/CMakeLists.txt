@@ -116,6 +116,8 @@ endif()
 option(BIOSEQ_CODEGEN_ENABLE_EXTERNAL "Build the external-API-client component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_WEBSITE "Build the website component" OFF)
 option(BIOSEQ_CODEGEN_ENABLE_SQL "Build the PostgreSQL extension SQL component" OFF)
+option(BIOSEQ_CODEGEN_USE_MODULE_STD
+  "Build and expose the selected standard library's named std module" ON)
 
 if(NOT BIOSEQ_CODEGEN_ENABLE_EXTERNAL
    AND NOT BIOSEQ_CODEGEN_ENABLE_WEBSITE
@@ -522,7 +524,7 @@ set_target_properties(bioseq_codegen PROPERTIES
   CXX_STANDARD 26
   CXX_STANDARD_REQUIRED ON
   CXX_EXTENSIONS ON
-  CXX_MODULE_STD ON
+  CXX_MODULE_STD "${BIOSEQ_CODEGEN_USE_MODULE_STD}"
   RUNTIME_OUTPUT_DIRECTORY "${BIOSEQ_CODEGEN_RUNTIME_OUTPUT_DIRECTORY}")
 
 if(BIOSEQ_CODEGEN_ENABLE_SQL)
