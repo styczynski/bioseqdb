@@ -91,6 +91,10 @@ aws --version
 # Install a current stable Rust toolchain for the unprivileged build identity.
 if ! sudo -u "$TARGET_USER" -H bash -lc 'command -v rustc >/dev/null 2>&1'; then
   RUSTUP_TMP=$(mktemp -d /tmp/bioseq-rustup.XXXXXX)
+  # mktemp creates a root-only directory.  The installer itself runs as the
+  # unprivileged build identity, so make the directory traversable without
+  # transferring ownership of the root-downloaded executable.
+  chmod 0755 "$RUSTUP_TMP"
   curl -fsSL "https://static.rust-lang.org/rustup/dist/${RUST_TARGET}/rustup-init" \
     -o "$RUSTUP_TMP/rustup-init"
   chmod 0755 "$RUSTUP_TMP/rustup-init"

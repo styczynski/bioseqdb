@@ -62,6 +62,7 @@ assert_literal "$BOOTSTRAP" 'BIOSEQ_SOURCE_STAGING_DIR'
 assert_literal "$BOOTSTRAP" 'status READY'
 assert_literal "$BOOTSTRAP" 'rpm rpm2cpio rsync'
 assert_literal "$BOOTSTRAP" 'cpio dpkg-deb readelf rpm rpm2cpio tar zstd'
+assert_literal "$BOOTSTRAP" 'chmod 0755 "$RUSTUP_TMP"'
 
 # Protected development instances must never become targets of this isolated
 # stack. Their ids belong only in the orchestrator's explicit denylist.
