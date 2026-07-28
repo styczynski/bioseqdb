@@ -89,7 +89,8 @@ Three additional rules close common correctness gaps:
     approximation is not extrapolated to geometry for which the port has no
     proof.
     \item A dispatched job whose slice or shader geometry fails per-job
-    validation returns \texttt{unsupported\_conservative} and is accepted.
+    validation returns
+    \texttt{unsupported\_\allowbreak conservative} and is accepted.
     ``Fail open'' here means preserving the candidate.
     \item Overflow while materializing a flat slice or aggregate offset omits
     that job conservatively before dispatch.  No job or result record is
@@ -210,7 +211,7 @@ horizontal segment.
     \draw[fill=orange!80!black,draw=white,thick] (\x,\y) circle (0.14);
   \draw[->,very thick,color=orange!75!black] (-0.55,3.5) -- (0.12,3.5);
   \draw[->,very thick,color=orange!75!black] (11.82,6.5) -- (12.55,6.5);
-  \node[anchor=east,font=\scriptsize] at (-0.6,3.5) {source};
+  \node[anchor=north east,font=\scriptsize] at (-0.6,3.35) {source};
   \node[anchor=west,font=\scriptsize] at (12.6,6.5) {destination};
   \node[draw=orange!75!black,fill=white,rounded corners=2pt,
         font=\scriptsize,align=left] at (9.5,1.0)
