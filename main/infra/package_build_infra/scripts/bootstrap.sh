@@ -112,6 +112,33 @@ set -Eeuo pipefail
 source /etc/bioseq-package-builder.env
 device=/dev/zram0
 
+wait_for_zram_device() {
+  local attempt
+  for attempt in {1..50}; do
+    [[ -b $device && -r /sys/block/zram0/comp_algorithm ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+ensure_zram_device() {
+  modprobe zram num_devices=1
+  # modprobe may create zram0 asynchronously, or current AWS kernels may expose
+  # only the dynamic hot-add interface. First give the legacy device time to
+  # settle; allocate explicitly only when it never appears.
+  if ! wait_for_zram_device; then
+    allocated_device=$(zramctl --find)
+    [[ $allocated_device == "$device" ]] || {
+      printf 'expected %s but zram allocated %s\n' "$device" "$allocated_device" >&2
+      return 1
+    }
+    wait_for_zram_device || {
+      printf 'zram device %s did not become ready after hot-add\n' "$device" >&2
+      return 1
+    }
+  fi
+}
+
 case "${1:-start}" in
   start)
     active_priority=$(awk -v device="$device" '$1 == device {print $5}' /proc/swaps)
@@ -120,35 +147,13 @@ case "${1:-start}" in
     elif [[ -n ${active_priority:-} ]]; then
       swapoff "$device"
     fi
-    modprobe zram num_devices=1
-    # Current AWS kernels can expose zram's hot-add interface without honoring
-    # the legacy num_devices module option. Allocate the first device explicitly
-    # when modprobe did not create it.
-    allocated_new_device=0
-    if [[ ! -b $device ]]; then
-      allocated_device=$(zramctl --find)
-      [[ $allocated_device == "$device" ]] || {
-        printf 'expected %s but zram allocated %s\n' "$device" "$allocated_device" >&2
-        exit 1
-      }
-      allocated_new_device=1
-      # On older M4 virtualization the hot-add syscall can return just before
-      # udev and sysfs expose the device together. Wait a bounded five seconds
-      # so the first service start is deterministic without relying on tracing
-      # or an external retry.
-      for _ in {1..50}; do
-        [[ -b $device && -r /sys/block/zram0/comp_algorithm ]] && break
-        sleep 0.1
-      done
-      [[ -b $device && -r /sys/block/zram0/comp_algorithm ]] || {
-        printf 'zram device %s did not become ready after hot-add\n' "$device" >&2
-        exit 1
-      }
-    fi
-    # util-linux removes dynamically hot-added zram devices when resetting
-    # them. Reset only a pre-existing stale device, never the one just added.
-    if [[ $allocated_new_device -eq 0 ]]; then
+    ensure_zram_device
+    # A nonzero inactive device is stale. util-linux removes dynamically
+    # hot-added devices when resetting them, so always ensure it again after a
+    # reset instead of assuming the block node survived.
+    if [[ $(cat /sys/block/zram0/disksize) -ne 0 ]]; then
       zramctl --reset "$device" 2>/dev/null || true
+      ensure_zram_device
     fi
     memory_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
     zram_bytes=$((memory_kib * 1024 * BIOSEQ_ZRAM_FRACTION_PERCENT / 100))

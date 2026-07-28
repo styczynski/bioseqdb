@@ -55,7 +55,7 @@ done
 assert_literal "$BOOTSTRAP" 'BIOSEQ_ZRAM_SWAP_PRIORITY'
 assert_literal "$BOOTSTRAP" 'BIOSEQ_DISK_SWAP_PRIORITY'
 assert_literal "$BOOTSTRAP" 'allocated_device=$(zramctl --find)'
-assert_literal "$BOOTSTRAP" 'if [[ $allocated_new_device -eq 0 ]]'
+assert_literal "$BOOTSTRAP" 'if [[ $(cat /sys/block/zram0/disksize) -ne 0 ]]'
 assert_literal "$BOOTSTRAP" 'zram device %s did not become ready after hot-add'
 assert_literal "$BOOTSTRAP" 'CPUSchedulingPriority=$BIOSEQ_SSH_RT_PRIORITY'
 assert_literal "$BOOTSTRAP" '/usr/bin/chrt --rr "$BIOSEQ_COMPILER_RT_PRIORITY"'
