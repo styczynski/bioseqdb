@@ -67,7 +67,18 @@ function(bioseq_add_codegen)
     endif()
   endforeach()
 
-  get_filename_component(_bioseq_repo_root "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+  if(BIOSEQ_PACKAGE_BUILD)
+    # Native packages carry the contents of main/ as their source root. Rebuild
+    # the repository-shaped path expected by the isolated codegen project
+    # without copying the source tree into the package build directory.
+    set(_bioseq_repo_root "${CMAKE_BINARY_DIR}/package-repository")
+    file(MAKE_DIRECTORY "${_bioseq_repo_root}")
+    if(NOT EXISTS "${_bioseq_repo_root}/main")
+      file(CREATE_LINK "${CMAKE_SOURCE_DIR}" "${_bioseq_repo_root}/main" SYMBOLIC)
+    endif()
+  else()
+    get_filename_component(_bioseq_repo_root "${CMAKE_SOURCE_DIR}/.." ABSOLUTE)
+  endif()
 
   # ---- toolchain discovery (moved from bioseq/external/CMakeLists.txt:17-97) --
   set(_bioseq_codegen_gcc_only OFF)
