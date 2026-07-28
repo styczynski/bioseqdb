@@ -3,13 +3,14 @@
 
 The first computational stage of the BioSeqDB mapper converts a sequence into a
 much smaller stream of representative $k$-mers.  This stream is called a
-\emph{minimizer sketch}.  The target sketch becomes an index; the query sketch
-is looked up in that index; and equal keys become the anchors consumed by
-Chapter~6.  Sketching is therefore more than a sampling optimisation.  Its hash
+\emph{minimizer sketch}. The target sketch becomes an index. The query sketch
+is looked up in that index, and equal keys become the anchors consumed by
+Chapter~\ref{r:06-chaining}. Sketching is therefore more than a sampling
+optimization. Its hash
 function, strand convention, tie rule, invalid-symbol rule, and output encoding
 jointly define the language spoken by the query and its stored target index.
-Changing any one of them can turn a fast implementation into a perfectly fast
-producer of keys that the index can never find.
+Changing any component can yield an implementation whose output is
+incompatible with the stored index.
 
 This observation explains an otherwise surprising property of the final
 implementation: BioSeqDB retains several minimizer backends instead of
@@ -17,8 +18,9 @@ declaring one universally best algorithm.  The current public backend enum in
 \path{main/bioseq/backend/sequences/kmers/index.cppm} contains
 \texttt{Scalar}, \texttt{ExactSimd}, \texttt{PaperNtHashSimd}, and
 \texttt{VulkanSegment}.  Scalar and ExactSimd share the legacy minimap-style
-scheme.  PaperNtHashSimd implements a different, explicitly identified
-32-bit ntHash scheme.  VulkanSegment reproduces the legacy minimap-style
+scheme. PaperNtHashSimd implements the versioned paper-derived 32-bit ntHash
+scheme stored under identifier \texttt{PNT1}. VulkanSegment reproduces the
+legacy minimap-style
 scheme on a device through the Phase C tiled kernel.  Persisted index metadata
 records the selected scheme; dispatch is not allowed to substitute one scheme
 for another merely because both outputs are called ``minimizers''.
@@ -478,10 +480,11 @@ compatibility with minimap2's hash or event stream.}
 The earliest vector collector kept minimap2's rescan state independently in
 each lane.  Two bugs arrived before performance could even be judged.  First,
 the strand bit was not carried through every buffer update, so approximately
-half of reverse-oriented matches disappeared.  DOC0107 records roughly
-50\% accuracy before the fix and 0.958/0.972 parity on its short/medium
-fixtures after strand masks, strand buffers, and duplicate-emission
-propagation were corrected.  Second, each lane's data-dependent rescan forced
+half of reverse-oriented matches disappeared. DOC0107 records values of 0.958
+and 0.972 on its short and medium fixtures after strand masks, strand buffers,
+and duplicate-emission propagation were corrected. The archived record does
+not define the metric and denominator precisely enough to promote these values
+to an accuracy claim. Second, each lane's data-dependent rescan forced
 horizontal tests and masked buffer updates.  The SIMD unit was busy, but the
 instruction stream did more bookkeeping than the scalar loop.
 
@@ -551,7 +554,7 @@ not because a table lookup was dropped into a legacy index.
 Checkpoint & Change & What was learned & Reported evidence\\
 \midrule
 V1 & strand propagation repaired & semantic parity must precede speed claims &
-$\sim50\%\rightarrow0.958/0.972$\\
+fixture values 0.958/0.972; metric incompletely specified\\
 V2 & complement/mask micro-tuning & instruction cleanup cannot fix divergent
 rescans & $40.8\rightarrow39.6$ ms\\
 V3 & packed storage, smaller state & conversion removal helped but SIMD still
@@ -572,7 +575,10 @@ measured, not a fabricated common benchmark series.}
 \label{tab:minimizer-history}
 \end{table}
 
-\section{The current ExactSimd continuation}
+\section{Current BioSeqDB minimizer backends}
+
+\subsection{ExactSimd: segmented minimap-compatible continuation}
+\label{sec:exact-simd}
 \label{sec:exact-simd}
 
 The exact segmented kernel was written to answer a different question from
@@ -584,7 +590,7 @@ Despite historical function names containing \texttt{nthash}, this path
 canonicalises the two-bit forward/reverse $k$-mer and applies the minimap
 integer scramble.  It is not ntHash.
 
-\subsection{Bounded state across arbitrary fragments}
+\subsubsection{Bounded state across arbitrary fragments}
 
 For a static $W,K$, \texttt{TwoStackContinuationState} retains at most
 $K-1$ normalised nt4 codes, $W-1$ candidate hashes/raw records/ordinals, less
@@ -646,7 +652,7 @@ It does not clear the $W$-candidate tail, reset its chronological ordinal, or
 emit the current minimum.  End-of-input alone performs minimap2's
 unconditional final-current flush.
 
-\subsection{The common $k=15,w=10$ B8 specialisation}
+\subsubsection{The common $k=15,w=10$ B8 specialization}
 
 The generic chronological kernel reconstructs overlapping canonical $k$-mers
 and scans $W$ candidates for each vector group.  DOC0370 showed why this exact
@@ -983,7 +989,7 @@ combination of an ABI proof, explicit replay ownership, exact scalar-equivalent
 event semantics, and a parallel schedule.  Removing any one of those
 properties reproduces a previously observed failure mode.
 
-\subsection{Measurements, provenance, and backend choice}
+\section{Measurements, provenance, and backend choice}
 \label{sec:minimizer-results}
 
 Minimizer benchmarks are unusually easy to misread.  A shorter sketch can make
@@ -992,11 +998,12 @@ construction cost; and a process exit status of one can mean either a crash or
 simply no complete end-to-end match.  The tables below therefore report
 measurements only with their algorithm contract and experiment scope.
 
-\subsubsection{Final CPU comparison}
+\subsection{Final CPU comparison}
 
 The latest qualifying CPU comparison available while this chapter was written
-is report 103 in DOC0370.  All three rows produced the expected result
-(one primary alignment and zero base-pair error).  This was a controlled
+is report 103 in DOC0370. All four configurations produced the stated
+acceptance result: one primary alignment and zero base-pair error. This was a
+controlled
 component/pipeline benchmark, not a promise of end-to-end ingestion
 throughput.  The PNT1 rows use a PNT1-built target index; the minimap2 and
 ExactSimd rows use their compatible index contracts.
@@ -1057,7 +1064,7 @@ route and $9.256/2.923=3.17\times$ faster than the exact segmented SIMD route
 in this experiment.  These ratios must not be quoted as universal instruction
 throughput: they include the tested sequence shape, build, and target machine.
 
-\subsubsection{GPU kernel progression}
+\subsection{GPU kernel progression}
 
 DOC0353 records the controlled before/after measurement of the Phase C shader
 rewrite shown in Table~\ref{tab:gpu-minimizer-rewrite}.  The primary evidence
@@ -1081,15 +1088,16 @@ rolling hash, all-lanes grid stride & 40.3\,ms & 494\,Mbp/s & 11.70\,s \\
 
 This is a $6.75\times$ kernel improvement and a $1.87\times$ whole-probe
 improvement for that workload.  It does not establish that Vulkan beats PNT1
-on every host, nor that the entire 2/4\,GB all-GPU pipeline has been qualified.
-DOC0369 explicitly records that the accepted 2/4\,GB runs available at that
-point exercised the CPU minimizer variants; the bounded 4096-base Phase C
+on every host, nor that the entire 2 and 4\,Gbp all-GPU pipeline has been
+qualified. DOC0369 explicitly records that the accepted 2 and 4\,Gbp runs
+available at that point exercised the CPU minimizer variants. The bounded
+4096-base Phase C
 proof established correctness but was then slower than the minimap2 control.
 The honest conclusion is narrower: Phase C removed the structural GPU sketch
 bottleneck and produced exact device events, while large-scale cross-backend
 qualification remained future measurement work.
 
-\subsubsection{Why older ``wins'' are retained but not promoted}
+\subsection{Why older ``wins'' are retained but not promoted}
 
 The archive contains faster-looking numbers which are valuable as engineering
 history but invalid as final claims.  Report 76 measured a 1.982\,s resident
@@ -1133,9 +1141,10 @@ algorithm only after it has chosen a compatible sketch/index scheme:
 
   \item[\texttt{VulkanSegment}.] The exact minimap-compatible device route
   when Phase C admission proves the representation, tile span, buffer
-  capacity, and device features.  It is favoured when the next stages remain
-  resident.  Admission failure returns a typed unsupported result or chooses
-  an explicitly compatible host route; it never launches a best-effort shader.
+  capacity, and device features. It is favored when the next stages remain
+  resident. Admission may select a compatible host backend before Vulkan
+  execution begins. Once VulkanSegment is selected, a device decline is an
+  error rather than a silent host fallback.
 \end{description}
 
 \begin{figure}[htbp]
@@ -1181,8 +1190,10 @@ incompatible seed definition.}
 Several limitations remain visible rather than hidden behind automatic
 fallbacks.  PNT1 currently requires proved packed dna4 and a supported
 position width.  ExactSimd's best-specialised continuation is the common
-$K=15,W=10$, eight-position shape; less favourable parameters use a generic
-path or scalar code.  The Phase C tile owns one serial scalar-equivalent state,
+$K=15,W=10$, eight-position shape. Other supported shapes use its generic
+exact-vector route. If ExactSimd admission fails, dispatch must select Scalar
+explicitly before ExactSimd execution begins. The Phase C tile owns one serial
+scalar-equivalent state,
 so positions within a tile are not independently parallel; parallelism comes
 from many tiles and grid-stride work distribution.  Count and emit deliberately
 run the state machine twice to obtain deterministic compact output.  Finally,
@@ -1190,11 +1201,16 @@ the historical full-resident route remains in the source for comparison and
 must not be mistaken for an exact compatibility proof.
 
 The most useful next measurements are therefore not another isolated hash
-loop.  They are: a preregistered 2/4\,GB comparison of complete PNT1 and
-Phase-C configurations; cold and warm target-index builds reported separately;
-adversarial ambiguity at every fragment and tile boundary; tie-heavy synthetic
-inputs that force the exact identity path; and cross-machine throughput with
-the emitted seed stream compared byte-for-byte against the appropriate oracle.
+loop. They are:
+\begin{enumerate}
+  \item a preregistered 2 and 4\,Gbp comparison of complete PNT1 and Phase C
+        configurations.
+  \item cold and warm target-index builds reported separately.
+  \item adversarial ambiguity at every fragment and tile boundary.
+  \item tie-heavy synthetic inputs that force the exact identity path.
+  \item cross-machine throughput with the emitted seed stream compared
+        byte-for-byte against the appropriate oracle.
+\end{enumerate}
 
 \subsection{Implementation evidence map}
 \label{sec:minimizer-evidence-map}
@@ -1247,7 +1263,7 @@ pipeline comparison \\
 \end{tabularx}
 \end{table}
 
-\subsection{Conclusion}
+\section{Conclusion}
 
 Minimizer extraction began as a familiar rolling-hash loop and became a
 lesson in systems correctness.  The observable object is not merely the

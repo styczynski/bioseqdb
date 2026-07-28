@@ -921,18 +921,22 @@ general claim that GPU execution is always faster.
   \centering
   \small
   \caption{Selected end-to-end PostgreSQL cases from \texttt{report\_47.json}.
-  Speedup is SIMD wall time divided by GPU wall time.}
+  The reported ratio is SIMD wall time divided by GPU wall time. The first
+  ratio is not an equal-output speedup claim because exact row-set parity was
+  not established.}
   \label{tab:pipeline-report47}
-  \begin{tabular}{p{0.34\linewidth}rrrr}
+  \begin{tabularx}{\linewidth}{p{0.25\linewidth}rrrX}
     \toprule
-    Case & GPU (s) & SIMD (s) & Speedup & Correct output \\
+    Case & GPU (s) & SIMD (s) & SIMD/GPU ratio & Acceptance receipt \\
     \midrule
     16 queries, 300 Mbp segmented target, coordinates &
-    10.585 & 25.746 & \(2.432\times\) & 16/16 queries found \\
+    10.585 & 25.746 & \(2.432\times\) &
+    16/16 expected queries had an in-tolerance hit. Exact row-set parity was
+    not tested. \\
     4,096 many-gap CIGAR queries &
-    1.809 & 4.512 & \(2.493\times\) & 4,096/4,096 CIGARs \\
+    1.809 & 4.512 & \(2.493\times\) & 4,096/4,096 CIGARs were correct. \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
 \end{table}
 
 \begin{figure}[ht]
@@ -969,8 +973,9 @@ general claim that GPU execution is always faster.
   \end{tikzpicture}
   \caption{The two selected \texttt{report\_47.json} cases.  These one-sample
   source-configuration measurements demonstrate the effect of query batching
-  and target-index reuse in their tested regimes.  They do not establish a
-  universal GPU break-even point.}
+  and target-index reuse in their tested regimes. Exact row-set parity was not
+  established for the 300 Mbp case, so its ratio is not an equal-output
+  speedup claim. Neither case establishes a universal GPU break-even point.}
   \label{fig:pipeline-report47}
 \end{figure}
 
