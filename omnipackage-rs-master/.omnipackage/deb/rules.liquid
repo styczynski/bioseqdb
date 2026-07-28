@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+# debian.rules
+# Be carefull, this is a Makefile, so the indents are tabs and not spaces!
+# -*- makefile -*-
+
+export DESTROOT=$(CURDIR)/debian/{{ package_name }}
+# export DH_VERBOSE=1
+{{ ENV_EXPORTS }}
+
+%:
+	dh $@ --parallel
+
+override_dh_auto_build:
+	PACKAGE_VERSION="{{ version }}" cargo build --release
+
+override_dh_auto_clean:
+	cargo clean
+	dh_auto_clean
+
+override_dh_auto_install:
+	install -d -m755 $(DESTROOT)/usr/bin/
+	install -m755 target/release/omnipackage $(DESTROOT)/usr/bin/omnipackage

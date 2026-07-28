@@ -1,0 +1,40 @@
+Name:       {{ package_name }}
+Version:    {{ version }}
+Release:    1%{?dist}
+Summary:    {{ description }}
+License:    GPL-3.0-or-later
+URL:        {{ homepage }}
+Source0:    {{ source_folder_name }}.tar.gz
+
+BuildRequires: {{ build_dependencies | join: ' ' }}
+{% if runtime_dependencies.size > 0 %}
+Requires: {{ runtime_dependencies | join: ', ' }}
+{% endif %}
+
+%define debug_package %{nil}
+%define _build_id_links none
+
+%description
+{{ description }}
+
+
+%prep
+%setup -q
+
+
+%build
+PACKAGE_VERSION="{{ version }}" cargo build --release
+
+
+%install
+install -d -m755 %{buildroot}/usr/bin/
+install -m755 target/release/omnipackage %{buildroot}/usr/bin/omnipackage
+
+
+%files
+%attr(755, root, root) /usr/bin/omnipackage
+
+
+%changelog
+* Sat Mar 28 2026 {{ maintainer }}
+- First release.

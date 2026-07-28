@@ -1,0 +1,51 @@
+# RPM spec template for a Tauri app. Provide <pkg>.desktop and an icons/
+# tree at the repo root.
+Name:       {{ package_name }}
+Version:    {{ version }}
+Release:    1%{?dist}
+Summary:    {{ description }}
+License:    GPL-3.0-or-later
+URL:        {{ homepage }}
+Source0:    {{ source_folder_name }}.tar.gz
+
+BuildRequires: {{ build_dependencies | join: ' ' }}
+{% if runtime_dependencies.size > 0 %}
+Requires: {{ runtime_dependencies | join: ', ' }}
+{% endif %}
+
+%define debug_package %{nil}
+%define _build_id_links none
+
+%description
+{{ description }}
+
+
+%prep
+%setup -q
+
+
+%build
+cargo install tauri-cli --version '^2.0.0'
+cargo tauri build --no-bundle
+
+
+%install
+install -d -m755 %{buildroot}/usr/bin/
+install -m755 src-tauri/target/release/__INIT_PACKAGE_NAME__ %{buildroot}/usr/bin/__INIT_PACKAGE_NAME__
+mkdir -p %{buildroot}/usr/share/applications/
+cp __INIT_PACKAGE_NAME__.desktop %{buildroot}/usr/share/applications/
+mkdir -p %{buildroot}/usr/share/
+cp -R icons %{buildroot}/usr/share/
+
+
+%files
+%attr(755, root, root) /usr/bin/__INIT_PACKAGE_NAME__
+%attr(644, root, root) /usr/share/applications/__INIT_PACKAGE_NAME__.desktop
+%attr(644, root, root) /usr/share/icons/hicolor/32x32/apps/__INIT_PACKAGE_NAME__.png
+%attr(644, root, root) /usr/share/icons/hicolor/128x128/apps/__INIT_PACKAGE_NAME__.png
+%attr(644, root, root) /usr/share/icons/hicolor/256x256/apps/__INIT_PACKAGE_NAME__.png
+
+
+%changelog
+* __INIT_TODAY__ {{ maintainer }}
+- Initial package release

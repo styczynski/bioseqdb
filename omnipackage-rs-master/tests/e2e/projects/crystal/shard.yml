@@ -1,0 +1,12 @@
+name: helloworld-crystal
+version: 1.2.3
+
+authors:
+  - E2E <e2e@example.com>
+
+targets:
+  helloworld-crystal:
+    main: src/helloworld-crystal.cr
+
+crystal: ">= 1.0.0"
+license: MIT

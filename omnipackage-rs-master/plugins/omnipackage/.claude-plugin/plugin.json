@@ -1,0 +1,4 @@
+{
+  "name": "omnipackage",
+  "description": "Package projects as native Linux RPM/DEB/pacman with omnipackage."
+}

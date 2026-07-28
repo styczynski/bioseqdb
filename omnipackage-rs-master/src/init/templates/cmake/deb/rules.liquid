@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+# debian.rules — Debian build rules for a CMake project. Indents are TABS.
+# -*- makefile -*-
+
+export DESTROOT=$(CURDIR)/debian/{{ package_name }}
+# export DH_VERBOSE=1
+
+%:
+	dh $@ --parallel --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release

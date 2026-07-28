@@ -1,0 +1,26 @@
+# PKGBUILD template rendered at build time. {{ vars }} come from config.yml.
+# If your Cargo binary name differs from the package name, edit the
+# `target/release/...` path below.
+# Maintainer: {{ maintainer }}
+pkgname={{ package_name }}
+pkgver={{ version }}
+pkgrel=1
+pkgdesc="{{ description }}"
+arch=("$(uname -m)")
+url="{{ homepage }}"
+license=('GPL-3.0-or-later')
+{% if runtime_dependencies.size > 0 %}depends=({{ runtime_dependencies | join: ' ' }}){% endif %}
+# makepkg defaults LTO on; disable it — breaks linking prebuilt C/asm (e.g. aws-lc-rs/ring).
+options=('!lto')
+source=("{{ source_folder_name }}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/{{ source_folder_name }}"
+  cargo build --release
+}
+
+package() {
+  cd "$srcdir/{{ source_folder_name }}"
+  install -Dm755 target/release/__INIT_PACKAGE_NAME__ "$pkgdir/usr/bin/__INIT_PACKAGE_NAME__"
+}

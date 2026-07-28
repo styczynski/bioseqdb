@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+# debian.rules — Debian build rules. Indents are TABS, not spaces.
+# -*- makefile -*-
+
+export DESTROOT=$(CURDIR)/debian/{{ package_name }}
+# export DH_VERBOSE=1
+
+%:
+	dh $@ --parallel
+
+override_dh_auto_install:
+	chmod +x $(CURDIR)/.omnipackage/install.sh
+	$(CURDIR)/.omnipackage/install.sh $(DESTROOT)

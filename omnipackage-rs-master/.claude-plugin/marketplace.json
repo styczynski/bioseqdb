@@ -1,0 +1,11 @@
+{
+  "name": "omnipackage",
+  "owner": { "name": "Oleg Antonyan", "email": "oleg.b.antonyan@gmail.com" },
+  "plugins": [
+    {
+      "name": "omnipackage",
+      "source": "./plugins/omnipackage",
+      "description": "Package projects as native Linux RPM/DEB/pacman with omnipackage."
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+name: Release AUR package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish without leading 'v' (blank = read Cargo.toml). Use an existing tag to test."
+        required: false
+        default: ""
+  release:
+    types: [published]
+
+jobs:
+  release-aur:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm --needed git openssh base-devel pacman-contrib sudo curl
+      - uses: actions/checkout@v6
+      - run: useradd -m builder
+      - name: Push to AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          PKGNAME: omnipackage
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: ./.github/aur/release-aur.sh

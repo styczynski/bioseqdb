@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Install mpz</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #f8f9fa;
+    --surface:   #ffffff;
+    --border:    #dee2e6;
+    --text:      #212529;
+    --muted:     #6c757d;
+    --hover-bg:  #f1f3f5;
+    --gpg-bg:    #f1f3f5;
+    --gpg-text:  #495057;
+    --link:      #0d6efd;
+    --footer:    #adb5bd;
+    --toggle-bg: #e9ecef;
+  }
+  [data-theme="dark"] {
+    --bg:        #0f1117;
+    --surface:   #1a1d27;
+    --border:    #2e3240;
+    --text:      #e2e4eb;
+    --muted:     #7c8196;
+    --hover-bg:  #22263a;
+    --gpg-bg:    #22263a;
+    --gpg-text:  #a0a8c0;
+    --link:      #5b9cf6;
+    --footer:    #4a5068;
+    --toggle-bg: #22263a;
+  }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 2rem 1rem;
+    transition: background .2s, color .2s;
+  }
+  .container { max-width: 900px; margin: 0 auto; }
+
+  header { margin-bottom: 2.5rem; position: relative; }
+  header h1 { font-size: 2rem; margin: .5rem 0 .25rem; }
+  header blockquote {
+    color: var(--muted); font-style: italic;
+    border-left: 3px solid var(--border);
+    padding-left: .75rem; margin: .5rem 0;
+    max-width: 400px; text-align: left;
+  }
+  header blockquote a { color: var(--link); }
+
+  .theme-toggle {
+    position: absolute; top: 0; right: 0;
+    display: flex; background: var(--toggle-bg);
+    border-radius: 20px; padding: 3px; gap: 2px;
+    border: 1px solid var(--border);
+    transition: background .2s, border-color .2s;
+  }
+  .theme-toggle button {
+    background: none; border: none; border-radius: 16px;
+    padding: 4px 8px; font-size: .75rem; cursor: pointer;
+    color: var(--muted); transition: background .15s, color .15s; line-height: 1;
+  }
+  .theme-toggle button.active {
+    background: var(--surface); color: var(--text);
+    box-shadow: 0 1px 3px rgba(0,0,0,.15);
+  }
+
+  .family-group {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    margin-top: 1.75rem;
+  }
+  .family-title {
+    font-size: 1rem;
+    font-weight: 700;
+    margin: 0 0 .75rem;
+    color: var(--text);
+  }
+  .family-logo {
+    flex-shrink: 0;
+    width: 48px;
+    height: 48px;
+    margin-top: .35rem;
+    color: var(--text);
+  }
+  .family-logo svg { width: 100%; height: 100%; display: block; }
+  .family-accordions { flex: 1; min-width: 0; }
+
+  .accordion {
+    border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden;
+    margin-bottom: .5rem; background: var(--surface);
+    transition: background .2s, border-color .2s;
+  }
+  .accordion-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: .85rem 1.1rem; cursor: pointer; user-select: none;
+    font-weight: 600; font-size: .95rem; transition: background .15s;
+  }
+  .accordion-header:hover { background: var(--hover-bg); }
+  .accordion-header .chevron {
+    width: 16px; height: 16px; flex-shrink: 0;
+    transition: transform .3s ease; color: var(--muted);
+  }
+  .accordion.open > .accordion-header .chevron { transform: rotate(180deg); }
+
+  .accordion-body {
+    display: grid; grid-template-rows: 0fr;
+    transition: grid-template-rows .3s ease;
+  }
+  .accordion.open > .accordion-body { grid-template-rows: 1fr; }
+  .accordion-inner {
+    overflow: hidden; padding: 0 1.1rem;
+    transition: padding .3s ease;
+  }
+  .accordion.open > .accordion-body > .accordion-inner { padding: 0 1.1rem 1.1rem; }
+
+  .step-label {
+    font-size: .7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted);
+    margin-bottom: .35rem; margin-top: .9rem;
+  }
+
+  .code-block {
+    display: flex; align-items: flex-start;
+    background: #1e1e2e; color: #cdd6f4; border-radius: 6px;
+    font-family: ui-monospace, 'Fira Code', monospace;
+    font-size: .8rem; line-height: 1.6;
+  }
+  .code-block .code-scroll {
+    flex: 1; overflow-x: auto; padding: .85rem 1rem; white-space: pre;
+  }
+  .copy-btn {
+    flex-shrink: 0; align-self: flex-start;
+    margin: .5rem .5rem 0 0; background: #313244;
+    border: none; color: #cdd6f4; border-radius: 4px;
+    padding: .25rem .6rem; font-size: .7rem; cursor: pointer;
+    transition: background .15s;
+  }
+  .copy-btn:hover { background: #45475a; }
+  .copy-btn.copied { background: #a6e3a1; color: #1e1e2e; }
+
+  .gpg-toggle {
+    display: inline-flex; align-items: center; gap: .35rem;
+    margin-top: .9rem; background: none;
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: .2rem .6rem; font-size: .7rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  .gpg-toggle:hover { background: var(--hover-bg); }
+  .gpg-toggle .gpg-chevron { width: 12px; height: 12px; transition: transform .25s ease; }
+  .gpg-toggle.open .gpg-chevron { transform: rotate(180deg); }
+
+  .gpg-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .25s ease; }
+  .gpg-body.open { grid-template-rows: 1fr; }
+  .gpg-inner { overflow: hidden; }
+  .gpg-block {
+    background: var(--gpg-bg); border-radius: 6px; padding: .75rem 1rem;
+    font-family: ui-monospace, monospace; font-size: .75rem;
+    color: var(--gpg-text); white-space: pre; overflow-x: auto;
+    margin-top: .35rem; transition: background .2s, color .2s;
+  }
+
+  .download-label { font-size: .8rem; color: var(--muted); margin-top: .85rem; display: block; }
+  .download-link  { font-size: .85rem; display: inline-block; color: var(--link); }
+
+  footer { text-align: center; margin-top: 2.5rem; color: var(--footer); font-size: .8rem; }
+  footer a { color: var(--footer); }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="theme-toggle" id="themeToggle">
+      <button data-mode="light" title="Light">☀ Light</button>
+      <button data-mode="auto"  title="Auto">⚙ Auto</button>
+      <button data-mode="dark"  title="Dark">🌙 Dark</button>
+    </div>
+    <h1>📦 Install mpz</h1>
+    <blockquote>
+      Music player for big local collections<br>
+      <a href="https://mpz-player.org/">https://mpz-player.org/</a>
+    </blockquote>
+  </header>
+  <div id="root"></div>
+  <footer>Powered by <a href="https://omnipackage.org" target="_blank">OmniPackage</a></footer>
+</div>
+
+<template id="tpl-accordion">
+  <div class="accordion">
+    <div class="accordion-header">
+      <span class="acc-name"></span>
+      <svg class="chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="4 6 8 10 12 6"/>
+      </svg>
+    </div>
+    <div class="accordion-body">
+      <div class="accordion-inner">
+        <div class="step-label">Installation steps</div>
+        <div class="code-block">
+          <span class="code-scroll acc-steps"></span>
+          <button class="copy-btn">Copy</button>
+        </div>
+        <button class="gpg-toggle">
+          GPG key
+          <svg class="gpg-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 6 8 10 12 6"/>
+          </svg>
+        </button>
+        <div class="gpg-body">
+          <div class="gpg-inner">
+            <div class="gpg-block acc-gpg"></div>
+          </div>
+        </div>
+        <span class="download-label">Or download package directly:</span>
+        <a class="download-link acc-download" href="#"></a>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script type="application/json" id="data">
+[
+  { "distro_id": "opensuse_15.5", "distro_name": "openSUSE 15.5", "install_steps": "zypper addrepo --refresh https://repositories.omnipackage.org/oleg/mpz/opensuse-15-5/mpz.repo\nzypper refresh\nzypper install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/opensuse-15-5/mpz-2.0.3-1.x86_64.rpm" },
+  { "distro_id": "opensuse_15.6", "distro_name": "openSUSE 15.6", "install_steps": "zypper addrepo --refresh https://repositories.omnipackage.org/oleg/mpz/opensuse-15-6/mpz.repo\nzypper refresh\nzypper install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/opensuse-15-6/mpz-2.0.3-1.x86_64.rpm" },
+  { "distro_id": "opensuse_16.0", "distro_name": "openSUSE 16.0", "install_steps": "zypper addrepo --refresh https://repositories.omnipackage.org/oleg/mpz/opensuse-16-0/mpz.repo\nzypper refresh\nzypper install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/opensuse-16-0/mpz-2.0.3-1.x86_64.rpm" },
+  { "distro_id": "opensuse_tumbleweed", "distro_name": "openSUSE Tumbleweed", "install_steps": "zypper addrepo --refresh https://repositories.omnipackage.org/oleg/mpz/opensuse-tumbleweed/mpz.repo\nzypper refresh\nzypper install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/opensuse-tumbleweed/mpz-2.0.3-1.x86_64.rpm" },
+  { "distro_id": "fedora_40", "distro_name": "Fedora 40", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/fedora-40/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/fedora-40/mpz-2.0.3-1.fc40.x86_64.rpm" },
+  { "distro_id": "fedora_41", "distro_name": "Fedora 41", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/fedora-41/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/fedora-41/mpz-2.0.3-1.fc41.x86_64.rpm" },
+  { "distro_id": "fedora_42", "distro_name": "Fedora 42", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/fedora-42/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/fedora-42/mpz-2.0.3-1.fc42.x86_64.rpm" },
+  { "distro_id": "fedora_rawhide", "distro_name": "Fedora Rawhide", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/fedora-rawhide/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/fedora-rawhide/mpz-2.0.3-1.fc44.x86_64.rpm" },
+  { "distro_id": "debian_11", "distro_name": "Debian 11", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/debian-11 stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/debian-11/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/debian-11/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "debian_12", "distro_name": "Debian 12", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/debian-12 stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/debian-12/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/debian-12/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "debian_13", "distro_name": "Debian 13", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/debian-13 stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/debian-13/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/debian-13/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "debian_testing", "distro_name": "Debian Testing", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/debian-testing stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/debian-testing/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/debian-testing/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "ubuntu_22.04", "distro_name": "Ubuntu 22.04", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/ubuntu-22-04 stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/ubuntu-22-04/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/ubuntu-22-04/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "ubuntu_24.04", "distro_name": "Ubuntu 24.04", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/ubuntu-24-04 stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/ubuntu-24-04/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/ubuntu-24-04/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "ubuntu_25.04", "distro_name": "Ubuntu 25.04", "install_steps": "echo 'deb https://repositories.omnipackage.org/oleg/mpz/ubuntu-25-04 stable/' | sudo tee /etc/apt/sources.list.d/omnipackage_mpz.list\ncurl -fsSL https://repositories.omnipackage.org/oleg/mpz/ubuntu-25-04/stable/Release.key | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/omnipackage_mpz.gpg > /dev/null\nsudo apt update\nsudo apt install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/ubuntu-25-04/stable/mpz_2.0.3-0_amd64.deb" },
+  { "distro_id": "almalinux_8", "distro_name": "AlmaLinux 8", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/almalinux-8/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/almalinux-8/mpz-2.0.3-1.el8.x86_64.rpm" },
+  { "distro_id": "almalinux_9", "distro_name": "AlmaLinux 9", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/almalinux-9/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/almalinux-9/mpz-2.0.3-1.el9.x86_64.rpm" },
+  { "distro_id": "almalinux_10", "distro_name": "AlmaLinux 10", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/almalinux-10/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/almalinux-10/mpz-2.0.3-1.el10.x86_64.rpm" },
+  { "distro_id": "rockylinux_8", "distro_name": "Rocky Linux 8", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/rockylinux-8/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/rockylinux-8/mpz-2.0.3-1.el8.x86_64.rpm" },
+  { "distro_id": "rockylinux_9", "distro_name": "Rocky Linux 9", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/rockylinux-9/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/rockylinux-9/mpz-2.0.3-1.el9.x86_64.rpm" },
+  { "distro_id": "mageia_9", "distro_name": "Mageia 9", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/mageia-9/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/mageia-9/mpz-2.0.3-1.mga9.x86_64.rpm" },
+  { "distro_id": "mageia_cauldron", "distro_name": "Mageia Cauldron", "install_steps": "curl -o /etc/yum.repos.d/mpz.repo https://repositories.omnipackage.org/oleg/mpz/mageia-cauldron/mpz.repo\ndnf install mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/mageia-cauldron/mpz-2.0.3-1.mga10.x86_64.rpm" },
+  { "distro_id": "arch", "distro_name": "Arch Linux", "install_steps": "curl -fsSL https://repositories.omnipackage.org/oleg/mpz/arch/public.key | sudo pacman-key --add -\nsudo pacman-key --lsign-key $(curl -fsSL https://repositories.omnipackage.org/oleg/mpz/arch/public.key | gpg --show-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')\nprintf '\\n[mpz]\\nSigLevel = Required DatabaseOptional\\nServer = https://repositories.omnipackage.org/oleg/mpz/arch\\n' | sudo tee -a /etc/pacman.conf\nsudo pacman -Sy mpz", "gpg_key": "pub   rsa4096 2024-05-10 [SCEA]\n      D6ED 0ECE 2DAC 71DA 61B4  3C50 DA01 38FD 21D3 9D31\nuid                      packages@omnipackage.org", "download_url": "https://repositories.omnipackage.org/oleg/mpz/arch/mpz-2.0.3-1-x86_64.pkg.tar.zst" }
+]
+</script>
+
+<script>
+const mq = window.matchMedia('(prefers-color-scheme: dark)');
+function applyTheme(mode) {
+  const dark = mode === 'dark' || (mode === 'auto' && mq.matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : '';
+  document.querySelectorAll('#themeToggle button').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === mode));
+}
+let currentMode = localStorage.getItem('theme') || 'auto';
+applyTheme(currentMode);
+document.getElementById('themeToggle').addEventListener('click', e => {
+  const b = e.target.closest('button[data-mode]');
+  if (!b) return;
+  currentMode = b.dataset.mode;
+  localStorage.setItem('theme', currentMode);
+  applyTheme(currentMode);
+});
+mq.addEventListener('change', () => { if (currentMode === 'auto') applyTheme('auto'); });
+
+const distros  = JSON.parse(document.getElementById('data').textContent);
+const template = document.getElementById('tpl-accordion');
+const root     = document.getElementById('root');
+
+function inferFamily(distro) {
+  const id = distro.distro_id.toLowerCase();
+  const name = distro.distro_name.toLowerCase();
+
+  if (id.includes('opensuse') || name.includes('opensuse')) return 'openSUSE';
+  if (id.includes('fedora') || name.includes('fedora')) return 'Fedora';
+  if (id.includes('debian') || name.includes('debian')) return 'Debian';
+  if (id.includes('ubuntu') || name.includes('ubuntu')) return 'Ubuntu';
+  if (id.includes('alma') || name.includes('alma')) return 'AlmaLinux';
+  if (id.includes('rocky') || name.includes('rocky')) return 'Rocky Linux';
+  if (id.includes('mageia') || name.includes('mageia')) return 'Mageia';
+
+  return 'Other';
+}
+
+const FAMILY_LOGOS = {
+  'openSUSE':    '<svg viewBox="0 0 24 24" fill="#73BA25" xmlns="http://www.w3.org/2000/svg"><path d="M10.724 0a12 12 0 0 0-9.448 4.623c1.464.391 2.5.727 2.81.832.005-.19.037-1.893.037-1.893s.004-.04.025-.06c.026-.026.065-.018.065-.018.385.056 8.602 1.274 12.066 3.292.427.25.638.517.902.786.958.99 2.223 5.108 2.359 5.957.005.033-.036.07-.054.083a5.177 5.177 0 0 1-.313.228c-.82.55-2.708 1.872-5.13 1.656-2.176-.193-5.018-1.44-8.445-3.699.336.79.668 1.58 1 2.371.497.258 5.287 2.7 7.651 2.651 1.904-.04 3.941-.968 4.756-1.458 0 0 .179-.108.257-.048.085.066.061.167.041.27-.05.234-.164.66-.242.863l-.065.165c-.093.25-.183.482-.356.625-.48.436-1.246.784-2.446 1.305-1.855.812-4.865 1.328-7.66 1.31-1.001-.022-1.968-.133-2.817-.232-1.743-.197-3.161-.357-4.026.269A12 12 0 0 0 10.724 24a12 12 0 0 0 12-12 12 12 0 0 0-12-12zM13.4 6.963a3.503 3.503 0 0 0-2.521.942 3.498 3.498 0 0 0-1.114 2.449 3.528 3.528 0 0 0 3.39 3.64 3.48 3.48 0 0 0 2.524-.946 3.504 3.504 0 0 0 1.114-2.446 3.527 3.527 0 0 0-3.393-3.64zm-.03 1.035a2.458 2.458 0 0 1 2.368 2.539 2.43 2.43 0 0 1-.774 1.706 2.456 2.456 0 0 1-1.762.659 2.461 2.461 0 0 1-2.364-2.542c.02-.655.3-1.26.777-1.707a2.419 2.419 0 0 1 1.756-.655zm.402 1.23c-.602 0-1.087.325-1.087.727 0 .4.485.725 1.087.725.6 0 1.088-.326 1.088-.725 0-.402-.487-.726-1.088-.726Z"/></svg>',
+  'Fedora':      '<svg viewBox="0 0 24 24" fill="#51A2DA" xmlns="http://www.w3.org/2000/svg"><path d="M12.001 0C5.376 0 .008 5.369.004 11.992H.002v9.287h.002A2.726 2.726 0 0 0 2.73 24h9.275c6.626-.004 11.993-5.372 11.993-11.997C23.998 5.375 18.628 0 12 0zm2.431 4.94c2.015 0 3.917 1.543 3.917 3.671 0 .197.001.395-.03.619a1.002 1.002 0 0 1-1.137.893 1.002 1.002 0 0 1-.842-1.175 2.61 2.61 0 0 0 .013-.337c0-1.207-.987-1.672-1.92-1.672-.934 0-1.775.784-1.777 1.672.016 1.027 0 2.046 0 3.07l1.732-.012c1.352-.028 1.368 2.009.016 1.998l-1.748.013c-.004.826.006.677.002 1.093 0 0 .015 1.01-.016 1.776-.209 2.25-2.124 4.046-4.424 4.046-2.438 0-4.448-1.993-4.448-4.437.073-2.515 2.078-4.492 4.603-4.469l1.409-.01v1.996l-1.409.013h-.007c-1.388.04-2.577.984-2.6 2.47a2.438 2.438 0 0 0 2.452 2.439c1.356 0 2.441-.987 2.441-2.437l-.001-7.557c0-.14.005-.252.02-.407.23-1.848 1.883-3.256 3.754-3.256z"/></svg>',
+  'Debian':      '<svg viewBox="0 0 24 24" fill="#A81D33" xmlns="http://www.w3.org/2000/svg"><path d="M13.88 12.685c-.4 0 .08.2.601.28.14-.1.27-.22.39-.33a3.001 3.001 0 01-.99.05m2.14-.53c.23-.33.4-.69.47-1.06-.06.27-.2.5-.33.73-.75.47-.07-.27 0-.56-.8 1.01-.11.6-.14.89m.781-2.05c.05-.721-.14-.501-.2-.221.07.04.13.5.2.22M12.38.31c.2.04.45.07.42.12.23-.05.28-.1-.43-.12m.43.12l-.15.03.14-.01V.43m6.633 9.944c.02.64-.2.95-.38 1.5l-.35.181c-.28.54.03.35-.17.78-.44.39-1.34 1.22-1.62 1.301-.201 0 .14-.25.19-.34-.591.4-.481.6-1.371.85l-.03-.06c-2.221 1.04-5.303-1.02-5.253-3.842-.03.17-.07.13-.12.2a3.551 3.552 0 012.001-3.501 3.361 3.362 0 013.732.48 3.341 3.342 0 00-2.721-1.3c-1.18.01-2.281.76-2.651 1.57-.6.38-.67 1.47-.93 1.661-.361 2.601.66 3.722 2.38 5.042.27.19.08.21.12.35a4.702 4.702 0 01-1.53-1.16c.23.33.47.66.8.91-.55-.18-1.27-1.3-1.48-1.35.93 1.66 3.78 2.921 5.261 2.3a6.203 6.203 0 01-2.33-.28c-.33-.16-.77-.51-.7-.57a5.802 5.803 0 005.902-.84c.44-.35.93-.94 1.07-.95-.2.32.04.16-.12.44.44-.72-.2-.3.46-1.24l.24.33c-.09-.6.74-1.321.66-2.262.19-.3.2.3 0 .97.29-.74.08-.85.15-1.46.08.2.18.42.23.63-.18-.7.2-1.2.28-1.6-.09-.05-.28.3-.32-.53 0-.37.1-.2.14-.28-.08-.05-.26-.32-.38-.861.08-.13.22.33.34.34-.08-.42-.2-.75-.2-1.08-.34-.68-.12.1-.4-.3-.34-1.091.3-.25.34-.74.54.77.84 1.96.981 2.46-.1-.6-.28-1.2-.49-1.76.16.07-.26-1.241.21-.37A7.823 7.824 0 0017.702 1.6c.18.17.42.39.33.42-.75-.45-.62-.48-.73-.67-.61-.25-.65.02-1.06 0C15.082.73 14.862.8 13.8.4l.05.23c-.77-.25-.9.1-1.73 0-.05-.04.27-.14.53-.18-.741.1-.701-.14-1.431.03.17-.13.36-.21.55-.32-.6.04-1.44.35-1.18.07C9.6.68 7.847 1.3 6.867 2.22L6.838 2c-.45.54-1.96 1.611-2.08 2.311l-.131.03c-.23.4-.38.85-.57 1.261-.3.52-.45.2-.4.28-.6 1.22-.9 2.251-1.16 3.102.18.27 0 1.65.07 2.76-.3 5.463 3.84 10.776 8.363 12.006.67.23 1.65.23 2.49.25-.99-.28-1.12-.15-2.08-.49-.7-.32-.85-.7-1.34-1.13l.2.35c-.971-.34-.57-.42-1.361-.67l.21-.27c-.31-.03-.83-.53-.97-.81l-.34.01c-.41-.501-.63-.871-.61-1.161l-.111.2c-.13-.21-1.52-1.901-.8-1.511-.13-.12-.31-.2-.5-.55l.14-.17c-.35-.44-.64-1.02-.62-1.2.2.24.32.3.45.33-.88-2.172-.93-.12-1.601-2.202l.15-.02c-.1-.16-.18-.34-.26-.51l.06-.6c-.63-.74-.18-3.102-.09-4.402.07-.54.53-1.1.88-1.981l-.21-.04c.4-.71 2.341-2.872 3.241-2.761.43-.55-.09 0-.18-.14.96-.991 1.26-.7 1.901-.88.7-.401-.6.16-.27-.151 1.2-.3.85-.7 2.421-.85.16.1-.39.14-.52.26 1-.49 3.151-.37 4.562.27 1.63.77 3.461 3.011 3.531 5.132l.08.02c-.04.85.13 1.821-.17 2.711l.2-.42M9.54 13.236l-.05.28c.26.35.47.73.8 1.01-.24-.47-.42-.66-.75-1.3m.62-.02c-.14-.15-.22-.34-.31-.52.08.32.26.6.43.88l-.12-.36m10.945-2.382l-.07.15c-.1.76-.34 1.511-.69 2.212.4-.73.65-1.541.75-2.362M12.45.12c.27-.1.66-.05.95-.12-.37.03-.74.05-1.1.1l.15.02M3.006 5.142c.07.57-.43.8.11.42.3-.66-.11-.18-.1-.42m-.64 2.661c.12-.39.15-.62.2-.84-.35.44-.17.53-.2.83"/></svg>',
+  'Ubuntu':      '<svg viewBox="0 0 24 24" fill="#E95420" xmlns="http://www.w3.org/2000/svg"><path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/></svg>',
+  'AlmaLinux':   '<svg viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M23.994 15.133c.079 1.061-.668 1.927-1.69 2.005a1.8 1.8 0 0 1-1.928-1.651c-.078-1.062.63-1.849 1.691-1.967 1.023-.078 1.849.59 1.927 1.613zm-12.623 4.955c-.944 0-1.73.786-1.73 1.809 0 1.14.747 1.848 1.887 1.848.904-.04 1.691-.865 1.691-1.809 0-.983-.904-1.848-1.848-1.848zm1.061-9.675c-.039-.865-.078-1.73.08-2.556.156-.944.314-1.887.904-2.674.707-.983 1.809-.944 2.399.118.314.511.432 1.062.471 1.652 0 .354.158.432.472.393.944-.157 1.888-.157 2.792.197.118.039.236.118.394 0 .314-.276.393-1.652.196-2.006-.354-.63-.904-.55-1.455-.55-.629.039-1.18-.158-1.612-.67-.393-.471-.511-1.06-.59-1.65-.04-.276-.079-.512-.315-.709-.55-.55-1.809-.432-2.477.118-2.556 2.045-2.989 5.467-1.534 8.18.04.118.118.236.275.157zm7.984 3.658c.354-.511.865-.747 1.415-.983a.973.973 0 0 0 .59-.472c.354-.669-.078-1.81-.747-2.36-2.595-2.006-5.938-1.612-8.18.433-.118.078-.157.196-.078.314.786-.236 1.612-.472 2.477-.51.905-.08 1.848-.158 2.753.235 1.14.472 1.337 1.534.472 2.36-.393.393-.905.668-1.455.825-.315.08-.354.236-.236.551.354.865.59 1.77.472 2.753-.04.157-.079.275.078.393.354.236 1.691 0 1.967-.275.511-.472.314-1.023.196-1.534-.157-.63-.078-1.219.276-1.73zm-7.197-2.045c-.118-.079-.197-.118-.315 0 .472.708.905 1.455 1.259 2.241.314.866.668 1.73.55 2.714-.118 1.18-1.1 1.69-2.123 1.101-.511-.275-.905-.669-1.22-1.14-.196-.276-.393-.276-.629-.08-.747.63-1.533 1.102-2.516 1.26-.158 0-.315 0-.394.157-.118.393.472 1.612.826 1.809.59.354 1.062 0 1.534-.276.55-.314 1.101-.432 1.73-.236.59.197.983.63 1.337 1.102.158.196.315.353.63.432.747.197 1.77-.59 2.084-1.376 1.18-3.028-.157-6.135-2.753-7.708zm-2.556 2.438c.472-.669.826-1.416.983-2.202-.157-.04-.197.04-.315.078-.904.944-1.848 1.849-3.067 2.478-.472.236-.983.433-1.534.433-.865 0-1.376-.551-1.298-1.416a2.92 2.92 0 0 1 .787-1.849c.236-.275.236-.432-.04-.668-.786-.55-1.494-1.22-1.848-2.124-.078-.275-.275-.275-.51-.157a4.293 4.293 0 0 0-.434.236c-1.022.63-1.14 1.416-.275 2.28.63.63.944 1.338.708 2.203-.118.433-.354.747-.63 1.101a.95.95 0 0 0-.235.787c.079.747.826 1.494 1.73 1.573 2.517.236 4.562-.63 5.978-2.753zm-4.68-5.152c1.376 1.18 3.067 1.455 4.837 1.377.157 0 .315 0 .354-.118.04-.197-.157-.197-.275-.236-.826-.354-1.691-.63-2.438-1.14S6.848 8.25 6.534 7.266c-.236-.747.078-1.415.825-1.651.669-.236 1.337-.236 1.967 0 .393.157.55.078.629-.354.118-.747.354-1.455.826-2.085.55-.786.55-.865-.354-1.376-.04 0-.04-.04-.079-.04-.865-.471-1.534-.196-1.848.709-.472 1.376-1.377 1.887-2.832 1.612-.196-.04-.393-.079-.472-.079-.747.118-1.18.55-1.297 1.14-.158 1.81.786 3.107 2.084 4.17zm-2.32 3.658c-.079-.944-1.023-1.652-2.045-1.534-.905.079-1.691 1.022-1.613 1.966.08.983 1.023 1.77 1.967 1.652 1.14-.079 1.73-1.18 1.69-2.084zm15.18-8.298c.943-.079 1.73-.983 1.651-1.927-.078-.983-1.022-1.77-2.005-1.691-1.023.079-1.73.983-1.652 1.966s.983 1.73 2.006 1.652zm-12.27-.826c1.062-.157 1.77-1.023 1.652-2.045C8.107.897 7.163.149 6.18.267c-1.062.118-1.691.944-1.573 2.085.118.865 1.061 1.612 1.966 1.494z"/></svg>',
+  'Rocky Linux': '<svg viewBox="0 0 24 24" fill="#10B981" xmlns="http://www.w3.org/2000/svg"><path d="M23.332 15.957c.433-1.239.668-2.57.668-3.957 0-6.627-5.373-12-12-12S0 5.373 0 12c0 3.28 1.315 6.251 3.447 8.417L15.62 8.245l3.005 3.005zm-2.192 3.819l-5.52-5.52L6.975 22.9c1.528.706 3.23 1.1 5.025 1.1 3.661 0 6.94-1.64 9.14-4.224z"/></svg>',
+  'Mageia':      '<svg viewBox="0 0 24 24" fill="#2397d4" xmlns="http://www.w3.org/2000/svg"><circle cx="7.66" cy="19.07" r="2.92"/><circle cx="15.56" cy="17.18" r="2.73"/><circle cx="13.31" cy="12.03" r="2.44"/><circle cx="17.02" cy="7.94" r="2.25"/><circle cx="11.96" cy="3.96" r="1.96"/></svg>',
+};
+
+function renderAccordion(distro) {
+  const node = template.content.cloneNode(true);
+  const acc  = node.querySelector('.accordion');
+  const pkg  = distro.download_url.split('/').pop();
+
+  acc.querySelector('.acc-name').textContent     = distro.distro_name;
+  acc.querySelector('.acc-steps').textContent    = distro.install_steps;
+  acc.querySelector('.acc-gpg').textContent      = distro.gpg_key;
+  acc.querySelector('.acc-download').href        = distro.download_url;
+  acc.querySelector('.acc-download').textContent = pkg;
+
+  acc.querySelector('.accordion-header').addEventListener('click', () =>
+    acc.classList.toggle('open'));
+
+  acc.querySelector('.copy-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const btn = e.currentTarget;
+    navigator.clipboard.writeText(distro.install_steps).then(() => {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1800);
+    });
+  });
+
+  const gpgBtn  = acc.querySelector('.gpg-toggle');
+  const gpgBody = acc.querySelector('.gpg-body');
+  gpgBtn.addEventListener('click', () => {
+    const open = gpgBody.classList.toggle('open');
+    gpgBtn.classList.toggle('open', open);
+  });
+
+  return acc;
+}
+
+const familyOrder = [];
+const byFamily = {};
+
+distros.forEach(d => {
+  const family = inferFamily(d);
+  if (!byFamily[family]) {
+    familyOrder.push(family);
+    byFamily[family] = [];
+  }
+  byFamily[family].push(d);
+});
+
+familyOrder.forEach(family => {
+  const group = document.createElement('div');
+  group.className = 'family-group';
+
+  const title = document.createElement('h2');
+  title.className = 'family-title';
+  title.textContent = family;
+
+  const logo = document.createElement('div');
+  logo.className = 'family-logo';
+  logo.setAttribute('aria-label', family + ' logo');
+  logo.innerHTML = FAMILY_LOGOS[family] || '';
+
+  const col = document.createElement('div');
+  col.className = 'family-accordions';
+  byFamily[family].forEach(d => col.appendChild(renderAccordion(d)));
+
+  // group.appendChild(title);
+  if (FAMILY_LOGOS[family]) group.appendChild(logo);
+  group.appendChild(col);
+  root.appendChild(group);
+});
+</script>
+</body>
+</html>

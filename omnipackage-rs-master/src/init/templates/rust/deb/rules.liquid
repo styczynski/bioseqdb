@@ -1,0 +1,20 @@
+#!/usr/bin/make -f
+# debian.rules — Debian build rules. Indents are TABS, not spaces.
+# -*- makefile -*-
+
+export DESTROOT=$(CURDIR)/debian/{{ package_name }}
+# export DH_VERBOSE=1
+
+%:
+	dh $@ --parallel
+
+override_dh_auto_build:
+	cargo build --release
+
+override_dh_auto_clean:
+	cargo clean
+	dh_auto_clean
+
+override_dh_auto_install:
+	install -d -m755 $(DESTROOT)/usr/bin/
+	install -m755 target/release/{{ package_name }} $(DESTROOT)/usr/bin/{{ package_name }}

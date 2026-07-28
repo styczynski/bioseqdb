@@ -1,0 +1,20 @@
+# PKGBUILD template rendered at build time. {{ vars }} come from config.yml.
+# The actual file copying lives in .omnipackage/install.sh — edit that to
+# match your project layout. It receives the staging root ($pkgdir) as $1.
+# Maintainer: {{ maintainer }}
+pkgname={{ package_name }}
+pkgver={{ version }}
+pkgrel=1
+pkgdesc="{{ description }}"
+arch=("$(uname -m)")
+url="{{ homepage }}"
+license=('GPL-3.0-or-later')
+{% if runtime_dependencies.size > 0 %}depends=({{ runtime_dependencies | join: ' ' }}){% endif %}
+source=("{{ source_folder_name }}.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir/{{ source_folder_name }}"
+  chmod +x .omnipackage/install.sh
+  .omnipackage/install.sh "$pkgdir"
+}

@@ -1,0 +1,15 @@
+# Build artifacts that may appear if e2e fixtures are smoke-tested natively.
+# The fixtures themselves are checked in; everything generated must stay out.
+**/target/
+**/build/
+**/Cargo.lock
+**/shard.lock
+**/lib/**/*.so
+**/lib/**/*.dylib
+**/.bundle/
+**/vendor/
+**/node_modules/
+**/__pycache__/
+**/*.pyc
+**/.omnipackage/
+**/.env

@@ -1,0 +1,40 @@
+Name:       {{ package_name }}
+Version:    {{ version }}
+Release:    1%{?dist}
+Summary:    {{ description }}
+License:    GPL-3.0-or-later
+URL:        {{ homepage }}
+Source0:    {{ source_folder_name }}.tar.gz
+Vendor:     OmniPackage
+
+BuildRequires: {{ build_dependencies | join: ' ' }}
+{% if runtime_dependencies.size > 0 %}
+Requires: {{ runtime_dependencies | join: ', ' }}
+{% endif %}
+
+%define debug_package %{nil}
+%define _build_id_links none
+
+%description
+{{ description }}
+
+
+%prep
+%setup -q
+
+
+%build
+make %{?_smp_mflags}
+
+
+%install
+make install INSTALL_ROOT=%{buildroot}
+
+
+%files
+%attr(755, root, root) /usr/bin/sample_project
+
+
+%changelog
+* Sun Feb 18 2024 {{ maintainer }}
+- Chuck Norris does not use revision control software. None of his code has ever needed revision.

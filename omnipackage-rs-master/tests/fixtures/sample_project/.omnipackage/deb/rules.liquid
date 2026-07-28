@@ -1,0 +1,13 @@
+#!/usr/bin/make -f
+# debian.rules
+# Be carefull, this is a Makefile, so the indents are tabs and not spaces!
+# -*- makefile -*-
+
+export DESTROOT=$(CURDIR)/debian/{{ package_name }}
+# export DH_VERBOSE=1
+
+%:
+	dh $@ --parallel
+
+override_dh_auto_install:
+	make install INSTALL_ROOT=$(DESTROOT)

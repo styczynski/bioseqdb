@@ -1,0 +1,43 @@
+# RPM spec template rendered at build time.
+Name:       {{ package_name }}
+Version:    {{ version }}
+Release:    1%{?dist}
+Summary:    {{ description }}
+License:    MIT
+URL:        {{ homepage }}
+Source0:    {{ source_folder_name }}.tar.gz
+Vendor:     OmniPackage
+
+BuildRequires: {{ build_dependencies | join: ' ' }}
+{% if runtime_dependencies.size > 0 %}
+Requires: {{ runtime_dependencies | join: ', ' }}
+{% endif %}
+
+%define debug_package %{nil}
+%define _build_id_links none
+
+%description
+{{ description }}
+
+
+%prep
+%setup -q
+
+
+%build
+shards install
+shards build --release
+
+
+%install
+install -d -m755 %{buildroot}/usr/bin/
+install -m755 bin/__INIT_PACKAGE_NAME__ %{buildroot}/usr/bin/
+
+
+%files
+%attr(755, root, root) /usr/bin/__INIT_PACKAGE_NAME__
+
+
+%changelog
+* __INIT_TODAY__ {{ maintainer }}
+- Initial package release

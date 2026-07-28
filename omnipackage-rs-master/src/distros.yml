@@ -1,0 +1,300 @@
+opensuse: &opensuse
+  package_type: "rpm"
+  setup:
+    - "zypper --non-interactive refresh"
+    - "zypper --non-interactive install -y --allow-downgrade --allow-vendor-change -t pattern devel_basis devel_rpm_build"
+    - "zypper --non-interactive install -y rpmdevtools rsync %{build_dependencies}"
+  setup_repo:
+    - "zypper --non-interactive refresh"
+    - "zypper --non-interactive install -y createrepo_c"
+  cleanup:
+    - "zypper clean --all"
+  install_steps:
+    - "zypper addrepo --refresh %{url}/%{project_slug}.repo"
+    - "zypper refresh"
+    - "zypper install %{package_name}"
+
+debian: &debian
+  package_type: "deb"
+  setup:
+    - "DEBIAN_FRONTEND=noninteractive apt-get update"
+    - "DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential debhelper ca-certificates rsync %{build_dependencies}"
+  setup_repo:
+    - "DEBIAN_FRONTEND=noninteractive apt-get update"
+    - "DEBIAN_FRONTEND=noninteractive apt-get -y install dpkg-dev ca-certificates gpg"
+  cleanup:
+    - "DEBIAN_FRONTEND=noninteractive apt-get clean && rm -rf /var/lib/apt/lists/*"
+  install_steps:
+    - "echo 'deb %{url} stable/' | tee /etc/apt/sources.list.d/omnipackage_%{project_slug}.list"
+    - "curl -fsSL %{url}/stable/Release.key | gpg --dearmor | tee /etc/apt/trusted.gpg.d/omnipackage_%{project_slug}.gpg > /dev/null"
+    - "apt-get update"
+    - "apt-get install %{package_name}"
+
+arch: &arch
+  package_type: "pacman"
+  setup:
+    # -Syu, not -Sy: partial upgrades break shared-library sonames on rolling distros.
+    - "pacman -Syu --noconfirm --needed base-devel sudo rsync %{build_dependencies}"
+  setup_repo:
+    - "pacman -Syu --noconfirm --needed gnupg"
+  cleanup:
+    - "pacman -Scc --noconfirm"
+  install_steps:
+    - "curl -fsSL %{url}/public.key | pacman-key --add -"
+    - "pacman-key --lsign-key $(curl -fsSL %{url}/public.key | gpg --show-keys --with-colons | awk -F: '/^fpr/{print $10; exit}')"
+    - "printf '\\n[%{project_slug}]\\nSigLevel = Required DatabaseOptional\\nServer = %{url}\\n' | tee -a /etc/pacman.conf"
+    - "pacman -Sy %{package_name}"
+
+redhat: &redhat
+  package_type: "rpm"
+  setup:
+    - "dnf install -y --allowerasing rpmdevtools tar rsync %{build_dependencies}"
+  setup_repo:
+    - "dnf install -y --allowerasing createrepo rpm-sign"
+  cleanup:
+    - "dnf clean all"
+  install_steps:
+    - "curl -o /etc/yum.repos.d/%{project_slug}.repo %{url}/%{project_slug}.repo"
+    - "dnf install %{package_name}"
+
+distros:
+  - id: "opensuse_15.3"
+    name: "openSUSE Leap 15.3"
+    image: "opensuse/leap:15.3"
+    <<: *opensuse
+    image_info_url: "https://hub.docker.com/r/opensuse/leap"
+
+  - id: "opensuse_15.4"
+    name: "openSUSE Leap 15.4"
+    image: "opensuse/leap:15.4"
+    <<: *opensuse
+    image_info_url: "https://hub.docker.com/r/opensuse/leap"
+
+  - id: "opensuse_15.5"
+    name: "openSUSE Leap 15.5"
+    image: "opensuse/leap:15.5"
+    <<: *opensuse
+    image_info_url: "https://hub.docker.com/r/opensuse/leap"
+
+  - id: "opensuse_15.6"
+    name: "openSUSE Leap 15.6"
+    image: "opensuse/leap:15.6"
+    <<: *opensuse
+    image_info_url: "https://hub.docker.com/r/opensuse/leap"
+
+  - id: "opensuse_16.0"
+    name: "openSUSE Leap 16.0"
+    image: "opensuse/leap:16.0"
+    <<: *opensuse
+    image_info_url: "https://hub.docker.com/r/opensuse/leap"
+
+  - id: "opensuse_tumbleweed"
+    name: "openSUSE Tumbleweed"
+    image: "opensuse/tumbleweed"
+    <<: *opensuse
+    image_info_url: "https://hub.docker.com/r/opensuse/tumbleweed"
+
+  - id: "fedora_38"
+    name: "Fedora 38"
+    image: "fedora:38"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_39"
+    name: "Fedora 39"
+    image: "fedora:39"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_40"
+    name: "Fedora 40"
+    image: "fedora:40"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_41"
+    name: "Fedora 41"
+    image: "fedora:41"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_42"
+    name: "Fedora 42"
+    image: "fedora:42"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_43"
+    name: "Fedora 43"
+    image: "fedora:43"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_44"
+    name: "Fedora 44"
+    image: "fedora:44"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "fedora_rawhide"
+    name: "Fedora Rawhide"
+    image: "fedora:rawhide"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/fedora"
+
+  - id: "debian_10"
+    name: "Debian 10"
+    image: "debian:10"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/debian"
+    deprecated: 'Official support ended in <a href="https://endoflife.date/debian" target="_blank">September 2020</a>. Repositories stopped working in July 2025'
+
+  - id: "debian_11"
+    name: "Debian 11"
+    image: "debian:11"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/debian"
+
+  - id: "debian_12"
+    name: "Debian 12"
+    image: "debian:12"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/debian"
+
+  - id: "debian_13"
+    name: "Debian 13"
+    image: "debian:trixie"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/debian"
+
+  - id: "debian_testing"
+    name: "Debian testing"
+    image: "debian:testing"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/debian"
+
+  - id: "debian_unstable"
+    name: "Debian unstable"
+    image: "debian:unstable"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/debian"
+
+  - id: "ubuntu_20.04"
+    name: "Ubuntu 20.04"
+    image: "ubuntu:20.04"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+
+  - id: "ubuntu_22.04"
+    name: "Ubuntu 22.04"
+    image: "ubuntu:22.04"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+
+  - id: "ubuntu_23.04"
+    name: "Ubuntu 23.04"
+    image: "ubuntu:23.04"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+    deprecated: "Repositories stopped working in July 2025"
+
+  - id: "ubuntu_23.10"
+    name: "Ubuntu 23.10"
+    image: "ubuntu:23.10"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+    deprecated: "Repositories stopped working in July 2025"
+
+  - id: "ubuntu_24.04"
+    name: "Ubuntu 24.04"
+    image: "ubuntu:24.04"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+
+  - id: "ubuntu_25.04"
+    name: "Ubuntu 25.04"
+    image: "ubuntu:25.04"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+
+  - id: "ubuntu_25.10"
+    name: "Ubuntu 25.10"
+    image: "ubuntu:25.10"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+
+  - id: "ubuntu_26.04"
+    name: "Ubuntu 26.04"
+    image: "ubuntu:26.04"
+    <<: *debian
+    image_info_url: "https://hub.docker.com/_/ubuntu"
+
+  - id: "mageia_9"
+    name: "Mageia 9"
+    image: "mageia:9"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/mageia"
+
+  - id: "mageia_10"
+    name: "Mageia 10"
+    image: "mageia:10"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/mageia"
+
+  - id: "mageia_cauldron"
+    name: "Mageia Cauldron"
+    image: "mageia:cauldron"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/mageia"
+
+  - id: "almalinux_8"
+    name: "AlmaLinux 8"
+    image: "almalinux:8"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/almalinux"
+
+  - id: "almalinux_9"
+    name: "AlmaLinux 9"
+    image: "almalinux:9"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/_/almalinux"
+
+  - id: "almalinux_10"
+    name: "AlmaLinux 10"
+    image: "almalinux:10"
+    <<: *redhat
+    setup_repo:
+      - "dnf install -y --allowerasing createrepo rpm-sign gpg"
+    image_info_url: "https://hub.docker.com/_/almalinux"
+
+  - id: "rockylinux_8"
+    name: "Rocky Linux 8"
+    image: "rockylinux/rockylinux:8"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/r/rockylinux/rockylinux"
+
+  - id: "rockylinux_9"
+    name: "Rocky Linux 9"
+    image: "rockylinux/rockylinux:9"
+    <<: *redhat
+    image_info_url: "https://hub.docker.com/r/rockylinux/rockylinux"
+
+  - id: "rockylinux_10"
+    name: "Rocky Linux 10"
+    image: "rockylinux/rockylinux:10"
+    <<: *redhat
+    setup_repo:
+      - "dnf install -y --allowerasing createrepo rpm-sign gpg"
+    image_info_url: "https://hub.docker.com/r/rockylinux/rockylinux"
+
+  - id: "arch"
+    name: "Arch Linux"
+    image: "archlinux:latest"
+    <<: *arch
+    image_info_url: "https://hub.docker.com/_/archlinux"
+
+  - id: "manjaro"
+    name: "Manjaro"
+    image: "manjarolinux/base:latest"
+    <<: *arch
+    image_info_url: "https://hub.docker.com/r/manjarolinux/base"

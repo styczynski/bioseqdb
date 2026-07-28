@@ -1,0 +1,46 @@
+# RPM spec template — fill in the %build and %install sections for your project.
+# {{ vars }} come from .omnipackage/config.yml at build time.
+Name:       {{ package_name }}
+Version:    {{ version }}
+Release:    1%{?dist}
+Summary:    {{ description }}
+License:    GPL-3.0-or-later
+URL:        {{ homepage }}
+Source0:    {{ source_folder_name }}.tar.gz
+Vendor:     OmniPackage
+
+BuildRequires: {{ build_dependencies | join: ' ' }}
+{% if runtime_dependencies.size > 0 %}
+Requires: {{ runtime_dependencies | join: ', ' }}
+{% endif %}
+
+%define debug_package %{nil}
+%define _build_id_links none
+
+%description
+{{ description }}
+
+
+%prep
+%setup -q
+
+
+%build
+# TODO: build commands (e.g. `make`, `cargo build --release`).
+
+
+%install
+# TODO: install commands. Files go under %{buildroot}.
+# Example:
+#   install -d -m755 %{buildroot}/usr/bin/
+#   install -m755 my-binary %{buildroot}/usr/bin/__INIT_PACKAGE_NAME__
+
+
+%files
+# TODO: list installed files. Example:
+# %attr(755, root, root) /usr/bin/__INIT_PACKAGE_NAME__
+
+
+%changelog
+* __INIT_TODAY__ {{ maintainer }}
+- Initial package release

@@ -1,0 +1,76 @@
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      version_extractor:
+        required: true
+        type: string
+      arch:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      skip_distros:
+        required: false
+        type: string
+        default: '[]'
+
+jobs:
+  bootstrap-binary:
+    runs-on: ${{ inputs.runs_on }}
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v6
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v6
+        with:
+          name: omnipackage-binary-${{ inputs.arch }}
+          path: target/release/omnipackage
+
+  list-distros:
+    needs: bootstrap-binary
+    runs-on: ${{ inputs.runs_on }}
+    outputs:
+      distros: ${{ steps.get-distros.outputs.distros }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: omnipackage-binary-${{ inputs.arch }}
+          path: /usr/local/bin
+      - run: chmod +x /usr/local/bin/omnipackage
+      - uses: actions/checkout@v6
+      - id: get-distros
+        env:
+          SKIP: ${{ inputs.skip_distros }}
+        run: |
+          all=$(omnipackage info --list-distros . --format json)
+          echo "distros=$(jq -cn --argjson all "$all" --argjson skip "$SKIP" '$all - $skip')" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: [bootstrap-binary, list-distros]
+    runs-on: ${{ inputs.runs_on }}
+    concurrency:
+      group: omnipackage-${{ inputs.repository }}-${{ matrix.distro }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: ${{ fromJson(needs.list-distros.outputs.distros) }}
+    steps:
+      - uses: actions/checkout@v6
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq podman gpg
+      - uses: actions/download-artifact@v8
+        with:
+          name: omnipackage-binary-${{ inputs.arch }}
+          path: /usr/local/bin
+      - run: chmod +x /usr/local/bin/omnipackage
+      - run: |
+          echo "${{ secrets.OMNIPACKAGE_DOTENV }}" > .env
+          echo "GITHUB_REGISTRY_USERNAME=${{ github.actor }}" >> .env
+          echo "GITHUB_REGISTRY_PASSWORD=${{ secrets.GITHUB_TOKEN }}" >> .env
+          echo "GITHUB_REGISTRY_NAMESPACE=${{ github.repository_owner }}" >> .env
+      - run:  omnipackage release . --build-dir $RUNNER_TEMP/_omp --repository "${{ inputs.repository }}" --distros "${{ matrix.distro }}" --version-extractor "${{ inputs.version_extractor }}" --image-cache github_${{ inputs.arch }}

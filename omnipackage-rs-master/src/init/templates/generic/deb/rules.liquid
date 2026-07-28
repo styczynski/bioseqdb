@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+# debian.rules — Debian build rules. Indents are TABS, not spaces.
+# Fill in the override_dh_auto_* targets for your project.
+# -*- makefile -*-
+
+export DESTROOT=$(CURDIR)/debian/{{ package_name }}
+# export DH_VERBOSE=1
+
+%:
+	dh $@ --parallel
+
+# override_dh_auto_build:
+# 	make
+#
+# override_dh_auto_install:
+# 	make install INSTALL_ROOT=$(DESTROOT)

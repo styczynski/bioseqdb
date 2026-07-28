@@ -1,0 +1,26 @@
+name: Image cache refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '44 6 * * 1'
+
+permissions:
+  packages: write
+
+jobs:
+  x86_64:
+    uses: ./.github/workflows/_prime.yml
+    secrets: inherit
+    with:
+      arch: "x86_64"
+      runs_on: "ubuntu-24.04"
+
+  aarch64:
+    uses: ./.github/workflows/_prime.yml
+    secrets: inherit
+    with:
+      arch: "aarch64"
+      runs_on: "ubuntu-24.04-arm"
+      # arch: no arm64 image. manjaro: Manjaro ARM repos frozen ~2024, cargo too old for edition2024
+      skip_distros: '["arch", "manjaro"]'
