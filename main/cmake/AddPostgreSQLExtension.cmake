@@ -176,10 +176,16 @@ function(AddCommonTarget LIBRARY_NAME ENABLE_TEST_TARGET)
   if(HAS_SOURCES)
     target_compile_definitions(${LIBRARY_NAME} PUBLIC -DPOSTGRESQL_VERSION_MAJOR=${PostgreSQL_VERSION_MAJOR})
 
+    if(BIOSEQ_PACKAGE_BUILD)
+      set(_bioseq_target_ipo FALSE)
+    else()
+      set(_bioseq_target_ipo TRUE)
+    endif()
+
     # Final touches on output file
     set_target_properties(${LIBRARY_NAME} PROPERTIES
       OUTPUT_NAME ${EXTENSION_NAME}
-      INTERPROCEDURAL_OPTIMIZATION TRUE
+      INTERPROCEDURAL_OPTIMIZATION ${_bioseq_target_ipo}
       #C_VISIBILITY_PRESET hidden # @TODO: how to get this working?
       PREFIX "" # Avoid lib* prefix on output file
     )
