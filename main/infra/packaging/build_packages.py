@@ -195,23 +195,27 @@ def signing_key_fingerprint(
         raise PackageBuildError("gpg is required to identify the package-signing key")
     try:
         armor = base64.b64decode(signing_key_base64, validate=True).decode()
-        completed = subprocess.run(
-            [
-                gpg,
-                "--batch",
-                "--no-tty",
-                "--with-colons",
-                "--import-options",
-                "show-only",
-                "--dry-run",
-                "--import",
-            ],
-            input=armor,
-            check=True,
-            env=environment,
-            capture_output=True,
-            text=True,
-        )
+        with tempfile.TemporaryDirectory(prefix="bioseq-signing-fingerprint-") as home:
+            os.chmod(home, 0o700)
+            completed = subprocess.run(
+                [
+                    gpg,
+                    "--batch",
+                    "--no-tty",
+                    "--homedir",
+                    home,
+                    "--with-colons",
+                    "--import-options",
+                    "show-only",
+                    "--dry-run",
+                    "--import",
+                ],
+                input=armor,
+                check=True,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
     except (ValueError, UnicodeDecodeError) as error:
         raise PackageBuildError("normalized signing key cannot be decoded") from error
     except (FileNotFoundError, subprocess.CalledProcessError) as error:
