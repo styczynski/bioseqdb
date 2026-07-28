@@ -1,0 +1,101 @@
+fasta_file	geo_loc_name	lat_lon	train_line
+test/SRR27257857_1.fasta.gz	Auckland	36.8623615 S 174.8095648 E	Orakei_station_
+test/SRR27257857_2.fasta.gz	Auckland	36.8623615 S 174.8095648 E	Orakei_station_
+test/SRR27257890_1.fasta.gz	Auckland	36.8787746 S 174.8542311 E	Glen_Innes_Railway_Station
+test/SRR27257890_2.fasta.gz	Auckland	36.8787746 S 174.8542311 E	Glen_Innes_Railway_Station
+test/SRR27257964_1.fasta.gz	Auckland	36.8442053 S 174.7679586 E	Britomart_Transport_Centre
+test/SRR27257964_2.fasta.gz	Auckland	36.8442053 S 174.7679586 E	Britomart_Transport_Centre
+test/SRR27257967_1.fasta.gz	Auckland	36.8663099 S 174.8207513 E	Meadowbank_station_
+test/SRR27257967_2.fasta.gz	Auckland	36.8663099 S 174.8207513 E	Meadowbank_station_
+test/SRR27258018_1.fasta.gz	Auckland	36.8662717 S 174.8207246 E	Meadowbank_station_
+test/SRR27258018_2.fasta.gz	Auckland	36.8662717 S 174.8207246 E	Meadowbank_station_
+test/SRR27257590_1.fasta.gz	Berlin	52.5139603 N 13.4749359 E	Frankfurter_Allee_
+test/SRR27257590_2.fasta.gz	Berlin	52.5139603 N 13.4749359 E	Frankfurter_Allee_
+test/SRR27257631_1.fasta.gz	Berlin	52.49800294 N 13.36279945 E	Buelowstrasse_
+test/SRR27257631_2.fasta.gz	Berlin	52.49800294 N 13.36279945 E	Buelowstrasse_
+test/SRR27257639_1.fasta.gz	Berlin	52.510608 N 13.4904944 E	Samariterstrasse_
+test/SRR27257639_2.fasta.gz	Berlin	52.510608 N 13.4904944 E	Samariterstrasse_
+test/SRR27257651_1.fasta.gz	Berlin	52.510608 N 13.4904944 E	Magdalenenstrasse_
+test/SRR27257651_2.fasta.gz	Berlin	52.510608 N 13.4904944 E	Magdalenenstrasse_
+test/SRR27257677_1.fasta.gz	Berlin	52.510608 N 13.4904944 E	Lichtenberg
+test/SRR27257677_2.fasta.gz	Berlin	52.510608 N 13.4904944 E	Lichtenberg
+test/SRR27257703_1.fasta.gz	Berlin	52.5167008 N 13.4407376 E	Straussberger_Platz_
+test/SRR27257703_2.fasta.gz	Berlin	52.5167008 N 13.4407376 E	Straussberger_Platz_
+test/SRR27257711_1.fasta.gz	Berlin	52.512626 N 13.4759983 E	Frankfurter_Tor_
+test/SRR27257711_2.fasta.gz	Berlin	52.512626 N 13.4759983 E	Frankfurter_Tor_
+test/SRR27257729_1.fasta.gz	Berlin	52.5084197 N 13.3771786 E	Potsdamer_Platz_
+test/SRR27257729_2.fasta.gz	Berlin	52.5084197 N 13.3771786 E	Potsdamer_Platz_
+test/SRR27257884_1.fasta.gz	Berlin	52.5127771 N 13.2677184 E	Neu_Westend_
+test/SRR27257884_2.fasta.gz	Berlin	52.5127771 N 13.2677184 E	Neu_Westend_
+test/SRR27257949_1.fasta.gz	Berlin	52.5088698 N 13.3227731 E	Deutsche_Oper_
+test/SRR27257949_2.fasta.gz	Berlin	52.5088698 N 13.3227731 E	Deutsche_Oper_
+test/SRR27257555_1.fasta.gz	Birmingham	52.440695 N 1.939762 W	Sainsburys
+test/SRR27257555_2.fasta.gz	Birmingham	52.440695 N 1.939762 W	Sainsburys
+test/SRR27257797_1.fasta.gz	Birmingham	52.475173 N 1.895698 W	Birmingham_China_Town
+test/SRR27257797_2.fasta.gz	Birmingham	52.475173 N 1.895698 W	Birmingham_China_Town
+test/SRR27257846_1.fasta.gz	Birmingham	52.440878 N 1.940148 W	Sainsbury's
+test/SRR27257846_2.fasta.gz	Birmingham	52.440878 N 1.940148 W	Sainsbury's
+test/SRR27257887_1.fasta.gz	Birmingham	52.475823 N 1.895886 W	Birmingham_Market
+test/SRR27257887_2.fasta.gz	Birmingham	52.475823 N 1.895886 W	Birmingham_Market
+test/SRR28910762_1.fasta.gz	Kyiv	missing	Heroiv_Dnipra
+test/SRR28910762_2.fasta.gz	Kyiv	missing	Heroiv_Dnipra
+test/SRR28910780_1.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
+test/SRR28910780_2.fasta.gz	Kyiv	missing	Maidan_Nezalezhnosti
+test/SRR28910782_1.fasta.gz	Kyiv	missing	Minska
+test/SRR28910782_2.fasta.gz	Kyiv	missing	Minska
+test/SRR28910784_1.fasta.gz	Kyiv	missing	Heroiv_Dnipra
+test/SRR28910784_2.fasta.gz	Kyiv	missing	Heroiv_Dnipra
+test/SRR28910785_1.fasta.gz	Kyiv	missing	Minska
+test/SRR28910785_2.fasta.gz	Kyiv	missing	Minska
+test/SRR28910791_1.fasta.gz	Kyiv	missing	Heroiv_Dnipra
+test/SRR28910791_2.fasta.gz	Kyiv	missing	Heroiv_Dnipra
+test/SRR28910794_1.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
+test/SRR28910794_2.fasta.gz	Kyiv	missing	Kontraktova_Ploshcha
+test/SRR27257327_1.fasta.gz	London	51.51010128 N 0.13399405 W	Picadilly Circus
+test/SRR27257327_2.fasta.gz	London	51.51010128 N 0.13399405 W	Picadilly Circus
+test/SRR27257341_1.fasta.gz	London	51.51519833 N 0.14175309 W	Oxford Circus
+test/SRR27257341_2.fasta.gz	London	51.51519833 N 0.14175309 W	Oxford Circus
+test/SRR27257384_1.fasta.gz	London	51.51792853 N 0.28095981 W	West Acton
+test/SRR27257384_2.fasta.gz	London	51.51792853 N 0.28095981 W	West Acton
+test/SRR27257436_1.fasta.gz	London	51.51537887 N 0.17536529 W	Paddington
+test/SRR27257436_2.fasta.gz	London	51.51537887 N 0.17536529 W	Paddington
+test/SRR27257495_1.fasta.gz	London	51.45267416 N 0.14795997 W	Clapham South
+test/SRR27257495_2.fasta.gz	London	51.45267416 N 0.14795997 W	Clapham South
+test/SRR27257516_1.fasta.gz	London	51.415307 N 0.191915 W	South Wimbledon
+test/SRR27257516_2.fasta.gz	London	51.415307 N 0.191915 W	South Wimbledon
+test/SRR27257523_1.fasta.gz	London	51.51519833 N 0.14175309 W	Oxford Circus
+test/SRR27257523_2.fasta.gz	London	51.51519833 N 0.14175309 W	Oxford Circus
+test/SRR27257526_1.fasta.gz	London	51.52343605 N 0.25970031 W	North Acton
+test/SRR27257526_2.fasta.gz	London	51.52343605 N 0.25970031 W	North Acton
+test/SRR27257536_1.fasta.gz	London	51.52313116 N 0.15688184 W	Baker Street
+test/SRR27257536_2.fasta.gz	London	51.52313116 N 0.15688184 W	Baker Street
+test/SRR27257561_1.fasta.gz	London	51.51627608 N 0.13085605 W	Tottenham Court Road
+test/SRR27257561_2.fasta.gz	London	51.51627608 N 0.13085605 W	Tottenham Court Road
+test/SRR27257572_1.fasta.gz	London	51.52357375 N 0.14684518 W	Regent's Park
+test/SRR27257572_2.fasta.gz	London	51.52357375 N 0.14684518 W	Regent's Park
+test/SRR27257693_1.fasta.gz	London	51.52516227 N 0.03340053 W	Mile End
+test/SRR27257693_2.fasta.gz	London	51.52516227 N 0.03340053 W	Mile End
+test/SRR28910741_1.fasta.gz	Singapore	1.429474 N 103.834138 E	yishun
+test/SRR28910741_2.fasta.gz	Singapore	1.429474 N 103.834138 E	yishun
+test/SRR28910747_1.fasta.gz	Singapore	1.432157 N 103.773752 E	marsiling
+test/SRR28910747_2.fasta.gz	Singapore	1.432157 N 103.773752 E	marsiling
+test/SRR28910749_1.fasta.gz	Singapore	1.432065 N 103.774143 E	marsiling
+test/SRR28910749_2.fasta.gz	Singapore	1.432065 N 103.774143 E	marsiling
+test/SRR28910750_1.fasta.gz	Singapore	1.429721 N 103.834916 E	yishun
+test/SRR28910750_2.fasta.gz	Singapore	1.429721 N 103.834916 E	yishun
+test/SRR28910753_1.fasta.gz	Singapore	1.432101 N 103.774234 E	marsiling
+test/SRR28910753_2.fasta.gz	Singapore	1.432101 N 103.774234 E	marsiling
+test/SRR28910754_1.fasta.gz	Singapore	1.429468 N 103.834133 E	yishun
+test/SRR28910754_2.fasta.gz	Singapore	1.429468 N 103.834133 E	yishun
+test/SRR27257800_1.fasta.gz	Tokyo	35.60088801 N 139.6848696 E	Tokyo_Tech
+test/SRR27257800_2.fasta.gz	Tokyo	35.60088801 N 139.6848696 E	Tokyo_Tech
+test/SRR27257813_1.fasta.gz	Tokyo	35.60088801 N 139.6848696 E	Tokyo_Tech
+test/SRR27257813_2.fasta.gz	Tokyo	35.60088801 N 139.6848696 E	Tokyo_Tech
+test/SRR27257815_1.fasta.gz	Tokyo	35.6053238 N 139.6824074 E	West_Hall
+test/SRR27257815_2.fasta.gz	Tokyo	35.6053238 N 139.6824074 E	West_Hall
+test/SRR27257847_1.fasta.gz	Tokyo	35.6053238 N 139.6824074 E	West_Hall
+test/SRR27257847_2.fasta.gz	Tokyo	35.6053238 N 139.6824074 E	West_Hall
+test/SRR27257898_1.fasta.gz	Tokyo	35.60114099 N 139.6846014 E	Tokyo_Tech
+test/SRR27257898_2.fasta.gz	Tokyo	35.60114099 N 139.6846014 E	Tokyo_Tech
+test/SRR28910756_1.fasta.gz	Tokyo	35.658743 N 139.699478 E	shibuya_crossing
+test/SRR28910756_2.fasta.gz	Tokyo	35.658743 N 139.699478 E	shibuya_crossing
