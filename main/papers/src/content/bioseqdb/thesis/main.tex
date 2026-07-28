@@ -94,6 +94,13 @@
 
 \if\dataeq{renderonly}{??}
 
+% Keep the generated metadata while giving the visible front matter proper
+% punctuation and a classification block that cannot strand its final item on
+% the following page.
+\keywords{sequence alignment, bioinformatics, minimap2, PostgreSQL, databases,
+    genomic data management, SIMD, GPU computing}
+\klasyfikacja{\mbox{Applied computing; Life and medical sciences; Bioinformatics}}
+
 \begin{abstract}
     Genomic analysis is commonly organized as a sequence of standalone
     programs connected by files.  This model provides specialized tools,
@@ -132,6 +139,13 @@
     introduced by batching, storage, and heterogeneous execution.
 \end{abstract}
 
+\makeatletter
+% The class defaults are sized for single-digit chapter numbers.  Reserve
+% enough width for entries such as 10.10 and 10.10.1 before their titles.
+\renewcommand*\l@section{\@dottedtocline{1}{1.5em}{3.0em}}
+\renewcommand*\l@subsection{\@dottedtocline{2}{3.8em}{4.0em}}
+\renewcommand*\l@subsubsection{\@dottedtocline{3}{7.0em}{5.0em}}
+\makeatother
 \tableofcontents
 
 \chapter*{Introduction}
