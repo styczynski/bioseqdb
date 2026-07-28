@@ -130,40 +130,50 @@ if [[ "${action}" == "build" ]]; then
     --libunwind "${libunwind_archive}" \
     --architecture "${expected_arch}"
 
-  "${cmake_bin}" -S "${persistent_source_dir}" -B "${build_dir}" -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_TOOLCHAIN_FILE="${vcpkg_root}/scripts/buildsystems/vcpkg.cmake" \
-    -DCMAKE_C_COMPILER_LAUNCHER="${compiler_launcher}" \
-    -DCMAKE_CXX_COMPILER_LAUNCHER="${compiler_launcher}" \
-    -DCMAKE_C_FLAGS= \
-    -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
-    -DCMAKE_C_FLAGS_RELEASE="-O0 -DNDEBUG -fno-omit-frame-pointer" \
-    -DCMAKE_CXX_FLAGS_RELEASE="-O0 -DNDEBUG -fno-omit-frame-pointer" \
-    -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -static-libstdc++ -static-libgcc" \
-    -DCMAKE_SKIP_RPATH=ON \
-    -DPostgreSQL_CONFIG="${pg_config}" \
-    -DBIOSEQ_PACKAGE_BUILD=ON \
-    -DBIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON="${libcxx_modules}" \
-    -DBIOSEQ_PACKAGE_LIBCXX_ARCHIVE="${libcxx_archive}" \
-    -DBIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE="${libcxxabi_archive}" \
-    -DBIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE="${libunwind_archive}" \
-    -DBIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE=0 \
-    -DBIOSEQ_BUILD_CORE=ON \
-    -DBIOSEQ_BUILD_CACHE=ON \
-    -DBIOSEQ_BUILD_PAPERS=OFF \
-    -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF \
-    -DBIOSEQ_BUILD_WEBSITE=OFF \
-    -DBIOSEQ_TEST_INDEXES=OFF \
-    -DBIOSEQ_CACHE_BUILD_TESTS=OFF \
-    -DBIOSEQ_CACHE_TESTING=OFF \
-    -DBIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK=OFF \
-    -DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF \
-    -DBIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST=OFF \
-    -DBIOSEQ_HEAVY_JOBS=1 \
-    -DVCPKG_TARGET_TRIPLET="${vcpkg_triplet}" \
-    -DVCPKG_TARGET_ARCHITECTURE="${vcpkg_arch}" \
-    -DVCPKG_OVERLAY_TRIPLETS="${persistent_source_dir}/cmake/triplets" \
-    -DVCPKG_OVERLAY_PORTS="${persistent_source_dir}/cmake/ports"
+  if [[ -f "${build_dir}/CMakeCache.txt" \
+      && -f "${build_dir}/build.ninja" ]] \
+      && grep -Fqx \
+        "CMAKE_HOME_DIRECTORY:INTERNAL=${persistent_source_dir}" \
+        "${build_dir}/CMakeCache.txt" \
+      && grep -Fqx 'CMAKE_GENERATOR:INTERNAL=Ninja' \
+        "${build_dir}/CMakeCache.txt"; then
+    echo "reusing existing CMake/Ninja package configuration"
+  else
+    "${cmake_bin}" -S "${persistent_source_dir}" -B "${build_dir}" -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_TOOLCHAIN_FILE="${vcpkg_root}/scripts/buildsystems/vcpkg.cmake" \
+      -DCMAKE_C_COMPILER_LAUNCHER="${compiler_launcher}" \
+      -DCMAKE_CXX_COMPILER_LAUNCHER="${compiler_launcher}" \
+      -DCMAKE_C_FLAGS= \
+      -DCMAKE_CXX_FLAGS="-stdlib=libc++" \
+      -DCMAKE_C_FLAGS_RELEASE="-O0 -DNDEBUG -fno-omit-frame-pointer" \
+      -DCMAKE_CXX_FLAGS_RELEASE="-O0 -DNDEBUG -fno-omit-frame-pointer" \
+      -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -static-libstdc++ -static-libgcc" \
+      -DCMAKE_SKIP_RPATH=ON \
+      -DPostgreSQL_CONFIG="${pg_config}" \
+      -DBIOSEQ_PACKAGE_BUILD=ON \
+      -DBIOSEQ_CODEGEN_CLANG_STDLIB_MODULES_JSON="${libcxx_modules}" \
+      -DBIOSEQ_PACKAGE_LIBCXX_ARCHIVE="${libcxx_archive}" \
+      -DBIOSEQ_PACKAGE_LIBCXXABI_ARCHIVE="${libcxxabi_archive}" \
+      -DBIOSEQ_PACKAGE_LIBUNWIND_ARCHIVE="${libunwind_archive}" \
+      -DBIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE=0 \
+      -DBIOSEQ_BUILD_CORE=ON \
+      -DBIOSEQ_BUILD_CACHE=ON \
+      -DBIOSEQ_BUILD_PAPERS=OFF \
+      -DBIOSEQ_BUILD_EXTERNAL_API_CLIENTS=OFF \
+      -DBIOSEQ_BUILD_WEBSITE=OFF \
+      -DBIOSEQ_TEST_INDEXES=OFF \
+      -DBIOSEQ_CACHE_BUILD_TESTS=OFF \
+      -DBIOSEQ_CACHE_TESTING=OFF \
+      -DBIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK=OFF \
+      -DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF \
+      -DBIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST=OFF \
+      -DBIOSEQ_HEAVY_JOBS=1 \
+      -DVCPKG_TARGET_TRIPLET="${vcpkg_triplet}" \
+      -DVCPKG_TARGET_ARCHITECTURE="${vcpkg_arch}" \
+      -DVCPKG_OVERLAY_TRIPLETS="${persistent_source_dir}/cmake/triplets" \
+      -DVCPKG_OVERLAY_PORTS="${persistent_source_dir}/cmake/ports"
+  fi
 
   python3 "${persistent_source_dir}/infra/packaging/scripts/verify_compile_optimization.py" \
     "${build_dir}/compile_commands.json"

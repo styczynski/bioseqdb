@@ -468,6 +468,14 @@ class StaticContractTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
+            "reusing existing CMake/Ninja package configuration",
+            build_script,
+        )
+        self.assertIn(
+            'CMAKE_HOME_DIRECTORY:INTERNAL=${persistent_source_dir}',
+            build_script,
+        )
+        self.assertIn(
             "-DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF",
             build_script,
         )
