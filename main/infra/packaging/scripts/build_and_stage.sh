@@ -87,7 +87,7 @@ export BIOSEQ_CODEGEN_CLANG_BINARY="${llvm_root}/bin/clang++"
 export BIOSEQ_COMPILER_LAUNCHER="${compiler_launcher}"
 export BIOSEQ_COMPILER_RT_PRIORITY=1
 export VCPKG_ROOT="${vcpkg_root}"
-export VCPKG_DEFAULT_BINARY_CACHE=/opt/bioseq-vcpkg-cache
+export VCPKG_DEFAULT_BINARY_CACHE=/opt/bioseq-package-toolchain/vcpkg-binary-cache
 export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
 
