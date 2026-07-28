@@ -1482,8 +1482,9 @@ precedes backend admission and fail-closed execution.
 
 \begin{figure}[htbp]
 \centering
-\resizebox{0.98\linewidth}{!}{%
 \begin{tikzpicture}[
+  scale=0.74,
+  transform shape,
   font=\small,
   >=Latex,
   q/.style={draw, diamond, aspect=2.0, align=center, fill=blue!7},
@@ -1519,7 +1520,6 @@ precedes backend admission and fail-closed execution.
   \draw[->,dashed,red!70!black] (exact.south) -- (runtimefail);
   \draw[->,dashed,red!70!black] (vk.south) |- (runtimefail.east);
 \end{tikzpicture}
-}
 \caption{Backend selection is subordinate to the persisted scheme and
 admission proofs. A planner may choose Scalar explicitly before selecting
 ExactSimd because both implement the minimap-compatible scheme. PNT1 proof
