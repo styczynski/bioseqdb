@@ -143,32 +143,35 @@ only a secondary locator.
   Later-dated implementation evidence and current source override earlier
   intentions.}
   \label{tab:external-chronology}
-  \begin{tabularx}{\linewidth}{p{.20\linewidth}p{.25\linewidth}X}
+  \begin{tabularx}{\linewidth}{
+      >{\raggedright\arraybackslash}p{.18\linewidth}
+      >{\raggedright\arraybackslash}p{.29\linewidth}
+      X}
     \toprule
     Dated document & Title and role & Result \\
     \midrule
     DOC0370, 10 July 2026 &
-    \emph{Generate HTTP Client for External Sequence Database}, initial prompt &
+    \textit{Generate HTTP Client for External Sequence Database}, initial prompt &
     Proposed deriving typed GET clients from embedded OpenAPI descriptions
     rather than maintaining provider-specific URL code by hand. \\
     DOC0371, 10 July 2026 &
-    \emph{Generated External API Clients with cppast and Oat++}, specification &
+    \textit{Generated External API Clients with cppast and Oat++}, specification &
     Defined cppast/libclang annotation discovery, a validated OpenAPI subset,
     build-tree-only C++ module generation, Oat++ transport, manifests and live
     integration fixtures. \\
     DOC0372, 11 July 2026 &
-    \emph{Common External Sequence Table Provider}, specification &
+    \textit{Common External Sequence Table Provider}, specification &
     Defined the provider concepts, canonical query and message model, logical
     PostgreSQL relations, a separate streaming data plane, resource admission,
     locator security and request policy. \\
     DOC0373, 12 July 2026 &
-    \emph{External Table Provider Data-Plane Implementation and PostgreSQL
+    \textit{External Table Provider Data-Plane Implementation and PostgreSQL
     Proof}, first implementation report &
     Proved all six relations through a real PostgreSQL custom scan. Q1--Q8 used
     NCBI, UCSC, and UniProt. EBI catalog access was shown separately. Sequence
     retrieval still used whole-response collection. \\
     DOC0374, report dated 12 July 2026 with session-5 evidence dated 13 July 2026 &
-    \emph{NCBI Streaming Sequence Data Plane}, implementation report &
+    \textit{NCBI Streaming Sequence Data Plane}, implementation report &
     Added the NCBI libcurl pull stream, backpressured channel, archive path,
     multi-record FASTA handling, process-local rate-policy implementation and
     live PostgreSQL evidence. It also records the remaining deferrals
@@ -197,16 +200,16 @@ still exists.
   \centering
   \begin{tikzpicture}[
       scale=.72,transform shape,
-      x=1cm,y=1cm,>=Latex,font=\scriptsize,
-      box/.style={draw,rounded corners,align=center,minimum height=.72cm},
+      x=1cm,y=1cm,>=Latex,font=\footnotesize,
+      box/.style={draw,rounded corners,align=center,minimum height=.8cm},
       flow/.style={->,thick}
     ]
     \node[box,text width=2.5cm] (sql) at (0,0)
       {SQL over\\\texttt{bioseq\_external.*}};
     \node[box,text width=2.5cm] (scan) at (3.4,0)
       {\texttt{BioseqExternalScan}\\qual translation};
-    \node[box,text width=2.45cm] (pack) at (6.8,0)
-      {compile-time provider pack\\one runtime dispatch};
+    \node[box,text width=2.65cm] (pack) at (6.8,0)
+      {normalized query\\compile-time provider pack\\one runtime dispatch};
 
     \node[box,text width=3.0cm] (meta) at (10.7,1.75)
       {metadata/control plane\\generated GET client\\Oat++ + full bounded body};
@@ -221,7 +224,7 @@ still exists.
       {PostgreSQL thread\\\texttt{row\_writer}\\pack \texttt{bioseq.seq}};
 
     \draw[flow] (sql) -- (scan);
-    \draw[flow] (scan) -- node[above]{normalized query} (pack);
+    \draw[flow] (scan) -- (pack);
     \draw[flow] (pack) -- (meta);
     \draw[flow] (pack) -- node[below left]{NCBI accession} (stream);
     \draw[flow] (meta) -- (messages1);
@@ -344,7 +347,8 @@ physical storage fork and does not contact a provider.  Its ordinary physical
 scan callbacks cannot produce tuples. The custom scan is the legal read path.
 The path builder in
 \path{main/bioseq/backend/pg/external/scan.cppm},
-\texttt{bioseq\_external\_try\_add\_paths}, recognizes the access method,
+\texttt{bioseq\_\allowbreak{}external\_\allowbreak{}try\_\allowbreak{}add\_%
+\allowbreak{}paths}, recognizes the access method,
 removes core-generated paths and inserts one non-parallel
 \texttt{CustomPath}.  Its current cost is a fixed \(1.0\), and its row estimate
 falls back to \(1000\).  This differs from BioSeqDB's alignment-function custom
@@ -574,7 +578,9 @@ Packing occurs on the PostgreSQL thread in
 \texttt{set\_seq} within
 \path{main/bioseq/backend/pg/external/row_writer.cppm}.  The function calls the
 active SIMD target's
-\texttt{\detokenize{stdc_convert_from_cstr<bioseq::pg_types::seq,...>}} with
+\texttt{stdc\_\allowbreak{}convert\_\allowbreak{}from\_\allowbreak{}cstr<%
+\allowbreak{}bioseq::\allowbreak{}pg\_\allowbreak{}types::\allowbreak{}seq,...>}
+with
 \texttt{pg\_alloc}. It normalizes nucleotide input according to the configured
 PostgreSQL sequence alphabet and creates a varlena \texttt{bioseq.seq} datum in
 the current memory context.  A chunk lease is released only after this datum
@@ -797,7 +803,9 @@ authoritative source file.
   \caption{Authoritative current source locations for the external-provider
   chapter.}
   \label{tab:external-reference-map}
-  \begin{tabularx}{\linewidth}{p{.32\linewidth}X}
+  \begin{tabularx}{\linewidth}{
+      >{\raggedright\arraybackslash}p{.32\linewidth}
+      >{\raggedright\arraybackslash}X}
     \toprule
     File & Principal symbols or responsibility \\
     \midrule

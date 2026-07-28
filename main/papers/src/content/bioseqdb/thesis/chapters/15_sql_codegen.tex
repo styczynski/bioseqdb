@@ -147,9 +147,11 @@ entire analysis on every edit.
   \draw[->,thick] (artifacts) -- (verify);
   \draw[->,dashed,thick]
     (verify.east) -- ++(0.45,0)
-    |- node[pos=0.52,left,align=right,font=\scriptsize]
-    {installed catalog, linked DSO,\\source and artifact hashes}
-    (owners.east);
+    |- (owners.east);
+  \node[anchor=north east,align=right,font=\scriptsize,text width=6.0cm]
+    at ([yshift=-0.18cm]verify.south east)
+    {Dashed verification return: installed catalog, linked DSO,\\
+     source and artifact hashes.};
 \end{tikzpicture}
 \caption{The SQL-generation authority flow.  Generation and verification use
 the same registered source, profile, toolchain, and module provenance.}
