@@ -2243,7 +2243,8 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       ${_bioseq_sql_row_codec_modules}
       ${_bioseq_sql_guc_modules}
       ${_bioseq_sql_support_vector_registry_modules}
-    COMMAND
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
       "$<TARGET_FILE:bioseq_codegen>" sql generate
       --stage support
       --profile "${_bioseq_sql_profile}"
@@ -2368,7 +2369,8 @@ add_custom_command(
     "${BIOSEQ_SQL_CORE_DESCRIPTOR_HASH}"
     "${BIOSEQ_SQL_CORE_MANIFEST}"
     ${BIOSEQ_SQL_ENTITY_HANDLE_MODULES}
-  COMMAND
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
     "$<TARGET_FILE:bioseq_codegen>" sql generate
     --stage core
     --profile production
@@ -2516,7 +2518,8 @@ foreach(_bioseq_sql_profile IN ITEMS production test_indexes)
       "${_bioseq_sql_generated_install}"
       "${_bioseq_sql_generated_manifest}"
       ${_bioseq_sql_fmgr_modules}
-    COMMAND
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT=${CMAKE_CURRENT_LIST_DIR}/.."
       "$<TARGET_FILE:bioseq_codegen>" sql generate
       --stage final
       --profile "${_bioseq_sql_profile}"

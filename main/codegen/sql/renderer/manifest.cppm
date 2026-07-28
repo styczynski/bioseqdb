@@ -3,6 +3,7 @@ module;
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <iterator>
@@ -109,6 +110,52 @@ inline void write_json_string(
                 + raw);
         }
         return result;
+    }
+
+    if (const char* reviewed_root_raw =
+            std::getenv("BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT");
+        reviewed_root_raw != nullptr && reviewed_root_raw[0] != '\0') {
+        std::error_code root_error;
+        const std::filesystem::path reviewed_root =
+            std::filesystem::weakly_canonical(
+                std::filesystem::path{reviewed_root_raw}, root_error);
+        std::error_code directory_error;
+        if (root_error
+            || !std::filesystem::is_directory(
+                reviewed_root, directory_error)
+            || directory_error) {
+            throw std::runtime_error(
+                "BIOSEQ_REVIEWED_MAIN_SOURCE_ROOT is not a directory: "
+                + std::string{reviewed_root_raw});
+        }
+
+        std::error_code path_error;
+        const std::filesystem::path reviewed_path =
+            std::filesystem::weakly_canonical(normalized, path_error);
+        if (!path_error) {
+            const std::filesystem::path relative =
+                reviewed_path.lexically_relative(reviewed_root);
+            if (relative == ".") return "main";
+            if (!relative.empty()
+                && std::ranges::none_of(
+                    relative,
+                    [](const std::filesystem::path& component) {
+                        return component == ".." || component == ".";
+                    })) {
+                const std::string first =
+                    relative.begin()->generic_string();
+                if (!std::ranges::contains(
+                        repository_main_roots,
+                        std::string_view{first})) {
+                    throw std::runtime_error(
+                        "absolute manifest repository path '"
+                        + std::string{field}
+                        + "' is outside the reviewed main source closure: "
+                        + path.generic_string());
+                }
+                return "main/" + relative.generic_string();
+            }
+        }
     }
 
     std::vector<std::string> components;
