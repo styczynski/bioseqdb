@@ -424,7 +424,10 @@ def cell_environment(
     prefix: str,
     postgres_major: int,
     signing_key: str,
+    toolchain_cache_dir: Path,
 ) -> dict[str, str]:
+    if not toolchain_cache_dir.is_absolute():
+        raise PackageBuildError("toolchain cache directory must be absolute")
     environment = dict(base)
     environment.update(
         {
@@ -435,6 +438,7 @@ def cell_environment(
             "BIOSEQ_S3_BUCKET": bucket,
             "BIOSEQ_S3_REGION": region,
             "BIOSEQ_S3_PREFIX": prefix,
+            "BIOSEQ_TOOLCHAIN_CACHE_DIR": str(toolchain_cache_dir),
             "BIOSEQ_DEB_POSTGRES_RUNTIME": f"postgresql-{postgres_major}",
             "BIOSEQ_FEDORA_POSTGRES_RUNTIME": f"postgresql{postgres_major}-server",
             "BIOSEQ_OPENSUSE_POSTGRES_RUNTIME": f"postgresql{postgres_major}-server",
@@ -1000,6 +1004,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if cell_build_dir.exists():
                         shutil.rmtree(cell_build_dir)
                     cell_build_dir.mkdir(parents=True)
+                    revision_root = source_dir.parent
+                    workspace_root = (
+                        revision_root.parent
+                        if revision_root.name.startswith("source-")
+                        else revision_root
+                    )
+                    toolchain_cache_dir = (
+                        workspace_root
+                        / "caches"
+                        / "package-toolchains"
+                        / distro
+                        / f"postgresql{postgres_major}"
+                    )
+                    toolchain_cache_dir.mkdir(parents=True, exist_ok=True)
                     environment = cell_environment(
                         dict(os.environ),
                         architecture=args.architecture,
@@ -1008,6 +1026,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         prefix=cell_prefix,
                         postgres_major=postgres_major,
                         signing_key=signing_key,
+                        toolchain_cache_dir=toolchain_cache_dir,
                     )
                     build_command = omnipackage_command(
                         omnipackage,

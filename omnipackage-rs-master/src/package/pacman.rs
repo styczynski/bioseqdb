@@ -74,6 +74,7 @@ impl Package for Pacman {
         self.mounts.insert(self.source_dir.to_string_lossy().to_string(), "/source".to_string());
         self.mounts.insert(work_path.to_string_lossy().to_string(), "/work".to_string());
         self.mounts.insert(output_path.to_string_lossy().to_string(), "/output".to_string());
+        self.mounts.extend(config.container_mounts.clone());
 
         if self.image_cache.is_none() {
             self.commands.extend(self.distro.setup(&config.build_dependencies));
@@ -235,6 +236,7 @@ mod tests {
             before_build_script: None,
             container_image: None,
             container_capabilities: vec![],
+            container_mounts: HashMap::new(),
             rpm: None,
             deb: None,
             pacman: Some(PacmanConfig {

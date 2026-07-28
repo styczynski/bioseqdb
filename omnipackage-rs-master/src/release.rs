@@ -225,6 +225,7 @@ mod tests {
             before_build_script: None,
             container_image: None,
             container_capabilities: vec![],
+            container_mounts: HashMap::new(),
             rpm: None,
             deb: None,
             pacman: None,

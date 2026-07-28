@@ -79,6 +79,8 @@ pub struct Build {
     pub container_image: Option<String>,
     #[serde(default)]
     pub container_capabilities: Vec<ContainerCapability>,
+    #[serde(default)]
+    pub container_mounts: HashMap<String, String>,
     pub rpm: Option<RpmConfig>,
     pub deb: Option<DebConfig>,
     pub pacman: Option<PacmanConfig>,

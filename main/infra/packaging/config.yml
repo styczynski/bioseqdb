@@ -37,6 +37,8 @@ common: &common
   optimization_level: 0
   architecture: ${BIOSEQ_ARCHITECTURE}
   container_capabilities: [SYS_NICE]
+  container_mounts:
+    ${BIOSEQ_TOOLCHAIN_CACHE_DIR}: /opt/bioseq-package-toolchain
   before_build_script: >-
     BIOSEQ_POSTGRES_MAJOR=${BIOSEQ_POSTGRES_MAJOR}
     BIOSEQ_OPTTIMIZATION_LEVEL=0

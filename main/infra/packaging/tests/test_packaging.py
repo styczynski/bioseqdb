@@ -121,10 +121,15 @@ class InputAndSigningTests(unittest.TestCase):
             prefix="bioseq/packages/arm64/postgresql17",
             postgres_major=17,
             signing_key="secret",
+            toolchain_cache_dir=Path("/cache/opensuse/postgresql17"),
         )
         self.assertEqual(environment["BIOSEQ_OPTTIMIZATION_LEVEL"], "0")
         self.assertEqual(environment["BIOSEQ_PACKAGE_NAME"], "bioseq-postgresql17")
         self.assertEqual(environment["BIOSEQ_ARCH_CONTAINER_IMAGE"], "menci/archlinuxarm:base")
+        self.assertEqual(
+            environment["BIOSEQ_TOOLCHAIN_CACHE_DIR"],
+            "/cache/opensuse/postgresql17",
+        )
 
     def test_cli_path_overrides_and_main_source_default(self):
         parser = runner.argument_parser()
