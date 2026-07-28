@@ -278,14 +278,19 @@ Table~\ref{tab:conclusion-system-status} separates the checked-in default from
 qualified alternatives, experimental work, and unsupported claims. An
 implemented selector is not automatically a qualified final route.
 
-\begin{table}[p]
+\begingroup
   \centering
   \scriptsize
-  \setlength{\tabcolsep}{3pt}
-  \caption{System-wide implementation and evidence status at code snapshot
-  \texttt{2c6dd51a2bd3}.}
-  \label{tab:conclusion-system-status}
-  \begin{tabularx}{\linewidth}{p{.12\linewidth}XXXXX}
+  \begin{longtblr}[
+    caption={System-wide implementation and evidence status at code snapshot
+    \texttt{2c6dd51a2bd3}.},
+    label={tab:conclusion-system-status},
+  ]{
+    width=\linewidth,
+    colspec={Q[l,wd=.12\linewidth] X[l] X[l] X[l] X[l] X[l]},
+    colsep=3pt,
+    rowhead=1,
+  }
     \toprule
     Component & Checked-in default & Qualified opt-in &
     Experimental & Unsupported or open & Evidence \\
@@ -364,8 +369,8 @@ implemented selector is not automatically a qualified final route.
     materialization, and EBI sequence retrieval. &
     Chapter 14 capability and live-proof tables. \\
     \bottomrule
-  \end{tabularx}
-\end{table}
+  \end{longtblr}
+\endgroup
 
 \section{Answers to the research questions}
 
