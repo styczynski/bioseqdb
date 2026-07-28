@@ -40,14 +40,29 @@ residency. This is more machinery than a conventional \texttt{.mmi} file, but
 it solves a different problem: making indexed alignment participate safely in
 transactional SQL.
 
+The notation distinguishes algorithms, wire formats, and physical providers.
+Minimizers per fragment (MPF) denotes
+\texttt{MinimizersPerFragmentIndex}. Minimizers per sequence (MPS) denotes
+\texttt{MinimizerSequenceMergedIndex}. Format~5 is the grouped
+relation-generation codec, whereas MPF5 is the sealed direct-reader image
+derived from an authenticated MPF Format~5 generation. Format~6 is the
+hash-major selective-stream codec used by a gated MPS route. Provider value
+\(0\) names the authoritative \texttt{postgres\_relation} lifecycle.
+Provider value \(1\) names the uninstalled independent
+\texttt{mapped\_file} lifecycle and is rejected before mutation. These
+provider values do not identify Format~5, MPF5, or Format~6.
+
 The index subsystem is deliberately separate from the base sequence storage
 described in Chapter~11. The base relation owns rows and sequence locators.
 An index sidecar owns a reproducible transformation of those sequence bytes.
-Deleting or replacing the index does not change the source sequence; changing
+Deleting or replacing the index does not change the source sequence. Changing
 the source epoch makes an old index ineligible. It is also separate from
 \texttt{bioseq\_cache}. The cache remembers a completed SQL request under an
 execution identity, whereas a minimizer index remembers a reusable search data
 structure under a source and algorithm identity.
+
+Figure~\ref{fig:index-control-data-plane} separates the authoritative control
+plane from the relation and sealed-reader data paths.
 
 \begin{figure}[ht]
   \centering
@@ -95,8 +110,8 @@ specific algorithm:
 
 \begin{enumerate}
   \item \texttt{CHUNKED\_PER\_FRAGMENT} associates one or more chunks with a
-  source fragment and an application-defined sub-key;
-  \item \texttt{INLINE\_PER\_SEQUENCE} stores one value for a sequence; and
+  source fragment and an application-defined sub-key.
+  \item \texttt{INLINE\_PER\_SEQUENCE} stores one value for a sequence.
   \item \texttt{CHUNKED\_PER\_TABLE} stores chunks belonging to a whole table.
 \end{enumerate}
 
@@ -104,18 +119,21 @@ Index traits bind an algorithm to one of these layouts at compile time. The
 PostgreSQL registry currently includes
 \texttt{MinimizersPerFragmentIndex} (MPF),
 \texttt{MinimizerSequenceMergedIndex} (MPS), and
-\texttt{SymbolCountsIndex}; a table-level count index exists only in test
+\texttt{SymbolCountsIndex}. A table-level count index exists only in test
 builds. Both minimizer implementations use the fragment-chunk storage adapter,
 while symbol counts use the per-sequence adapter. Static assertions verify
 that each registered algorithm and storage class agree about their layout.
 This prevents a name added to SQL from accidentally selecting a class whose
 row key has different semantics.
 
+Table~\ref{tab:index-registry} connects these registered names to their
+physical granularity and checked-in update policy.
+
 \begin{table}[ht]
   \centering
   \small
   \caption{Current registered indexes and default policy. ``Automatic'' means
-  that the policy is enabled on insertion; it does not mean that every read is
+  that the policy is enabled on insertion. It does not mean that every read is
   forced to use the resulting representation.}
   \label{tab:index-registry}
   \begin{tabularx}{\linewidth}{p{.22\linewidth}p{.20\linewidth}
@@ -126,7 +144,7 @@ row key has different semantics.
     \midrule
     \texttt{minimizers\_per\_fragment} &
     chunked per fragment & on insert &
-    Default active read index; preserves fragment-native construction and
+    Default active read index. It preserves fragment-native construction and
     permits direct assembly of the target lookup.\\
     \texttt{minimizers\_per\_sequence} &
     chunked per fragment & manual &
@@ -145,7 +163,7 @@ Update policy and read policy are intentionally distinct. An index may be
 query contract can allow a persisted index, require its absence, or require a
 compatible persisted index. The default active minimizer read name is MPF.
 The setting that permits stored-index reads controls whether persistence is
-consulted; it does not dictate the transient in-memory shape used after
+consulted. It does not dictate the transient in-memory shape used after
 loading. This separation permits experiments with MPS or accelerator views
 without changing the SQL-visible index name, and it supplies a strict mode for
 experiments that are intended to measure cold persistence rather than hidden
@@ -165,7 +183,7 @@ contiguous components:
 
 \begin{itemize}
   \item a hash table from minimizer hash to a packed
-  \((\mathit{offset},\mathit{count})\) pair; and
+  \((\mathit{offset},\mathit{count})\) pair.
   \item a positions array in which an occurrence is encoded as
   \((\mathit{globalPosition}\ll1)\mathbin{\vert}\mathit{strand}\).
 \end{itemize}
@@ -212,9 +230,12 @@ global occurrence limits are applied, positions are clipped to the requested
 target interval, and a transient lookup is assembled. In a DOC0301 experiment
 the query selected 4,227,179 of 523,428,324 target minimizers, or
 approximately 0.8076 percent. That result demonstrated the value of query
-selection, but the
-specific A16 path was transient and persisted nothing; it is not evidence for
+selection, but the specific A16 path was transient and persisted nothing.
+It is not evidence for
 a durable MPS build.
+
+Figure~\ref{fig:mps-selective-load} shows how the directory turns a query hash
+set into a bounded subset of stored controls and positions.
 
 \begin{figure}[ht]
   \centering
@@ -250,7 +271,7 @@ a durable MPS build.
           {query-specific transient lookup\\with clipped target positions};
   \end{tikzpicture}
   \caption{Query-selective MPS loading. The directory is small enough to
-  authenticate and search as a whole; only buckets intersecting the query hash
+  authenticate and search as a whole. Only buckets intersecting the query hash
   set are admitted. Format~6 generalizes the same principle to separate
   directory, control, and postings streams.}
   \label{fig:mps-selective-load}
@@ -278,7 +299,7 @@ The first sequence-wide builder accumulated a large vector of
 That algorithm is easy to state and performs well while the vector fits in
 memory. It is not a safe PostgreSQL operator for multi-gigabase targets. The
 early 4 Gbp external-sort experiments recorded approximately 80 GB of
-temporary storage for dna4 and 93 GB for dna5; a 6 Gbp run exceeded 120 GB.
+temporary storage for dna4 and 93 GB for dna5. A 6 Gbp run exceeded 120 GB.
 The lesson was not merely to increase a buffer. A database operator needs a
 resource envelope that does not depend on the target being friendly.
 
@@ -288,11 +309,14 @@ DOC0299 replaced the unbounded phase with sorted runs backed by PostgreSQL
   P=(\texttt{u64 kmer},\texttt{u64 encodedPositionAndStrand}).
 \]
 Pairs first occupy a memory-bounded run. A full run is sorted and may remain
-resident only while the run-residency budget permits; otherwise it is spilled.
+resident only while the run-residency budget permits. Otherwise it is spilled.
 The merge opens a bounded number of readers and combines runs in passes. The
 current sequence builder also spills the accumulator for a single extremely
 frequent \(k\)-mer, so neither the number of runs nor a heavy hitter can bypass
 the memory contract.
+
+Algorithm~\ref{alg:mps-build} states the bounded builder and distinguishes
+legacy directory-last completion from opt-in generation publication.
 
 \begin{algorithm}[ht]
   \caption{Bounded MPS construction and mode-specific publication}
@@ -305,7 +329,7 @@ the memory contract.
       \State sketch the range and convert local occurrences to global positions
       \State append 16-byte \((hash,encodedPosition)\) pairs to the active run
       \If{the run budget is full}
-        \State sort the run; retain it only if a residency permit is available
+        \State sort the run and retain it only if a residency permit is available
         \State otherwise spill it to a PostgreSQL \texttt{BufFile}
       \EndIf
     \EndFor
@@ -314,7 +338,7 @@ the memory contract.
       \State merge one bounded fan-in group into a new run
     \EndWhile
     \State merge remaining runs in hash order
-    \State form approximately 8 MiB buckets; spill a heavy-hash accumulator
+    \State form approximately 8 MiB buckets and spill a heavy-hash accumulator
           when necessary
     \State write every bucket with length, checksum, source, and compatibility
           identity
@@ -356,7 +380,7 @@ index administration path rejects any minimizer \texttt{mapped\_file} request
 before it mutates either the catalog or an artifact. This rule also covers the
 asynchronous MPS route. Current settings separate
 \texttt{index\_async\_persist} from
-\texttt{recompute\_async\_persist}; both must permit the deferred write, and
+\texttt{recompute\_async\_persist}. Both must permit the deferred write, and
 the production gate is restricted to the supported \(k=15,w=10\) profile.
 
 This model has an intentional cost: the worker reads and sketches the source
@@ -381,11 +405,14 @@ new table inherit the previous table's index accidentally.
 
 The three generic layouts have deliberately small schemas:
 
+Table~\ref{tab:index-legacy-schemas} records the row key and payload contract
+for each legacy adapter.
+
 \begin{table}[ht]
   \centering
   \scriptsize
   \caption{Legacy physical adapters. The minimizer implementations use the
-  first row; the remaining rows show why the abstraction is not
+  first row. The remaining rows show why the abstraction is not
   minimizer-specific.}
   \label{tab:index-legacy-schemas}
   \begin{tabularx}{\linewidth}{p{.18\linewidth}p{.47\linewidth}X}
@@ -396,17 +423,17 @@ The three generic layouts have deliberately small schemas:
     Chunked per fragment &
     \texttt{query\_key BIGINT},
     \texttt{sub\_key BIGINT}, \texttt{chunk\_no INT},
-    \texttt{chunk\_bytes INT}, \texttt{blob BYTEA};
-    primary key \((query\_key,sub\_key,chunk\_no)\) &
-    Heap relation; \texttt{blob} uses external storage. Supports MPF and MPS
+    \texttt{chunk\_bytes INT}, \texttt{blob BYTEA}.
+    Primary key \((query\_key,sub\_key,chunk\_no)\) &
+    Heap relation. \texttt{blob} uses external storage. Supports MPF and MPS
     directories/buckets.\\
     Inline per sequence &
     \texttt{query\_key BIGINT}, \texttt{chunk\_bytes INT},
-    \texttt{blob BYTEA}; primary key \((query\_key)\) &
+    \texttt{blob BYTEA}. Primary key \((query\_key)\) &
     One logical object per sequence, with external storage for the byte value.\\
     Chunked per table &
     \texttt{chunk\_no INT}, \texttt{chunk\_bytes INT},
-    \texttt{blob BYTEA}; primary key \((chunk\_no)\) &
+    \texttt{blob BYTEA}. Primary key \((chunk\_no)\) &
     Whole-table abstraction retained and tested, but no production index
     currently uses it.\\
     \bottomrule
@@ -426,7 +453,7 @@ The first update path used replace-in-place semantics. It cleared an old
 sidecar and wrote the replacement. Directory-last publication prevented a
 partial MPS build from looking complete, but readers and writers still shared
 one mutable physical namespace. This model remains useful for the generic
-legacy adapters; it is not the strongest lifecycle now available.
+legacy adapters. It is not the strongest lifecycle now available.
 
 \subsection{Immutable generations}
 \label{sec:index-generations}
@@ -467,9 +494,12 @@ reproducible from durable sequence data, and logging every derived payload byte
 would duplicate write amplification. Unlogged is not the same as unchecked:
 generation identity, manifest data, lengths, and checksums still detect partial
 or misaddressed content. After an unlogged reset, the generation must be
-rebuilt rather than treated as valid. The \(8064\)-byte Format-5 row payload
+rebuilt rather than treated as valid. The \(8064\)-byte Format~5 row payload
 was selected so a PLAIN bytea and its tuple header fit on one ordinary
 PostgreSQL page, avoiding a TOAST fetch for every small cold-read unit.
+
+Figure~\ref{fig:index-generation-lifecycle} shows why publication changes one
+small descriptor only after the new generation has been authenticated.
 
 \begin{figure}[ht]
   \centering
@@ -507,15 +537,49 @@ PostgreSQL page, avoiding a TOAST fetch for every small cold-read unit.
 
 The storage history contains an important reversal. DOC0381 rejected an mmap
 fallback under a strict interpretation that every index byte had to reside in
-a PostgreSQL relation. Its diagnosis was nevertheless decisive: a cold
-\texttt{just\_index} run spent 103.839560417 s in index-and-map work versus
-17.168589792 s for minimap2, a 6.048x region disadvantage. Of the BioSeqDB
-time, 62.519740125 s read 4,463,431,732 payload bytes from 562,075 rows and
-41.319820292 s remained outside raw payload fetch. The old accounting loop
-made 103,003 passes over the extent set, or about 1.768 billion visits. A
-second checksum pass reread the same 4.46 GB. The primary-index route then
-performed roughly 562,000 heap fetches. PostgreSQL ownership alone did not
-make this tuple shape an efficient large immutable image.
+a PostgreSQL relation. Its historical cold-path diagnosis is separated by
+measurement region in Table~\ref{tab:index-doc0381-cold-path}. The ratio
+\(\rho=B/M\) divides BioSeqDB time \(B\) by minimap2 time \(M\), so
+\(\rho>1\) denotes a BioSeqDB slowdown. The rows that describe internal
+BioSeqDB work have no minimap2 counterpart and therefore have no ratio.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{DOC0381 historical cold \texttt{just\_index} diagnosis. Internal
+  rows partition or explain the BioSeqDB index-and-map region. They are not
+  additional end-to-end measurements.}
+  \label{tab:index-doc0381-cold-path}
+  \begin{tabularx}{\linewidth}{p{.25\linewidth}p{.18\linewidth}
+                               p{.18\linewidth}X}
+    \toprule
+    \textbf{Region or event} & \textbf{BioSeqDB} &
+    \textbf{minimap2} & \textbf{Comparison or scope}\\
+    \midrule
+    Index and map &
+    103.839560417 s & 17.168589792 s &
+    \(\rho=6.048\), so BioSeqDB was 6.048x slower.\\
+    Outer E2E &
+    110.851165250 s & 17.821864250 s &
+    \(\rho=6.220\), so BioSeqDB was 6.220x slower.\\
+    Payload callback &
+    62.519740125 s & not applicable &
+    Read \(4{,}463{,}431{,}732\) bytes from \(562{,}075\) rows.\\
+    Residual index-and-map work &
+    41.319820292 s & not applicable &
+    Difference after subtracting the payload callback.\\
+    Extent accounting &
+    \(103{,}003\) passes & not applicable &
+    Approximately \(1.768\) billion extent visits.\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+A second checksum pass reread the same 4.46 GB. The primary-index route then
+performed roughly 562,000 heap fetches. These historical measurements diagnose
+that relation-row reader and do not characterize the later compact-direct
+route. PostgreSQL ownership alone did not make the tuple shape an efficient
+large immutable image.
 
 DOC0383 reframed ownership more precisely. PostgreSQL 17 does not expose a
 supported extension hook for a custom storage manager, so forcing a
@@ -563,7 +627,7 @@ truthful:
 Mappings are registered with a PostgreSQL \texttt{ResourceOwner}, so error
 unwinding closes them even when normal C++ control flow is bypassed. Transaction
 callbacks use a fixed-capacity action queue rather than allocating or throwing
-inside a callback; prepared transactions are rejected while such actions are
+inside a callback. Prepared transactions are rejected while such actions are
 armed. Replacement records a full transaction identifier. The reaper waits
 until PostgreSQL's global visibility test says that identifier is removable,
 then reclaims the retired descriptor and artifact. Its work is bounded per
@@ -601,13 +665,13 @@ and local 32-bit positions. Format~5 stores a grouped, structure-of-arrays
 shape suitable for direct CPU or accelerator assembly. Its preferred logical
 segment is approximately 8 MiB, while the PostgreSQL relation provider splits
 that segment into 8064-byte physical rows. A 64-byte generation head points to
-manifests; Format-5 manifests and directory entries carry the additional
+manifests. Format~5 manifests and directory entries carry the additional
 section sizes and shape metadata required to authenticate the image.
 
 The essential change is that the persistent shape is no longer merely “some
 bytes that deserialize into a C++ hash map.” It is a specified arrangement of
 controls and positions that can be range checked, checksummed, and adapted
-without rebuilding the original container. The same logical Format-5
+without rebuilding the original container. The same logical Format~5
 generation is backed by PostgreSQL rows. The MPF5 sidecar carries a closely
 related direct layout with its own authenticated outer header.
 
@@ -618,14 +682,14 @@ Format~6 makes query selectivity a physical property. It separates three
 storage-neutral streams:
 
 \begin{enumerate}
-  \item an authenticated directory over hash ranges;
+  \item an authenticated directory over hash ranges.
   \item control blocks containing up to 4096 hashes and global occurrence
-  counts; and
+  counts.
   \item postings extents containing positions for hashes that survived the
   occurrence policy.
 \end{enumerate}
 
-The fixed head is 224 bytes and the manifest is 336 bytes; a directory entry
+The fixed head is 224 bytes and the manifest is 336 bytes. A directory entry
 is 80 bytes. PostgreSQL payload rows remain 8064 bytes and the reader coalesces
 authorized ranges into read slabs of at most 8 MiB. It first validates the
 complete directory, intersects query hashes with directory ranges, reads only
@@ -633,6 +697,9 @@ the corresponding control blocks, rejects hashes above
 \texttt{max\_occ}, and authorizes only the resulting postings intervals.
 Exact-count exception data preserves correctness where a compact count field
 would otherwise saturate.
+
+Figure~\ref{fig:format6-streams} shows the authorization sequence from a
+complete directory to selected controls and postings.
 
 \begin{figure}[ht]
   \centering
@@ -665,8 +732,8 @@ would otherwise saturate.
     \draw[->,thick,green!45!black] (8.775,1.45)--(8.775,1.03);
   \end{tikzpicture}
   \caption{Format~6 separates navigation, hash controls, and variable-length
-  postings. Green regions illustrate the blocks authorized by one query;
-  unselected postings need not enter the backend.}
+  postings. Green regions illustrate the blocks authorized by one query.
+  Unselected postings need not enter the backend.}
   \label{fig:format6-streams}
 \end{figure}
 
@@ -675,7 +742,7 @@ profile to this format only when its compatibility registration and grouped
 generation path are enabled. MPF remains on Format~5. The grouped persisted
 generation setting defaults to false in the current source, so Format~6 is an
 implemented specialized route, not the unconditional default. Unsupported or
-unregistered profiles fall back to the compatible Format-5 path rather than
+unregistered profiles fall back to the compatible Format~5 path rather than
 guessing a wire identity.
 
 \subsection{A rejected per-query occurrence merge}
@@ -683,13 +750,34 @@ guessing a wire identity.
 Selective loading introduces another temptation: compute target occurrence
 counts separately for every query and merge them on demand. DOC0385 compared
 that candidate with the compact global query-occurrence radix used by the
-current path. On its canonical case
-\((N,R,U)=(7{,}440{,}026,7{,}258{,}660,7{,}258{,}562)\), the compact global
-method took 267,837,208 ns and 206,618,624 bytes peak RSS, while the per-query
-merge took 516,441,416 ns and 294,830,080 bytes. The candidate was slower and
-larger on every measured workload and was rejected. This is an example of a
-local-looking optimization that duplicates work across the SQL batch; the
-global radix amortizes it while retaining exact occurrence policy.
+current path. Table~\ref{tab:index-doc0385-occurrence} reports the canonical
+case \((N,R,U)=(7{,}440{,}026,7{,}258{,}660,7{,}258{,}562)\).
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{DOC0385 occurrence-policy A/B result for the canonical case. Ratios
+  divide the per-query candidate by the compact global baseline.}
+  \label{tab:index-doc0385-occurrence}
+  \begin{tabularx}{\linewidth}{p{.30\linewidth}p{.19\linewidth}
+                               p{.19\linewidth}X}
+    \toprule
+    \textbf{Design} & \textbf{Time (ns)} & \textbf{Peak RSS (bytes)} &
+    \textbf{Relative result}\\
+    \midrule
+    Compact global query-occurrence radix &
+    \(267{,}837{,}208\) & \(206{,}618{,}624\) & Baseline.\\
+    Per-query occurrence merge &
+    \(516{,}441{,}416\) & \(294{,}830{,}080\) &
+    1.928x the time and 1.427x the peak RSS.\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+DOC0385 reports that the candidate was slower and larger on every measured
+workload, so it was rejected. The local-looking optimization duplicates work
+across the SQL batch. The global radix amortizes that work while retaining
+exact occurrence policy.
 
 \section{Compatibility is part of correctness}
 \label{sec:index-compatibility}
@@ -704,11 +792,11 @@ minimizers. BioSeqDB therefore authenticates meaning as well as bytes.
 The compatibility contract pins at least:
 
 \begin{itemize}
-  \item alphabet identifier and storage width;
-  \item minimizer \(k\) and window \(w\);
-  \item scheme identifier, scheme version, and producer backend;
-  \item position width and stored shape/format;
-  \item occurrence-limit semantics; and
+  \item alphabet identifier and storage width.
+  \item minimizer \(k\) and window \(w\).
+  \item scheme identifier, scheme version, and producer backend.
+  \item position width and stored shape/format.
+  \item occurrence-limit semantics.
   \item accelerator ABI when the persistent shape is consumed directly by a
   device path.
 \end{itemize}
@@ -730,6 +818,9 @@ load benchmark and can violate a caller's operational requirement. An
 \texttt{require\_absent} policy supplies the converse experimental contract:
 the query must exercise the no-index route.
 
+Table~\ref{tab:index-mismatch-response} makes the fail-closed response explicit
+for representative identity, format, and policy mismatches.
+
 \begin{table}[ht]
   \centering
   \small
@@ -741,9 +832,9 @@ the query must exercise the no-index route.
     \textbf{Response}\\
     \midrule
     Different source epoch & The same logical row key can now name different
-    sequence bytes & Reject generation; rebuild only when policy permits.\\
+    sequence bytes & Reject generation. Rebuild only when policy permits.\\
     Same \(k,w\), different hash scheme & Query and target keys inhabit
-    different hash languages & Reject; no conversion can recover omitted
+    different hash languages & Reject. No conversion can recover omitted
     minimizers.\\
     Unsupported position width & A decoded occurrence can truncate or wrap &
     Reject before allocation or device upload.\\
@@ -751,7 +842,7 @@ the query must exercise the no-index route.
     installed & Reject the descriptor or update request. Never reinterpret it
     as provider 0.\\
     Checksum or section-bound failure & Payload is corrupt, misaddressed, or
-    incomplete & Reject the selected extent/generation; never continue with
+    incomplete & Reject the selected extent/generation. Never continue with
     partial postings.\\
     Strict persisted requirement, no generation & Recompute would change the
     experiment and operational contract & Raise an error rather than falling
@@ -803,11 +894,11 @@ The corrective design therefore attacks both axes:
 
 \begin{enumerate}
   \item directory and control structures make the authorized postings set
-  smaller;
+  smaller.
   \item accounting walks each extent a constant number of times instead of
-  rescanning the whole set for every batch;
-  \item adjacent physical ranges are coalesced into bounded slabs;
-  \item checksums are computed at the same granularity as authorization; and
+  rescanning the whole set for every batch.
+  \item adjacent physical ranges are coalesced into bounded slabs.
+  \item checksums are computed at the same granularity as authorization.
   \item the relation-provider MPF5 sidecar removes tuple and heap-fetch
   overhead when the explicit compact-direct reader route is selected.
 \end{enumerate}
@@ -819,7 +910,7 @@ Cold persistence does not imply that every query must reread every selected
 chunk. The PostgreSQL backend maintains two bounded LRU caches:
 
 \begin{itemize}
-  \item a chunk cache of at most 256 entries and 2 GiB; and
+  \item a chunk cache of at most 256 entries and 2 GiB.
   \item an assembled-index cache of at most 32 entries and 4 GiB.
 \end{itemize}
 
@@ -831,7 +922,7 @@ cache entry must not survive a source generation or algorithm change merely
 because a short SQL name remains equal.
 
 Transaction, subtransaction, and relcache callbacks maintain coherence. A
-write recorded in an aborted transaction is evicted; commit marks eligible
+write recorded in an aborted transaction is evicted. Commit marks eligible
 entries stable. Relation invalidation and explicit index-identity invalidation
 remove affected entries. This is a backend-local acceleration, not a
 cross-backend consistency mechanism: PostgreSQL snapshots and generation
@@ -840,15 +931,43 @@ descriptors remain authoritative.
 GPU residency follows the same idea at a different boundary. The Phase-B
 implementation assembled a GPU view from existing serialized buckets and
 kept it in an LRU keyed by the in-memory shape or persisted assembly identity.
-That first implementation was 5--8x slower on small cases and 1.8x slower on
-its XXL case, demonstrating that residency alone does not erase conversion and
-launch overhead. Phase C replaced a problematic open-addressed device table
-that could trigger device loss with sorted dense buckets and binary search.
-On its later XXL measurement the GPU route took 7.558 s versus 9.501 s for
-SIMD, a 1.26x improvement, with 93,309,652 target positions and no fallback.
-Those numbers characterize an accelerator front-end, not index persistence,
-but they explain why persistent metadata includes enough shape identity to
-make safe direct residency possible.
+Table~\ref{tab:index-gpu-residency-evidence} separates that losing phase from
+the later DOC0311 Phase-C result.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Historical GPU-residency evidence by implementation phase. The
+  DOC0311 timings are P50 values. They measure the accelerator front end, not
+  persistent-index loading.}
+  \label{tab:index-gpu-residency-evidence}
+  \begin{tabularx}{\linewidth}{p{.16\linewidth}p{.25\linewidth}
+                               p{.27\linewidth}X}
+    \toprule
+    \textbf{Evidence} & \textbf{Workload and host} &
+    \textbf{Measured comparison} & \textbf{Interpretation}\\
+    \midrule
+    Phase B small cases &
+    Phase-B benchmark cases &
+    GPU was between 5x and 8x slower than SIMD. &
+    Residency did not repay conversion and launch overhead.\\
+    Phase B XXL &
+    Phase-B XXL case &
+    GPU was 1.8x slower than SIMD. &
+    A larger workload reduced but did not reverse the loss.\\
+    DOC0311 Phase C XXL &
+    500 Mbp target, 5 Mbp query, Apple M1 Pro with MoltenVK &
+    GPU P50 7.558 s, SIMD P50 9.501 s, giving a 1.257x GPU speedup. &
+    \(93{,}309{,}652\) target positions and no fallback.\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Phase C replaced a problematic open-addressed device table that could trigger
+device loss with sorted dense buckets and binary search. The qualified result
+explains why persistent metadata includes enough shape identity to make safe
+direct residency possible, but it is not evidence about current index
+persistence throughput.
 
 \section{Runtime selection}
 \label{sec:index-runtime-selection}
@@ -857,7 +976,7 @@ At execution time the scheduler does not simply ask “does a table named
 \texttt{mpf} exist?” It resolves an effective index policy for each sequence
 column and combines it with the query's read requirement, algorithm
 compatibility, source identity, memory admission, and backend availability.
-The main decision shape is:
+Algorithm~\ref{alg:index-runtime-selection} states the main decision shape.
 
 \begin{algorithm}[ht]
   \caption{Persisted-index selection in the alignment dispatcher}
@@ -883,13 +1002,13 @@ The main decision shape is:
       \State sketch the target and build a transient index
       \State optionally schedule identity-only persistence when all gates permit it
     \EndIf
-    \State execute seed lookup; retain the selected generation/view until the batch ends
+    \State execute seed lookup and retain the selected generation/view until the batch ends
   \end{algorithmic}
 \end{algorithm}
 
 An absent index is thus not always an error, and a present index is not always
 usable. This distinction is essential to benchmarks. The \texttt{no\_index}
-case should prove that absence was required; the \texttt{just\_index} case
+case should prove that absence was required. The \texttt{just\_index} case
 should prove that a compatible persisted generation was used and that
 construction was outside the measured region. A fast row without these
 attestations can be a recomputation result, a warm assembled cache, or a
@@ -912,8 +1031,10 @@ The bundled minimap2 source provides a useful algorithmic baseline because the
 BioSeqDB seed lookup derives from the same mapping family. Its
 \texttt{mm\_idx\_t} records bucket bits \(b\), window \(w\), \(k\), flags,
 sequence metadata, an optional packed reference \(S\), and an array \(B\) of
-buckets. A bucket contains an array of minimizer/position pairs during
-construction, an open-addressing hash table, and a positions array.
+buckets. This comparison uses the published algorithm and the pinned software
+artifact cited for the thesis \autocite{minimap2_paper,minimap2_software}.
+A bucket contains an array of minimizer/position pairs during construction, an
+open-addressing hash table, and a positions array.
 
 Lookup partitions a minimizer hash with the low \(b\) bits selecting the
 bucket. The remaining high key is found in that bucket's hash table. A low
@@ -928,10 +1049,13 @@ The \texttt{.mmi} writer serializes a magic and five 32-bit parameters,
 sequence names and lengths, every bucket's position array and hash entries,
 and optionally the packed reference. The loader in the bundled implementation
 uses \texttt{fread}, allocates all buckets and position arrays, and reconstructs
-the complete in-memory index; it is not a selective mmap reader. Index
+the complete in-memory index. It is not a selective mmap reader. Index
 parameters stored in the file can override command-line values, with a warning.
 This format is compact and practical for a command-line mapper whose unit of
 reuse is a reference file.
+
+Table~\ref{tab:mmi-bioseq-index} compares architectural responsibilities
+rather than claiming wire compatibility.
 
 \begin{table}[ht]
   \centering
@@ -948,20 +1072,20 @@ reuse is a reference file.
     Ownership & Standalone file named by the caller &
     Derived object bound to a PostgreSQL physical relation, column, source
     epoch, and generation descriptor.\\
-    Logical shape & Bucket-local hash table; singleton inline, repeated
+    Logical shape & Bucket-local hash table. Singletons are inline, with repeated
     occurrences in \texttt{p} &
-    MPF fragment images or MPS hash-range directory; generation Formats 5/6
+    MPF fragment images or an MPS hash-range directory. Generation Formats 5/6
     provide specified controls and positions streams.\\
     Load granularity & Reconstruct complete bucket arrays and optional
     reference with \texttt{fread} &
-    Full MPF image when appropriate, or query-selected MPS and Format-6
+    Full MPF image when appropriate, or query-selected MPS and Format~6
     controls and postings, with bounded working-memory admission and backend
     LRU reuse.\\
     Update & User rebuilds/replaces a file &
     Manual or insert policy. The checked-in legacy mode replaces relation
     content. Opt-in grouped mode validates unpublished generations before
     atomic head replacement and snapshot-safe predecessor retirement.\\
-    Compatibility & File parameters and flags; mapper-specific load contract &
+    Compatibility & File parameters and flags under a mapper-specific load contract &
     Alphabet, widths, \(k,w\), scheme/version, producer, occurrence policy,
     source epoch, and optional accelerator ABI digest.\\
     Transactions & Outside database transaction semantics &
@@ -973,7 +1097,7 @@ reuse is a reference file.
     an immutable MPF5 sidecar for direct reading while still recording
     provider 0. Provider 1 is rejected.\\
     SQL batch sharing & One process consumes one loaded index &
-    Query batch shares occurrence analysis and assembled views; planner and
+    Query batch shares occurrence analysis and assembled views. Planner and
     custom scan choose the route.\\
     \bottomrule
   \end{tabularx}
@@ -987,7 +1111,7 @@ reference identifier, and the index may begin fragmented because the database
 stores long sequences in independently addressable pieces. It must also
 authenticate a minimizer scheme shared with Chapter~5's SIMD and Vulkan
 implementations. A minimap2 index assumes its mapper controls the surrounding
-process; BioSeqDB must make the object safe for SQL transactions, lazy source
+process. BioSeqDB must make the object safe for SQL transactions, lazy source
 reads, memory admission, and multiple execution backends.
 
 \section{Design evolution}
@@ -1011,7 +1135,7 @@ enabled. It records what each stage taught the next one.
     \textbf{Observed limitation or result} & \textbf{Retained consequence}\\
     \midrule
     DOC0279, DOC0282 &
-    Typed registry; MPF migration; MPS introduced &
+    Typed registry, MPF migration, and MPS introduction &
     One generic ``index blob'' API could not express fragment, sequence, and
     table granularity safely &
     Compile-time algorithm/layout registry and distinct SQL index names.\\
@@ -1019,11 +1143,11 @@ enabled. It records what each stage taught the next one.
     PostgreSQL ingestion followed by automatic index update &
     Early persisted reuse was competitive on several 2/4 Gbp cases, but the
     old large build could consume 80--93 GB of temporary space &
-    End-to-end correctness is necessary; build resource evidence is a separate
+    End-to-end correctness is necessary. Build resource evidence is a separate
     acceptance condition.\\
     DOC0298 &
     Sequence-wide hash directory and query-selected MPS buckets &
-    Building and merging all minimizers could retain excessive memory; partial
+    Building and merging all minimizers could retain excessive memory. Partial
     output needed a completeness rule &
     Reserved sub-key namespace, fixed directory records, and directory-last
     publication.\\
@@ -1035,16 +1159,16 @@ enabled. It records what each stage taught the next one.
     and explicit run residency.\\
     DOC0301 &
     Durable, lazy, adaptive, and query-filtered variants &
-    Durable A6 completed correctly but took 303.399 s wall; transient A16 took
+    Durable A6 completed correctly but took 303.399 s wall. Transient A16 took
     about 26.3 s by retaining approximately 0.8076 percent and persisted
     nothing &
-    Persistence attestation is mandatory; query selectivity was retained as a
+    Persistence attestation is mandatory. Query selectivity was retained as a
     design goal, not confused with a completed durable build.\\
     DOC0307--DOC0311 &
     GPU-resident derived view, then dense sorted GPU buckets &
-    First residency path was slower; open-addressing caused device loss;
+    First residency path was slower. Open addressing caused device loss.
     sorted binary search later beat SIMD on its XXL case &
-    Persistent compatibility includes shape/ABI; device representation is
+    Persistent compatibility includes shape/ABI. Device representation is
     derived only after host validation and owns a residency permit.\\
     DOC0371, DOC0373 &
     Immutable PostgreSQL generations and shape-aware compact layouts &
@@ -1076,7 +1200,8 @@ enabled. It records what each stage taught the next one.
 
 The phrase ``final index format'' would be misleading because the current
 system deliberately preserves more than one verified route. The default
-policy is nevertheless concrete:
+policy is nevertheless concrete. Table~\ref{tab:index-current-mode-matrix}
+separates the checked-in default from each opt-in or rejected route.
 
 \begin{table}[ht]
   \centering
@@ -1149,30 +1274,45 @@ implementation, not current reader-route claims.
 
 \begin{table}[ht]
   \centering
-  \small
-  \caption{DOC0288 historical \texttt{just\_index} results. Speedup is
-  minimap2 time divided by BioSeqDB time. Values are mean
+  \scriptsize
+  \caption{DOC0288 historical indexed and no-index results. The ratio
+  \(\rho=M/B\) divides minimap2 time \(M\) by BioSeqDB time \(B\), so
+  \(\rho>1\) means BioSeqDB was faster. Values are mean
   \(\pm\) reported variation.}
   \label{tab:index-doc0288}
-  \begin{tabular}{llrrl}
+  \begin{tabularx}{\linewidth}{p{.14\linewidth}p{.11\linewidth}
+                               p{.10\linewidth}p{.22\linewidth}
+                               p{.22\linewidth}X}
     \toprule
-    \textbf{Target} & \textbf{Alphabet} &
+    \textbf{Mode} & \textbf{Target} & \textbf{Alphabet} &
     \textbf{BioSeqDB (s)} & \textbf{minimap2 (s)} & \textbf{Ratio}\\
     \midrule
-    2 Gbp & dna4 & \(14.29\pm0.22\) & \(21.53\pm0.30\) & 1.51x\\
-    2 Gbp & dna5 & \(15.97\pm0.51\) & \(18.66\pm1.05\) & 1.17x\\
-    4 Gbp & dna4 & \(23.20\pm0.65\) & \(32.22\pm0.89\) & 1.39x\\
-    4 Gbp & dna5 & \(25.65\pm0.94\) & \(25.48\pm0.55\) & parity\\
+    \texttt{just\_index} & 2 Gbp & dna4 &
+    \(14.29\pm0.22\) & \(21.53\pm0.30\) & 1.51x\\
+    \texttt{just\_index} & 2 Gbp & dna5 &
+    \(15.97\pm0.51\) & \(18.66\pm1.05\) & 1.17x\\
+    \texttt{just\_index} & 4 Gbp & dna4 &
+    \(23.20\pm0.65\) & \(32.22\pm0.89\) & 1.39x\\
+    \texttt{just\_index} & 4 Gbp & dna5 &
+    \(25.65\pm0.94\) & \(25.48\pm0.55\) & 0.99x\\
+    \texttt{no\_index} & 2 Gbp & dna4 &
+    \(84.87\pm0.65\) & \(75.50\pm0.64\) & 0.89x\\
+    \texttt{no\_index} & 2 Gbp & dna5 &
+    \(95.51\pm1.43\) & \(67.29\pm2.40\) & 0.70x\\
+    \texttt{no\_index} & 4 Gbp & dna4 &
+    \(171.34\pm4.06\) & \(276.41\pm1.04\) & 1.61x\\
+    \texttt{no\_index} & 4 Gbp & dna5 &
+    \(190.40\pm4.02\) & \(227.36\pm3.25\) & 1.19x\\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
 \end{table}
 
 All checked hits were correct and reported target offsets differed by 2--8 bp.
-The same report's \texttt{no\_index} rows were mixed: BioSeqDB was slower at
-2 Gbp, but at 4 Gbp it took 171.34 s versus 276.41 s for dna4 and 190.40 s
-versus 227.36 s for dna5. The report observed approximately 15 GB of swap for
+The table shows mixed \texttt{no\_index} results. BioSeqDB was slower at
+2 Gbp and faster at 4 Gbp. The report observed approximately 15 GB of swap for
 minimap2 versus about 2.6 GB for BioSeqDB on the 4 Gbp no-index case. These
-numbers show the interaction between construction and memory pressure; they do
+historical numbers show the interaction between construction and memory
+pressure. They do
 not isolate a wire format.
 
 The apparent success of the \texttt{just\_index} rows coexisted with the
@@ -1183,6 +1323,10 @@ compact-direct reader route that did not turn a multi-gigabyte image into
 hundreds of thousands of heap fetches.
 
 \subsection{Intermediate results must retain their persistence label}
+
+Table~\ref{tab:index-mps-intermediate} keeps persistence status beside every
+intermediate timing so transient selectivity is not mistaken for a durable
+reader result.
 
 \begin{table}[ht]
   \centering
@@ -1206,13 +1350,13 @@ hundreds of thousands of heap fetches.
     Valid foreground MPS plus wait &
     303.399 / 91.316 s &
     650 persisted rows &
-    Correct 2 bp offset; about 210 s was outside the foreground region while
+    Correct 2 bp offset. About 210 s was outside the foreground region while
     persistence completed.\\
     DOC0301 A12 &
     transient no-persist recompute &
     about 89 s &
     none &
-    Useful recomputation baseline; not a cold persisted read.\\
+    Useful recomputation baseline, not a cold persisted read.\\
     DOC0301 A14 &
     adaptive waves &
     33.797 s wall &
@@ -1221,7 +1365,7 @@ hundreds of thousands of heap fetches.
     DOC0301 A16 &
     query-filtered transient target index &
     26.312--26.454 / 25.071--25.113 s &
-    none; audit rows \(=0\) &
+    none, with audit rows \(=0\) &
     Kept approximately 0.8076 percent of target minimizers and returned the
     correct 2 bp
     offset. Demonstrates selectivity only.\\
@@ -1237,19 +1381,43 @@ access dominate.
 
 \subsection{Current relation-provider compact-direct evidence}
 
-DOC0384 reports six retained BioSeqDB \texttt{just\_index} samples:
-\[
-  6.389712833,\ 5.401551458,\ 5.343038250,\ 5.368746000,\
-  5.610243750,\ 5.321436000\ \mathrm{s}.
-\]
-The run explicitly selected \texttt{compact\_h32\_direct}. Its
+Table~\ref{tab:index-doc0384-series} presents the six retained BioSeqDB
+\texttt{just\_index} samples from E2E Reports 147 through 152. Each report
+contains one raw sample, records \texttt{meta.dirty=true}, and lacks paired-rule
+evidence. Matching parameters, generation identity, database OID, and row
+counts make the series useful, but it is manually assembled and does not prove
+source-frozen same-binary continuity.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{DOC0384 manually assembled E2E Reports 147 through 152. The exact
+  3x gate is 5.495842361 s. ``Restart repeat'' means PostgreSQL was restarted,
+  not that operating-system page residency was measured.}
+  \label{tab:index-doc0384-series}
+  \begin{tabularx}{\linewidth}{rrrX}
+    \toprule
+    \textbf{E2E report} & \textbf{Index and map (s)} &
+    \textbf{3x gate} & \textbf{Run position}\\
+    \midrule
+    147 & 6.389712833 & fail & first post-build touch\\
+    148 & 5.401551458 & pass & restart repeat\\
+    149 & 5.343038250 & pass & restart repeat\\
+    150 & 5.368746000 & pass & restart repeat\\
+    151 & 5.610243750 & fail & restart repeat\\
+    152 & 5.321436000 & pass & restart repeat\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The series explicitly selected \texttt{compact\_h32\_direct}. Its
 \texttt{provider\_opened=0} attestation identifies the authoritative
 \texttt{postgres\_relation} provider. It is not evidence that provider 1
 opened successfully.
 DOC0384 labels 5.368746 s as P50 by selecting the lower-middle order statistic.
 For six samples this is not the conventional arithmetic median, which is
 \((5.368746000 + 5.401551458)/2 = 5.385148729\) s.  The report's 3.071020x
-ratio uses its stated P50 convention against a minimap2 P50 of 16.487527 s.
+ratio uses its stated P50 convention against a minimap2 P50 of 16.487527084 s.
 Using the conventional BioSeqDB median while leaving that baseline unchanged
 would give approximately 3.062x. Figure~\ref{fig:index-doc0384-bars} preserves
 the report-defined P50 so that its acceptance decision remains reproducible.
@@ -1286,16 +1454,44 @@ the report-defined P50 so that its acceptance decision remains reproducible.
 Correctness was exact for all 16 checked cases in match position, strand, and
 CIGAR. The speed result must retain its caveats. The report-defined P50 was only
 0.127096 s below the time corresponding to its 3x acceptance limit.
-The run used a manually assembled, dirty worktree, process-cold operating-system
-cache state was not fully specified, and not every individual run passed the
-3x boundary. A later fresh E2E row in the same report measured
-6.080941750 s versus 43.118770584 s (7.0908x in that same run), but it also
-recorded a wrapper/configuration artifact. It is corroboration that the new
-path is viable, not a statistically interchangeable replacement for the
-six-run distribution.
+The series was manually assembled from reports that record a dirty worktree.
+Process-cold operating-system cache state was not fully specified, and not
+every individual run passed the 3x boundary.
+
+Fresh E2E Report 154 is separate evidence, summarized in
+Table~\ref{tab:index-report154}. Here the ratio \(\rho=M/B\) divides minimap2
+time by BioSeqDB time. The sealed raw manifest was complete for the four
+configured rows, with zero rule violations, zero regressions, and exact 16/16
+mapping correctness for both tools in \texttt{just\_index} and
+\texttt{no\_index} modes.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Fresh E2E Report 154 \texttt{just\_index} corroboration. This is the
+  E2E report namespace, not the same-number full-suite report. It is a
+  same-run comparison and not a replacement for the six-report distribution.}
+  \label{tab:index-report154}
+  \begin{tabular}{lrrr}
+    \toprule
+    \textbf{Region} & \textbf{BioSeqDB (s)} &
+    \textbf{minimap2 (s)} & \textbf{\(\rho=M/B\)}\\
+    \midrule
+    Index and map & 6.080941750 & 43.118770584 & 7.090804740x\\
+    Outer E2E & 9.001988750 & 44.173812375 & 4.907117038x\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The Report 154 wrapper exited nonzero because its override omitted four
+unrelated registered benchmark schemas after the requested rowset had
+completed. This configuration-scope artifact does not invalidate the sealed
+raw rows. The report corroborates route viability under a fresh same-run
+comparison, but it is not statistically interchangeable with Reports
+147 through 152.
 
 These qualifications are not incidental. DOC0381 had shown a 6.220x outer
-wall-clock disadvantage for the prior cold relation path; DOC0384 shows that a
+wall-clock disadvantage for the prior cold relation path. DOC0384 shows that a
 different physical data plane can reverse the result. Neither number is a
 universal property of “indexes in PostgreSQL.” They measure particular source
 states, reader routes, and attested execution regions.
@@ -1328,7 +1524,7 @@ does not face:
 \end{itemize}
 
 There is also a semantic limitation inherited from deriving a minimizer index.
-It accelerates seed lookup; it does not turn BioSeqDB into a byte-identical
+It accelerates seed lookup. It does not turn BioSeqDB into a byte-identical
 minimap2 execution. Chapter~5 documents minimizer-scheme differences,
 Chapter~6 documents chaining differences, and Chapter~7 documents extension
 and CIGAR boundaries. The index compatibility contract ensures that BioSeqDB's
@@ -1374,3 +1570,7 @@ of heap fetches. The current solution is therefore not simply “store the
 minimap2 index in a table.” It separates logical organization, physical
 representation, reader route, compatibility, publication, and runtime view so
 each can be measured and changed without weakening the others.
+
+With persistent index identity and reader selection established, Chapter~13
+turns to reliable I/O ingestion, where source bytes must reach those indexed
+relations without truncation or ambiguous completion.

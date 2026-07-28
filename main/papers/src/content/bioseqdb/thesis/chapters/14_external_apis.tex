@@ -712,6 +712,9 @@ A live NCBI source test recorded on 13 July 2026 streamed the
 \(4.64\)-Mbp \emph{E. coli} record with a measured BioSeqDB carry-buffer peak
 no greater than 256~KiB.
 
+Table~\ref{tab:external-streaming-benchmark} compares the bounded streaming
+emitter with the whole-body comparator.
+
 \begin{table}[htbp]
   \centering
   \small
@@ -732,7 +735,10 @@ no greater than 256~KiB.
 Table~\ref{tab:external-streaming-benchmark} demonstrates a memory trade-off,
 not a throughput improvement. The whole-body comparator only counted letters,
 whereas the streaming path constructed payload messages. The throughput
-difference therefore does not estimate network or SQL overhead.
+difference therefore does not estimate network or SQL overhead. Relative to
+the 32.00~MiB comparator peak, the 1.06~MiB streaming peak is a \(96.7\%\)
+reduction. The \(30.2\times\) value in the table is the ratio between the two
+peaks, not a ``fold reduction.''
 
 The benchmark is a standalone Catch2 measurement, not a case in the formal
 \texttt{bench-io} matrix. The performance values are from DOC0374 session 2.
