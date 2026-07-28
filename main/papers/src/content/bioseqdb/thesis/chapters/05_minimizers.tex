@@ -179,40 +179,51 @@ and final-flush branches explicit.
 \caption{Minimap-style scalar event collector, including the semantic branches}
 \label{alg:minimap-scalar-events}
 \small
-\begin{algorithmic}[1]
-\Require packed or decoded sequence $S$, $k$, $w$
-\State initialize forward and reverse rolling encodings
-\State $\textit{ring}[0..w-1]\gets\infty$
-\State $\textit{current}\gets\infty$
-\For{each base $s_i$}
-  \If{$s_i$ is ambiguous}
-    \State reset valid-run length and both rolling encodings
-    \State $\textit{candidate}\gets\infty$
-  \Else
-    \State roll $(F,R)$
-    \State increment valid-run length
-    \If{at least $k$ clean bases and $F\ne R$}
-      \State $\textit{candidate}\gets
-        (H_{\mathrm{mm}}(\min(F,R)),i,\operatorname{strand}(F,R))$
-    \Else
-      \State $\textit{candidate}\gets\infty$
-    \EndIf
-  \EndIf
-  \State overwrite the next circular-buffer slot with \textit{candidate}
-  \If{this is the first full window}
-    \State emit other identities tied with \textit{current}
-  \EndIf
-  \If{$\textit{candidate.hash}\le\textit{current.hash}$}
-    \State emit old \textit{current} when the stream is armed
-    \State $\textit{current}\gets\textit{candidate}$
-  \ElsIf{the overwritten slot held \textit{current}}
-    \State emit old \textit{current}
-    \State rescan the ring with $\ge$
-    \State emit other identities tied with the rescanned minimum
-  \EndIf
-\EndFor
-\State unconditionally emit the final live \textit{current}
-\end{algorithmic}
+\textbf{Input:} packed or decoded sequence \(S\), \(k\), and \(w\).
+
+\textbf{Output:} the chronological minimizer event stream.
+
+\begin{enumerate}
+  \item Initialize the forward and reverse rolling encodings, then set
+    \[
+      \textit{ring}[0..w-1]\gets\infty,
+      \qquad
+      \textit{current}\gets\infty.
+    \]
+  \item For each base \(s_i\), perform the following steps.
+    \begin{enumerate}
+      \item Select a candidate.
+        \begin{itemize}
+          \item If \(s_i\) is ambiguous, reset the valid-run length and both
+            rolling encodings, then set
+            \(\textit{candidate}\gets\infty\).
+          \item Otherwise, roll \((F,R)\) and increment the valid-run length.
+            If there are at least \(k\) clean bases and \(F\ne R\), set
+            \[
+              \textit{candidate}\gets
+              \bigl(H_{\mathrm{mm}}(\min(F,R)),i,
+              \operatorname{strand}(F,R)\bigr).
+            \]
+            Otherwise, set \(\textit{candidate}\gets\infty\).
+        \end{itemize}
+      \item Overwrite the next circular-buffer slot with
+        \(\textit{candidate}\).
+      \item If this is the first full window, emit other identities tied with
+        \(\textit{current}\).
+      \item Apply the minimum-update branch.
+        \begin{itemize}
+          \item If
+            \(\textit{candidate.hash}\le\textit{current.hash}\), emit the old
+            \(\textit{current}\) when the stream is armed, then set
+            \(\textit{current}\gets\textit{candidate}\).
+          \item Otherwise, if the overwritten slot held
+            \(\textit{current}\), emit the old \(\textit{current}\), rescan the
+            ring with \(\ge\), and emit other identities tied with the
+            rescanned minimum.
+        \end{itemize}
+    \end{enumerate}
+  \item Unconditionally emit the final live \(\textit{current}\).
+\end{enumerate}
 \end{algorithm}
 
 An ambiguous input character resets the clean-base counter and rolling
@@ -439,26 +450,35 @@ PNT1 collector.
 \caption{BioSeqDB PNT1 data-independent ntHash minimizers}
 \label{alg:paper-nthash}
 \small
-\begin{algorithmic}[1]
-\Require dna4 sequence $S$, compile-time $k$, $w$
-\State split $S$ into eight logical streams with $k+w-2$ bases of context
-\State initialize vector forward/reverse ntHash states and a $w$-slot ring
-\For{each lock-step packed-symbol vector}
-  \State decode ranks directly from packed sequence words
-  \State update forward and reverse ntHash with rotations/XOR/table lookup
-  \State $h\gets H^F+H^R\pmod{2^{32}}$
-  \State record the per-$k$-mer strand from $H^R<H^F$
-  \State update the block prefix minimum with
-         $(h,p_\ell,p_r,z_\ell,z_r)$
-  \If{the $w$-slot block wrapped}
-    \State rebuild all suffix minima in a fixed reverse loop
-  \EndIf
-  \State combine one prefix and one suffix minimum
-  \State emit the left endpoint if its identity differs from the last output
-  \State emit the right endpoint too when the minimum is tied
-\EndFor
-\State reconcile the first/last identities of adjacent logical streams
-\end{algorithmic}
+\textbf{Input:} dna4 sequence \(S\), compile-time \(k\), and \(w\).
+
+\textbf{Output:} reconciled minimizer events from the eight logical streams.
+
+\begin{enumerate}
+  \item Split \(S\) into eight logical streams with \(k+w-2\) bases of
+    context.
+  \item Initialize vector forward and reverse ntHash states and a
+    \(w\)-slot ring.
+  \item For each lock-step packed-symbol vector, perform the following steps.
+    \begin{enumerate}
+      \item Decode ranks directly from packed sequence words.
+      \item Update forward and reverse ntHash with rotations, XOR, and table
+        lookup.
+      \item Set
+        \[
+          h\gets H^F+H^R\pmod{2^{32}},
+        \]
+        and record the per-\(k\)-mer strand from \(H^R<H^F\).
+      \item Update the block prefix minimum with
+        \((h,p_\ell,p_r,z_\ell,z_r)\).
+      \item If the \(w\)-slot block wrapped, rebuild all suffix minima in a
+        fixed reverse loop.
+      \item Combine one prefix and one suffix minimum.
+      \item Emit the left endpoint if its identity differs from the last
+        output. Emit the right endpoint too when the minimum is tied.
+    \end{enumerate}
+  \item Reconcile the first and last identities of adjacent logical streams.
+\end{enumerate}
 \end{algorithm}
 
 \subsection{Eight logical streams on variable-width SIMD}
@@ -788,28 +808,32 @@ tie-recovery path.
 \caption{ExactSimd B8 block, simplified}
 \label{alg:exact-b8}
 \small
-\begin{algorithmic}[1]
-\Require $K=15,W=10$, eight pending dna4 positions, continuation state
-\State load $22=K+8-1$ context symbols and SWAR-pack them
-\State extract eight overlapping forward K15 integers by fixed shifts
-\State construct eight reverse-complement integers
-\State $c\gets\min(f,r)$
-\State mark palindromes as max sentinels
-\State $h\gets H_{\mathrm{mm}}(c)$
-\State pack $(h,p,z)$ in raw metadata
-\State concatenate the saved $W-1$ candidate tail and eight new candidates
-\For{each of the $W$ chronological slots}
-  \State update eight lane minima using $\le$ (rightmost equal wins)
-\EndFor
-\State derive entering-minimum, expiry, first-window, and final event masks
-\If{no actual equal-hash/different-identity event}
-  \State stable-compress ordinary events directly
-\Else
-  \State build and transpose the exact tie-event matrix
-  \State stable-compress all chronological events
-\EndIf
-\State save the final $W-1$ candidates and current minima as continuation
-\end{algorithmic}
+\textbf{Input:} \(K=15\), \(W=10\), eight pending dna4 positions, and the
+continuation state.
+
+\textbf{Output:} chronological events and the updated continuation state.
+
+\begin{enumerate}
+  \item Load \(22=K+8-1\) context symbols and SWAR-pack them.
+  \item Extract eight overlapping forward K15 integers by fixed shifts, then
+    construct eight reverse-complement integers.
+  \item Set \(c\gets\min(f,r)\), mark palindromes as max sentinels, and set
+    \(h\gets H_{\mathrm{mm}}(c)\).
+  \item Pack \((h,p,z)\) in raw metadata.
+  \item Concatenate the saved \(W-1\) candidate tail and eight new candidates.
+  \item For each of the \(W\) chronological slots, update eight lane minima
+    using \(\le\), so the rightmost equal candidate wins.
+  \item Derive the entering-minimum, expiry, first-window, and final event
+    masks.
+  \item Select the emission path.
+    \begin{itemize}
+      \item If there is no actual equal-hash, different-identity event,
+        stable-compress ordinary events directly.
+      \item Otherwise, build and transpose the exact tie-event matrix, then
+        stable-compress all chronological events.
+    \end{itemize}
+  \item Save the final \(W-1\) candidates and current minima as continuation.
+\end{enumerate}
 \end{algorithm}
 
 The source still contains a separately attested full-resident
@@ -873,26 +897,35 @@ canonical sorting turn fragmented input into one PNT1 MPF generation.
 \caption{PNT1 MPF replay over fragmented packed storage}
 \label{alg:pnt1}
 \small
-\begin{algorithmic}[1]
-\Require manifest scheme $(1,1)$, packed dna4 sequence, physical cores
-\State require $K=15$, $W=10$, and full-u32 hash storage
-\State require representable positions and a four- or eight-lane vector shape
-\For{each core $[c_\ell,c_h)$ in logical order}
-  \State $r\gets W+K-2$
-  \State $s_\ell\gets\max(0,c_\ell-r)$
-  \State $s_h\gets\min(|S|,c_h+r)$
-  \State plan contiguous u32 access for $[s_\ell,s_h)$
-  \State borrow the interval or materialize it under memory admission
-  \State run the checked eight-stream PNT1 kernel on the bounded interval
-  \State require an accepted proof with magic \texttt{0x504E5431}
-  \State require zero fallback and fail-closed counters
-  \State translate segment-local positions to global positions
-  \State retain only events with position in $[c_\ell,c_h)$
-  \State sort by $(\textit{hash},\textit{encoded position})$
-  \State remove identical canonical events
-\EndFor
-\State publish the MPF generation with manifest scheme $(1,1)$
-\end{algorithmic}
+\textbf{Input:} manifest scheme \((1,1)\), a packed dna4 sequence, and
+physical cores.
+
+\textbf{Output:} a published MPF generation with manifest scheme \((1,1)\).
+
+\begin{enumerate}
+  \item Require \(K=15\), \(W=10\), full-u32 hash storage, representable
+    positions, and a four- or eight-lane vector shape.
+  \item For each core \([c_\ell,c_h)\) in logical order, perform the following
+    steps.
+    \begin{enumerate}
+      \item Set
+        \[
+          r\gets W+K-2,\qquad
+          s_\ell\gets\max(0,c_\ell-r),\qquad
+          s_h\gets\min(|S|,c_h+r).
+        \]
+      \item Plan contiguous u32 access for \([s_\ell,s_h)\).
+      \item Borrow the interval or materialize it under memory admission.
+      \item Run the checked eight-stream PNT1 kernel on the bounded interval.
+      \item Require an accepted proof with magic
+        \texttt{0x504E5431}, zero fallback, and zero fail-closed counters.
+      \item Translate segment-local positions to global positions.
+      \item Retain only events with positions in \([c_\ell,c_h)\).
+      \item Sort by \((\textit{hash},\textit{encoded position})\), then remove
+        identical canonical events.
+    \end{enumerate}
+  \item Publish the MPF generation with manifest scheme \((1,1)\).
+\end{enumerate}
 \end{algorithm}
 
 Table~\ref{tab:pnt1-contract} separates four implementations that were easy to
@@ -1088,39 +1121,37 @@ the compact two-pass route rather than every Phase C caller.
 \caption{Phase C compact count/scan/emit minimizer extraction}
 \label{alg:phase-c-minimizers}
 \small
-\begin{algorithmic}[1]
-\Require packed sequence descriptors, $(K,W)$, half-open tile ownership
-\For{pass $\in\{\mathrm{count},\mathrm{emit}\}$}
-  \ForAll{tiles in a grid-stride loop}
-    \State start at the tile's replay origin with empty scalar-derived state
-    \For{each logical symbol through the owned interval}
-      \State decode rank from the representation-specific packed layout
-      \State $\textit{candidate}\gets\infty$
-      \If{the symbol is invalid}
-        \State reset rolling encodings and valid-run length
-      \Else
-        \State roll forward and reverse encodings
-        \If{the clean run has length at least $K$ and is not palindromic}
-          \State canonicalize, scramble, and assign \textit{candidate}
-        \EndIf
-      \EndIf
-      \State overwrite the next ring slot with \textit{candidate}
-      \State apply first-window, rightmost-tie, and expiry rules
-      \ForAll{events triggered at this position}
-        \If{trigger is in the half-open owned interval}
-          \State count it, or write it at the scanned tile offset
-        \EndIf
-      \EndFor
-    \EndFor
-    \If{this tile owns sequence end and the final minimum is live}
-      \State count or emit the final minimum
-    \EndIf
-  \EndFor
-  \If{pass is \textsc{count}}
-    \State exclusive-scan tile counts and allocate the counted output
-  \EndIf
-\EndFor
-\end{algorithmic}
+\textbf{Input:} packed sequence descriptors, \((K,W)\), and half-open tile
+ownership.
+
+\textbf{Output:} the counted and emitted compact minimizer array.
+
+\begin{enumerate}
+  \item For each pass in
+    \(\{\textsc{count},\textsc{emit}\}\), perform the following steps.
+    \begin{enumerate}
+      \item For every tile in a grid-stride loop, perform the following steps.
+        \begin{enumerate}
+          \item Start at the tile's replay origin with empty scalar-derived
+            state.
+          \item For each logical symbol through the owned interval, decode its
+            rank from the representation-specific packed layout and set
+            \(\textit{candidate}\gets\infty\). If the symbol is invalid, reset
+            the rolling encodings and valid-run length. Otherwise, roll the
+            forward and reverse encodings. If the clean run has length at
+            least \(K\) and is not palindromic, canonicalize, scramble, and
+            assign \(\textit{candidate}\). Then overwrite the next ring slot
+            with \(\textit{candidate}\) and apply the first-window,
+            rightmost-tie, and expiry rules. For every event triggered at this
+            position, count it or write it at the scanned tile offset only if
+            its trigger lies in the half-open owned interval.
+          \item If this tile owns sequence end and the final minimum is live,
+            count or emit that minimum.
+        \end{enumerate}
+      \item If the pass is \textsc{count}, exclusive-scan tile counts and
+        allocate the counted output.
+    \end{enumerate}
+\end{enumerate}
 \end{algorithm}
 
 \subsubsection{Why the first GPU version was not the final one}

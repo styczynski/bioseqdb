@@ -202,30 +202,47 @@ global-best rescue explicit around the recurrence.
 \begin{algorithm}[tb]
 \caption{BioSeqDB scalar chaining, with control semantics made explicit}
 \label{alg:scalar-chaining}
-\begin{algorithmic}[1]
-\Require anchors sorted by the canonical order, chaining parameters
-\For{\(i=0,\ldots,n-1\)}
-  \State expire predecessors outside the strand/reference window
-  \State \(f_i\gets\ell_i,\ p_i\gets-1,\ c\gets0\)
-  \State \(j_{\min}\gets\max(\text{window-begin},i-\text{max-iterations})\)
-  \For{\(j=i-1,\ldots,j_{\min}\) in descending order}
-    \If{\((a_j,a_i)\) is geometrically admissible}
-      \State \(v\gets f_j+\alpha(i,j)\)
-      \If{\(v>f_i\)}
-        \State \(f_i\gets v,\ p_i\gets j,\ c\gets\max(0,c-1)\)
-      \ElsIf{\(p_j\ge0\) and predecessor \(p_j\) was marked for \(i\)}
-        \State \(c\gets c+1\)
-        \If{\(c>\text{max-skip}\)} \State \textbf{break} \EndIf
-      \EndIf
-      \State mark \(j\) as visited by generation \(i\)
-    \EndIf
-  \EndFor
-  \If{the best earlier global endpoint was not scanned and improves \(f_i\)}
-    \State adopt it as \(p_i\) \Comment{global-best rescue}
-  \EndIf
-\EndFor
-\State \Return \(f,p\)
-\end{algorithmic}
+\small
+\textbf{Input:} anchors sorted by the canonical order and the chaining
+parameters.
+
+\textbf{Output:} score vector \(f\) and predecessor vector \(p\).
+
+\begin{enumerate}
+  \item For \(i=0,\ldots,n-1\), perform the following steps.
+    \begin{enumerate}
+      \item Expire predecessors outside the strand/reference window.
+      \item Set
+        \[
+          f_i\gets\ell_i,\qquad p_i\gets-1,\qquad c\gets0.
+        \]
+      \item Set
+        \[
+          j_{\min}\gets
+          \max(\text{window-begin},i-\text{max-iterations}).
+        \]
+      \item Visit \(j=i-1,\ldots,j_{\min}\) in descending order. Whenever
+        \((a_j,a_i)\) is geometrically admissible, perform the following
+        updates.
+        \begin{itemize}
+          \item Set \(v\gets f_j+\alpha(i,j)\).
+          \item If \(v>f_i\), set
+            \[
+              f_i\gets v,\qquad
+              p_i\gets j,\qquad
+              c\gets\max(0,c-1).
+            \]
+          \item Otherwise, if \(p_j\ge0\) and predecessor \(p_j\) was marked
+            for \(i\), set \(c\gets c+1\). Break the descending visit when
+            \(c>\text{max-skip}\).
+          \item If the descending visit was not broken, mark \(j\) as visited
+            by generation \(i\).
+        \end{itemize}
+      \item If the best earlier global endpoint was not scanned and improves
+        \(f_i\), adopt it as \(p_i\). This is the global-best rescue.
+    \end{enumerate}
+  \item Produce \(f,p\).
+\end{enumerate}
 \end{algorithm}
 
 \subsection{Why the control flow is semantically observable}

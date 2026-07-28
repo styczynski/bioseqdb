@@ -312,36 +312,47 @@ flow for one query against one prepared target.
 \begin{algorithm}[H]
   \caption{Logical execution of one BioSeqDB query against one prepared target}
   \label{alg:bioseq-logical-pipeline}
-  \begin{algorithmic}[1]
-    \Require lazy query \(Q\), lazy target \(T\), target index \(I\), parameters \(P\)
-    \Ensure ordered collection of typed mapping results
-    \If{the entry point starts from sequence symbols}
-      \State \(M \gets \Call{Sketch}{Q,P.w,P.k,P.minimizer\_algorithm}\)
-    \Else
-      \State \(M \gets\) authenticated prebuilt query minimizers
-    \EndIf
-    \State \(A \gets \Call{LookupAndCanonicalize}{M,I,P.max\_occ}\)
-    \State \((C,A') \gets \Call{Chain}{A,P.chaining\_algorithm}\)
-    \State \(R \gets \Call{GenerateRegions}{C,A',|Q|}\)
-    \State \Call{ClassifyAndFilterSecondaries}{\(R,P\)}
-    \If{divergence was requested by the projection}
-      \State \Call{EstimateDivergence}{\(R,M,P.k\)}
-    \EndIf
-    \If{a conservative prefilter is enabled}
-      \State \Call{RejectImpossibleGapJobs}{\(R,A',Q,T,P\)}
-    \EndIf
-    \If{CIGAR output or edit distance requires extension}
-      \State \Call{ExtendRegions}{\(R,A',Q,T,P.base\_alignment\_algorithm\)}
-    \EndIf
-    \If{an exact edit predicate is active}
-      \State \(R \gets \Call{ApplyExactEditPredicate}{R,P}\)
-      \State \Call{ClassifyAndFilterSecondaries}{\(R,P\)}
-    \EndIf
-    \If{mapping quality was requested by the projection}
-      \State \Call{ComputeMapq}{\(R,P\)}
-    \EndIf
-    \State \Return \Call{ConvertToMatchResults}{\(R,|Q|,|T|\)}
-  \end{algorithmic}
+  \small
+  \textbf{Input:} lazy query \(Q\), lazy target \(T\), target index \(I\),
+  and parameters \(P\).
+
+  \textbf{Output:} an ordered collection of typed mapping results.
+
+  \begin{enumerate}
+    \item Select query minimizers \(M\).
+      \begin{itemize}
+        \item If the entry point starts from sequence symbols, set
+          \[
+            M \gets
+            \operatorname{Sketch}(Q,P.w,P.k,P.\texttt{minimizer\_algorithm}).
+          \]
+        \item Otherwise, set \(M\) to the authenticated prebuilt query
+          minimizers.
+      \end{itemize}
+    \item Set
+      \(A \gets \operatorname{LookupAndCanonicalize}(M,I,P.\texttt{max\_occ})\).
+    \item Set
+      \((C,A') \gets
+      \operatorname{Chain}(A,P.\texttt{chaining\_algorithm})\).
+    \item Set \(R \gets \operatorname{GenerateRegions}(C,A',|Q|)\).
+    \item Apply \(\operatorname{ClassifyAndFilterSecondaries}(R,P)\).
+    \item If divergence was requested by the projection, apply
+      \(\operatorname{EstimateDivergence}(R,M,P.k)\).
+    \item If a conservative prefilter is enabled, apply
+      \(\operatorname{RejectImpossibleGapJobs}(R,A',Q,T,P)\).
+    \item If CIGAR output or edit distance requires extension, apply
+      \[
+        \operatorname{ExtendRegions}
+        (R,A',Q,T,P.\texttt{base\_alignment\_algorithm}).
+      \]
+    \item If an exact edit predicate is active, replace
+      \(R\) with \(\operatorname{ApplyExactEditPredicate}(R,P)\), then apply
+      \(\operatorname{ClassifyAndFilterSecondaries}(R,P)\) again.
+    \item If mapping quality was requested by the projection, apply
+      \(\operatorname{ComputeMapq}(R,P)\).
+    \item Produce
+      \(\operatorname{ConvertToMatchResults}(R,|Q|,|T|)\).
+  \end{enumerate}
 \end{algorithm}
 
 \subsection{Preparation before the stage chain}
@@ -786,30 +797,45 @@ and backend choice interact at wave granularity.
 \begin{algorithm}[H]
   \caption{Memory-aware batch dispatch}
   \label{alg:bioseq-batch-dispatch}
-  \begin{algorithmic}[1]
-    \Require buffered SQL rows \(B\), typed layout \(S\), resolved parameters \(P\)
-    \State group rows by compatible query mode, target identity and index policy
-    \State estimate flat hydration bytes for every row
-    \State partition \(B\) into row-span waves under the live memory ceiling
-    \ForAll{waves \(W\)}
-      \State \(permit \gets \Call{TryReserve}{\Call{EstimatedBytes}{W}}\)
-      \If{\(permit\) exists}
-        \State hydrate only operands required by the selected kernel
-      \Else
-        \State retain lazy locators and stream through the PostgreSQL scanner
-      \EndIf
-      \State prepare or reuse one CPU/GPU target object for each physical target
-      \If{\Call{MandatoryVulkanTupleIsSelected}{\(P\)}}
-        \State require at least two jobs, complete tuple and usable runtime
-        \State sketch queries in batch and create query-segment jobs
-        \State execute admitted resident GPU waves with operation proofs
-      \Else
-        \State run typed scalar/SIMD queries serially or through the TBB pool
-      \EndIf
-      \State scatter result collections back to buffered row identifiers
-      \State finish read sessions, destroy wave storage, release \(permit\)
-    \EndFor
-  \end{algorithmic}
+  \small
+  \textbf{Input:} buffered SQL rows \(B\), typed layout \(S\), and resolved
+  parameters \(P\).
+
+  \textbf{Output:} result collections scattered back to their buffered row
+  identifiers.
+
+  \begin{enumerate}
+    \item Group rows by compatible query mode, target identity, and index
+      policy.
+    \item Estimate flat hydration bytes for every row.
+    \item Partition \(B\) into row-span waves under the live memory ceiling.
+    \item For every wave \(W\), perform the following steps.
+      \begin{enumerate}
+        \item Set
+          \[
+            permit \gets
+            \operatorname{TryReserve}(\operatorname{EstimatedBytes}(W)).
+          \]
+        \item If \(permit\) exists, hydrate only operands required by the
+          selected kernel. Otherwise, retain lazy locators and stream through
+          the PostgreSQL scanner.
+        \item Prepare or reuse one CPU/GPU target object for each physical
+          target.
+        \item Select the execution route.
+          \begin{itemize}
+            \item If
+              \(\operatorname{MandatoryVulkanTupleIsSelected}(P)\), require at
+              least two jobs, a complete tuple, and a usable runtime. Sketch
+              queries in batch, create query-segment jobs, and execute admitted
+              resident GPU waves with operation proofs.
+            \item Otherwise, run typed scalar/SIMD queries serially or through
+              the TBB pool.
+          \end{itemize}
+        \item Scatter result collections back to buffered row identifiers.
+        \item Finish read sessions, destroy wave storage, and release
+          \(permit\).
+      \end{enumerate}
+  \end{enumerate}
 \end{algorithm}
 
 \section{Description and execution evidence}
