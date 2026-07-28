@@ -937,41 +937,36 @@ general claim that GPU execution is always faster.
 
 \begin{figure}[ht]
   \centering
-  \begin{CacheMeCode}{python, custom include command={\input{\robExtAddCachePathAndName{\robExtFinalHash.pgf}}}, set placeholder eval={__LINEWIDTH__}{\lenToCmNoUnit[in]{\linewidth}}}
-    import matplotlib
-    matplotlib.use("pgf")
-    import matplotlib.pyplot as plt
-    import numpy as np
-    matplotlib.rcParams.update({
-      "font.family": "serif",
-      "font.serif": [],
-      "text.usetex": True,
-    })
-    cases = [
-      "16 queries, 300 Mbp\\ncoordinates",
-      "4096 queries, many-gap\\nCIGAR",
-    ]
-    gpu = np.array([10.585377791, 1.809468125])
-    simd = np.array([25.746412500, 4.511529167])
-    x = np.arange(len(cases))
-    width = 0.34
-    fig, ax = plt.subplots()
-    fig.set_size_inches(__LINEWIDTH__, 0.48*__LINEWIDTH__, forward=True)
-    bars_gpu = ax.bar(x-width/2, gpu, width, color="#2ca02c", label="Vulkan")
-    bars_simd = ax.bar(x+width/2, simd, width, color="#1f77b4", label="SIMD")
-    ax.set_ylabel("End-to-end wall time (s)", fontsize=8)
-    ax.set_xticks(x)
-    ax.set_xticklabels(cases, fontsize=7)
-    ax.tick_params(axis="y", labelsize=7)
-    ax.grid(axis="y", alpha=0.25)
-    ax.legend(frameon=False, fontsize=7)
-    for bars in (bars_gpu, bars_simd):
-      for bar in bars:
-        ax.text(bar.get_x()+bar.get_width()/2, bar.get_height(),
-                f"{bar.get_height():.2f}", ha="center", va="bottom", fontsize=6)
-    print(get_filename_from_extension(".pgf"))
-    plt.savefig(get_filename_from_extension(".pgf"), bbox_inches="tight")
-  \end{CacheMeCode}
+  \begin{tikzpicture}[x=1cm,y=0.145cm,font=\scriptsize]
+    \foreach \tick in {0,5,...,30} {
+      \draw[black!15] (0,\tick) -- (7.3,\tick);
+      \node[anchor=east] at (-0.12,\tick) {\tick};
+    }
+    \draw[->] (0,0) -- (7.45,0);
+    \draw[->] (0,0) -- (0,31);
+    \node[rotate=90,anchor=south] at (-0.75,15)
+      {end-to-end wall time (s)};
+
+    \fill[green!58!black] (1.15,0) rectangle (1.78,10.585);
+    \fill[blue!62]        (1.88,0) rectangle (2.51,25.746);
+    \node[anchor=south] at (1.465,10.585) {10.59};
+    \node[anchor=south] at (2.195,25.746) {25.75};
+
+    \fill[green!58!black] (4.65,0) rectangle (5.28,1.809);
+    \fill[blue!62]        (5.38,0) rectangle (6.01,4.512);
+    \node[anchor=south] at (4.965,1.809) {1.81};
+    \node[anchor=south] at (5.695,4.512) {4.51};
+
+    \node[align=center,anchor=north] at (1.83,-1.1)
+      {16 queries, 300 Mbp\\coordinates};
+    \node[align=center,anchor=north] at (5.33,-1.1)
+      {4,096 queries, many-gap\\CIGAR};
+
+    \fill[green!58!black] (2.35,29.0) rectangle ++(0.35,1.1);
+    \node[anchor=west] at (2.82,29.55) {Vulkan};
+    \fill[blue!62] (4.25,29.0) rectangle ++(0.35,1.1);
+    \node[anchor=west] at (4.72,29.55) {SIMD};
+  \end{tikzpicture}
   \caption{The two selected \texttt{report\_47.json} cases.  These one-sample
   source-configuration measurements demonstrate the effect of query batching
   and target-index reuse in their tested regimes.  They do not establish a
