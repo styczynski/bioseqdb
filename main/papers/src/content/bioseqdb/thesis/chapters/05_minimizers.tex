@@ -51,7 +51,7 @@ performance.
 \label{sec:minimizer-definition}
 
 Let $S=s_0s_1\ldots s_{n-1}$ be a sequence over an alphabet $\Sigma$.  For
-nucleotide sketching, valid bases are normalised to minimap2's nt4 codes
+nucleotide sketching, valid bases are normalized to minimap2's nt4 codes
 \[
   \eta(A)=0,\qquad \eta(C)=1,\qquad \eta(G)=2,\qquad \eta(T)=3,
 \]
@@ -83,7 +83,7 @@ the basic minimizer is an argument attaining
 \[
   m_j=\min_{x\in W_j} h(x).
 \]
-Random hashes make the same candidate the minimum of several neighbouring
+Random hashes make the same candidate the minimum of several neighboring
 windows. Adjacent windows therefore usually repeat a position. A collector
 emits a deduplicated event stream driven by entering minima, expiry, ties,
 first-window handling, and the final flush rather than one record per window. For
@@ -97,6 +97,9 @@ different identity''.  Two equal hashes at different positions are therefore
 ties to be reported, not duplicate machine words to be discarded.  This is why
 the final ExactSimd implementation carries both a hash vector and raw
 position/strand metadata through its rare tie path.
+
+Figure~\ref{fig:minimizer-windows} illustrates why a window minimum is an
+event-history contract rather than a single value per window.
 
 \begin{figure}[ht]
 \centering
@@ -164,6 +167,8 @@ candidate expires, the ring is scanned from oldest to newest with a
 (rightmost) equal candidate.  The first full window and expiry path also emit
 other equal-hash, different-identity candidates.  This chronology is more
 specific than the often-quoted rule ``deduplicate minimizer positions''.
+Algorithm~\ref{alg:minimap-scalar-events} makes the first-window, expiry, tie,
+and final-flush branches explicit.
 
 \begin{algorithm}[H]
 \caption{Minimap-style scalar event collector, including the semantic branches}
@@ -171,7 +176,7 @@ specific than the often-quoted rule ``deduplicate minimizer positions''.
 \small
 \begin{algorithmic}[1]
 \Require packed or decoded sequence $S$, $k$, $w$
-\State initialise forward and reverse rolling encodings
+\State initialize forward and reverse rolling encodings
 \State $\textit{ring}[0..w-1]\gets\infty$
 \State $\textit{current}\gets\infty$
 \For{each base $s_i$}
@@ -214,12 +219,15 @@ This was chosen so scalar and vector lanes share one chronological window
 shape.  It is a disclosed structural deviation from minimap2, not an accidental
 implementation detail.
 
+Table~\ref{tab:minimizer-semantics} compares the compatibility-defining
+semantics of the four retained reference and implementation routes.
+
 \begin{table}[ht]
 \centering
 \small
 \begin{tabularx}{\linewidth}{p{.19\linewidth}XXXX}
 \toprule
-Property & minimap2 \texttt{mm\_sketch} & BioSeq scalar / ExactSimd &
+Property & minimap2 \texttt{mm\_sketch} & BioSeqDB scalar / ExactSimd &
 PaperNtHashSimd & Vulkan Phase C\\
 \midrule
 Candidate hash & canonical two-bit integer, Wang scramble &
@@ -234,7 +242,8 @@ Ambiguity & reset clean run & reset, one invalid ring transition, no flush &
 production packed route is dna4-only and fails closed otherwise &
 rank LUT, rolling-state reset, $k$-base re-arm\\
 Fragment boundary & whole byte string & bounded continuation, no reset or replay &
-contiguous bounded execution, MPF uses replay halo, core ownership, then
+contiguous bounded execution, minimizers-per-fragment (MPF) replay halo,
+core ownership, then
 sort/unique & replay halo plus half-open tile ownership\\
 Persisted identity & minimap2 index format & legacy-minimap-v1 &
 manifest scheme $(1,1)$ & legacy-minimap-v1\\
@@ -267,22 +276,36 @@ more work even though it computed four hashes at once.
 
 \subsection{Deque, rescan, and two-stack formulations}
 
-There are three standard ways to maintain a sliding minimum:
+There are three standard ways to maintain a sliding minimum.
+Table~\ref{tab:sliding-minimum-formulations} separates their state updates from
+the control-flow tradeoff that determines SIMD suitability.
 
-\begin{description}
-  \item[Rescan.] Keep a circular buffer and a current minimum. Scan $w$
-    candidates only when that minimum expires.  Expected linear time and very
-    small scalar state, but data-dependent work.
-  \item[Monotone deque.] Remove expired indices from the front and candidates
-    no smaller than the entering value from the back.  Amortised $O(n)$, but
-    each candidate executes a data-dependent number of pops.  It vectorises
-    poorly for the same reason.
-  \item[Prefix/suffix or two-stack minimum.] Partition candidates into blocks
-    of $w$.  Store prefix minima from the start of the current block and suffix
-    minima from the end of the previous block.  A crossing window is the
-    minimum of exactly two precomputed values.  The suffix pass runs once every
-    $w$ candidates and always has the same length.
-\end{description}
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Sliding-minimum formulations and their execution tradeoffs.}
+  \label{tab:sliding-minimum-formulations}
+  \begin{tabularx}{\linewidth}{p{0.20\linewidth}XX}
+    \toprule
+    Formulation & State update & Execution tradeoff \\
+    \midrule
+    Rescan &
+    Keep a circular buffer and scan its \(w\) candidates when the saved
+    minimum expires. &
+    Expected linear time and very small scalar state, but data-dependent work. \\
+    Monotone deque &
+    Remove expired indices from the front and candidates no smaller than the
+    entering value from the back. &
+    Amortized \(O(n)\), but each candidate performs a data-dependent number of
+    pops and therefore vectorizes poorly. \\
+    Prefix/suffix or two-stack minimum &
+    Partition candidates into blocks of \(w\), storing prefix minima for the
+    current block and suffix minima for the preceding block. &
+    Each crossing window combines exactly two values. The fixed-length suffix
+    pass runs once per \(w\) candidates. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 For a hash sequence $a_0,\ldots,a_{n-1}$, let block
 $B_q=(a_{qw},\ldots,a_{qw+w-1})$.  Define
@@ -297,6 +320,9 @@ for $i\in B_q$.  If a window begins at $j$ and ends at $e=j+w-1$,
 Both input and control flow are therefore regular.  A tie-aware combine can
 carry $(h,p_\ell,p_r)$ instead of a single hash, retaining the leftmost and
 rightmost positions that attain $h$.
+
+Figure~\ref{fig:two-stack-minimum} shows how two precomputed extrema replace a
+data-dependent rescan for every crossing window.
 
 \begin{figure}[ht]
 \centering
@@ -341,7 +367,7 @@ $r$ (BioSeqDB freezes $r=7$). For a $k$-mer beginning at $i$,
        \operatorname{rotl}\!\left(f(\overline{s_{i+j}}),rj\right).
 \end{aligned}
 \]
-After the $O(k)$ initialisation, the forward state advances in constant time:
+After the $O(k)$ initialization, the forward state advances in constant time:
 \[
  H^F_{i+1}=
  \operatorname{rotl}(H^F_i,r)
@@ -357,6 +383,9 @@ BioSeqDB PNT1 scheme the canonical key is the wrapping 32-bit sum
 while the stored strand records whether $H^R_i<H^F_i$.  This differs
 fundamentally from applying minimap2's integer scramble to
 $\min(F_i,R_i)$. The two schemes cannot share a persisted index.
+
+Table~\ref{tab:upstream-pnt-delta} separates the upstream
+SIMD-Minimizers contract from BioSeqDB's PNT1 contract.
 
 \begin{table}[ht]
 \centering
@@ -396,6 +425,9 @@ reverse-complement-symmetric endpoint superset without importing the upstream
 window-orientation counter. Table~\ref{tab:upstream-pnt-delta} makes the
 incompatibility explicit.
 
+Algorithm~\ref{alg:paper-nthash} summarizes BioSeqDB's tie-aware, eight-stream
+PNT1 collector.
+
 \begin{algorithm}[H]
 \caption{BioSeqDB PNT1 data-independent ntHash minimizers}
 \label{alg:paper-nthash}
@@ -403,7 +435,7 @@ incompatibility explicit.
 \begin{algorithmic}[1]
 \Require dna4 sequence $S$, compile-time $k$, $w$
 \State split $S$ into eight logical streams with $k+w-2$ bases of context
-\State initialise vector forward/reverse ntHash states and a $w$-slot ring
+\State initialize vector forward/reverse ntHash states and a $w$-slot ring
 \For{each lock-step packed-symbol vector}
   \State decode ranks directly from packed sequence words
   \State update forward and reverse ntHash with rotations/XOR/table lookup
@@ -425,7 +457,7 @@ incompatibility explicit.
 \subsection{Eight logical streams on variable-width SIMD}
 
 The original Rust implementation fixes eight 32-bit lanes.  It splits the
-sequence into eight contiguous chunks and overlaps neighbouring chunks by
+sequence into eight contiguous chunks and overlaps neighboring chunks by
 $k+w-2$ bases so that each owned window has enough left and right context.
 Window minima are produced lane-wise, transposed back to sequence order, and
 deduplicated at chunk joins.
@@ -448,6 +480,9 @@ collector does not promise a global append order across the eight lock-step
 streams. Persisted MPF output establishes its canonical order later by sorting
 the pair $(\textit{hash},\textit{encoded position})$ and removing identical
 records.
+
+Figure~\ref{fig:paper-simd-streams} relates the eight logical streams to
+variable physical vector width and boundary deduplication.
 
 \begin{figure}[ht]
 \centering
@@ -496,6 +531,9 @@ PNT1 contract.}
 \label{fig:paper-simd-streams}
 \end{figure}
 
+Table~\ref{tab:upstream-simd-minimizers} reports the published upstream
+throughput separately from BioSeqDB measurements.
+
 \begin{table}[ht]
 \centering
 \small
@@ -536,7 +574,7 @@ to an accuracy claim. Second, each lane's data-dependent rescan forced
 horizontal tests and masked buffer updates.  The SIMD unit was busy, but the
 instruction stream did more bookkeeping than the scalar loop.
 
-Micro-optimisations could not repair that algorithmic shape.  DOC0108 replaced
+Micro-optimizations could not repair that algorithmic shape.  DOC0108 replaced
 general complement work with dna4 XOR, hoisted palindrome masks, and fused
 lane predicates.  Its measured collector moved only from approximately
 40.8 to 39.6 ms while the scalar reference remained near
@@ -561,7 +599,7 @@ remain useful:
 
 \begin{itemize}
   \item direct traversal of packed sequence storage.
-  \item static $w=10,k=15$ specialisation.
+  \item static $w=10,k=15$ specialization.
   \item two independent vector streams on NEON to expose instruction-level
         parallelism.
   \item explicit transposition and stable compression of lane outputs.
@@ -582,7 +620,7 @@ detection on its long dual-stream route and had stream-topology-dependent
 boundaries.  It is therefore historical approximate evidence, not a
 byte-for-byte baseline for today's ExactSimd continuation.
 
-The optimisation sequence was nevertheless informative.  The V8 ordering
+The optimization sequence was nevertheless informative.  The V8 ordering
 change roughly halved the expensive inner work, V11 interleaved two independent
 streams, and V12 removed a surviving out-of-line lambda. The recorded inner
 phase fell to approximately 9.23 ms on that report's case.  V13's largest win
@@ -595,6 +633,9 @@ true ntHash table lookup, adding about 2 ms of sketch time while saving only
 correctly rejected as a net loss.  The later PNT1 backend succeeds because it
 changes the entire hash/window scheme coherently and records that new scheme,
 not because a table lookup was dropped into a legacy index.
+
+Table~\ref{tab:minimizer-history} condenses the heterogeneous intermediate
+experiments without treating them as one common benchmark series.
 
 \begin{table}[ht]
 \centering
@@ -636,18 +677,21 @@ minimap-style event stream over a lazy, fragmented packed sequence without
 falling back to scalar sketching?  Its public checked driver is in
 \path{main/bioseq/backend/sequences/kmers/two_stacks_minimizers.cppm}.
 Despite historical function names containing \texttt{nthash}, this path
-canonicalises the two-bit forward/reverse $k$-mer and applies the minimap
+canonicalizes the two-bit forward/reverse $k$-mer and applies the minimap
 integer scramble.  It is not ntHash.
 
 \subsubsection{Bounded state across arbitrary fragments}
 
 For a static $W,K$, \texttt{TwoStackContinuationState} retains at most
-$K-1$ normalised nt4 codes, $W-1$ candidate hashes/raw records/ordinals, less
+$K-1$ normalized nt4 codes, $W-1$ candidate hashes/raw records/ordinals, less
 than one pending SIMD block, the current minimum, counters, and execution
 proof.  A fragment boundary neither resets nor replays the biological
 algorithm.  The next call completes the pending chronological block and
 continues from the saved carries.  The memory bound depends on $K$, $W$, and
 the vector width, not on sequence length or fragment count.
+
+Figure~\ref{fig:exact-continuation} distinguishes an invisible storage-fragment
+boundary from an ambiguity event that resets biological state.
 
 \begin{figure}[ht]
 \centering
@@ -686,9 +730,9 @@ window state used by the scalar reference.}
 For dna5, packed symbols do not form a continuous bit stream across storage
 words because three bits per symbol leave unused high bits.  The generic
 decoder therefore prepares source-word addresses and shifts per active lane,
-then performs rank extraction, rank-to-nt4 normalisation, and ambiguity
+then performs rank extraction, rank-to-nt4 normalization, and ambiguity
 classification as Highway vector operations.  Scalar orchestration is
-reported separately and never hashes, canonicalises, selects a minimum, or
+reported separately and never hashes, canonicalizes, selects a minimum, or
 emits a record.  Unsupported alphabets, storage shapes, position ranges, or
 scalar Highway targets return a checked status and are converted into
 \texttt{ExactSimdRuntimeError}. The selected Exact backend does not silently
@@ -708,10 +752,11 @@ and scans $W$ candidates for each vector group. The same uniquely named
 slowness event log showed why this exact approach regressed. On a 500 Mbp
 target an older two-lane version executed
 about 250 million vector batches but 9.75 billion scalar-orchestration steps,
-behaving like $O(N(K+W)/2)$ rather than a rolling hash plus amortised minimum.
+behaving like $O(N(K+W)/2)$ rather than a rolling hash plus amortized minimum.
 
-The retained specialisation processes eight candidates at a time.  It takes
-the $K+B-1=22$ needed dna4 codes, SWAR-packs them into 44 bits, extracts eight
+The retained specialization processes eight candidates at a time.  It takes
+the $K+B-1=22$ needed dna4 codes, applies SIMD within a register (SWAR) to pack
+them into 44 bits, and extracts eight
 overlapping 30-bit K15 words through fixed shifts, forms forward and reverse
 orientations in two independent u32 streams, applies the exact minimap
 scramble, and carries 64-bit position/strand metadata separately.  The
@@ -728,6 +773,9 @@ the raw verifier and tie matrix.  When that rare route is needed, the kernel
 constructs event 0 (the old minimum) plus up to $W$ tied identities per lane,
 transposes the event matrix in registers, and stable-compresses rows in
 chronological order.
+
+Algorithm~\ref{alg:exact-b8} isolates the specialized exact block and its rare
+tie-recovery path.
 
 \begin{algorithm}[H]
 \caption{ExactSimd B8 block, simplified}
@@ -785,7 +833,7 @@ a tempting hidden substitution into an explicit index contract without
 confusing execution evidence with the wire identifier.
 
 The public PNT1 route currently accepts only $K=15$, $W=10$, and packed dna4.
-It requires a contiguous borrowed or admission-materialised u32 interval, a
+It requires a contiguous borrowed or admission-materialized u32 interval, a
 minimizer representation with all 32 hash bits, a representable position
 range, and a Highway target with four or eight physical u32 lanes. The kernel
 keeps eight logical streams and maps them onto one or two physical vector
@@ -799,7 +847,7 @@ unspecified.
 
 PNT1 does not carry rolling or minimum continuation state across physical
 fragments. A bounded query request borrows one contiguous interval or
-materialises that interval under memory admission before invoking the checked
+materializes that interval under memory admission before invoking the checked
 kernel. The persisted MPF producer handles fragmented storage at a different
 level. For each physical core $[c_\ell,c_h)$ it rescans a bounded interval with
 a halo of $W+K-2$ bases, accepts only events whose global positions lie in the
@@ -809,6 +857,9 @@ event from surviving in two cores. If any storage, vector-shape, position, or
 scheme proof is missing, the selected backend fails closed. It does not
 reinterpret dna5 bytes and it does not fall through to a differently named
 scheme.
+
+Algorithm~\ref{alg:pnt1} shows how bounded replay, half-open ownership, and
+canonical sorting turn fragmented input into one PNT1 MPF generation.
 
 \begin{algorithm}[H]
 \caption{PNT1 MPF replay over fragmented packed storage}
@@ -823,7 +874,7 @@ scheme.
   \State $s_\ell\gets\max(0,c_\ell-r)$
   \State $s_h\gets\min(|S|,c_h+r)$
   \State plan contiguous u32 access for $[s_\ell,s_h)$
-  \State borrow the interval or materialise it under memory admission
+  \State borrow the interval or materialize it under memory admission
   \State run the checked eight-stream PNT1 kernel on the bounded interval
   \State require an accepted proof with magic \texttt{0x504E5431}
   \State require zero fallback and fail-closed counters
@@ -839,7 +890,7 @@ scheme.
 Table~\ref{tab:pnt1-contract} separates four implementations that were easy to
 conflate during development.  In particular, the V13 resident experiment is
 not the ancestor of the persisted PNT1 hash: V13's destructive prefix-hash
-optimisation collapsed effective entropy to roughly 14 bits and was reverted.
+optimization collapsed effective entropy to roughly 14 bits and was reverted.
 
 \begin{table}[htbp]
 \centering
@@ -848,7 +899,7 @@ optimisation collapsed effective entropy to roughly 14 bits and was reverted.
 \small
 \begin{tabularx}{\textwidth}{p{0.19\textwidth}XXXX}
 \toprule
-Property & SIMD-Minimizers reference & BioSeq PNT1 & BioSeq ExactSimd &
+Property & SIMD-Minimizers reference & BioSeqDB PNT1 & BioSeqDB ExactSimd &
 Historical resident V13 \\
 \midrule
 Hash family & rolling ntHash, 16-bit packed key & rolling ntHash-derived,
@@ -875,18 +926,18 @@ Two consequences are important for SQL users.  First, a query sketch and the
 stored target index must name the same scheme. Matching hashes from different
 families is meaningless even if both fields happen to be 32 bits wide.
 Second, changing a seed contract is an index-format migration, not a local
-micro-optimisation.  The catalogue and on-disk header can reject a mismatch
+micro-optimization.  The catalog and on-disk header can reject a mismatch
 before the false-negative failure reaches the chaining stage.
 
 \subsection{Vulkan Phase C: exact extraction on the device}
 \label{sec:vulkan-minimizers}
 
-The GPU implementation follows a different optimisation path.  Its purpose is
+The GPU implementation follows a different optimization path.  Its purpose is
 not to reproduce the eight-stream PNT1 decomposition, but to execute the
 minimap-compatible scalar state machine over device-resident packed sequences.
 It belongs to Phase C of the GPU pipeline: metadata, packed bases, sketch
 events, seed hits, and downstream work can remain on the device.  This avoids
-making a fast kernel irrelevant by repeatedly materialising sequences or
+making a fast kernel irrelevant by repeatedly materializing sequences or
 events on the host.
 
 \subsubsection{Relationship to G3SA}
@@ -902,8 +953,8 @@ small DNA-plus-\texttt{N} alphabet and treats an invalid character as a local
 \texttt{continue}. That is not equivalent to resetting every window that
 spans the symbol.
 
-BioSeqDB adopts the useful system-level lesson---keep the data and successive
-stages resident---but not those sketch semantics.  The implementation uses
+BioSeqDB adopts the useful system-level lesson of keeping data and successive
+stages resident, but not G3SA's sketch semantics.  The implementation uses
 Vulkan compute shaders, packed generic sequence descriptors, rolling
 forward/reverse encodings, and an exact minimap scramble. Its compact output
 route uses count/scan/emit. Its persisted sorted-pair route uses atomic append
@@ -935,7 +986,7 @@ Ambiguity & skip the current position & reset rolling validity, advance one max
 sentinel through the existing chronological window state \\
 Boundary ownership & read-local & replay overlap plus half-open owned trigger
 interval \\
-Compatibility target & minimap2-inspired & scalar BioSeq/minimap event stream,
+Compatibility target & minimap2-inspired & scalar BioSeqDB/minimap event stream,
 including ties and final flush \\
 \bottomrule
 \end{tabularx}
@@ -949,15 +1000,19 @@ therefore invent resets and lose boundary events.  Phase C solves this with
 replay and ownership.  For a tile whose owned trigger interval is
 $[b,e)$, the shader begins earlier by a conservative overlap currently bounded
 by $K+W+1$, reconstructs the exact state, and emits only events whose trigger
-position lies in $[b,e)$.  Neighbouring tiles may recompute context, but they
+position lies in $[b,e)$.  Neighboring tiles may recompute context, but they
 cannot both own the same event.
 
 The planner targets approximately 256 logical bases and rounds storage
 according to the sequence representation. A dna5 packing shape therefore
-commonly produces 252-base logical tiles.  The ABI bounds the supported span
+commonly produces 252-base logical tiles.  The Phase C application binary
+interface (ABI) bounds the supported span
 and currently admits up to 384 bases including replay.  Those numbers are
 planner parameters, not algorithmic constants: correctness follows from
 replay coverage and half-open ownership, not from the nominal tile size.
+
+Figure~\ref{fig:phase-c-tiles} shows the replay overlap, disjoint ownership,
+and deterministic count/scan/emit path.
 
 \begin{figure}[htbp]
 \centering
@@ -1024,7 +1079,7 @@ the compact two-pass route rather than every Phase C caller.
       \Else
         \State roll forward and reverse encodings
         \If{the clean run has length at least $K$ and is not palindromic}
-          \State canonicalise, scramble, and assign \textit{candidate}
+          \State canonicalize, scramble, and assign \textit{candidate}
         \EndIf
       \EndIf
       \State overwrite the next ring slot with \textit{candidate}
@@ -1052,7 +1107,7 @@ The development record is instructive because each intermediate version was
 plausible in isolation:
 
 \begin{enumerate}
-  \item Phase B used a mixture of host metadata and specialised GPU work.  A
+  \item Phase B used a mixture of host metadata and specialized GPU work.  A
   4096-base dna5 case produced 859 events where the scalar oracle produced
   795.  Changing padding and inserting \texttt{N} symbols did not remove the
   excess, pointing to ownership/state rather than input corruption
@@ -1088,8 +1143,8 @@ Report 103, recorded on 11 July 2026 in
 is a useful historical four-configuration checkpoint. It is not the current
 production-backend decision. The local Darwin arm64/NEON run contains 16
 complete raw records, which gives four observations for each configuration.
-The table reports the recorded P50 values. Every observation produced one
-correct primary alignment at zero base-pair offset. The focused executable
+The table reports the recorded 50th-percentile (P50) values. Every observation
+produced one correct primary alignment at zero base-pair offset. The focused executable
 returned status one only because globally registered rules matched none of the
 deliberately filtered cases. It recorded zero algorithm-rule violations and
 zero regressions.
@@ -1098,6 +1153,10 @@ This was a controlled component/pipeline experiment, not restart-cold
 \texttt{just\_index} evidence and not a promise of ingestion throughput. The
 PNT1 rows used a PNT1-built target index. The minimap2 and ExactSimd rows used
 their compatible index contracts.
+
+Table~\ref{tab:cpu-report103-minimizers} records the four compatible
+configurations without promoting this checkpoint to the current backend
+decision.
 
 \begin{table}[htbp]
 \centering
@@ -1120,6 +1179,9 @@ reference \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+Figure~\ref{fig:cpu-report103-minimizers} visualizes only the sketch component
+of those configurations.
 
 \begin{figure}[htbp]
 \centering
@@ -1146,7 +1208,7 @@ configurations rather than interchangeable function bodies.}
 \end{figure}
 
 The checkpoint closes one historical loop begun by the disappointing DOC0113
-microbenchmark. Merely vectorising minimap2's scan did not help on those long
+microbenchmark. Merely vectorizing minimap2's scan did not help on those long
 inputs. Report 103 showed that a separately named seed contract could be
 evaluated coherently with its matching index and downstream consumers. Within
 this one experiment, PNT1 sketching was
@@ -1166,7 +1228,8 @@ scheme with its own manifest identity.
 
 Newer measurements explain why report 103 cannot close the CPU story.
 DOC0384 report 134 measures the exact B8 query sketch at
-1.903142375\,s, down from approximately 2.72\,s on its retained E2E fixture.
+1.903142375\,s, down from approximately 2.72\,s on its retained end-to-end
+(E2E) fixture.
 Reports 136 through 140 retain values of approximately 1.90--1.92\,s with exact
 biological and CIGAR parity. These E2E query-sketch values use a different
 fixture and pipeline boundary from report 103, so no absolute ratio is
@@ -1177,7 +1240,7 @@ production sign-off. It is structurally complete, yet it has no
 \texttt{just\_index} cell and its B8 route counters are zero. Its two
 Paper-ntHash comparisons are unequal-work prototype diagnostics. Their raw
 ratios are approximately 1.46--1.48 relative to the exact-SIMD oracle, and
-normalisation by recorded input volume gives approximately 1.397. The current
+normalization by recorded input volume gives approximately 1.397. The current
 evidence therefore supports ExactSimd as the production/default CPU route.
 PNT1 remains a versioned alternative whose future production use would require
 an equal-work experiment. DOC0384 identifies winner-only or rare-tie recovery
@@ -1225,7 +1288,7 @@ history but invalid as final claims.  Report 76 measured a 1.982\,s resident
 vector route against a 9.416\,s scalar route, yet later forensic work found
 approximate lexicographic/golden-ratio hashes, missing dual-stream palindrome
 semantics, and topology-dependent boundaries.  Report 90 restored exactness
-but regressed to 66.273\,s. Later specialisation reduced that to 13.413\,s and
+but regressed to 66.273\,s. Later specialization reduced that to 13.413\,s and
 eventually the historical report-103 value of 9.256\,s. Those experiments show
 why performance must be attached to an audited contract, not merely to the class name
 \texttt{TwoStackMinimizerAlgorithm}.
@@ -1269,6 +1332,9 @@ only after it has chosen a compatible sketch/index scheme:
   execution begins. Once VulkanSegment is selected, a device decline is an
   error rather than a silent host fallback.
 \end{description}
+
+Figure~\ref{fig:minimizer-selection} summarizes how persisted scheme identity
+precedes backend admission and fail-closed execution.
 
 \begin{figure}[htbp]
 \centering
@@ -1322,8 +1388,8 @@ decline is an error.}
 
 Several limitations remain visible rather than hidden behind automatic
 fallbacks. PNT1 currently requires $K=15$, $W=10$, proved contiguous or
-admission-materialised u32 dna4, a full-u32 hash field, representable positions,
-and a four- or eight-lane Highway shape. ExactSimd's best-specialised
+admission-materialized u32 dna4, a full-u32 hash field, representable positions,
+and a four- or eight-lane Highway shape. ExactSimd's best specialized
 continuation is the common $K=15,W=10$, eight-position shape. Other supported
 shapes use its generic exact-vector route. If ExactSimd admission fails,
 dispatch may select Scalar explicitly before ExactSimd execution begins. Once
@@ -1353,7 +1419,7 @@ loop. They are:
 
 Table~\ref{tab:minimizer-source-map} records the authoritative code regions
 used for this chapter.  Line numbers describe the version inspected for this
-draft and should be refreshed if the modules are reformatted.  The archive was
+thesis and should be refreshed if the modules are reformatted.  The archive was
 used to explain the path to the implementation. Current call sites and scheme
 identifiers were used to decide what the implementation is now.
 
@@ -1367,11 +1433,11 @@ identifiers were used to decide what the implementation is now.
 Source & Lines inspected & Evidence \\
 \midrule
 \texttt{main/bioseq/backend/sequences/kmers/index.cppm} &
-70--220; 776--968 &
+70--220 and 776--968 &
 layout widths, persisted sketch fields, backend enumeration, scalar oracle,
 ambiguity and tie/final-event rules \\
 \texttt{main/bioseq/backend/sequences/kmers/two\_stacks\_minimizers.cppm} &
-557--629; 2367--3435; 4036--4085; 5461--6020 &
+557--629, 2367--3435, 4036--4085, and 5461--6020 &
 Exact continuation proofs, exact B8 path, bounded PNT1 execution, resident
 control, and current pipeline routing \\
 \texttt{main/bioseq/backend/pipeline/minimap\_port.cppm} and
@@ -1416,7 +1482,7 @@ pipeline comparison \\
 
 Minimizer extraction began as a familiar rolling-hash loop and became a lesson
 in systems correctness. The observable object is not merely the minimum hash
-of a window. Its identity depends on canonicalisation, hash width, tie
+of a window. Its identity depends on canonicalization, hash width, tie
 direction, equal-hash $K$-mer identity, palindromes, ambiguity resets, fragment
 ownership, position width, and the final flush. ExactSimd and the compact
 Phase C route expose a chronological event stream. The PNT1 collector instead
@@ -1436,6 +1502,6 @@ resident-pipeline insight \cite{g3sa_paper} and reconstructs the sketch around
 BioSeqDB's packed representations, exact reset semantics, and replay
 ownership. Its compact route uses deterministic count/scan/emit allocation.
 Its sorted-pair persistence route uses atomic append followed by a stable
-device sort. In every route, an optimisation is accepted only when the seed
+device sort. In every route, an optimization is accepted only when the seed
 scheme, storage proof, boundary ownership, execution evidence, and measured
 downstream result agree.

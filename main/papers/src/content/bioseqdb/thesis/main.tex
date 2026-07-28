@@ -45,7 +45,7 @@
 %   - !partial
 %     title: Minimizer extraction
 %     path: chapters/05_minimizers
-%     description: explains minimizer sketching, rolling hashing, SIMD and Vulkan implementations, comparison with minimap2 and SIMD-Minimizers, and the optimisations selected for the final system.
+%     description: explains minimizer sketching, rolling hashing, SIMD and Vulkan implementations, comparison with minimap2 and SIMD-Minimizers, and the optimizations selected for the final system.
 %   - !partial
 %     title: Chaining seed anchors
 %     path: chapters/06_chaining
@@ -69,7 +69,7 @@
 %   - !partial
 %     title: Physical sequence storage in PostgreSQL
 %     path: chapters/11_postgres_storage
-%     description: explains the columnar-derived storage layout, fragment metadata, cache and request locking, and vectorised metadata processing.
+%     description: explains the columnar-derived storage layout, fragment metadata, cache and request locking, and vectorized metadata processing.
 %   - !partial
 %     title: Persistent sequence indexes
 %     path: chapters/12_index_storage
@@ -77,7 +77,7 @@
 %   - !partial
 %     title: Reliable sequence ingestion
 %     path: chapters/13_io_loading
-%     description: presents the bounded IO pipeline for FASTA and FASTQ data, compression, header parsing, typed PostgreSQL writes, failure handling, and measured throughput.
+%     description: presents the bounded input/output (I/O) pipeline for FASTA and FASTQ data, compression, header parsing, typed PostgreSQL writes, failure handling, and measured throughput.
 %   - !partial
 %     title: External sequence providers
 %     path: chapters/14_external_apis
@@ -85,7 +85,7 @@
 %   - !partial
 %     title: Source-driven SQL code generation
 %     path: chapters/15_sql_codegen
-%     description: documents structural source analysis, annotations, dependency graphs, SQL and fmgr generation, safety ledgers, reproducibility controls, and migration from handwritten boundary code.
+%     description: documents structural source analysis, annotations, dependency graphs, SQL and PostgreSQL function-manager generation, safety ledgers, reproducibility controls, and migration from handwritten boundary code.
 %   - !partial
 %     title: Conclusions
 %     path: chapters/16_conclusion
@@ -105,8 +105,8 @@
     scans.
     The work is both algorithmic and systems-oriented.  It develops
     alphabet-generic bit-packed sequence views, scalar and
-    single-instruction, multiple-data (SIMD) minimizer extraction, and Vulkan
-    implementations of
+    single-instruction, multiple-data (SIMD) minimizer extraction, and
+    implementations for graphics processing units (GPUs) using Vulkan for
     selected sketching and chaining operations, exact extension based on
     established dynamic-programming kernels, and optional SneakySnake and
     GateKeeper prefilters.  It also develops persistent database-resident
@@ -140,7 +140,9 @@
     reference interval belongs to an assembly and annotation release.
     An alignment has a score, a strand, a position, an edit path, and a
     relationship to experimental metadata.  Conventional workflows keep
-    the strings in FASTA, FASTQ, SAM, BAM, or mapper-specific index files
+    the strings in FASTA and FASTQ sequence files, Sequence Alignment/Map
+    (SAM) and Binary Alignment/Map (BAM) alignment files, or mapper-specific
+    index files
     while keeping much of the surrounding information in tables or
     ad-hoc scripts.  Each tool sees only the portion of the workflow
     represented by its command-line arguments.
@@ -179,19 +181,20 @@
     invokes the alignment pipeline, and makes its results available to
     planned expressions through injected PostgreSQL nodes.  This is what
     permits alignment to participate in filters, projections, and joins
-    while retaining the execution structure required by CPU vector units
+    while retaining the execution structure required by central processing
+    unit (CPU) vector units
     and GPUs.
 
     The central research question is therefore not whether an existing
     aligner can be called from SQL.  It is whether the aligner's data and
     control flow can become a database execution primitive without
     losing algorithmic fidelity, resource bounds, or the ability to
-    exploit modern processors.  The investigation is organised around
+    exploit modern processors.  The investigation is organized around
     four supporting questions:
 
     \begin{enumerate}
-        \item Which parts of seed--chain--extend can be expressed over a
-        common compact sequence abstraction without eager conversion?
+        \item Which parts of seeding, chaining, and extension can be expressed
+        over a common compact sequence abstraction without eager conversion?
         \item Which scalar operations benefit from SIMD or GPU execution,
         and which overheads move the break-even point?
         \item How can PostgreSQL plan and execute a set-valued,
@@ -204,7 +207,7 @@
 
     This thesis answers these questions through implementation and
     measurement.  Historical designs are included when they explain a
-    constraint or a rejected optimisation.  They are not presented as
+    constraint or a rejected optimization.  They are not presented as
     simultaneous production architectures.  Where project documents
     disagree, the implementation and the most recent dated evidence take
     precedence.  Numerical claims are tied to a named benchmark report

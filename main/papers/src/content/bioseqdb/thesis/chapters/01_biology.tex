@@ -13,7 +13,7 @@
 \section{Biological sequences as information-bearing observations}
 \label{sec:biology-sequences}
 
-The data processed by Bioseq originate in molecules, but an alignment
+The data processed by BioSeqDB originate in molecules, but an alignment
 algorithm does not receive a molecule. It receives an ordered sequence of
 symbols. This distinction is elementary and important. A physical DNA molecule
 has chemical structure, direction, complementary strands and a history inside
@@ -44,13 +44,14 @@ forward sequence and its reverse complement.
 
 Four symbols are sufficient for an unambiguous DNA string, but experimental
 data are not always unambiguous. The symbol \(\mathtt{N}\) conventionally means
-that the nucleotide at a position is unknown or was not resolved. Other IUPAC
-codes describe sets of possible bases, such as a purine at a position. These
+that the nucleotide at a position is unknown or was not resolved. Other
+International Union of Pure and Applied Chemistry (IUPAC) codes describe sets
+of possible bases, such as a purine at a position. These
 are uncertainty symbols, not additional chemical bases. Treating
 \(\mathtt{N}\) as if it were an ordinary fifth base would change the meaning of
 exact matches, hashes and alignment scores. A sequence type therefore needs an
 explicit alphabet and an explicit policy for symbols outside that alphabet.
-The current Bioseq sequence core follows this principle at the software level:
+The current BioSeqDB sequence core follows this principle at the software level:
 its compact ranges are parameterized by an alphabet, and current code paths
 instantiate both four-symbol and five-symbol DNA representations. The later
 sequence-abstraction chapter explains how those symbols are packed and viewed.
@@ -61,8 +62,9 @@ DNA. Protein-coding transcripts can then be translated in groups of three
 nucleotides, called codons, into amino acids. For protein-coding genes,
 transcription followed by translation yields the familiar DNA-to-RNA-to-protein
 flow. Crick's central dogma is the narrower restriction that residue-by-residue
-sequence information cannot flow from protein back to protein or nucleic
-acid.\footnote{F. Crick, ``Central dogma of molecular biology'',
+sequence information cannot flow from a protein sequence into either another
+protein sequence or a nucleic acid.\footnote{F. Crick, ``Central dogma of
+molecular biology'',
 \emph{Nature} 227 (1970), pp.~561--563,
 \url{https://doi.org/10.1038/227561a0}.} It is not a claim that all RNA is
 translated. Ribosomal, transfer, regulatory and many other RNAs are functional
@@ -76,6 +78,8 @@ acid with one having similar chemical properties may be more plausible than a
 replacement with a very different residue. Protein aligners therefore often
 use empirical substitution matrices. Nucleotide aligners can also use a
 matrix, but a simpler match, mismatch and gap model is often appropriate.
+Table~\ref{tab:biological-alphabets} summarizes the distinctions that storage
+and alignment must preserve.
 
 \begin{table}[ht]
   \centering
@@ -104,7 +108,7 @@ matrix, but a simpler match, mismatch and gap model is often appropriate.
   \caption{Biological alphabets and the distinctions that a sequence-processing
     system must not erase. The table describes biological data in general. It
     does not assert that every alphabet or ambiguity convention is exposed by
-    every Bioseq SQL path.}
+    every BioSeqDB SQL path.}
   \label{tab:biological-alphabets}
 \end{table}
 
@@ -112,7 +116,7 @@ The alphabet is thus part of the type of a sequence, not a decorative label.
 It determines the set of valid symbols, the minimum number of bits needed for
 storage, whether a complement operation exists and how comparison should
 behave. This observation connects basic biology to a central systems decision
-in Bioseq: algorithms should consume a common sequence abstraction while
+in BioSeqDB: algorithms should consume a common sequence abstraction while
 remaining explicit about the alphabet represented by that abstraction.
 
 \section{From genomes to computational records}
@@ -178,7 +182,8 @@ mixtures and contexts of these errors, which is why one universal scoring
 preset is insufficient for all data.\footnote{S. Goodwin, J.~D. McPherson and
 W.~R. McCombie, ``Coming of age: ten years of next-generation sequencing
 technologies'', \emph{Nature Reviews Genetics} 17 (2016), pp.~333--351,
-\url{https://doi.org/10.1038/nrg.2016.49}; G.~A. Logsdon, M.~R. Vollger and
+\url{https://doi.org/10.1038/nrg.2016.49}. See also G.~A. Logsdon,
+M.~R. Vollger and
 E.~E. Eichler, ``Long-read human genome sequencing and its applications'',
 \emph{Nature Reviews Genetics} 21 (2020), pp.~597--614,
 \url{https://doi.org/10.1038/s41576-020-0236-x}.}
@@ -200,6 +205,8 @@ sequencing error, or a difference between the reference assembly and the
 sample. A split alignment may represent a structural variant, a splice
 junction, an assembly boundary or an experimental chimera. Interpretation
 therefore requires metadata and context in addition to the aligned strings.
+Figure~\ref{fig:variation-versus-error} traces how biological variation and
+measurement error can produce the same observed disagreement.
 
 \begin{figure}[ht]
   \centering
@@ -242,6 +249,8 @@ too strict and why alignment alone is not a variant caller. The comparison
 stage must tolerate plausible differences. A later stage must then combine
 the alignment with coverage, base qualities, sample relationships and other
 evidence before assigning a biological interpretation.
+Table~\ref{tab:alignment-ambiguity} maps common alignment patterns to the
+distinct causes that remain unresolved at this stage.
 
 \begin{table}[ht]
   \centering
@@ -286,7 +295,7 @@ These are roles in an operation, not fixed classes of molecule. A chromosome
 assembly can be a reference when reads are mapped to it and a query when it is
 compared with another assembly. A read set can be searched against a reference
 genome, against another read set to find overlaps, or against a database of
-known sequences. Bioseq's SQL-facing similarity predicate follows the same
+known sequences. BioSeqDB's SQL-facing similarity predicate follows the same
 operational distinction by accepting a target sequence value and a query
 sequence value.
 
@@ -336,10 +345,11 @@ product of their lengths. Genome-scale tools therefore avoid evaluating most
 matrix cells. Modern mappers commonly identify short exact or near-exact
 anchors, connect mutually consistent anchors into chains, and perform detailed
 alignment only around promising chains. Minimap2 is a prominent example of
-this seed--chain--align organization.\footnote{H. Li, ``Minimap2: pairwise
+this organization around seeding, chaining, and alignment.\footnote{H. Li,
+``Minimap2: pairwise
 alignment for nucleotide sequences'', \emph{Bioinformatics} 34(18), 2018,
 pp.~3094--3100, \url{https://doi.org/10.1093/bioinformatics/bty191}.}
-Bioseq's current alignment pipeline is minimap2-based, while replacing or
+BioSeqDB's current alignment pipeline is minimap2-based, while replacing or
 extending individual stages with CPU SIMD and GPU-oriented implementations.
 The following chapter introduces these algorithmic families without assuming
 that every method uses the same seed representation or the same final
@@ -404,7 +414,7 @@ This organization is valuable for five reasons.
     explicit.
 \end{enumerate}
 
-Bioseq implements this idea as a PostgreSQL extension rather than as a
+BioSeqDB implements this idea as a PostgreSQL extension rather than as a
 standalone aligner wrapped by SQL text. Current source exposes alphabet-aware
 sequence values and an \texttt{mmsearch} similarity predicate. Integration
 tests exercise searches over stored columns, constants, slices and joins.
@@ -440,7 +450,7 @@ at scale. It begins with exact dynamic programming to establish what an
 alignment optimizes. It then explains seed-and-extend methods, minimizer-based
 seeding and graph-based alternatives such as de Bruijn graphs. That progression
 connects the biological sources of disagreement described here to the design
-of Bioseq's processing pipeline: minimizer extraction proposes candidate
+of BioSeqDB's processing pipeline: minimizer extraction proposes candidate
 anchors, chaining assembles them into coherent placements, prefilters reject
 unlikely pairs, and the final alignment step produces a base-level account of
 matches, substitutions and gaps.

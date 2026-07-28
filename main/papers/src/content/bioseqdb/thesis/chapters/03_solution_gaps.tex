@@ -141,7 +141,8 @@ execution, not a PostgreSQL-specific defect.
 In a conventional workflow, relational metadata and biological sequences
 often meet only in orchestration code.  A query selects samples or
 identifiers.  A script exports sequences to FASTA or FASTQ.  A mapper
-opens or constructs an index and emits PAF, SAM, or BAM.  Another step
+opens or constructs an index and emits Pairwise mApping Format (PAF),
+Sequence Alignment/Map (SAM), or Binary Alignment/Map (BAM) records.  Another step
 parses the results and joins them with annotations.  Workflow engines can
 make this process repeatable, but the mapper and the database still
 optimize different fragments of the computation.
@@ -218,11 +219,10 @@ The current contract is stated in \texttt{DOC0321}.}
 
 The present \texttt{mmsearch} body is a typed planner/executor rendezvous, not
 a scalar alignment fallback.  If no BioSeqDB custom executor owns the
-expression, both current overloads fail closed with PostgreSQL error code
-\texttt{FEATURE\_NOT\_SUPPORTED}.  The attached support function handles a
-\texttt{SupportRequestCost} by reporting startup cost \(100000\) and
-per-tuple cost \(0\).  The SQL declarations attach that support function and
-do not contain a separate literal \texttt{COST} clause.  PostgreSQL documents
+expression, both current overloads fail closed with a PostgreSQL
+feature-not-supported error.  The attached support function reports startup
+cost \(100000\) and per-tuple cost \(0\).  The SQL declarations attach that
+support function instead of declaring a separate literal cost.  PostgreSQL documents
 support functions as the mechanism for input-dependent cost information and
 other planner knowledge.\footnote{PostgreSQL Global Development Group,
 ``Function Optimization Information'', \emph{PostgreSQL 17 Documentation},
@@ -255,10 +255,10 @@ arguments and interacts badly with constant folding and error unwinding.
 \label{sec:representation-gap}
 
 A biological sequence is logically a range of symbols.  At the storage
-boundary it may be a PostgreSQL varlena value, an inline packed payload, a
-fragmented column, a lazy slice, a concatenation, a reverse view, a
+boundary it may be a PostgreSQL variable-length (varlena) value, an inline
+packed payload, a fragmented column, a lazy slice, a concatenation, a reverse view, a
 mapped external page, or a materialized C++ container.  Treating all of
-these as \texttt{std::string} would simplify an interface by hiding the
+these as one owning byte string would simplify an interface by hiding the
 most important cost.  PostgreSQL's Oversized-Attribute Storage Technique
 (TOAST) can compress or move a variable-length value out of line, so C-level
 code cannot assume that a received datum is already one contiguous
@@ -266,12 +266,13 @@ four-byte-header payload.\footnote{PostgreSQL Global Development Group,
 ``TOAST'', \emph{PostgreSQL 17 Documentation},
 \url{https://www.postgresql.org/docs/17/storage-toast.html}.}
 
-The April integration design illustrates the problem.  A Datum obtained
+The April integration design illustrates the problem.  A PostgreSQL Datum,
+the generic C-level value carrier, obtained
 from a tuple slot cannot be retained after the slot is reused.  A toasted
 value may have to be detoasted into memory owned by a PostgreSQL context.
 The first real batch design therefore copied each complete varlena into an
 owned C++ byte vector and then constructed an owning
-\texttt{compact\_sequence\_range} for each row.  This was a reasonable
+compact-sequence range for each row.  This was a reasonable
 correctness step.  The same document explicitly listed a non-owning
 compact view and batch-level target-index reuse as follow-up
 work.\footnote{\texttt{DOC0058}, Sections 4, 7, and 11, archived
@@ -401,7 +402,8 @@ how much input can be buffered.  A database loader must turn this stream
 into typed columns while preserving record boundaries and reporting the
 record that caused a conversion error.
 
-This task should not be embedded in the mapper.  The non-PostgreSQL IO
+This task should not be embedded in the mapper.  The non-PostgreSQL
+input/output (I/O)
 module parses and decompresses sequence records.  A concept-constrained
 writer defines the boundary.  The PostgreSQL implementation maps parsed
 fields to destination columns and invokes the appropriate type input
@@ -423,12 +425,12 @@ algorithm implementations and their correctness surface.
 \label{sec:solution-gap-evidence}
 
 The strongest illustration of the systems gap is that the ranking of two
-implementations changed when the index delivery path changed.  Table
-\ref{tab:integration-evidence} contains three dated measurements.  They
+implementations changed when the index delivery path changed.
+Table~\ref{tab:integration-evidence} contains three dated measurements.  They
 are not combined into one speedup claim because the reports use different
 artifacts and acceptance states.  In the first two rows, minimizers per
-fragment (MPF) is the persisted-index layout, and the BioSeqDB route is
-\texttt{bioseq\_block\_simd\_dp\_two\_stack\_nthash} with MPF.  Their source
+fragment (MPF) is the persisted-index layout, and the BioSeqDB route uses
+Block Aligner, SIMD chaining, and the matching MPF sketch scheme.  Their source
 is the local Darwin-on-Arm report
 \path{main/DOCS/CURRENT/REPORTS/0369_LOCAL_E2E_2_AND_4_GBP_SIMD_MINIMAP2_GPU_BENCHMARK_REPORT_2026_07_07.md}.
 The third row comes from
@@ -443,7 +445,7 @@ The third row comes from
     Evidence and route & Statistic and correctness & BioSeqDB & minimap2 &
     Bounded interpretation \\
     \midrule
-    2026-07-08, 2 Gbp DNA4, no index, MPF route &
+    2026-07-08, 2 billion base pairs (2 Gbp) of DNA4, no index, MPF route &
     One reported framework measurement.  Both tools found the expected
     result. &
     23.888 s &
@@ -451,7 +453,7 @@ The third row comes from
     BioSeqDB's recompute route was faster in this observation. \\
     2026-07-08, 2 Gbp DNA4, forced cold restart, persisted MPF route &
     Arithmetic mean of three samples.  Both tools produced the expected
-    match.  P50 values are shown in parentheses. &
+    match.  The 50th-percentile (P50) values are shown in parentheses. &
     36.187 s mean
     \newline (35.964 s P50) &
     15.465 s mean
@@ -460,8 +462,10 @@ The third row comes from
     does not isolate a single cause. \\
     2026-07-18 retained persisted-\texttt{just\_index},
     fragment-native and compact-direct receipts &
-    Lower-middle P50 from six BioSeqDB process-cold invocations.  Every
-    invocation returned 16/16 expected results, or 96/96 in total. &
+    Lower of the two middle index-and-map observations from six BioSeqDB
+    process-cold invocations with unspecified operating-system cache state.
+    Every invocation returned
+    16/16 expected results, or 96/96 in total. &
     5.368746000 s &
     16.487527084 s &
     The retained comparison is \(3.071020\times\).  It is scoped to this
@@ -477,6 +481,8 @@ The third row comes from
 
 The first two rows are useful because they reject a kernel-only story.
 They were measured on Darwin on Arm and are not portable performance claims.
+The cited report does not state a complete processor and memory inventory, so
+the table reports only the platform family that it supports.
 A later benchmark protocol review identified an asymmetry in which BioSeqDB
 query ingestion was outside its timer while minimap2 query ingestion was
 inside.  It prescribed equivalent timer boundaries beginning immediately
@@ -489,7 +495,7 @@ quantify the causal contribution of any one component.
 The retained six-invocation result was manually assembled from matching
 process-cold receipts.  It was not a source-frozen, same-binary aggregate.
 The retained handoff does not restate a complete processor and memory
-inventory beside this assembled statistic, so this draft does not infer one
+inventory beside this assembled statistic, so this thesis does not infer one
 from the earlier Darwin-on-Arm report.  That missing machine disclosure is a
 reproducibility limitation of the retained evidence.
 The 2026-07-19 closeout marked the scoped implementation complete and added
@@ -504,11 +510,12 @@ BioSeqDB query is faster than minimap2.
 \section{Comparison of solution classes}
 \label{sec:solution-class-comparison}
 
-Table \ref{tab:solution-class-gaps} summarizes the roles of the principal
+Table~\ref{tab:solution-class-gaps} summarizes the roles of the principal
 named systems and database mechanisms.  The comparison uses each source's
 documented task rather than treating a missing claim as evidence of a missing
 capability.  The minimap2 paper establishes a nucleotide
-seed--chain--align mapper.  BLAST+ documents heuristic sequence-database
+mapper based on seeding, chaining, and alignment.  BLAST+ documents heuristic
+sequence-database
 search, persistent BLAST databases, and a modular data-access
 library.\footnote{C. Camacho, G. Coulouris, V. Avagyan, N. Ma,
 J. Papadopoulos, K. Bealer and T. L. Madden, ``BLAST+: architecture and
@@ -729,4 +736,4 @@ The next chapter follows one query through the resulting pipeline.  It
 defines the stage boundaries that make these separate forms of evidence
 possible.  The algorithm chapters then compare each retained stage with
 its minimap2 or research origin.  The systems chapters return to the
-sequence, planner, storage, index, and IO requirements established here.
+sequence, planner, storage, index, and I/O requirements established here.

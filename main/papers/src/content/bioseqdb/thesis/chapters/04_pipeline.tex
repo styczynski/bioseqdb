@@ -1,20 +1,21 @@
 \section{From an alignment function to a database execution pipeline}
 \label{sec:pipeline-overview}
 
-BioSeqDB follows the same broad seed--chain--extend idea as minimap2, but
+BioSeqDB follows the same broad seeding, chaining, and extension idea as
+minimap2, but
 ``the pipeline'' in BioSeqDB means more than the sequence of biological
 algorithms.  A request begins as an SQL expression, passes through a
 PostgreSQL custom scan, is grouped with other requests, obtains or constructs
 a target minimizer index, and only then enters the mapper.  The selected
-mapper can execute on scalar CPU code, vectorised CPU code, or a Vulkan
+mapper can execute on scalar CPU code, vectorized CPU code, or a Vulkan
 device.  Its results return to the scan as typed records which are projected
 into SQL rows.  Consequently, there are two useful views of the system:
 
 \begin{enumerate}
   \item the \emph{logical alignment pipeline}, which transforms sequence
   symbols into minimizers, anchors, chains, candidate regions and final
-  matches; and
-  \item the \emph{physical execution pipeline}, which acquires sequences and
+  matches.
+  \item The \emph{physical execution pipeline} acquires sequences and
   indexes, admits memory, creates CPU or GPU work waves, records which engine
   executed each stage, and delivers the results to PostgreSQL.
 \end{enumerate}
@@ -28,6 +29,9 @@ explicitly identified as data transfer rather than biological computation.
 The final architecture therefore makes stage ownership, index provenance and
 backend execution observable rather than inferring them from configuration
 names.
+
+Figure~\ref{fig:bioseq-pipeline-dataflow} provides the chapter's end-to-end
+map of logical stages, physical backends, and execution evidence.
 
 The implementation described in this chapter is grounded in four source
 surfaces.  The minimap2-derived algorithms and result structures are in
@@ -55,7 +59,7 @@ disagree.
       every path/.style={thick}
     ]
     \node[host,text width=7.6cm] (sql) at (0,0)
-      {SQL \texttt{mmsearch} expression owned by a BioSeq custom scan};
+      {SQL \texttt{mmsearch} expression owned by a BioSeqDB custom scan};
     \node[host,text width=7.6cm] (batch) at (0,-1.25)
       {buffer rows, group compatible sequence layouts, choose index source,
        split memory-admitted waves};
@@ -121,7 +125,7 @@ disagree.
 
 \subsection{The direct minimap2-derived port}
 
-The earliest useful implementation was organised like an ordinary mapper.
+The earliest useful implementation was organized like an ordinary mapper.
 A call acquired a target index, collected query minimizers, looked up seed
 hits, chained anchors, generated regions, classified primary and secondary
 hits, ran dynamic programming, calculated mapping quality and converted the
@@ -129,10 +133,10 @@ internal region into an output record.  This shape remains visible in
 \path{minimap_port.cppm}.  For example, \texttt{collect\_seed\_hits} performs
 the minimizer-index lookup and canonical anchor sort, while
 \texttt{generate\_regions}, \texttt{classify\_primary\_secondary} and the
-alignment helpers correspond to recognisable minimap2 operations.
+alignment helpers correspond to recognizable minimap2 operations.
 
 This first form was valuable because it established semantic parity before
-optimisation.  It was also insufficient as a database execution primitive.
+optimization.  It was also insufficient as a database execution primitive.
 Intermediate values were owned by local containers, algorithm selection was
 interleaved with work, and a caller could observe only the final
 \texttt{MatchResultCollection}.  The structure did not provide a common
@@ -147,7 +151,7 @@ minimap2.  DOC0091 later found that some comparisons accidentally selected
 Block Aligner when they were intended to compare KSW2, while DOC0103 traced
 missing long-input results to unrealistic error profiles, run ordering and an
 RMQ defect.  These values are not current performance claims.  Their lasting
-contribution is methodological: a pipeline optimisation is meaningful only
+contribution is methodological: a pipeline optimization is meaningful only
 when the selected algorithms, correctness predicate, input regime and
 measured region are explicit.
 
@@ -207,18 +211,19 @@ semantics are documented directly at
 \path{pipe.cppm:9286}--\path{pipe.cppm:9294}.
 
 This episode explains an important final design choice.  BioSeqDB does not
-specialise every conceivable runtime value.  Common \(w=10\) and registered
-\(K\) and \(L\) combinations receive compile-time specialisations at higher
-optimisation levels.  Other values use a typed generic fallback.  The
+specialize every conceivable runtime value.  Common \(w=10\) and registered
+\(K\) and \(L\) combinations receive compile-time specializations at higher
+optimization levels.  Other values use a typed generic fallback.  The
 dispatcher therefore moves common decisions out of the hot path without
 requiring an unbounded binary.
 
 \subsection{Database-aware scheduling and accelerator residency}
 
 The next transition moved the unit of work from one sequence pair to a
-database batch.  DOC0294 introduced the current TBB pool, coarse task regions,
-memory-admitted waves and PostgreSQL scheduler constraints.  DOC0303 then
-analysed G3SA\footnote{Y.~Han, S.~Kim, S.~Park and J.~Lee,
+database batch.  DOC0294 introduced the current oneAPI Threading Building
+Blocks (TBB) pool, coarse task regions, memory-admitted waves, and PostgreSQL
+scheduler constraints.  DOC0303 then analyzed G3SA\footnote{Y.~Han, S.~Kim,
+S.~Park and J.~Lee,
 \emph{G3SA: A GPU-Accelerated Gold Standard Genomics Library for End-to-End
 Sequence Alignment}, ICS 2025, DOI 10.1145/3721145.3729516.}
 against BioSeqDB and minimap2.  At that date the project did not
@@ -282,20 +287,20 @@ deliberately pins \texttt{EntryPoint::WithPrebuiltMinimizers} and the scalar
 minimizer trait.  Tail-stage order therefore cannot drift into a separate
 hand-maintained \texttt{EXPLAIN} pipeline.  The description does not claim to
 reproduce the runtime query-sketch head or its selected minimizer kernel.  The
-current executable order is:
-
-\begin{verbatim}
-[Minimizer] -> Index -> SeedHit -> Chain -> Region
- -> PrimarySecondary -> SecondaryFilter -> Divergence
- -> Prefilter -> Align -> ExactEditFilter
- -> PrimarySecondary -> SecondaryFilter -> Mapq -> Sink
-\end{verbatim}
+executable order begins with optional query sketching, then proceeds through
+index handoff, seed lookup, chaining, region generation, candidate
+classification and filtering, divergence estimation, conservative
+prefiltering, extension, exact-edit filtering, reclassification, mapping
+quality, and result emission.
 
 The bracketed minimizer stage exists only for
 \texttt{EntryPoint::FromSequence}.  A caller with authenticated prebuilt
 query minimizers uses \texttt{EntryPoint::WithPrebuiltMinimizers} and begins
 at the index hand-off.  This is structural omission, not an empty runtime
 branch.
+
+Algorithm~\ref{alg:bioseq-logical-pipeline} turns this order into the control
+flow for one query against one prepared target.
 
 \begin{algorithm}[H]
   \caption{Logical execution of one BioSeqDB query against one prepared target}
@@ -308,7 +313,7 @@ branch.
     \Else
       \State \(M \gets\) authenticated prebuilt query minimizers
     \EndIf
-    \State \(A \gets \Call{LookupAndCanonicalise}{M,I,P.max\_occ}\)
+    \State \(A \gets \Call{LookupAndCanonicalize}{M,I,P.max\_occ}\)
     \State \((C,A') \gets \Call{Chain}{A,P.chaining\_algorithm}\)
     \State \(R \gets \Call{GenerateRegions}{C,A',|Q|}\)
     \State \Call{ClassifyAndFilterSecondaries}{\(R,P\)}
@@ -371,7 +376,7 @@ and naturally produce an empty batch.
 
 \texttt{IndexStage} performs no biological work.  It decorates the query
 minimizer batch with a target-index reference and an optional GPU cache
-identity.  At optimisation level \(O3\) this stage is intended to inline
+identity.  At optimization level \(O3\) this stage is intended to inline
 away.  Keeping it explicit is nevertheless useful because the wire type says
 exactly when index provenance enters the mapper.
 
@@ -397,7 +402,7 @@ the same downstream contract even when its physical work is a zero-copy
 handoff.
 
 The ordering invariant is important.  Chaining algorithms may use different
-internal traversal or vectorisation schemes, but they all begin from the same
+internal traversal or vectorization schemes, but they all begin from the same
 reference, query and full-position ordering.  BioSeqDB retains 64-bit
 coordinates in this boundary, avoiding the truncation that would occur for a
 multi-gigabase target if an encoded position were narrowed to 32 bits.
@@ -405,7 +410,7 @@ multi-gigabase target if an encoded position were narrowed to 32 bits.
 On the selected Vulkan path, seed lookup requires a resident target index.
 The query device span from \texttt{MinimizerStage} can be reused directly.
 If index residency, hardware support or the accepted completion token is
-missing, the selected route throws instead of materialising scalar anchors.
+missing, the selected route throws instead of materializing scalar anchors.
 This rule is what allows the later execution report to interpret a GPU seed
 counter as evidence rather than as a request that might have fallen back.
 
@@ -476,6 +481,10 @@ Reclassification makes the final candidate set self-consistent before
 \texttt{MatchResult} values with 64-bit coordinates, score, chain and seed
 metadata, optional divergence, MAPQ, edit distance and CIGAR.
 
+Tables~\ref{tab:pipeline-stage-contracts-a}
+and~\ref{tab:pipeline-stage-contracts-b} make the input, output, and invariant
+of each logical stage explicit.
+
 \begin{table}[p]
   \centering
   \scriptsize
@@ -490,11 +499,11 @@ metadata, optional divergence, MAPQ, edit distance and CIGAR.
     lazy query symbols &
     minimizer span, optionally with device span &
     deterministic representation and position domain for the selected
-    \(w,k\); valid empty output for short queries \\
+    \(w,k\). Short queries produce a valid empty output. \\
     Index &
     minimizer batch &
     minimizers plus target-index reference and cache identity &
-    zero-copy hand-off; identity cannot alias another target segment \\
+    Zero-copy handoff with an identity that cannot alias another target segment \\
     SeedHit &
     minimizers and target index &
     canonical \texttt{Anchor} span &
@@ -539,8 +548,8 @@ metadata, optional divergence, MAPQ, edit distance and CIGAR.
     Prefilter &
     regions, anchors and lazy sequences &
     compact candidate prefix &
-    only a proven lower bound above the threshold rejects a region;
-    unsupported jobs continue to exact alignment \\
+    Only a proven lower bound above the threshold rejects a region.
+    Unsupported jobs continue to exact alignment. \\
     Align &
     candidates, anchors and sequence windows &
     scored regions with optional edit path &
@@ -585,10 +594,13 @@ where \(\mathrm{Cep}\) is the compile-time window, \(k\)-mer and
 sequence-length bucket, \(\mathrm{BAA}\) is the base aligner,
 \(\mathrm{CA}\) is the chainer, \(\mathrm{MA}\) is the minimizer algorithm,
 and \(\mathrm{EP}\) is the entry point.  The concrete cascade is
-\texttt{dispatch\_pipeline} at \path{pipe.cppm:10321}.  At build optimisation
-level 5 or higher, the execution leaf uses a specialised \(w=10\) parameter
-object when the runtime values match a registered tuple.  Lower optimisation
+\texttt{dispatch\_pipeline} at \path{pipe.cppm:10321}.  At build optimization
+level 5 or higher, the execution leaf uses a specialized \(w=10\) parameter
+object when the runtime values match a registered tuple.  Lower optimization
 levels and unregistered tuples use the typed fallback.
+
+Table~\ref{tab:pipeline-algorithm-axes} summarizes the independently selectable
+algorithm axes of the generic pipeline.
 
 \begin{table}[ht]
   \centering
@@ -616,11 +628,11 @@ levels and unregistered tuples use the typed fallback.
 \end{table}
 
 This design avoids virtual dispatch and repeated option checks within the
-high-frequency stage calls.  It also localises unsupported combinations.  A
+high-frequency stage calls.  It also localizes unsupported combinations.  A
 new algorithm must provide the required trait surface, including the kernel
 type, label and metadata.  Static assertions at
 \path{pipe.cppm:9987}--\path{pipe.cppm:9999} verify that every registered enum
-value has a trait specialisation.
+value has a trait specialization.
 
 \subsection{The CPU and SIMD route}
 
@@ -659,7 +671,7 @@ The currently admitted dedicated GPU tuple is checked by
 \path{pipe.cppm:8692}.  It requires Vulkan capability, Vulkan seed hits, the
 fused front end, GPU target-index build, Vulkan minimap-int, Vulkan tiled-DP
 chaining and the Block Aligner selector.  Divergence, MAPQ, exact edit
-filtering and the independent prefilter are excluded from this specialised
+filtering and the independent prefilter are excluded from this specialized
 shape.  CIGAR is allowed only when Vulkan extension is enabled.
 
 The PostgreSQL typed scheduler imposes additional physical constraints.  A
@@ -720,11 +732,11 @@ required to hydrate every row and divides the batch into row-span waves under
 the currently allocatable budget.  It then requests a
 \texttt{MemoryPermit} for the wave.
 
-If the permit is granted, materialised buffers and their permit share a
+If the permit is granted, materialized buffers and their permit share a
 carefully ordered lifetime: storage is destroyed before the permit is
 released.  If hydration is not admitted and the selected route can stream,
 the target locators remain lazy and are served through \texttt{scanner\_pg}.
-The system therefore degrades by reducing materialisation, not by ignoring
+The system therefore degrades by reducing materialization, not by ignoring
 the budget.
 
 \texttt{MemoryAdmissionController::try\_reserve} takes one live snapshot of
@@ -757,6 +769,9 @@ duplicate deferred-align implementation was deleted and current runtime
 semantics do not depend on the flag.  Cross-query acceleration today is
 provided by PostgreSQL work grouping and the dedicated GPU batch route, not
 by the deleted per-query KSW2 accumulator.
+
+Algorithm~\ref{alg:bioseq-batch-dispatch} shows how admission, target reuse,
+and backend choice interact at wave granularity.
 
 \begin{algorithm}[H]
   \caption{Memory-aware batch dispatch}
@@ -815,17 +830,34 @@ on the heuristic.
 \subsection{Stable physical stages}
 
 The execution-evidence vocabulary is more detailed than the logical C++
-stage classes.  \texttt{PipelineStage} in \path{pipe.cppm:224} assigns stable
-ordinals to 20 operations:
+stage classes. It assigns stable ordinals to 20 operations.
+Table~\ref{tab:pipeline-physical-stages} groups them by responsibility while
+preserving their distinct evidence counters.
 
-\begin{verbatim}
-query sketch, target sketch, target index build,
-persisted index decode, partition selection, device index upload,
-seed lookup, chain score, chain backtrack, region generation,
-primary/secondary reduction, divergence, MAPQ,
-target-window plan, target-window I/O, target-window upload,
-CIGAR job generation, left extension, gap extension, right extension
-\end{verbatim}
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Stable physical operations represented in execution evidence.}
+  \label{tab:pipeline-physical-stages}
+  \begin{tabularx}{\linewidth}{p{0.22\linewidth}X}
+    \toprule
+    Responsibility & Physical operations \\
+    \midrule
+    Sketch and index preparation &
+    query sketch, target sketch, target-index build, persisted-index decode,
+    partition selection, and device-index upload \\
+    Seed and chain &
+    seed lookup, chain scoring, and chain backtracking \\
+    Region reduction &
+    region generation, primary/secondary reduction, divergence, and MAPQ \\
+    Extension preparation &
+    target-window planning, target-window I/O, target-window upload, and CIGAR
+    job generation \\
+    Extension &
+    left extension, gap extension, and right extension \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 This split answers questions the logical chain alone cannot answer.  For
 example, a persisted CPU route should report host I/O for index decode,
@@ -868,7 +900,7 @@ required for its named route.
 
 \subsection{The minimap2 control structure}
 
-Upstream minimap2 organises the long-read mapper around
+Upstream minimap2 organizes the long-read mapper around
 \texttt{mm\_map\_frag\_core} in
 \path{main/bench/tool_minimap2/minimap2/map.c:588}.  It sketches the query,
 collects seed matches from an \texttt{.mmi} index, invokes DP or RMQ chaining,
@@ -877,14 +909,17 @@ performs post-chain processing and extension, then calculates MAPQ.  CPU
 parallelism is primarily expressed as \texttt{kt\_for} over input fragments,
 with a worker-local \texttt{mm\_tbuf\_t} allocation arena.
 
-BioSeqDB preserves the recognisable backbone, but not every minimap2 mode.
+BioSeqDB preserves the recognizable backbone, but not every minimap2 mode.
 Its current focus is the database-resident long-read and single-target path.
 It should not be described as reproducing all paired-read, splice, rescue or
-multi-segment behaviours.  The important differences are systems
+multi-segment behaviors.  The important differences are systems
 differences: packed lazy sequences rather than ASCII query strings,
 PostgreSQL-resident or selectively loaded indexes rather than only an
 external \texttt{.mmi}, typed stages rather than one imperative routine, and
 query-plan batching rather than a command-line input batch.
+
+Table~\ref{tab:pipeline-system-comparison} places these differences beside
+minimap2 and G3SA at the level of complete execution systems.
 
 \begin{table}[p]
   \centering
@@ -919,7 +954,7 @@ query-plan batching rather than a command-line input batch.
     TBB task arena with controlled coarse regions and memory-admitted fan-out \\
     GPU execution &
     none in upstream &
-    CUDA seed--chain--extend with exceptional CPU fallback &
+    CUDA seeding, chaining, and extension with exceptional CPU fallback &
     Vulkan computational routes with mandatory selected paths failing closed \\
     Candidate filtering &
     minimap2 occurrence, chain and region heuristics &
@@ -940,8 +975,8 @@ query-plan batching rather than a command-line input batch.
 
 \subsection{What was adopted from G3SA}
 
-G3SA treats seed--chain--extend as a resident accelerator graph rather than
-three unrelated kernels.  Its minimap2 route sketches batches of reads,
+G3SA treats seeding, chaining, and extension as a resident accelerator graph
+rather than three unrelated kernels.  Its minimap2 route sketches batches of reads,
 looks minimizers up in a resident index, stores anchors in structure-of-arrays
 form, sorts them, applies tiled DP and RMQ chaining, packs extension jobs, runs
 an AGAThA-derived forward kernel and reconstructs the path with gridded
@@ -982,7 +1017,8 @@ artifact was generated on 28 June 2026 from commit
 \texttt{ac58f88500d4ad8652e26e163d2840e5713346b4}, with a dirty-tree marker.
 It contains no rule violation or regression, but it contains sanity warnings
 for constant metrics and only one sample per shown configuration.  The two
-rows below are therefore implementation evidence for the named cases, not a
+rows in Table~\ref{tab:pipeline-report47} are therefore implementation evidence
+for the named cases, not a
 general claim that GPU execution is always faster.
 
 Report~47 predates the strict persisted-index route and measures a recomputed
@@ -1012,6 +1048,9 @@ route.  It does not prove persisted all-GPU CIGAR.
     \bottomrule
   \end{tabularx}
 \end{table}
+
+Figure~\ref{fig:pipeline-report47} visualizes the same wall times while
+retaining the unequal-output qualification of the coordinate case.
 
 \begin{figure}[ht]
   \centering
@@ -1064,7 +1103,8 @@ fallback rows, zero SIMD fallback rows and zero Vulkan declines.
 
 These historical results support the architectural story rather than an
 isolated kernel claim.  In the 300 Mbp source configuration, query sketching
-and the seed--chain kernel are a small part of the measured GPU region, while
+and the combined seeding-and-chaining kernel are a small part of the measured
+GPU region, while
 target deduplication and index build dominate.  Reusing residency across more
 queries is therefore as important as accelerating the recurrence.  This is
 why the database scheduler batches resident GPU work and why a one-row
@@ -1075,7 +1115,7 @@ the pipeline.
 \section{Final architecture, invariants and remaining boundaries}
 \label{sec:pipeline-final}
 
-The final pipeline is best summarised by its invariants.
+The final pipeline is best summarized by its invariants.
 
 \begin{enumerate}
   \item \textbf{One common tail composer.}  Executable chains use
@@ -1094,7 +1134,7 @@ The final pipeline is best summarised by its invariants.
   reused across compatible query waves.
   \item \textbf{Parallelism is bounded twice.}  A single TBB arena controls
   worker concurrency, while memory admission controls the number and size of
-  concurrent materialisations.
+  concurrent materializations.
   \item \textbf{Accelerator selection is fail-closed.}  A selected mandatory
   Vulkan tuple cannot turn into CPU or SIMD biological work without being
   rejected.
@@ -1120,7 +1160,8 @@ faster.
 These qualifications do not weaken the contribution.  They explain why the
 final solution differs from the original direct port.  BioSeqDB has turned a
 procedural mapper into a typed, inspectable and resource-bounded database
-operator.  It keeps minimap2's seed--chain--extend semantics recognisable,
+operator.  It keeps minimap2's seeding, chaining, and extension semantics
+recognizable,
 while adding lazy packed inputs, persistent indexes, conservative
 prefiltering, compile-time algorithm traits, controlled CPU parallelism,
 resident Vulkan batches and execution attestation.  The following chapters

@@ -18,10 +18,11 @@ Sequence search and sequence alignment are related, but they are not the same
 operation. A search procedure asks where useful correspondences might exist.
 An alignment describes one such correspondence symbol by symbol. This
 distinction is the organizing idea behind modern mappers. Exhaustive dynamic
-programming can solve a precisely stated pairwise problem, but it is too
-expensive to apply to every possible reference interval. Seed--chain--extend
-methods first generate a small set of plausible intervals, then apply dynamic
-programming only there. Graph methods change the object against which the query
+programming (DP) can solve a precisely stated pairwise problem, but it is too
+expensive to apply to every possible reference interval. Methods based on
+seeding, chaining, and extension first generate a small set of plausible
+intervals, then apply dynamic programming only there. Graph methods change the
+object against which the query
 is compared. They can represent several reference alternatives at once, but
 they do not remove the need to define alignment scores and paths.
 
@@ -111,6 +112,8 @@ figure reconstruction specification, DOC0367, records eight such boundary
 patterns. The unifying rule is simple: a fixed corner or penalized border
 requires the alignment to account for that end, while a free border allows
 traceback to start or stop there without paying for the omitted flank.
+Table~\ref{tab:alignment-objectives} compares the resulting boundary and
+endpoint conventions.
 
 \begin{table}[ht]
   \centering
@@ -134,7 +137,7 @@ traceback to start or stop there without paying for the omitted flank.
     Overlap &
     Make the permitted unaligned prefix and suffix borders free &
     One allowed border to another &
-    Suffix--prefix or prefix--suffix overlap \\
+    Suffix-to-prefix or prefix-to-suffix overlap \\
     Extension &
     Fix an anchor cell, then permit a free stopping position &
     Anchor to the best permitted endpoint &
@@ -155,7 +158,8 @@ problems. Minimap2 can terminate a nominally global inter-anchor fill with
 Z-drop when the accumulated score deteriorates too quickly.\footnote{H. Li,
 ``Minimap2: pairwise alignment for nucleotide sequences'',
 \emph{Bioinformatics} 34 (2018), pp.~3094--3100, Section~2.2.3,
-\url{https://doi.org/10.1093/bioinformatics/bty191}.} BioSeqDB's KSW2 route
+\url{https://doi.org/10.1093/bioinformatics/bty191}.} BioSeqDB's KSW2
+implementation of the Suzuki--Kasahara recurrence
 normally uses configured band and Z-drop limits. Its edit-distance accounting
 route disables both limits for a gap fill. The Block Aligner route uses global
 mode for inter-anchor fills and X-drop for outer extension. The final record is
@@ -226,11 +230,13 @@ gaps. Minimap2 therefore uses a two-piece affine cost
 The first component can model short insertions and deletions, while the second
 has a larger open cost and smaller extension cost for long events. The DP
 adds a second insertion state and a second deletion state. BioSeqDB's Highway
-KSW2 port exposes both single- and dual-affine modes through the unified
-\texttt{KswAlignerMode} template. Its module comment and types in
-\path{main/bioseq/backend/alignment_hwy/ksw2.cppm} document the
-Suzuki--Kasahara difference states used by the implementation. The alternative
-Block Aligner backend is deliberately single-affine.
+KSW2 port exposes both single- and dual-affine modes. It implements the
+Suzuki--Kasahara difference states described below. The alternative Block
+Aligner backend is deliberately single-affine. Chapter~\ref{r:07-final-alignment}
+specifies the implementation contracts of both routes.
+
+Algorithm~\ref{alg:affine-dp} summarizes the recurrence and traceback procedure
+independently of either implementation.
 
 \begin{algorithm}[ht]
   \caption{Affine-gap global alignment with score and traceback states}
@@ -284,8 +290,10 @@ practical and is the basis of KSW2.\footnote{H. Suzuki and M. Kasahara,
 ``Introducing difference recurrence relations for faster semi-global
 alignment of long sequences'', \emph{BMC Bioinformatics} 19, 45 (2018),
 \url{https://doi.org/10.1186/s12859-018-2014-8}.} BioSeqDB ports that
-formulation to Google Highway so one source can dispatch to SSE, AVX, NEON,
-SVE, WebAssembly SIMD, and other supported targets. The Block Aligner backend
+formulation to Google Highway so one source can dispatch to Streaming SIMD
+Extensions (SSE), Advanced Vector Extensions (AVX), NEON, the Scalable Vector
+Extension (SVE), WebAssembly SIMD, and other supported targets. The Block
+Aligner backend
 uses a different geometric optimization. It maintains a square block around
 the promising part of the matrix and slides, grows, or shrinks that block
 instead of visiting the full rectangle. The adaptive greedy band can return a
@@ -298,7 +306,7 @@ backend uses global mode for inter-anchor fills and native two-confirmation
 X-drop for outer extension. The details and measured trade-offs are developed
 in the final-alignment chapter.
 
-\section{Seed--chain--extend}
+\section{Seeding, chaining, and extension}
 \label{sec:seed-chain-extend}
 
 \subsection{Why candidate generation is necessary}
@@ -309,7 +317,7 @@ positions cannot belong to a useful alignment. A mapper therefore seeks a
 cheap signal that is likely to survive a true alignment but is infrequent in
 unrelated intervals. Exact or hashed short substrings provide that signal.
 
-The seed--chain--extend pattern separates the problem into three abstractions:
+The three-stage pattern separates the problem into three abstractions:
 
 \begin{enumerate}
   \item \emph{Seeding} selects query substrings and finds compatible
@@ -318,7 +326,7 @@ The seed--chain--extend pattern separates the problem into three abstractions:
   isolated hits into candidate regions.
   \item \emph{Extension} performs base-level dynamic programming between and
   around the anchors, then emits coordinates, a score, optionally a CIGAR, and
-  a mapping quality (MAPQ).
+  a mapping quality (MAPQ) value.
 \end{enumerate}
 
 This is a heuristic search wrapped around a dynamic-programming recurrence.
@@ -330,6 +338,9 @@ approximate because a static band, an adaptive block, Z-drop, or X-drop may
 exclude part of the unconstrained state space. Sensitivity and optimality must
 therefore be discussed stage by stage rather than by calling the whole mapper
 either exact or approximate.
+
+Figure~\ref{fig:seed-chain-extend} summarizes how the sparse search stages
+reduce the input before base-level refinement.
 
 \begin{figure}[ht]
   \centering
@@ -432,26 +443,24 @@ unproductive predecessors, making the usual cost much smaller while retaining
 the same local scoring rule.\footnote{H. Li, ``Minimap2: pairwise alignment
 for nucleotide sequences'', \emph{Bioinformatics} 34 (2018),
 pp.~3094--3100, \url{https://doi.org/10.1093/bioinformatics/bty191}.}
-Range-minimum-query methods accelerate a related formulation for long gaps.
+Range-minimum-query (RMQ) methods accelerate a related formulation for long gaps.
 SIMD and tiled GPU implementations instead evaluate several predecessor
 scores together. These are not interchangeable labels. One changes the data
 structure and search formulation, another changes the execution of the
 predecessor loop, and a bounded approximate policy may change which endpoint
 is selected.
 
-BioSeqDB preserves this distinction in its current API. The
-\texttt{ChainingAlgorithmType} enum in
-\path{main/bioseq/backend/pipeline/minimap_port.cppm} exposes scalar minimap2,
-SIMD minimap2, RMQ and Vulkan tiled-DP routes. The shared
-\texttt{compute\_chaining\_score} function in
-\path{main/bioseq/backend/sequences/chaining/chaining_utils.cppm} rejects
-invalid geometry, rewards new coverage, then applies linear and logarithmic
-penalties. The current \texttt{Anchor} is a flat 24-byte object with 64-bit
-stored coordinates. The scoring helper narrows predecessor reference and query
-distances to signed 32-bit values, consistent with its 32-bit distance
-parameters, before geometry checks and penalties. This is an important
-difference from early April design notes, which discussed older packed layouts
-and must not be read as the present implementation.
+BioSeqDB preserves this distinction by exposing scalar minimap2, SIMD minimap2,
+RMQ, and Vulkan tiled-DP routes over a shared anchor contract. Stored anchor
+coordinates are 64-bit. The shared scoring helper narrows predecessor reference
+and query distances to signed 32-bit values, consistent with its 32-bit
+distance parameters, before geometry checks and penalties. It then rejects
+invalid geometry, rewards new coverage, and applies linear and logarithmic
+penalties. This differs from early April design notes about older packed
+layouts, which do not describe the present implementation.
+
+Algorithm~\ref{alg:anchor-chaining} presents the bounded predecessor search
+without depending on a concrete backend.
 
 \begin{algorithm}[ht]
   \caption{Conceptual bounded predecessor chaining}
@@ -480,9 +489,9 @@ and must not be read as the present implementation.
 \subsection{From chains to base-level alignment}
 
 A chain supplies orientation and approximate query and reference intervals.
-It also divides the work into left extension, mandatory gaps between anchors,
-and right extension. The anchors themselves account for exact matching
-segments. Dynamic programming fills the intervening pieces and decides
+It also divides the work into left extension, inter-anchor segments, and right
+extension. The anchors account for seed-supported matching spans. Dynamic
+programming fills the intervening pieces and decides
 whether an apparent displacement is better represented by substitutions or
 gaps. Traceback concatenates the resulting operations with the anchored
 matches.
@@ -493,19 +502,11 @@ Z-drop values. When exact edit-distance accounting is requested, its
 inter-anchor calls disable both limits. The Block Aligner alternative requests
 global mode for those fills and uses X-drop for the outer extensions. Its
 adaptive block geometry still means that global mode is not a proof of an
-unbanded optimum. Minimap2's source-level sequence is visible in the local
-comparison copy:
-\texttt{mm\_sketch} in \path{minimap2-master-clean/sketch.c},
-\texttt{mm\_collect\_matches} in
-\path{minimap2-master-clean/seed.c}, \texttt{mg\_lchain\_dp} in
-\path{minimap2-master-clean/lchain.c}, then
-\texttt{mm\_align\_skeleton} and \texttt{ksw\_extd2\_sse} in
-\path{minimap2-master-clean/align.c}. BioSeqDB retains the same conceptual
-sequence but exposes several implementations at each stage. Current
-\path{main/bioseq/backend/pipeline/minimap_port.cppm} names nine high-level
-steps: target minimizer index construction, seed collection, chaining, region
-generation, primary/secondary classification, filtering, dual-affine
-alignment, mapping-quality calculation and result construction.
+unbanded optimum. Minimap2's base-level route proceeds conceptually from query
+sketching and seed lookup through chaining, region generation, post-chain
+processing, extension, and mapping-quality calculation. BioSeqDB retains this
+sequence while exposing several implementations at individual stages.
+Table~\ref{tab:minimap2-bioseq-foundations} summarizes the correspondence.
 
 \begin{table}[ht]
   \centering
@@ -516,7 +517,7 @@ alignment, mapping-quality calculation and result construction.
     Stage & Minimap2 reference path & BioSeqDB implementation surface & Meaning retained \\
     \midrule
     Sketch &
-    Scalar canonical minimizers from \texttt{mm\_sketch} &
+    Scalar canonical minimizer sketching &
     Scalar minimap-int, reference SIMD, production two-stack ntHash,
     paper-compatible ntHash SIMD, and Vulkan minimap-int selectors &
     Sparse representative seeds \\
@@ -539,7 +540,7 @@ alignment, mapping-quality calculation and result construction.
     Output &
     Pairwise mApping Format (PAF) or Sequence Alignment/Map (SAM) records with
     primary/secondary semantics &
-    \texttt{MatchResult} records with coordinates, strand, score, MAPQ,
+    Typed mapping records with coordinates, strand, score, MAPQ,
     divergence and optional CIGAR &
     Search evidence becomes an interpretable mapping \\
     \bottomrule
@@ -640,6 +641,9 @@ selection, index size, update and output-coordinate questions. A database
 system must additionally decide how graph nodes, named paths and annotations
 participate in relational joins and versioning.
 
+Figure~\ref{fig:variation-graph-branch} illustrates the distinction between
+choosing one linear allele and retaining both alternatives as graph paths.
+
 \begin{figure}[ht]
   \centering
   \begin{tikzpicture}[
@@ -679,10 +683,10 @@ participate in relational joins and versioning.
 
 \subsection{Relation to BioSeqDB}
 
-BioSeqDB's current mapper is a linear-reference seed--chain--extend system.
-Its anchor contract stores one reference coordinate and a strand, and current
-code explicitly removes a reference identifier from the 24-byte anchor because
-the active fragment index is single-target. The pipeline may process many
+BioSeqDB's current mapper uses a linear reference with seeding, chaining, and
+extension. Its anchor contract stores one reference coordinate and a strand.
+The active fragment index is single-target and therefore cannot represent graph
+positions directly. The pipeline may process many
 stored sequences and many target fragments, but each mapping problem still
 chains against a linear coordinate system. This is an implementation fact, not
 a claim that graph references are unimportant.
@@ -701,16 +705,20 @@ minimap2-derived pipeline.
 \label{sec:choosing-alignment-approach}
 
 No single method dominates for every task. Exhaustive dynamic programming is
-the clearest exact model for two moderate strings. Seed--chain--extend is a
-practical strategy when searching long references or large collections,
-provided its sensitivity and repetitive-seed behavior are understood. Graph
+the clearest exact model for two moderate strings. Seeding, chaining, and
+extension form a practical strategy when searching long references or large
+collections, provided its sensitivity and repetitive-seed behavior are
+understood. Graph
 mapping is appropriate when representing alternatives is itself part of the
 problem, at the cost of a more complex reference, index and coordinate model.
 These choices are not mutually exclusive. A target representation answers what
 sequences or paths exist, while a search strategy answers how candidate
-regions are found and refined. A graph mapper can therefore use
-seed--chain--extend, and a linear target can be searched by methods other than
-that strategy.
+regions are found and refined. A graph mapper can therefore use the same
+three-stage search strategy, and a linear target can be searched by other
+methods.
+
+Table~\ref{tab:alignment-approach-comparison} compares these orthogonal
+representation and search viewpoints.
 
 \begin{table}[ht]
   \centering
@@ -726,7 +734,7 @@ that strategy.
     None in the unbanded formulation &
     Precisely defined optimum for the selected scoring and boundary model &
     Quadratic state space in the unbanded case \\
-    Seed--chain--extend &
+    Seeding, chaining, and extension &
     Linear or graph-derived coordinate system &
     Sparse seeds, occurrence filtering and coordinate chaining &
     Scales to long references while retaining base-level refinement in selected
