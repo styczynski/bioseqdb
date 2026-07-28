@@ -136,17 +136,22 @@ physical granularity and checked-in update policy.
   that the policy is enabled on insertion. It does not mean that every read is
   forced to use the resulting representation.}
   \label{tab:index-registry}
-  \begin{tabularx}{\linewidth}{p{.22\linewidth}p{.20\linewidth}
-                               p{.20\linewidth}X}
+  \begin{tabularx}{\linewidth}{
+      >{\raggedright\arraybackslash}p{.22\linewidth}
+      >{\raggedright\arraybackslash}p{.20\linewidth}
+      >{\raggedright\arraybackslash}p{.20\linewidth}
+      >{\raggedright\arraybackslash}X}
     \toprule
     \textbf{Index name} & \textbf{Layout} & \textbf{Default update} &
     \textbf{Role}\\
     \midrule
-    \texttt{minimizers\_per\_fragment} &
+    \shortstack[l]{\texttt{minimizers\_per}\\
+                   \texttt{\_fragment}} &
     chunked per fragment & on insert &
     Default active read index. It preserves fragment-native construction and
     permits direct assembly of the target lookup.\\
-    \texttt{minimizers\_per\_sequence} &
+    \shortstack[l]{\texttt{minimizers\_per}\\
+                   \texttt{\_sequence}} &
     chunked per fragment & manual &
     Merged sequence-wide, hash-partitioned buckets with a directory for
     query-selective loading.\\
@@ -246,7 +251,8 @@ set into a bounded subset of stored controls and positions.
     \node[draw,rounded corners,fill=orange!12,minimum width=3.0cm,
           minimum height=.8cm] (d) at (6.0,4.6)
           {authenticated directory};
-    \draw[->,thick] (q)--node[above]{binary search}(d);
+    \draw[->,thick] (q)--node[midway,above=5mm,font=\scriptsize]
+      {binary search}(d);
 
     \draw[fill=gray!14] (2.10,3.10) rectangle (3.55,3.82);
     \node[font=\scriptsize] at (2.825,3.46) {\([0,20)\)};
@@ -466,8 +472,9 @@ legacy adapters. It is not the strongest lifecycle now available.
 \label{sec:index-generations}
 
 The immutable-generation design is an opt-in mode. The checked-in
-\texttt{grouped32\_persisted\_generation\_enabled} setting is false, so the
-default path uses the legacy relation adapters and replace-in-place updates.
+\texttt{grouped32\_persisted\_}\allowbreak
+\texttt{generation\_enabled} setting is false, so the default path uses the
+legacy relation adapters and replace-in-place updates.
 When the setting is enabled, a writer allocates a positive generation
 identifier and appends all of its rows without modifying the generation visible
 to current readers. It validates the finished object and only then atomically
@@ -511,26 +518,30 @@ small descriptor only after the new generation has been authenticated.
 \begin{figure}[ht]
   \centering
   \begin{tikzpicture}[
-      node distance=.65cm and .95cm,
+      x=1cm,y=1cm,
       box/.style={draw,rounded corners,align=center,minimum height=.75cm,
                   minimum width=2.55cm},
       >=Latex,font=\small]
-    \node[box,fill=gray!12] (old) {generation \(g\)\\currently visible};
-    \node[box,fill=orange!12,right=2.1cm of old] (new) {
+    \node[box,fill=gray!12] (old) at (0,3.6)
+      {generation \(g\)\\currently visible};
+    \node[box,fill=orange!12] (new) at (7.0,3.6) {
       generation \(g+1\)\\unpublished};
-    \node[box,fill=blue!12,below=1.0cm of new] (validate) {
+    \node[box,fill=blue!12] (validate) at (7.0,1.7) {
       validate all rows, manifest,\\checksums and compatibility};
-    \node[box,fill=green!12,below=1.0cm of old] (head) {
+    \node[box,fill=green!12] (head) at (0,1.7) {
       generation-zero head\\atomic descriptor replace};
-    \node[box,fill=purple!10,below=1.0cm of head] (retire) {
+    \node[box,fill=purple!10] (retire) at (0,-0.2) {
       predecessor retained\\then retired after visibility horizon};
 
     \draw[->,thick] (new)--(validate);
-    \draw[->,thick] (validate)--node[above,sloped]{publish only on success}(head);
+    \draw[->,thick] (validate.west)--
+      node[midway,above=2mm,font=\scriptsize,fill=white,inner sep=1pt]
+      {publish only on success}(head.east);
     \draw[->,thick] (old)--(head);
     \draw[->,thick] (head)--(retire);
-    \draw[->,dashed,thick] (retire.east) -| node[pos=.25,right]
-      {bounded reaper} (new.south);
+    \draw[->,dashed,thick] (retire.south)--++(0,-.55)--
+      node[midway,below=1mm,font=\scriptsize]{bounded reaper}++(8.6,0)
+      |-(new.east);
   \end{tikzpicture}
   \caption{Copy-on-publish lifecycle in the opt-in grouped-generation mode. A
   failed build can leave removable unpublished material, but it cannot make a
@@ -1143,8 +1154,11 @@ enabled. It records what each stage taught the next one.
   \caption{Evolution of BioSeqDB persistent minimizer storage. Newer
   documents and current source supersede older status claims.}
   \label{tab:index-evolution}
-  \begin{tabularx}{\textwidth}{p{.105\textwidth}p{.22\textwidth}
-                               p{.28\textwidth}X}
+  \begin{tabularx}{\textwidth}{
+      >{\raggedright\arraybackslash}p{.105\textwidth}
+      >{\raggedright\arraybackslash}p{.22\textwidth}
+      >{\raggedright\arraybackslash}p{.28\textwidth}
+      >{\raggedright\arraybackslash}X}
     \toprule
     \textbf{Evidence} & \textbf{Design at that point} &
     \textbf{Observed limitation or result} & \textbf{Retained consequence}\\
@@ -1166,7 +1180,7 @@ enabled. It records what each stage taught the next one.
     output needed a completeness rule &
     Reserved sub-key namespace, fixed directory records, and directory-last
     publication.\\
-    DOC0299--DOC0300 &
+    \shortstack[l]{DOC0299--\\DOC0300} &
     Memory-bounded sorted runs and PostgreSQL \texttt{BufFile} spill &
     First measured builder produced 440,117 temporary files and six merge
     passes despite bounded run memory &
@@ -1179,7 +1193,7 @@ enabled. It records what each stage taught the next one.
     nothing &
     Persistence attestation is mandatory. Query selectivity was retained as a
     design goal, not confused with a completed durable build.\\
-    DOC0307--DOC0311 &
+    \shortstack[l]{DOC0307--\\DOC0311} &
     GPU-resident derived view, then dense sorted GPU buckets &
     First residency path was slower. Open addressing caused device loss.
     sorted binary search later beat SIMD on its XXL case &
@@ -1197,7 +1211,7 @@ enabled. It records what each stage taught the next one.
     562,000 heap fetches &
     Linear accounting, coalesced ranges, address-bound CRC, and a reconsidered
     physical read route rather than optimization of logical selectivity alone.\\
-    DOC0383--DOC0384 &
+    \shortstack[l]{DOC0383--\\DOC0384} &
     Fragment-native MPF plus a relation-provider sealed MPF5 sidecar &
     Implemented six-run P50 5.368746 s versus minimap2 16.487527 s, narrowly
     satisfying a 3x gate under documented caveats &
