@@ -28,7 +28,7 @@ The current CPU implementation exposes two selectable algorithms:
 \begin{enumerate}
     \item a Highway port of KSW2, retaining minimap2's single- or
     two-piece-affine recurrence, diagonal-difference representation, banding,
-    Z-drop, endpoint selection, and packed CIGAR convention;
+    Z-drop, endpoint selection, and packed CIGAR convention.
     \item a native Highway port of Block Aligner, using a single affine gap
     model, an adaptive block that shifts, grows, and shrinks, and native
     global or X-drop termination.
@@ -80,7 +80,7 @@ vertical axis, a global Needleman--Wunsch--Gotoh recurrence is
     \label{eq:affine-h}
 \end{align}
 The \(I\) and \(D\) states remember whether the best partial path already ends
-in a gap. For global alignment the axes are initialised by cumulative gap
+in a gap. For global alignment the axes are initialized by cumulative gap
 costs. Local alignment additionally permits zero in the maximum. A full
 matrix costs \(O(nm)\) time and, if every trace decision is stored,
 \(O(nm)\) memory.\footnote{O. Gotoh, ``An improved algorithm for matching
@@ -108,12 +108,12 @@ maintains two insertion states and two deletion states:
  I_1,I_2,D_1,D_2\}.
 \end{align}
 This two-piece concave cost is important for long reads, where a structural
-variant should not be penalised as a series of unrelated short errors.
+variant should not be penalized as a series of unrelated short errors.
 
 Block Aligner uses only \((q_1,e_1)\). Its recurrence is therefore not a
 drop-in semantic replacement for KSW2 under the default two-piece model. This
 is an intentional production trade-off. The adapter projects the short pair,
-the block interval, and the X-drop threshold. It does not pretend to honour
+the block interval, and the X-drop threshold. It does not pretend to honor
 the second affine pair, KSW2's band, right-alignment tie flag, end bonus, or
 approximate-maximum flag.
 
@@ -188,7 +188,7 @@ an outer interval on either side, bounded by \texttt{max\_gap} and by an
 additional score-derived allowance. Left extension is solved in reverse so
 that both end extensions can use a forward DP recurrence. Current compact and
 lazy sequence views can emit this reversed orientation directly. They do not
-first materialise an entire reversed query.
+first materialize an entire reversed query.
 
 The seed-to-seed walk is especially consequential. A cursor begins at the
 first seed. Intermediate anchors whose accumulated query or target distance
@@ -273,6 +273,15 @@ resolve gaps, and end extensions refine the outer coordinates.}
 \end{algorithmic}
 \end{algorithm}
 
+Algorithm~\ref{alg:three-phase-alignment} makes the cursor semantics explicit.
+The left extension runs only when both outer slices are nonempty. Inside the
+anchor loop, skipping a short interval does not advance \((q_s,t_s)\), so
+several short intervals accumulate into one mandatory fill. The right
+extension then runs only when the selected backend contract permits it.
+Reverse-strand projection and final score metadata are applied after these
+three phases. This order preserves the chain geometry while allowing KSW2 and
+Block Aligner to implement different phase contracts.
+
 \subsection{Where the port intentionally stops matching minimap2}
 
 The inspected minimap2 reference contains more policy than the three boxes in
@@ -307,7 +316,7 @@ algorithm branch rather than hidden in a common KSW-shaped adapter.
 A straightforward SIMD implementation stores absolute \(H\), \(I\), and \(D\)
 scores. Long alignments require wide integers because absolute scores grow with
 sequence length. Wide lanes reduce the number of cells processed per vector.
-Suzuki and Kasahara observed that neighbouring-score differences remain
+Suzuki and Kasahara observed that neighboring-score differences remain
 bounded by the scoring parameters even when the absolute score is large.
 KSW2 therefore represents quantities related to
 \[
@@ -321,7 +330,7 @@ exact maximum tracking and endpoints.\footnote{H. Suzuki and M. Kasahara,
 alignment of long sequences'', \emph{BMC Bioinformatics} 19, 2018,
 doi:10.1186/s12859-018-2014-8.}
 
-BioSeqDB ports that organisation to Highway. A scalable byte tag supplies the
+BioSeqDB ports that organization to Highway. A scalable byte tag supplies the
 partial-score lanes, while a scalable 32-bit tag reduces reconstructed maxima.
 The source instantiates a single-affine kernel only when
 \((q_1,e_1)=(q_2,e_2)\). Under the ordinary defaults the pairs differ, so the
@@ -339,11 +348,11 @@ Section~\ref{sec:final-alignment-batching}.
 KSW2 tracks several endpoint summaries:
 
 \begin{itemize}
-    \item the best score and its query/target coordinates;
+    \item the best score and its query/target coordinates.
     \item the best score at the query end, with the associated target
-    coordinate;
+    coordinate.
     \item the best score at the target end, with the associated query
-    coordinate;
+    coordinate.
     \item the bottom-right global score if the band reaches it.
 \end{itemize}
 
@@ -376,7 +385,7 @@ execution engine:
     live in a per-alignment arena. The returned CIGAR has independent lifetime.
     \item Buffers that are overwritten before first read are not eagerly
     zero-filled. In the dual-affine state, the short and long gap arrays are
-    initialised directly to their required offsets. The trace matrix likewise
+    initialized directly to their required offsets. The trace matrix likewise
     skips a full clear.
     \item The common nucleotide scoring layout uses a fused equality-based
     score selection. Generic matrices retain a table path.
@@ -400,7 +409,8 @@ costs that minimap2 does not have.
 
 Block Aligner starts from the same single-affine recurrence as
 Equations~\ref{eq:affine-i}--\ref{eq:affine-h}, but it does not fill a static
-band. It keeps a square \(B\times B\) block positioned over the DP matrix. A
+band~\cite{block_aligner_paper}. It keeps a square \(B\times B\) block
+positioned over the DP matrix. A
 step computes only a strip of width \(S\) on the right or bottom edge, where
 the reference implementation uses \(S=8\). The next direction is selected by
 comparing the first \(S\) scores on the two outgoing borders:
@@ -431,10 +441,7 @@ datasets it reports more than five- to tenfold speedups over some comparison
 methods with an error rate below 3\% on the evaluated protein and long-read
 sets. These are paper results on the authors' hardware and workloads. They are
 not BioSeqDB speedups and are not directly comparable with the SQL E2E
-measurements below.\footnote{D. Liu and M. Steinegger, ``Block Aligner: an
-adaptive SIMD-accelerated aligner for sequences and position-specific scoring
-matrices'', \emph{Bioinformatics} 39(8), 2023,
-doi:10.1093/bioinformatics/btad487.}
+measurements below.
 
 \begin{figure}[htbp]
 \centering
@@ -488,6 +495,13 @@ algorithm and the paper's Figure~2, not copied from the paper artwork.}
 \label{fig:block-adaptive-reconstruction}
 \end{figure}
 
+Figure~\ref{fig:block-adaptive-reconstruction} should be read from left to
+right. Panel~(a) chooses the next strip from the competing border-prefix
+maxima. Panel~(b) restores a checkpoint and enlarges the search after progress
+stalls. Panel~(c) halves the block only after a maximum reaches an outgoing
+border suffix. The figure therefore depicts an adaptive search trajectory, not
+a fixed diagonal band.
+
 \subsection{SIMD inside a block}
 
 Block Aligner lays vectors vertically or horizontally rather than on
@@ -518,13 +532,13 @@ module rather than a foreign-library call. The production core has the
 following concrete geometry:
 
 \begin{itemize}
-    \item a fixed step \(S=8\);
+    \item a fixed step \(S=8\).
     \item signed 16-bit lanes with saturating arithmetic and a bias of
     \(2^{14}\), together with a 32-bit step offset.
-    \item a Highway capped tag of at most 16 lanes;
+    \item a Highway capped tag of at most 16 lanes.
     \item admitted lane counts of exactly 8 or 16, corresponding to the
-    proven reference geometries;
-    \item power-of-two minimum and maximum block sizes;
+    proven reference geometries.
+    \item power-of-two minimum and maximum block sizes.
     \item global mode for mandatory seed gaps and two-confirmation X-drop for
     left and right extension.
 \end{itemize}
@@ -567,7 +581,7 @@ requested, the exact edit count.
 \toprule
 \textbf{Aspect} & \textbf{Original Block Aligner} & \textbf{BioSeqDB port}\\
 \midrule
-Implementation & Rust with explicit SSE2, AVX2, Neon, WebAssembly SIMD and C
+Implementation & Rust with explicit SSE2, AVX2, Arm NEON, WebAssembly SIMD and C
 bindings & C++26 module with Highway target dispatch and a capped, proven
 8/16-lane geometry\\
 Input & contiguous sequence or PSSM buffers & alphabet-generic lazy views over
@@ -630,14 +644,14 @@ symbols directly, reverses packed groups when required, XORs query and target,
 and collapses each two-bit mismatch group for a population count. It computes
 the score and, when requested, the edit count without byte expansion. When
 CIGAR output is requested, the caller emits one \(nM\) run. A score-only call
-does not materialise that run. Its decision is three-valued:
+does not materialize that run. Its decision is three-valued:
 
 \begin{enumerate}
     \item \emph{not eligible}: no packed scan ran, so the ordinary path,
-    including the generic byte certificate, remains available;
+    including the generic byte certificate, remains available.
     \item \emph{rejected}: exact packed content was scanned but
     Equation~\ref{eq:block-certificate} did not prove uniqueness, so Block DP
-    runs with the byte certificate disabled to avoid scanning twice;
+    runs with the byte certificate disabled to avoid scanning twice.
     \item \emph{certified}: score and endpoint are committed. A requested edit
     count and requested \(nM\) CIGAR are also committed without constructing
     padded buffers, scratch, or trace. The result CIGAR vector is not allocated
@@ -783,16 +797,16 @@ counts, and endpoints are stitched into their original chains.
 This is useful scheduling infrastructure. It is not yet an inter-sequence
 SIMD recurrence. The current function named
 \texttt{ksw2\_extz2\_batched\_inner} loops over occupied lanes and calls
-\texttt{run\_single\_fill}; that function invokes the ordinary
-intra-sequence KSW2 kernel once per lane. Execution evidence deliberately calls
-them bucket lanes rather than SIMD DP lanes. The earlier DOC0254 design and
-some source comments describe the intended fused-lane endpoint, but current
-code is authoritative.
+\texttt{run\_single\_fill}. That function invokes the ordinary intra-sequence
+KSW2 kernel once per lane. Execution evidence deliberately calls them bucket
+lanes rather than SIMD DP lanes. The earlier DOC0254 design and some source
+comments describe the intended fused-lane endpoint, but current code is
+authoritative.
 
 The experiment still yielded two lasting design lessons. First, separating
 fill collection from execution is sufficient to expose batch geometry without
 changing region semantics. Second, a label such as ``batched'' does not prove
-that the arithmetic itself is vectorised across independent sequences.
+that the arithmetic itself is vectorized across independent sequences.
 BioSeqDB's final public CPU choice therefore remains native Block Aligner or
 intra-sequence KSW2.
 
@@ -802,10 +816,10 @@ intra-sequence KSW2.
 \subsection{The G3SA idea}
 
 The G3SA extending stage addresses a conflict between the forward pass and
-traceback. GPU forward DP is fastest when scores remain in registers or shared
-memory. Conventional traceback wants one direction value per cell in global
-memory. Writing that direction matrix can remove the benefit of the GPU
-kernel.
+traceback~\cite{g3sa_paper}. GPU forward DP is fastest when scores remain in
+registers or shared memory. Conventional traceback wants one direction value
+per cell in global memory. Writing that direction matrix can remove the benefit
+of the GPU kernel.
 
 G3SA's gridded traceback stores only score states on regularly spaced tile
 boundaries. Once the final endpoint is known, the backward kernel loads the
@@ -813,9 +827,7 @@ nearest upper-left boundaries, recomputes one tile in fast memory, traces
 through that tile, discards its directions, and repeats for the next tile on
 the path. Forward memory traffic falls from an entire direction matrix to a
 grid of borders. Traceback performs additional arithmetic only in tiles
-touched by the final path.\footnote{Y. Han, S. Kim, S. Park, and J. Lee,
-``G3SA: A GPU-Accelerated Gold Standard Genomics Library for End-to-End
-Sequence Alignment'', \emph{ICS 2025}, doi:10.1145/3721145.3729516.}
+touched by the final path.
 
 \begin{figure}[htbp]
 \centering
@@ -863,6 +875,12 @@ pass. Purple tiles are recomputed only while the orange path is traced. The
 drawing is a new TikZ reconstruction, not copied paper artwork.}
 \label{fig:gridded-traceback}
 \end{figure}
+
+Figure~\ref{fig:gridded-traceback} separates persisted state from replayed
+work. The left panel shows the forward pass spilling only tile-border score
+states. The right panel shows traceback recomputing only the purple tiles
+touched by the orange path. The design trades extra arithmetic during
+traceback for a much smaller forward-pass memory footprint.
 
 G3SA's CUDA implementation uses subwarps, packed bases, anti-diagonal
 forward computation, a separate traceback kernel, and a principal grid size
@@ -925,7 +943,7 @@ reversed at completion.
 
 Several constrained scripts avoid DP altogether: exact equal-length spans,
 one- or two-gap scripts, a bounded unit-gap walk, and a greedy anchored gap
-walk. Exact and recognised unit-gap jobs can reserve zero traceback words.
+walk. Exact and recognized unit-gap jobs can reserve zero traceback words.
 The current caps are 256 symbols for an individual simple gap and 64 gap
 operations for the simple-script family.
 
@@ -953,7 +971,7 @@ Gap model & inspected gridded CUDA trace uses one affine family & two affine
 families with short and long gaps\\
 Input & packed CUDA query/reference batches & alphabet-rank arrays packed
 from lazy/PostgreSQL views after coordinate selection\\
-Fast paths & GPU extension kernels and G3SA scheduling optimisations & exact,
+Fast paths & GPU extension kernels and G3SA scheduling optimizations & exact,
 simple-script, unit-gap, bounded full-trace, and gridded routes\\
 Integration proof & standalone end-to-end aligner comparisons & SQL E2E
 counters include selected branch, jobs, waves, CIGAR jobs, traceback words,
@@ -975,7 +993,7 @@ dedicated SQL CIGAR route.
 
 The result is best described as a G3SA-inspired traceback memory layout, not a
 Vulkan translation of G3SA. BioSeqDB gains the border/recompute trade-off and
-batch amortisation, while retaining its own SQL admission rules, alphabet
+batch amortization, while retaining its own SQL admission rules, alphabet
 surface, gap model, result ABI, and fail-closed evidence.
 
 \section{Intermediate measurements and current evidence}
@@ -984,7 +1002,8 @@ surface, gap model, result ABI, and fail-closed evidence.
 \subsection{CPU block-size sweep}
 
 The current \texttt{Minimap2Params} source preserves a tuning sweep performed
-on an Apple M1/Neon long, very-long, and extra-long CCS benchmark grid. It
+on an Apple M1 with Arm NEON over a long, very-long, and extra-long CCS
+benchmark grid. It
 used ntHash minimizers and SIMD chaining, with KSW2 reported at 172\,ms for
 the cited very-long baseline. Table~\ref{tab:block-sweep} reproduces the
 displayed Block timings. The final column is calculated directly from the two
@@ -1072,6 +1091,13 @@ fallbacks, and zero Vulkan declines.}
 \end{tabular}
 \end{table}
 
+Table~\ref{tab:gpu-alignment-evidence} separates elapsed time from each
+fixture's acceptance gate. The 512-job row establishes fixture acceptance
+without a speed advantage. The 4096-job row combines the same class of gate
+with a \(2.493\times\) ratio. The 300\,Mbp row uses a coordinate-tolerance
+gate, not CIGAR-path comparison or row-set parity. These rows therefore cannot
+be treated as one uniform equivalence test.
+
 \begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[x=2.65cm,y=1.45cm,font=\scriptsize]
@@ -1094,19 +1120,25 @@ fallbacks, and zero Vulkan declines.}
 \end{tikzpicture}
 \caption{Batch-size effect in the selected E2E evidence. The dashed line is
 break-even. A 512-job gridded CIGAR batch is tied, while larger or
-target-heavy batches amortise the PostgreSQL and Vulkan fixed costs.}
+target-heavy batches amortize the PostgreSQL and Vulkan fixed costs.}
 \label{fig:gpu-alignment-speedups}
 \end{figure}
+
+Figure~\ref{fig:gpu-alignment-speedups} plots the ratio of SIMD time to GPU
+time, not either raw duration. A value above one favors the GPU. The 512-job
+many-gap case sits at break-even, while the two larger-work cases exceed
+\(2.4\times\). The figure supports a fixed-cost amortization conclusion only
+for these scoped cases.
 
 The 4096-job CIGAR case executed 4096 gridded jobs in one extension dispatch
 and planned 327,069,696 traceback words. It reduced wall time by 59.891\%.
 The 512-job version was correct and used 40,883,712 traceback words, but GPU
 and SIMD wall times were effectively equal. This is a useful negative result:
-gridded storage alone does not make a small batch fast. Runtime initialisation,
+gridded storage alone does not make a small batch fast. Runtime initialization,
 rank packing, job classification, allocation, submission, and result
 construction remain.
 
-The 300\,Mbp coordinate case gives a different view of amortisation. Its GPU
+The 300\,Mbp coordinate case gives a different view of amortization. Its GPU
 region time was 3.857821\,s versus 25.612293\,s for the SIMD control, a
 6.639-fold region speedup. Total wall time improved by 2.432-fold because the
 GPU path also spent approximately 12.082\,ms in query sketching,
@@ -1142,21 +1174,40 @@ scalar-per-job limitation, or row-set caveat.
 
 \subsection{Why the paper and project numbers should not be merged}
 
-Three superficially similar speed claims now appear in this chapter:
+The chapter contains four evidence classes that answer different questions.
 
-\begin{itemize}
-    \item Block Aligner's paper comparison against several CPU aligners;
-    \item BioSeqDB's embedded M1 Block-vs-KSW2 tuning sweep;
-    \item G3SA's CUDA results and BioSeqDB's Vulkan/PostgreSQL E2E results.
-\end{itemize}
+\begin{table}[htbp]
+\centering
+\small
+\caption{Evidence classes used for final-alignment claims.}
+\label{tab:alignment-evidence-classes}
+\begin{tabular}{p{0.19\textwidth}p{0.22\textwidth}p{0.25\textwidth}p{0.24\textwidth}}
+\toprule
+\textbf{Evidence class} & \textbf{Measured scope} &
+\textbf{What it supports} & \textbf{What it does not support}\\
+\midrule
+Block Aligner paper & standalone CPU library on the authors' workloads &
+algorithm motivation and published score-error behavior &
+BioSeqDB or PostgreSQL speed\\
+BioSeqDB M1 sweep & historical integrated CPU tuning with Arm NEON &
+the 16--32 in-process Block interval for that workload &
+semantic equivalence to KSW2 or the SQL 32--256 default\\
+G3SA paper & modified standalone mapper using CUDA &
+the border-storage and tile-replay design trade-off &
+BioSeqDB Vulkan or SQL performance\\
+BioSeqDB report 47 & one-sample dirty PostgreSQL E2E signoff &
+case-scoped route execution, acceptance gates, and elapsed times &
+algorithm-only speed, literal CIGAR identity, or row-set parity\\
+\bottomrule
+\end{tabular}
+\end{table}
 
-They answer different questions. The Block paper isolates a library algorithm
-and reports a score-error rate. The M1 sweep chooses scratch geometry inside
-BioSeqDB's CPU pipeline. G3SA measures a modified standalone mapper on CUDA.
-The BioSeqDB E2E cases include PostgreSQL planning, data preparation, target
-index handling, batching, GPU submission, and SQL result projection. A single
-``alignment speedup'' column across all four would be misleading. The thesis
-therefore uses each number only for the design decision it actually supports.
+Table~\ref{tab:alignment-evidence-classes} prevents a single ``alignment
+speedup'' column from collapsing incompatible scopes. The Block paper isolates
+a library algorithm. The M1 sweep chooses CPU scratch geometry. G3SA measures
+a CUDA mapper. Report 47 includes PostgreSQL planning, data preparation, target
+index handling, batching, GPU submission, and SQL projection. Each number is
+used only for the design decision that its evidence class supports.
 
 \section{The final solution and its boundaries}
 \label{sec:final-alignment-decision}
@@ -1174,7 +1225,7 @@ rather than one kernel forced onto every query:
     scoring, finite bands, Z-drop, and minimap-style endpoint selection. The
     BioSeqDB port adds lazy subrange encoding, arena allocation, eliminated
     clears, and portable Highway dispatch.
-    \item Native Block Aligner is the default CPU selection. It is favoured for
+    \item Native Block Aligner is the default CPU selection. It is favored for
     the many short mandatory fills exposed by the seed walk. The implementation
     adds direct compact input, compressed trace masks, fused edit counting,
     exact diagonal certificates, and fail-closed phase evidence.
@@ -1199,11 +1250,11 @@ the layer where it is actually defined.}
 \midrule
 CPU Block & C++ and PostgreSQL base-alignment default & many short fills,
 portable SIMD, low scratch at tuned block sizes & single affine and adaptive
-heuristic; C++ 16--32 and SQL 32--256 defaults differ\\
+heuristic. C++ 16--32 and SQL 32--256 defaults differ\\
 CPU KSW2 & explicit base-alignment option & two-piece affine, band/Z-drop,
 closest current path to minimap2's ordinary extension core & missing
 minimap2 splice, inversion, and second-pass policies in the surrounding port\\
-internal batched KSW2 & internal enum only; generated SQL value omitted &
+internal batched KSW2 & internal enum only. Generated SQL value omitted &
 experimentation with deferred fill scheduling and restitching & no fused
 inter-sequence SIMD DP yet\\
 dedicated Vulkan & complete all-GPU tuple, plus explicit extension enable for
@@ -1217,6 +1268,14 @@ edit result\\
 \end{tabular}
 \end{table}
 
+Table~\ref{tab:final-alignment-selection} shows that ``default'' is
+layer-specific. CPU Block is the C++ and PostgreSQL base-alignment default, but
+that choice does not force the dedicated Vulkan route. KSW2 remains available
+when its two-piece-affine and endpoint semantics matter. The no-base-DP row is
+valid only when neither CIGAR nor an exact edit count is requested. Route
+selection therefore depends on requested outputs and admitted geometry, not
+only on the backend name.
+
 \subsection{How the final design differs from the starting point}
 
 The starting point was conceptually simple: port minimap2's KSW2 calls and
@@ -1228,14 +1287,14 @@ produce the exact SQL edit count. A packed diagonal proof can eliminate DP.
 Algorithm execution is attested. A GPU route owns its whole selected
 seed--chain--coordinate--CIGAR path and is forbidden from falling back.
 
-The changes also reveal which optimisations did \emph{not} become the final
+The changes also reveal which optimizations did \emph{not} become the final
 solution. The first idea of inter-sequence KSW2 batching stopped at scheduling
 and stitching. A Block interval of 32--256 was too expensive for the measured
 short-fill CPU workload, although it remains the SQL safety-oriented default.
 The first bounded GPU CIGAR route was insufficient for long many-gap cases,
 which motivated gridded traceback. Even after gridded traceback, 512 jobs did
 not beat SIMD because fixed costs dominated. The final system therefore
-retains multiple routes and reports the break-even behaviour instead of
+retains multiple routes and reports the break-even behavior instead of
 declaring one accelerator universally faster.
 
 \subsection{Open technical limitations}

@@ -24,7 +24,7 @@ WHERE mmsearch(seq, query)
 The SQL expression means that returned alignments have unit-cost edit distance
 strictly below ten.  It does not mean that the database may return the
 approximation computed by SneakySnake or GateKeeper.  The planner therefore
-normalises the exclusive bound \(B=10\) to the inclusive prefilter threshold
+normalizes the exclusive bound \(B=10\) to the inclusive prefilter threshold
 \(E=B-1=9\).  A cheap stage may remove a candidate only when it can prove that
 its distance is greater than \(E\).  Every survivor still undergoes the selected
 base aligner, and an exact post-traceback stage applies the original strict
@@ -68,10 +68,10 @@ right ends.  A lower bound for a mandatory seed-to-seed gap is composable:
 disjoint mandatory gaps require disjoint edits, so their lower bounds may be
 summed for a region.  A bound derived from a local extension window is not
 composable in the same way.  X-drop or local alignment may legitimately omit
-an expensive prefix or suffix; rejecting because that optional window has a
+an expensive prefix or suffix.  Rejecting because that optional window has a
 large global distance would delete a valid local result.
 
-BioSeqDB therefore materialises only mandatory global fill windows.  The
+BioSeqDB therefore materializes only mandatory global fill windows.  The
 iteration at \texttt{pipe.cppm}, lines 7985--8048, converts each window to flat
 alphabet ranks, applies reverse-query orientation when required, and records
 which region owns the job.  Left and right local extensions are deliberately
@@ -91,7 +91,7 @@ Three additional rules close common correctness gaps:
     \item A dispatched job whose slice or shader geometry fails per-job
     validation returns \texttt{unsupported\_conservative} and is accepted.
     ``Fail open'' here means preserving the candidate.
-    \item Overflow while materialising a flat slice or aggregate offset omits
+    \item Overflow while materializing a flat slice or aggregate offset omits
     that job conservatively before dispatch.  No job or result record is
     created, and the owning region receives no rejection evidence from it.
     \item Allocation, mapping, device, or runtime failures throw.  If Vulkan
@@ -101,7 +101,7 @@ Three additional rules close common correctness gaps:
 \end{enumerate}
 
 The common ABI makes these cases visible.  \texttt{PrefilterJob} is a 20-byte
-record containing two offsets, two lengths, and \(E\);
+record containing two offsets, two lengths, and \(E\).
 \texttt{PrefilterResult} is a 16-byte record containing a lower bound, status,
 accept bit, and diagnostic word
 (\texttt{prefilter\_types.cppm}, lines 16--61).  The three statuses are
@@ -119,15 +119,15 @@ alignment scores, z-drop, and traceback to decide how the region should be
 reported.  It has seed-frequency and chaining heuristics that reduce the
 candidate set, but these are not a proof of the SQL condition
 \(\operatorname{edit}<B\).  The SneakySnake and GateKeeper papers likewise
-evaluate candidate read/reference pairs before an exact aligner; neither
+evaluate candidate read/reference pairs before an exact aligner.  Neither
 defines how an edit predicate should participate in PostgreSQL planning.
 
 BioSeqDB preserves minimap2-derived seeds, chains, region geometry, and the
 chosen final aligner.  It inserts one additional conditional stage after
 divergence estimation and before base alignment.  The stage is enabled only
 when the query requests exact edit accounting and provides a representable
-positive strict bound.  Rejection removes KSW2 or Block-Aligner work; acceptance
-does not change scoring parameters, z-drop, CIGAR construction, primary versus
+positive strict bound.  Rejection removes KSW2 or Block-Aligner work.
+Acceptance does not change scoring parameters, z-drop, CIGAR construction, primary versus
 secondary classification, or mapping quality.  The exact survivor stage runs
 before the final classification pass so a candidate that violates the SQL
 predicate cannot influence another survivor's metadata.
@@ -146,9 +146,10 @@ filter throughput number alone.
 
 The original paper, \emph{SneakySnake: A Fast and Accurate Universal Genome
 Pre-Alignment Filter for CPUs, GPUs, and FPGAs}, reformulates approximate
-string matching as a single-net-routing problem.  For equal-length strings of
-length \(m\) and threshold \(E\), it considers a grid with \(m\) columns and
-\(2E+1\) rows.  A row represents one relative diagonal
+string matching as a single-net-routing
+problem~\cite{sneakysnake_paper}.  For equal-length strings of length \(m\) and
+threshold \(E\), it considers a grid with \(m\) columns and \(2E+1\) rows.  A
+row represents one relative diagonal
 \(d\in[-E,E]\).  At column \(j\), the cell is free when the target symbol
 matches the query symbol at the shifted coordinate and is an obstacle
 otherwise:
@@ -165,12 +166,12 @@ obstacle is an \emph{escape segment}.  At a checkpoint, the algorithm examines
 all \(2E+1\) diagonals, takes the longest zero run, crosses its following
 obstacle if one exists, and advances the checkpoint.  Reaching the right
 boundary with at most \(E\) obstacles means that exact alignment is still
-necessary; observing more than \(E\) obstacles permits rejection.
+necessary.  Observing more than \(E\) obstacles permits rejection.
 
 Figure~\ref{fig:prefilter-chip-maze} reconstructs this mechanism rather than
 copying the paper artwork.  Its visual grammar follows the project figure
 reconstruction reference: a white background, explicit row labels, black
-obstacles, and one amber route.  The particular bits are illustrative; the
+obstacles, and one amber route.  The particular bits are illustrative.  The
 invariant is the movement from one checkpoint to the furthest available
 horizontal segment.
 
@@ -219,7 +220,7 @@ horizontal segment.
 a query--target shift, a white cell is a match, and a dark cell is an
 obstacle.  From each checkpoint the route takes the longest immediately
 available horizontal match run.  The number of crossed obstacles is used as
-an edit-distance lower bound; the route does not reconstruct an edit script.}
+an edit-distance lower bound.  The route does not reconstruct an edit script.}
 \label{fig:prefilter-chip-maze}
 \end{figure}
 
@@ -232,7 +233,7 @@ loss of information is useful only in one direction: the route may
 \emph{underestimate} the true edit distance, but a reliable implementation
 must not overestimate it.  If the route crosses \(r\) obstacles and
 \(r>D(Q,T)\), then a valid pair could be rejected.  The paper's central
-argument is that the greedy route minimises obstacles in its routing model and
+argument is that the greedy route minimizes obstacles in its routing model and
 that this number is a lower bound for the corresponding equal-length global
 matching problem.
 
@@ -256,7 +257,7 @@ accept for exact alignment
 The current BioSeqDB scalar and Highway implementations follow this structure
 in \texttt{sneaky\_snake.cppm}, lines 350--400.  The production submaze width
 is 512 symbols.  Partitioning a long maze makes execution and GPU resource
-requirements bounded; it can reduce filter strength by producing a smaller
+requirements bounded.  It can reduce filter strength by producing a smaller
 lower bound, but that direction creates false accepts rather than false
 rejects.
 
@@ -269,10 +270,10 @@ uses fixed packing and compile-time dimensions.  BioSeqDB retains the
 algorithmic walk but changes the representation and execution contract:
 
 \begin{enumerate}
-    \item \textbf{Alphabet-generic ranks.}  The filter compares normalised
+    \item \textbf{Alphabet-generic ranks.}  The filter compares normalized
     rank bytes for equality.  It does not encode \(A,C,G,T\) inside the
     algorithm, so DNA4, DNA5, amino-acid, and generated alphabets use the same
-    primitive once the pipeline has materialised the mandatory gaps.  Equal
+    primitive once the pipeline has materialized the mandatory gaps.  Equal
     numeric ranks are compared only after the surrounding sequence type has
     established a common alphabet.
     \item \textbf{Checked flat batches.}  Each job names slices in two flat
@@ -283,7 +284,7 @@ algorithmic walk but changes the representation and execution contract:
     difference and marks the result \texttt{conservative\_unequal}
     (\texttt{sneaky\_snake.cppm}, lines 402--425).
     \item \textbf{Pipeline-safe windows.}  Only mandatory global fills are
-    evaluated.  Reverse-strand gaps are materialised in their oriented rank
+    evaluated.  Reverse-strand gaps are materialized in their oriented rank
     order.  Local extension regions never cause a rejection.
     \item \textbf{Query-scoped threshold.}  \(E\) is derived from the SQL
     predicate, not from a global feature switch.  The same query also enables
@@ -291,7 +292,7 @@ algorithmic walk but changes the representation and execution contract:
 \end{enumerate}
 
 The first CPU port performed one rank comparison at a time and the first SIMD
-design vectorised several independent jobs with gather-heavy state.  That
+design vectorized several independent jobs with gather-heavy state.  That
 implementation was correct but slower than the bundled C reference in most
 standalone cells.  The retained scalar path now scans a matching prefix with
 unaligned 64-bit loads, XOR, and first-differing-byte detection
@@ -303,9 +304,9 @@ shift only if the query symbol at that best-offset could improve the result.
 Highway applies this candidate test to a contiguous window, avoiding the
 earlier per-lane job-state machinery (lines 263--348).
 
-The optimisation is exact, not heuristic.  Suppose the current best run has
+The optimization is exact, not heuristic.  Suppose the current best run has
 length \(b\).  A candidate diagonal can improve the maximum only if its first
-\(b\) symbols match; in particular, it must match the target at offset \(b\).
+\(b\) symbols match.  In particular, it must match the target at offset \(b\).
 Testing that symbol discards only candidates that cannot beat the current
 best.  Full prefix scanning is performed for every surviving candidate.
 
@@ -319,8 +320,8 @@ after measurement:
 
 \begin{itemize}
     \item mode 1 assigns an independent invocation to a job and is used for
-    low thresholds, where synchronisation and team setup cost more than they
-    save;
+    low thresholds, where synchronization and team setup cost more than they
+    save.
     \item mode 8 uses an eight-lane team when at least one supported
     equal-length job has \(E\ge16\), exposing diagonal work in parallel.
 \end{itemize}
@@ -339,11 +340,13 @@ never turns software Vulkan such as llvmpipe into a claimed GPU result.
 
 SneakySnake is attractive over a wide range of lengths and thresholds, but its
 checkpoint loop and diagonal scans leave fixed overhead for very small seed
-gaps.  GateKeeper is a bit-vector filter derived from Shifted Hamming Distance.
+gaps.  GateKeeper is a bit-vector filter derived from Shifted Hamming
+Distance~\cite{gatekeeper_paper}.
 The original GateKeeper-GPU system packs DNA symbols into two bits, creates one
 CUDA thread per read/reference pair, and fixes read length and threshold at
-compile time.  Its small, regular boolean data flow is a better match for the
-32- and 64-symbol gaps that occur in the BioSeqDB pipeline.
+compile time~\cite{gatekeeper_gpu_paper}.  Its small, regular boolean data flow
+is a better match for the 32- and 64-symbol gaps that occur in the BioSeqDB
+pipeline.
 
 For equal-length \(Q,T\) and threshold \(E\), define a mismatch mask on the
 unshifted diagonal,
@@ -382,7 +385,7 @@ the valid sequence interval, the operation can be expressed as
 \end{split}
 \]
 The result is masked back to valid positions.  Multiword implementations must
-carry neighbouring bits across 32-bit boundaries; otherwise a two-zero run
+carry neighboring bits across 32-bit boundaries.  Otherwise a two-zero run
 straddling a word boundary would be treated differently from the same pattern
 inside a word.
 
@@ -407,7 +410,7 @@ cost two, and every other nonzero nibble costs one.  Accumulation stops at
 16-entry CUDA lookup table.
 
 Figure~\ref{fig:prefilter-gatekeeper} reconstructs the data flow from the
-original paper and kernel.  It emphasises a feature that is easy to miss in a
+original paper and kernel.  It emphasizes a feature that is easy to miss in a
 prose description: amendment is performed per shifted mask \emph{before} the
 mask intersection, and the final count is a grouped estimate rather than a
 popcount.
@@ -531,12 +534,18 @@ activation, guard-confirmed rejection, or the exact \(E=0\) Hamming rejection
 \subsection{Clean-room, alphabet-generic implementation}
 
 The reference CUDA kernel has several properties that are unsuitable as a
-database extension boundary.  It encodes only \(A,C,G,T\) in two bits; passes
-undefined symbols by a separate rule; allocates a compile-time
-\((2E+1)\)-by-word mask matrix per thread; performs explicit carry repair
-between 32-bit words; uses a constant-memory amendment lookup table; and
-requires recompilation when length or threshold changes.  Host orchestration
-uses CUDA unified memory and mapper-specific batches.
+database extension boundary:
+
+\begin{itemize}
+    \item It encodes only \(A,C,G,T\) in two bits and passes undefined symbols
+    by a separate rule.
+    \item It allocates a compile-time \((2E+1)\)-by-word mask matrix per thread.
+    \item It performs explicit carry repair between 32-bit words.
+    \item It uses a constant-memory amendment lookup table.
+    \item It requires recompilation when length or threshold changes.
+\end{itemize}
+
+Host orchestration uses CUDA unified memory and mapper-specific batches.
 
 BioSeqDB re-derived the operations over equality-comparable rank bytes.  The
 CPU oracle uses a 128-bit logical mask, with direct support for equal nonempty
@@ -552,7 +561,7 @@ production variants:
 \[
  (m,E)\in\{(32,2),(32,4),(64,2),(64,4)\}.
 \]
-All have local size 64 and maximum span 128; the static variant registry is
+All have local size 64 and maximum span 128.  The static variant registry is
 explicit in \texttt{shader\_variants.cppm}, lines 344--353.  A fixed variant is
 chosen only for a homogeneous batch whose rank offsets are four-byte aligned.
 It loads the packed rank words once, derives Hamming and shifted masks in
@@ -570,12 +579,12 @@ shader because it does not satisfy one fixed variant's homogeneous geometry.
 \begin{tabular}{p{0.20\textwidth}p{0.34\textwidth}p{0.36\textwidth}}
 \textbf{Property} & \textbf{GateKeeper-GPU reference} & \textbf{BioSeqDB GateKeeper}\\
 \hline
-Input symbols & two-bit DNA; undefined base handled specially &
-alphabet-normalised rank equality; no DNA constant in the algorithm\\
+Input symbols & two-bit DNA. Undefined base handled specially &
+alphabet-normalized rank equality. No DNA constant in the algorithm\\
 Execution API & CUDA kernel, one pair per thread, compile-time \(m,E\) &
-shared batch ABI; Vulkan generic shader plus four measured fixed variants\\
+shared batch ABI. Vulkan generic shader plus four measured fixed variants\\
 Mask storage & \(2E+1\) word arrays per thread &
-streamed/intersected masks; fixed variants keep packed ranks and required
+streamed/intersected masks. Fixed variants keep packed ranks and required
 diagonals in registers\\
 Amendment & 16-entry LUT plus cross-word repair &
 boolean run definition, explicitly tested at word boundaries\\
@@ -584,7 +593,7 @@ same semantic compensation, applied after amendment and valid-bit masking\\
 Rejection basis & approximate grouped mask count &
 mask candidate plus exact bounded global-edit guard\\
 Unsupported input & mapper-specific handling &
-status-2 conservative accept; selected runtime failure remains an error\\
+status-2 conservative accept. Selected runtime failure remains an error\\
 \end{tabular}
 \caption{Algorithmic and systems differences between the research
 GateKeeper-GPU implementation and the BioSeqDB port.}
@@ -621,7 +630,7 @@ At the PostgreSQL boundary, the planner accepts exactly one top-level
 \texttt{bioseq.edit(sequence\_column) < integer\_constant} predicate using the
 built-in operators for 16-, 32-, or 64-bit integer constants.  An overloaded
 operator merely named ``\(<\)'', a nonconstant bound, a wrong target column,
-\(\le\), or an ambiguous placeholder does not enter the optimisation
+\(\le\), or an ambiguous placeholder does not enter the optimization
 (\texttt{custom\_scan.cppm}, lines 1976--2050).  Unsupported forms fail with a
 feature-not-supported error rather than silently evaluating a stub with
 different semantics.
@@ -631,12 +640,12 @@ custom scan sets \(E=B-1\).  Backend selection then follows current execution
 capability:
 
 \begin{itemize}
-    \item an existing Vulkan minimisation, seeding, chaining, or extension
-    route selects Vulkan for the prefilter too;
+    \item an existing Vulkan minimization, seeding, chaining, or extension
+    route selects Vulkan for the prefilter too.
     \item a per-call
     \texttt{aligner\_options(vulkan\_enabled => true)} may explicitly request
-    the standalone Vulkan prefilter;
-    \item otherwise the scan selects Highway when vectorisation is enabled and
+    the standalone Vulkan prefilter.
+    \item otherwise the scan selects Highway when vectorization is enabled and
     scalar when it is disabled.
 \end{itemize}
 
@@ -668,8 +677,8 @@ retained two rows with edit counts zero and four under the strict bound five.
 The performance history matters because the final policy was not obvious from
 the papers.  A fast published filter can become slower after generic rank
 conversion, safe bounds checks, batching, runtime validation, and GPU
-synchronisation are included.  The project benchmark records
-\texttt{backend\_batch\_ns} for upload, dispatch, synchronisation, and result
+synchronization are included.  The project benchmark records
+\texttt{backend\_batch\_ns} for upload, dispatch, synchronization, and result
 readback.  The later hardware-route comparisons use that field.  It also
 records \texttt{wall\_clock\_ns} for the complete benchmark callback.
 Table~\ref{tab:sneaky-intermediate} transcribes complete-callback wall-clock
@@ -684,8 +693,8 @@ The final-source intermediate run
 \texttt{meta.commit=679aa4264853eeaaa8a3bd2c891e8e2da7e8e967},
 \texttt{dirty=true}, and \texttt{fast=false}.  The implementation report
 attributes the dirty flag to local builder configuration and an untracked
-generated report and states that compiled source matched the pushed commit;
-the artefact is consequently described as a scoped measurement, not as a
+generated report and states that compiled source matched the pushed commit.
+The artifact is consequently described as a scoped measurement, not as a
 clean-tree run.  Each standalone cell used a
 deterministic 1,024-pair prefix from the bundled upstream corpus.  Decisions
 matched the original and false rejects were zero, but Table
@@ -722,9 +731,9 @@ alignment work.  The same report measured the complete candidate pipeline:
 \textbf{Observed downstream work}\\
 \hline
 MEDIUM\_HIFI & 22.145 ms & 22.193 ms & 22.309 ms &
-no region rejected; 175 KSW2 calls and 6,672,027 input cells in every row\\
+no region rejected. 175 KSW2 calls and 6,672,027 input cells in every row\\
 MEDIUM\_ONT\_MODERN & 21.864 ms & 10.646 ms & 10.373 ms &
-all six candidate regions removed; KSW2 calls \(160\to0\), input cells
+all six candidate regions removed. KSW2 calls \(160\to0\), input cells
 \(6{,}915{,}415\to0\)\\
 \end{tabular}
 \caption{Whole-pipeline P50 results from report 127.  Threshold-qualified
@@ -736,18 +745,23 @@ The HiFi case is the break-even warning: if a filter rejects nothing, its work
 is pure overhead and the result is neutral or slightly slower.  The ONT
 fixture is the intended case: avoiding dynamic programming more than repays
 the filter and produces approximately \(2.1\times\) speedup.  The ONT exact
-threshold truth set was empty, so ``recall one'' there is vacuous; parity is
+threshold truth set was empty, so ``recall one'' there is vacuous.  Parity is
 instead established by the independently computed truth/correct counts and
 unchanged empty match result.
 
-\subsection{Optimised SneakySnake CPU and Vulkan}
+\subsection{Optimized SneakySnake CPU and Vulkan}
 
-The next-day optimisation replaced gather-heavy independent-job SIMD with the
+The next-day optimization replaced gather-heavy independent-job SIMD with the
 contiguous-byte traversal described earlier, added the frozen-best candidate
 test, introduced the hybrid Vulkan mode, and retained recorded commands.
-DOC0382 identifies report 138 as the final uncontended reproduction:
+DOC0382 identifies report 138 as the final uncontended reproduction.
 
-\begin{center}
+\begin{table}[htbp]
+\centering
+\small
+\caption{Scoped aggregate comparisons from dirty report 138. Ratios below one
+indicate lower time than the bundled original CPU implementation.}
+\label{tab:sneakysnake-report138}
 \begin{tabular}{p{0.30\textwidth}p{0.23\textwidth}p{0.35\textwidth}}
 \textbf{Comparison in report 138} & \textbf{Ratio to bundled original CPU} &
 \textbf{Interpretation}\\
@@ -759,7 +773,13 @@ summed P50 was 48.2\% of the original\\
 Vulkan, summed P50 & 0.175 &
 summed P50 was 17.5\% of the original\\
 \end{tabular}
-\end{center}
+\end{table}
+
+Table~\ref{tab:sneakysnake-report138} reports two different aggregates. The
+equal-weight mean gives every configured cell the same influence. The summed
+P50 weights the total timed work represented by the matrix. The Vulkan ratio
+of 0.175 therefore states that its summed P50 was 17.5\% of the original. It
+does not state that Vulkan won every threshold cell.
 
 All final Vulkan cells reported an available backend, 1,024 evaluated jobs,
 valid result count, runtime validation, zero reference-decision mismatches, and
@@ -770,12 +790,12 @@ the pre-cache hybrid in report 134, and reports 137 and 138 differed by only
 This aggregate result must not be read as ``GPU wins for every threshold''.
 In report 138 the synchronous Vulkan round trip was still
 \(4.94\)--\(11.81\times\) the original CPU at \(E=2\) and
-\(1.90\)--\(2.56\times\) at \(E=8\); the \(E=16\) and \(E=31\) team paths
+\(1.90\)--\(2.56\times\) at \(E=8\).  The \(E=16\) and \(E=31\) team paths
 supplied the aggregate gain.  The report metadata records commit
 \texttt{71fe8366555f682571c87005c3469a8e207307ab}, creation time
 2026-07-17T00:54:28Z, and \texttt{dirty=true}.  The result is therefore useful
-as the documented optimisation decision but is not described here as a clean
-commit artefact.  The same report recorded one SneakySnake Vulkan wall-clock
+as the documented optimization decision but is not described here as a clean
+commit artifact.  The same report recorded one SneakySnake Vulkan wall-clock
 P50 regression for the SRR 250-base \(E=100\) fixture evaluated at \(E=2\),
 with 902,250\,ns versus the preceding 656,209\,ns.  It also carried eleven
 report-level constant-metric sanity warnings and zero rule violations.  The
@@ -823,7 +843,7 @@ Report 151 is
 \texttt{dirty=false}, \texttt{fast=false}, created
 2026-07-17T15:43:33Z.  Its 13 benchmark blocks and raw evidence were complete.
 The process exit status was nonzero because unrelated chaining, historical XXL,
-and paper-ntHash rules failed; no violation or regression referenced
+and paper-ntHash rules failed.  No violation or regression referenced
 \texttt{bench\_prefilter\_small\_seeds}.  Keeping this distinction prevents a
 global red status from erasing valid scoped evidence, while also avoiding a
 false claim that the repository-wide benchmark was green.
@@ -844,7 +864,7 @@ fresh clean, same-head repetitions before claiming a current performance win.
 The resulting production choice is deliberately piecewise:
 
 \begin{itemize}
-    \item Scalar or Highway uses optimised SneakySnake.
+    \item Scalar or Highway uses optimized SneakySnake.
     \item Vulkan uses GateKeeper with the exact guard when every job
     independently has equal query and target lengths, length 32 or 64, and
     \(E=2\) or \(E=4\).  A homogeneous aligned batch can use a fixed variant.
@@ -897,7 +917,7 @@ represented does not wrap to a large unsigned \(E\).
 
 \paragraph{GPU latency and availability matter.}
 The small-\(E\) SneakySnake GPU cells demonstrate that high throughput on
-larger work does not imply low latency.  GateKeeper's specialised variants
+larger work does not imply low latency.  GateKeeper's specialized variants
 improve the measured small-window route, but first dispatch can still contain a
 25--31 ms pipeline/runtime outlier while steady-state P50 is about
 0.28--0.36 ms.  The benchmark claim is a five-sample steady-state P50 claim,
@@ -938,7 +958,7 @@ The intermediate measurements also explain the final design.  The first
 SneakySnake port preserved decisions but its SIMD kernel was slower than the
 bundled original.  Contiguous Highway scans, an exact candidate filter, hybrid
 Vulkan teams, and command replay reversed that aggregate result.  The remaining
-small-threshold GPU latency motivated GateKeeper specialisation.  On 2026-07-17,
+small-threshold GPU latency motivated GateKeeper specialization.  On 2026-07-17,
 reports 148 and 151 placed GateKeeper more than ten percent below SneakySnake
 in all sixteen historical acceptance comparisons.  Later dirty,
 history-ineligible runs contained two P50 blockers.  The most recent dirty run
