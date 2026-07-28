@@ -237,7 +237,8 @@ structurally.  Cost only describes the alternatives that remain meaningful.
 Figure~\ref{fig:mmsearch-planner-ownership} separates structural recognition
 from scalar cost metadata.
 
-\begin{figure}[htbp]
+\begin{center}
+\begin{minipage}{\linewidth}
 \centering
 \begin{tikzpicture}[
   node distance=0.55cm and 0.85cm,
@@ -268,12 +269,13 @@ executable qualifier and retain\\owner metadata};
 \draw[arrow] (path) -- (prune);
 \draw[arrow] (prune) -- (plan);
 \end{tikzpicture}
-\caption{Current \texttt{mmsearch} planning.  Structural hooks recognize a
+\captionof{figure}{Current \texttt{mmsearch} planning.  Structural hooks recognize a
 supported call and establish exact ownership.  The support function
 independently marks scalar execution as expensive.  Correctness depends on
 ownership and removal of executable copies, not on winning a cost race.}
 \label{fig:mmsearch-planner-ownership}
-\end{figure}
+\end{minipage}
+\end{center}
 
 \subsection{Relation and join hooks}
 
@@ -320,54 +322,54 @@ callbacks and their responsibilities.
 \scriptsize
 \caption{Planner and executor lifecycle of a base \texttt{BioseqScan}.}
 \label{tab:bioseq-customscan-lifecycle}
-\begin{tabular}{@{}p{0.22\textwidth}p{0.25\textwidth}p{0.45\textwidth}@{}}
+\begin{tabular}{@{}p{0.36\textwidth}p{0.58\textwidth}@{}}
 \toprule
-Phase & Current symbol & Responsibility \\
+Phase and current symbol & Responsibility \\
 \midrule
-Relation path hook &
-\texttt{BioseqColumnSetRelPathlistHook} &
+Relation path hook\newline
+\texttt{BioseqColumnSet}\allowbreak\texttt{RelPathlistHook} &
 Observe table paths, add supported BioSeqDB paths, and leave unrelated
 relations untouched. \\
-Path construction &
+Path construction\newline
 \texttt{AddBioseqColumnScanPath} &
 Choose the exact owned restriction, establish target/query provenance,
 carry needed expressions, and assign an honest cost. \\
-Path-set finalization &
+Path-set finalization\newline
 \texttt{AddBioseqColumnScanPaths} &
 After an owner exists, prune alternatives that would execute the same
 \texttt{RestrictInfo} without ownership. \\
-Plan construction &
-\texttt{BioseqColumnScanPath\_PlanCustomPath} &
+Plan construction\newline
+\texttt{BioseqColumnScanPath\_}\allowbreak\texttt{PlanCustomPath} &
 Build \texttt{CustomScan}, remove the owned predicate from scalar,
 vector, and storage qualifiers, and place setrefs-safe expressions and
 private tags in PostgreSQL node lists. \\
-State creation &
-\texttt{BioseqColumnScan\_CreateCustomScanState} &
+State creation\newline
+\texttt{BioseqColumnScan\_}\allowbreak\texttt{CreateCustomScanState} &
 Allocate the PostgreSQL state shell and bind method tables.  Defer runtime
 resources so plain EXPLAIN does not execute the pipeline. \\
-Initialization &
-\texttt{BioseqColumnScan\_BeginCustomScan} &
+Initialization\newline
+\texttt{BioseqColumnScan\_}\allowbreak\texttt{BeginCustomScan} &
 Create per-scan runtime, initialize expression states and source providers,
 bind constants or parameters, snapshot options, configure the dispatcher,
 and register cleanup. \\
-First execution &
+First execution\newline
 \texttt{CustomExecScan} &
 Allocate typed placeholder constants and rewrite attributable projection
 helpers in the finalized target list. \\
-Iteration &
+Iteration\newline
 \texttt{Inner\_CustomExecScan} &
 Collect qualified inputs, dispatch full or terminal batches, drain match
 cursors, populate placeholders, and project one output row per match. \\
-Rescan &
-\texttt{BioseqColumnScan\_ReScanCustomScan} &
+Rescan\newline
+\texttt{BioseqColumnScan\_}\allowbreak\texttt{ReScanCustomScan} &
 Clear cursors and retained rows, reset source state, re-evaluate
 \texttt{PARAM\_EXEC} operands, and rescan the access method. \\
-Normal teardown &
-\texttt{BioseqColumnScan\_EndCustomScan} &
+Normal teardown\newline
+\texttt{BioseqColumnScan\_}\allowbreak\texttt{EndCustomScan} &
 Clear parent-visible slots, close providers while resource owners are live,
 and mark runtime cleanup as complete. \\
-Diagnostics &
-\texttt{BioseqColumnScan\_ExplainCustomScan} &
+Diagnostics\newline
+\texttt{BioseqColumnScan\_}\allowbreak\texttt{ExplainCustomScan} &
 Render ownership, storage, pipeline, batching, fallback, and runtime
 counters in PostgreSQL EXPLAIN formats. \\
 \bottomrule
@@ -781,7 +783,8 @@ transformation or arbitrary query shape.
 Figure~\ref{fig:batchjoin-ownership} shows the tested structural invariant:
 child nodes publish operands while the parent remains the sole semantic owner.
 
-\begin{figure}[htbp]
+\begin{center}
+\begin{minipage}{\linewidth}
 \centering
 \begin{tikzpicture}[
   node distance=0.55cm and 1.0cm,
@@ -804,13 +807,17 @@ child nodes publish operands while the parent remains the sole semantic owner.
 \draw[arrow] (target) -- (join);
 \draw[arrow] (query) -- (join);
 \draw[arrow] (slice) -- (target);
-\draw[-Latex, dashed, red!70!black] (removed) -- node[below, sloped]{must not execute} (join);
+\draw[-Latex, dashed, red!70!black] (removed.north) --
+  node[midway, right=2mm, fill=white, inner sep=1pt, align=left,
+       font=\scriptsize, text=red!70!black]{must not\\execute}
+  (join.south);
 \end{tikzpicture}
-\caption{Join-level ownership.  Child providers publish operands and ordinary
+\captionof{figure}{Join-level ownership.  Child providers publish operands and ordinary
 columns.  Only the parent alignment owner consumes the semantic
 \texttt{mmsearch} restriction.}
 \label{fig:batchjoin-ownership}
-\end{figure}
+\end{minipage}
+\end{center}
 
 \subsection{Security and evaluation order}
 
@@ -824,9 +831,9 @@ cannot be transferred safely.
 
 These checks intentionally sacrifice some plan shapes.  A database extension
 cannot justify moving a volatile expression, bypassing a security barrier, or
-reusing a value across rows merely because doing so would produce a larger
-alignment batch.  Unsupported shapes remain visible through the fail-closed
-SQL boundary.
+reusing a value across rows.  Producing a larger alignment batch does not
+change that constraint.  Unsupported shapes remain visible through the
+fail-closed SQL boundary.
 
 \section{What BioSeqDB borrowed from ParadeDB}
 \label{sec:paradedb-customscan-comparison}
@@ -1131,7 +1138,9 @@ facts such as owned-qual audit counters, projected columns, index
 read/recompute decisions, storage hydration, submission counts, and fallback
 reasons.
 
-\section{PostgreSQL configuration parameters, prepared plans, and resource safety}
+\section[PostgreSQL configuration parameters, prepared plans, and resource
+safety]{PostgreSQL configuration parameters, prepared plans, and
+\mbox{resource safety}}
 \label{sec:customscan-safety}
 
 \subsection{Configuration-parameter behavior}
