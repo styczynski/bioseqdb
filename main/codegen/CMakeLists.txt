@@ -182,8 +182,13 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL OR BIOSEQ_CODEGEN_ENABLE_WEBSITE)
   endif()
   find_library(BIOSEQ_CODEGEN_CLANG_CPP_LIB NAMES clang-cpp
     PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH REQUIRED)
-  find_library(BIOSEQ_CODEGEN_LLVM_LIB NAMES LLVM
-    PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH REQUIRED)
+  find_library(BIOSEQ_CODEGEN_LLVM_LIB NAMES LLVM LLVM-22
+    PATHS "${_bioseq_llvm_libdir}" NO_DEFAULT_PATH)
+  if(NOT BIOSEQ_CODEGEN_LLVM_LIB)
+    # LLVM's official Linux release archive links the LLVM components into
+    # libclang-cpp itself and does not ship a separate monolithic libLLVM.
+    set(BIOSEQ_CODEGEN_LLVM_LIB "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
+  endif()
   file(SHA256 "${LLVM_CONFIG_BINARY}" _bioseq_llvm_config_sha256)
   file(SHA256 "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}"
     _bioseq_clang_cpp_sha256)
@@ -202,8 +207,11 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL OR BIOSEQ_CODEGEN_ENABLE_WEBSITE)
     "${_codegen_src}/clang_structural/implementation.cppm"
     "${_codegen_src}/safety/fact_producer_implementation.cppm"
     PROPERTIES COMPILE_OPTIONS "-x;c++")
-  list(APPEND _codegen_link_libs
-    "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}" "${BIOSEQ_CODEGEN_LLVM_LIB}")
+  list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
+  if(NOT "${BIOSEQ_CODEGEN_LLVM_LIB}" STREQUAL
+      "${BIOSEQ_CODEGEN_CLANG_CPP_LIB}")
+    list(APPEND _codegen_link_libs "${BIOSEQ_CODEGEN_LLVM_LIB}")
+  endif()
 endif()
 
 if(BIOSEQ_CODEGEN_ENABLE_SQL)
