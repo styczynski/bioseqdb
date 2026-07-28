@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import inspect
 import json
+import signal
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,18 @@ class LifecycleSafetyTests(unittest.TestCase):
             )
         self.assertEqual(image["State"], "available")
         sleep.assert_called_once_with(15)
+
+    def test_external_interrupt_is_forwarded_to_active_child(self) -> None:
+        child = mock.Mock()
+        child.poll.return_value = None
+        with package_builder.ACTIVE_CHILDREN_LOCK:
+            package_builder.ACTIVE_CHILDREN.add(child)
+        try:
+            package_builder.interrupt_active_children()
+        finally:
+            with package_builder.ACTIVE_CHILDREN_LOCK:
+                package_builder.ACTIVE_CHILDREN.discard(child)
+        child.send_signal.assert_called_once_with(signal.SIGINT)
 
 
 class ManifestTests(unittest.TestCase):

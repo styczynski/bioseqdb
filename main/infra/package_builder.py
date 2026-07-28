@@ -32,6 +32,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -76,6 +77,8 @@ DEFAULT_S3_PREFIX = "bioseq/packages"
 REMOTE_ROOT = "/opt/bioseq-package-builder/workspace/builds"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
+ACTIVE_CHILDREN: set[subprocess.Popen[str]] = set()
+ACTIVE_CHILDREN_LOCK = threading.Lock()
 
 
 class PackageBuilderError(RuntimeError):
@@ -105,15 +108,29 @@ def run_command(
     stdout: Any = None,
 ) -> subprocess.CompletedProcess[str]:
     info(f"$ {command_text(argv)}")
-    completed = subprocess.run(
+    if capture and stdout is not None:
+        raise PackageBuilderError("run_command cannot combine capture=True with stdout")
+    process = subprocess.Popen(
         [str(arg) for arg in argv],
         cwd=str(cwd) if cwd else None,
         text=True,
-        check=False,
-        capture_output=capture,
         env=env,
         stdin=stdin,
-        stdout=stdout,
+        stdout=subprocess.PIPE if capture else stdout,
+        stderr=subprocess.PIPE if capture else None,
+    )
+    with ACTIVE_CHILDREN_LOCK:
+        ACTIVE_CHILDREN.add(process)
+    try:
+        captured_stdout, captured_stderr = process.communicate()
+    finally:
+        with ACTIVE_CHILDREN_LOCK:
+            ACTIVE_CHILDREN.discard(process)
+    completed = subprocess.CompletedProcess(
+        [str(arg) for arg in argv],
+        process.returncode,
+        captured_stdout,
+        captured_stderr,
     )
     if check and completed.returncode != 0:
         detail = ""
@@ -125,6 +142,17 @@ def run_command(
             f"{command_text(argv)}{suffix}"
         )
     return completed
+
+
+def interrupt_active_children() -> None:
+    """Forward an interrupt so OpenTofu/SSH can flush state and exit first."""
+
+    with ACTIVE_CHILDREN_LOCK:
+        children = list(ACTIVE_CHILDREN)
+    for child in children:
+        if child.poll() is None:
+            with contextlib.suppress(ProcessLookupError):
+                child.send_signal(signal.SIGINT)
 
 
 def require_executable(name: str) -> str:
@@ -1793,11 +1821,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     previous_sigterm = signal.getsignal(signal.SIGTERM)
+    previous_sigint = signal.getsignal(signal.SIGINT)
 
     def interrupt_for_cleanup(signum: int, _frame: Any) -> None:
+        interrupt_active_children()
         raise KeyboardInterrupt(f"received signal {signum}")
 
     signal.signal(signal.SIGTERM, interrupt_for_cleanup)
+    signal.signal(signal.SIGINT, interrupt_for_cleanup)
     try:
         with exclusive_lock():
             args.handler(args)
@@ -1809,6 +1840,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
+        signal.signal(signal.SIGINT, previous_sigint)
     return 0
 
 
