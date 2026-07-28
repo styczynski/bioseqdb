@@ -72,7 +72,7 @@ CACHE_TAGS = {
 BOOTSTRAP_SCHEMA = "1"
 DEFAULT_REGION = "us-east-1"
 DEFAULT_S3_PREFIX = "bioseq/packages"
-REMOTE_ROOT = "/var/lib/bioseq-package-build"
+REMOTE_ROOT = "/opt/bioseq-package-builder/workspace/builds"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
 
@@ -1046,7 +1046,7 @@ def run_remote_build(
         "--region",
         region,
         "--source-dir",
-        remote_source,
+        f"{remote_source}/main",
         "--build-root",
         build_root,
         "--manifest",

@@ -249,6 +249,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(result, manifest)
         self.assertIn("BIOSEQ_OPTTIMIZATION_LEVEL=0", commands[0])
         self.assertIn("--architecture arm64", commands[0])
+        self.assertIn("--source-dir /opt/bioseq/source/main", commands[0])
         self.assertIn("--postgres 17", commands[0])
         self.assertIn("--distros arch", commands[0])
 
