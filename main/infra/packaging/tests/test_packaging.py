@@ -457,9 +457,14 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn("BIOSEQ_DOC0388_RUN_LEDGER_MAINTAINER_CHECK", bioseq_cmake)
         self.assertIn("cmake_cache_root=/opt/bioseq-package-cmake-cache", build_script)
         self.assertIn('"${cmake_cache_root}/source"', build_script)
+        self.assertIn('"${cmake_cache_root}/main"', build_script)
         self.assertIn('"${cmake_cache_root}/build-rooted"', build_script)
         self.assertIn(
             "rsync --archive --checksum --no-times --omit-dir-times --delete",
+            build_script,
+        )
+        self.assertIn(
+            "for repository_tree in bioseq codegen cmake; do",
             build_script,
         )
         self.assertIn(

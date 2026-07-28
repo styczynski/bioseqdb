@@ -15,6 +15,7 @@ readonly package_metadata_dir="${2:-}"
 readonly package_source_dir="${PWD}"
 readonly cmake_cache_root=/opt/bioseq-package-cmake-cache
 readonly persistent_source_dir="${cmake_cache_root}/source"
+readonly repository_main_dir="${cmake_cache_root}/main"
 readonly build_dir="${cmake_cache_root}/build-rooted"
 [[ "${action}" == "build" || "${action}" == "install" ]] \
   || die "usage: build_and_stage.sh {build BUILD_DIR PG_MAJOR|install BUILD_DIR DESTDIR PG_MAJOR}"
@@ -32,10 +33,29 @@ fi
 [[ "${postgres_major}" =~ ^[0-9]+$ ]] || die "PostgreSQL major must be decimal"
 
 if [[ "${action}" == "build" ]]; then
-  mkdir -p "${persistent_source_dir}" "${build_dir}" "${package_metadata_dir}"
+  mkdir -p \
+    "${persistent_source_dir}" \
+    "${repository_main_dir}" \
+    "${build_dir}" \
+    "${package_metadata_dir}"
   rsync --archive --checksum --no-times --omit-dir-times --delete \
     --exclude=/_bioseq-package-build/ \
     "${package_source_dir}/" "${persistent_source_dir}/"
+
+  # The distribution archive is rooted at main/, while a small number of
+  # repository-provenance contracts intentionally consume paths such as
+  # main/bioseq/... from the repository root.  Project only their reviewed
+  # source inputs into that stable repository shape.  These are real files,
+  # rather than symlinks or hard links, because the verifier rejects aliases.
+  for repository_tree in bioseq codegen cmake; do
+    mkdir -p "${repository_main_dir}/${repository_tree}"
+    rsync --archive --checksum --no-times --omit-dir-times --delete \
+      "${persistent_source_dir}/${repository_tree}/" \
+      "${repository_main_dir}/${repository_tree}/"
+  done
+  rsync --archive --checksum --no-times \
+    "${persistent_source_dir}/CMakeLists.txt" \
+    "${repository_main_dir}/CMakeLists.txt"
 fi
 
 readonly tool_root=/opt/bioseq-package-toolchain
