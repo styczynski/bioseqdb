@@ -719,7 +719,7 @@ function(bioseq_add_codegen)
       "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_cxx_launcher_argument}"
       "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON"
       "-DCMAKE_C_FLAGS:STRING="
-      "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++"
+      "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ -fno-rtti"
       "-DCMAKE_C_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer"
       "-DCMAKE_CXX_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer")
   endif()
