@@ -109,12 +109,14 @@ signatures are
 
 Both are declared immutable and parallel safe at the SQL expression boundary
 and both name \texttt{mmsearch\_support} as their PostgreSQL support function.
-These declarations allow PostgreSQL to reason about typing and expression
-placement.  They are not a promise that the scalar C++ body implements the
-alignment.  The body raises \texttt{ERRCODE\_FEATURE\_NOT\_SUPPORTED} with the
-message \emph{``mmsearch qualifier has no Bioseq executor owner''}.  The
-three-argument entry point preserves SQL null behavior for null operands
-before reaching that error boundary.
+This uses PostgreSQL's planner-support interface rather than a private parser
+extension~\cite{postgresql17_support_functions}.  These declarations allow
+PostgreSQL to reason about typing and expression placement.  They are not a
+promise that the scalar C++ body implements the alignment.  The body raises
+\texttt{ERRCODE\_FEATURE\_NOT\_SUPPORTED} with the message
+\emph{``mmsearch qualifier has no Bioseq executor owner''}.  The three-argument
+entry point preserves SQL null behavior for null operands before reaching that
+error boundary.
 
 This fail-closed body is important for two reasons.  First, PostgreSQL can
 copy or move expression trees during planning.  If an unexpected copy
@@ -195,9 +197,11 @@ For an owning base scan, the conceptual cost is
 \]
 
 where \(L_t\) and \(L_q\) are estimated target and query symbols, \(B\) is
-the dispatch capacity, and \(I\) records whether a compatible persistent
-index may be read.  Join ownership additionally accounts for complete query
-child materialization, target-child scanning, residual join expressions, and
+the dispatch capacity, and \(I\) records whether the planned index contract
+permits an attempt to read a stored index.  It does not assert that a
+compatible generation exists.  Presence and compatibility remain runtime
+checks.  Join ownership additionally accounts for complete query child
+materialization, target-child scanning, residual join expressions, and
 estimated result rows.  Every component is clamped to a finite nonnegative
 PostgreSQL cost.  An incumbent path's cost may be retained as EXPLAIN
 evidence, but it is not used as a magic threshold.
@@ -243,7 +247,7 @@ therefore enforced by semantic ownership rather than by cost preference alone.
 \node[decision, right=of support] (shape) {one supported\\semantic call?};
 \node[owner, below=of shape] (path) {Build honest-cost\\\texttt{CustomPath} and attach\\exact \texttt{RestrictInfo}};
 \node[unsafe, above=of shape] (fallback) {No owner constructed:\\ordinary body fails closed\\if execution reaches it};
-\node[owner, left=of path] (prune) {Prune only paths that\\execute the same restriction\\without ownership};
+\node[owner, left=of path] (prune) {Finalize the path set:\\non-index ordinary paths\\are already removed, then prune\\exact unowned copies};
 \node[owner, left=of prune] (plan) {\texttt{PlanCustomPath}: remove\\executable qualifier and keep\\owner expression in metadata};
 \draw[arrow] (parse) -- (support);
 \draw[arrow] (support) -- (shape);
@@ -253,8 +257,9 @@ therefore enforced by semantic ownership rather than by cost preference alone.
 \draw[arrow] (prune) -- (plan);
 \end{tikzpicture}
 \caption{Current \texttt{mmsearch} planning.  The high support cost makes
-the scalar alternative visible as expensive, but correctness comes from
-exact ownership and structural pruning, not from a negative cost.}
+the scalar alternative visible as expensive.  The relation policy first
+removes non-index ordinary paths, and the ownership pass then removes exact
+unowned copies.  Correctness does not depend on a negative cost.}
 \label{fig:mmsearch-planner-ownership}
 \end{figure}
 
@@ -290,10 +295,11 @@ this expression'', not ``assume that the Boolean stub is close enough''.
 \section{From CustomPath to CustomScan}
 \label{sec:custom-path-plan-lifecycle}
 
-PostgreSQL separates planning data from executable state.  BioSeqDB follows
-that separation rather than putting C++ objects or process-local pointers in
-serialized plan metadata.  Table~\ref{tab:bioseq-customscan-lifecycle}
-summarizes the principal callbacks and their responsibilities.
+PostgreSQL separates planning data from executable state through the Custom
+Scan API~\cite{postgresql17_custom_scan}.  BioSeqDB follows that separation
+rather than putting C++ objects or process-local pointers in serialized plan
+metadata.  Table~\ref{tab:bioseq-customscan-lifecycle} summarizes the principal
+callbacks and their responsibilities.
 
 \begin{table}[htbp]
 \centering
@@ -545,8 +551,9 @@ Before each \texttt{ExecProject},
 \texttt{populate\_placeholder\_consts} copies one
 \texttt{MatchResult} into the requested nodes.  Coordinates and lengths use
 PostgreSQL \texttt{BIGINT}, because the C++ source values are unsigned
-64-bit sequence sizes.  Scores, map quality, and seed counters remain
-\texttt{INT4} because their source fields are 32-bit.  Strand and status use
+64-bit sequence sizes.  Edit distance also uses a \texttt{BIGINT}
+placeholder.  Scores, map quality, and seed counters remain \texttt{INT4}
+because their source fields are 32-bit.  Strand and status use
 \texttt{BOOLEAN}, divergence uses a floating type, and CIGAR is formatted as
 PostgreSQL text only when a CIGAR placeholder exists.
 
@@ -564,10 +571,12 @@ Projection family & Placeholder type & Source and update rule \\
 \texttt{INT4} &
 Copied from 32-bit \texttt{MatchResult} score/counter fields. \\
 \texttt{query\_start}, \texttt{query\_end},
-\texttt{target\_start}, \texttt{target\_end}, lengths &
+\texttt{target\_start}, \texttt{target\_end}, lengths,
+\texttt{edit} &
 \texttt{BIGINT} &
-Value-preserving conversion from unsigned sequence-size fields, with the
-project's supported size ceiling below \texttt{INT64\_MAX}. \\
+Coordinates and lengths are converted from unsigned sequence-size fields
+under the project's \texttt{INT64\_MAX} ceiling.  Edit distance is widened to
+the same SQL type. \\
 \texttt{is\_reverse}, \texttt{is\_primary},
 \texttt{has\_cigar} &
 \texttt{BOOLEAN} &
@@ -608,7 +617,9 @@ wraps it with PostgreSQL's \texttt{PlaceHolderVar}.  The wrapper preserves
 \texttt{phlevelsup}, \texttt{phrels}, and \texttt{phnullingrels}.  PostgreSQL
 can then carry the value upward from the correct evaluation level without
 re-evaluating the helper in a sibling scan.  At executor rewrite time, the
-wrapper remains intact while its contained owned function is replaced.
+wrapper remains intact while its contained owned function is replaced.  The
+placement and nulling fields follow PostgreSQL's primary node
+definition~\cite{postgresql17_placeholdervar}.
 
 This mechanism was introduced after a LEFT JOIN plus CIGAR projection exposed
 a crash: the planner had pushed a helper into a child that had no current
@@ -787,21 +798,21 @@ SQL boundary.
 \section{What BioSeqDB borrowed from ParadeDB}
 \label{sec:paradedb-customscan-comparison}
 
-The copied \texttt{paradedb-experiments} repository provided a concrete
+The vendored \texttt{paradedb-experiments} repository provided a concrete
 PostgreSQL extension example in which planned projection helpers are
-substituted by executor-owned values.  Its PDB scan recognizes score and
-snippet projections, injects typed placeholder constants, and updates
-\texttt{const\_score\_node} with the score of the current search hit.  Its
-\texttt{placeholder\_support} also wraps projection expressions in
-\texttt{PlaceHolderVar} for joins and aggregates, preserving
-\texttt{phlevelsup} and \texttt{phnullingrels}.
+substituted by executor-owned values~\cite{paradedb_pg_search_customscan}.
+Its PDB scan recognizes score and snippet projections, injects typed
+placeholder constants, and updates \texttt{const\_score\_node} with the score
+of the current search hit.  Its \texttt{placeholder\_support} also wraps
+projection expressions in \texttt{PlaceHolderVar} for joins and aggregates,
+preserving \texttt{phlevelsup} and \texttt{phnullingrels}.
 
 These mechanisms answered an important feasibility question: an extension
 does not need custom SQL syntax for every result field.  It can allow
 PostgreSQL to parse an ordinary function call, preserve the expression's
 placement through planning, and replace the call with an executor-local
-value at the custom scan boundary.  The early BioSeqDB proof of concept copied
-this pattern for one synthetic score.
+value at the custom scan boundary.  The early BioSeqDB proof of concept
+adapted this pattern for one synthetic score.
 
 The complete BioSeqDB problem is nevertheless different.  Text search
 commonly associates one score with one hit already enumerated by the search
@@ -814,7 +825,7 @@ traceback, and mapping-quality fields.
 \begin{table}[htbp]
 \centering
 \small
-\caption{Relationship between the copied ParadeDB technique and the final
+\caption{Relationship between the adapted ParadeDB technique and the final
 BioSeqDB design.}
 \label{tab:paradedb-bioseq-comparison}
 \begin{tabular}{@{}p{0.23\textwidth}p{0.31\textwidth}p{0.36\textwidth}@{}}
@@ -852,11 +863,10 @@ Specific to the PDB search interface &
 \end{tabular}
 \end{table}
 
-The resulting design should therefore be described as inspired by ParadeDB's
-projection-node technique, not as a port of its custom scan.  The mutable
-constant is the common mechanism.  Batch cardinality, alignment ownership,
-deferred sequence access, parameter rebinding, and the match-row ABI are
-BioSeqDB-specific extensions.
+The projection-node mechanism was adapted from ParadeDB, but the complete
+custom scan was not ported.  The mutable constant is the common mechanism.
+Batch cardinality, alignment ownership, deferred sequence access, parameter
+rebinding, and the match-row ABI are BioSeqDB-specific extensions.
 
 \section{Evolution from proof of concept to the final owner protocol}
 \label{sec:customscan-design-evolution}

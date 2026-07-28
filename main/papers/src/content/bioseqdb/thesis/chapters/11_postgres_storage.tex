@@ -61,14 +61,14 @@ the source in \path{backend/storage/bucket_math.cppm} and
 
 \subsection{Lineage and retained ideas}
 
-The base table access method has a concrete lineage in Citus Columnar. The
-correspondence is visible in both organization and operations. Citus
-\path{columnar_storage.c} maps logical offsets onto PostgreSQL blocks, keeps a
-metapage, and reserves stripe, row, and byte ranges. Its writer buffers rows
-into stripes and chunk groups, serializes a validity stream and a value stream
-for every column chunk, and writes skip metadata. Its reader selects chunk
-groups using metadata before reconstructing rows. BioSeqDB retains this family
-of mechanisms in the C++ modules
+The physical-storage layer was ported and adapted from Citus
+Columnar~\cite{citus_columnar_storage}. The correspondence is visible in both
+organization and operations. Citus \path{columnar_storage.c} maps logical
+offsets onto PostgreSQL blocks, keeps a metapage, and reserves stripe, row, and
+byte ranges. Its writer buffers rows into stripes and chunk groups, serializes
+a validity stream and a value stream for every column chunk, and writes skip
+metadata. Its reader selects chunk groups using metadata before reconstructing
+rows. The BioSeqDB port retains this family of mechanisms in the C++ modules
 \path{pg/column/storage_physical.cppm},
 \path{pg/table/io/writer.cppm}, and
 \path{pg/table/io/reader.cppm}.
@@ -402,8 +402,11 @@ address of fragment \(i\) is
 The fragment relation is created lazily with one
 \texttt{bioseq.seq(alphabet,width)} column and uses the BioSeq access method.
 A matching heap sidecar relation stores a bytea blob keyed by the first
-fragment row number. The sidecar is a storage attachment point; persistent
+fragment row number. The sidecar is a storage attachment point. Persistent
 minimizer-index generations and their validation are covered in Chapter~12.
+These are distinct relation families. Canonical minimizer-generation storage
+uses separately named relations with generation, query, subkey, segment, and
+chunk metadata rather than one blob in this fragment attachment relation.
 The canonical \texttt{seq\_sub\_table} catalog records both relation OIDs.
 
 \begin{figure}[ht]
@@ -445,13 +448,14 @@ The canonical \texttt{seq\_sub\_table} catalog records both relation OIDs.
 
 \subsection{Concurrency, shard rollover, and lifecycle}
 
-Two kinds of transaction advisory lock protect the fragment layout. A shard
-allocation lock serializes creation or selection of a new shard for a
-parent-column and length bucket. A writer lock keyed by database, parent
-storage identity, column, bucket, and shard serializes fragment row-number
-assignment. This is a suitable use of advisory locking because the locked
-identity is an internal storage resource and the lock is held by the
-transaction that writes it.
+Two kinds of transaction advisory lock protect the fragment layout. The shard
+allocation key folds the database OID, parent relfilenode, column, and length
+bucket into one signed 64-bit value. The writer key additionally folds in the
+shard. These are coordination keys rather than unique serializations of the
+catalog identity. They omit the tablespace OID, storage identifier, and source
+epoch. A key collision conservatively serializes unrelated writers. It does
+not make their locators interchangeable. Each lock is held by the transaction
+that writes the internal storage resource.
 
 For a known-size insertion, the manager computes its projected payload size. If
 the active shard lacks enough remaining configured capacity, it selects a
@@ -558,6 +562,13 @@ provider interface is generic and keeps the two DSOs from linking to each
 other. The current tree does not ship a BioSeq-specific production provider.
 The only \texttt{ProviderV1} implementation is explicitly test-only.
 
+Independent buildability does not remove the PostgreSQL preload requirement.
+The \texttt{bioseq\_cache} library must be named in
+\texttt{shared\_preload\_libraries} and the server must be restarted before
+\texttt{same} or \texttt{reuse} can be enabled. \texttt{CREATE EXTENSION}
+installs the SQL objects, but it cannot retroactively reserve shared memory or
+register the required postmaster hooks.
+
 The user-visible optimization GUC has three modes:
 
 \begin{description}
@@ -590,10 +601,21 @@ long-running SQL advisory lock. The legal main path is
   \mathrm{ABSENT}\rightarrow\mathrm{CLAIMED}\rightarrow
   \mathrm{BUILDING}\rightarrow\mathrm{COMPLETE}.
 \]
-Claimed or building generations can become failed; building or complete
-generations can become invalidated; terminal generations pass through
-evicting before becoming absent. A complete generation is never mutated back
-into a building generation. A retry receives a new generation identity.
+Claimed or building generations can become failed. Building or complete
+generations can become invalidated. Terminal generations pass through evicting
+before becoming absent. A complete generation is never mutated back into a
+building generation. A retry receives a new generation identity.
+
+This is the request-registry protocol. Physical result storage has a separate
+manifest protocol,
+\[
+  \mathrm{EMPTY}\rightarrow\mathrm{PUBLISHING}\rightarrow
+  \mathrm{COMPLETE}\rightarrow\mathrm{RETIRING}.
+\]
+The intermediate \(\mathrm{PUBLISHING}\) state records that blocks are being
+linked and validated. It is not the registry's \(\mathrm{BUILDING}\) state.
+An abandoned publishing manifest can be reclaimed without presenting a
+partial result as complete.
 
 Every entry identity contains a digest, a postmaster boot nonce, a generation,
 and a monotonically assigned claim sequence. Waiters use PostgreSQL condition
@@ -614,7 +636,7 @@ The distinction from sequence shard locking is important. Fragment insertion
 uses a transaction advisory lock for a small internal resource with a 64-bit
 identity. Query coalescing needs generation state, waiters, readers,
 dependencies, manifests, failure codes, and ABA-safe identities. The shared
-registry supplies that information; the PostgreSQL lock table does not.
+registry supplies that information. The PostgreSQL lock table does not.
 
 \begin{figure}[ht]
   \centering
@@ -639,9 +661,9 @@ registry supplies that information; the PostgreSQL lock table does not.
     \draw[->,thick] (i) -- (e);
     \draw[->,thick,bend right=35] (e) to (a);
   \end{tikzpicture}
-  \caption{Simplified query-cache generation state machine. Publication of
-  \texttt{COMPLETE} occurs only after all blocks and the manifest have been
-  sealed and validated.}
+  \caption{Simplified request-registry state machine. Registry
+  \texttt{COMPLETE} is exposed only after the separate physical manifest
+  protocol has made the generation readable.}
   \label{fig:query-cache-state}
 \end{figure}
 
@@ -656,12 +678,16 @@ discovers the already complete generation receives an immediate miss. The
 consumer applies the smaller of the producer's captured TTL and its own
 current TTL.\@
 
-Publication is ordered. The producer seals every block, seals and validates
-the manifest and dependency snapshot, stores counts and handles, performs a
-release barrier, changes state to complete, and broadcasts. A reader performs
-an acquire load before following the manifest. Reader pins and waiter
-references prevent eviction while a generation is in use. Generation plus
-claim sequence prevents an old token from referring to a newly reused slot.
+Publication orders both protocols. The producer first places the physical
+manifest in \(\mathrm{PUBLISHING}\), seals and links every block, validates the
+manifest and dependency snapshot, and stores counts and handles. It then
+publishes the physical manifest as \(\mathrm{COMPLETE}\). Only after that
+release does it expose registry \(\mathrm{COMPLETE}\) and broadcast to
+waiters. A reader performs an acquire load before following the manifest.
+Reader pins and waiter references prevent eviction while a generation is in
+use. Generation plus claim sequence prevents an old token from referring to a
+newly reused slot. The janitor can repair or reclaim a manifest left in
+\(\mathrm{PUBLISHING}\) after producer failure.
 
 Cached tuples are stored in row groups which are internally columnar. A row
 group contains a row ordinal interval, one chunk descriptor per column,
@@ -669,7 +695,7 @@ validity information, offsets for variable-width values, encoded values, and
 checksums. The current wire layer uses a fixed magic and format version,
 little-endian metadata, schema identity, PostgreSQL-major and boot identity,
 block CRC32C, and a manifest digest. Direct encodings are used only for
-representations proven safe. Varlena values are flattened; external TOAST and
+representations proven safe. Varlena values are flattened. External TOAST and
 expanded-object pointers are never persisted as if they were ordinary bytes.
 
 The backing store is hybrid. A pinned dynamic shared area is the hot tier.
