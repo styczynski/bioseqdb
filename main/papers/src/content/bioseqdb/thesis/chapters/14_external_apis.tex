@@ -615,7 +615,8 @@ provided directly by \texttt{ncbi\_eutils\_policy}.
 
 The metadata transport in
 \path{main/bioseq/external/https.cppm} uses blocking Oat++ I/O over a custom
-OpenSSL stream.  It requires TLS~1.2 or newer, system trust roots, SNI,
+OpenSSL stream.  It requires TLS~1.2 or newer, system trust roots, Server Name
+Indication (SNI),
 certificate-chain verification and hostname verification.  Socket reads and
 writes have 30-second timeouts.  A per-client connection pool is configured
 for up to 32 connections, a 30-second idle lifetime and a 10-second acquisition

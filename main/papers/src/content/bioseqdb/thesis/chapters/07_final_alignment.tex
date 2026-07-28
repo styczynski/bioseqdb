@@ -299,8 +299,9 @@ special modes.
 The ordinary paths also differ at an anchor boundary. BioSeqDB derives the
 boundary from the stored \texttt{cur\_anchor.query\_position} and
 \texttt{cur\_anchor.ref\_position}, then adds one. Upstream minimap2 normally
-calls \texttt{mm\_adjust\_minier} before extension. Its short-read, non-HPC
-special path is an exception. BioSeqDB does not perform that adjustment here,
+calls \texttt{mm\_adjust\_minier} before extension. Its short-read special path
+with homopolymer compression (HPC) disabled is an exception. BioSeqDB does not
+perform that adjustment here,
 so the DP windows can differ even when the chain anchors agree.
 
 There is also a subtle difference after a dropped phase. KSW2 suppresses the
@@ -595,8 +596,8 @@ with bounded subregion encoding\\
 Trace & four-bit decisions decoded by a LUT & lane masks compressed with
 \texttt{BitsFromMask}, LUT trace, direct packed run construction, optional
 edit count\\
-Fast exact case & no equivalent resident packed proof & DNA4/u64 or byte-rank
-diagonal certificate can bypass DP\\
+Fast exact case & no equivalent resident packed proof & DNA4 packed in 64-bit
+words or byte-rank diagonal certificate can bypass DP\\
 Route integrity & library call selected by caller & execution proof records
 phase, lane width, cells, growth, shrinking, trace, certificate, and forbidden
 fallbacks\\
@@ -637,9 +638,9 @@ Therefore
 Strict inequality is essential. Equality could expose a different traceback
 tie policy.
 
-For resident DNA4/u64 storage, the fast certificate reads packed two-bit
-symbols directly, reverses packed groups when required, XORs query and target,
-and collapses each two-bit mismatch group for a population count. It computes
+For resident DNA4 storage packed in 64-bit words, the fast certificate reads
+packed two-bit symbols directly, reverses packed groups when required, XORs
+query and target, and collapses each two-bit mismatch group for a population count. It computes
 the score and, when requested, the edit count without byte expansion. When
 CIGAR output is requested, the caller emits one \(nM\) run. A score-only call
 does not materialize that run. Its decision is three-valued:

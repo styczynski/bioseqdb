@@ -35,7 +35,7 @@ decoded and repacked until a consumer requests a representation that requires
 those operations.
 
 Consumers include scalar central processing unit (CPU) kernels and
-single-instruction, multiple-data (SIMD) kernels as well as GPU upload paths.
+single instruction, multiple data (SIMD) kernels as well as GPU upload paths.
 
 The final design has two principal C++ interfaces.  The
 \texttt{compact\_sequence\_range} family provides typed rank access with an
@@ -179,7 +179,7 @@ failure documented in DOC0213 arose when a 32-bit physical DNA4 unit, which
 contains only 16 ranks, was also treated as the rolling-hash state.  The
 sequence was stored correctly, but the \(k\)-mer was silently shortened.  The
 final rule is that packing width controls loads and iteration.  A hash,
-\(k\)-mer, score, or coordinate type must be selected independently from the
+\(k\)-mer, score, or coordinate type must be selected independently of the
 mathematical range it must represent.
 
 The range family shares an algorithm-facing vocabulary, but Table
@@ -480,7 +480,7 @@ struct compact_sequence_range<Instance> {
 };
 \end{lstlisting}
 
-The header records run-time type parameters, logical length, and last-unit
+The header records runtime type parameters, logical length, and last-unit
 padding.  \texttt{data[]} contains the packed payload.  The reserved field makes
 the payload offset a multiple of eight, allowing every enabled 1-, 2-, 4-, or
 8-byte instance to form naturally aligned typed loads.  The PostgreSQL
@@ -490,7 +490,7 @@ four-byte uncompressed varlena encoding, rather than a raw byte count.  A raw
 count would make PostgreSQL interpret only one quarter of the object and
 truncate detoasted copies.
 
-\texttt{compact\_sequence\_stdc\_instance} carries no run-time state.  It pins
+\texttt{compact\_sequence\_stdc\_instance} carries no runtime state.  It pins
 the two header bytes, alphabet code and physical width, as C++ template
 parameters.  PostgreSQL first classifies the frame and header in
 \texttt{view\_session.cppm}, lines 331--358.  That production boundary checks
@@ -545,7 +545,7 @@ slice/concat lifetime & caller/batch responsibility &
 expanded object, arena dependencies, retained source handle, and declared
 flattening boundary\\
 alphabet dispatch & nucleotide lookup tables and reference-specific encoding &
-compile-time alphabet pack selected once from run-time datum metadata\\
+compile-time alphabet pack selected once from runtime datum metadata\\
 \end{tabular}
 \end{table}
 
@@ -1281,7 +1281,7 @@ May 22, 2026, DOC0258 & standard C-compatible packed object &
 introduced \texttt{compact\_sequence\_stdc} and an in-place typed range rather
 than duplicating PostgreSQL and standalone layouts\\
 May 24, 2026, DOC0261 & type-level alphabet names and packs &
-replaced hand-written string ladders with one runtime-to-template dispatch
+replaced handwritten string ladders with one runtime-to-template dispatch
 authority\\
 May 25, 2026, DOC0263 & scanner-parameterized lazy fragmented sequence &
 added fragment-aware cursors, direct reads within one fragment, and scratch

@@ -401,7 +401,8 @@ the PostgreSQL loader.
 
 When \texttt{worker\_count} is nonzero, the general asynchronous path parses on
 the caller and submits completed batches to the project-wide task pool.  Its
-module comment still describes per-worker SPSC rings, and
+module comment still describes per-worker single-producer,
+single-consumer (SPSC) rings, and
 \texttt{concurrency\_options} still has a \texttt{ring\_capacity} field, but
 the current body dispatches task-group closures directly.  The field does not
 bound outstanding batches.  The thesis therefore treats the ring design as
@@ -466,7 +467,8 @@ to index accession, organism, taxonomy identifier, dates, ranges, and numeric
 fields using PostgreSQL types.
 
 BioSeqDB's parser recognizes AUTO and PLAIN modes plus UniProtKB, UniRef,
-UniParc, UniMes, SPD, NCBI generic, NCBI GI, NCBI PDB, RefSeq, GenBank,
+UniParc, UniMes, SPD, NCBI generic, NCBI GI, NCBI Protein Data Bank (PDB),
+RefSeq, GenBank,
 GISAID, and IMGT dialects.  Format definitions are constexpr tables in
 \path{io/identifier_parser/identifier_formats.cppm}.  They state
 whether a field is positional, free description text, a

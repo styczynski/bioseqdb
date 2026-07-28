@@ -35,7 +35,7 @@ form the alphabet
   \{\mathtt{A},\mathtt{C},\mathtt{G},\mathtt{T}\}.
 \]
 The order of symbols is normally written from the \(5'\) end of a strand to its
-\(3'\) end. DNA in a chromosome is usually double stranded. Adenine pairs with
+\(3'\) end. DNA in a chromosome is usually double-stranded. Adenine pairs with
 thymine, while cytosine pairs with guanine. Consequently, the sequence
 \(\mathtt{ACGTT}\) on one strand determines
 \(\mathtt{AACGT}\) on the opposite strand when that strand is also written in
@@ -65,12 +65,9 @@ nucleotides, called codons, into amino acids. For protein-coding genes,
 transcription followed by translation yields the familiar DNA-to-RNA-to-protein
 flow. Crick's central dogma is the narrower restriction that residue-by-residue
 sequence information cannot flow from a protein sequence into either another
-protein sequence or a nucleic acid.\footnote{F. Crick, ``Central dogma of
-molecular biology'',
-\emph{Nature} 227 (1970), pp.~561--563,
-\url{https://doi.org/10.1038/227561a0}.} It is not a claim that all RNA is
-translated. Ribosomal, transfer, regulatory and many other RNAs are functional
-without becoming proteins.
+protein sequence or a nucleic acid~\cite{crick_central_dogma_1970}. It is not
+a claim that all RNA is translated. Ribosomal, transfer, regulatory and many
+other RNAs are functional without becoming proteins.
 
 A protein sequence is written over the twenty common amino-acid symbols.
 Protein comparison differs from nucleotide comparison in two ways that matter
@@ -168,27 +165,17 @@ an estimated error probability \(p\) as
   Q = -10\log_{10}p.
 \]
 The FASTQ format and the historical variation in its quality encodings are
-documented by Cock et al.\footnote{P.~J.~A. Cock, C.~J. Fields, N.~Goto,
-M.~L. Heuer and P.~M. Rice, ``The Sanger FASTQ file format for sequences with
-quality scores, and the Solexa/Illumina FASTQ variants'',
-\emph{Nucleic Acids Research} 38(6), 2010, pp.~1767--1771,
-\url{https://doi.org/10.1093/nar/gkp1137}.} A quality score is useful evidence,
-but it is neither a guarantee nor a biological property of the base itself.
-Calibration can vary by instrument, chemistry and processing pipeline.
+documented by Cock et al.~\cite{cock_fastq_2010}. A quality score is useful
+evidence, but it is neither a guarantee nor a biological property of the base
+itself. Calibration can vary by instrument, chemistry and processing pipeline.
 
 Sequencing errors are commonly described as substitutions, insertions and
 deletions. A substitution reports one symbol in place of another. An insertion
 adds a symbol relative to the underlying molecule or comparison target. A
 deletion omits one. Long-read and short-read technologies can have different
 mixtures and contexts of these errors, which is why one universal scoring
-preset is insufficient for all data.\footnote{S. Goodwin, J.~D. McPherson and
-W.~R. McCombie, ``Coming of age: ten years of next-generation sequencing
-technologies'', \emph{Nature Reviews Genetics} 17 (2016), pp.~333--351,
-\url{https://doi.org/10.1038/nrg.2016.49}. See also G.~A. Logsdon,
-M.~R. Vollger and
-E.~E. Eichler, ``Long-read human genome sequencing and its applications'',
-\emph{Nature Reviews Genetics} 21 (2020), pp.~597--614,
-\url{https://doi.org/10.1038/s41576-020-0236-x}.}
+preset is insufficient for all data~\cite{goodwin_ngs_2016,
+logsdon_long_read_2020}.
 
 \subsection{Biological variation and measurement error}
 

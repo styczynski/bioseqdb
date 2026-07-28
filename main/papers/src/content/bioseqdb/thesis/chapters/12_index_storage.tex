@@ -193,6 +193,9 @@ contiguous components:
   \((\mathit{globalPosition}\ll1)\mathbin{\vert}\mathit{strand}\).
 \end{itemize}
 
+In the record descriptions below, \texttt{u32} and \texttt{u64} denote
+unsigned fixed-width integer types of 32 and 64 bits, respectively, while
+\texttt{i64} denotes a signed 64-bit integer.
 The version-2 legacy serialization begins with a 32-byte header whose magic is
 \texttt{0xB1000001}. Every occupied logical bucket is a 16-byte record
 \(\{\texttt{u64 hash},\texttt{u32 offset},\texttt{u32 count}\}\), followed by
@@ -305,7 +308,7 @@ The first sequence-wide builder accumulated a large vector of
 That algorithm is easy to state and performs well while the vector fits in
 memory. It is not a safe PostgreSQL operator for multi-gigabase targets. The
 early 4 Gbp external-sort experiments recorded approximately 80 GB of
-temporary storage for dna4 and 93 GB for dna5. A 6 Gbp run exceeded 120 GB.
+temporary storage for DNA4 and 93 GB for DNA5. A 6 Gbp run exceeded 120 GB.
 The lesson was not merely to increase a buffer. A database operator needs a
 resource envelope that does not depend on the target being friendly.
 
@@ -576,10 +579,12 @@ BioSeqDB work have no minimap2 counterpart and therefore have no ratio.
     \midrule
     Index and map &
     103.839560417 s & 17.168589792 s &
-    \(\rho=6.048\), so BioSeqDB was 6.048x slower.\\
+    \(\rho=6.048\), so BioSeqDB elapsed time was
+    \(6.048\times\) minimap2's.\\
     Outer E2E &
     110.851165250 s & 17.821864250 s &
-    \(\rho=6.220\), so BioSeqDB was 6.220x slower.\\
+    \(\rho=6.220\), so BioSeqDB elapsed time was
+    \(6.220\times\) minimap2's.\\
     Payload callback &
     62.519740125 s & not applicable &
     Read \(4{,}463{,}431{,}732\) bytes from \(562{,}075\) rows.\\
@@ -755,7 +760,7 @@ complete directory to selected controls and postings.
   \label{fig:format6-streams}
 \end{figure}
 
-The current implementation routes the supported MPS dna4 \(k=15,w=10\)
+The current implementation routes the supported MPS DNA4 \(k=15,w=10\)
 profile to this format only when its compatibility registration and grouped
 generation path are enabled. MPF remains on Format~5. The grouped persisted
 generation setting defaults to false in the current source, so Format~6 is an
@@ -770,6 +775,7 @@ counts separately for every query and merge them on demand. DOC0385 compared
 that candidate with the compact global query-occurrence radix used by the
 current path. Table~\ref{tab:index-doc0385-occurrence} reports the canonical
 case \((N,R,U)=(7{,}440{,}026,7{,}258{,}660,7{,}258{,}562)\).
+Peak memory is reported as resident set size (RSS).
 
 \begin{table}[ht]
   \centering
@@ -787,7 +793,8 @@ case \((N,R,U)=(7{,}440{,}026,7{,}258{,}660,7{,}258{,}562)\).
     \(267{,}837{,}208\) & \(206{,}618{,}624\) & Baseline.\\
     Per-query occurrence merge &
     \(516{,}441{,}416\) & \(294{,}830{,}080\) &
-    1.928x the time and 1.427x the peak RSS.\\
+    The per-query merge used \(1.928\times\) the baseline time and
+    \(1.427\times\) the baseline peak RSS.\\
     \bottomrule
   \end{tabularx}
 \end{table}
@@ -925,8 +932,8 @@ The corrective design therefore attacks both axes:
 \label{sec:index-residency}
 
 Cold persistence does not imply that every query must reread every selected
-chunk. The PostgreSQL residency module defines two bounded LRU container
-types:
+chunk. The PostgreSQL residency module defines two bounded least-recently-used
+(LRU) container types:
 
 \begin{itemize}
   \item a chunk cache of at most 256 entries and 2 GiB;
@@ -961,7 +968,8 @@ authoritative.
 
 GPU residency follows the same idea at a different boundary. The Phase-B
 implementation assembled a GPU view from existing serialized buckets and
-kept it in an LRU keyed by the in-memory shape or persisted assembly identity.
+kept it in an LRU cache keyed by the in-memory shape or persisted assembly
+identity.
 Table~\ref{tab:index-gpu-residency-evidence} separates that losing phase from
 the later DOC0311 Phase-C result.
 
@@ -980,15 +988,17 @@ the later DOC0311 Phase-C result.
     \midrule
     Phase B small cases &
     Phase-B benchmark cases &
-    GPU was between 5x and 8x slower than SIMD. &
+    GPU elapsed time was between \(5\times\) and \(8\times\) SIMD elapsed
+    time. &
     Residency did not repay conversion and launch overhead.\\
     Phase B XXL &
     Phase-B XXL case &
-    GPU was 1.8x slower than SIMD. &
+    GPU elapsed time was \(1.8\times\) SIMD elapsed time. &
     A larger workload reduced but did not reverse the loss.\\
     DOC0311 Phase C XXL &
     500 Mbp target, 5 Mbp query, Apple M1 Pro with MoltenVK &
-    GPU P50 7.558 s, SIMD P50 9.501 s, giving a 1.257x GPU speedup. &
+    GPU P50 7.558 s and SIMD P50 9.501 s, so SIMD elapsed time was
+    \(1.257\times\) GPU elapsed time. &
     \(93{,}309{,}652\) target positions and no fallback.\\
     \bottomrule
   \end{tabularx}
@@ -1227,7 +1237,7 @@ enabled. It records what each stage taught the next one.
     \shortstack[l]{DOC0383--\\DOC0384} &
     Fragment-native MPF plus a relation-provider sealed MPF5 sidecar &
     Implemented six-run P50 5.368746 s versus minimap2 16.487527 s, narrowly
-    satisfying a 3x gate under documented caveats &
+    satisfying a threefold speedup gate under documented caveats &
     Provider 0 remains authoritative. The opt-in compact-direct reader maps
     the sealed sidecar. Provider 1 remains fail-closed.\\
     DOC0385 &
@@ -1272,7 +1282,7 @@ separates the checked-in default from each opt-in or rejected route.
                    \texttt{recompute\_async\_persist}\\
                    \texttt{=off}} &
     Authenticated PostgreSQL generation &
-    MPF uses Format~5. A registered MPS dna4 \(k=15,w=10\) profile may use
+    MPF uses Format~5. A registered MPS DNA4 \(k=15,w=10\) profile may use
     Format~6. Copy-on-publish and predecessor retirement apply here.\\
     Grouped MPF reader choice &
     \shortstack[l]{\texttt{mpf\_format5\_lookup}\\
@@ -1340,22 +1350,22 @@ implementation, not current reader-route claims.
     \textbf{Mode} & \textbf{Target} & \textbf{Alphabet} &
     \textbf{BioSeqDB (s)} & \textbf{minimap2 (s)} & \textbf{Ratio}\\
     \midrule
-    \texttt{just\_index} & 2 Gbp & dna4 &
-    \(14.29\pm0.22\) & \(21.53\pm0.30\) & 1.51x\\
-    \texttt{just\_index} & 2 Gbp & dna5 &
-    \(15.97\pm0.51\) & \(18.66\pm1.05\) & 1.17x\\
-    \texttt{just\_index} & 4 Gbp & dna4 &
-    \(23.20\pm0.65\) & \(32.22\pm0.89\) & 1.39x\\
-    \texttt{just\_index} & 4 Gbp & dna5 &
-    \(25.65\pm0.94\) & \(25.48\pm0.55\) & 0.99x\\
-    \texttt{no\_index} & 2 Gbp & dna4 &
-    \(84.87\pm0.65\) & \(75.50\pm0.64\) & 0.89x\\
-    \texttt{no\_index} & 2 Gbp & dna5 &
-    \(95.51\pm1.43\) & \(67.29\pm2.40\) & 0.70x\\
-    \texttt{no\_index} & 4 Gbp & dna4 &
-    \(171.34\pm4.06\) & \(276.41\pm1.04\) & 1.61x\\
-    \texttt{no\_index} & 4 Gbp & dna5 &
-    \(190.40\pm4.02\) & \(227.36\pm3.25\) & 1.19x\\
+    \texttt{just\_index} & 2 Gbp & DNA4 &
+    \(14.29\pm0.22\) & \(21.53\pm0.30\) & \(1.51\times\)\\
+    \texttt{just\_index} & 2 Gbp & DNA5 &
+    \(15.97\pm0.51\) & \(18.66\pm1.05\) & \(1.17\times\)\\
+    \texttt{just\_index} & 4 Gbp & DNA4 &
+    \(23.20\pm0.65\) & \(32.22\pm0.89\) & \(1.39\times\)\\
+    \texttt{just\_index} & 4 Gbp & DNA5 &
+    \(25.65\pm0.94\) & \(25.48\pm0.55\) & \(0.99\times\)\\
+    \texttt{no\_index} & 2 Gbp & DNA4 &
+    \(84.87\pm0.65\) & \(75.50\pm0.64\) & \(0.89\times\)\\
+    \texttt{no\_index} & 2 Gbp & DNA5 &
+    \(95.51\pm1.43\) & \(67.29\pm2.40\) & \(0.70\times\)\\
+    \texttt{no\_index} & 4 Gbp & DNA4 &
+    \(171.34\pm4.06\) & \(276.41\pm1.04\) & \(1.61\times\)\\
+    \texttt{no\_index} & 4 Gbp & DNA5 &
+    \(190.40\pm4.02\) & \(227.36\pm3.25\) & \(1.19\times\)\\
     \bottomrule
   \end{tabularx}
 \end{table}
@@ -1445,13 +1455,13 @@ source-frozen same-binary continuity.
   \centering
   \small
   \caption{DOC0384 manually assembled E2E Reports 147 through 152. The exact
-  3x gate is 5.495842361 s. ``Restart repeat'' means PostgreSQL was restarted,
-  not that operating-system page residency was measured.}
+  threefold speedup gate is 5.495842361 s. ``Restart repeat'' means PostgreSQL
+  was restarted, not that operating-system page residency was measured.}
   \label{tab:index-doc0384-series}
   \begin{tabularx}{\linewidth}{rrrX}
     \toprule
     \textbf{E2E report} & \textbf{Index and map (s)} &
-    \textbf{3x gate} & \textbf{Run position}\\
+    \textbf{Threefold speedup gate} & \textbf{Run position}\\
     \midrule
     147 & 6.389712833 & fail & first post-build touch\\
     148 & 5.401551458 & pass & restart repeat\\
@@ -1469,10 +1479,11 @@ The series explicitly selected \texttt{compact\_h32\_direct}. Its
 opened successfully.
 DOC0384 labels 5.368746 s as P50 by selecting the lower-middle order statistic.
 For six samples this is not the conventional arithmetic median, which is
-\((5.368746000 + 5.401551458)/2 = 5.385148729\) s.  The report's 3.071020x
-ratio uses its stated P50 convention against a minimap2 P50 of 16.487527084 s.
+\((5.368746000 + 5.401551458)/2 = 5.385148729\) s. The report's
+\(3.071020\times\) speedup uses its stated P50 convention against a minimap2
+P50 of 16.487527084 s.
 Using the conventional BioSeqDB median while leaving that baseline unchanged
-would give approximately 3.062x. Figure~\ref{fig:index-doc0384-bars} preserves
+would give an approximately \(3.062\times\) speedup. Figure~\ref{fig:index-doc0384-bars} preserves
 the report-defined P50 so that its acceptance decision remains reproducible.
 
 \begin{figure}[ht]
@@ -1506,10 +1517,11 @@ the report-defined P50 so that its acceptance decision remains reproducible.
 
 Correctness was exact for all 16 checked cases in match position, strand, and
 CIGAR. The speed result must retain its caveats. The report-defined P50 was only
-0.127096 s below the time corresponding to its 3x acceptance limit.
+0.127096 s below the time corresponding to its threefold speedup acceptance
+limit.
 The series was manually assembled from reports that record a dirty worktree.
 Process-cold operating-system cache state was not fully specified, and not
-every individual run passed the 3x boundary.
+every individual run passed the threefold speedup boundary.
 
 Fresh E2E Report 154 is separate evidence, summarized in
 Table~\ref{tab:index-report154}. Here the ratio \(\rho=M/B\) divides minimap2
@@ -1530,8 +1542,8 @@ mapping correctness for both tools in \texttt{just\_index} and
     \textbf{Region} & \textbf{BioSeqDB (s)} &
     \textbf{minimap2 (s)} & \textbf{\(\rho=M/B\)}\\
     \midrule
-    Index and map & 6.080941750 & 43.118770584 & 7.090804740x\\
-    Outer E2E & 9.001988750 & 44.173812375 & 4.907117038x\\
+    Index and map & 6.080941750 & 43.118770584 & \(7.090804740\times\)\\
+    Outer E2E & 9.001988750 & 44.173812375 & \(4.907117038\times\)\\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -1543,8 +1555,9 @@ raw rows. The report corroborates route viability under a fresh same-run
 comparison, but it is not statistically interchangeable with Reports
 147 through 152.
 
-These qualifications are not incidental. DOC0381 had shown a 6.220x outer
-wall-clock disadvantage for the prior cold relation path. DOC0384 shows that a
+These qualifications are not incidental. DOC0381 had shown that BioSeqDB outer
+elapsed time was \(6.220\times\) minimap2's for the prior cold relation path.
+DOC0384 shows that a
 different physical data plane can reverse the result. Neither number is a
 universal property of “indexes in PostgreSQL.” They measure particular source
 states, reader routes, and attested execution regions.

@@ -80,7 +80,7 @@ stable in-place compaction retains survivor order (lines 8105--8162).  This is
 narrower than applying a published filter to the whole candidate interval, but
 it matches the semantic unit that the aligner is obliged to solve.
 
-Three additional rules close common correctness gaps:
+Four additional rules close common correctness gaps:
 
 \begin{enumerate}
     \item For unequal-length windows, both implemented filters use only
@@ -524,7 +524,8 @@ reject.  The four measured fixed Vulkan shaders use an equivalent bounded
 wavefront guard and reuse mismatch masks for longest-common-prefix extension.
 
 This design gives a stronger guarantee than the published heuristic alone:
-a mask false reject is converted to an accept by the exact guard.  It also
+a false rejection proposed by the mask is converted to acceptance by the
+exact guard.  It also
 changes the meaning of the result fields.  A GateKeeper mask acceptance
 contributes numeric lower bound zero.  A confirmed rejection returns \(E+1\).
 The raw mask estimate is diagnostic and must not be summed across region gaps.
@@ -701,7 +702,10 @@ attributes the dirty flag to local builder configuration and an untracked
 generated report and states that compiled source matched the pushed commit.
 The artifact is consequently described as a scoped measurement, not as a
 clean-tree run.  Each standalone cell used a
-deterministic 1,024-pair prefix from the bundled upstream corpus.  Decisions
+deterministic 1,024-pair prefix from the bundled upstream corpus.  In the
+tables below, ERR and SRR retain the upstream run-accession prefixes from the
+\texttt{ERR240727} and \texttt{SRR826471} corpus names; the suffix \(E2\),
+\(E8\), \(E40\), or \(E100\) records the source corpus label.  Decisions
 matched the original and false rejects were zero, but Table
 \ref{tab:sneaky-intermediate} shows that the initial BioSeqDB SIMD path was
 between \(2.39\times\) and \(2.85\times\) the original complete-callback time.
@@ -872,7 +876,8 @@ SneakySnake recorded 439,458\,ns and 389,916\,ns.  At length 64, they recorded
 instead of the required 10\%.  DOC0388 also records that reports 188--190 did
 not retain a stable small-seed identity across reruns.  Dirty,
 history-ineligible report 192 from 2026-07-27 passed the configured P50
-comparisons, but recorded a GateKeeper \(E=4\) wall-clock P99 regression of
+comparisons, but recorded a GateKeeper \(E=4\) wall-clock 99th-percentile
+(P99) regression of
 591,042\,ns versus 356,875\,ns.  These later observations do not remove the
 implemented route or invalidate its historical acceptance.  They do require
 fresh clean, same-head repetitions before claiming a current performance win.

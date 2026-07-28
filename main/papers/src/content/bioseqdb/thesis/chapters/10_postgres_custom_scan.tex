@@ -24,8 +24,8 @@ WHERE mmsearch(
         'ACGTACGT...'::bioseq.seq('dna4', 32));
 \end{lstlisting}
 
-Here CIGAR denotes the Concise Idiosyncratic Gapped Alignment Report that
-encodes the alignment edit path.
+Here CIGAR denotes the Compact Idiosyncratic Gapped Alignment Report string
+that encodes the alignment edit path \cite{sam_format_specification}.
 
 The parser can resolve the types of this statement without learning a new SQL
 grammar.  It produces a normal \texttt{FuncExpr} for \texttt{mmsearch} and
@@ -75,7 +75,7 @@ Repeated at every function call site &
 Performed once by the alignment owner.  Fields are projected afterwards \\
 Accelerator use &
 Submission overhead occurs at tuple granularity &
-The scheduler can choose single-instruction, multiple-data (SIMD), central
+The scheduler can choose single instruction, multiple data (SIMD), central
 processing unit (CPU) task, or graphics processing unit (GPU) routes for a
 batch \\
 Result consistency &
@@ -851,7 +851,7 @@ fail-closed SQL boundary.
 The vendored \texttt{paradedb-experiments} repository provided a concrete
 PostgreSQL extension example in which planned projection helpers are
 substituted by executor-owned values~\cite{paradedb_pg_search_customscan}.
-Its PDB scan recognizes score and snippet projections, injects typed
+Its ParadeDB scan recognizes score and snippet projections, injects typed
 placeholder constants, and updates \texttt{const\_score\_node} with the score
 of the current search hit.  Its \texttt{placeholder\_support} also wraps
 projection expressions in \texttt{PlaceHolderVar} for joins and aggregates,
@@ -887,7 +887,7 @@ BioSeqDB design.}
 Concern & ParadeDB experiment & BioSeqDB adaptation \\
 \midrule
 SQL projection &
-Score/snippet helper recognized in a PDB custom scan &
+Score/snippet helper recognized in a ParadeDB custom scan &
 Family of match and metadata helpers bound to an exact alignment owner \\
 Injected node &
 Typed score/snippet \texttt{Const}.  Executor updates
@@ -902,7 +902,7 @@ Cardinality &
 Projection decorates the current text-search hit &
 Owner creates zero, one, or many SQL rows for each sequence input \\
 Input lifetime &
-Search fields managed by the PDB scan &
+Search fields managed by the ParadeDB scan &
 Copied tuple slots, fragment locators, lazy providers, per-output promotion,
 and restoration across memory-context resets \\
 Path forcing &
@@ -911,7 +911,7 @@ costs &
 Final design uses honest nonnegative costs, then removes only paths that
 would execute the exact owned restriction \\
 Failure boundary &
-Specific to the PDB search interface &
+Specific to the ParadeDB search interface &
 \texttt{mmsearch} is a fail-closed rendezvous.  No unowned plan may execute it \\
 \bottomrule
 \end{tabular}

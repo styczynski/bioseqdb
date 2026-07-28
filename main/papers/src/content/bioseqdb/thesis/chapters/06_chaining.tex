@@ -12,7 +12,7 @@ than about individual \(k\)-mers.
 This chapter presents the chaining implementation that BioSeqDB uses.  The
 project contains four generations of designs.  A minimap2-compatible scalar
 dynamic program provides the semantic baseline.  An augmented tree implements
-range minimum queries (RMQs).  Two single-instruction, multiple-data (SIMD)
+range minimum queries (RMQs).  Two single instruction, multiple data (SIMD)
 policies accelerate execution on the central processing unit (CPU).  A Vulkan
 path inspired by G3SA targets a graphics processing unit (GPU).
 
@@ -37,7 +37,7 @@ stored as full 64-bit values, the strand has a dedicated 32-bit field, the span
 is an 8-bit value, and the segment and flags occupy the remaining fields.  The
 64-bit physical storage matters for database-resident references because a
 concatenated collection need not fit in the 32-bit coordinate model assumed by
-older stand-alone mappers.  The canonical reference key reserves its high bit
+older standalone mappers.  The canonical reference key reserves its high bit
 for the strand, however, and the region conversion casts coordinates to signed
 64-bit values.  The supported canonical reference-coordinate domain is
 therefore below \(2^{63}\).  Nor does the physical layout imply end-to-end

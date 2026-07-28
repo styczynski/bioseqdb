@@ -186,8 +186,9 @@ Each cell represents a state \((i,j)\), meaning that \(i\) symbols of \(X\)
 and \(j\) symbols of \(Y\) have been consumed. A diagonal transition consumes
 one symbol from each sequence. Vertical and horizontal transitions consume
 one symbol from only one sequence. A traceback from the chosen terminal cell
-therefore spells an edit path and can be run-length encoded as a concise
-idiosyncratic gapped alignment report (CIGAR) string. For example,
+therefore spells an edit path and can be run-length encoded as a Compact
+Idiosyncratic Gapped Alignment Report (CIGAR) string
+\cite{sam_format_specification}. For example,
 \(10\mathtt{M}1\mathtt{I}4\mathtt{M}\) denotes ten aligned
 symbol pairs, one insertion, then four more aligned pairs. Whether
 \(\mathtt{M}\) is later refined to exact-match \(\mathtt{=}\) and mismatch
@@ -236,7 +237,7 @@ adds a second insertion state and a second deletion state. BioSeqDB's Highway
 KSW2 port exposes both single- and dual-affine modes. It implements the
 Suzuki--Kasahara difference states described below. The alternative Block
 Aligner backend is deliberately single-affine.
-Chapter~\ref{sec:final-alignment-role} specifies the implementation contracts
+Section~\ref{sec:final-alignment-role} specifies the implementation contracts
 of both routes.
 
 Algorithm~\ref{alg:affine-dp} summarizes the recurrence and traceback procedure
@@ -290,7 +291,7 @@ an extension when its current score has fallen sufficiently far behind the
 best score observed. They are endpoint heuristics for extension, not
 substitutes for the affine recurrence.
 
-Single-instruction, multiple-data (SIMD) execution does not change the
+Single instruction, multiple data (SIMD) execution does not change the
 optimization objective when it evaluates the same cells with the same
 precision, boundary conditions, stopping policy, and tie policy. The
 Suzuki--Kasahara difference formulation stores bounded

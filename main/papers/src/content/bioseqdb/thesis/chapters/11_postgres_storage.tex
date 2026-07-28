@@ -480,7 +480,8 @@ write states close.
 
 Dynamic fragment relations are deliberately not installed as extension
 members. An early approach attempted to alter extension membership from nested
-SPI and resource-owner contexts and could provoke severe lifecycle failures.
+Server Programming Interface (SPI) and resource-owner contexts and could
+provoke severe lifecycle failures.
 The current design instead treats \texttt{seq\_sub\_table} as the canonical
 registry. Parent-table drop hooks remove associated relations, and an orphan
 reaper handles mismatches in either direction. This makes cleanup an explicit

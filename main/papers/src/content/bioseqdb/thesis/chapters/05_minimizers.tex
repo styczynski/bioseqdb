@@ -5,7 +5,7 @@ The first computational stage of the BioSeqDB mapper converts a sequence into a
 much smaller stream of representative $k$-mers.  This stream is called a
 \emph{minimizer sketch}. The target sketch becomes an index. The query sketch
 is looked up in that index, and equal keys become the anchors consumed by
-Chapter~\ref{sec:chaining-purpose}. Sketching is therefore more than a sampling
+Section~\ref{sec:chaining-purpose}. Sketching is therefore more than a sampling
 optimization. Its hash
 function, strand convention, tie rule, invalid-symbol rule, and output encoding
 jointly define the language spoken by the query and its stored target index.
@@ -20,10 +20,13 @@ sketch-backend enum in
 \texttt{Scalar}, \texttt{ExactSimd}, \texttt{PaperNtHashSimd}, and
 \texttt{VulkanSegment}.  It is distinct from the higher-level runtime
 \texttt{MinimizerAlgorithmType}, which also retains the
-\texttt{SIMD\_MINIMAP2\_SLOW} reference selector. Scalar and ExactSimd share
-the legacy minimap-style scheme. The
+\texttt{SIMD\_MINIMAP2\_SLOW} reference selector. In this chapter,
+\texttt{u8} and \texttt{u32} denote unsigned fixed-width integer types of
+8 and 32 bits, respectively. Scalar and ExactSimd share the legacy
+minimap-style scheme. The
 initializer-level runtime default is Scalar in both
-\texttt{Minimap2Params} and the PostgreSQL GUC. ExactSimd is the
+\texttt{Minimap2Params} and the corresponding PostgreSQL Grand Unified
+Configuration (GUC) parameter. ExactSimd is the
 production-targeted all-SIMD alternative selected explicitly as
 \texttt{two\_stack\_nthash}, including by named benchmark configurations.
 PaperNtHashSimd implements a separate versioned, paper-derived 32-bit ntHash
@@ -31,11 +34,11 @@ scheme. Its persisted manifest identity is the pair $(1,1)$, while
 \texttt{PNT1} and \texttt{0x504E5431} name the human-readable scheme family
 and the checked-kernel proof magic. VulkanSegment targets the legacy
 minimap-style scheme on a device through the Phase C tiled kernel. Its current
-oracle contract is exact for dna4. For dna5 and the tested generic
-dna5/u8-packing route, the scalar events must be a subset of the device output
-and the number of additional events is bounded. Persisted index metadata
-records the selected scheme. Dispatch is not allowed to substitute one scheme
-for another merely because both outputs are called ``minimizers''.
+oracle contract is exact for DNA4. For DNA5 and the tested generic
+DNA5/\texttt{u8}-packing route, the scalar events must be a subset of the
+device output and the number of additional events is bounded. Persisted index
+metadata records the selected scheme. Dispatch is not allowed to substitute
+one scheme for another merely because both outputs are called ``minimizers''.
 
 The implementation history is useful because it exposes three recurring
 lessons:
@@ -64,7 +67,7 @@ nucleotide sketching, valid bases are normalized to minimap2's nt4 codes
 \[
   \eta(A)=0,\qquad \eta(C)=1,\qquad \eta(G)=2,\qquad \eta(T)=3,
 \]
-and an ambiguous base such as dna5's $N$ maps to a sentinel.  The $k$-mer
+and an ambiguous base such as DNA5's $N$ maps to a sentinel.  The $k$-mer
 beginning at $i$ is $K_i=S[i,i+k)$.  Its reverse complement is
 $\overline{K_i}$, and its canonical orientation is determined from the two
 encoded integers
@@ -282,13 +285,13 @@ same legacy scheme & 32-bit rolling ntHash, wrapping forward+reverse sum &
 same legacy minimap-style scheme\\
 Equal minimum & entering/rightmost winner, special duplicate emissions &
 same event chronology & keep left and right extremes, emit both identities
-when tied & exact dna4 chronology, scalar-event superset for dna5 and the
-tested dna5/u8-packing route\\
+when tied & exact DNA4 chronology, scalar-event superset for DNA5 and the
+tested DNA5/\texttt{u8}-packing route\\
 Palindrome & iteration skipped & max sentinel consumes a slot &
 ntHash endpoint with recorded orientation & max sentinel\\
 Ambiguity & reset clean run & reset, one invalid ring transition, no flush &
-production packed route is dna4-only and fails closed otherwise &
-rank LUT, rolling-state reset, $k$-base re-arm\\
+production packed route is DNA4-only and fails closed otherwise &
+rank lookup table (LUT), rolling-state reset, $k$-base re-arm\\
 Fragment boundary & whole byte string & bounded continuation, no reset or replay &
 contiguous bounded execution, minimizers-per-fragment (MPF) replay halo,
 core ownership, then
@@ -297,8 +300,8 @@ Persisted identity & minimap2 index format & legacy-minimap-v1 &
 manifest scheme $(1,1)$ & legacy-minimap-v1\\
 Execution evidence & not part of this comparison & exact route counters and
 continuation proof & proof magic \texttt{0x504E5431} plus zero fail-closed
-counters & exact dna4 comparison, subset and bounded-extra checks for dna5
-and the tested dna5/u8-packing route\\
+counters & exact DNA4 comparison, subset and bounded-extra checks for DNA5
+and the tested DNA5/\texttt{u8}-packing route\\
 \bottomrule
 \end{tabularx}
 \caption{The four implementations are not interchangeable merely because they
@@ -498,7 +501,7 @@ PNT1 collector.
 \caption{BioSeqDB PNT1 data-independent ntHash minimizers}
 \label{alg:paper-nthash}
 \small
-\textbf{Input:} dna4 sequence \(S\), compile-time \(k\), and \(w\).
+\textbf{Input:} DNA4 sequence \(S\), compile-time \(k\), and \(w\).
 
 \textbf{Output:} reconciled minimizer events from the eight logical streams.
 
@@ -668,11 +671,12 @@ horizontal tests and masked buffer updates.  The SIMD unit was busy, but the
 instruction stream did more bookkeeping than the scalar loop.
 
 Micro-optimizations could not repair that algorithmic shape.  DOC0108 replaced
-general complement work with dna4 XOR, hoisted palindrome masks, and fused
+general complement work with DNA4 XOR, hoisted palindrome masks, and fused
 lane predicates.  Its measured collector moved only from approximately
 40.8 to 39.6 ms while the scalar reference remained near
 12.7--12.9 ms.  Later direct packed access removed an eager conversion, but
-also exposed an LSB-first ordering error in the first helper.  Correcting that
+also exposed a least-significant-bit-first (LSB-first) ordering error in the
+first helper. Correcting that
 error restored identity, not speed.
 
 The long-sequence report DOC0113 gives the honest intermediate result.  For
@@ -833,7 +837,7 @@ boundary from an ambiguity event that resets biological state.
   \draw[->] (state.north)--(7.4,.7)--(7.4,1.15);
 
   \node[draw,rounded corners,fill=red!6,align=center] at (6.1,-1.45) {
-    dna5 $N$: flush pending valid candidates and clear rolling $K$ context\\
+    DNA5 $N$: flush pending valid candidates and clear rolling $K$ context\\
     advance one max-valued ring slot and do not flush the minimizer ring};
   \draw[->,dashed] (6.1,-.78)--(6.1,-1.05);
 \end{tikzpicture}
@@ -844,7 +848,7 @@ window state used by the scalar reference.}
 \label{fig:exact-continuation}
 \end{figure}
 
-For dna5, packed symbols do not form a continuous bit stream across storage
+For DNA5, packed symbols do not form a continuous bit stream across storage
 words because three bits per symbol leave unused high bits.  The generic
 decoder therefore prepares source-word addresses and shifts per active lane,
 then performs rank extraction, rank-to-nt4 normalization, and ambiguity
@@ -872,10 +876,10 @@ about 250 million vector batches but 9.75 billion scalar-orchestration steps,
 behaving like $O(N(K+W)/2)$ rather than a rolling hash plus amortized minimum.
 
 The retained specialization processes eight candidates at a time.  It takes
-the $K+B-1=22$ needed dna4 codes, applies SIMD within a register (SWAR) to pack
+the $K+B-1=22$ needed DNA4 codes, applies SIMD within a register (SWAR) to pack
 them into 44 bits, and extracts eight
 overlapping 30-bit K15 words through fixed shifts, forms forward and reverse
-orientations in two independent u32 streams, applies the exact minimap
+orientations in two independent \texttt{u32} streams, applies the exact minimap
 scramble, and carries 64-bit position/strand metadata separately.  The
 $W=10$ reduction still scans ten chronological slots, deliberately using
 \texttt{<=} so each lane ends on the rightmost equal minimum.  This is more
@@ -898,7 +902,7 @@ tie-recovery path.
 \caption{ExactSimd B8 block, simplified}
 \label{alg:exact-b8}
 \small
-\textbf{Input:} \(K=15\), \(W=10\), eight pending dna4 positions, and the
+\textbf{Input:} \(K=15\), \(W=10\), eight pending DNA4 positions, and the
 continuation state.
 
 \textbf{Output:} chronological events and the updated continuation state.
@@ -927,8 +931,8 @@ continuation state.
 \end{algorithm}
 
 The source still contains a separately attested full-resident
-\texttt{vector\_stream} route for borrowed contiguous dna4/u32 data and the
-historical XXL shape.  It is intentionally distinguished in
+\texttt{vector\_stream} route for borrowed contiguous DNA4/\texttt{u32} data
+and the historical XXL shape.  It is intentionally distinguished in
 \texttt{TwoStackExecutionProof} from the B8 continuation.  Because later
 forensics found that historical route did not satisfy all exact palindrome and
 boundary semantics, it must be treated as an approximate resident control, not
@@ -954,12 +958,12 @@ magic \texttt{0x504E5431}, which reads as \texttt{PNT1}. This decision converts
 a tempting hidden substitution into an explicit index contract without
 confusing execution evidence with the wire identifier.
 
-The public PNT1 route currently accepts only $K=15$, $W=10$, and packed dna4.
-It requires a contiguous borrowed or admission-materialized u32 interval, a
-minimizer representation with all 32 hash bits, a representable position
-range, and a Highway target with four or eight physical u32 lanes. The kernel
-keeps eight logical streams and maps them onto one or two physical vector
-registers. Forward and reverse-complement rolling hashes use seven-bit
+The public PNT1 route currently accepts only $K=15$, $W=10$, and packed DNA4.
+It requires a contiguous borrowed or admission-materialized \texttt{u32}
+interval, a minimizer representation with all 32 hash bits, a representable
+position range, and a Highway target with four or eight physical \texttt{u32}
+lanes. The kernel keeps eight logical streams and maps them onto one or two
+physical vector registers. Forward and reverse-complement rolling hashes use seven-bit
 rotations. Each stream retains both extreme equal minima. The upstream
 canonical algorithm chooses one extreme from complete-window orientation.
 BioSeqDB instead emits the left extreme and then the right extreme when their
@@ -977,7 +981,7 @@ half-open core, sorts them by $(\textit{hash},\textit{encoded position})$, and
 removes identical records. Disjoint core ownership prevents a legitimate
 event from surviving in two cores. If any storage, vector-shape, position, or
 scheme proof is missing, the selected backend fails closed. It does not
-reinterpret dna5 bytes and it does not fall through to a differently named
+reinterpret DNA5 bytes and it does not fall through to a differently named
 scheme.
 
 Algorithm~\ref{alg:pnt1} shows how bounded replay, half-open ownership, and
@@ -987,13 +991,13 @@ canonical sorting turn fragmented input into one PNT1 MPF generation.
 \caption{PNT1 MPF replay over fragmented packed storage}
 \label{alg:pnt1}
 \small
-\textbf{Input:} manifest scheme \((1,1)\), a packed dna4 sequence, and
+\textbf{Input:} manifest scheme \((1,1)\), a packed DNA4 sequence, and
 physical cores.
 
 \textbf{Output:} a published MPF generation with manifest scheme \((1,1)\).
 
 \begin{enumerate}
-  \item Require \(K=15\), \(W=10\), full-u32 hash storage, representable
+  \item Require \(K=15\), \(W=10\), full-\texttt{u32} hash storage, representable
     positions, and a four- or eight-lane vector shape.
   \item For each core \([c_\ell,c_h)\) in logical order, perform the following
     steps.
@@ -1004,7 +1008,7 @@ physical cores.
           s_\ell\gets\max(0,c_\ell-r),\qquad
           s_h\gets\min(|S|,c_h+r).
         \]
-      \item Plan contiguous u32 access for \([s_\ell,s_h)\).
+      \item Plan contiguous \texttt{u32} access for \([s_\ell,s_h)\).
       \item Borrow the interval or materialize it under memory admission.
       \item Run the checked eight-stream PNT1 kernel on the bounded interval.
       \item Require an accepted proof with magic
@@ -1051,9 +1055,10 @@ both distinct extremes retained & canonical $K$-mer before scrambling &
 experimental dual streams \\
 Tie contract & one oriented extreme & left, then distinct right & minimap2
 rightmost/event identity rules & not a compatibility contract \\
-Input & packed two-bit DNA & $K=15,W=10$, proved u32 dna4, four/eight lanes,
-full-u32 hash and position proof & one-word exact
-representations with generic fallback & borrowed resident dna4 \\
+Input & packed two-bit DNA & $K=15,W=10$, proved \texttt{u32} DNA4,
+four/eight lanes,
+full-\texttt{u32} hash and position proof & one-word exact
+representations with generic fallback & borrowed resident DNA4 \\
 Fragment handling & eight overlapped chunks & per-core halo replay, ownership,
 sort/unique &
 bounded streaming continuation & full-resident only \\
@@ -1070,17 +1075,17 @@ Second, changing a seed contract is an index-format migration, not a local
 micro-optimization.  The catalog and on-disk header can reject a mismatch
 before the false-negative failure reaches the chaining stage.
 
-\subsection{Vulkan Phase C: exact dna4 extraction and conservative superset extraction}
+\subsection{Vulkan Phase C: exact DNA4 extraction and conservative superset extraction}
 \label{sec:vulkan-minimizers}
 
 The GPU implementation follows a different optimization path.  Its purpose is
 not to reproduce the eight-stream PNT1 decomposition, but to execute the
 minimap-compatible scalar-derived state machine over device-resident packed
-sequences. Exact event parity is currently verified for dna4. The dna5 and
-tested generic dna5/u8-packing routes instead use a conservative contract:
-every scalar event must be present and the number of additional events is
-bounded. It belongs to Phase C of the GPU pipeline: metadata, packed bases,
-sketch events, seed hits, and downstream work can remain on the device. This
+sequences. Exact event parity is currently verified for DNA4. The DNA5 and
+tested generic DNA5/\texttt{u8}-packing routes instead use a conservative
+contract: every scalar event must be present and the number of additional
+events is bounded. It belongs to Phase C of the GPU pipeline: metadata, packed
+bases, sketch events, seed hits, and downstream work can remain on the device. This
 avoids making a fast kernel irrelevant by repeatedly materializing sequences
 or events on the host.
 
@@ -1118,7 +1123,7 @@ Dimension & G3SA reference & BioSeqDB Phase C \\
 Programming model & CUDA, one block per read & Vulkan compute, grid-stride
 tile ownership \\
 Source representation & character DNA/\texttt{N} & descriptor-proved packed
-dna4 or generic rank lookup \\
+DNA4 or generic rank lookup \\
 $K$-mer update & reconstruct $K$ symbols per position & rolling
 forward/reverse state, $O(1)$ per position \\
 Tile shape & 128 bases, 32-thread warp & planner target about 256 bases,
@@ -1131,8 +1136,8 @@ sentinel through the existing chronological window state \\
 Boundary ownership & read-local & replay overlap plus half-open owned trigger
 interval \\
 Compatibility target & minimap2-inspired & exact scalar BioSeqDB event stream
-for dna4, bounded conservative scalar-event superset for dna5 and the tested
-dna5/u8-packing route \\
+for DNA4, bounded conservative scalar-event superset for DNA5 and the tested
+DNA5/\texttt{u8}-packing route \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -1147,8 +1152,8 @@ shader begins earlier by a conservative overlap currently bounded by $K+W+1$,
 replays scalar-derived state, and emits only events whose trigger position lies
 in $[b,e)$. The half-open trigger filter is intended to prevent neighboring
 tiles from owning the same event. Exact cross-tile event parity is verified for
-dna4. For dna5 and the tested dna5/u8-packing route, the oracle instead
-requires every scalar triple to be present and limits additional triples to
+DNA4. For DNA5 and the tested DNA5/\texttt{u8}-packing route, the oracle
+instead requires every scalar triple to be present and limits additional triples to
 \[
   2\,T\,(K+W+1),
 \]
@@ -1157,7 +1162,7 @@ not a claim that every additional event has been localized to a particular
 boundary.
 
 The planner targets approximately 256 logical bases and rounds storage
-according to the sequence representation. A dna5 packing shape therefore
+according to the sequence representation. A DNA5 packing shape therefore
 commonly produces 252-base logical tiles.  The Phase C application binary
 interface (ABI) bounds the supported span
 and currently admits up to 384 bases including replay.  Those numbers are
@@ -1262,7 +1267,7 @@ plausible in isolation:
 
 \begin{enumerate}
   \item Phase B used a mixture of host metadata and specialized GPU work.  A
-  4096-base dna5 case produced 859 events where the scalar oracle produced
+  4096-base DNA5 case produced 859 events where the scalar oracle produced
   795.  Changing padding and inserting \texttt{N} symbols did not remove the
   excess, pointing to ownership/state rather than input corruption
   (DOC0348).
@@ -1272,14 +1277,14 @@ plausible in isolation:
   \item The first Phase C shader still reconstructed too much state and left
   work concentrated in too few lanes.  DOC0353 replaced that structure with
   rolling hash updates and an all-lanes, grid-stride tile schedule. The
-  measured dna4 configuration remained bit-exact while sketch throughput
+  measured DNA4 configuration remained bit-exact while sketch throughput
   increased from about 73 to 494\,Mbp/s in the recorded benchmark.
 \end{enumerate}
 
 This sequence matters more than the name of a kernel. The final design combines
 an ABI proof, explicit replay ownership, a parallel schedule, and a
-representation-specific oracle contract. That contract is exact for dna4 and
-is a bounded conservative superset for dna5 and the tested dna5/u8-packing
+representation-specific oracle contract. That contract is exact for DNA4 and
+is a bounded conservative superset for DNA5 and the tested DNA5/\texttt{u8}-packing
 route. Removing any one of those properties reproduces a previously observed
 failure mode.
 
@@ -1415,7 +1420,7 @@ evidence-based direction if that prototype is pursued.
 
 DOC0353 records the controlled before/after measurement of the Phase C shader
 rewrite shown in Table~\ref{tab:gpu-minimizer-rewrite}. The primary evidence is
-bit-exact output for the recorded dna4 configuration together with the kernel
+bit-exact output for the recorded DNA4 configuration together with the kernel
 improvement. The total probe also improved because sketching ceased to dominate
 the GPU pipeline.
 
@@ -1444,8 +1449,8 @@ execution and correct CIGARs for all 4096 queries, but it covered the complete
 bounded alignment route rather than a minimizer-only Phase C kernel. GPU
 execution was slower than the minimap2 control on that case.
 The honest conclusion is narrower: Phase C removed the structural GPU sketch
-bottleneck and produced bit-exact device events for the recorded dna4
-configuration. The current dna5 and tested dna5/u8-packing oracle instead
+bottleneck and produced bit-exact device events for the recorded DNA4
+configuration. The current DNA5 and tested DNA5/\texttt{u8}-packing oracle instead
 accepts a bounded conservative superset. Large-scale cross-backend
 qualification remained future measurement work.
 
@@ -1490,7 +1495,7 @@ compatible sketch/index scheme:
   implicit scalar call.
 
   \item[\texttt{PaperNtHashSimd}.] A versioned unequal-work
-  alternative/prototype for packed dna4 when both sides carry manifest scheme
+  alternative/prototype for packed DNA4 when both sides carry manifest scheme
   $(1,1)$. It realises the eight-stream rolling idea while making BioSeqDB's
   tie rule and hash width part of a persistent contract. It cannot open or
   query a minimap-compatible index by treating every minimizer as an
@@ -1499,7 +1504,7 @@ compatible sketch/index scheme:
   \item[\texttt{VulkanSegment}.] The device implementation of the legacy
   minimap-style hash and reset contract when Phase C admission proves the
   representation, tile span, buffer capacity, and device features. Current
-  dna4 checks require exact parity. Dna5 and the tested dna5/u8-packing route
+  DNA4 checks require exact parity. DNA5 and the tested DNA5/\texttt{u8}-packing route
   require all scalar events with a bounded number of additional events. It is
   favored when the next stages remain resident. The planner may select a
   compatible host backend before Vulkan execution begins. Once VulkanSegment
@@ -1524,7 +1529,7 @@ precedes backend admission and fail-closed execution.
 ]
   \node[q] (scheme) {Which persisted\\sketch scheme?};
   \node[q, below left=1.5cm and 1.8cm of scheme] (pntproof)
-    {PNT1 + packed\\dna4 proof?};
+    {PNT1 + packed\\DNA4 proof?};
   \node[q, below right=1.5cm and 1.8cm of scheme] (device)
     {minimap-compatible +\\Phase C admitted?};
   \node[b, below=1.25cm of pntproof] (pnt) {\texttt{PaperNtHashSimd}};
@@ -1563,16 +1568,16 @@ decline is an error.}
 
 Several limitations remain visible rather than hidden behind automatic
 fallbacks. PNT1 currently requires $K=15$, $W=10$, proved contiguous or
-admission-materialized u32 dna4, a full-u32 hash field, representable positions,
-and a four- or eight-lane Highway shape. ExactSimd's best specialized
+admission-materialized \texttt{u32} DNA4, a full-\texttt{u32} hash field,
+representable positions, and a four- or eight-lane Highway shape. ExactSimd's best specialized
 continuation is the common $K=15,W=10$, eight-position shape. Other supported
 shapes use its generic exact-vector route. If ExactSimd admission fails,
 dispatch may select Scalar explicitly before ExactSimd execution begins. Once
 ExactSimd is selected, failure is an error. The Phase C tile owns one serial
 scalar-derived replay state, so positions within a tile are not independently
 parallel. Parallelism comes from many tiles and grid-stride work distribution.
-Its semantic acceptance remains representation-specific: exact for dna4 and a
-bounded conservative superset for dna5 and the tested dna5/u8-packing route.
+Its semantic acceptance remains representation-specific: exact for DNA4 and a
+bounded conservative superset for DNA5 and the tested DNA5/\texttt{u8}-packing route.
 The compact route deliberately runs count and emit to obtain deterministic
 output. The sorted-pair persistence route instead uses atomic append followed
 by a stable device sort. Finally, the historical full-resident route remains
@@ -1662,8 +1667,8 @@ tile preparation, buffer protocol, dispatch, and supported representation
 admission \\
 \path{main/bioseq/backend/sequences/kmers/minimizers_vulkan_test.cpp} &
 232--279, 1425--1560, 2971--2992, and 3045--3128 &
-exact dna4 oracle checks and subset with bounded-extra checks for dna5 and the
-tested dna5/u8-packing route, including the sorted-pair API \\
+exact DNA4 oracle checks and subset with bounded-extra checks for DNA5 and the
+tested DNA5/\texttt{u8}-packing route, including the sorted-pair API \\
 \path{main/bioseq/backend/gpu/vulkan/phase_c_abi.cppm} &
 1438--1584 &
 descriptor layout, replay/span bounds, and Phase C proof obligations \\
@@ -1714,8 +1719,8 @@ newer evidence does not support presenting it as a wholesale replacement for
 ExactSimd. The GPU solution adopts G3SA's resident-pipeline insight
 \cite{g3sa_paper} and reconstructs the sketch around BioSeqDB's packed
 representations, reset semantics, and replay ownership. Its current oracle
-contract is exact for dna4 and a bounded conservative superset for dna5 and
-the tested dna5/u8-packing route. Its compact route uses deterministic
+contract is exact for DNA4 and a bounded conservative superset for DNA5 and
+the tested DNA5/\texttt{u8}-packing route. Its compact route uses deterministic
 count/scan/emit allocation. Its sorted-pair persistence route uses atomic
 append followed by a stable device sort. In every route, an optimization is
 accepted only when the seed scheme, storage proof, boundary ownership,

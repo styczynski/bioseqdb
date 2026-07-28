@@ -58,7 +58,7 @@ preserving coordinate, lifetime, failure, and resource semantics across the
 complete query.
 
 The six canonical contributions stated in the Introduction and
-Chapter~\ref{sec:solution-gap-questions} are assessed against their principal
+Section~\ref{sec:solution-gap-questions} are assessed against their principal
 evidence in Table~\ref{tab:conclusion-contribution-evidence}.  Repeating the
 same identifiers here prevents a subsystem layer or an experimental backend
 from becoming an additional, unsupported contribution claim.
@@ -125,8 +125,10 @@ records, an in-memory or \texttt{.mmi} reference index, scalar chaining, and
 KSW2 extension.  Work is distributed over CPU workers.  Allocators and option
 branches are organized around a standalone process.
 
-BioSeqDB retained the underlying algorithmic decomposition because it is a
-good decomposition.  It did not retain the assumption that all data starts as
+BioSeqDB retained the underlying algorithmic decomposition because sparse
+representative seeds, collinear chaining, and bounded extension concentrate
+base-level work on plausible regions.  It did not retain the assumption that
+all data starts as
 an ASCII buffer or that one process owns the whole reference index.  It also
 did not reproduce every minimap2 operating mode.  The implemented focus is
 the sequence-search path used by the extension, not a byte-identical clone of
@@ -341,7 +343,7 @@ implemented selector is not automatically a qualified final route.
     Correct empty or all-NULL \texttt{sum}, \texttt{min}, and \texttt{max}
     results in the current route. &
     Chapter 11 semantic-difference table. \\
-    Local IO &
+    Local I/O &
     Bounded \texttt{bioseq.load}, mmap or POSIX plain input, zlib gzip, and
     overlap disabled. &
     Explicit overlap and the general-reader parallel-gzip backend are separate
@@ -596,7 +598,7 @@ retains minimap2's successful algorithmic decomposition
 \cite{minimap2_paper}, replaces process-local assumptions with explicit
 sequence and index abstractions, and adds measured fragment-native CPU and SIMD
 execution plus bounded heterogeneous routes.  PostgreSQL receives a
-planner-visible batch executor.  The same ownership discipline extends to IO,
+planner-visible batch executor.  The same ownership discipline extends to I/O,
 external providers, cache coordination, and generated SQL boundaries.  The
 result is an integrated experimental platform and a candid record of
 intermediate outcomes, suitable for further scientific and systems work.

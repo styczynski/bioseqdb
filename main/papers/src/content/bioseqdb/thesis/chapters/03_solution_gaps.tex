@@ -7,9 +7,7 @@ engineered answer to the algorithmic question.  It avoids whole-matrix
 dynamic programming, reduces the seed set with minimizers, chains
 compatible anchors, and invokes expensive alignment only for selected
 regions.  It also provides a persistent \texttt{.mmi} representation for
-reuse of a reference index.\footnote{H. Li, ``Minimap2: pairwise alignment
-for nucleotide sequences'', \emph{Bioinformatics} 34 (2018),
-pp.~3094--3100, \url{https://doi.org/10.1093/bioinformatics/bty191}.}
+reuse of a reference index~\cite{minimap2_paper}.
 It would therefore be misleading to motivate
 BioSeqDB by claiming that existing mappers are generally slow or
 algorithmically naive.
@@ -186,11 +184,8 @@ belong to one database query.
 PostgreSQL makes it straightforward to expose C or C++ code as a typed
 function.  It also supports set-returning functions that emit zero or more
 rows, and a \texttt{LATERAL} item can correlate such a function with an input
-row.\footnote{PostgreSQL Global Development Group, ``Set Returning
-Functions'', \emph{PostgreSQL 17 Documentation},
-\url{https://www.postgresql.org/docs/17/functions-srf.html}, and
-``SQL Functions Returning Sets'',
-\url{https://www.postgresql.org/docs/17/xfunc-sql.html}.} Standard SQL can
+row~\cite{postgresql17_set_returning_functions,postgresql17_sql_functions}.
+Standard SQL can
 therefore express result multiplicity.  Those mechanisms do not by themselves
 allow one alignment scan to own cross-tuple batching, shared
 multi-field projections, or accelerator admission.  A scalar Boolean
@@ -226,19 +221,15 @@ feature-not-supported error.  The attached support function reports startup
 cost \(100000\) and per-tuple cost \(0\).  The SQL declarations attach that
 support function instead of declaring a separate literal cost.  PostgreSQL documents
 support functions as the mechanism for input-dependent cost information and
-other planner knowledge.\footnote{PostgreSQL Global Development Group,
-``Function Optimization Information'', \emph{PostgreSQL 17 Documentation},
-\url{https://www.postgresql.org/docs/17/xfunc-optimization.html}.}
+other planner knowledge~\cite{postgresql17_support_functions}.
 The deliberately unattractive unowned path allows a supported, cheaper custom
 path to win.  The custom plan owns batching and replaces result-bearing
 expressions with nodes whose values are populated for each emitted match.
 The custom scan can therefore return no row for a target without a match
 or several rows for a target with several matches.  PostgreSQL's documented
 custom-scan interface permits extensions to add alternative relation scans,
-including scans motivated by caching or hardware acceleration.\footnote{
-PostgreSQL Global Development Group, ``Writing a Custom Scan Provider'',
-\emph{PostgreSQL 17 Documentation},
-\url{https://www.postgresql.org/docs/17/custom-scan.html}.} Current project
+including scans motivated by caching or hardware
+acceleration~\cite{postgresql17_custom_scan}. Current project
 guidelines require this plan choice to be verified with
 \texttt{EXPLAIN (ANALYZE)} and require both vectorized and
 non-vectorized execution to be tested.\footnote{\texttt{DOC0321},
@@ -264,9 +255,7 @@ these as one owning byte string would simplify an interface by hiding the
 most important cost.  PostgreSQL's Oversized-Attribute Storage Technique
 (TOAST) can compress or move a variable-length value out of line, so C-level
 code cannot assume that a received datum is already one contiguous
-four-byte-header payload.\footnote{PostgreSQL Global Development Group,
-``TOAST'', \emph{PostgreSQL 17 Documentation},
-\url{https://www.postgresql.org/docs/17/storage-toast.html}.}
+four-byte-header payload~\cite{postgresql17_toast}.
 
 The April integration design illustrates the problem.  PostgreSQL
 \texttt{Datum} is the generic C-level value carrier.  A borrowed
@@ -539,24 +528,13 @@ capability.  The minimap2 paper establishes a nucleotide
 mapper based on seeding, chaining, and alignment.  BLAST+ documents heuristic
 sequence-database
 search, persistent BLAST databases, and a modular data-access
-library.\footnote{C. Camacho, G. Coulouris, V. Avagyan, N. Ma,
-J. Papadopoulos, K. Bealer and T. L. Madden, ``BLAST+: architecture and
-applications'', \emph{BMC Bioinformatics} 10, 421 (2009),
-\url{https://doi.org/10.1186/1471-2105-10-421}.}  MMseqs2 documents
+library~\cite{blast_plus_2009}.  MMseqs2 documents
 sensitive protein search over massive data sets and a staged
-prefilter-and-alignment workflow.\footnote{M. Steinegger and J. S\"oding,
-``MMseqs2 enables sensitive protein sequence searching for the analysis of
-massive data sets'', \emph{Nature Biotechnology} 35 (2017),
-pp.~1026--1028, \url{https://doi.org/10.1038/nbt.3988}.}
+prefilter-and-alignment workflow~\cite{mmseqs2_2017}.
 Database-centric work by R\"ohm and Blakeley explored SQL and user-defined
 functions for high-throughput genomics, while Bio-Strings prototyped
 semantically meaningful biological string types and stored operations in
-PostgreSQL.\footnote{U. R\"ohm and J. A. Blakeley, ``Data Management for
-High-Throughput Genomics'', \emph{CIDR 2009}, pp.~97--111,
-\url{https://arxiv.org/abs/0909.1764}.  S. Lifschitz et al.,
-``Bio-Strings: A Relational Database Data-Type for Dealing with Large
-Biosequences'', \emph{BioTech} 11, 31 (2022),
-\url{https://doi.org/10.3390/biotech11030031}.}
+PostgreSQL~\cite{roehm_blakeley_genomics_2009,bio_strings_2022}.
 
 \begin{table}[ht]
   \centering
