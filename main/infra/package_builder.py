@@ -1160,7 +1160,7 @@ def update_stopped_builder_user_data(
             "--attribute",
             "userData",
             "--value",
-            f"fileb://{payload_file.name}",
+            f"file://{payload_file.name}",
         )
     response = aws_json(
         region,

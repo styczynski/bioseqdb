@@ -232,8 +232,8 @@ class LifecycleSafetyTests(unittest.TestCase):
         observed: dict[str, bytes] = {}
 
         def capture_payload(*args: str) -> None:
-            file_argument = next(value for value in args if value.startswith("fileb://"))
-            observed["payload"] = Path(file_argument.removeprefix("fileb://")).read_bytes()
+            file_argument = next(value for value in args if value.startswith("file://"))
+            observed["payload"] = Path(file_argument.removeprefix("file://")).read_bytes()
 
         encoded = package_builder.base64.b64encode(user_data.encode()).decode()
         with mock.patch.object(
