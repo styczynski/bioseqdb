@@ -270,7 +270,8 @@ bounded subset of parameterizations because join clauses may make an outer
 relation's value available as a \texttt{PARAM\_EXEC} input.
 
 For an INNER join whose restriction itself contains one semantic
-\texttt{mmsearch}, \path{BioseqBatchJoinSetJoinPathlistHook} can construct a
+\texttt{mmsearch},
+\texttt{BioseqBatchJoinSet}\allowbreak\texttt{JoinPathlistHook} can construct a
 join-level owner.  It either retains a proven parameterized base-scan owner or
 constructs a \texttt{BioseqBatchJoin} path with target and query children.
 Lazy slice or other evaluated operands may require a

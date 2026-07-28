@@ -574,7 +574,7 @@ pointer would force all fragments to be joined before a consumer could inspect
 the first rank.
 
 The first BioSeqDB lazy design, still visible in
-\texttt{main/bioseq/backend/storage/lazy\_compact\_sequence.cppm}, was
+\path{main/bioseq/backend/storage/lazy_compact_sequence.cppm}, was
 parameterized by a concrete range and scanner.  Its no-fragment specialization
 was close to a pointer-sized wrapper.  The fragmented specialization held a
 small fragment cache and stitched a requested window into scratch storage when
