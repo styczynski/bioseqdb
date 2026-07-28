@@ -838,7 +838,8 @@ def start_builders(
             raise PackageBuilderError(
                 f"cannot start {name} builder {builder.instance_id} from state {state!r}"
             )
-    for builder in builders.values():
+
+    def wait_until_healthy(builder: Builder) -> None:
         run_command(
             [
                 require_executable("aws"),
@@ -863,6 +864,16 @@ def start_builders(
                 builder.instance_id,
             ]
         )
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(builders), thread_name_prefix="bioseq-builder-start"
+    ) as executor:
+        futures = {
+            executor.submit(wait_until_healthy, builder): name
+            for name, builder in builders.items()
+        }
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
     return validate_builders(region, builders, matrix)
 
 
