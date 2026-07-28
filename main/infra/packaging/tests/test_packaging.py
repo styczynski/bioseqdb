@@ -454,6 +454,10 @@ class StaticContractTests(unittest.TestCase):
         )
         self.assertIn("BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST", bioseq_cmake)
         self.assertIn("BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST", bioseq_cmake)
+        self.assertIn("cmake_cache_root=/opt/bioseq-package-cmake-cache", build_script)
+        self.assertIn('"${cmake_cache_root}/source"', build_script)
+        self.assertIn('"${cmake_cache_root}/build-rooted"', build_script)
+        self.assertIn("rsync --archive --delete", build_script)
         self.assertIn(
             "-DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF",
             build_script,

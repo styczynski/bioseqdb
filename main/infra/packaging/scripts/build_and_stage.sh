@@ -12,7 +12,10 @@ die() {
 
 readonly action="${1:-}"
 readonly package_metadata_dir="${2:-}"
-readonly build_dir=/opt/bioseq-package-cmake-cache/build
+readonly package_source_dir="${PWD}"
+readonly cmake_cache_root=/opt/bioseq-package-cmake-cache
+readonly persistent_source_dir="${cmake_cache_root}/source"
+readonly build_dir="${cmake_cache_root}/build-rooted"
 [[ "${action}" == "build" || "${action}" == "install" ]] \
   || die "usage: build_and_stage.sh {build BUILD_DIR PG_MAJOR|install BUILD_DIR DESTDIR PG_MAJOR}"
 [[ -n "${package_metadata_dir}" ]] || die "package metadata directory is required"
@@ -28,11 +31,18 @@ else
 fi
 [[ "${postgres_major}" =~ ^[0-9]+$ ]] || die "PostgreSQL major must be decimal"
 
+if [[ "${action}" == "build" ]]; then
+  mkdir -p "${persistent_source_dir}" "${build_dir}" "${package_metadata_dir}"
+  rsync --archive --delete \
+    --exclude=/_bioseq-package-build/ \
+    "${package_source_dir}/" "${persistent_source_dir}/"
+fi
+
 readonly tool_root=/opt/bioseq-package-toolchain
 readonly llvm_root="${tool_root}/llvm-22"
 readonly cmake_bin="${tool_root}/cmake/bin/cmake"
 readonly vcpkg_root="${tool_root}/vcpkg"
-readonly compiler_launcher="${PWD}/infra/packaging/scripts/compiler_launcher.sh"
+readonly compiler_launcher="${persistent_source_dir}/infra/packaging/scripts/compiler_launcher.sh"
 readonly pg_state="${tool_root}/state/pg_config-${postgres_major}"
 
 [[ -x "${cmake_bin}" ]] || die "prepared CMake is missing at ${cmake_bin}"
@@ -93,16 +103,14 @@ export VCPKG_DISABLE_METRICS=1
 export POSTGRESQL_VERSION="${postgres_major}"
 
 if [[ "${action}" == "build" ]]; then
-  mkdir -p "${build_dir}" "${package_metadata_dir}"
-
-  python3 infra/packaging/scripts/prove_static_runtime.py \
+  python3 "${persistent_source_dir}/infra/packaging/scripts/prove_static_runtime.py" \
     --cxx "${llvm_root}/bin/clang++" \
     --libcxx "${libcxx_archive}" \
     --libcxxabi "${libcxxabi_archive}" \
     --libunwind "${libunwind_archive}" \
     --architecture "${expected_arch}"
 
-  "${cmake_bin}" -S . -B "${build_dir}" -G Ninja \
+  "${cmake_bin}" -S "${persistent_source_dir}" -B "${build_dir}" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_TOOLCHAIN_FILE="${vcpkg_root}/scripts/buildsystems/vcpkg.cmake" \
     -DCMAKE_C_COMPILER_LAUNCHER="${compiler_launcher}" \
@@ -133,10 +141,10 @@ if [[ "${action}" == "build" ]]; then
     -DBIOSEQ_HEAVY_JOBS=1 \
     -DVCPKG_TARGET_TRIPLET="${vcpkg_triplet}" \
     -DVCPKG_TARGET_ARCHITECTURE="${vcpkg_arch}" \
-    -DVCPKG_OVERLAY_TRIPLETS="${PWD}/cmake/triplets" \
-    -DVCPKG_OVERLAY_PORTS="${PWD}/cmake/ports"
+    -DVCPKG_OVERLAY_TRIPLETS="${persistent_source_dir}/cmake/triplets" \
+    -DVCPKG_OVERLAY_PORTS="${persistent_source_dir}/cmake/ports"
 
-  python3 infra/packaging/scripts/verify_compile_optimization.py \
+  python3 "${persistent_source_dir}/infra/packaging/scripts/verify_compile_optimization.py" \
     "${build_dir}/compile_commands.json"
 
   grep -Fqx 'BIOSEQ_OPTTIMIZATION_LEVEL_OVERRIDE:STRING=0' "${build_dir}/CMakeCache.txt" \
@@ -155,7 +163,7 @@ if [[ "${action}" == "build" ]]; then
     -name compile_commands.json -type f -print)
   [[ "${#compile_databases[@]}" -gt 0 ]] \
     || die "package build emitted no compile_commands.json"
-  python3 infra/packaging/scripts/verify_compile_optimization.py \
+  python3 "${persistent_source_dir}/infra/packaging/scripts/verify_compile_optimization.py" \
     "${compile_databases[@]}"
 
   mapfile -t built_dsos < <(find "${build_dir}" -type f \
@@ -163,7 +171,7 @@ if [[ "${action}" == "build" ]]; then
   [[ "${#built_dsos[@]}" == "2" ]] \
     || die "expected exactly two built extension DSOs, found ${#built_dsos[@]}"
   for dso in "${built_dsos[@]}"; do
-    python3 infra/packaging/scripts/validate_package.py \
+    python3 "${persistent_source_dir}/infra/packaging/scripts/validate_package.py" \
       --dso "${dso}" --architecture "${expected_arch}"
   done
   exit 0
@@ -176,7 +184,7 @@ grep -Fqx "PostgreSQL_CONFIG:FILEPATH=${pg_config}" "${build_dir}/CMakeCache.txt
 
 mkdir -p "${destdir}"
 DESTDIR="${destdir}" "${cmake_bin}" --install "${build_dir}" --component bioseq
-python3 infra/packaging/scripts/validate_package.py \
+python3 "${persistent_source_dir}/infra/packaging/scripts/validate_package.py" \
   --staged-root "${destdir}" \
   --pg-config "${pg_config}" \
   --postgres-major "${postgres_major}" \
