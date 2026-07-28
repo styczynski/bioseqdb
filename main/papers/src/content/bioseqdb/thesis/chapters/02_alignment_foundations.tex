@@ -245,27 +245,31 @@ independently of either implementation.
 \begin{algorithm}[ht]
   \caption{Affine-gap global alignment under the normalized gap convention}
   \label{alg:affine-dp}
-  \begin{algorithmic}[1]
-    \Require sequences \(X[1..n]\), \(Y[1..m]\), substitution score \(s\),
-      gap-open cost \(q\), extension cost \(e\), and the normalized gap-path
-      convention under the scoring assumption stated above
-    \State initialize \(M,I,D\) for the selected boundary objective
-    \For{\(i=1,\ldots,n\)}
-      \For{\(j=1,\ldots,m\)}
-        \State \(M_{i,j}\gets
-          \max(M_{i-1,j-1},I_{i-1,j-1},D_{i-1,j-1})+s(x_i,y_j)\)
-        \State \(I_{i,j}\gets
-          \max(M_{i,j-1}-q-e,I_{i,j-1}-e)\)
-        \State \(D_{i,j}\gets
-          \max(M_{i-1,j}-q-e,D_{i-1,j}-e)\)
-        \State store a predecessor code for each winning state
-      \EndFor
-    \EndFor
-    \State choose the terminal cell permitted by the objective
-    \State follow predecessor codes to an allowed initial cell
-    \State reverse and run-length encode the resulting operations
-    \State \Return score, endpoints and CIGAR
-  \end{algorithmic}
+  \begin{enumerate}
+    \item \textbf{Input.} Sequences \(X[1..n]\) and \(Y[1..m]\), substitution
+      score \(s\), gap-open cost \(q\), extension cost \(e\), and the normalized
+      gap-path convention under the scoring assumption stated above.
+    \item \textbf{Initialization.} Initialize \(M\), \(I\), and \(D\) for the
+      selected boundary objective, including sentinel values for impossible
+      transitions.
+    \item \textbf{Matrix fill.} For each \(i=1,\ldots,n\), in increasing order,
+      perform the following updates for each \(j=1,\ldots,m\), also in
+      increasing order:
+      \begin{enumerate}
+        \item \(M_{i,j}\gets
+          \max(M_{i-1,j-1},I_{i-1,j-1},D_{i-1,j-1})+s(x_i,y_j)\).
+        \item \(I_{i,j}\gets
+          \max(M_{i,j-1}-q-e,I_{i,j-1}-e)\).
+        \item \(D_{i,j}\gets
+          \max(M_{i-1,j}-q-e,D_{i-1,j}-e)\).
+        \item \(H_{i,j}\gets\max(M_{i,j},I_{i,j},D_{i,j})\).
+        \item Store a predecessor code for each winning state.
+      \end{enumerate}
+    \item \textbf{Traceback.} Choose the terminal cell permitted by the
+      objective. Follow predecessor codes to an allowed initial cell, then
+      reverse and run-length encode the resulting operations.
+    \item \textbf{Result.} Return the score, endpoints, and CIGAR string.
+  \end{enumerate}
 \end{algorithm}
 
 \subsection{Cost, banding and stopping criteria}
