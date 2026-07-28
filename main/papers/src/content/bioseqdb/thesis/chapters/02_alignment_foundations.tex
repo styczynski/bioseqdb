@@ -356,25 +356,26 @@ orientation \(o\) and seed span \(\ell\).
 \begin{figure}[ht]
   \centering
   \begin{tikzpicture}[
-      scale=0.62,
+      scale=0.82,
       transform shape,
       >=Latex,
-      node distance=0.55cm,
+      node distance=0.62cm,
       stage/.style={draw, rounded corners=2pt, minimum height=1.05cm,
                     minimum width=2.65cm, align=center, fill=gray!8},
       datum/.style={draw, rounded corners=8pt, minimum height=0.72cm,
                     minimum width=1.55cm, align=center, fill=blue!8},
-      note/.style={font=\scriptsize, align=center, text width=2.4cm}
+      note/.style={font=\footnotesize, align=center, text width=2.65cm}
     ]
     \node[datum] (query) {query};
     \node[stage, right=of query] (sketch) {sketch\\representative \(k\)-mers};
     \node[stage, right=of sketch] (lookup) {index lookup\\seed occurrences};
     \node[datum, right=of lookup] (anchors) {anchors\\\((r,q,o,\ell)\)};
-    \node[stage, right=of anchors] (chain) {chaining DP\\collinear subsets};
-    \node[datum, right=of chain] (regions) {regions};
-    \node[stage, right=of regions] (extend) {base-level DP\\traceback};
-    \node[stage, right=of extend] (post) {postprocess\\alternatives and MAPQ};
-    \node[datum, right=of post] (result) {score, coordinates\\CIGAR, MAPQ};
+    \node[stage, below=1.62cm of anchors] (chain)
+      {chaining DP\\collinear subsets};
+    \node[datum, left=of chain] (regions) {regions};
+    \node[stage, left=of regions] (extend) {base-level DP\\traceback};
+    \node[stage, left=of extend] (post) {postprocess\\alternatives and MAPQ};
+    \node[datum, left=of post] (result) {score, coordinates\\CIGAR, MAPQ};
 
     \draw[->] (query) -- (sketch);
     \draw[->] (sketch) -- (lookup);
@@ -385,9 +386,11 @@ orientation \(o\) and seed span \(\ell\).
     \draw[->] (extend) -- (post);
     \draw[->] (post) -- (result);
 
-    \node[note, below=0.45cm of sketch] {reduces sequence\\to a sparse sketch};
-    \node[note, below=0.45cm of chain] {suppresses random and\\inconsistent hits};
-    \node[note, below=0.45cm of extend] {recovers symbol-level\\edit path};
+    \node[note, below=0.36cm of sketch] {reduces sequence\\to a sparse sketch};
+    \node[note, below=0.36cm of chain]
+      {suppresses random and\\inconsistent hits};
+    \node[note, below=0.36cm of extend]
+      {recovers symbol-level\\edit path};
   \end{tikzpicture}
   \caption{The seed--chain--extend decomposition. The diagram is reconstructed
     from the stage contracts in current BioSeqDB code and the dated DOC0367
@@ -530,40 +533,57 @@ Table~\ref{tab:minimap2-bioseq-foundations} summarizes the correspondence.
 \begin{table}[ht]
   \centering
   \small
-  \setlength{\tabcolsep}{3pt}
-  \begin{tabular}{p{0.15\linewidth}p{0.29\linewidth}p{0.34\linewidth}p{0.14\linewidth}}
+  \setlength{\tabcolsep}{5pt}
+  \begin{tabularx}{\linewidth}{
+      @{}
+      >{\raggedright\arraybackslash}p{0.18\linewidth}
+      >{\raggedright\arraybackslash}X
+      @{}
+    }
     \toprule
-    Stage & Minimap2 reference path & BioSeqDB implementation surface & Meaning retained \\
+    Stage & Reference and implementation correspondence \\
     \midrule
     Sketch &
-    Scalar canonical minimizer sketching &
-    Scalar minimap-int, reference SIMD, production two-stack ntHash,
-    paper-compatible ntHash SIMD, and Vulkan minimap-int selectors &
-    Sparse representative seeds \\
+    \textbf{Minimap2:} scalar canonical minimizer sketching.
+    \par\smallskip
+    \textbf{BioSeqDB:} scalar minimap-int, reference SIMD, production two-stack
+    ntHash, paper-compatible ntHash SIMD, and Vulkan minimap-int selectors.
+    \par\smallskip
+    \textbf{Retained meaning:} sparse representative seeds. \\[3pt]
     Seed lookup &
-    Minimizer index lookup followed by anchor preparation and sorting &
-    PostgreSQL-capable fragment index, seed-hit collection, canonical anchor
-    ordering and CPU or device preparation paths &
-    Matching keys become coordinate anchors \\
+    \textbf{Minimap2:} minimizer-index lookup followed by anchor preparation
+    and sorting.
+    \par\smallskip
+    \textbf{BioSeqDB:} PostgreSQL-capable fragment index, seed-hit collection,
+    canonical anchor ordering, and CPU or device preparation paths.
+    \par\smallskip
+    \textbf{Retained meaning:} matching keys become coordinate anchors. \\[3pt]
     Chain &
-    Bounded dynamic programming and optional RMQ path &
-    Scalar, Highway SIMD, RMQ and Vulkan tiled-DP selectors over a shared
-    anchor contract &
-    Collinear anchors define candidate regions \\
+    \textbf{Minimap2:} bounded dynamic programming and an optional RMQ path.
+    \par\smallskip
+    \textbf{BioSeqDB:} scalar, Highway SIMD, RMQ, and Vulkan tiled-DP selectors
+    over a shared anchor contract.
+    \par\smallskip
+    \textbf{Retained meaning:} collinear anchors define candidate regions. \\[3pt]
     Extend &
-    SSE KSW2 two-piece-affine banded extension with Z-drop &
-    Highway KSW2 single/dual-affine, batched KSW2 and adaptive Block Aligner
-    selectors &
-    Candidate regions become scored base-level refinement paths under the
-    selected band, block, and drop policies \\
+    \textbf{Minimap2:} SSE KSW2 two-piece-affine banded extension with Z-drop.
+    \par\smallskip
+    \textbf{BioSeqDB:} Highway KSW2 single/dual-affine, batched KSW2, and
+    adaptive Block Aligner selectors.
+    \par\smallskip
+    \textbf{Retained meaning:} candidate regions become scored base-level
+    refinement paths under the selected band, block, and drop policies. \\[3pt]
     Postprocess and output &
-    Primary/secondary classification followed by Pairwise mApping Format (PAF)
-    or Sequence Alignment/Map (SAM) records &
-    Mapping classification and typed records with coordinates, strand, score,
-    MAPQ, divergence and optional CIGAR &
-    Search evidence becomes an interpretable mapping \\
+    \textbf{Minimap2:} primary/secondary classification followed by Pairwise
+    Mapping Format (PAF) or Sequence Alignment/Map (SAM) records.
+    \par\smallskip
+    \textbf{BioSeqDB:} mapping classification and typed records with
+    coordinates, strand, score, MAPQ, divergence, and optional CIGAR.
+    \par\smallskip
+    \textbf{Retained meaning:} search evidence becomes an interpretable
+    mapping. \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
   \caption{Conceptual correspondence between minimap2 and current BioSeqDB.
     The table describes available implementation routes, not a claim that all
     routes execute simultaneously. Runtime and compile-time policy select a
@@ -664,7 +684,7 @@ choosing one linear allele and retaining both alternatives as graph paths.
                    fill=gray!8},
       branch/.style={draw, rounded corners=2pt, minimum width=1.15cm,
                      minimum height=0.7cm, fill=blue!7},
-      lab/.style={font=\scriptsize, align=center}
+      lab/.style={font=\footnotesize, align=center, text width=4.2cm}
     ]
     \node[base] (a) {A};
     \node[base, right=0.7cm of a] (c) {C};
@@ -679,10 +699,10 @@ choosing one linear allele and retaining both alternatives as graph paths.
     \draw[->] (t) -- (a2);
     \draw[->] (a2) -- (c2);
 
-    \node[lab, below=1.25cm of c] (linear) {
+    \node[lab, below=1.20cm of c, xshift=-1.45cm] (linear) {
       linear reference chooses one path\\
       \(\mathtt{ACGAC}\) or \(\mathtt{ACTAC}\)};
-    \node[lab, below=1.25cm of a2] {
+    \node[lab, below=1.20cm of a2, xshift=1.45cm] {
       graph retains the shared prefix and suffix\\
       while representing both alleles};
   \end{tikzpicture}
@@ -735,36 +755,62 @@ representation and search viewpoints.
 \begin{table}[ht]
   \centering
   \small
-  \setlength{\tabcolsep}{3pt}
-  \begin{tabular}{p{0.17\linewidth}p{0.21\linewidth}p{0.20\linewidth}p{0.20\linewidth}p{0.14\linewidth}}
+  \setlength{\tabcolsep}{5pt}
+  \begin{tabularx}{\linewidth}{
+      @{}
+      >{\raggedright\arraybackslash}p{0.22\linewidth}
+      >{\raggedright\arraybackslash}X
+      @{}
+    }
     \toprule
-    Viewpoint & Search object & Candidate reduction & Principal strength &
-    Principal limitation \\
+    Viewpoint & Search object, reduction, strength, and limitation \\
     \midrule
     Exhaustive pairwise DP &
-    Two explicit strings &
-    None in the unbanded formulation &
-    Precisely defined optimum for the selected scoring and boundary model &
-    Quadratic state space in the unbanded case \\
+    \textbf{Search object:} two explicit strings.
+    \par\smallskip
+    \textbf{Candidate reduction:} none in the unbanded formulation.
+    \par\smallskip
+    \textbf{Principal strength:} precisely defined optimum for the selected
+    scoring and boundary model.
+    \par\smallskip
+    \textbf{Principal limitation:} quadratic state space in the unbanded
+    case. \\[3pt]
     Seeding, chaining, and extension &
-    Linear or graph-derived coordinate system &
-    Sparse seeds, occurrence filtering and coordinate chaining &
-    Scales to long references while retaining base-level refinement in selected
-    regions &
-    Search sensitivity and route-level optimality depend on seeds, chaining,
-    bands, blocks, and stopping rules \\
+    \textbf{Search object:} a linear or graph-derived coordinate system.
+    \par\smallskip
+    \textbf{Candidate reduction:} sparse seeds, occurrence filtering, and
+    coordinate chaining.
+    \par\smallskip
+    \textbf{Principal strength:} scales to long references while retaining
+    base-level refinement in selected regions.
+    \par\smallskip
+    \textbf{Principal limitation:} search sensitivity and route-level
+    optimality depend on seeds, chaining, bands, blocks, and stopping
+    rules. \\[3pt]
     Variation-graph mapping &
-    Named paths and alternatives in a sequence graph &
-    Graph-aware seeds, clustering, chaining or local-subgraph extraction &
-    Represents known alternatives and can reduce linear-reference bias &
-    Larger and more ambiguous index, path-aware coordinates and DP \\
+    \textbf{Search object:} named paths and alternatives in a sequence graph.
+    \par\smallskip
+    \textbf{Candidate reduction:} graph-aware seeds, clustering, chaining, or
+    local-subgraph extraction.
+    \par\smallskip
+    \textbf{Principal strength:} represents known alternatives and can reduce
+    linear-reference bias.
+    \par\smallskip
+    \textbf{Principal limitation:} a larger and more ambiguous index,
+    path-aware coordinates, and graph dynamic programming. \\[3pt]
     de Bruijn graph representation and assembly &
-    Local \(k\)-mer adjacency graph &
-    \(k\)-mer compaction, graph cleaning and path constraints &
-    Natural representation of assembly evidence and local sequence language &
-    Repeats collapse, errors branch, and a graph walk is not yet an alignment \\
+    \textbf{Search object:} a local \(k\)-mer adjacency graph.
+    \par\smallskip
+    \textbf{Candidate reduction:} \(k\)-mer compaction, graph cleaning, and
+    path constraints.
+    \par\smallskip
+    \textbf{Principal strength:} natural representation of assembly evidence
+    and local sequence language.
+    \par\smallskip
+    \textbf{Principal limitation:} repeats collapse, errors branch, and a
+    graph walk is not yet an alignment. \\
     \bottomrule
-  \end{tabular}
+  \end{tabularx}
   \caption{Comparison of the main algorithmic viewpoints introduced in this
     chapter. The rows are not mutually exclusive because target representation
     and search strategy are orthogonal. Candidate reduction makes large-scale

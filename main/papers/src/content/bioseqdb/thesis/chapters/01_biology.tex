@@ -213,14 +213,13 @@ measurement error can produce the same observed disagreement.
 \begin{figure}[ht]
   \centering
   \begin{tikzpicture}[
-      scale=.76,
-      transform shape,
-      node distance=1.15cm and 1.35cm,
+      node distance=1.30cm and 1.80cm,
       >=Latex,
       box/.style={draw, rounded corners=2pt, align=center,
                   minimum height=8mm, text width=25mm, fill=black!3},
       cause/.style={draw, rounded corners=2pt, align=center,
-                    minimum height=8mm, text width=27mm, fill=black!7}
+                    minimum height=8mm, text width=27mm, fill=black!7},
+      flow note/.style={font=\scriptsize, align=center, inner sep=1pt}
     ]
     \node[box] (reference) {reference\\assembly};
     \node[box, below=of reference] (sample) {sample's true\\molecule};
@@ -231,9 +230,11 @@ measurement error can produce the same observed disagreement.
     \draw[<->, densely dashed] (reference) --
       node[right, font=\scriptsize, align=left] {biological\\variation}
       (sample);
-    \draw[->] (sample) -- node[above, font=\scriptsize] {true sample string}
+    \draw[->] (sample) --
+      node[midway, above=1pt, flow note] {true sample\\string}
       (sequencing);
-    \draw[->] (sequencing) -- node[above, font=\scriptsize] {may add error}
+    \draw[->] (sequencing) --
+      node[midway, above=1pt, flow note] {may add\\error}
       (read);
     \draw[->] (read) -- (comparison);
     \draw[->] (reference) -- (comparison);
