@@ -63,6 +63,7 @@ impl Rpm {
 impl Package for Rpm {
     fn setup_build(&mut self, config: Build) -> Result<(), anyhow::Error> {
         self.prepare_build_dir()?;
+        self.distro.container_capabilities = config.container_capabilities.clone();
         let specfile_path_template_path = config.rpm.clone().ok_or_else(|| anyhow::anyhow!("rpm config is missing"))?.spec_template;
 
         let rpmbuild_path = self.output_path();
@@ -179,7 +180,7 @@ impl Package for Rpm {
 mod tests {
     use super::*;
     use crate::config::{Build, Repository, RepositoryProvider, RpmConfig, S3Config};
-    use crate::distros::Distros;
+    use crate::distros::{ContainerCapability, Distros};
     use crate::gpg::Gpg;
     use crate::job_variables::JobVariables;
     use std::collections::HashMap;
@@ -227,6 +228,8 @@ mod tests {
             build_dependencies: vec!["gcc".to_string(), "make".to_string()],
             runtime_dependencies: vec![],
             before_build_script: None,
+            container_image: None,
+            container_capabilities: vec![],
             rpm: Some(RpmConfig {
                 spec_template: spec_template.to_string(),
             }),
@@ -248,8 +251,9 @@ mod tests {
                 path_in_bucket: Some("packages".to_string()),
                 bucket_public_url: Some("https://cdn.example.com".to_string()),
                 endpoint: "https://s3.example.com".to_string(),
-                access_key_id: "keyid".to_string(),
-                secret_access_key: "secret".to_string(),
+                access_key_id: Some("keyid".to_string()),
+                secret_access_key: Some("secret".to_string()),
+                session_token: None,
                 region: Some("us-east-1".to_string()),
                 force_path_style: false,
                 cloudflare_zone_id: None,
@@ -291,6 +295,18 @@ mod tests {
         // build_output_dir points to RPMS/ which is created by rpmbuild at runtime,
         // but the parent rpmbuild dir is created by setup_build
         assert!(rpm.build_output_dir().parent().unwrap().exists());
+    }
+
+    #[test]
+    fn test_setup_build_propagates_typed_container_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rpm = make_rpm(&dir);
+        let mut config = make_build_config(&dir);
+        config.container_capabilities = vec![ContainerCapability::SysNice];
+
+        rpm.setup_build(config).unwrap();
+
+        assert_eq!(rpm.container_capabilities(), vec![ContainerCapability::SysNice]);
     }
 
     #[test]

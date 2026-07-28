@@ -48,14 +48,15 @@ impl JobSetup {
         })
     }
 
-    pub fn make_package(&self, distro_id: &str, package_name: &str) -> Result<Box<dyn Package>, anyhow::Error> {
-        let distro = Distros::get().by_id(distro_id);
+    pub fn make_package(&self, build_config: &Build) -> Result<Box<dyn Package>, anyhow::Error> {
+        let mut distro = Distros::get().by_id(&build_config.distro);
+        distro.image = build_config.resolved_container_image(&distro.image)?;
 
         make_package(
             distro.clone(),
             self.source_dir.clone(),
             self.job_variables.clone(),
-            self.build_dir.join(format!("{}-{}", package_name, distro_id)),
+            self.build_dir.join(format!("{}-{}", build_config.package_name, build_config.distro)),
             self.image_cache.clone(),
             self.ignore_source_files.clone(),
         )
@@ -67,8 +68,8 @@ pub fn build(args: BuildArgs) -> Result<(), anyhow::Error> {
     let setup = JobSetup::new(&args.project, &args.job, &config, &args.version_extractor)?;
     let mut any_failed = false;
 
-    for build_config in detect_builds(args.job.clone(), config) {
-        let mut pkg = setup.make_package(&build_config.distro, &build_config.package_name)?;
+    for build_config in detect_builds(args.job.clone(), config)? {
+        let mut pkg = setup.make_package(&build_config)?;
         pkg.setup_build(build_config.clone())?;
 
         let builder = Runner::new(pkg.clone(), args.logging.clone(), setup.job_variables.clone());
@@ -88,8 +89,8 @@ pub fn publish(args: PublishArgs) -> Result<(), anyhow::Error> {
     let repository_config = config.repositories.find_by_name_or_default(args.repository.as_deref())?.clone();
     let mut any_failed = false;
 
-    for build_config in detect_builds(args.job.clone(), config) {
-        let mut pkg = setup.make_package(&build_config.distro, &build_config.package_name)?;
+    for build_config in detect_builds(args.job.clone(), config)? {
+        let mut pkg = setup.make_package(&build_config)?;
         pkg.setup_repository(repository_config.clone())?;
         let skip_upload = apply_retention(&repository_config, pkg.as_ref())?;
 
@@ -113,8 +114,8 @@ pub fn release(args: ReleaseArgs) -> Result<(), anyhow::Error> {
     let repository_config = config.repositories.find_by_name_or_default(args.repository.as_deref())?.clone();
     let mut any_failed = false;
 
-    for build_config in detect_builds(args.job.clone(), config) {
-        let mut pkg = setup.make_package(&build_config.distro, &build_config.package_name)?;
+    for build_config in detect_builds(args.job.clone(), config)? {
+        let mut pkg = setup.make_package(&build_config)?;
         pkg.setup_build(build_config.clone())?;
         pkg.setup_repository(repository_config.clone())?;
         let skip_upload = apply_retention(&repository_config, pkg.as_ref())?;
@@ -141,12 +142,34 @@ pub fn fail_fast_or_continue(result: Result<(), anyhow::Error>, fail_fast: bool)
     }
 }
 
-pub fn detect_builds(job: JobArgs, config: Config) -> impl Iterator<Item = Build> {
-    config
+pub fn detect_builds(job: JobArgs, config: Config) -> Result<Vec<Build>, anyhow::Error> {
+    let distros = Distros::get();
+
+    if !job.distros.is_empty() {
+        let unknown: Vec<&str> = job.distros.iter().map(String::as_str).filter(|id| !distros.contains(id)).collect();
+        if !unknown.is_empty() {
+            return Err(anyhow::anyhow!("unknown requested distro ID(s): {}", unknown.join(", ")));
+        }
+
+        let configured: HashSet<&str> = config.builds.iter().map(|build| build.distro.as_str()).collect();
+        let unconfigured: Vec<&str> = job.distros.iter().map(String::as_str).filter(|id| !configured.contains(id)).collect();
+        if !unconfigured.is_empty() {
+            return Err(anyhow::anyhow!("requested distro(s) not configured in builds: {}", unconfigured.join(", ")));
+        }
+    }
+
+    let builds: Vec<Build> = config
         .builds
         .into_iter()
-        .filter(move |build| Distros::get().contains(&build.distro))
-        .filter(move |build| job.distros.is_empty() || job.distros.contains(&build.distro))
+        .filter(|build| distros.contains(&build.distro))
+        .filter(|build| job.distros.is_empty() || job.distros.contains(&build.distro))
+        .collect();
+
+    if !job.distros.is_empty() && builds.is_empty() {
+        return Err(anyhow::anyhow!("requested distro filter matched no builds"));
+    }
+
+    Ok(builds)
 }
 
 #[cfg(test)]
@@ -184,6 +207,8 @@ mod tests {
             build_dependencies: vec![],
             runtime_dependencies: vec![],
             before_build_script: None,
+            container_image: None,
+            container_capabilities: vec![],
             rpm: None,
             deb: None,
             pacman: None,
@@ -214,7 +239,7 @@ mod tests {
     #[test]
     fn test_detect_builds_drops_unknown_distros() {
         let config = make_config(vec![make_build("debian_12"), make_build("nonexistent_99")]);
-        let detected: Vec<_> = detect_builds(make_job(vec![]), config).collect();
+        let detected = detect_builds(make_job(vec![]), config).unwrap();
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].distro, "debian_12");
     }
@@ -222,7 +247,7 @@ mod tests {
     #[test]
     fn test_detect_builds_filters_by_requested_distros() {
         let config = make_config(vec![make_build("debian_12"), make_build("fedora_40")]);
-        let detected: Vec<_> = detect_builds(make_job(vec!["fedora_40".to_string()]), config).collect();
+        let detected = detect_builds(make_job(vec!["fedora_40".to_string()]), config).unwrap();
         assert_eq!(detected.len(), 1);
         assert_eq!(detected[0].distro, "fedora_40");
     }
@@ -230,7 +255,39 @@ mod tests {
     #[test]
     fn test_detect_builds_empty_filter_keeps_all_known() {
         let config = make_config(vec![make_build("debian_12"), make_build("fedora_40")]);
-        let detected: Vec<_> = detect_builds(make_job(vec![]), config).collect();
+        let detected = detect_builds(make_job(vec![]), config).unwrap();
         assert_eq!(detected.len(), 2);
+    }
+
+    #[test]
+    fn test_detect_builds_rejects_unknown_requested_distro() {
+        let config = make_config(vec![make_build("debian_12")]);
+        let error = detect_builds(make_job(vec!["nonexistent_99".to_string()]), config).unwrap_err();
+        assert!(error.to_string().contains("unknown requested distro"));
+    }
+
+    #[test]
+    fn test_detect_builds_rejects_known_but_unconfigured_requested_distro() {
+        let config = make_config(vec![make_build("debian_12")]);
+        let error = detect_builds(make_job(vec!["fedora_40".to_string()]), config).unwrap_err();
+        assert!(error.to_string().contains("not configured"));
+    }
+
+    #[test]
+    fn test_make_package_applies_build_container_image_override() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let setup = JobSetup {
+            job_variables: job_variables::JobVariables::new("1.2.3".to_string()),
+            build_dir: temp_dir.path().join("build"),
+            source_dir: temp_dir.path().join("source"),
+            image_cache: None,
+            ignore_source_files: vec![],
+        };
+        let mut build = make_build("debian_12");
+        build.container_image = Some("registry.example.com/debian:arm64".to_string());
+
+        let package = setup.make_package(&build).unwrap();
+
+        assert_eq!(package.distro().image, "registry.example.com/debian:arm64");
     }
 }

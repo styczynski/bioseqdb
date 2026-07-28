@@ -1,3 +1,4 @@
+use crate::distros::ContainerCapability;
 use crate::logger::Logger;
 use crate::template::Var;
 use anyhow::{Context, Result};
@@ -75,6 +76,9 @@ pub struct Build {
     #[serde(default)]
     pub runtime_dependencies: Vec<String>,
     pub before_build_script: Option<String>,
+    pub container_image: Option<String>,
+    #[serde(default)]
+    pub container_capabilities: Vec<ContainerCapability>,
     pub rpm: Option<RpmConfig>,
     pub deb: Option<DebConfig>,
     pub pacman: Option<PacmanConfig>,
@@ -93,8 +97,9 @@ pub struct S3Config {
     pub path_in_bucket: Option<String>,
     pub bucket_public_url: Option<String>,
     pub endpoint: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+    pub session_token: Option<String>,
     pub region: Option<String>,
     #[serde(default)]
     pub force_path_style: bool,
@@ -323,6 +328,14 @@ impl Config {
 }
 
 impl Build {
+    pub fn resolved_container_image(&self, default_image: &str) -> Result<String, anyhow::Error> {
+        match self.container_image.as_deref() {
+            Some(image) if image.trim().is_empty() => Err(anyhow::anyhow!("container_image for '{}' cannot be empty", self.distro)),
+            Some(image) => Ok(image.to_string()),
+            None => Ok(default_image.to_string()),
+        }
+    }
+
     pub fn to_template_vars(&self) -> HashMap<String, Var> {
         let mut vars = HashMap::new();
         vars.insert("package_name".to_string(), self.package_name.clone().into());
@@ -331,6 +344,9 @@ impl Build {
         vars.insert("description".to_string(), self.description.clone().into());
         vars.insert("build_dependencies".to_string(), self.build_dependencies.clone().into());
         vars.insert("runtime_dependencies".to_string(), self.runtime_dependencies.clone().into());
+        if let Some(container_image) = &self.container_image {
+            vars.insert("container_image".to_string(), container_image.clone().into());
+        }
 
         for (k, v) in &self.rest {
             let var = match v {
@@ -394,8 +410,8 @@ mod tests {
         assert_eq!(<std::option::Option<std::string::String> as Clone>::clone(&s3.s3().region).unwrap(), "auto");
         assert!(s3.localfs.is_none());
         assert!(s3.gpg_private_key_base64.len() > 1);
-        assert_eq!(s3.s3().access_key_id, "testkeyid");
-        assert_eq!(s3.s3().secret_access_key, "testsecretkey");
+        assert_eq!(s3.s3().access_key_id.as_deref(), Some("testkeyid"));
+        assert_eq!(s3.s3().secret_access_key.as_deref(), Some("testsecretkey"));
 
         let localfs = &config.repositories[1];
         assert_eq!(localfs.name, "Local test");
@@ -426,6 +442,82 @@ mod tests {
         let template = crate::template::Template::from_file(path).unwrap();
         let output = template.render(vars).unwrap();
         assert_eq!(output, "Test hello true");
+    }
+
+    #[test]
+    fn test_build_container_options_are_typed() {
+        let yaml = r#"
+    distro: arch
+    package_name: myapp
+    maintainer: Test <test@test.com>
+    homepage: https://example.com
+    description: Test
+    container_image: registry.example.com/archlinuxarm:aarch64
+    container_capabilities: [SYS_NICE]
+    "#;
+
+        let build: Build = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(build.container_image.as_deref(), Some("registry.example.com/archlinuxarm:aarch64"));
+        assert_eq!(build.container_capabilities, vec![ContainerCapability::SysNice]);
+        assert_eq!(build.resolved_container_image("archlinux:latest").unwrap(), "registry.example.com/archlinuxarm:aarch64");
+    }
+
+    #[test]
+    fn test_build_rejects_unapproved_container_capability() {
+        let yaml = r#"
+    distro: arch
+    package_name: myapp
+    maintainer: Test <test@test.com>
+    homepage: https://example.com
+    description: Test
+    container_capabilities: [SYS_ADMIN]
+    "#;
+
+        assert!(serde_saphyr::from_str::<Build>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_build_uses_default_container_image_when_override_is_omitted() {
+        let yaml = r#"
+    distro: arch
+    package_name: myapp
+    maintainer: Test <test@test.com>
+    homepage: https://example.com
+    description: Test
+    "#;
+
+        let build: Build = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(build.resolved_container_image("archlinux:latest").unwrap(), "archlinux:latest");
+        assert!(build.container_capabilities.is_empty());
+    }
+
+    #[test]
+    fn test_build_rejects_empty_container_image_override() {
+        let yaml = r#"
+    distro: arch
+    package_name: myapp
+    maintainer: Test <test@test.com>
+    homepage: https://example.com
+    description: Test
+    container_image: ""
+    "#;
+
+        let build: Build = serde_saphyr::from_str(yaml).unwrap();
+        assert!(build.resolved_container_image("archlinux:latest").is_err());
+    }
+
+    #[test]
+    fn test_s3_credentials_may_be_omitted_for_default_aws_chain() {
+        let yaml = r#"
+    bucket: packages
+    endpoint: https://s3.us-east-1.amazonaws.com
+    region: us-east-1
+    "#;
+
+        let s3: S3Config = serde_saphyr::from_str(yaml).unwrap();
+        assert!(s3.access_key_id.is_none());
+        assert!(s3.secret_access_key.is_none());
+        assert!(s3.session_token.is_none());
     }
 
     #[test]
@@ -583,8 +675,9 @@ builds: []
             path_in_bucket: None,
             bucket_public_url: Some("https://cdn.example.com/".to_string()),
             endpoint: "https://s3.example.com".to_string(),
-            access_key_id: "k".to_string(),
-            secret_access_key: "s".to_string(),
+            access_key_id: Some("k".to_string()),
+            secret_access_key: Some("s".to_string()),
+            session_token: None,
             region: None,
             force_path_style: false,
             cloudflare_zone_id: None,
@@ -600,8 +693,9 @@ builds: []
             path_in_bucket: None,
             bucket_public_url: None,
             endpoint: "https://s3.example.com/".to_string(),
-            access_key_id: "k".to_string(),
-            secret_access_key: "s".to_string(),
+            access_key_id: Some("k".to_string()),
+            secret_access_key: Some("s".to_string()),
+            session_token: None,
             region: None,
             force_path_style: false,
             cloudflare_zone_id: None,
@@ -617,8 +711,9 @@ builds: []
             path_in_bucket: Some("packages/sub".to_string()),
             bucket_public_url: Some("https://cdn.example.com".to_string()),
             endpoint: "https://s3.example.com".to_string(),
-            access_key_id: "k".to_string(),
-            secret_access_key: "s".to_string(),
+            access_key_id: Some("k".to_string()),
+            secret_access_key: Some("s".to_string()),
+            session_token: None,
             region: None,
             force_path_style: false,
             cloudflare_zone_id: None,
@@ -634,8 +729,9 @@ builds: []
             path_in_bucket: None,
             bucket_public_url: Some("https://cdn.example.com".to_string()),
             endpoint: "https://s3.example.com".to_string(),
-            access_key_id: "k".to_string(),
-            secret_access_key: "s".to_string(),
+            access_key_id: Some("k".to_string()),
+            secret_access_key: Some("s".to_string()),
+            session_token: None,
             region: None,
             force_path_style: false,
             cloudflare_zone_id: None,

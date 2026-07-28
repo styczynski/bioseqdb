@@ -33,7 +33,7 @@ fn download_existing(config: &Repository, package: &dyn Package, dir: &Path) -> 
                 .join(&package.distro().id)
                 .to_string_lossy()
                 .to_string();
-            super::s3::S3::new(s3_config, in_bucket_path).download_all(dir)?;
+            super::s3::S3::new(s3_config, in_bucket_path)?.download_all(dir)?;
         }
         RepositoryProvider::LocalFs => {
             let src = config.localfs().repository_path().join(&package.distro().id);

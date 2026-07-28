@@ -1,5 +1,6 @@
 use crate::LoggingArgs;
 use crate::config::ImageCacheProvider;
+use crate::distros::ContainerCapability;
 use crate::image_cache::login_to_registry;
 use crate::job_variables::JobVariables;
 use crate::logger::{Color, Logger, colorize};
@@ -64,6 +65,7 @@ impl Runner {
 
     fn execute(&self) -> Result<Vec<PathBuf>, ExecuteError> {
         let mut args = vec!["run".to_string(), "--rm".to_string(), "--entrypoint".to_string(), "/bin/bash".to_string()];
+        args.extend(container_capability_args(&self.package.container_capabilities()));
 
         let mut commands = self.package.commands().clone();
         if self.logging.disable_container_echo {
@@ -115,5 +117,24 @@ impl Runner {
 
     fn container_logger(&self) -> Logger {
         self.logging.container_logger().with_secrets(self.job_variables.secrets.values().cloned().collect::<Vec<String>>())
+    }
+}
+
+fn container_capability_args(capabilities: &[ContainerCapability]) -> Vec<String> {
+    capabilities.iter().flat_map(|capability| ["--cap-add".to_string(), capability.to_string()]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn container_capability_args_adds_only_typed_capabilities() {
+        assert_eq!(container_capability_args(&[ContainerCapability::SysNice]), vec!["--cap-add".to_string(), "SYS_NICE".to_string()]);
+    }
+
+    #[test]
+    fn container_capability_args_is_empty_by_default() {
+        assert!(container_capability_args(&[]).is_empty());
     }
 }

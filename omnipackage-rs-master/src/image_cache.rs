@@ -17,7 +17,7 @@ pub fn refresh(args: PrimeArgs) -> Result<(), anyhow::Error> {
         .find_by_name_or_default(args.job.image_cache.as_deref())?;
     let mut any_failed = false;
 
-    for build_config in release::detect_builds(args.job.clone(), config.clone()) {
+    for build_config in release::detect_builds(args.job.clone(), config.clone())? {
         Logger::new().info(format!("starting image cache refresh for {}", build_config.distro));
         let started_at = Instant::now();
         let res = refresh_distro(args.clone(), build_config.clone(), ic.clone());
@@ -75,7 +75,7 @@ fn refresh_distro(args: PrimeArgs, build_config: Build, image_cache_config: Imag
     let temp_dir = args.job.build_dir.join(format!("{}-{}", build_config.package_name, build_config.distro));
     std::fs::create_dir_all(&temp_dir)?;
 
-    let base_image = distro.image.clone();
+    let base_image = build_config.resolved_container_image(&distro.image)?;
     let mut commands: Vec<String> = Vec::new();
     commands.extend(distro.setup(&build_config.build_dependencies));
     commands.extend(distro.setup_repo.clone());

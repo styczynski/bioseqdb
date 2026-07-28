@@ -114,6 +114,7 @@ do_hash "SHA256" "sha256sum"
 impl Package for Deb {
     fn setup_build(&mut self, config: Build) -> Result<(), anyhow::Error> {
         self.prepare_build_dir()?;
+        self.distro.container_capabilities = config.container_capabilities.clone();
         let debian_folder_template_path = config.deb.clone().ok_or_else(|| anyhow::anyhow!("deb config is missing"))?.debian_templates;
 
         let build_path = self.distro_build_dir().join("build");
@@ -290,6 +291,8 @@ mod tests {
             build_dependencies: vec!["gcc".to_string(), "make".to_string()],
             runtime_dependencies: vec![],
             before_build_script: None,
+            container_image: None,
+            container_capabilities: vec![],
             rpm: None,
             deb: Some(DebConfig { debian_templates }),
             pacman: None,
@@ -308,8 +311,9 @@ mod tests {
                 path_in_bucket: Some("packages".to_string()),
                 bucket_public_url: Some("https://cdn.example.com".to_string()),
                 endpoint: "https://s3.example.com".to_string(),
-                access_key_id: "keyid".to_string(),
-                secret_access_key: "secret".to_string(),
+                access_key_id: Some("keyid".to_string()),
+                secret_access_key: Some("secret".to_string()),
+                session_token: None,
                 region: Some("us-east-1".to_string()),
                 force_path_style: false,
                 cloudflare_zone_id: None,

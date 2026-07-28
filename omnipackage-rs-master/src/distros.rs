@@ -3,6 +3,20 @@ use serde::Deserialize;
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub enum ContainerCapability {
+    #[serde(rename = "SYS_NICE")]
+    SysNice,
+}
+
+impl std::fmt::Display for ContainerCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContainerCapability::SysNice => write!(f, "SYS_NICE"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PackageType {
@@ -47,6 +61,8 @@ pub struct Distro {
     pub cleanup: Vec<String>,
     pub image_info_url: Option<String>,
     pub deprecated: Option<String>,
+    #[serde(default)]
+    pub container_capabilities: Vec<ContainerCapability>,
 }
 
 impl Distro {
@@ -215,6 +231,7 @@ mod tests {
             image_info_url: None,
             deprecated: None,
             cleanup: Vec::new(),
+            container_capabilities: Vec::new(),
         }
     }
 

@@ -55,6 +55,7 @@ impl Pacman {
 impl Package for Pacman {
     fn setup_build(&mut self, config: Build) -> Result<(), anyhow::Error> {
         self.prepare_build_dir()?;
+        self.distro.container_capabilities = config.container_capabilities.clone();
         let pkgbuild_template_path = config.pacman.clone().ok_or_else(|| anyhow::anyhow!("pacman config is missing"))?.pkgbuild_template;
 
         let work_path = self.work_path();
@@ -232,6 +233,8 @@ mod tests {
             build_dependencies: vec!["gcc".to_string(), "make".to_string()],
             runtime_dependencies: vec![],
             before_build_script: None,
+            container_image: None,
+            container_capabilities: vec![],
             rpm: None,
             deb: None,
             pacman: Some(PacmanConfig {
@@ -252,8 +255,9 @@ mod tests {
                 path_in_bucket: Some("packages".to_string()),
                 bucket_public_url: Some("https://cdn.example.com".to_string()),
                 endpoint: "https://s3.example.com".to_string(),
-                access_key_id: "keyid".to_string(),
-                secret_access_key: "secret".to_string(),
+                access_key_id: Some("keyid".to_string()),
+                secret_access_key: Some("secret".to_string()),
+                session_token: None,
                 region: Some("us-east-1".to_string()),
                 force_path_style: false,
                 cloudflare_zone_id: None,

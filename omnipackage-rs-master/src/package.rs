@@ -1,5 +1,5 @@
 use crate::config::{Build, ImageCache, Repository, RepositoryProvider, S3Config};
-use crate::distros::{Distro, PackageType};
+use crate::distros::{ContainerCapability, Distro, PackageType};
 use crate::gpg::{Gpg, Key};
 use crate::job_variables::JobVariables;
 use anyhow::{Context, Result};
@@ -59,6 +59,10 @@ pub trait Package {
     fn setup_stages(&self) -> Vec<SetupStage>;
     fn gpgkey(&self) -> Option<Key>;
     fn image_cache(&self) -> Option<ImageCache>;
+
+    fn container_capabilities(&self) -> Vec<ContainerCapability> {
+        self.distro().container_capabilities
+    }
 
     fn teardown(&self) {
         let dir = self.home_dir();

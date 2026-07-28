@@ -85,7 +85,7 @@ impl Publish {
         match self.config.provider {
             RepositoryProvider::S3 => {
                 let s3_config = self.config.s3();
-                let s3 = S3::new(s3_config, self.s3_in_bucket_distro_path(s3_config));
+                let s3 = S3::new(s3_config, self.s3_in_bucket_distro_path(s3_config))?;
 
                 if !s3.bucket_exists()? {
                     return Err(anyhow::anyhow!("bucket '{}' does not exist", s3_config.bucket));
@@ -165,7 +165,7 @@ impl Publish {
             RepositoryProvider::S3 => {
                 let s3_config = self.config.s3();
                 let path = PathBuf::from(s3_config.path_in_bucket.as_deref().unwrap_or(""));
-                let s3 = S3::new(s3_config, path.to_string_lossy().to_string());
+                let s3 = S3::new(s3_config, path.to_string_lossy().to_string())?;
                 let base_url = s3_config.base_bucket_url();
 
                 locking::commit_anchored(&s3, INSTALL_PAGE_NAME, "text/html", |existing_html| {
