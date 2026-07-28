@@ -246,31 +246,36 @@ resolve gaps, and end extensions refine the outer coordinates.}
 \begin{algorithm}[htbp]
 \caption{Final alignment of one chained region}
 \label{alg:three-phase-alignment}
-\begin{algorithmic}[1]
-\Require query view \(Q\), target view \(T\), ordered anchors \(A\), parameters \(P\)
-\State derive inner seed bounds and bounded outer extension bounds
-\State reserve region CIGAR capacity from the outer query and target extents
-\If{both left outer intervals are non-empty}
-    \State run reverse-oriented extension with KSW2 or Block X-drop
-    \State update the left endpoint from the selected maximum or query-end score
-\EndIf
-\State \((q_s,t_s)\gets\) start of the first seed
-\For{each later anchor \(a_i\)}
-    \State \((q_e,t_e)\gets\) end coordinates of \(a_i\)
-    \If{\(a_i\) is not last and \(q_e-q_s<P.\textit{minLen}\) or
-          \(t_e-t_s<P.\textit{minLen}\)}
-        \State continue without advancing \((q_s,t_s)\)
-    \EndIf
-    \If{both accumulated intervals are non-empty}
-        \State solve one mandatory global fill and append its packed CIGAR
-        \State \((q_s,t_s)\gets(q_e,t_e)\)
-    \EndIf
-\EndFor
-\If{right outer intervals are non-empty and the selected contract permits it}
-    \State run forward extension and update the right endpoint
-\EndIf
-\State project reverse-strand query coordinates and final score metadata
-\end{algorithmic}
+\begin{minipage}{\linewidth}
+\small
+\textbf{Input.} Query view \(Q\), target view \(T\), ordered anchors \(A\),
+and parameters \(P\).
+\begin{enumerate}
+    \item Derive the inner seed bounds and the bounded outer extension bounds.
+    \item Reserve region CIGAR capacity from the outer query and target extents.
+    \item If both left outer intervals are non-empty:
+    \begin{enumerate}
+        \item Run reverse-oriented extension with KSW2 or Block X-drop.
+        \item Update the left endpoint from the selected maximum or query-end
+              score.
+    \end{enumerate}
+    \item Set \((q_s,t_s)\gets\) the start of the first seed.
+    \item For each later anchor \(a_i\):
+    \begin{enumerate}
+        \item Set \((q_e,t_e)\gets\) the end coordinates of \(a_i\).
+        \item If \(a_i\) is not the last anchor and either
+              \(q_e-q_s<P.\textit{minLen}\) or
+              \(t_e-t_s<P.\textit{minLen}\), continue without advancing
+              \((q_s,t_s)\).
+        \item Otherwise, if both accumulated intervals are non-empty, solve
+              one mandatory global fill, append its packed CIGAR, and set
+              \((q_s,t_s)\gets(q_e,t_e)\).
+    \end{enumerate}
+    \item If the right outer intervals are non-empty and the selected contract
+          permits it, run forward extension and update the right endpoint.
+    \item Project reverse-strand query coordinates and final score metadata.
+\end{enumerate}
+\end{minipage}
 \end{algorithm}
 
 Algorithm~\ref{alg:three-phase-alignment} makes the cursor semantics explicit.
