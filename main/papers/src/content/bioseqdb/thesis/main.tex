@@ -75,7 +75,7 @@
 %     path: chapters/12_index_storage
 %     description: describes index construction, storage, compatibility, selective cold loading, memory accounting, update semantics, and differences from standalone minimap2 indexes.
 %   - !partial
-%     title: Reliable sequence ingestion
+%     title: Bounded sequence ingestion and integrity limits
 %     path: chapters/13_io_loading
 %     description: presents the bounded input/output (I/O) pipeline for FASTA and FASTQ data, compression, header parsing, typed PostgreSQL writes, failure handling, and measured throughput.
 %   - !partial
@@ -201,9 +201,12 @@
 
     The database boundary is equally important.  An SQL expression such
     as \texttt{mmsearch(a, b)} has a conventional function definition so
-    that PostgreSQL can type and plan it.  Its ordinary implementation is
-    deliberately expensive.  Planner support code can instead construct
-    a cheaper custom path.  The resulting custom scan batches input,
+    that PostgreSQL can type and plan it.  The ordinary function body is not
+    an alignment fallback: it fails closed if no BioSeqDB custom executor
+    owns the expression.  Its planner-support function assigns the unowned
+    expression a high startup cost, while structural planner hooks can
+    construct an owning custom path with honest nonnegative costs.  The
+    resulting custom scan batches input,
     invokes the alignment pipeline, and makes its results available to
     planned expressions through injected PostgreSQL nodes.  This is what
     permits alignment to participate in filters, projections, and joins
