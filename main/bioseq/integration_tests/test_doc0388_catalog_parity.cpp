@@ -64,52 +64,52 @@ namespace {
 }  // namespace
 
 TEST_CASE(
-    "DOC0388 legacy and generated catalogs match the closed delta on clean PG17 nodes",
-    "[doc0388][catalog][parity][private-pg][relocatable]") {
-  SECTION("bundle validator mutation tests") {
-    auto command = evidence_command_prefix();
-    command.emplace_back("self-test");
-    REQUIRE(run_evidence_command(command) == 0);
-  }
+    "DOC0388 catalog parity bundle validator rejects mutations",
+    "[doc0388][catalog][parity]") {
+  auto command = evidence_command_prefix();
+  command.emplace_back("self-test");
+  REQUIRE(run_evidence_command(command) == 0);
+}
 
-  SECTION("live dual-cluster catalog and relocation evidence") {
-    auto command = evidence_command_prefix();
-    const std::vector<std::string> arguments{
-        "run",
-        "--repository-root",
-        BIOSEQ_DOC0388_CATALOG_PARITY_REPOSITORY_ROOT,
-        "--output-root",
-        BIOSEQ_DOC0388_CATALOG_PARITY_OUTPUT_ROOT,
-        "--cmake",
-        BIOSEQ_DOC0388_CATALOG_PARITY_CMAKE,
-        "--git",
-        BIOSEQ_DOC0388_CATALOG_PARITY_GIT,
-        "--pg-config",
-        BIOSEQ_DOC0388_CATALOG_PARITY_PG_CONFIG,
-        "--stage-script",
-        BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT,
-        "--config-template",
-        BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE,
-        "--control-file",
-        BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE,
-        "--candidate-sql",
-        BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_SQL,
-        "--candidate-manifest",
-        BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_MANIFEST,
-        "--candidate-dso",
-        BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_DSO,
-        "--snapshot-query",
-        BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY,
-        "--approved-delta",
-        BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA,
-        "--guc-parity-ledger",
-        BIOSEQ_DOC0388_CATALOG_PARITY_GUC_LEDGER,
-        "--active-profile",
-        BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE,
-        "--timeout-seconds",
-        "180",
-    };
-    command.insert(command.end(), arguments.begin(), arguments.end());
-    REQUIRE(run_evidence_command(command) == 0);
-  }
+TEST_CASE(
+    "DOC0388 legacy and generated catalogs match on clean PG17 nodes",
+    "[.][doc0388-hardening][catalog][parity][private-pg][relocatable]") {
+  auto command = evidence_command_prefix();
+  const std::vector<std::string> arguments{
+      "run",
+      "--repository-root",
+      BIOSEQ_DOC0388_CATALOG_PARITY_REPOSITORY_ROOT,
+      "--output-root",
+      BIOSEQ_DOC0388_CATALOG_PARITY_OUTPUT_ROOT,
+      "--cmake",
+      BIOSEQ_DOC0388_CATALOG_PARITY_CMAKE,
+      "--git",
+      BIOSEQ_DOC0388_CATALOG_PARITY_GIT,
+      "--pg-config",
+      BIOSEQ_DOC0388_CATALOG_PARITY_PG_CONFIG,
+      "--stage-script",
+      BIOSEQ_DOC0388_CATALOG_PARITY_STAGE_SCRIPT,
+      "--config-template",
+      BIOSEQ_DOC0388_CATALOG_PARITY_CONFIG_TEMPLATE,
+      "--control-file",
+      BIOSEQ_DOC0388_CATALOG_PARITY_CONTROL_FILE,
+      "--candidate-sql",
+      BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_SQL,
+      "--candidate-manifest",
+      BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_MANIFEST,
+      "--candidate-dso",
+      BIOSEQ_DOC0388_CATALOG_PARITY_CANDIDATE_DSO,
+      "--snapshot-query",
+      BIOSEQ_DOC0388_CATALOG_PARITY_SNAPSHOT_QUERY,
+      "--approved-delta",
+      BIOSEQ_DOC0388_CATALOG_PARITY_APPROVED_DELTA,
+      "--guc-parity-ledger",
+      BIOSEQ_DOC0388_CATALOG_PARITY_GUC_LEDGER,
+      "--active-profile",
+      BIOSEQ_DOC0388_CATALOG_PARITY_ACTIVE_PROFILE,
+      "--timeout-seconds",
+      "180",
+  };
+  command.insert(command.end(), arguments.begin(), arguments.end());
+  REQUIRE(run_evidence_command(command) == 0);
 }

@@ -261,6 +261,23 @@ struct sql_scalar_conversion<table_am_handler_context> final {
 };
 
 template<>
+struct sql_scalar_conversion<subscript_handler_context> final {
+    static constexpr const char* key = "subscript_handler/context";
+
+    [[nodiscard]] static subscript_handler_context read(
+            Datum value) noexcept {
+        static_cast<void>(value);
+        return {};
+    }
+
+    [[nodiscard]] static Datum write(
+            subscript_handler_context value) noexcept {
+        static_cast<void>(value);
+        return static_cast<Datum>(0);
+    }
+};
+
+template<>
 struct sql_scalar_conversion<const TableAmRoutine*> final {
     static constexpr const char* key = "table_am_handler/pointer";
 
@@ -645,6 +662,21 @@ template<class T>
         FunctionCallInfo call,
         int zero_based_index,
         std::type_identity<std::optional<T>>) {
+    if constexpr (
+            std::same_as<T, table_am_handler_context>
+            || std::same_as<T, subscript_handler_context>) {
+        /*
+         * PostgreSQL declares table-AM and subscripting handlers with one
+         * INTERNAL pseudo-argument but invokes them through OidFunctionCall0.
+         * Preserve those catalog signatures while representing the absent
+         * call-frame value as the handler-specific optional context marker.
+         */
+        if (call != nullptr
+            && zero_based_index == 0
+            && call->nargs == 0) {
+            return std::nullopt;
+        }
+    }
     detail::require_sql_argument(call, zero_based_index);
     if (call->args[zero_based_index].isnull) {
         return std::nullopt;
@@ -784,6 +816,7 @@ static_assert(registered_sql_scalar<StringInfo>);
 static_assert(registered_sql_scalar<text*>);
 static_assert(registered_sql_scalar<void*>);
 static_assert(registered_sql_scalar<table_am_handler_context>);
+static_assert(registered_sql_scalar<subscript_handler_context>);
 static_assert(registered_sql_scalar<const TableAmRoutine*>);
 static_assert(registered_sql_scalar<NameData>);
 static_assert(is_optional<std::optional<bool>>::value);

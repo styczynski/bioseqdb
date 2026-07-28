@@ -38,7 +38,7 @@ import bioseq.codegen.sql.annotation_model;
 
 namespace bioseq::external::sql_routines {
 
-/** @brief Returns the table access-method handler for external relations. */
+extern "C" {
 [[bioseq_sql::function({
     .schema = bioseq::sql::fixed_schema<"bioseq">,
 })]]
@@ -50,11 +50,13 @@ namespace bioseq::external::sql_routines {
 [[bioseq_sql::result({
     .sql_type = bioseq::sql::pg::table_am_handler,
 })]]
-extern "C" PGDLLEXPORT Datum bioseq_external_handler(
+/** @brief Returns the table access-method handler for external relations. */
+PGDLLEXPORT Datum bioseq_external_handler(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
     FunctionCallInfo fcinfo);
+}
 
 }  // namespace bioseq::external::sql_routines
 #endif
@@ -115,7 +117,7 @@ export const TableAmRoutine *GetBioseqExternalTableAmRoutine(void);
 export bool relation_uses_bioseq_external_am(Relation rel);
 
 /* Register the relation-option kind + option names. Called once from _PG_init. */
-export void bioseq_external_tableam_init(void);
+extern "C" void bioseq_external_tableam_init(void);
 
 /* ======================================================================== */
 /* Relation options                                                          */
@@ -677,7 +679,7 @@ relation_uses_bioseq_external_am(Relation rel)
 	return rel != nullptr && rel->rd_tableam == &bioseq_external_am_methods;
 }
 
-void
+extern "C" void
 bioseq_external_tableam_init(void)
 {
 	if (bioseq_external_relopt_kind != static_cast<relopt_kind>(0))

@@ -387,7 +387,7 @@ TEST_CASE("DOC0388 metadata row codecs match the live catalog and write rows",
 #if defined(BIOSEQ_TEST_INDEXES)
 
 TEST_CASE("DOC0388 all generated row codecs execute the exact manifest matrix",
-          "[doc0388][row-codec][runtime][manifest]") {
+          "[.][doc0388-hardening][row-codec][runtime][manifest]") {
   auto ctx = fresh_context();
   const auto projection = manifest_joined_runtime_projection();
   REQUIRE(projection.size() == 14);

@@ -251,10 +251,18 @@ struct [[bioseq_sql::type({
     }
 };
 
+struct letter_typmod_input {
+    letter value;
+};
+
 }  // namespace bioseq::pg_types
 
 static_assert(sizeof(bioseq::pg_types::letter) == 2u);
 static_assert(std::is_trivially_copyable_v<bioseq::pg_types::letter>);
+static_assert(std::is_trivially_copyable_v<
+              bioseq::pg_types::letter_typmod_input>);
+static_assert(std::is_standard_layout_v<
+              bioseq::pg_types::letter_typmod_input>);
 
 export [[nodiscard]] inline Datum make_letter_datum(
     std::uint8_t alphabet_code,
@@ -737,6 +745,26 @@ struct sql_scalar_conversion<bioseq::pg_types::letter> final {
     }
 };
 
+template<>
+struct sql_scalar_conversion<
+    bioseq::pg_types::letter_typmod_input> final {
+    static constexpr const char* key =
+        "bioseq.letter/raw_typmod_input";
+
+    [[nodiscard]] static
+    bioseq::pg_types::letter_typmod_input read(
+        Datum value) noexcept {
+        return {.value = ::datum_get_letter(value)};
+    }
+
+    [[nodiscard]] static Datum write(
+        bioseq::pg_types::letter_typmod_input value) noexcept {
+        return ::make_letter_datum(
+            value.value.alphabet_code,
+            value.value.rank);
+    }
+};
+
 }  // namespace bioseq::pg_utils::detail
 
 [[nodiscard]] inline std::uint16_t letter_key(bioseq::pg_types::letter value) noexcept
@@ -1045,26 +1073,27 @@ bioseq::pg_types::letter letter(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::custom_type<"bioseq.letter">,
     })]]
-    bioseq::pg_types::letter input,
+    bioseq::pg_types::letter_typmod_input input,
     std::int32_t target_typmod,
     bool explicit_cast) {
   static_cast<void>(explicit_cast);
-  if (input.alphabet_code == unresolved_letter_alphabet_code) {
+  if (input.value.alphabet_code == unresolved_letter_alphabet_code) {
     if (target_typmod < 0) {
       unresolved_letter_input_error();
     }
     const auto alphabet = decode_letter_typmod_checked(target_typmod);
     const auto rank = rank_for_letter_symbol_checked(
-        alphabet, input.rank);
+        alphabet, input.value.rank);
     return {.alphabet_code = alphabet, .rank = rank};
   }
   if (target_typmod >= 0 &&
-      decode_letter_typmod_checked(target_typmod) != input.alphabet_code) {
+      decode_letter_typmod_checked(target_typmod) !=
+          input.value.alphabet_code) {
     ereport(ERROR,
             (errcode(ERRCODE_DATATYPE_MISMATCH),
              errmsg("cannot relabel bioseq.letter to a different alphabet")));
   }
-  return input;
+  return input.value;
 }
 
 [[bioseq_sql::function({

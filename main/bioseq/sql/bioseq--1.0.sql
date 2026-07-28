@@ -422,8 +422,6 @@ GRANT EXECUTE ON FUNCTION bioseq.list_seq_storage_shards(regclass) TO public;
 CREATE OR REPLACE PROCEDURE bioseq.vacuum_seq_storage(rel regclass)
 AS 'MODULE_PATHNAME', 'vacuum_seq_storage'
 LANGUAGE C
-VOLATILE
-PARALLEL UNSAFE
 SECURITY INVOKER;
 
 GRANT EXECUTE ON PROCEDURE bioseq.vacuum_seq_storage(regclass) TO PUBLIC;
@@ -1878,7 +1876,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE OR REPLACE FUNCTION bioseq.seq_typmod_in(array cstring[])
+CREATE OR REPLACE FUNCTION bioseq.seq_typmod_in("array" cstring[])
 RETURNS integer
 AS 'MODULE_PATHNAME', 'seq_typmod_in'
 LANGUAGE C
@@ -1934,7 +1932,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.letter_typmod_in(array cstring[])
+CREATE FUNCTION bioseq.letter_typmod_in("array" cstring[])
 RETURNS integer
 AS 'MODULE_PATHNAME', 'letter_typmod_in'
 LANGUAGE C
@@ -2365,7 +2363,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.seq_concat_text_array(sequence bioseq.seq, array text[])
+CREATE FUNCTION bioseq.seq_concat_text_array(sequence bioseq.seq, "array" text[])
 RETURNS bioseq.seq
 AS 'MODULE_PATHNAME', 'seq_concat_text_array'
 LANGUAGE C
@@ -2374,7 +2372,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.text_array_concat_seq(array text[], sequence bioseq.seq)
+CREATE FUNCTION bioseq.text_array_concat_seq("array" text[], sequence bioseq.seq)
 RETURNS bioseq.seq
 AS 'MODULE_PATHNAME', 'text_array_concat_seq'
 LANGUAGE C
@@ -2383,7 +2381,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.seq_concat_letter_array(sequence bioseq.seq, array bioseq.letter[])
+CREATE FUNCTION bioseq.seq_concat_letter_array(sequence bioseq.seq, "array" bioseq.letter[])
 RETURNS bioseq.seq
 AS 'MODULE_PATHNAME', 'seq_concat_letter_array'
 LANGUAGE C
@@ -2392,7 +2390,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.letter_array_concat_seq(array bioseq.letter[], sequence bioseq.seq)
+CREATE FUNCTION bioseq.letter_array_concat_seq("array" bioseq.letter[], sequence bioseq.seq)
 RETURNS bioseq.seq
 AS 'MODULE_PATHNAME', 'letter_array_concat_seq'
 LANGUAGE C
@@ -2473,7 +2471,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.from_array(array bioseq.letter[], width_bits integer)
+CREATE FUNCTION bioseq.from_array("array" bioseq.letter[], width_bits integer)
 RETURNS bioseq.seq
 AS 'MODULE_PATHNAME', 'from_array'
 LANGUAGE C
@@ -2482,7 +2480,7 @@ PARALLEL SAFE
 SECURITY INVOKER
 STRICT;
 
-CREATE FUNCTION bioseq.from_array(array bioseq.letter[], alphabet_name text, width_bits integer)
+CREATE FUNCTION bioseq.from_array("array" bioseq.letter[], alphabet_name text, width_bits integer)
 RETURNS bioseq.seq
 AS 'MODULE_PATHNAME', 'from_array'
 LANGUAGE C

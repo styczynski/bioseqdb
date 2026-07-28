@@ -6188,14 +6188,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 143204,
-          "byte_end": 143755,
+          "byte_begin": 143484,
+          "byte_end": 144035,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3641,
-          "line_end": 3655
+          "line_begin": 3652,
+          "line_end": 3666
         }
       },
       "sql_identity": "function:$extension.bioseq_placeholder_support(internal)",
@@ -6227,14 +6227,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 139085,
-          "byte_end": 140304,
+          "byte_begin": 139365,
+          "byte_end": 140584,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3542,
-          "line_end": 3571
+          "line_begin": 3553,
+          "line_end": 3582
         }
       },
       "sql_identity": "function:$extension.bioseq_symbol_count_support(internal)",
@@ -6275,14 +6275,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 116234,
-          "byte_end": 117075,
+          "byte_begin": 116514,
+          "byte_end": 117355,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 2868,
-          "line_end": 2892
+          "line_begin": 2879,
+          "line_end": 2903
         }
       },
       "sql_identity": "function:$extension.mmsearch(bioseq.seq,bioseq.seq)",
@@ -6332,14 +6332,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 117420,
-          "byte_end": 118558,
+          "byte_begin": 117700,
+          "byte_end": 118838,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 2904,
-          "line_end": 2935
+          "line_begin": 2915,
+          "line_end": 2946
         }
       },
       "sql_identity": "function:$extension.mmsearch(bioseq.seq,bioseq.seq,$extension.bioseq_aligner_options)",
@@ -6371,14 +6371,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 140706,
-          "byte_end": 141817,
+          "byte_begin": 140986,
+          "byte_end": 142097,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3585,
-          "line_end": 3612
+          "line_begin": 3596,
+          "line_end": 3623
         }
       },
       "sql_identity": "function:$extension.mmsearch_support(internal)",
@@ -11373,14 +11373,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "47af696f0d759b5a84434bb7e796b382fd43e4d43a407e271bb581c968ce8753",
+        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
         "span": {
-          "byte_begin": 123925,
-          "byte_end": 124247,
+          "byte_begin": 123983,
+          "byte_end": 124305,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3849,
-          "line_end": 3859
+          "line_begin": 3850,
+          "line_end": 3860
         }
       },
       "sql_identity": "function:bioseq.bioseq_handler(internal)",
@@ -11412,14 +11412,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 124287,
-          "byte_end": 124548,
+          "byte_begin": 124567,
+          "byte_end": 124828,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3115,
-          "line_end": 3123
+          "line_begin": 3126,
+          "line_end": 3134
         }
       },
       "sql_identity": "function:bioseq.block_length(anyelement)",
@@ -11490,14 +11490,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 126185,
-          "byte_end": 126444,
+          "byte_begin": 126465,
+          "byte_end": 126724,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3175,
-          "line_end": 3183
+          "line_begin": 3186,
+          "line_end": 3194
         }
       },
       "sql_identity": "function:bioseq.chain_score(anyelement)",
@@ -11529,14 +11529,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 130653,
-          "byte_end": 130911,
+          "byte_begin": 130933,
+          "byte_end": 131191,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3316,
-          "line_end": 3324
+          "line_begin": 3327,
+          "line_end": 3335
         }
       },
       "sql_identity": "function:bioseq.cigar(anyelement)",
@@ -11577,14 +11577,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 216833,
-          "byte_end": 217419,
+          "byte_begin": 217113,
+          "byte_end": 217699,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5689,
-          "line_end": 5709
+          "line_begin": 5700,
+          "line_end": 5720
         }
       },
       "sql_identity": "function:bioseq.column_row_number(regclass,tid)",
@@ -11829,14 +11829,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 130006,
-          "byte_end": 130259,
+          "byte_begin": 130286,
+          "byte_end": 130539,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3295,
-          "line_end": 3303
+          "line_begin": 3306,
+          "line_end": 3314
         }
       },
       "sql_identity": "function:bioseq.divergence(anyelement)",
@@ -11868,14 +11868,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 126730,
-          "byte_end": 126991,
+          "byte_begin": 127010,
+          "byte_end": 127271,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3192,
-          "line_end": 3200
+          "line_begin": 3203,
+          "line_end": 3211
         }
       },
       "sql_identity": "function:bioseq.dp_max_score(anyelement)",
@@ -11907,14 +11907,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 119443,
-          "byte_end": 119696,
+          "byte_begin": 119723,
+          "byte_end": 119976,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 2963,
-          "line_end": 2971
+          "line_begin": 2974,
+          "line_end": 2982
         }
       },
       "sql_identity": "function:bioseq.dp_score(anyelement)",
@@ -11936,14 +11936,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 215195,
-          "byte_end": 215285,
+          "byte_begin": 215475,
+          "byte_end": 215565,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5630,
-          "line_end": 5632
+          "line_begin": 5641,
+          "line_end": 5643
         }
       },
       "sql_identity": "function:bioseq.drop_all_index_tables()",
@@ -11975,14 +11975,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 124878,
-          "byte_end": 125368,
+          "byte_begin": 125158,
+          "byte_end": 125648,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3134,
-          "line_end": 3149
+          "line_begin": 3145,
+          "line_end": 3160
         }
       },
       "sql_identity": "function:bioseq.edit(anyelement)",
@@ -12119,7 +12119,7 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "47af696f0d759b5a84434bb7e796b382fd43e4d43a407e271bb581c968ce8753",
+        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
         "span": {
           "byte_begin": 18891,
           "byte_end": 19500,
@@ -12148,14 +12148,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 131132,
-          "byte_end": 131262,
+          "byte_begin": 131412,
+          "byte_end": 131542,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3334,
-          "line_end": 3337
+          "line_begin": 3345,
+          "line_end": 3348
         }
       },
       "sql_identity": "function:bioseq.gpu_warmup_shader_cache()",
@@ -12187,14 +12187,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 129470,
-          "byte_end": 129720,
+          "byte_begin": 129750,
+          "byte_end": 130000,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3278,
-          "line_end": 3286
+          "line_begin": 3289,
+          "line_end": 3297
         }
       },
       "sql_identity": "function:bioseq.has_cigar(anyelement)",
@@ -12244,14 +12244,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 214805,
-          "byte_end": 215060,
+          "byte_begin": 215085,
+          "byte_end": 215340,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5615,
-          "line_end": 5624
+          "line_begin": 5626,
+          "line_end": 5635
         }
       },
       "sql_identity": "function:bioseq.index_distinct_sub_keys(regclass,text,bigint)",
@@ -12292,14 +12292,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 174524,
-          "byte_end": 174739,
+          "byte_begin": 174804,
+          "byte_end": 175019,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4458,
-          "line_end": 4466
+          "line_begin": 4469,
+          "line_end": 4477
         }
       },
       "sql_identity": "function:bioseq.index_table_row_count(regclass,text)",
@@ -12340,14 +12340,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 174874,
-          "byte_end": 176015,
+          "byte_begin": 175154,
+          "byte_end": 176295,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4472,
-          "line_end": 4504
+          "line_begin": 4483,
+          "line_end": 4515
         }
       },
       "sql_identity": "function:bioseq.inspect_cold_no_index_absence(regclass,text)",
@@ -12436,14 +12436,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 180737,
-          "byte_end": 181369,
+          "byte_begin": 181017,
+          "byte_end": 181649,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4635,
-          "line_end": 4654
+          "line_begin": 4646,
+          "line_end": 4665
         }
       },
       "sql_identity": "function:bioseq.inspect_ready_minimizer_format6_generation(regclass,text,bigint)",
@@ -12493,14 +12493,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 176516,
-          "byte_end": 180166,
+          "byte_begin": 176796,
+          "byte_end": 180446,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4519,
-          "line_end": 4616
+          "line_begin": 4530,
+          "line_end": 4627
         }
       },
       "sql_identity": "function:bioseq.inspect_ready_minimizer_generation(regclass,text,bigint)",
@@ -12532,14 +12532,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 128932,
-          "byte_end": 129184,
+          "byte_begin": 129212,
+          "byte_end": 129464,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3261,
-          "line_end": 3269
+          "line_begin": 3272,
+          "line_end": 3280
         }
       },
       "sql_identity": "function:bioseq.is_primary(anyelement)",
@@ -12571,14 +12571,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 128394,
-          "byte_end": 128646,
+          "byte_begin": 128674,
+          "byte_end": 128926,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3244,
-          "line_end": 3252
+          "line_begin": 3255,
+          "line_end": 3263
         }
       },
       "sql_identity": "function:bioseq.is_reverse(anyelement)",
@@ -12600,14 +12600,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 153038,
-          "byte_end": 153906,
+          "byte_begin": 153318,
+          "byte_end": 154186,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3877,
-          "line_end": 3901
+          "line_begin": 3888,
+          "line_end": 3912
         }
       },
       "sql_identity": "function:bioseq.last_alignment_execution_stats()",
@@ -12629,14 +12629,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 154041,
-          "byte_end": 154921,
+          "byte_begin": 154321,
+          "byte_end": 155201,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3907,
-          "line_end": 3931
+          "line_begin": 3918,
+          "line_end": 3942
         }
       },
       "sql_identity": "function:bioseq.last_alignment_execution_stats_v2()",
@@ -12658,14 +12658,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 155124,
-          "byte_end": 155544,
+          "byte_begin": 155404,
+          "byte_end": 155824,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3940,
-          "line_end": 3950
+          "line_begin": 3951,
+          "line_end": 3961
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence()",
@@ -12687,14 +12687,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 155747,
-          "byte_end": 156173,
+          "byte_begin": 156027,
+          "byte_end": 156453,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3959,
-          "line_end": 3969
+          "line_begin": 3970,
+          "line_end": 3980
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v2()",
@@ -12716,14 +12716,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 156376,
-          "byte_end": 156802,
+          "byte_begin": 156656,
+          "byte_end": 157082,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3978,
-          "line_end": 3988
+          "line_begin": 3989,
+          "line_end": 3999
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v3()",
@@ -12745,14 +12745,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 157005,
-          "byte_end": 157431,
+          "byte_begin": 157285,
+          "byte_end": 157711,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3997,
-          "line_end": 4007
+          "line_begin": 4008,
+          "line_end": 4018
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v4()",
@@ -12774,14 +12774,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 157634,
-          "byte_end": 158093,
+          "byte_begin": 157914,
+          "byte_end": 158373,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4016,
-          "line_end": 4026
+          "line_begin": 4027,
+          "line_end": 4037
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v5()",
@@ -12803,14 +12803,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 158296,
-          "byte_end": 158755,
+          "byte_begin": 158576,
+          "byte_end": 159035,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4035,
-          "line_end": 4045
+          "line_begin": 4046,
+          "line_end": 4056
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format5_reader_memory_evidence_v6()",
@@ -12832,14 +12832,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 158958,
-          "byte_end": 159364,
+          "byte_begin": 159238,
+          "byte_end": 159644,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4054,
-          "line_end": 4064
+          "line_begin": 4065,
+          "line_end": 4075
         }
       },
       "sql_identity": "function:bioseq.last_alignment_format6_reader_evidence()",
@@ -12861,14 +12861,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 159625,
-          "byte_end": 160077,
+          "byte_begin": 159905,
+          "byte_end": 160357,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4074,
-          "line_end": 4084
+          "line_begin": 4085,
+          "line_end": 4095
         }
       },
       "sql_identity": "function:bioseq.last_alignment_persisted_gpu_operation_evidence_v1()",
@@ -12890,14 +12890,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 160338,
-          "byte_end": 160789,
+          "byte_begin": 160618,
+          "byte_end": 161069,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4094,
-          "line_end": 4104
+          "line_begin": 4105,
+          "line_end": 4115
         }
       },
       "sql_identity": "function:bioseq.last_alignment_persisted_gpu_operation_evidence_v2()",
@@ -12919,14 +12919,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 161383,
-          "byte_end": 161529,
+          "byte_begin": 161663,
+          "byte_end": 161809,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4127,
-          "line_end": 4130
+          "line_begin": 4138,
+          "line_end": 4141
         }
       },
       "sql_identity": "function:bioseq.last_index_merge_run_count()",
@@ -12948,14 +12948,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 164177,
-          "byte_end": 165611,
+          "byte_begin": 164457,
+          "byte_end": 165891,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4197,
-          "line_end": 4225
+          "line_begin": 4208,
+          "line_end": 4236
         }
       },
       "sql_identity": "function:bioseq.last_mps_build_stats()",
@@ -13005,9 +13005,9 @@
       "injected_context": [],
       "inputs": [
         {
-          "converter_key": "argument.bioseq.letter.by_value",
+          "converter_key": "argument.bioseq.letter.raw_typmod_input",
           "cpp_identifier": "input",
-          "cpp_type": "bioseq::pg_types::letter",
+          "cpp_type": "bioseq::pg_types::letter_typmod_input",
           "nullable": false,
           "ordinal": 1,
           "sql_name": "input",
@@ -13044,14 +13044,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 35889,
-          "byte_end": 36774,
+          "byte_begin": 36692,
+          "byte_end": 37624,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 1044,
-          "line_end": 1068
+          "line_begin": 1072,
+          "line_end": 1097
         }
       },
       "sql_identity": "function:bioseq.letter(bioseq.letter,integer,boolean)",
@@ -13140,7 +13140,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 6656,
           "byte_end": 7252,
@@ -13188,7 +13188,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 3145,
           "byte_end": 4046,
@@ -13236,7 +13236,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 4914,
           "byte_end": 5780,
@@ -13284,7 +13284,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 5786,
           "byte_end": 6650,
@@ -13323,7 +13323,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 7258,
           "byte_end": 7787,
@@ -13371,7 +13371,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 7793,
           "byte_end": 8413,
@@ -13428,14 +13428,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 29474,
-          "byte_end": 30352,
+          "byte_begin": 30277,
+          "byte_end": 31155,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 849,
-          "line_end": 874
+          "line_begin": 877,
+          "line_end": 902
         }
       },
       "sql_identity": "function:bioseq.letter_in(cstring,oid,integer)",
@@ -13476,7 +13476,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 2273,
           "byte_end": 3139,
@@ -13524,7 +13524,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 1403,
           "byte_end": 2267,
@@ -13572,7 +13572,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
           "byte_begin": 4052,
           "byte_end": 4908,
@@ -13611,14 +13611,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 30639,
-          "byte_end": 31016,
+          "byte_begin": 31442,
+          "byte_end": 31819,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 885,
-          "line_end": 897
+          "line_begin": 913,
+          "line_end": 925
         }
       },
       "sql_identity": "function:bioseq.letter_out(bioseq.letter)",
@@ -13668,14 +13668,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 33591,
-          "byte_end": 33856,
+          "byte_begin": 34394,
+          "byte_end": 34659,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 973,
-          "line_end": 982
+          "line_begin": 1001,
+          "line_end": 1010
         }
       },
       "sql_identity": "function:bioseq.letter_recv(internal,oid,integer)",
@@ -13707,14 +13707,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 34139,
-          "byte_end": 34490,
+          "byte_begin": 34942,
+          "byte_end": 35293,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 993,
-          "line_end": 1004
+          "line_begin": 1021,
+          "line_end": 1032
         }
       },
       "sql_identity": "function:bioseq.letter_send(bioseq.letter)",
@@ -13746,14 +13746,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 37051,
-          "byte_end": 37370,
+          "byte_begin": 37901,
+          "byte_end": 38220,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 1079,
-          "line_end": 1088
+          "line_begin": 1108,
+          "line_end": 1117
         }
       },
       "sql_identity": "function:bioseq.letter_to_text(bioseq.letter)",
@@ -13785,14 +13785,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 27435,
-          "byte_end": 28383,
+          "byte_begin": 28238,
+          "byte_end": 29186,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 789,
-          "line_end": 814
+          "line_begin": 817,
+          "line_end": 842
         }
       },
       "sql_identity": "function:bioseq.letter_typmod_in(cstring[])",
@@ -13824,14 +13824,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 28743,
-          "byte_end": 29171,
+          "byte_begin": 29546,
+          "byte_end": 29974,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 827,
-          "line_end": 838
+          "line_begin": 855,
+          "line_end": 866
         }
       },
       "sql_identity": "function:bioseq.letter_typmod_out(integer)",
@@ -13853,14 +13853,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 144180,
-          "byte_end": 152903,
+          "byte_begin": 144460,
+          "byte_end": 153183,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3668,
-          "line_end": 3871
+          "line_begin": 3679,
+          "line_end": 3882
         }
       },
       "sql_identity": "function:bioseq.list_metadata()",
@@ -13958,14 +13958,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 125654,
-          "byte_end": 125899,
+          "byte_begin": 125934,
+          "byte_end": 126179,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3158,
-          "line_end": 3166
+          "line_begin": 3169,
+          "line_end": 3177
         }
       },
       "sql_identity": "function:bioseq.mapq(anyelement)",
@@ -13997,14 +13997,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 123742,
-          "byte_end": 124001,
+          "byte_begin": 124022,
+          "byte_end": 124281,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3098,
-          "line_end": 3106
+          "line_begin": 3109,
+          "line_end": 3117
         }
       },
       "sql_identity": "function:bioseq.num_matches(anyelement)",
@@ -14036,14 +14036,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 121310,
-          "byte_end": 121565,
+          "byte_begin": 121590,
+          "byte_end": 121845,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3022,
-          "line_end": 3030
+          "line_begin": 3033,
+          "line_end": 3041
         }
       },
       "sql_identity": "function:bioseq.query_end(anyelement)",
@@ -14075,14 +14075,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 119982,
-          "byte_end": 120237,
+          "byte_begin": 120262,
+          "byte_end": 120517,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 2980,
-          "line_end": 2988
+          "line_begin": 2991,
+          "line_end": 2999
         }
       },
       "sql_identity": "function:bioseq.query_len(anyelement)",
@@ -14114,14 +14114,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 120645,
-          "byte_end": 120904,
+          "byte_begin": 120925,
+          "byte_end": 121184,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3001,
-          "line_end": 3009
+          "line_begin": 3012,
+          "line_end": 3020
         }
       },
       "sql_identity": "function:bioseq.query_start(anyelement)",
@@ -14143,13 +14143,13 @@
       "source": {
         "module": "bioseq.storage.manager:sequence_storage_manager",
         "path": "main/bioseq/backend/pg/storage_pg/sequence_storage_manager.cppm",
-        "sha256": "200205a26105dc9eacfc01b3290b2ddf1be85a2887c613b26d44084bd8cb4ab8",
+        "sha256": "22e1f7af8d128272caf86e1b291ab83ad4bb029c688bfe4f2e65c62799b36b7f",
         "span": {
-          "byte_begin": 197126,
-          "byte_end": 219571,
+          "byte_begin": 197062,
+          "byte_end": 219543,
           "column_begin": 15,
           "column_end": 2,
-          "line_begin": 4471,
+          "line_begin": 4470,
           "line_end": 5017
         }
       },
@@ -14250,14 +14250,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 165746,
-          "byte_end": 167584,
+          "byte_begin": 166026,
+          "byte_end": 167864,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4231,
-          "line_end": 4266
+          "line_begin": 4242,
+          "line_end": 4277
         }
       },
       "sql_identity": "function:bioseq.scheduler_mps_build_stats()",
@@ -14279,14 +14279,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 172639,
-          "byte_end": 172712,
+          "byte_begin": 172919,
+          "byte_end": 172992,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4405,
-          "line_end": 4407
+          "line_begin": 4416,
+          "line_end": 4418
         }
       },
       "sql_identity": "function:bioseq.scheduler_restart()",
@@ -14308,14 +14308,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 172847,
-          "byte_end": 173966,
+          "byte_begin": 173127,
+          "byte_end": 174246,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4413,
-          "line_end": 4439
+          "line_begin": 4424,
+          "line_end": 4450
         }
       },
       "sql_identity": "function:bioseq.scheduler_stats()",
@@ -14347,14 +14347,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 118844,
-          "byte_end": 119157,
+          "byte_begin": 119124,
+          "byte_end": 119437,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 2944,
-          "line_end": 2954
+          "line_begin": 2955,
+          "line_end": 2965
         }
       },
       "sql_identity": "function:bioseq.score(anyelement)",
@@ -14386,14 +14386,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 127820,
-          "byte_end": 128108,
+          "byte_begin": 128100,
+          "byte_end": 128388,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3226,
-          "line_end": 3235
+          "line_begin": 3237,
+          "line_end": 3246
         }
       },
       "sql_identity": "function:bioseq.secondary_chain_score(anyelement)",
@@ -14425,14 +14425,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 127277,
-          "byte_end": 127534,
+          "byte_begin": 127557,
+          "byte_end": 127814,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3209,
-          "line_end": 3217
+          "line_begin": 3220,
+          "line_end": 3228
         }
       },
       "sql_identity": "function:bioseq.seed_count(anyelement)",
@@ -15355,9 +15355,9 @@
       "injected_context": [],
       "inputs": [
         {
-          "converter_key": "argument.datum.opaque[internal].nullable",
+          "converter_key": "argument.subscript_handler.context.nullable",
           "cpp_identifier": "input",
-          "cpp_type": "std::__1::optional<Datum>",
+          "cpp_type": "std::__1::optional<bioseq::pg_utils::subscript_handler_context>",
           "nullable": true,
           "ordinal": 1,
           "sql_name": "input",
@@ -15376,10 +15376,10 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:subscript",
         "path": "main/bioseq/backend/pg/types/compact_sequence/subscript.cppm",
-        "sha256": "ffd3d0b74de48c0db36e24546b63358298ac46d5a330102718cc7b33f85c8dc5",
+        "sha256": "ddbebb93b7d0e99b96cb2dc95283c9540b61a3bb64e8693406505c56ed9a4a18",
         "span": {
           "byte_begin": 8866,
-          "byte_end": 9262,
+          "byte_end": 9300,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 265,
@@ -15502,14 +15502,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 216147,
-          "byte_end": 216698,
+          "byte_begin": 216427,
+          "byte_end": 216978,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5664,
-          "line_end": 5683
+          "line_begin": 5675,
+          "line_end": 5694
         }
       },
       "sql_identity": "function:bioseq.set_active_read_index(regclass,text)",
@@ -15559,14 +15559,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 215420,
-          "byte_end": 216012,
+          "byte_begin": 215700,
+          "byte_end": 216292,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5638,
-          "line_end": 5658
+          "line_begin": 5649,
+          "line_end": 5669
         }
       },
       "sql_identity": "function:bioseq.set_index_policy(regclass,text,text)",
@@ -15607,14 +15607,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 133252,
-          "byte_end": 135830,
+          "byte_begin": 133532,
+          "byte_end": 136110,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3386,
-          "line_end": 3454
+          "line_begin": 3397,
+          "line_end": 3465
         }
       },
       "sql_identity": "function:bioseq.symbol_count(bioseq.seq,text)",
@@ -15646,14 +15646,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 123199,
-          "byte_end": 123456,
+          "byte_begin": 123479,
+          "byte_end": 123736,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3081,
-          "line_end": 3089
+          "line_begin": 3092,
+          "line_end": 3100
         }
       },
       "sql_identity": "function:bioseq.target_end(anyelement)",
@@ -15685,14 +15685,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 121851,
-          "byte_end": 122108,
+          "byte_begin": 122131,
+          "byte_end": 122388,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3039,
-          "line_end": 3047
+          "line_begin": 3050,
+          "line_end": 3058
         }
       },
       "sql_identity": "function:bioseq.target_len(anyelement)",
@@ -15724,14 +15724,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 122524,
-          "byte_end": 122785,
+          "byte_begin": 122804,
+          "byte_end": 123065,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3060,
-          "line_end": 3068
+          "line_begin": 3071,
+          "line_end": 3079
         }
       },
       "sql_identity": "function:bioseq.target_start(anyelement)",
@@ -16024,14 +16024,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 161019,
-          "byte_end": 161248,
+          "byte_begin": 161299,
+          "byte_end": 161528,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4113,
-          "line_end": 4121
+          "line_begin": 4124,
+          "line_end": 4132
         }
       },
       "sql_identity": "function:bioseq.update_index(regclass,text)",
@@ -16101,14 +16101,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 131500,
-          "byte_end": 132698,
+          "byte_begin": 131780,
+          "byte_end": 132978,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3345,
-          "line_end": 3369
+          "line_begin": 3356,
+          "line_end": 3380
         }
       },
       "sql_identity": "function:bioseq.vulkan_runtime_status()",
@@ -16130,14 +16130,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 162154,
-          "byte_end": 164042,
+          "byte_begin": 162434,
+          "byte_end": 164322,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4152,
-          "line_end": 4191
+          "line_begin": 4163,
+          "line_end": 4202
         }
       },
       "sql_identity": "function:bioseq_internal.active_read_policy_debug()",
@@ -16169,14 +16169,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 167842,
-          "byte_end": 170029,
+          "byte_begin": 168122,
+          "byte_end": 170309,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4276,
-          "line_end": 4331
+          "line_begin": 4287,
+          "line_end": 4342
         }
       },
       "sql_identity": "function:bioseq_internal.arm_async_mps_worker_failure(text)",
@@ -16208,14 +16208,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 217799,
-          "byte_end": 218586,
+          "byte_begin": 218079,
+          "byte_end": 218866,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5723,
-          "line_end": 5746
+          "line_begin": 5734,
+          "line_end": 5757
         }
       },
       "sql_identity": "function:bioseq_internal.arm_inline_sequence_pg_failure(text)",
@@ -16247,14 +16247,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 248026,
-          "byte_end": 254191,
+          "byte_begin": 248306,
+          "byte_end": 254597,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 6786,
-          "line_end": 6972
+          "line_begin": 6797,
+          "line_end": 6989
         }
       },
       "sql_identity": "function:bioseq_internal.arm_sequence_source_failure(text)",
@@ -16286,14 +16286,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 259369,
-          "byte_end": 259463,
+          "byte_begin": 259775,
+          "byte_end": 259869,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7120,
-          "line_end": 7122
+          "line_begin": 7137,
+          "line_end": 7139
         }
       },
       "sql_identity": "function:bioseq_internal.arm_slice_dsm_fixture(text)",
@@ -16315,14 +16315,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 170984,
-          "byte_end": 172504,
+          "byte_begin": 171264,
+          "byte_end": 172784,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4365,
-          "line_end": 4399
+          "line_begin": 4376,
+          "line_end": 4410
         }
       },
       "sql_identity": "function:bioseq_internal.async_mps_worker_boundary_stats()",
@@ -16344,14 +16344,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "6a581204097f831cbe6d82f067142d814afdd767ed2b1ea0713805eeaba8284f",
+        "sha256": "0a2ee64c6350f09ade9bb22f26a3a3ebd36d850431f107071f4bc8046a5df308",
         "span": {
-          "byte_begin": 790421,
-          "byte_end": 795166,
+          "byte_begin": 790567,
+          "byte_end": 795312,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 19946,
-          "line_end": 20059
+          "line_begin": 19950,
+          "line_end": 20063
         }
       },
       "sql_identity": "function:bioseq_internal.base_match_executor_translation_probe()",
@@ -16373,7 +16373,7 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "6a581204097f831cbe6d82f067142d814afdd767ed2b1ea0713805eeaba8284f",
+        "sha256": "0a2ee64c6350f09ade9bb22f26a3a3ebd36d850431f107071f4bc8046a5df308",
         "span": {
           "byte_begin": 360136,
           "byte_end": 365634,
@@ -16466,14 +16466,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 185242,
-          "byte_end": 187999,
+          "byte_begin": 185522,
+          "byte_end": 188279,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4779,
-          "line_end": 4849
+          "line_begin": 4790,
+          "line_end": 4860
         }
       },
       "sql_identity": "function:bioseq_internal.build_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
@@ -16532,14 +16532,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 200934,
-          "byte_end": 206138,
+          "byte_begin": 201214,
+          "byte_end": 206418,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5236,
-          "line_end": 5378
+          "line_begin": 5247,
+          "line_end": 5389
         }
       },
       "sql_identity": "function:bioseq_internal.build_ready_mpf_generation(regclass,text,bigint,text)",
@@ -16598,14 +16598,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 206559,
-          "byte_end": 214670,
+          "byte_begin": 206839,
+          "byte_end": 214950,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5392,
-          "line_end": 5609
+          "line_begin": 5403,
+          "line_end": 5620
         }
       },
       "sql_identity": "function:bioseq_internal.build_ready_mps_generation(regclass,text,bigint,text)",
@@ -16655,14 +16655,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 196587,
-          "byte_end": 197119,
+          "byte_begin": 196867,
+          "byte_end": 197399,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5090,
-          "line_end": 5108
+          "line_begin": 5101,
+          "line_end": 5119
         }
       },
       "sql_identity": "function:bioseq_internal.copy_primary_index_shape(regclass,regclass,text)",
@@ -16684,14 +16684,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 174224,
-          "byte_end": 174389,
+          "byte_begin": 174504,
+          "byte_end": 174669,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4449,
-          "line_end": 4452
+          "line_begin": 4460,
+          "line_end": 4463
         }
       },
       "sql_identity": "function:bioseq_internal.cpu_prepared_target_same_object_reprepare_probe()",
@@ -16741,14 +16741,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 221872,
-          "byte_end": 223368,
+          "byte_begin": 222152,
+          "byte_end": 223648,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5860,
-          "line_end": 5907
+          "line_begin": 5871,
+          "line_end": 5918
         }
       },
       "sql_identity": "function:bioseq_internal.delete_index_manifest(regclass,text,bigint)",
@@ -16770,14 +16770,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 170287,
-          "byte_end": 170726,
+          "byte_begin": 170567,
+          "byte_end": 171006,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4341,
-          "line_end": 4355
+          "line_begin": 4352,
+          "line_end": 4366
         }
       },
       "sql_identity": "function:bioseq_internal.disarm_async_mps_worker_failure()",
@@ -16799,14 +16799,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 254445,
-          "byte_end": 254675,
+          "byte_begin": 254851,
+          "byte_end": 255081,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 6982,
-          "line_end": 6989
+          "line_begin": 6999,
+          "line_end": 7006
         }
       },
       "sql_identity": "function:bioseq_internal.disarm_sequence_source_failure()",
@@ -16838,14 +16838,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "47af696f0d759b5a84434bb7e796b382fd43e4d43a407e271bb581c968ce8753",
+        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
         "span": {
-          "byte_begin": 133576,
-          "byte_end": 134046,
+          "byte_begin": 133634,
+          "byte_end": 134104,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4171,
-          "line_end": 4187
+          "line_begin": 4172,
+          "line_end": 4188
         }
       },
       "sql_identity": "function:bioseq_internal.downgrade_bioseq_storage(regclass)",
@@ -16904,14 +16904,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 198383,
-          "byte_end": 198916,
+          "byte_begin": 198663,
+          "byte_end": 199196,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5152,
-          "line_end": 5169
+          "line_begin": 5163,
+          "line_end": 5180
         }
       },
       "sql_identity": "function:bioseq_internal.exercise_generation_session_failure(regclass,text,bigint,text)",
@@ -16933,10 +16933,10 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
-          "byte_begin": 156514,
-          "byte_end": 162794,
+          "byte_begin": 156522,
+          "byte_end": 162802,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 3954,
@@ -16999,14 +16999,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 181954,
-          "byte_end": 182722,
+          "byte_begin": 182234,
+          "byte_end": 183002,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4673,
-          "line_end": 4695
+          "line_begin": 4684,
+          "line_end": 4706
         }
       },
       "sql_identity": "function:bioseq_internal.format6_parallel_scan_probe(regclass,text,bigint,integer)",
@@ -17065,14 +17065,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 199312,
-          "byte_end": 200544,
+          "byte_begin": 199592,
+          "byte_end": 200824,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5183,
-          "line_end": 5222
+          "line_begin": 5194,
+          "line_end": 5233
         }
       },
       "sql_identity": "function:bioseq_internal.inspect_generation_storage_transition(regclass,text,bigint,text)",
@@ -17094,14 +17094,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 22929,
-          "byte_end": 23042,
+          "byte_begin": 23175,
+          "byte_end": 23288,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 648,
-          "line_end": 651
+          "line_begin": 656,
+          "line_end": 659
         }
       },
       "sql_identity": "function:bioseq_internal.letter_hook_chain_calls()",
@@ -17123,14 +17123,14 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:letter",
         "path": "main/bioseq/backend/pg/types/compact_sequence/letter.cppm",
-        "sha256": "4d5d4f025ec1cd33d4d615f3258bba4506e334d31d39648a58727c4f02eda52b",
+        "sha256": "41d61dc367ca4a492f24fa45e2369cb06a6102146144a8cdfa3428b359b74602",
         "span": {
-          "byte_begin": 34700,
-          "byte_end": 35563,
+          "byte_begin": 35503,
+          "byte_end": 36366,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 1013,
-          "line_end": 1031
+          "line_begin": 1041,
+          "line_end": 1059
         }
       },
       "sql_identity": "function:bioseq_internal.letter_wire_self_test()",
@@ -17152,7 +17152,7 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "6a581204097f831cbe6d82f067142d814afdd767ed2b1ea0713805eeaba8284f",
+        "sha256": "0a2ee64c6350f09ade9bb22f26a3a3ebd36d850431f107071f4bc8046a5df308",
         "span": {
           "byte_begin": 529174,
           "byte_end": 541930,
@@ -17191,14 +17191,14 @@
       "source": {
         "module": "bioseq.table:custom_scan",
         "path": "main/bioseq/backend/pg/table/custom_scan.cppm",
-        "sha256": "6a581204097f831cbe6d82f067142d814afdd767ed2b1ea0713805eeaba8284f",
+        "sha256": "0a2ee64c6350f09ade9bb22f26a3a3ebd36d850431f107071f4bc8046a5df308",
         "span": {
-          "byte_begin": 807549,
-          "byte_end": 808691,
+          "byte_begin": 807695,
+          "byte_end": 808837,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 20348,
-          "line_end": 20382
+          "line_begin": 20352,
+          "line_end": 20386
         }
       },
       "sql_identity": "function:bioseq_internal.match_owner_finalization_scope_diagnostics(boolean)",
@@ -17220,10 +17220,10 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
-          "byte_begin": 155352,
-          "byte_end": 155447,
+          "byte_begin": 155360,
+          "byte_end": 155455,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 3920,
@@ -17342,14 +17342,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 188401,
-          "byte_end": 192415,
+          "byte_begin": 188681,
+          "byte_end": 192695,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4863,
-          "line_end": 4969
+          "line_begin": 4874,
+          "line_end": 4980
         }
       },
       "sql_identity": "function:bioseq_internal.read_minimizer_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
@@ -17408,14 +17408,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 195607,
-          "byte_end": 196194,
+          "byte_begin": 195887,
+          "byte_end": 196474,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5059,
-          "line_end": 5076
+          "line_begin": 5070,
+          "line_end": 5087
         }
       },
       "sql_identity": "function:bioseq_internal.remove_sequence_fragment(regclass,text,bigint,integer)",
@@ -17437,14 +17437,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 161787,
-          "byte_end": 161896,
+          "byte_begin": 162067,
+          "byte_end": 162176,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4140,
-          "line_end": 4142
+          "line_begin": 4151,
+          "line_end": 4153
         }
       },
       "sql_identity": "function:bioseq_internal.reset_active_read_policy_debug()",
@@ -17466,14 +17466,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 254929,
-          "byte_end": 255216,
+          "byte_begin": 255335,
+          "byte_end": 255622,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 6999,
-          "line_end": 7007
+          "line_begin": 7016,
+          "line_end": 7024
         }
       },
       "sql_identity": "function:bioseq_internal.reset_sequence_source_counters()",
@@ -17523,14 +17523,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 197510,
-          "byte_end": 198012,
+          "byte_begin": 197790,
+          "byte_end": 198292,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5122,
-          "line_end": 5138
+          "line_begin": 5133,
+          "line_end": 5149
         }
       },
       "sql_identity": "function:bioseq_internal.rewrite_source_checksum(regclass,bigint,bigint)",
@@ -17616,14 +17616,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 192841,
-          "byte_end": 195247,
+          "byte_begin": 193121,
+          "byte_end": 195527,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4983,
-          "line_end": 5045
+          "line_begin": 4994,
+          "line_end": 5056
         }
       },
       "sql_identity": "function:bioseq_internal.scan_minimizer_generation_fixture(regclass,text,bigint,smallint,smallint,smallint,text)",
@@ -17655,14 +17655,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 261307,
-          "byte_end": 261742,
+          "byte_begin": 261713,
+          "byte_end": 262148,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7185,
-          "line_end": 7200
+          "line_begin": 7202,
+          "line_end": 7217
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_facade_orientation_probe(bioseq.seq)",
@@ -17694,10 +17694,10 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
-          "byte_begin": 155769,
-          "byte_end": 156078,
+          "byte_begin": 155777,
+          "byte_end": 156086,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 3933,
@@ -17723,14 +17723,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 255538,
-          "byte_end": 258998,
+          "byte_begin": 255944,
+          "byte_end": 259404,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7020,
-          "line_end": 7107
+          "line_begin": 7037,
+          "line_end": 7124
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_counters()",
@@ -17752,14 +17752,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 260212,
-          "byte_end": 260457,
+          "byte_begin": 260618,
+          "byte_end": 260863,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7149,
-          "line_end": 7156
+          "line_begin": 7166,
+          "line_end": 7173
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_fault_contract_probe()",
@@ -17781,14 +17781,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 261996,
-          "byte_end": 262228,
+          "byte_begin": 262402,
+          "byte_end": 262634,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7210,
-          "line_end": 7217
+          "line_begin": 7227,
+          "line_end": 7234
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_pre_prepare_probe()",
@@ -17810,14 +17810,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 260711,
-          "byte_end": 260950,
+          "byte_begin": 261117,
+          "byte_end": 261356,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7166,
-          "line_end": 7173
+          "line_begin": 7183,
+          "line_end": 7190
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_route_alias_probe()",
@@ -17839,14 +17839,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 259717,
-          "byte_end": 259958,
+          "byte_begin": 260123,
+          "byte_end": 260364,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 7132,
-          "line_end": 7139
+          "line_begin": 7149,
+          "line_end": 7156
         }
       },
       "sql_identity": "function:bioseq_internal.sequence_source_wrong_thread_probe()",
@@ -17878,7 +17878,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
           "byte_begin": 88168,
           "byte_end": 89842,
@@ -17907,7 +17907,7 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
           "byte_begin": 87816,
           "byte_end": 87900,
@@ -17946,10 +17946,10 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
           "byte_begin": 90158,
-          "byte_end": 90819,
+          "byte_end": 90827,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 2281,
@@ -17985,10 +17985,10 @@
       "source": {
         "module": "bioseq.types.pg_compact_sequence:packed_output",
         "path": "main/bioseq/backend/pg/types/compact_sequence/packed_output.cppm",
-        "sha256": "976691455982872435f5f7282ea7dce94151b0d4eaa72ce0030b0a4485f33265",
+        "sha256": "73fc306b028e909897d54a3a61f699386edc34f2504bcc1281cc480c7dd9f979",
         "span": {
-          "byte_begin": 154240,
-          "byte_end": 155142,
+          "byte_begin": 154248,
+          "byte_end": 155150,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 3887,
@@ -18053,14 +18053,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "47af696f0d759b5a84434bb7e796b382fd43e4d43a407e271bb581c968ce8753",
+        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
         "span": {
-          "byte_begin": 132883,
-          "byte_end": 133350,
+          "byte_begin": 132941,
+          "byte_end": 133408,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4148,
-          "line_end": 4164
+          "line_begin": 4149,
+          "line_end": 4165
         }
       },
       "sql_identity": "function:bioseq_internal.upgrade_bioseq_storage(regclass)",
@@ -18137,14 +18137,14 @@
       "source": {
         "module": "bioseq.mod",
         "path": "main/bioseq/backend/pg/mod.cppm",
-        "sha256": "faae6d5141ff092b12498b65d10eaeddcedd7f649673e5fc37ca6b1ca03af27d",
+        "sha256": "f9907234b3d3ee26e97af2892f66f458536748ec8a9cd47add22ec058872b464",
         "span": {
-          "byte_begin": 218730,
-          "byte_end": 221728,
+          "byte_begin": 219010,
+          "byte_end": 222008,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 5752,
-          "line_end": 5854
+          "line_begin": 5763,
+          "line_end": 5865
         }
       },
       "sql_identity": "function:bioseq_internal.write_index_chunk(regclass,text,bigint,bigint,integer,bytea)",
@@ -18212,14 +18212,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "47af696f0d759b5a84434bb7e796b382fd43e4d43a407e271bb581c968ce8753",
+        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
         "span": {
-          "byte_begin": 130403,
-          "byte_end": 132565,
+          "byte_begin": 130461,
+          "byte_end": 132623,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 4062,
-          "line_end": 4137
+          "line_begin": 4063,
+          "line_end": 4138
         }
       },
       "sql_identity": "function:pg_catalog.alter_bioseq_table_reset(regclass,boolean,boolean,boolean,boolean)",
@@ -18287,14 +18287,14 @@
       "source": {
         "module": "bioseq.table:access_method",
         "path": "main/bioseq/backend/pg/table/access_method.cppm",
-        "sha256": "47af696f0d759b5a84434bb7e796b382fd43e4d43a407e271bb581c968ce8753",
+        "sha256": "7e6e82eb68ba21c3a12a2f9a51fa1203e05566b7c31077c7a12f6f2cdb9ab5ec",
         "span": {
-          "byte_begin": 126169,
-          "byte_end": 130116,
+          "byte_begin": 126227,
+          "byte_end": 130174,
           "column_begin": 1,
           "column_end": 2,
-          "line_begin": 3908,
-          "line_end": 4051
+          "line_begin": 3909,
+          "line_end": 4052
         }
       },
       "sql_identity": "function:pg_catalog.alter_bioseq_table_set(regclass,integer,integer,name,integer)",
@@ -18333,14 +18333,14 @@
       "source": {
         "module": "bioseq.storage.manager:sequence_storage_manager",
         "path": "main/bioseq/backend/pg/storage_pg/sequence_storage_manager.cppm",
-        "sha256": "200205a26105dc9eacfc01b3290b2ddf1be85a2887c613b26d44084bd8cb4ab8",
+        "sha256": "22e1f7af8d128272caf86e1b291ab83ad4bb029c688bfe4f2e65c62799b36b7f",
         "span": {
-          "byte_begin": 220040,
-          "byte_end": 223788,
+          "byte_begin": 220012,
+          "byte_end": 224699,
           "column_begin": 1,
           "column_end": 2,
           "line_begin": 5037,
-          "line_end": 5144
+          "line_end": 5165
         }
       },
       "sql_identity": "procedure:bioseq.vacuum_seq_storage(regclass)",

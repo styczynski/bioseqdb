@@ -3353,7 +3353,7 @@
   ],
   "inputs": {
     "approved_delta_semantic_sha256": "039882ffa7b642b8f3dff91e6c036e3844a787ee812a37b8a539d48dfbda27ae",
-    "candidate_manifest_semantic_sha256": "03c8d4d57fcd8ad9f089109d7c2fed6156a6f6cac9eb63a762497f92d513f347",
+    "candidate_manifest_semantic_sha256": "dca619623beb972760769b9f861ca986031238ae91dd1445562cd94b7f7709c8",
     "legacy_sql_sha256": "0eb3aa6da75d80fc07c92dc1f6213ef27ddf1da7f4eaed33e6c69e6c8a7dfa71"
   },
   "schema": "bioseq_doc0388_catalog_join_projection/v1"

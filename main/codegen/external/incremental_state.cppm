@@ -105,9 +105,14 @@ load_source_state(
     input << command.compiler_id << '\n'
           << clang_binary.generic_string() << '\n'
           << fs::file_size(clang_binary) << '\n'
-          << fs::last_write_time(clang_binary).time_since_epoch().count() << '\n'
+          << static_cast<std::int64_t>(
+                 fs::last_write_time(clang_binary).time_since_epoch().count())
+          << '\n'
           << fs::file_size(command.generator_binary) << '\n'
-          << fs::last_write_time(command.generator_binary).time_since_epoch().count();
+          << static_cast<std::int64_t>(
+                 fs::last_write_time(command.generator_binary)
+                     .time_since_epoch()
+                     .count());
     std::ostringstream output;
     output << std::hex << bioseq::common::fnv1a_64(input.str());
     return output.str();

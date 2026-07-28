@@ -2284,7 +2284,7 @@ bool slice_trace_worker_failure_probe(std::int32_t action) {
   if (IsParallelWorker()) {
     ereport(ERROR,
             (errcode(ERRCODE_INTERNAL_ERROR),
-             errmsg("injected SliceProject parallel worker failure"),
+             errmsg("injected DOC0377 SliceProject parallel worker failure"),
              errdetail("the original worker ERROR must survive DSM cleanup")));
   }
   return true;

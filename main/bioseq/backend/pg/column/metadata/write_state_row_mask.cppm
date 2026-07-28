@@ -388,7 +388,7 @@ UpdateRowMask(RelFileLocator relfilelocator, uint64_t storageId,
 			const row_mask_row stored_row = row_mask_codec::deform(
 				rowMaskHeapTuple,
 				tupleDescriptor,
-				RowMaskStateCache.context());
+				CurrentMemoryContext);
 			if (!stored_row.mask.has_value()
 				|| *stored_row.mask == nullptr)
 			{

@@ -431,8 +431,13 @@ public:
     }
 
     [[nodiscard]] std::size_t non_null_count() const noexcept {
-        return static_cast<std::size_t>(std::ranges::count(
-            nulls(), false));
+        std::size_t count = 0;
+        for (std::size_t lane_index = 0;
+             lane_index < column_->dimension;
+             ++lane_index) {
+            count += column_->isnull[lane_index] ? 0u : 1u;
+        }
+        return count;
     }
 
 private:

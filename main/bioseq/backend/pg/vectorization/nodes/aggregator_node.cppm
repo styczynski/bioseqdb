@@ -2164,6 +2164,8 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 	 */
 	while (!aggstate->agg_done)
 	{
+		bool first_input_is_vector = false;
+
 		/*
 		 * Clear the per-output-tuple context for each group, as well as
 		 * aggcontext (which contains any pass-by-ref transvalues of the old
@@ -2290,17 +2292,29 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 			 * If we don't already have the first tuple of the new group,
 			 * fetch it from the outer plan.
 			 */
-			if (aggstate->grp_firstTuple == NULL)
-			{
-				outerslot = fetch_input_tuple(aggstate);
-				if (!TupIsNull(outerslot))
+				if (aggstate->grp_firstTuple == NULL)
 				{
-					/*
-					 * Make a copy of the first input tuple; we will use this
-					 * for comparisons (in group mode) and for projection.
-					 */
-					aggstate->grp_firstTuple = ExecCopySlotHeapTuple(outerslot);
-				}
+					outerslot = fetch_input_tuple(aggstate);
+					if (!TupIsNull(outerslot))
+					{
+						first_input_is_vector =
+							IsVectorTupleTableSlot(outerslot);
+						if (first_input_is_vector)
+						{
+							if (node->aggstrategy != AGG_PLAIN)
+							{
+								ereport(ERROR,
+									(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+									 errmsg("VectorAgg supports only plain aggregation")));
+							}
+						}
+						else
+						{
+							ereport(ERROR,
+								(errcode(ERRCODE_INTERNAL_ERROR),
+								 errmsg("VectorAgg input is not a vector tuple slot")));
+						}
+					}
 				else
 				{
 					/* outer plan produced no tuples at all */
@@ -2351,16 +2365,20 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 			 */
 			initialize_aggregates(aggstate, pergroups, numReset);
 
-			if (aggstate->grp_firstTuple != NULL)
-			{
+				if (aggstate->grp_firstTuple != NULL
+					|| first_input_is_vector)
+				{
 				/*
 				 * Store the copied first input tuple in the tuple table slot
 				 * reserved for it.  The tuple will be deleted when it is
 				 * cleared from the slot.
 				 */
-				ExecForceStoreHeapTuple(aggstate->grp_firstTuple,
-										firstSlot, true);
-				aggstate->grp_firstTuple = NULL;	/* don't keep two pointers */
+					if (aggstate->grp_firstTuple != NULL)
+					{
+						ExecForceStoreHeapTuple(aggstate->grp_firstTuple,
+												firstSlot, true);
+						aggstate->grp_firstTuple = NULL;
+					}
 
 				/* set up for first advance_aggregates call */
 				tmpcontext->ecxt_outertuple = outerslot;
@@ -2369,8 +2387,15 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 				 * Process each outer-plan tuple, and then fetch the next one,
 				 * until we exhaust the outer plan or cross a group boundary.
 				 */
-				for (;;)
-				{
+					for (;;)
+					{
+						if (!IsVectorTupleTableSlot(outerslot))
+						{
+							ereport(ERROR,
+								(errcode(ERRCODE_INTERNAL_ERROR),
+								 errmsg("VectorAgg input is not a vector tuple slot")));
+						}
+
 					/*
 					 * During phase 1 only of a mixed agg, we need to update
 					 * hashtables as well in advance_aggregates.
@@ -2399,11 +2424,14 @@ agg_retrieve_direct(VectorAggState *vectoraggstate)
 
 						pergroupstate = &pergroups[currentSet][transno];
 
-						// Should handle COUNT(*)
 						if (pertrans->aggref->aggstar)
 						{
-							int slotDim = reinterpret_cast<VectorTupleTableSlot *>(outerslot)->dimension;
-							pergroupstate->transValue += slotDim;
+							const auto *vector_slot =
+								reinterpret_cast<VectorTupleTableSlot *>(outerslot);
+							pergroupstate->transValue = Int64GetDatum(
+								DatumGetInt64(pergroupstate->transValue)
+								+ static_cast<std::int64_t>(
+									vector_slot->dimension));
 						}
 					}
 

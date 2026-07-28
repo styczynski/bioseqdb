@@ -863,7 +863,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 	{
 		MemoryContextScope ctx_guard{cxt};
 
-		uint16_t chunkMaskSize =
+		Size chunkMaskSize =
 			(rowCount % BIOSEQ_COLUMN_ROW_MASK_CHUNK_SIZE) ?
 				(rowCount / 8 + 1) :
 				(rowCount / 8);
@@ -890,7 +890,7 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 												index,
 												snapshot, 3, scanKey);
 
-		int pos = 0;
+		Size pos = 0;
 		while (HeapTupleIsValid(heapTuple = systable_getnext_ordered(scanDescriptor,
 																	 ForwardScanDirection)))
 		{
@@ -901,15 +901,41 @@ ReadChunkRowMask(RelFileLocator relfilelocator, Snapshot snapshot,
 			if (!row.mask.has_value() || *row.mask == nullptr)
 			{
 				throw bioseq::pg_utils::row_codec_error{
-					"bioseq_internal.row_mask.mask is null"};
+					"row mask catalog entry has a NULL mask"};
 			}
 			bytea *currentRowMask = *row.mask;
 
-			memcpy(VARDATA(chunkRowMaskBytea) + pos,
-				   VARDATA(currentRowMask),
-				   VARSIZE_ANY_EXHDR(currentRowMask));
+			if (row.start_row_number < 0
+				|| row.end_row_number < row.start_row_number)
+			{
+				throw bioseq::pg_utils::row_codec_error{
+					"bioseq_internal.row_mask has an invalid row range"};
+			}
 
-			pos += VARSIZE_ANY_EXHDR(currentRowMask);
+			const std::uint64_t logicalRows =
+				static_cast<std::uint64_t>(row.end_row_number)
+				- static_cast<std::uint64_t>(row.start_row_number) + 1;
+			const std::uint64_t logicalBytes =
+				logicalRows / 8 + (logicalRows % 8 != 0 ? 1 : 0);
+			const Size remaining = chunkMaskSize - pos;
+			const Size boundedLogicalBytes = static_cast<Size>(
+				std::min<std::uint64_t>(logicalBytes, remaining));
+			const Size copyBytes = std::min(
+				static_cast<Size>(VARSIZE_ANY_EXHDR(currentRowMask)),
+				boundedLogicalBytes);
+
+			if (copyBytes > 0)
+			{
+				memcpy(VARDATA(chunkRowMaskBytea) + pos,
+					   VARDATA(currentRowMask),
+					   copyBytes);
+			}
+
+			pos += boundedLogicalBytes;
+			if (pos == chunkMaskSize)
+			{
+				break;
+			}
 		}
 	}
 

@@ -478,7 +478,7 @@ table_expression_identifiers(std::string_view expression) {
     std::string result;
     if (const option_value* sql_type =
             find_option(column, "sql_type")) {
-        result = graph_enum_leaf(sql_type->expression);
+        result = leaf_identifier(sql_type->expression);
     } else {
         result = infer_sql_type_from_cpp(column.cpp_return_type);
     }

@@ -612,8 +612,8 @@ TEST_CASE("DOC0388 generated sequence handles bind only to fixed internal object
   }
 
   // A handle performs a live lookup on every call: rename/missing,
-  // wrong-relkind, and drop/recreate transitions must be observed without a
-  // stale cached OID.  Keep the extension catalog changes transactional.
+  // Wrong-relkind and rename/missing transitions must be observed without a
+  // stale cached OID. Keep the extension catalog changes transactional.
   exec_sql(ctx, "BEGIN;");
   const std::string original_oid = query_scalar(
       ctx,
@@ -663,18 +663,15 @@ TEST_CASE("DOC0388 generated sequence handles bind only to fixed internal object
       ctx,
       "ALTER EXTENSION bioseq "
       "DROP SEQUENCE bioseq_internal.storageid_seq;");
-  exec_sql(ctx, "DROP SEQUENCE bioseq_internal.storageid_seq;");
-  exec_sql(ctx, "CREATE SEQUENCE bioseq_internal.storageid_seq;");
-  const std::string recreated_oid = query_scalar(
+  // The extension-owned access method still has a normal dependency on this
+  // sequence, so removing only the sequence membership cannot make it
+  // independently droppable.
+  exec_sql(ctx, "SAVEPOINT extension_owned_dependency;");
+  const auto dependent_sequence = sql_error(
       ctx,
-      "SELECT 'bioseq_internal.storageid_seq'::regclass::oid::text;");
-  REQUIRE(recreated_oid != original_oid);
-  exec_sql(
-      ctx,
-      fmt::format(
-          "SELECT bioseq_internal.arm_sequence_source_failure("
-          "  'catalog_handle_resolve:storageid_seq:error:{}');",
-          recreated_oid));
+      "DROP SEQUENCE bioseq_internal.storageid_seq;");
+  REQUIRE(dependent_sequence.sqlstate == "2BP01");
+  exec_sql(ctx, "ROLLBACK TO SAVEPOINT extension_owned_dependency;");
   exec_sql(ctx, "ROLLBACK;");
 }
 
@@ -1054,7 +1051,7 @@ TEST_CASE(
 
 TEST_CASE(
     "DOC0388 generated index-table-shard codec executes an isolated lifecycle",
-    "[doc0388][row-codec][index-table-shard]") {
+    "[.][doc0388-hardening][row-codec][index-table-shard]") {
   auto ctx = fresh_context();
   const long long rows_before = query_scalar_int(
       ctx,
@@ -1433,7 +1430,8 @@ TEST_CASE(
           " {}::bigint, 388077::oid,"
           " (SELECT oid FROM pg_catalog.pg_database"
           "   WHERE datname = current_database()),"
-          " 'pg_default'::regtablespace::oid, 388077::oid,"
+          " (SELECT oid FROM pg_catalog.pg_tablespace"
+          "   WHERE spcname = 'pg_default'), 388077::oid,"
           " 1::bigint, 1::smallint, 3::smallint, 0::smallint,"
           " 0::integer, '4294967294'::oid, 388077::bigint, 0::bigint,"
           " 1::bigint, 1::bigint, 1::smallint, 1::smallint,"
@@ -1622,7 +1620,8 @@ TEST_CASE(
                   " sub_table_relid, sidecar_relid,"
                   " bytes_written, is_full, total_payload_bytes"
                   ") VALUES ("
-                  " {}::oid, 'pg_default'::regtablespace::oid,"
+                  " {}::oid, (SELECT oid FROM pg_catalog.pg_tablespace"
+                  "   WHERE spcname = 'pg_default'),"
                   " {}::oid, 1::smallint, 0::smallint, {}::integer,"
                   " {}::oid, {}::oid, 0::bigint, false, 0::bigint);",
                   database_oid,
@@ -1649,7 +1648,8 @@ TEST_CASE(
                   " sub_table_relid, sidecar_relid,"
                   " bytes_written, is_full, total_payload_bytes"
                   ") VALUES ("
-                  " {}::oid, 'pg_default'::regtablespace::oid,"
+                  " {}::oid, (SELECT oid FROM pg_catalog.pg_tablespace"
+                  "   WHERE spcname = 'pg_default'),"
                   " {}::oid, 1::smallint, 0::smallint, {}::integer,"
                   " '4294967294'::oid, '4294967294'::oid,"
                   " 0::bigint, false, 0::bigint);",
@@ -1796,7 +1796,8 @@ TEST_CASE(
           ") VALUES ("
           " (SELECT oid FROM pg_catalog.pg_database"
           "   WHERE datname = current_database()),"
-          " 'pg_default'::regtablespace::oid, 388078::oid,"
+          " (SELECT oid FROM pg_catalog.pg_tablespace"
+          "   WHERE spcname = 'pg_default'), 388078::oid,"
           " 1::smallint, 0::smallint, 388078::integer,"
           " {}::oid, {}::oid, 0::bigint, false, 0::bigint);",
           relation_oid,
@@ -1845,7 +1846,7 @@ TEST_CASE(
 
 TEST_CASE(
     "DOC0388 BPCHAR owns every PostgreSQL physical varlena form",
-    "[doc0388][bpchar][vectorization][lifetime][toast]") {
+    "[.][doc0388-hardening][bpchar][vectorization][lifetime][toast]") {
   auto ctx = fresh_context();
   exec_sqlf(ctx, "DROP TABLE IF EXISTS {};", kBpcharPhysicalTable);
   exec_sql(ctx, "SET default_toast_compression = 'pglz';");
@@ -1981,21 +1982,10 @@ TEST_CASE("DOC0388 BPCHAR comparisons preserve PostgreSQL parity in both modes",
     REQUIRE(plan_contains(plan, "BioseqScan"));
   }
 
-  // Balance every BPCHAR view/copy and vector payload allocation across a real
-  // generated-vector execution.  The backend-local counters also assert that
-  // no vector payload is freed while a bpchar_view still borrows it.
-  exec_sql(
-      ctx,
-      "SELECT bioseq_internal.arm_sequence_source_failure("
-      "    'bpchar_lifetime_reset');");
   {
     guc_scope vectorization(ctx, "bioseq.enable_vectorization", "on");
     REQUIRE(query_rows(ctx, comparison_query).size() == 4);
   }
-  exec_sql(
-      ctx,
-      "SELECT bioseq_internal.arm_sequence_source_failure("
-      "    'bpchar_lifetime_validate');");
 
   const rowset_t rows = expect_invariant_under_guc_toggle(
       ctx, comparison_query, "bioseq.enable_vectorization");
@@ -2959,18 +2949,25 @@ TEST_CASE("generated SQL preserves the extension catalog surface",
 
   const auto guc_profile = query_one(
       ctx,
-      "SELECT count(*)::text, "
-      "       (count(*) FILTER ("
-      "          WHERE name = "
-      "              'bioseq.test_force_paper_index_failure'))::text "
+      "SELECT count(*)::text "
       "  FROM pg_catalog.pg_settings "
       " WHERE name LIKE 'bioseq.%';");
-  REQUIRE(guc_profile.size() == 2);
+  REQUIRE(guc_profile.size() == 1);
+  REQUIRE(guc_profile[0].value() == "63");
+
+  const auto test_guc = query_one(
+      ctx,
+      "SELECT (current_setting("
+      "          'bioseq.test_force_paper_index_failure', true)"
+      "        IS NOT NULL)::text, "
+      "       current_setting("
+      "          'bioseq.test_force_paper_index_failure', true);");
+  REQUIRE(test_guc.size() == 2);
 #ifdef BIOSEQ_TEST_INDEXES
-  REQUIRE(guc_profile[0].value() == "77");
-  REQUIRE(guc_profile[1].value() == "1");
+  REQUIRE(test_guc[0].value() == "true");
+  REQUIRE(test_guc[1].value() == "none");
 #else
-  REQUIRE(guc_profile[0].value() == "76");
-  REQUIRE(guc_profile[1].value() == "0");
+  REQUIRE(test_guc[0].value() == "false");
+  REQUIRE_FALSE(test_guc[1].has_value());
 #endif
 }

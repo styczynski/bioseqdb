@@ -1489,10 +1489,11 @@ set(BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE
   "${CMAKE_CURRENT_LIST_DIR}/backend/pg/pg_utils/row_codec_runtime_test_support.cppm")
 list(REMOVE_ITEM SRC_MOD_FILES
   "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
-if(BIOSEQ_TEST_INDEXES)
-  list(APPEND SRC_MOD_FILES
-    "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
-endif()
+# Both profile prepares need this named-module provider in the raw compile
+# database. The extension imports and executes its test API only when
+# BIOSEQ_TEST_INDEXES is enabled.
+list(APPEND SRC_MOD_FILES
+  "${BIOSEQ_SQL_ROW_CODEC_RUNTIME_TEST_MODULE}")
 set(BIOSEQ_SQL_CODEGEN_DIR
   "${CMAKE_CURRENT_BINARY_DIR}/generated/sql")
 set(BIOSEQ_SQL_PROFILE_ARTIFACT_ROOT

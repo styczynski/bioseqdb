@@ -169,7 +169,7 @@ EXPECTED_TOP_LEVEL_IDENTITIES = {
     (
         "sql:revoke:function:"
         "bioseq.bioseq_external_handler(internal):"
-        "all:public:ordinary"
+        "execute:public:ordinary"
     ),
 }
 

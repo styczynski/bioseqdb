@@ -710,6 +710,11 @@ inline void append_compatibility_sql_newline(std::string& output) {
     return sql_type == "quoted_any" ? "\"any\"" : std::string{sql_type};
 }
 
+[[nodiscard]] inline std::string render_parameter_name(
+    std::string_view name) {
+    return name == "array" ? "\"array\"" : std::string{name};
+}
+
 [[nodiscard]] inline std::string render_parameters(
     const collected_entity& entity) {
     std::string result;
@@ -723,7 +728,7 @@ inline void append_compatibility_sql_newline(std::string& output) {
                 "SQL routine input parameters must be named");
         }
         if (index != 0) result += ", ";
-        result += parameter.name + " "
+        result += render_parameter_name(parameter.name) + " "
             + render_sql_type(parameter.sql_type);
         if (parameter.has_default) {
             saw_default = true;
@@ -1217,7 +1222,13 @@ struct type_role_binding {
     }
     result += "\nAS 'MODULE_PATHNAME', '" + source.name
         + "'\nLANGUAGE C";
-    result += routine_properties(source);
+    if (procedure) {
+        result += option_is(source, "security", "definer")
+            ? "\nSECURITY DEFINER"
+            : "\nSECURITY INVOKER";
+    } else {
+        result += routine_properties(source);
+    }
     result += ";";
     return result;
 }
@@ -2357,12 +2368,16 @@ parse_numbered_references(
                         "sql_type",
                         infer_sql_type_from_cpp(
                             child->source.cpp_return_type));
+                    const std::string rendered_sql_type =
+                        sql_type.contains("custom_type<")
+                        ? leaf_identifier(sql_type)
+                        : (sql_type.contains("::")
+                               ? detail::enum_leaf(sql_type)
+                               : sql_type);
                     result += "    " + child->source.name + " "
                         + (sql_type.empty()
                                ? "text"
-                               : (sql_type.contains("::")
-                                      ? detail::enum_leaf(sql_type)
-                                      : sql_type));
+                               : rendered_sql_type);
                     if (!child->source.cpp_return_type.contains(
                             "optional<")) {
                         result += " NOT NULL";

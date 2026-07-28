@@ -17,7 +17,6 @@ extern "C" {
 
 #include <concepts>
 #include <cstddef>
-#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -32,44 +31,6 @@ import bioseq.pg_utils.sql_boundary;
 export namespace bioseq::column {
 
 using bioseq::column::vec::CmpOp;
-
-template<CmpOp Operation>
-inline constexpr CmpOp inverse_comparison =
-    Operation == CmpOp::gt ? CmpOp::lt
-    : Operation == CmpOp::lt ? CmpOp::gt
-    : Operation == CmpOp::ge ? CmpOp::le
-    : Operation == CmpOp::le ? CmpOp::ge
-    : Operation;
-
-class vector_result_sink final {
-public:
-    void allocate(std::uint32_t lane_count) {
-        result_.emplace(
-            bioseq::pg_utils::vector_result<
-                bioseq::sql::pg::boolean, bool>::allocate(lane_count));
-    }
-
-    [[nodiscard]] bool* value_data() {
-        return result_->values().data();
-    }
-
-    [[nodiscard]] bool* null_data() {
-        return result_->nulls().data();
-    }
-
-    [[nodiscard]] bioseq::pg_utils::vector_result<
-        bioseq::sql::pg::boolean, bool>
-    take() {
-        return std::move(*result_);
-    }
-
-private:
-    std::optional<bioseq::pg_utils::vector_result<
-        bioseq::sql::pg::boolean, bool>> result_;
-};
-
-static_assert(
-    bioseq::column::vec::is_compare_result_sink<vector_result_sink>);
 
 template<CmpOp Operation, class Left, class Right>
 [[nodiscard]] inline bool compare_scalar_values(
@@ -144,37 +105,48 @@ compare_vector_operands(
         std::same_as<LeftLane, bioseq::pg_utils::bpchar_view>
         || std::same_as<RightLane, bioseq::pg_utils::bpchar_view>;
     if constexpr (!character_comparison) {
-        vector_result_sink sink;
+        const std::size_t lane_count = column_is_left
+            ? left.column().size()
+            : right.column().size();
+        auto result = bioseq::pg_utils::vector_result<
+            bioseq::sql::pg::boolean, bool>::allocate(lane_count);
+        std::span<bool> result_values = result.values();
+        std::span<bool> result_nulls = result.nulls();
+
         if (column_is_left) {
             auto column = left.column();
             const auto constant = right.constant();
-            const std::span<const LeftLane> values =
-                column.contiguous_values();
-            const std::span<const bool> nulls = column.nulls();
-            bioseq::column::vec::compare_column<
-                Operation, LeftLane, RightLane>(
-                    values.data(),
-                    nulls.data(),
-                    static_cast<std::uint32_t>(column.size()),
-                    constant,
-                    sink);
+            for (std::size_t lane_index = 0;
+                 lane_index < lane_count;
+                 ++lane_index) {
+                result_nulls[lane_index] =
+                    column.is_null(lane_index);
+                if (result_nulls[lane_index]) {
+                    result_values[lane_index] = false;
+                    continue;
+                }
+                result_values[lane_index] =
+                    compare_scalar_values<Operation>(
+                        column.value(lane_index), constant);
+            }
         } else {
             auto column = right.column();
             const auto constant = left.constant();
-            const std::span<const RightLane> values =
-                column.contiguous_values();
-            const std::span<const bool> nulls = column.nulls();
-            bioseq::column::vec::compare_column<
-                inverse_comparison<Operation>,
-                RightLane,
-                LeftLane>(
-                    values.data(),
-                    nulls.data(),
-                    static_cast<std::uint32_t>(column.size()),
-                    constant,
-                    sink);
+            for (std::size_t lane_index = 0;
+                 lane_index < lane_count;
+                 ++lane_index) {
+                result_nulls[lane_index] =
+                    column.is_null(lane_index);
+                if (result_nulls[lane_index]) {
+                    result_values[lane_index] = false;
+                    continue;
+                }
+                result_values[lane_index] =
+                    compare_scalar_values<Operation>(
+                        constant, column.value(lane_index));
+            }
         }
-        return sink.take();
+        return result;
     } else {
         const std::size_t lane_count = column_is_left
             ? left.column().size()

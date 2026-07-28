@@ -12,4 +12,4 @@ P496	primary	sql:table:bioseq_external.sequences
 P497	primary	sql:table:bioseq_external.sequence_chunks
 P498	primary	sql:revoke:schema:bioseq_external:all:public:ordinary
 P499	primary	sql:revoke:all tables in schema:bioseq_external:all:public:ordinary
-P500	primary	sql:revoke:function:bioseq.bioseq_external_handler(internal):all:public:ordinary
+P500	primary	sql:revoke:function:bioseq.bioseq_external_handler(internal):execute:public:ordinary

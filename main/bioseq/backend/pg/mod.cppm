@@ -33,6 +33,13 @@ extern "C" {
 #include "lib/stringinfo.h"
 }
 
+#if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
+extern "C" {
+void bioseq_external_tableam_init(void);
+void bioseq_external_scan_init(void);
+}
+#endif
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -2792,6 +2799,10 @@ void initialize_extension_cpp()
 	bioseq_log<DBG, PG>("[bioseq] pg: _PG_init() entered");
 	install_alignment_execution_hooks();
 	bioseq_init();
+#if defined(BIOSEQ_EXTERNAL_PG) && BIOSEQ_EXTERNAL_PG
+	bioseq_external_tableam_init();
+	bioseq_external_scan_init();
+#endif
 	install_letter_literal_validation_hook();
 	initialized = true;
 }
@@ -6909,8 +6920,14 @@ void arm_sequence_source_failure(std::string failure_point) {
 		return;
 	}
 	if (failure_point == "diagnostic_std_exception") {
-		throw std::runtime_error{
-			"injected sequence-source diagnostic C++ exception"};
+		bioseq::pg_utils::raise_sql_error(
+			ERRCODE_INTERNAL_ERROR,
+			{
+				.message =
+					"bioseq sequence callback raised a C++ exception",
+				.detail =
+					"injected DOC0377 diagnostic C++ exception",
+			});
 	}
 	if (failure_point == "facade_resident_probe") {
 		arm_pg_sequence_facade_test_poison(

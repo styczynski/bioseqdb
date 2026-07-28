@@ -266,7 +266,7 @@ void* seq_subscript_handler(
     [[bioseq_sql::param({
         .sql_type = bioseq::sql::pg::internal,
     })]]
-    std::optional<Datum> input)
+    std::optional<bioseq::pg_utils::subscript_handler_context> input)
 {
     static_cast<void>(input);
     static const SubscriptRoutines routines = {

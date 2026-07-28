@@ -28,10 +28,6 @@ import bioseq.storage.manager;
 import bioseq.scheduler.supervisor_pg;
 import bioseq.column.planner_hook;        // DOC0322 §9.4 — exported bioseq_planner_init
 import bioseq.table.batch_sort_scan;      // exported bioseq_batch_sort_init (sequence ORDER BY)
-#if BIOSEQ_EXTERNAL_PG
-import bioseq.pg.external.relation;        // DOC0372 — bioseq_external_tableam_init
-import bioseq.pg.external.scan;            // DOC0372 — bioseq_external_scan_init
-#endif
 
 /*
  * Install the extension's table access method and planner/executor hooks.
@@ -52,15 +48,6 @@ bioseq_init()
 	// :custom_scan and imported directly here so the bioseq.table aggregate
 	// does not need to re-export the heavy custom scan partition on GCC.
 	bioseq_customscan_init();
-#if BIOSEQ_EXTERNAL_PG
-	/* DOC0372 — external logical relations. Register the external table access
-	 * method's reloption kind and the external CustomScan (methods + path
-	 * builder slot). Gated by BIOSEQ_EXTERNAL_PG, which is defined only when the
-	 * provider stack is compiled into the extension; without it the always-owned
-	 * path-builder slot stays null and the columnar hook falls through. */
-	bioseq_external_tableam_init();
-	bioseq_external_scan_init();
-#endif
 	bioseq_planner_init();
 	/* Outer custom scan that sorts sequences for `ORDER BY <bioseq.seq>`,
 	 * replacing PostgreSQL's own Sort via a create_upper_paths_hook. */

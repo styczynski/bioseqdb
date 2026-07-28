@@ -1225,6 +1225,25 @@ inline void run_fmgr_renderer_contract_tests() {
                 && program.entities.front().result.form
                     == routine_result_form::void_,
             "procedure void result reconciles without a RETURNS clause");
+        normalized_entity normalized{
+            .source = program.entities.front(),
+            .stable_identity = "sql:procedure:$extension.probe(integer)",
+            .installed_identity = "sql:procedure:public.probe(integer)",
+        };
+        const sql_graph graph{.extension_schema = "public"};
+        const std::string rendered =
+            detail::render_entity_statement(normalized, graph, {});
+        require(
+            rendered.contains("PROCEDURE probe(value integer)")
+                && rendered.contains("\nSECURITY INVOKER")
+                && !rendered.contains("\nVOLATILE")
+                && !rendered.contains("\nIMMUTABLE")
+                && !rendered.contains("\nPARALLEL")
+                && !rendered.contains("\nSTRICT")
+                && !rendered.contains("\nCOST")
+                && !rendered.contains("\nROWS")
+                && !rendered.contains("\nSUPPORT"),
+            "procedure rendering omits function-only attributes");
     }
     {
         fmgr_contract_test_detail::owner_pair owners =
@@ -2500,6 +2519,45 @@ inline void run_fmgr_renderer_contract_tests() {
                    "(lock_fallback_classifications:bigint,"
                    "missing_relation_observations:bigint)",
         "result-row converter provenance is exact");
+
+    sql_graph subscript_graph;
+    normalized_entity subscript_handler =
+        fmgr_contract_test_detail::routine(
+            "sql:function:bioseq.seq_subscript_handler(internal)",
+            "bioseq::pg_types::sql_routines::seq_subscript_handler",
+            "seq_subscript_handler",
+            {
+                routine_parameter{
+                    .name = "input",
+                    .cpp_type =
+                        "std::optional<bioseq::pg_utils::"
+                        "subscript_handler_context>",
+                    .sql_type = "internal",
+                },
+            },
+            "void*",
+            "internal");
+    subscript_handler.source.source_module =
+        "bioseq.types.pg_compact_sequence:subscript";
+    subscript_handler.source.schema = "bioseq";
+    subscript_graph.entities = {std::move(subscript_handler)};
+    const std::vector<rendered_fmgr_entrypoint_module>
+        subscript_modules =
+            render_fmgr_entrypoint_modules(subscript_graph);
+    require(
+        subscript_modules.size() == 1
+            && subscript_modules.front().content.contains(
+                "sql_argument<std::optional<bioseq::pg_utils::"
+                "subscript_handler_context>>(fcinfo, 0)")
+            && subscript_modules.front().wrappers.size() == 1
+            && subscript_modules.front()
+                .wrappers.front()
+                .overloads.front()
+                .argument_converter_keys
+                == std::vector<std::string>{
+                    "argument.subscript_handler.context.nullable"},
+        "subscripting handlers retain the catalog INTERNAL argument while "
+        "using their zero-argument runtime context marker");
 
     const rendered_sql_artifact row_sql =
         render_sql_graph(row_graph);

@@ -165,6 +165,7 @@ add_custom_command(
   COMMAND "${BIOSEQ_CODEGEN_EXECUTABLE}" self_test external
   COMMAND "${BIOSEQ_CODEGEN_EXECUTABLE}"
     external generate
+    --generator-binary "${BIOSEQ_CODEGEN_EXECUTABLE}"
     --source-root "${_bioseq_external_source_root}"
     --output-root "${BIOSEQ_EXTERNAL_GENERATED_ROOT}"
     --clang-binary "${BIOSEQ_CODEGEN_CLANG_BINARY}"

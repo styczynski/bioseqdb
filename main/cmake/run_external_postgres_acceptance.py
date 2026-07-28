@@ -73,7 +73,7 @@ EXPECTED_EXTERNAL_TOP_LEVEL_IDENTITIES = frozenset({
     ),
     (
         "sql:revoke:function:"
-        "bioseq.bioseq_external_handler(internal):all:public:ordinary"
+        "bioseq.bioseq_external_handler(internal):execute:public:ordinary"
     ),
 })
 

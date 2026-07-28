@@ -75,6 +75,8 @@ struct sql_boundary_access final {
 
 struct table_am_handler_context final {};
 
+struct subscript_handler_context final {};
+
 class sql_subtransaction final {
 public:
     [[nodiscard]] static sql_subtransaction begin();
@@ -768,6 +770,7 @@ static_assert(!std::is_copy_assignable_v<sql_call_context>);
 static_assert(!std::is_move_constructible_v<sql_call_context>);
 static_assert(!std::is_move_assignable_v<sql_call_context>);
 static_assert(std::is_empty_v<table_am_handler_context>);
+static_assert(std::is_empty_v<subscript_handler_context>);
 static_assert(!std::is_copy_constructible_v<sql_subtransaction>);
 static_assert(!std::is_copy_assignable_v<sql_subtransaction>);
 static_assert(!std::is_move_constructible_v<sql_subtransaction>);

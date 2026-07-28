@@ -2926,11 +2926,12 @@ bioseq_scan_analyze_next_block(TableScanDesc scan,
 {
 	/*
 	 * Our access method is not pages based, i.e. tuples are not confined
-	 * to pages boundaries. So not much to do here. We return true anyway
-	 * so acquire_sample_rows() in analyze.c would call our
-	 * bioseq_scan_analyze_next_tuple() callback.
+	 * to page boundaries. Present the relation as one logical block so
+	 * acquire_sample_rows() scans it once, then terminates.
 	 */
-	return true;
+	const auto bioseq_scan =
+		reinterpret_cast<BioseqColumnScanDesc>(scan);
+	return bioseq_scan->cs_readState == nullptr;
 }
 
 

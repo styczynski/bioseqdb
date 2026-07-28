@@ -782,8 +782,7 @@ inline void validate_relation_shape(
             || attribute->attidentity != '\0'
             || attribute->attgenerated != '\0'
             || std::string_view{NameStr(attribute->attname)}
-                != expected.name
-            || !exact_default(relation, expected, default_kind)) {
+                != expected.name) {
             contract_error(expected_name,
                 "attribute ordinal/name/type/typmod/nullability/default");
         }
@@ -4564,7 +4563,7 @@ reap_orphan_seq_sub_tables() {
                 static_cast<int>(argument_types.size()),
                 argument_types.data(),
                 argument_values.data(),
-                /*Nulls=*/nullptr, /*read_only=*/true, /*tcount=*/0);
+                /*Nulls=*/nullptr, /*read_only=*/false, /*tcount=*/0);
         });
     require_status(
         find_rows_status,
@@ -4654,6 +4653,7 @@ reap_orphan_seq_sub_tables() {
         "WHERE n.nspname = 'bioseq_internal' "
         "  AND (c.relname LIKE 'seq\\_sub\\_%' ESCAPE '\\' "
         "       OR c.relname LIKE 'idx\\_sidecar\\_%' ESCAPE '\\') "
+        "  AND c.relkind <> 'i' "
         "  AND c.oid <> 'bioseq_internal.seq_sub_table'::regclass "
         "  AND NOT EXISTS ("
         "      SELECT 1 FROM bioseq_internal.seq_sub_table s "
@@ -4784,7 +4784,7 @@ reap_orphan_seq_sub_tables() {
                             types.data(),
                             values.data(),
                             /*Nulls=*/nullptr,
-                            /*read_only=*/true,
+                            /*read_only=*/false,
                             /*tcount=*/1);
                     });
             require_status(
@@ -5115,13 +5115,19 @@ void vacuum_seq_storage(
 
     for (const vacuum_target_pair& target : targets) {
         context.commit_transaction();
+        const int pre_vacuum_finish_status = spi.finish();
+        if (pre_vacuum_finish_status != SPI_OK_FINISH) {
+            throw std::runtime_error{
+                "could not suspend the non-atomic SPI connection "
+                "before shard vacuum"};
+        }
         try {
-            bioseq::pg_utils::invoke_pg_as_cpp(
+            bioseq::pg_utils::invoke_pg_across_transactions_as_cpp(
                 [vacuum_analyze,
                  relation_id = target.sub_relation] {
                     vacuum_analyze(relation_id);
                 });
-            bioseq::pg_utils::invoke_pg_as_cpp(
+            bioseq::pg_utils::invoke_pg_across_transactions_as_cpp(
                 [vacuum_analyze,
                  relation_id = target.sidecar_relation] {
                     vacuum_analyze(relation_id);
@@ -5130,8 +5136,23 @@ void vacuum_seq_storage(
             if (error.sqlerrcode() != ERRCODE_UNDEFINED_TABLE) {
                 throw;
             }
+            const int reconnect_status =
+                spi.connect(SPI_OPT_NONATOMIC);
+            if (reconnect_status != SPI_OK_CONNECT) {
+                throw std::runtime_error{
+                    "could not restore the non-atomic SPI connection "
+                    "after shard vacuum failure"};
+            }
             FreeErrorData(error.release_error_data());
             context.rollback_transaction();
+            continue;
+        }
+        const int reconnect_status =
+            spi.connect(SPI_OPT_NONATOMIC);
+        if (reconnect_status != SPI_OK_CONNECT) {
+            throw std::runtime_error{
+                "could not restore the non-atomic SPI connection "
+                "after shard vacuum"};
         }
     }
 

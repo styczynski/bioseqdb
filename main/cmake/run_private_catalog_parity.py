@@ -60,7 +60,7 @@ _EXPECTED_DELTA_SEMANTIC_SHA256 = (
     "1222893245e8a6be481e723b40464dfb37c2d61ee0e92777119f3a45bdad826b"
 )
 _EXPECTED_GUC_LEDGER_SHA256 = (
-    "50570664230f03d55d9b22ec0f523c89271292f06e9b60f4e1080a8c6a83e2a9"
+    "684823cdde26f2a8647cdaa1e8332ec74ea56c2f11a4e0970254218ab8bb88df"
 )
 _UNUSUAL_SCHEMA = "doc0388_relocated_7f3"
 _RELOCATION_PROBE_SCHEMA = "doc0388_relocation_probe_4c9"
@@ -262,10 +262,18 @@ def _regular_file(value: str | Path, label: str) -> Path:
 
 
 def _executable(value: str | Path, label: str) -> Path:
-    path = _regular_file(value, label)
-    if not os.access(path, os.X_OK):
-        raise CatalogParityError(f"{label} is not executable: {path}")
-    return path
+    path = Path(value).expanduser()
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.stat()
+    except OSError as error:
+        raise CatalogParityError(f"{label} is missing: {path}") from error
+    if not stat.S_ISREG(metadata.st_mode):
+        raise CatalogParityError(
+            f"{label} must resolve to a regular file: {path}")
+    if not os.access(resolved, os.X_OK):
+        raise CatalogParityError(f"{label} is not executable: {resolved}")
+    return resolved
 
 
 def _real_directory(

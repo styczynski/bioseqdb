@@ -180,11 +180,6 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
                             Snapshot snapshot,
                             MemoryContext payload_mctx)
 {
-	if (snapshot == nullptr) {
-		ereport(ERROR,
-			(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-			 errmsg("bioseq sequence hydration requires an explicit snapshot")));
-	}
 	if (cache == nullptr || amc.seq_attnos.empty()) {
 		return;
 	}
@@ -196,6 +191,11 @@ hydrate_seq_columns_in_slot(Relation main_rel, TupleTableSlot* slot,
 		auto* hdr = reinterpret_cast<const bioseq::pg_types::seq*>(
 			DatumGetPointer(slot->tts_values[idx]));
 		if (!bioseq::storage::is_locator_stub(hdr)) continue;
+		if (snapshot == nullptr) {
+			ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("bioseq sequence hydration requires an explicit snapshot")));
+		}
 		const auto loc_decoded = bioseq::storage::decode_locator_from_stub(hdr);
 		bioseq::storage::validate_locator_flat_materialization_length(loc_decoded);
 		/* Two bits per letter is the smallest possible packed payload.  This

@@ -534,12 +534,12 @@ $legacy$;
   REQUIRE(table_options(ctx, kLegacyTable) == changed);
   require_hook_snapshot(ctx, 1, kLegacyTable, changed);
 
-  const sql_error_info legacy_reset =
-      sql_error(ctx, fmt::format("SELECT pg_temp.doc0388_legacy_alter_reset("
-                                 "  '{}'::regclass);",
-                                 kLegacyTable));
-  REQUIRE(legacy_reset.sqlstate == "22023");
-  REQUIRE(legacy_reset.contains("unrecognized parameter"));
+  // PostgreSQL rejects SET for an unknown namespaced reloption, but RESET of
+  // that absent option is a valid no-op.
+  exec_sqlf(ctx,
+            "SELECT pg_temp.doc0388_legacy_alter_reset("
+            "  '{}'::regclass);",
+            kLegacyTable);
   REQUIRE(table_options(ctx, kLegacyTable) == changed);
   require_hook_snapshot(ctx, 1, kLegacyTable, changed);
 

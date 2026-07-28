@@ -388,6 +388,12 @@ vector_tuple_slot_ops()
 
 }  // namespace
 
+export [[nodiscard]] bool
+IsVectorTupleTableSlot(const TupleTableSlot* slot) noexcept
+{
+	return slot != nullptr && slot->tts_ops == vector_tuple_slot_ops();
+}
+
 /*
  * CreateVectorTupleTableSlot allocates a TupleTableSlot whose body is a
  * VectorTupleTableSlot. One VectorColumn is created per attribute; columns

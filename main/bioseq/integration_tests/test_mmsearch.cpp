@@ -12,9 +12,8 @@
 //     `kmer_size`) execute without erroring out.
 //   * Per-row projection helpers (`bioseq.cigar`, `bioseq.target_start`, …)
 //     produce well-shaped values: integer ranges in order, valid CIGAR text.
-//   * SELECTs without an mmsearch qual on a `USING bioseq` table emit zero
-//     rows. This is the documented "tuples only flow under mmsearch"
-//     constraint from SPEC_HOW_TO_CONNECT_ALIGNER_3 §13.1.
+//   * SELECTs without an mmsearch qual on a `USING bioseq` table preserve the
+//     ordinary scan rows; mmsearch batching only engages for an owned qual.
 
 #include "common_tests_integration.h"
 #include "headers/pg_build_config.h"
@@ -4032,16 +4031,16 @@ TEST_CASE("GPU target outcomes count logical rows with identical sequence conten
         plan, "backend_declines=0 backend_fallbacks=0"));
 }
 
-TEST_CASE("USING bioseq table without mmsearch qual emits zero rows",
+TEST_CASE("USING bioseq table without mmsearch qual scans all rows",
           "[mmsearch][columnar][no_qual]") {
     auto ctx = fresh_context({kHoe});
     seed_hoe_fixture(ctx, kHoe);
 
-    // Pinned per SPEC_HOW_TO_CONNECT_ALIGNER_3 §13.1: the custom scan only
-    // buffers tuples when SeqMmsearchOpExpr is part of the scan qual list.
+    // Without an executor-owned mmsearch qualifier, BioseqScan follows its
+    // ordinary projection path and preserves every seeded row.
     REQUIRE(query_scalar_int(
                 ctx, fmt::format("SELECT COUNT(*)::bigint FROM {};", kHoe)) ==
-            0);
+            5);
 }
 
 TEST_CASE(

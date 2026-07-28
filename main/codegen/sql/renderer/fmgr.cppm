@@ -531,6 +531,15 @@ struct cpp_template_binding final {
                 "bioseq::pg_utils::table_am_handler_context",
             .key = "argument.table_am_handler.context",
         };
+    } else if (cpp_leaf(normalized.canonical)
+                   == "subscript_handler_context"
+               && !result
+               && sql_type_is(sql_type, {"internal"})) {
+        binding = {
+            .canonical_cpp_type =
+                "bioseq::pg_utils::subscript_handler_context",
+            .key = "argument.subscript_handler.context",
+        };
     } else if ((cpp_leaf(normalized.canonical)
                     == "TableAmRoutine*"
                 || cpp_leaf(normalized.canonical)
@@ -560,6 +569,15 @@ struct cpp_template_binding final {
         binding = {
             .canonical_cpp_type = "bioseq::pg_types::letter",
             .key = direction + "bioseq.letter.by_value",
+        };
+    } else if (cpp_leaf(normalized.canonical)
+                   == "letter_typmod_input"
+               && !result
+               && sql_type_is(sql_type, {"bioseq.letter"})) {
+        binding = {
+            .canonical_cpp_type =
+                "bioseq::pg_types::letter_typmod_input",
+            .key = "argument.bioseq.letter.raw_typmod_input",
         };
     } else if (normalized.canonical == "Datum"
                || normalized.canonical == "datum") {

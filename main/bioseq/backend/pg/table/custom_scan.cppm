@@ -14375,7 +14375,11 @@ BioseqBatchJoinSetJoinPathlistHook(
 		return;
 	}
 
-	const BioseqStubOids& oids = get_cached_stub_oids();
+	const BioseqStubOids* stub_oids = try_get_cached_stub_oids();
+	if (stub_oids == nullptr) {
+		return;
+	}
+	const BioseqStubOids& oids = *stub_oids;
 	std::size_t semantic_calls = 0;
 	RestrictInfo* restriction = nullptr;
 	for (RestrictInfo* candidate : PList<RestrictInfo>(extra->restrictlist)) {
@@ -16821,8 +16825,8 @@ CostBioseqColumnScan(PlannerInfo *root, RelOptInfo *rel, Oid relationId,
 	stripesToRead = std::max(stripesToRead, 1.0);
 
 	path->rows = rel->tuples;
-	path->startup_cost = 0;
-	path->total_cost = stripesToRead *
+	path->startup_cost = enable_seqscan ? 0 : disable_cost;
+	path->total_cost = path->startup_cost + stripesToRead *
 					   BioseqColumnPerStripeScanCost(rel, relationId, numberOfColumnsRead);
 }
 
@@ -27743,8 +27747,127 @@ struct MmsearchRowEvaluation {
 	return result;
 }
 
-static TupleTableSlot *
-Inner_CustomExecScan(BioseqScanState *bioseqScanState,
+	/*
+	 * VectorAgg consumes one VectorColumn pointer per projected attribute.
+	 * The ordinary scan path extracts scalar rows, so build a projected
+	 * vector batch explicitly when the planner attached VectorAgg.
+	 */
+	static TupleTableSlot *
+	NextVectorizedAggregateBatch(BioseqScanState *bioseqScanState,
+				   ExecScanAccessMtd accessMtd,
+				   ExecScanRecheckMtd recheckMtd)
+	{
+		ScanState *node = reinterpret_cast<ScanState *>(
+			&bioseqScanState->custom_scanstate.ss);
+		BioseqScanRuntime& runtime = bioseq_runtime(bioseqScanState);
+		ExprContext *econtext = node->ps.ps_ExprContext;
+		ExprState *qual = node->ps.qual;
+		TupleTableSlot *result_slot =
+			bioseqScanState->vectorization.resultVectorSlot;
+		auto *result_vector =
+			reinterpret_cast<VectorTupleTableSlot *>(result_slot);
+		TupleTableSlot *scalar_scan_slot = node->ss_ScanTupleSlot;
+		const bool projects_attributes =
+			result_slot->tts_tupleDescriptor->natts != 0;
+		ProjectionInfo *projection = projects_attributes
+			? ExecBuildProjectionInfo(
+				runtime.newtargetlist,
+				econtext,
+				node->ps.ps_ResultTupleSlot,
+				&node->ps,
+				scalar_scan_slot->tts_tupleDescriptor)
+			: nullptr;
+
+		for (;;)
+		{
+			TupleTableSlot *slot =
+				ExecScanFetch(node, accessMtd, recheckMtd);
+			if (TupIsNull(slot))
+			{
+				runtime.source_exhausted = true;
+				return ExecClearTuple(result_slot);
+			}
+			if (!IsVectorTupleTableSlot(slot))
+			{
+				ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("VectorAgg input is not a vector tuple slot")));
+			}
+
+			auto *scan_vector =
+				reinterpret_cast<VectorTupleTableSlot *>(slot);
+			if (bioseqScanState->vectorization.vectorizedQualList != NULL)
+			{
+				if (bioseqScanState->vectorization.constructedVectorizedQualList
+					== NULL)
+				{
+					bioseqScanState->vectorization.constructedVectorizedQualList =
+						ConstructVectorizedQualList(
+							slot,
+							bioseqScanState->vectorization.vectorizedQualList);
+				}
+				bool *result_qual = ExecuteVectorizedQual(
+					slot,
+					bioseqScanState->vectorization.constructedVectorizedQualList,
+					AND_EXPR,
+					econtext);
+				memcpy(
+					scan_vector->keep,
+					result_qual,
+					scan_vector->dimension * sizeof(bool));
+			}
+
+			std::uint32_t result_dimension = 0;
+			for (std::uint32_t row_index = 0;
+				 row_index < scan_vector->dimension;
+				 ++row_index)
+			{
+				if (!scan_vector->keep[row_index])
+					continue;
+
+				ResetExprContext(econtext);
+				ExecClearTuple(scalar_scan_slot);
+				ExtractTupleFromVectorSlot(
+					scalar_scan_slot,
+					scan_vector,
+					static_cast<std::int32_t>(row_index),
+					bioseqScanState->vectorization.attrNeededList);
+				scalar_scan_slot->tts_tid =
+					row_number_to_tid(scan_vector->rowNumber[row_index]);
+				econtext->ecxt_scantuple = scalar_scan_slot;
+
+				if (qual != nullptr && !ExecQual(qual, econtext))
+				{
+					InstrCountFiltered1(node, 1);
+					continue;
+				}
+
+				if (projects_attributes)
+				{
+					TupleTableSlot *projected = ExecProject(projection);
+					WriteTupleToVectorSlot(
+						projected,
+						result_vector,
+						static_cast<std::int32_t>(result_dimension));
+				}
+				++result_dimension;
+			}
+
+			bioseqScanState->vectorization.vectorPendingRowNumber = 0;
+			bioseqScanState->vectorization.vectorRowIndex =
+				scan_vector->dimension;
+			if (result_dimension == 0)
+				continue;
+
+			result_vector->dimension = result_dimension;
+			memset(result_vector->keep, true, result_dimension);
+			ExecStoreVirtualTuple(result_slot);
+			return result_slot;
+		}
+	}
+
+	static TupleTableSlot *
+	Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 			   ExecScanAccessMtd accessMtd,
 			   ExecScanRecheckMtd recheckMtd)
 {
@@ -27761,6 +27884,8 @@ Inner_CustomExecScan(BioseqScanState *bioseqScanState,
 	if (bioseqScanState->vectorization.vectorizationAggregate)
 	{
 		ExecClearTuple(bioseqScanState->vectorization.resultVectorSlot);
+		return NextVectorizedAggregateBatch(
+			bioseqScanState, accessMtd, recheckMtd);
 	}
 
 	/*

@@ -579,9 +579,11 @@ ExecuteVectorizedQual(TupleTableSlot* slot, List* vectorized_qual_list,
 		{
 			const std::uint32_t n = vector_slot->dimension;
 			if (bool_type == AND_EXPR)
-				bioseq::column::vec::mask_and({combined_result, n}, {qual_result, n});
+				bioseq::column::vec::mask_and(
+					combined_result, qual_result, n);
 			else if (bool_type == OR_EXPR)
-				bioseq::column::vec::mask_or({combined_result, n}, {qual_result, n});
+				bioseq::column::vec::mask_or(
+					combined_result, qual_result, n);
 		}
 	}
 

@@ -23,7 +23,6 @@ module;
 
 #include <concepts>
 #include <cstdint>
-#include <span>
 #include <utility>
 
 export module bioseq.column.vector_compare;
@@ -99,8 +98,14 @@ void compare_column(const ValueT* vp, const bool* np, std::uint32_t n,
     }
 }
 
-void mask_and(std::span<bool> lhs, std::span<const bool> rhs) noexcept;
+void mask_and(
+    bool* lhs,
+    const bool* rhs,
+    std::uint32_t lane_count) noexcept;
 
-void mask_or(std::span<bool> lhs, std::span<const bool> rhs) noexcept;
+void mask_or(
+    bool* lhs,
+    const bool* rhs,
+    std::uint32_t lane_count) noexcept;
 
 }  // namespace bioseq::column::vec
