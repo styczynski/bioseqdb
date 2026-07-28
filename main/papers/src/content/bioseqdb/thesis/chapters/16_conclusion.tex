@@ -255,6 +255,15 @@ steady-state median latency are not interchangeable.  This thesis preserves
 those qualifications and treats the newest clean configuration-matched
 receipts as the strongest performance evidence.
 
+The fresh full benchmark run of 28 July 2026 produced
+\texttt{report\_193.json}, but it is non-qualifying failure evidence rather
+than a current performance result.  The repository was dirty,
+\texttt{history\_eligible=false}, and raw evidence stopped incomplete at 123
+records, with 40 regressions, 194 rule violations and 84 sanity warnings.
+Strict Vulkan minimizer admission fell short by 8,210,340 bytes, approximately
+\(7.83\ \mathrm{MiB}\).  This incomplete run does not replace Report~192 or
+the qualified historical tables in the preceding chapters.
+
 The fourth limitation is operational hardening.  The IO chapter identifies
 strict-alphabet configuration that is exposed but not connected to the active
 reader, gzip paths that do not yet compare every accumulated integrity value
