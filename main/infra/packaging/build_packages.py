@@ -356,7 +356,6 @@ def resolve_omnipackage(
     vendored_root = source_dir.parent / "omnipackage-rs-master"
     manifest = vendored_root / "Cargo.toml"
     lockfile = vendored_root / "Cargo.lock"
-    vendored = vendored_root / "target" / "release" / "omnipackage"
     if not manifest.is_file() or not lockfile.is_file():
         raise PackageBuildError(
             f"vendored OmniPackage source or lockfile is missing under {vendored_root}"
@@ -373,13 +372,30 @@ def resolve_omnipackage(
     home.mkdir(parents=True, exist_ok=True)
     cargo_home = Path(build_environment.get("CARGO_HOME", str(home / ".cargo")))
     rustup_home = Path(build_environment.get("RUSTUP_HOME", str(home / ".rustup")))
-    if not cargo_home.is_absolute() or not rustup_home.is_absolute():
-        raise PackageBuildError("CARGO_HOME and RUSTUP_HOME must be absolute")
+    cache_root = source_dir.parent
+    if cache_root.name.startswith("source-"):
+        cache_root = cache_root.parent
+    target_dir = Path(
+        build_environment.get(
+            "BIOSEQ_OMNIPACKAGE_TARGET_DIR",
+            str(cache_root / "caches" / "omnipackage-target"),
+        )
+    )
+    if (
+        not cargo_home.is_absolute()
+        or not rustup_home.is_absolute()
+        or not target_dir.is_absolute()
+    ):
+        raise PackageBuildError(
+            "CARGO_HOME, RUSTUP_HOME, and the OmniPackage target directory must be absolute"
+        )
+    vendored = target_dir / "release" / "omnipackage"
     build_environment.update(
         {
             "HOME": str(home),
             "CARGO_HOME": str(cargo_home),
             "RUSTUP_HOME": str(rustup_home),
+            "CARGO_TARGET_DIR": str(target_dir),
             "PATH": f"{cargo_home / 'bin'}:{build_environment.get('PATH', '')}",
         }
     )

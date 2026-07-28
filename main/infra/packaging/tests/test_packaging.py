@@ -165,7 +165,7 @@ class OmnipackageAndValidationTests(unittest.TestCase):
 
             def fake_run(command, *, environment, cwd=None):
                 calls.append((command, environment, cwd))
-                output = vendored / "target" / "release" / "omnipackage"
+                output = Path(environment["CARGO_TARGET_DIR"]) / "release" / "omnipackage"
                 output.parent.mkdir(parents=True)
                 output.write_text("#!/bin/sh\n")
                 output.chmod(0o755)
@@ -178,7 +178,9 @@ class OmnipackageAndValidationTests(unittest.TestCase):
                     source,
                     environment={"HOME": str(root), "PATH": "/usr/bin", "GPG_PRIVATE_KEY": "nope"},
                 )
-            self.assertEqual(resolved, (vendored / "target/release/omnipackage").resolve())
+            self.assertEqual(
+                resolved, (root / "caches/omnipackage-target/release/omnipackage").resolve()
+            )
             self.assertEqual(calls[0][0], ["/usr/bin/cargo", "build", "--release", "--locked"])
             self.assertEqual(calls[0][2], vendored)
             self.assertNotIn("GPG_PRIVATE_KEY", calls[0][1])
