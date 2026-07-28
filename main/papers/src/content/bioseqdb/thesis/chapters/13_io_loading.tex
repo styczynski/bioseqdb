@@ -112,7 +112,8 @@ decided from the file's magic bytes.
   \draw[arr] (flush) -- (index);
 
   \draw[arr, dashed, color=orange!75!black]
-      (chunks.south) to[bend left=25] node[below,align=center]
+      (chunks.south) to[bend left=25]
+      node[pos=0.5,above=1pt,align=center,fill=white,inner sep=1pt]
       {default: direct\\single-backend call} (seqwriter.south);
 \end{tikzpicture}
 \caption{The BioSeqDB loading path. The reusable I/O layer ends at native
@@ -189,7 +190,7 @@ recognized format extension.
 The PostgreSQL loader and its decompressed-prefix sampler use
 \texttt{stream\_sequences\_file} and the same source-selection helper. For a
 plain input this helper first attempts
-\texttt{mmap\_source::try\_open\_with\_magic}. A mapped input can be presented
+\texttt{mmap\_source::\allowbreak try\_open\_\allowbreak with\_magic}. A mapped input can be presented
 directly to the parser, eliminating slab refills and copies. If mapping is
 unavailable or outside its configured size limit, a
 \texttt{posix\_read\_source} retries \texttt{EINTR} and supplies sequential
@@ -652,7 +653,7 @@ flush locators, advance visibility, optionally build persistent table indexes\\
 \bottomrule
 \end{tabular}
 \caption{Why loading into BioSeqDB requires more than embedding a standalone
-FASTA/FASTQ parser.}
+\mbox{FASTA/FASTQ} parser.}
 \label{tab:io-minimap2-comparison}
 \end{table}
 
