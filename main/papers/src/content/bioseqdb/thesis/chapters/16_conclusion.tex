@@ -7,7 +7,7 @@ a database operation without reducing either side of the combination to a
 thin wrapper?  The resulting BioSeqDB system shows that the answer is
 qualified but affirmative.  PostgreSQL can own compact biological sequences,
 relational metadata, persistent sequence indexes, and the lifecycle of an
-alignment query.  The alignment engine can retain a recognisable
+alignment query.  The alignment engine can retain a recognizable
 seed--chain--extend structure while operating on database-backed and lazily
 composed sequence values.  The planner can replace a scalar-looking SQL
 predicate with a batch-oriented custom scan.  CPU vector units and Vulkan
@@ -32,7 +32,7 @@ The system built around these contracts has five main layers:
   \item The sequence layer represents packed, fragmented,
   PostgreSQL-backed, and lazy values through a common alphabet-aware access
   model.  Slicing, concatenation, reversal, letter extraction, and explicit
-  materialisation are expressed without requiring every consumer to accept a
+  materialization are expressed without requiring every consumer to accept a
   byte string.
   \item The alignment layer implements a minimap2-derived pipeline.  It
   extracts minimizers, finds seed hits, chains anchors, constructs regions,
@@ -48,7 +48,7 @@ The system built around these contracts has five main layers:
   turns alignment expressions into custom paths, plans, and scans.
   \item The boundary-generation layer derives SQL installation objects,
   fmgr entrypoints, row codecs, GUC bindings, catalog handles, and validation
-  ledgers from structurally analysed C++ sources.
+  ledgers from structurally analyzed C++ sources.
 \end{enumerate}
 
 Together these layers are the principal contribution.  Any one kernel could
@@ -58,11 +58,12 @@ complete query.
 
 \section{From the original pipeline to the final architecture}
 
-The starting point was minimap2's mature long-read mapper.  Its core is a
+The starting point was minimap2's mature long-read mapper
+\cite{minimap2_paper}.  Its core is a
 highly tuned imperative C pipeline over ASCII query strings, packed minimizer
 records, an in-memory or \texttt{.mmi} reference index, scalar chaining, and
 KSW2 extension.  Work is distributed over CPU workers.  Allocators and option
-branches are organised around a standalone process.
+branches are organized around a standalone process.
 
 BioSeqDB retained the underlying algorithmic decomposition because it is a
 good decomposition.  It did not retain the assumption that all data starts as
@@ -70,6 +71,12 @@ an ASCII buffer or that one process owns the whole reference index.  It also
 did not reproduce every minimap2 operating mode.  The implemented focus is
 the sequence-search path used by the extension, not a byte-identical clone of
 pairing, spliced alignment, rescue, and every command-line preset.
+
+Table~\ref{tab:conclusion-transformation} summarizes the retained decomposition
+and the changes made at each boundary.  Its extension and filtering rows refer
+to Block Aligner~\cite{block_aligner_paper},
+SneakySnake~\cite{sneakysnake_paper}, and
+GateKeeper~\cite{gatekeeper_paper,gatekeeper_gpu_paper}.
 
 \begin{table}[htbp]
   \centering
@@ -122,11 +129,12 @@ pairing, spliced alignment, rescue, and every command-line preset.
   \label{tab:conclusion-transformation}
 \end{table}
 
-Several intermediate designs were valuable precisely because they failed.
+Several intermediate designs were valuable because they exposed constraints
+that shaped the final architecture.
 Naive SIMD work exposed long dependency chains and data-rearrangement costs.
 Per-query GPU submissions lost to command, fence, and allocation overhead.
 GPU chaining without a resident upstream and downstream path moved too little
-work to amortise the boundary.  A gather-heavy SneakySnake port preserved the
+work to amortize the boundary.  A gather-heavy SneakySnake port preserved the
 decision procedure but not its performance.  Loader overlap added queueing and
 copy costs to a workload with too little independent work.  Persisting every
 fragment independently increased first-query work and write pressure.
@@ -153,7 +161,7 @@ Yes, for the implemented paths, but the answer requires more than a range
 concept at a public function boundary.  Iterators need precise symbol and bit
 geometry.  Fragments need stable ownership and cross-boundary context.
 Algorithms that require contiguous ranks need an access plan that says when a
-bounded materialisation is unavoidable.  PostgreSQL slices and concatenations
+bounded materialization is unavoidable.  PostgreSQL slices and concatenations
 need lifetimes that survive planner and executor transitions.  The final
 abstraction makes these choices visible instead of converting every value
 eagerly.
@@ -199,11 +207,12 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
     Historical Report 47 recomputed resident Vulkan route &
     Coordinate case \(2.432\times\), many-gap CIGAR case \(2.493\times\) &
     Both are dirty one-sample measurements.  The coordinate case did not
-    establish exact row-set parity.  The CIGAR case proves GPU DP and traceback
-    followed by host result construction, not persisted all-GPU CIGAR. \\
-    Current authenticated persisted Shape-V5 route &
-    No accepted fresh-postmaster performance ratio &
-    Direct coordinate execution and fail-closed proof machinery exist.
+    establish exact row-set parity.  The CIGAR fixture exercised GPU dynamic
+    programming (DP) and traceback followed by host result construction.  It
+    does not demonstrate persisted all-GPU CIGAR. \\
+    Current authenticated persisted-format route (Shape V5) &
+    No accepted performance ratio after a fresh PostgreSQL postmaster start &
+    Direct coordinate execution and fail-closed attestation machinery exist.
     Persisted CIGAR is unsupported, and the evidence set does not establish an
     accepted authentic persisted all-GPU timing result. \\
     \bottomrule
@@ -211,18 +220,21 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
 \end{table}
 
 \paragraph{Can a batch mapper retain an ordinary SQL surface?}
-Yes.  The ordinary function definition provides PostgreSQL types and a
-fail-closed fallback contract.  Its cost encourages planner support to choose
-a custom path.  The custom plan carries the information required by
-\texttt{BioseqScan}.  Execution batches input rows and may produce several
-alignment rows for one input.  Injected \texttt{Const} and \texttt{Var} nodes
-allow filters, projections, and joins to observe alignment fields without
-calling an expensive scalar function independently for each row.
+Yes.  The ordinary function definition supplies PostgreSQL types and a
+fail-closed direct-call contract.  Planner support and custom-path hooks
+identify supported \texttt{mmsearch} shapes, while the ordinary function's
+high cost makes unowned scalar evaluation unattractive.  The resulting custom
+plan carries the information required by \texttt{BioseqScan}.  Execution
+batches input rows and may produce several alignment rows for one input.
+Injected \texttt{Const} and \texttt{Var} nodes allow filters, projections, and
+joins to observe alignment fields without invoking an expensive scalar
+function for each row.
 
 \paragraph{Can the surrounding system remain reliable and inspectable?}
 The implementation provides strong mechanisms, but the result is not
 uniformly complete.  Versioned storage, explicit memory admission, bounded
-PostgreSQL loading, transaction-aware persistence, custom-scan proof,
+PostgreSQL loading, transaction-aware persistence, custom-scan ownership and
+plan-shape checks,
 hardware-only accelerator qualification, and generated physical ledgers make
 important failures visible.  The chapter audits also identify places where an
 option exists but is not wired, a footer is accumulated but not validated, a
@@ -237,32 +249,26 @@ minimap2 command-line mode or every graph mapper.  Graph and de Bruijn
 approaches are included to explain alternative representations, not because
 the extension currently performs full variation-graph alignment.
 
-The second limitation is heterogeneous completeness.  Vulkan sketching, seed
-processing, chaining, filtering, and GPU DP with traceback are implemented for
-admitted recomputed resident shapes.  Their packed traceback data is decoded
-into host result and CIGAR objects.  The authenticated persisted Shape-V5
-route is currently coordinate-only.  Its direct-read and fail-closed proof
-machinery exists, but the evidence set contains no accepted fresh-postmaster
-persisted all-GPU performance result.  Persisted CIGAR is unsupported.
-Unsupported geometry must stay on a CPU-selected route or be accepted
-conservatively where the relevant algorithm permits it.
+The second limitation is heterogeneous completeness.
+Table~\ref{tab:conclusion-performance-evidence} states the evidence boundary
+for the recomputed and persisted GPU routes.  Work outside their admitted
+shapes requires a CPU route or conservative acceptance where the relevant
+filter permits it.
 
-The third limitation is evidence comparability.  Historical reports were
-produced on different code revisions and configurations.  Some reports are
-dirty snapshots.  Some GPU tests prove that every query has a correct hit but
-do not prove equality of all emitted rows.  First-dispatch latency and
-steady-state median latency are not interchangeable.  This thesis preserves
-those qualifications and treats the newest clean configuration-matched
-receipts as the strongest performance evidence.
+The third limitation is evidence comparability.  The reports summarized in
+Table~\ref{tab:conclusion-performance-evidence} differ in source revision,
+configuration, worktree state, and correctness predicate.  Their ratios
+therefore remain route-specific evidence and are not pooled into a system-wide
+speedup estimate.
 
-The fresh full benchmark run of 28 July 2026 produced
-\texttt{report\_193.json}, but it is non-qualifying failure evidence rather
-than a current performance result.  The repository was dirty,
-\texttt{history\_eligible=false}, and raw evidence stopped incomplete at 123
-records, with 40 regressions, 194 rule violations and 84 sanity warnings.
-Strict Vulkan minimizer admission fell short by 8,210,340 bytes, approximately
-\(7.83\ \mathrm{MiB}\).  This incomplete run does not replace Report~192 or
-the qualified historical tables in the preceding chapters.
+A full benchmark attempt on 28 July 2026 terminated after writing an incomplete
+\texttt{report\_193.json}.  The repository was dirty and the report was marked
+ineligible for historical comparison
+(\texttt{history\_eligible=false}).  Its raw evidence contains 123 records,
+and the incomplete summary lists 40 regressions, 194 rule violations, and 84
+sanity warnings.  The terminating strict-Vulkan sketch request was short by
+8,210,340 bytes, approximately \(7.83\ \mathrm{MiB}\).  Because the run was
+incomplete, none of its timing cells is used as current performance evidence.
 
 The fourth limitation is operational hardening.  The IO chapter identifies
 strict-alphabet configuration that is exposed but not connected to the active
@@ -273,7 +279,8 @@ plane, but generation, authentication, cancellation, and structured error
 coverage are not equally mature for every service.
 
 Finally, database integration increases the amount of correctness surface.
-PostgreSQL can abort through longjmp, the planner may rewrite expressions, a
+PostgreSQL can abort through a non-local jump
+\cite{postgresql17_cpp_extensibility}.  The planner may rewrite expressions, a
 custom scan may duplicate rows, and cached or persisted state may outlive the
 statement that created it.  Generated fmgr and SQL ownership removes a major
 source of drift, but it does not remove the need for SQL, lifecycle, and
@@ -286,20 +293,20 @@ The most valuable future work follows directly from the limitations:
 \begin{enumerate}
   \item complete the authenticated persisted-format accelerator path so that
   eligible queries can keep minimizers, occurrences, anchors, chaining,
-  windows, extension, and traceback on the device under one attested route;
+  windows, extension, and traceback on the device under one attested route.
   \item strengthen algorithm parity tests for RMQ predecessor admissibility,
   backtracking order, full emitted row sets, and all supported alphabet and
-  coordinate widths;
+  coordinate widths.
   \item finish reader integrity and strict-alphabet enforcement, then measure
   multi-record FASTQ and compressed workloads where bounded producer and
-  consumer overlap has genuine independent work;
+  consumer overlap has genuine independent work.
   \item harden standalone writer durability with an explicit temporary-file,
-  flush, synchronization, and atomic-publication protocol;
+  flush, synchronization, and atomic-publication protocol.
   \item extend external providers with generated clients, cancellation-safe
   streaming, bounded retries, credential handling, and uniform structured
-  SQL errors;
+  SQL errors.
   \item qualify the generated SQL and fmgr boundary across the intended
-  PostgreSQL, operating-system, and architecture matrix; and
+  PostgreSQL, operating-system, and architecture matrix.
   \item maintain benchmark qualifications as versioned evidence whose
   dataset, hardware, configuration, correctness predicate, and repository
   state are recorded together.
@@ -316,13 +323,11 @@ embedded in a database cannot ignore planning, transactions, row
 multiplicity, memory contexts, and schema ownership.
 
 The final system brings these concerns into one inspectable pipeline.  It
-keeps the successful algorithmic structure of minimap2, replaces process-local
-assumptions with explicit sequence and index abstractions, adds a measured
-fragment-native CPU and SIMD route, and records the historical recomputed
-resident Vulkan results with their proof boundaries.  PostgreSQL receives a
-planner-visible batch executor.  The same emphasis on explicit ownership
-extends to IO, external providers, cache coordination, and generated SQL
-boundaries.  The result is not the end of the engineering path.  It is a
-sufficiently complete platform and a sufficiently candid record of its
-intermediate results to support the next round of scientific and systems
-work.
+retains minimap2's successful algorithmic decomposition
+\cite{minimap2_paper}, replaces process-local assumptions with explicit
+sequence and index abstractions, and adds measured fragment-native CPU and SIMD
+execution plus bounded heterogeneous routes.  PostgreSQL receives a
+planner-visible batch executor.  The same ownership discipline extends to IO,
+external providers, cache coordination, and generated SQL boundaries.  The
+result is an integrated experimental platform and a candid record of
+intermediate outcomes, suitable for further scientific and systems work.

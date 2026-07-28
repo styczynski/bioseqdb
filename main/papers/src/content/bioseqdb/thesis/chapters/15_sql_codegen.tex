@@ -1,4 +1,4 @@
-% Chapter 15 draft: C-driven PostgreSQL SQL and boundary generation.
+% Chapter 15 draft: source-driven PostgreSQL SQL and boundary generation.
 
 \section{Why the SQL boundary became generated code}
 \label{sec:sql-codegen}
@@ -10,20 +10,21 @@ script and the C function-manager boundary.  PostgreSQL must know the SQL name
 and signature of every routine, while the shared library must export a C
 symbol with a matching \texttt{pg\_finfo\_*} record.  The C++ implementation
 must decode the same argument types, implement the same null policy, and
-materialize the declared result shape.  Tables, sequences, operators,
-operator classes, aggregates, access methods, configuration variables, grants,
-comments, and extension dependencies add further copies of the same facts.
+materialize the declared result shape.  Catalog objects, configuration,
+permissions, documentation, and extension dependencies add further copies of
+the same facts.
 
 In the original arrangement these facts were distributed between a
 handwritten installation script, PostgreSQL macros, C++ conversion code,
-catalog constants, GUC registration calls, tuple deformation code, and
-documentation.  Each copy could be locally reasonable and still disagree with
-another.  A function rename, for example, could change the SQL name without
-changing \texttt{prosrc}.  A new nullable parameter could be added to SQL while
-the wrapper continued to call \texttt{PG\_GETARG\_*} unconditionally.  A table
-column could move while an \texttt{Anum\_*} constant retained the former
-ordinal.  These failures are difficult to detect by reading one file because
-the defect is a relationship between files.
+catalog constants, PostgreSQL configuration-variable (GUC) registration calls,
+tuple deformation code, and documentation.  Each copy could be locally
+reasonable and still disagree with another.  A function rename, for example,
+could change the SQL name without changing \texttt{prosrc}.  A new nullable
+parameter could be added to SQL while the wrapper continued to call
+\texttt{PG\_GETARG\_*} unconditionally.  A table column could move while an
+\texttt{Anum\_*} constant retained the former ordinal.  These failures are
+difficult to detect by reading one file because the defect is a relationship
+between files.
 
 The final BioSeqDB design treats the C++ declaration as the semantic owner and
 generates the redundant PostgreSQL surface from compiler-observed facts.  This
@@ -49,8 +50,8 @@ Duplicated fact & Handwritten failure mode & Generated invariant \\
 Routine identity &
 SQL name, \texttt{prosrc}, exported C symbol, and
 \texttt{pg\_finfo\_*} diverge &
-The declaration leaf derives all three names.  The manifest and DSO ledgers
-require one owner for every installed identity. \\
+The declaration leaf derives all three names.  The manifest and dynamic shared
+object (DSO) ledgers require one owner for every installed identity. \\
 Argument contract &
 SQL type, nullability, default, or name differs from the C++ conversion path &
 The collector combines C++ type facts with typed parameter annotations and
@@ -58,7 +59,7 @@ the renderer selects a closed converter. \\
 Result shape &
 \texttt{RETURNS TABLE}, composite layout, and tuple materializer disagree &
 Generated result identities and row codecs are checked against field order,
-OID, ownership, and nullability. \\
+PostgreSQL object identifier (OID), ownership, and nullability. \\
 Catalog ordering &
 An operator, cast, view, or opclass is emitted before its prerequisite &
 Explicit and inferred edges form a dependency graph.  Compatibility order is
@@ -70,11 +71,11 @@ descriptor.  Profile parity is checked. \\
 Error handling &
 PostgreSQL \texttt{ERROR} crosses a live C++ object or an exception escapes an
 fmgr callback &
-Generated wrappers use one audited boundary, while a CFG and lifetime ledger
-must classify every reachable recoverable error site. \\
+Generated wrappers use one audited boundary, while a control-flow graph (CFG)
+and lifetime ledger must classify every reachable recoverable error site. \\
 \bottomrule
 \end{tabular}
-\caption{Failure modes addressed by C-driven SQL generation.}
+\caption{Failure modes addressed by source-driven SQL generation.}
 \label{tab:sql-codegen-drift}
 \end{table}
 
@@ -99,7 +100,8 @@ and guess which files matter.  CMake registers the source and output ownership
 of each stage.  A \emph{PREPARE} step selects commands from the configured
 compilation database, normalizes them for the linked Clang toolchain, builds
 the required named module closure, and emits an owned compilation database
-plus a PCM manifest.  Only then may the structural pass visit declarations.
+plus a precompiled-module (PCM) manifest.  Only then may the structural pass
+visit declarations.
 The exhaustive post-FINAL compiler-facts and PostgreSQL-ERROR closure is an
 explicit qualification target.  Ordinary builds retain cheaper ledger,
 determinism, static-contract, and runtime checks rather than rerunning that
@@ -122,14 +124,15 @@ entire analysis on every edit.
     {PREPARE: normalized compile database, module closure,
      content-keyed PCM and provenance manifest};
   \node[data] (ast) at (0,3.10)
-    {Clang structural index: USRs, declarations, attributes, types,
-     fields, parameters, conditions, documentation};
+    {Clang structural index: unified symbol resolution (USR) identifiers,
+     declarations, attributes, types, fields, parameters, conditions,
+     documentation};
   \node[data] (ir) at (0,1.95)
-    {typed collection and normalized IR: stable identities, signatures,
-     result rows, property provenance};
+    {typed collection and normalized intermediate representation (IR):
+     stable identities, signatures, result rows, property provenance};
   \node[data] (graph) at (0,0.80)
-    {dependency graph, SCC validation, deterministic ordering,
-     physical-ledger attachment};
+    {dependency graph, strongly connected component (SCC) validation,
+     deterministic ordering, physical-ledger attachment};
   \node[gen] (artifacts) at (0,-0.35)
     {SQL, fmgr entrypoint modules, row codecs, GUC modules,
      catalog handles, manifests and ledgers};
@@ -347,20 +350,20 @@ corrupt.  The resulting
 \texttt{prepared\_compilation\_environment} contains:
 
 \begin{itemize}
-  \item the owned compilation database and PCM manifest;
-  \item an incremental-build depfile;
-  \item absolute and relocatable compilation signatures;
-  \item relocatable hashes of the database and manifest; and
+  \item the owned compilation database and PCM manifest.
+  \item an incremental-build depfile.
+  \item absolute and relocatable compilation signatures.
+  \item relocatable hashes of the database and manifest.
   \item the complete dependency path set.
 \end{itemize}
 
 Before any structural scan, the generator calls
 \texttt{validate\_prepared\_compilation\_environment}.  Validation recomputes
 the toolchain, profile, authority, source, dependency, provenance, and PCM
-joins.  A cached BMI is therefore a performance optimization only after it has
-been proven to represent the requested source state.  This design was
-especially important during the large migration because several CMake build
-trees and both profiles could coexist.
+joins.  A cached PCM is therefore a performance optimization only after
+validation shows that it represents the requested source state.  This design
+was especially important during the large migration because several CMake
+build trees and both profiles could coexist.
 
 The structural implementation is isolated in one module implementation unit
 whose global module fragment includes Clang and LLVM headers.  The exported
@@ -435,10 +438,10 @@ order.
 The graph may contain legitimate strongly connected components, such as
 catalog objects that require shell and definition phases.  Other cycles are
 errors.  The implementation in
-\path{main/codegen/sql/graph/index.cppm} uses Tarjan's algorithm to identify
-components and then performs a lexically stable topological sort of the
-condensation graph.  Algorithm~\ref{alg:sql-codegen-order} gives the essential
-procedure.
+\path{main/codegen/sql/graph/index.cppm} uses Tarjan's algorithm
+\cite{tarjan_1972_depth_first_search} to identify components and then performs
+a lexically stable topological sort of the condensation graph.
+Algorithm~\ref{alg:sql-codegen-order} gives the essential procedure.
 
 \begin{algorithm}[htbp]
 \caption{Deterministic ordering of collected SQL entities}
@@ -537,8 +540,8 @@ For an ordinary routine, the fmgr renderer selects a converter for each SQL
 parameter, injects a call context when declared, calls the typed C++ function,
 and passes the result to \texttt{sql\_result\_to\_datum}.  Named and set-valued
 rows use a generated encoder derived from the result-row record.  Void,
-nullable, scalar, array, composite, polymorphic, record, and SRF forms have
-separate closed paths.
+nullable, scalar, array, composite, polymorphic, record, and
+set-returning-function (SRF) forms have separate closed paths.
 
 The public wrapper has global C linkage and exactly one
 \texttt{PG\_FUNCTION\_INFO\_V1} declaration.  Its body invokes the common SQL
@@ -600,12 +603,10 @@ Enum GUCs use \texttt{postgres\_enum\_registration<Enum>} and generated value
 tables.  Enumerator annotations may omit sentinel values or provide hidden
 aliases.  The generated registry calls every owner registration once and
 publishes a profile count.  Current collector and renderer contract tests
-require 76 production authorities and 77 test-index authorities.  Thirteen
-production settings carry \texttt{no\_show\_all}, yielding the 63
-\emph{visible} \texttt{bioseq.\%} settings observed by the final PostgreSQL
-proof.  These numbers describe different projections: generated authority
-inventory versus ordinary runtime visibility.  The distinction is checked
-rather than resolved by discarding either count.
+require 76 production authorities and 77 test-index authorities.  Fourteen
+registrations intentionally use \texttt{no\_show\_all}.  The final PostgreSQL
+proof separately observed 63 visible \texttt{bioseq.\%} rows.  These values
+describe different inventories and are therefore reported independently.
 
 \section{Physical order, manifests, and provenance}
 \label{sec:sql-codegen-ledgers}
@@ -654,14 +655,14 @@ These records support checks which a textual SQL diff cannot express:
 
 \begin{itemize}
   \item every \texttt{LANGUAGE C} catalog identity joins to one generated or
-  explicitly reviewed C owner;
+  explicitly reviewed C owner.
   \item every generated public symbol joins to at least one SQL identity, with
-  only the two reviewed overload groups sharing;
+  only the two reviewed overload groups sharing.
   \item every row result joins to a generated codec with the same ordered
-  types and nullability;
-  \item every catalog handle joins stable and installation-schema identities;
+  types and nullability.
+  \item every catalog handle joins stable and installation-schema identities.
   \item every GUC storage descriptor joins the selected profile and live
-  PostgreSQL registration; and
+  PostgreSQL registration.
   \item website-visible entities form an explicit subset rather than a source
   directory heuristic.
 \end{itemize}
@@ -679,19 +680,21 @@ generated ownership and rejects a missing, duplicate, or unexpected symbol.
 \subsection{Why a wrapper catch is not sufficient}
 
 PostgreSQL's recoverable \texttt{ERROR} mechanism unwinds its own error stack
-with a non-local jump.  It does not behave like a C++ exception and therefore
-does not automatically execute C++ destructors in frames it crosses.  A
-\texttt{std::string}, detoast guard, tuple owner, lock guard, or lambda capture
-which remains live at such a site can leak resources or leave state
-inconsistent.  Conversely, a C++ exception must never cross a PostgreSQL C
-callback ABI.
+with a non-local jump rather than a C++ exception
+\cite{postgresql17_cpp_extensibility}.  It therefore does not automatically
+execute C++ destructors in frames it crosses.  A \texttt{std::string}, detoast
+guard, tuple owner, lock guard, or lambda capture which remains live at such a
+site can leak resources or leave state inconsistent.  Conversely, a C++
+exception must never cross a PostgreSQL C application binary interface (ABI)
+callback.
 
 The common \texttt{invoke\_sql\_boundary} handles the outer translation.
 Within the typed lambda, PostgreSQL errors intended to cross C++ are represented
 by \texttt{PostgresErrorAsCpp}.  The boundary catches that type, a standard
 exception, or an unknown exception.  It moves or copies the diagnostic into
-POD-only state.  Only after the catch handler and all owner locals have ended
-does it call \texttt{ReThrowError} or a final \texttt{ereport(ERROR)}.
+plain-old-data (POD) state.  Only after the catch handler and all owner locals
+have ended does it call \texttt{ReThrowError} or a final
+\texttt{ereport(ERROR)}.
 The generated probe descriptor identifies the boundary tail for runtime
 fault-injection evidence.
 
@@ -709,11 +712,11 @@ sites must receive one of four classifications:
 
 \begin{description}
   \item[\texttt{bridged}] the call executes through the general
-  PostgreSQL-to-C++ error bridge;
+  PostgreSQL-to-C++ error bridge.
   \item[\texttt{specialized\_bridge}] an audited mechanism such as an SQL
-  subtransaction or call context owns the transition;
+  subtransaction or call context owns the transition.
   \item[\texttt{lifetime\_free\_direct}] no nontrivial C++ lifetime crosses
-  the direct site; or
+  the direct site.
   \item[\texttt{terminal\_after\_unwind}] the terminal PostgreSQL raise occurs
   only after relevant C++ state has been unwound.
 \end{description}
@@ -754,15 +757,15 @@ A reproducible update follows these steps:
 
 \begin{enumerate}
   \item configure exact owners, profiles, toolchain fingerprints, and expected
-  generated paths;
-  \item PREPARE the owned compile database and content-keyed PCM closure;
+  generated paths.
+  \item PREPARE the owned compile database and content-keyed PCM closure.
   \item generate support, core, and final artifacts into isolated build-tree
-  roots;
+  roots.
   \item validate SQL parsing, graph completeness, physical order, manifests,
   fmgr ownership, row codecs, and GUC parity, then run the exhaustive safety
-  ledger when performing the full qualification path;
+  ledger when performing the full qualification path.
   \item compare the proposed SQL, JSON, and \texttt{.cppm} outputs with their
-  checked counterparts and print the bounded delta; and
+  checked counterparts and print the bounded delta.
   \item only under the explicit update target, replace the approved checked
   artifacts and rerun the ordinary check path.
 \end{enumerate}
@@ -770,29 +773,28 @@ A reproducible update follows these steps:
 Generation signatures include registered source hashes, normalized compiler
 arguments, profile definitions, module and Doxygen inputs, toolchain hashes,
 and the generator executable.  Depfiles make an ordinary incremental build
-sensitive to the same closure.  Contract tests permute input discovery and
-run generation twice, requiring byte-identical output.  A clean-tree gate
-removes generated outputs and BMIs before rebuilding, so determinism is not
-inferred solely from a warm cache.
+sensitive to the same closure.  The repository retains an opt-in
+canonical/reversed/shuffled replay target and mutation tests that require
+byte-identical output.  The latest full replay exposed a lexical include-path
+spelling mismatch, so this thesis does not claim that the expensive permutation
+proof passed.  Ordinary builds instead rely on golden byte comparison,
+source/artifact seals, and inexpensive determinism contracts.
 
 The distinction between \emph{calibration} and \emph{qualification} is also
 deliberate.  The SQL-codegen benchmark framework can measure cold and no-op
-generator time, peak RSS, generated SQL/JSON/C++ sizes, affected-target compile
-times, and database runtime paths.  Runtime cases include both
+generator time, peak resident set size (RSS), generated SQL/JSON/C++ sizes,
+affected-target compile times, and database runtime paths.  Runtime cases include both
 \texttt{from\_array} arities, both \texttt{mmsearch} arities, a generated
 typed wrapper compared with an implementation-equivalent handwritten
 test-only wrapper, and generated row codecs compared with retained
 handwritten test-only codecs.  Each case checks correctness and path
 attestation before timing.
 
-A calibration report is visibly non-qualifying.  It keeps build
-qualification and baseline kind at zero.  A blocking qualification requires a
-sealed reviewed baseline, explicit numeric limits, an exact environment and
-source join, and live publication provenance.  The repository records that no
-historical Stage-0 performance artifact was captured before cutover.
-Post-cutover recovery data cannot silently claim to be that baseline.  This is
-an honest limitation: the system has a strong performance-regression protocol,
-but it does not manufacture a pre-migration speedup claim from later data.
+A calibration report is non-qualifying.  Migration qualification would require
+a reviewed pre-cutover baseline joined to an exact environment and source
+state.  No such Stage-0 artifact exists.  Post-cutover
+generated-versus-handwritten comparators can establish future regressions, but
+they cannot establish a retrospective migration speedup.
 
 \section{Migration outcome and evidence}
 \label{sec:sql-codegen-outcome}
@@ -806,14 +808,13 @@ of typed owners, while its physical order and approved compatibility choices
 remain reviewable.  Table~\ref{tab:sql-codegen-migration} summarizes the
 transition.
 
-The immediately preceding lazy-sequence implementation report records a
-centralized but still handwritten set of 64 SQL wrappers and a retained
-non-module C ABI exception bridge.  The corrective SQL-generation inventory
-then enumerated 270 target C-language routine identities.  It required all 494
-input parameters to use their C++ identifier, including 309 inputs which had
-been anonymous in the baseline.  Thus the migration was not simply a change
-in where wrapper text was printed.  It converted previously implicit
-signature and ownership facts into checked graph data.
+The lazy-sequence implementation summary recorded 64 centralized but still
+handwritten SQL wrappers and a retained non-module C ABI exception bridge.  The
+corrective SQL-generation inventory then enumerated 270 target C-language
+routine identities and required all 494 input parameters to use their C++
+identifiers, including 309 formerly anonymous inputs.  The migration therefore
+converted implicit signature and ownership facts into checked graph data
+rather than merely changing where wrapper text was printed.
 
 \begin{table}[htbp]
 \centering
@@ -851,12 +852,12 @@ Annotated storage members, initializer-derived defaults, enum tables, owner
 modules, and a generated registry. \\
 Safety &
 Wrapper conventions and local tests &
-270-owner static closure, 268 symbol/finfo closure, versioned PostgreSQL
-provenance, and runtime classification matrices. \\
+An opt-in 270-owner static-analysis target, 268-symbol/finfo ownership closure,
+versioned PostgreSQL provenance, and runtime classification matrices. \\
 \bottomrule
 \end{tabular}
 \caption{Migration from the handwritten PostgreSQL boundary to the final
-C-driven design.}
+source-driven design.}
 \label{tab:sql-codegen-migration}
 \end{table}
 
@@ -900,16 +901,12 @@ BPCHAR names, scalar/vector comparison parity, selection of
 \texttt{Custom Scan (BioseqScan)}, metadata and shard results, vacuum
 preservation, orphan reaping, and generated routine shapes.
 
-The ordinary algorithm benchmark produced 13 groups, 79 execution tuples, and
-392 populated cells in \texttt{report\_192.json}.  Its process status was
-nonzero because the framework reported eight historical performance
-regressions and three relative rules.  The preceding full
-\texttt{report\_187.json} already contained nine historical regressions and
-three relative rules.  The code-generation migration changed neither the
-algorithm benchmark configuration nor the implicated alignment and prefilter
-kernels.  Consequently this result is evidence that generation and report
-production completed, not evidence of a codegen speed regression or of a
-universal performance improvement.
+The code-generation sign-off wrote \texttt{report\_192.json} after completing
+13 benchmark groups, 79 execution tuples, and 392 populated cells.  The process
+exited nonzero because historical regression checks remained red.  Because the
+migration did not change the implicated alignment or prefilter kernels, this
+receipt shows that generation and report production completed.  It is not
+evidence for a code-generation performance effect.
 
 The ordinary end-to-end path passed generation gates, extension installation,
 and PostgreSQL restart, then stopped because strict Vulkan was unavailable on
@@ -917,9 +914,9 @@ the host.  A CPU configuration completed its one case with four populated
 cells, and every correctness check and rule passed.  These results support the
 claim that the generated boundary preserved the exercised runtime paths.  They
 do not replace the dedicated sealed-baseline qualification described above.
-The implementation report also records that independent reviewer execution
-was skipped at explicit user direction.  Its results are therefore strong
-implementation evidence, not an independent final audit.
+No independent replication of this qualification was recorded.  The results
+therefore constitute project implementation evidence rather than an
+independently reproduced audit.
 
 \section{Lessons and remaining limitations}
 \label{sec:sql-codegen-lessons}
@@ -936,30 +933,25 @@ Several limitations remain explicit:
 \begin{itemize}
   \item the annotation model is intentionally closed.  A genuinely new
   PostgreSQL feature requires a modeled entity, validation, rendering, and
-  tests rather than an arbitrary SQL escape;
+  tests rather than an arbitrary SQL escape.
   \item Clang structural collection and named-module preparation are
   substantial build-time dependencies.  Owner partitioning, depfiles, and
-  content-keyed PCM reuse control their cost but do not make it zero;
+  content-keyed PCM reuse control their cost but do not make it zero.
   \item the physical ledger preserves the current install order.  A future
   extension-upgrade system still needs version-to-version migration semantics,
-  not only a reproducible version-1 installation;
+  not only a reproducible version-1 installation.
   \item safety analysis is pinned to exact PostgreSQL source provenance.
   Moving to another major or upstream revision requires refreshing and
-  reviewing that evidence; and
-  \item no reviewed pre-cutover Stage-0 performance baseline exists.  Current
-  calibration and generated-versus-handwritten comparators can qualify future
-  regressions once an approved baseline is established, but they cannot
-  retrospectively prove a migration speedup.
+  reviewing that evidence.
 \end{itemize}
 
-Within those limits, the final system changes the PostgreSQL extension
-boundary from a collection of synchronized conventions into an executable
-contract.  A C++ declaration, its SQL identity, its fmgr wrapper, its result
-materializer, its documentation, and its safety evidence can be traced through
-stable identities.  An ordinary build checks artifact ownership,
-deterministic bytes, ledgers, and the reviewed SQL golden.  The explicit
-qualification path additionally proves the exhaustive compiler-facts and
-PostgreSQL-ERROR closure.  Together these gates let the algorithmic and
-storage components described throughout the thesis remain a single
-maintainable PostgreSQL extension rather than a set of separately versioned
-interfaces.
+Within those limits, the final system changes SQL generation from an opaque
+configure-time side effect into a compiler-audited, dependency-explicit part
+of the extension build.  Its boundaries comprise AST extraction, canonical
+IR, graph validation, fragment rendering, SQL-to-C registration, runtime
+sealing, and calibration.  An ordinary build checks golden bytes, artifact
+seals, and cross-language contracts.  The exhaustive compiler-facts and
+PostgreSQL-\texttt{ERROR} analysis remains a separate opt-in qualification
+target.  The recorded ordinary qualification does not include a fresh
+execution of that heavy proof.  The concluding chapter therefore distinguishes
+demonstrated capability from remaining qualification work.

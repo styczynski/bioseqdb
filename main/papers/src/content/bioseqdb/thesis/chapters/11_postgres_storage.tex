@@ -84,6 +84,9 @@ vector-batch slots, alignment custom scans, and sequence-specific pruning
 rules. These changes were consolidated by the refactor described in
 \texttt{DOC0322} and its implementation report \texttt{DOC0323}.
 
+Table~\ref{tab:citus-bioseq-storage} separates inherited column-store
+mechanisms from BioSeqDB's sequence-specific extensions.
+
 \begin{table}[ht]
   \centering
   \small
@@ -94,7 +97,8 @@ rules. These changes were consolidated by the refactor described in
     \textbf{Concern} & \textbf{Citus-derived mechanism} &
     \textbf{BioSeqDB-specific extension}\\
     \midrule
-    Physical bytes & Metapage, logical offsets, PostgreSQL pages, generic WAL &
+    Physical bytes & Metapage, logical offsets, PostgreSQL pages, generic
+    write-ahead logging (WAL) &
     C++ module boundary and typed physical/storage APIs\\
     Row organization & Stripe, chunk group, one value stream and one existence
     stream per column chunk & Sequence values may be locators whose payloads
@@ -102,8 +106,8 @@ rules. These changes were consolidated by the refactor described in
     Metadata & Stripe and chunk catalogs, stream offsets, compression, min/max &
     Annotated C++ catalog structs, generated SQL/tuple codecs, shard registry\\
     Reading & Projection mask, chunk pruning, decompression, row reconstruction &
-    Sequence extrema excluded from ordinary pruning; scalar and vector slots;
-    lazy sequence scanner\\
+    Sequence extrema excluded from ordinary pruning.\newline Scalar and vector
+    slots.\newline Lazy sequence scanner\\
     Execution & PostgreSQL TableAM and custom scan support &
     Alignment-aware custom scans, vector aggregates, and exact query-result
     cache coalescing\\
@@ -198,7 +202,7 @@ per-table options. The allowed ranges begin at 1,000 rows and extend to
 
 Rows are accumulated in a \texttt{ChunkData} object. Its arrays distinguish
 NULL presence from Datum values and keep one growing serialized buffer per
-column. Serialization is performed by the zero-cost
+column. Serialization is performed by the typed
 \texttt{pg\_datum} wrapper from
 \path{pg/pg_utils/datums.cppm}. The wrapper computes PostgreSQL's aligned datum
 length, zeroes alignment padding, copies pass-by-value or pass-by-reference
@@ -224,7 +228,7 @@ the streams into the reserved logical range, and records stripe, chunk-group,
 chunk, and row-mask metadata. A single value whose aligned Datum
 representation reaches 256~MiB is rejected. The writer also flushes a stripe
 before a value buffer can approach the roughly 1.024~GiB buffer bound. These
-checks concern one column chunk buffer; they are separate from the fragment
+checks concern one column chunk buffer. They are separate from the fragment
 layout used for very large sequence values.
 
 \subsection{Skip metadata and generated catalogs}
@@ -237,8 +241,8 @@ PostgreSQL predicate over the extrema and ask whether the predicate is refuted
 for that chunk.
 
 Sequence columns are deliberately excluded from this optimization. Their
-serialized values may be locator stubs, and the physical rank-stream ordering
-does not define a useful biological ordering. Treating an arbitrary minimum
+serialized values may be locator stubs, and neither locator bytes nor packed
+symbols define a biologically useful ordering. Treating an arbitrary minimum
 and maximum packed sequence as a valid range bound would be at best
 unselective and at worst misleading. Scalar metadata columns next to the
 sequence, such as a numeric length, date, or sample category, remain eligible.
@@ -301,7 +305,7 @@ manager is entered.
 
 The same read state can publish scalar tuple slots or vector slots. The vector
 slot capacity is 10,000 lanes, which matches the default chunk-group row
-count. Each projected column owns a \texttt{VectorColumn}; the slot also
+count. Each projected column owns a \texttt{VectorColumn}. The slot also
 contains a keep mask and logical row numbers. Deleted rows and predicates
 clear lanes. Residual scalar expressions can force extraction and repacking,
 but a supported vector path keeps the chunk group as a batch.
@@ -335,9 +339,11 @@ without introducing a DNA-only storage path.
 The current locator payload is a frozen, standard-layout, trivially copyable
 40-byte structure. It is copied into the data area of a normal 16-byte
 \texttt{bioseq.seq} header, making the parent stub 56 bytes. The high bit of
-the header's storage-width byte marks the value as a locator; the low nibble
-retains the logical storage-unit width. The alphabet code and last-fragment
+the header's storage-width byte marks the value as a locator, while the low
+nibble retains the logical storage-unit width. The alphabet code and last-fragment
 padding remain available in the header.
+
+Table~\ref{tab:locator-v3} gives the byte-level locator payload contract.
 
 \begin{table}[ht]
   \centering
@@ -409,6 +415,9 @@ uses separately named relations with generation, query, subkey, segment, and
 chunk metadata rather than one blob in this fragment attachment relation.
 The canonical \texttt{seq\_sub\_table} catalog records both relation OIDs.
 
+Figure~\ref{fig:sequence-indirection} follows a parent locator through the
+shard registry to bounded lazy-fragment acquisition.
+
 \begin{figure}[ht]
   \centering
   \begin{tikzpicture}[x=1cm,y=1cm,font=\small,>=Latex]
@@ -441,7 +450,7 @@ The canonical \texttt{seq\_sub\_table} catalog records both relation OIDs.
       {read only requested fragment};
   \end{tikzpicture}
   \caption{Sequence indirection. The parent locator resolves through a
-  canonical registry to contiguous fragment rows; the algorithm sees a lazy
+  canonical registry to contiguous fragment rows. The algorithm sees a lazy
   scanner rather than an eagerly concatenated value.}
   \label{fig:sequence-indirection}
 \end{figure}
@@ -515,6 +524,9 @@ does not require constructing one full payload.
 The word ``cache'' appears in three layers of BioSeqDB.\@ Treating them as one
 feature obscures both correctness and performance.
 
+Table~\ref{tab:cache-scopes} distinguishes the three mechanisms by scope, key,
+and retained object.
+
 \begin{table}[ht]
   \centering
   \small
@@ -542,8 +554,9 @@ The reader's decompression cache is implemented in
 \path{pg/table/io/cache.cppm}. Its key contains relation, stripe, chunk, and
 column identifiers. Only compressed chunks benefit, because an uncompressed
 chunk can already use its raw buffer. The cache lives below
-\texttt{TopMemoryContext} in one PostgreSQL backend; another backend cannot see
-it. The default is disabled, with a configured size of 200~MiB when enabled.
+\texttt{TopMemoryContext} in one PostgreSQL backend. Another backend cannot
+see it. The default is disabled, with a configured size of 200~MiB when
+enabled.
 
 Entries are maintained in an intrusive list and account for their allocated
 bytes. On reaching the configured ceiling, eviction removes enough
@@ -556,7 +569,8 @@ does not coordinate duplicate expensive SQL requests.
 \subsection{The separate query-result cache extension}
 
 \texttt{bioseq\_cache} addresses the latter problem. It is an independently
-buildable PostgreSQL extension and DSO under \path{main/bioseq_caching}. It
+buildable PostgreSQL extension and dynamic shared object (DSO) under
+\path{main/bioseq_caching}. It
 does not require the BioSeq alphabet, minimizer, or alignment modules. Its
 provider interface is generic and keeps the two DSOs from linking to each
 other. The current tree does not ship a BioSeq-specific production provider.
@@ -622,21 +636,24 @@ and a monotonically assigned claim sequence. Waiters use PostgreSQL condition
 variables and check interrupts. They copy state and producer identity under
 the cache lock, release the lock, check liveness and dependency epochs, and
 then sleep with a bounded timeout. Cancellation removes the waiter reference
-without cancelling the producer. Producer cancellation marks its generation
+without canceling the producer. Producer cancellation marks its generation
 failed, wakes waiters, and makes a controlled takeover possible.
 
 Nested cached execution creates a potential deadlock: producer \(A\) may
 execute SQL that requests \(B\), while producer \(B\) requests \(A\). The
 implementation prevents this by allowing a backend to wait only for a claim
 sequence strictly smaller than every generation it currently owns. Wait edges
-therefore form a descending directed acyclic graph. No registry or DSA lock is
-held while sleeping.
+therefore form a descending directed acyclic graph. No registry lock or
+dynamic shared area (DSA) lock is held while sleeping.
 
 The distinction from sequence shard locking is important. Fragment insertion
 uses a transaction advisory lock for a small internal resource with a 64-bit
 identity. Query coalescing needs generation state, waiters, readers,
 dependencies, manifests, failure codes, and ABA-safe identities. The shared
 registry supplies that information. The PostgreSQL lock table does not.
+
+Figure~\ref{fig:query-cache-state} summarizes the request-registry transitions
+and distinguishes them from the physical-manifest states.
 
 \begin{figure}[ht]
   \centering
@@ -667,16 +684,16 @@ registry supplies that information. The PostgreSQL lock table does not.
   \label{fig:query-cache-state}
 \end{figure}
 
-\subsection{TTL, publication, and hybrid storage}
+\subsection{Time to live, publication, and hybrid storage}
 
 The second GUC, \texttt{bioseq.query\_cache\_ttl}, defaults to one hour. Age
 starts when a generation becomes complete, not when its potentially long
 computation begins. A building request therefore cannot expire before it
-finishes. TTL zero still permits an executor that already registered as a
-waiter to receive a one-time just-completed entitlement. A session that first
-discovers the already complete generation receives an immediate miss. The
-consumer applies the smaller of the producer's captured TTL and its own
-current TTL.\@
+finishes. A time to live (TTL) of zero still permits an executor that already
+registered as a waiter to receive a one-time just-completed entitlement. A
+session that first discovers the already complete generation receives an
+immediate miss. The consumer applies the smaller of the producer's captured
+TTL and its own current TTL.\@
 
 Publication orders both protocols. The producer first places the physical
 manifest in \(\mathrm{PUBLISHING}\), seals and links every block, validates the
@@ -702,7 +719,7 @@ The backing store is hybrid. A pinned dynamic shared area is the hot tier.
 Larger results can use cache-owned private files, and a generation manifest
 names the tier of every sealed block. Admission is reserved with shared atomic
 counters before allocation. Memory admission observes a cache ceiling and
-system free-memory floor; file admission observes both a capacity fraction and
+system free-memory floor. File admission observes both a capacity fraction and
 a free-space floor. If neither tier can accept the next row group, caching
 fails open: the producer continues the source SQL but publishes no reusable
 result. A background janitor handles expiration, invalidation, dead owners,
@@ -728,20 +745,21 @@ numbers. Vector comparison and Boolean nodes update lanes, and the vector
 aggregate node invokes a transition function once per vector input rather
 than once per PostgreSQL scalar tuple.
 
-The current transition implementations are C++ lane loops. It would therefore
-be inaccurate to claim that every aggregate uses a hardware SIMD instruction.
-The gain comes from batch transport, fewer executor calls, compact NULL
-handling, and improved locality. Highway vector kernels exist elsewhere in the
-system, but ``vectorized aggregate'' describes the executor interface rather
-than promising one machine instruction per operation.
+The current transition implementations are C++ lane loops rather than
+guaranteed hardware-SIMD kernels. Batching reduces executor-call frequency and
+keeps NULL handling compact. Because this chapter presents no current isolated
+benchmark for this path, it makes no speedup claim for VectorAgg. Highway
+vector kernels exist elsewhere in the system, but ``vectorized aggregate''
+describes the executor interface rather than promising one machine instruction
+per operation.
 
 The generated aggregate registry recognizes 16 scalar-to-vector
 associations:
 
 \begin{itemize}
-  \item \texttt{count(*)} and \texttt{count(any)};
+  \item \texttt{count(*)} and \texttt{count(any)}.
   \item \texttt{sum}, \texttt{avg}, \texttt{min}, and \texttt{max} for
-  \texttt{smallint}, \texttt{integer}, and \texttt{bigint};
+  \texttt{smallint}, \texttt{integer}, and \texttt{bigint}.
   \item \texttt{min} and \texttt{max} for \texttt{date}.
 \end{itemize}
 
@@ -893,3 +911,7 @@ because the implementation is still actively refactored.
     \bottomrule
   \end{tabular}
 \end{table}
+
+With source bytes, epochs, and bounded fragment access established,
+Chapter~12 treats the minimizer index as derived state whose validity depends
+on those storage identities.
