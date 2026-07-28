@@ -651,8 +651,8 @@ Figure~6 in the G3SA paper by Y.~Han and colleagues
     \draw[->,blue!65!black] (p0.south) -- (p3.north west);
     \draw[->,blue!65!black] (p1.south) -- (p3.north);
     \draw[->,blue!65!black] (p2.south) -- (p3.north east);
-    \node[align=center] at (1.7,1.0)
-      {within-tile\\triangular dependencies};
+    \node[align=center] at (1.45,1.05)
+      {within-tile\\triangular\\dependencies};
 
     \draw[dashed] (3.45,.45) -- (3.45,4.2);
     \node[font=\itshape] at (5.3,4.0) {tail};
@@ -1040,13 +1040,9 @@ These data support enabling bounded SIMD for an explicitly selected PostgreSQL
 SIMD request on the qualified workload.  They do not establish equivalence
 outside that workload or erase the constructed counterexample.  The available
 GPU comparison measured \(4.414989792\) seconds for a coordinate-only row in
-\texttt{main/reporting/\allowbreak
-bioseq\_bench\_e2e\_chain\_probe\_gpu\_coord\_only/\allowbreak
-report\_7.json}
+\path{main/reporting/bioseq_bench_e2e_chain_probe_gpu_coord_only/report_7.json}
 and \(4.928971958\) seconds for a SIMD row in
-\texttt{main/reporting/\allowbreak
-bioseq\_bench\_e2e\_chain\_probe\_simd\_current/\allowbreak
-report\_1.json}.
+\path{main/reporting/bioseq_bench_e2e_chain_probe_simd_current/report_1.json}.
 This June 2026 evidence is a historical whole-region
 comparison with different endpoint offsets, 48 and 3 bases respectively.  It
 is not a current chaining-only speed claim.  The audited evidence contains no
