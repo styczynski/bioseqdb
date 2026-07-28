@@ -1,0 +1,836 @@
+% Chapter 11 draft: physical sequence storage in PostgreSQL.
+% Document chronology and source audit:
+%   research_audit/ch11_docs.md
+% Principal current-source anchors:
+%   backend/pg/column/storage_physical.cppm
+%   backend/pg/column/metadata/{types,sql_rows,core}.cppm
+%   backend/pg/table/io/{writer,reader,reader_chunk,reader_pruning,cache}.cppm
+%   backend/storage/bucket_math.cppm
+%   backend/pg/storage_pg/{sequence_storage_manager,sequence_scanner_pg}.cppm
+%   backend/pg/vectorization/**
+%   bioseq_caching/{core,pg}/**
+
+\section{Storage is part of the execution model}
+\label{sec:pg-storage-role}
+
+Storing a biological sequence in PostgreSQL appears at first to be a type
+implementation problem. A compact value can be placed in a variable-length
+attribute, and PostgreSQL can then store, retrieve, and compare it like any
+other datum. This is sufficient for short values, but it does not describe the
+requirements of BioSeqDB.\@ A target sequence may be larger than one PostgreSQL
+allocation. An alignment may need only a few bounded windows from that target.
+A metadata query may project an identifier and a length without reading any
+sequence bytes. A long-running search may be requested concurrently by several
+sessions. Consequently, the physical representation must cooperate with the
+reader, the planner, memory accounting, and concurrency control.
+
+The current implementation separates four concerns which earlier prototypes
+partly conflated:
+
+\begin{enumerate}
+  \item Ordinary table columns are stored by a PostgreSQL table access method
+  in stripes, chunk groups, and per-column streams.
+  \item A sequence value in the parent row is normally a small locator. Its
+  packed fragments reside in length-bucketed shard relations.
+  \item Persistent minimizer indexes use their own relations and generation
+  metadata. Their format is discussed in Chapter~12.
+  \item Reuse of a complete query result is implemented by the separate
+  \texttt{bioseq\_cache} extension. It is not the same object as either a
+  sequence fragment cache or a persistent minimizer index.
+\end{enumerate}
+
+This separation gives a useful projection property. A query such as
+\texttt{SELECT sample\_id, length FROM targets} can read narrow scalar streams
+without materializing sequence payloads. A search operator can instead follow
+the locator and acquire fragments lazily. A repeated whole query can be served
+from a sealed result generation only when its execution identity and
+dependencies still match. Each mechanism has its own lifetime and correctness
+contract.
+
+The design was reached through the Phase A, B, and C storage series
+(\texttt{DOC0260}, \texttt{DOC0263}, and \texttt{DOC0264}) and several
+corrective reports. Those documents are useful for understanding the rejected
+alternatives, but they do not define the current byte layout. In particular,
+the Phase C specification described a version-2 locator. The current source
+defines version~3 and adds an immutable source epoch. The account below follows
+the source in \path{backend/storage/bucket_math.cppm} and
+\path{backend/pg/storage_pg/sequence_storage_manager.cppm}.
+
+\section{The Citus-derived column store}
+\label{sec:pg-storage-columnar}
+
+\subsection{Lineage and retained ideas}
+
+The base table access method has a concrete lineage in Citus Columnar. The
+correspondence is visible in both organization and operations. Citus
+\path{columnar_storage.c} maps logical offsets onto PostgreSQL blocks, keeps a
+metapage, and reserves stripe, row, and byte ranges. Its writer buffers rows
+into stripes and chunk groups, serializes a validity stream and a value stream
+for every column chunk, and writes skip metadata. Its reader selects chunk
+groups using metadata before reconstructing rows. BioSeqDB retains this family
+of mechanisms in the C++ modules
+\path{pg/column/storage_physical.cppm},
+\path{pg/table/io/writer.cppm}, and
+\path{pg/table/io/reader.cppm}.
+
+This is more specific than saying that both systems are columnar. The physical
+page convention, the reservation counters, the stripe and chunk-group
+vocabulary, the per-column validity/value streams, compression metadata, and
+min/max pruning all have direct counterparts. BioSeqDB then changes the
+surrounding architecture. The code was moved behind a PostgreSQL-specific
+module boundary, renamed from generic ``columnar'' terminology to the BioSeq
+column store, and coupled to sequence locators, generated catalog rows,
+vector-batch slots, alignment custom scans, and sequence-specific pruning
+rules. These changes were consolidated by the refactor described in
+\texttt{DOC0322} and its implementation report \texttt{DOC0323}.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Citus Columnar mechanisms retained and extended by BioSeqDB.}
+  \label{tab:citus-bioseq-storage}
+  \begin{tabular}{p{0.25\linewidth}p{0.31\linewidth}p{0.34\linewidth}}
+    \toprule
+    \textbf{Concern} & \textbf{Citus-derived mechanism} &
+    \textbf{BioSeqDB-specific extension}\\
+    \midrule
+    Physical bytes & Metapage, logical offsets, PostgreSQL pages, generic WAL &
+    C++ module boundary and typed physical/storage APIs\\
+    Row organization & Stripe, chunk group, one value stream and one existence
+    stream per column chunk & Sequence values may be locators whose payloads
+    live in separate fragment shards\\
+    Metadata & Stripe and chunk catalogs, stream offsets, compression, min/max &
+    Annotated C++ catalog structs, generated SQL/tuple codecs, shard registry\\
+    Reading & Projection mask, chunk pruning, decompression, row reconstruction &
+    Sequence extrema excluded from ordinary pruning; scalar and vector slots;
+    lazy sequence scanner\\
+    Execution & PostgreSQL TableAM and custom scan support &
+    Alignment-aware custom scans, vector aggregates, query-result cache provider\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Pages, logical offsets, and reservations}
+
+The main relation fork begins with two non-data blocks. Block~0 contains
+\texttt{BioseqColumnMetapage}. Block~1 is reserved and empty. Logical data
+starts after the PostgreSQL page header in block~2. If
+\[
+  P = \mathrm{BLCKSZ} - \mathrm{SizeOfPageHeaderData}
+\]
+is the number of usable bytes in one page, then the first valid logical data
+offset is \(2P\). For a logical offset \(x\), the storage layer computes
+\[
+  \mathrm{block}(x)=\left\lfloor\frac{x}{P}\right\rfloor,\qquad
+  \mathrm{inpage}(x)=\mathrm{SizeOfPageHeaderData}+(x\bmod P).
+\]
+Higher layers can therefore reserve and address one continuous byte space
+without manually splitting every stream at page boundaries.
+
+The metapage records the format version, a storage identifier, the first unused
+stripe identifier, the first unused logical row number, the first unused
+logical byte offset, and an unlogged-reset flag. Reservations modify these
+counters while holding the relation extension lock. Initialization and
+truncation require an access-exclusive relation lock. Metapage changes use
+PostgreSQL generic WAL through \texttt{GenericXLogStart},
+\texttt{GenericXLogRegisterBuffer}, and \texttt{GenericXLogFinish}. Thus the
+column format does not replace PostgreSQL's page, buffer, lock, or recovery
+machinery. It builds a logical append space on top of it.
+
+The distinction between a reservation and a completed stripe matters for
+concurrent writers. A writer first obtains non-overlapping row, stripe, and
+byte ranges. It can then serialize the stripe without racing another writer
+for identifiers or offsets. Completion publishes the actual data length and
+row count in the metadata catalogs. A reader considers the published metadata,
+not an arbitrary byte suffix, to determine which stripes are visible.
+
+\subsection{Stripes, chunk groups, and column streams}
+
+The physical hierarchy is shown in
+Figure~\ref{fig:bioseq-column-hierarchy}. A stripe is the large append and
+metadata unit. It is divided into chunk groups, each containing the same row
+interval for every column. For every pair of column and chunk group, the writer
+produces an existence bitmap and a serialized value stream. The current
+defaults are 150,000 rows per stripe and 10,000 rows per chunk group. Both are
+per-table options. The allowed ranges begin at 1,000 rows and extend to
+100,000,000 rows.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[x=1cm,y=1cm,font=\small,>=Latex]
+    \draw[rounded corners,thick,fill=gray!8] (0,0) rectangle (13,5.7);
+    \node[anchor=west,font=\bfseries] at (0.3,5.35) {BioSeq table relation};
+    \draw[fill=blue!12] (0.5,4.35) rectangle (2.8,5.0);
+    \node at (1.65,4.68) {block 0: metapage};
+    \draw[fill=gray!18] (3.15,4.35) rectangle (5.35,5.0);
+    \node at (4.25,4.68) {block 1: reserved};
+    \draw[fill=green!10] (5.7,4.35) rectangle (12.45,5.0);
+    \node at (9.08,4.68) {block 2 onward: logical data bytes};
+
+    \draw[rounded corners,thick,fill=orange!10] (0.5,2.4) rectangle (12.45,3.9);
+    \node[anchor=west,font=\bfseries] at (0.75,3.55) {stripe};
+    \draw[fill=orange!22] (2.2,2.72) rectangle (5.15,3.38);
+    \node at (3.68,3.05) {chunk group 0};
+    \draw[fill=orange!22] (5.45,2.72) rectangle (8.4,3.38);
+    \node at (6.93,3.05) {chunk group 1};
+    \draw[fill=orange!22] (8.7,2.72) rectangle (11.65,3.38);
+    \node at (10.18,3.05) {\(\cdots\)};
+
+    \draw[rounded corners,thick,fill=purple!8] (0.5,0.35) rectangle (12.45,1.92);
+    \node[anchor=west,font=\bfseries] at (0.75,1.58)
+      {within one chunk group};
+    \draw[fill=purple!18] (2.2,0.68) rectangle (4.65,1.28);
+    \node at (3.43,0.98) {column \(c\): exists};
+    \draw[fill=purple!18] (4.9,0.68) rectangle (7.35,1.28);
+    \node at (6.13,0.98) {column \(c\): values};
+    \draw[fill=purple!18] (7.6,0.68) rectangle (10.05,1.28);
+    \node at (8.83,0.98) {column \(c+1\): exists};
+    \node at (11.1,0.98) {\(\cdots\)};
+
+    \draw[->,thick] (9.1,4.35) -- (9.1,3.92);
+    \draw[->,thick] (6.9,2.4) -- (6.9,1.94);
+  \end{tikzpicture}
+  \caption{The column-store hierarchy. Metadata catalogs map stripe and chunk
+  identifiers to offsets in the logical byte space.}
+  \label{fig:bioseq-column-hierarchy}
+\end{figure}
+
+Rows are accumulated in a \texttt{ChunkData} object. Its arrays distinguish
+NULL presence from Datum values and keep one growing serialized buffer per
+column. Serialization is performed by the zero-cost
+\texttt{pg\_datum} wrapper from
+\path{pg/pg_utils/datums.cppm}. The wrapper computes PostgreSQL's aligned datum
+length, zeroes alignment padding, copies pass-by-value or pass-by-reference
+representations correctly, and advances the buffer. It also provides an
+explicit \texttt{copy} operation for by-reference min/max values. These small
+ownership distinctions prevent a temporary PostgreSQL Datum from being kept
+after its memory context has been reset.
+
+When a chunk group is complete, its Boolean presence array is packed at one bit
+per row. The requested compression algorithm is applied to the serialized
+value stream, but the compressed result is retained only when it is smaller
+than the original. The metadata therefore records the \emph{actual}
+compression algorithm, which may be \texttt{none}. The compile-time feature
+set chooses the default in this order: Zstandard when available, otherwise LZ4
+when available, otherwise PostgreSQL PGLZ.\@ The default level is~3. This policy
+avoids paying decompression cost for an incompressible chunk merely because the
+table requested compression.
+
+During stripe flush, offsets are computed before bytes are written. For each
+column the physical order is all of its existence buffers, followed by all of
+its value buffers. The writer then completes the stripe reservation, writes
+the streams into the reserved logical range, and records stripe, chunk-group,
+chunk, and row-mask metadata. A single value whose aligned Datum
+representation reaches 256~MiB is rejected. The writer also flushes a stripe
+before a value buffer can approach the roughly 1.024~GiB buffer bound. These
+checks concern one column chunk buffer; they are separate from the fragment
+layout used for very large sequence values.
+
+\subsection{Skip metadata and generated catalogs}
+
+For ordinary columns, the writer finds the B-tree comparison procedure and
+tracks the minimum and maximum non-NULL Datum in each chunk. This information
+is stored together with stream offsets, compressed and decompressed lengths,
+row counts, and compression identifiers. The reader can construct a
+PostgreSQL predicate over the extrema and ask whether the predicate is refuted
+for that chunk.
+
+Sequence columns are deliberately excluded from this optimization. Their
+serialized values may be locator stubs, and the physical rank-stream ordering
+does not define a useful biological ordering. Treating an arbitrary minimum
+and maximum packed sequence as a valid range bound would be at best
+unselective and at worst misleading. Scalar metadata columns next to the
+sequence, such as a numeric length, date, or sample category, remain eligible.
+
+The catalog definitions are not maintained independently in C++ and SQL.\@
+Structures in \path{pg/column/metadata/sql_rows.cppm} carry
+\texttt{bioseq\_sql} annotations. The code generator produces the installation
+SQL and tuple codecs used by \path{pg/column/metadata/core.cppm}. Chapter~15
+describes this generation system. Table~\ref{tab:column-catalogs} summarizes
+the storage-specific result.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Principal internal catalogs of the BioSeq column store.}
+  \label{tab:column-catalogs}
+  \begin{tabular}{p{0.22\linewidth}p{0.68\linewidth}}
+    \toprule
+    \textbf{Catalog} & \textbf{Role}\\
+    \midrule
+    \texttt{options} & Per-relation stripe size, chunk-group size, compression
+    type, and compression level.\\
+    \texttt{stripe} & Storage identifier, stripe number, logical offset,
+    byte length, column and chunk counts, row count, and first row number.\\
+    \texttt{chunk\_group} & Row count and deletion count for one row interval
+    of a stripe.\\
+    \texttt{chunk} & Per-column and per-chunk extrema, stream offsets and
+    lengths, compression information, decompressed length, and value count.\\
+    \texttt{row\_mask} & A byte mask and row interval describing deleted rows.\\
+    \texttt{seq\_sub\_table} & Canonical registry that maps a parent storage
+    identity, sequence column, length bucket, and shard to its fragment and
+    sidecar relations, capacity state, and byte counters.\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The shard registry key is deliberately wider than a relation OID or
+relfilenode. It contains database OID, tablespace OID, parent relfilenode,
+column attribute number, bucket index, and shard index. This is the correction
+to an early design in which relfilenode alone could collide across databases
+or tablespaces. Partial and prefix indexes support active-shard lookup and
+parent cleanup. Check constraints prevent negative byte counters.
+
+\subsection{Projection, pruning, and reconstruction}
+
+A scan begins with a projection mask. Only requested columns have their
+streams loaded. For every stripe, the reader obtains the skip list, tests
+eligible predicates against chunk extrema, and builds a selected-chunk mask.
+For a selected projected chunk it reads the existence stream and value stream,
+decompresses the latter if necessary, and reconstructs aligned Datums. A
+column added after an old stripe was written is supplied from its PostgreSQL
+default or as NULL.\@ The row mask excludes deleted row numbers.
+
+This ordering matters for a table containing a sequence, a sample identifier,
+and many metadata fields. A predicate on a date may discard most chunk groups
+before the sequence locator column is read. A projection of only the sample
+identifier need not touch the locator at all. Columnar storage therefore
+reduces both memory traffic and the number of times the sequence storage
+manager is entered.
+
+The same read state can publish scalar tuple slots or vector slots. The vector
+slot capacity is 10,000 lanes, which matches the default chunk-group row
+count. Each projected column owns a \texttt{VectorColumn}; the slot also
+contains a keep mask and logical row numbers. Deleted rows and predicates
+clear lanes. Residual scalar expressions can force extraction and repacking,
+but a supported vector path keeps the chunk group as a batch.
+
+\section{Sequence payload indirection}
+\label{sec:pg-storage-sequence-indirection}
+
+\subsection{Why a locator is necessary}
+
+A PostgreSQL varlena is a convenient envelope for a compact sequence, but a
+single ordinary allocation is bounded by \texttt{MaxAllocSize}, approximately
+one GiB. Eager reconstruction also defeats the purpose of a lazy alignment
+algorithm: an operation that requires a few windows would first copy the whole
+chromosome or assembly. BioSeqDB therefore treats the parent sequence Datum as
+a typed address when the payload is externalized.
+
+The storage unit remains alphabet-generic. For a storage-unit width \(B\)
+bytes and an alphabet-specific number \(L\) of letters per unit, one fragment
+contains
+\[
+  U_f = 1024\ \text{storage units},\qquad
+  S_f = 1024B\ \text{bytes},\qquad
+  N_f = 1024L\ \text{letters}.
+\]
+For the common DNA4/\texttt{uint64} representation this is 8~KiB and
+32,768 letters. For another alphabet or unit width, the formula changes
+without introducing a DNA-only storage path.
+
+\subsection{The version-3 locator}
+
+The current locator payload is a frozen, standard-layout, trivially copyable
+40-byte structure. It is copied into the data area of a normal 16-byte
+\texttt{bioseq.seq} header, making the parent stub 56 bytes. The high bit of
+the header's storage-width byte marks the value as a locator; the low nibble
+retains the logical storage-unit width. The alphabet code and last-fragment
+padding remain available in the header.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Current \texttt{seq\_locator} version-3 payload.}
+  \label{tab:locator-v3}
+  \begin{tabular}{r r p{0.27\linewidth}p{0.42\linewidth}}
+    \toprule
+    \textbf{Offset} & \textbf{Bytes} & \textbf{Field} & \textbf{Meaning}\\
+    \midrule
+    0 & 1 & \texttt{version} & Format version, currently 3.\\
+    1 & 1 & \texttt{bucket\_idx} & Length-bucket index.\\
+    2 & 2 & padding & Must be zero.\\
+    4 & 4 & \texttt{shard\_idx} & Shard inside the bucket.\\
+    8 & 4 & \texttt{num\_fragments} & Number of fragment rows.\\
+    12 & 4 & padding & Must be zero.\\
+    16 & 8 & \texttt{total\_bp\_size} & Full logical sequence length.\\
+    24 & 8 & \texttt{first\_sub\_row\_no} & Row number of fragment zero.\\
+    32 & 8 & \texttt{source\_epoch} & Immutable PostgreSQL-owned content
+    version.\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Version~2 already addressed the important geometric problem: the parent row
+could locate a contiguous run of fragments and report a 64-bit length.
+Version~3 adds \texttt{source\_epoch}. An address alone says where bytes were
+once written. The epoch says which immutable logical source those bytes
+belong to. Current validation requires a non-zero epoch and checks it against
+the source catalog before a lazy binding or persistent index is accepted. This
+prevents a locator or index generation from silently referring to a different
+content version after lifecycle changes.
+
+The two padding fields are also checked. The expected fragment count and final
+padding are recomputed from the logical length, unit width, and
+letters-per-unit. A malformed locator is a data-corruption error, not an
+invitation to read whatever rows follow its address.
+
+\subsection{Length buckets, shards, and fragment rows}
+
+The production storage manager is instantiated as
+\texttt{sequence\_storage\_manager<uint64\_t,8,42>}. It generates 35 length
+buckets. The first contains bit widths up to~8. Bit widths 9 through 41 each
+receive one bucket. The final bucket covers the remaining widths through~64.
+The bucket is selected from the bit width of the requested size using a
+compile-time lookup table.
+
+Length bucketing is not a biological classification. It is an operational
+device. Similar-sized payloads have similar fragment counts and access
+behavior, while very small and extremely large sequences do not compete for
+one active shard. A bucket can contain several shards. The whole sequence is
+placed in one shard and its fragments receive contiguous row numbers, so the
+address of fragment \(i\) is
+\[
+  r_i = \texttt{first\_sub\_row\_no} + i,\qquad
+  0\le i<\texttt{num\_fragments}.
+\]
+
+The fragment relation is created lazily with one
+\texttt{bioseq.seq(alphabet,width)} column and uses the BioSeq access method.
+A matching heap sidecar relation stores a bytea blob keyed by the first
+fragment row number. The sidecar is a storage attachment point; persistent
+minimizer-index generations and their validation are covered in Chapter~12.
+The canonical \texttt{seq\_sub\_table} catalog records both relation OIDs.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[x=1cm,y=1cm,font=\small,>=Latex]
+    \draw[rounded corners,thick,fill=blue!10] (0.2,3.4) rectangle (3.5,4.65);
+    \node[font=\bfseries] at (1.85,4.28) {parent row};
+    \node at (1.85,3.82) {56-byte locator stub};
+
+    \draw[rounded corners,thick,fill=gray!12] (4.5,3.4) rectangle (8.6,4.65);
+    \node[font=\bfseries] at (6.55,4.28) {\texttt{seq\_sub\_table}};
+    \node at (6.55,3.82) {bucket + shard registry};
+
+    \draw[rounded corners,thick,fill=green!10] (9.6,2.65) rectangle (13.7,5.35);
+    \node[font=\bfseries] at (11.65,4.98) {fragment shard};
+    \draw[fill=green!22] (10.1,4.1) rectangle (13.2,4.62);
+    \node at (11.65,4.36) {row \(r_0\): fragment 0};
+    \draw[fill=green!22] (10.1,3.43) rectangle (13.2,3.95);
+    \node at (11.65,3.69) {row \(r_0+1\): fragment 1};
+    \draw[fill=green!22] (10.1,2.86) rectangle (13.2,3.28);
+    \node at (11.65,3.07) {\(\cdots\)};
+
+    \draw[rounded corners,thick,fill=purple!10] (4.5,0.35) rectangle (8.6,1.6);
+    \node[font=\bfseries] at (6.55,1.23) {lazy scanner};
+    \node at (6.55,0.77) {bounded resident slots};
+
+    \draw[->,thick] (3.5,4.02) -- (4.5,4.02);
+    \draw[->,thick] (8.6,4.02) -- (9.6,4.02);
+    \draw[->,thick] (10.25,2.65) -- (8.1,1.6);
+    \draw[->,thick,dashed] (6.55,1.6) -- (6.55,3.4);
+    \node[anchor=west,font=\scriptsize] at (8.75,1.8)
+      {read only requested fragment};
+  \end{tikzpicture}
+  \caption{Sequence indirection. The parent locator resolves through a
+  canonical registry to contiguous fragment rows; the algorithm sees a lazy
+  scanner rather than an eagerly concatenated value.}
+  \label{fig:sequence-indirection}
+\end{figure}
+
+\subsection{Concurrency, shard rollover, and lifecycle}
+
+Two kinds of transaction advisory lock protect the fragment layout. A shard
+allocation lock serializes creation or selection of a new shard for a
+parent-column and length bucket. A writer lock keyed by database, parent
+storage identity, column, bucket, and shard serializes fragment row-number
+assignment. This is a suitable use of advisory locking because the locked
+identity is an internal storage resource and the lock is held by the
+transaction that writes it.
+
+Before writing a sequence, the manager computes its projected payload size. If
+the active shard lacks enough remaining configured capacity, it selects a
+fresh shard first. A sequence is not split across shards. If the sequence
+itself exceeds the configured per-shard cap
+\texttt{bioseq.storage.max\_seq\_sub\_table\_gbs}, insertion fails with a
+diagnostic rather than producing an ambiguous multi-shard locator. Byte deltas
+are accumulated in the per-execution cache and committed to the registry when
+write states close.
+
+Dynamic fragment relations are deliberately not installed as extension
+members. An early approach attempted to alter extension membership from nested
+SPI and resource-owner contexts and could provoke severe lifecycle failures.
+The current design instead treats \texttt{seq\_sub\_table} as the canonical
+registry. Parent-table drop hooks remove associated relations, and an orphan
+reaper handles mismatches in either direction. This makes cleanup an explicit
+storage-manager responsibility.
+
+\subsection{Lazy fragment acquisition}
+
+The per-execution \texttt{seq\_caches} object is a sorted small map keyed by
+column attribute number, bucket, and shard. Each entry retains a relation and
+the appropriate BioSeq read or write state. It is not thread-local and it is
+not embedded by value in a \texttt{palloc0}-allocated C-shaped structure. The
+latter was a critical defect found in the Phase A/B/C review: raw zeroed
+memory does not construct a C++ container. Current scan and write structures
+hold an opaque pointer to a correctly constructed cache.
+
+On the read side, \texttt{sequence\_scanner\_pg} resolves a fragment row through
+that cache and copies its packed storage units into a scanner-owned
+PostgreSQL memory context. It has 16 fixed slots. For DNA4 with 64-bit storage
+units, the maximum packed fragment payload resident in those slots is
+approximately
+\[
+  16\times1024\times8 = 131{,}072\ \text{bytes}.
+\]
+The lazy sequence layer normally evicts more aggressively, but the scanner
+capacity supplies a hard local bound. A request contained in one resident
+fragment can return its pointer directly. A request crossing a boundary is
+stitched into caller-supplied scratch storage. Algorithm-specific encoded
+views use a similarly bounded slot discipline. The result is that logical
+sequence length and resident fragment memory are decoupled.
+
+This does not prove that an entire alignment is constant-memory. Anchor
+collections, indexes, and dynamic-programming workspaces need their own
+budgets. \texttt{DOC0276} is important precisely because it found a target
+index whose linear memory growth could force a 16~GiB machine into swap even
+though its input was fragmented. The later segmented path bounded that
+consumer. The storage claim is narrower and testable: acquiring sequence bytes
+does not require constructing one full payload.
+
+\section{Caches with different scopes}
+\label{sec:pg-storage-caches}
+
+The word ``cache'' appears in three layers of BioSeqDB.\@ Treating them as one
+feature obscures both correctness and performance.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Cache-like mechanisms in and around sequence storage.}
+  \label{tab:cache-scopes}
+  \begin{tabular}{p{0.22\linewidth}p{0.20\linewidth}p{0.25\linewidth}p{0.23\linewidth}}
+    \toprule
+    \textbf{Mechanism} & \textbf{Scope} & \textbf{Key} & \textbf{Stored object}\\
+    \midrule
+    Lazy fragment and \texttt{seq\_caches} & One execution/backend context &
+    Column, bucket, shard, fragment & Open relations/read states and bounded
+    fragment bytes\\
+    Column decompression cache & One PostgreSQL backend & Relation, stripe,
+    chunk group, column & Decompressed column value buffer\\
+    \texttt{bioseq\_cache} & Shared across backends in one postmaster &
+    Exact execution identity or reusable coverage identity & Sealed columnar
+    query results and coverage fragments\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Backend-local decompression cache}
+
+The reader's decompression cache is implemented in
+\path{pg/table/io/cache.cppm}. Its key contains relation, stripe, chunk, and
+column identifiers. Only compressed chunks benefit, because an uncompressed
+chunk can already use its raw buffer. The cache lives below
+\texttt{TopMemoryContext} in one PostgreSQL backend; another backend cannot see
+it. The default is disabled, with a configured size of 200~MiB when enabled.
+
+Entries are maintained in an intrusive list and account for their allocated
+bytes. On reaching the configured ceiling, eviction removes enough
+least-read data to return to approximately 90 percent occupancy. Chunk groups
+currently marked in use are not evicted. A cache hit returns a borrowed
+buffer, not a fresh copy, so the caller must respect the entry lifetime. This
+cache is useful when one backend repeatedly scans compressed metadata, but it
+does not coordinate duplicate expensive SQL requests.
+
+\subsection{The separate query-result cache extension}
+
+\texttt{bioseq\_cache} addresses the latter problem. It is an independently
+buildable PostgreSQL extension and DSO under \path{main/bioseq_caching}. It
+does not require the BioSeq alphabet, minimizer, or alignment modules. Optional
+provider interfaces add BioSeq-specific reusable boundaries without making
+the two DSOs link to each other.
+
+The user-visible optimization GUC has three modes:
+
+\begin{description}
+  \item[\texttt{disabled}] No cache path is created, no request claim is made,
+  and execution follows the ordinary plan. This is the default.
+  \item[\texttt{same}] The first executor of one exact execution identity is
+  the producer. Concurrent identical executors wait, and later identical
+  executors replay the completed ordered multiset while it remains valid.
+  \item[\texttt{reuse}] Exact coalescing remains available, and compatible
+  coverage at an expensive operator boundary may be reused with residual
+  predicates and hidden lineage. If that proof cannot be made, execution
+  falls back to exact behavior.
+\end{description}
+
+An exact key is stronger than normalized SQL text. It includes the analyzed
+query shape, runtime parameter values, the execution and security environment,
+and a dependency version vector. A final result and reusable coverage are
+different products. The former can answer only the same execution identity
+and preserves result order and duplicates. The latter carries enough source
+and occurrence lineage to re-evaluate a new predicate without confusing SQL
+bag semantics. A final projection containing only alignment coordinates is
+not sufficient to evaluate a later predicate on sample metadata.
+
+\subsection{Claim state and request locking}
+
+Request locking is implemented as a shared registry state machine, not as a
+long-running SQL advisory lock. The legal main path is
+\[
+  \mathrm{ABSENT}\rightarrow\mathrm{CLAIMED}\rightarrow
+  \mathrm{BUILDING}\rightarrow\mathrm{COMPLETE}.
+\]
+Claimed or building generations can become failed; building or complete
+generations can become invalidated; terminal generations pass through
+evicting before becoming absent. A complete generation is never mutated back
+into a building generation. A retry receives a new generation identity.
+
+Every entry identity contains a digest, a postmaster boot nonce, a generation,
+and a monotonically assigned claim sequence. Waiters use PostgreSQL condition
+variables and check interrupts. They copy state and producer identity under
+the cache lock, release the lock, check liveness and dependency epochs, and
+then sleep with a bounded timeout. Cancellation removes the waiter reference
+without cancelling the producer. Producer cancellation marks its generation
+failed, wakes waiters, and makes a controlled takeover possible.
+
+Nested cached execution creates a potential deadlock: producer \(A\) may
+execute SQL that requests \(B\), while producer \(B\) requests \(A\). The
+implementation prevents this by allowing a backend to wait only for a claim
+sequence strictly smaller than every generation it currently owns. Wait edges
+therefore form a descending directed acyclic graph. No registry or DSA lock is
+held while sleeping.
+
+The distinction from sequence shard locking is important. Fragment insertion
+uses a transaction advisory lock for a small internal resource with a 64-bit
+identity. Query coalescing needs generation state, waiters, readers,
+dependencies, manifests, failure codes, and ABA-safe identities. The shared
+registry supplies that information; the PostgreSQL lock table does not.
+
+\begin{figure}[ht]
+  \centering
+  \begin{tikzpicture}[x=1cm,y=1cm,font=\small,>=Latex]
+    \node[draw,rounded corners,fill=gray!12] (a) at (0,2.2) {ABSENT};
+    \node[draw,rounded corners,fill=blue!12] (c) at (3,2.2) {CLAIMED};
+    \node[draw,rounded corners,fill=orange!14] (b) at (6,2.2) {BUILDING};
+    \node[draw,rounded corners,fill=green!14] (d) at (9,3.25) {COMPLETE};
+    \node[draw,rounded corners,fill=red!12] (f) at (9,1.15) {FAILED};
+    \node[draw,rounded corners,fill=purple!12] (i) at (12,2.2) {INVALIDATED};
+    \node[draw,rounded corners,fill=gray!18] (e) at (9,-0.5) {EVICTING};
+
+    \draw[->,thick] (a) -- (c);
+    \draw[->,thick] (c) -- (b);
+    \draw[->,thick] (b) -- (d);
+    \draw[->,thick] (c) -- (f);
+    \draw[->,thick] (b) -- (f);
+    \draw[->,thick] (b) -- (i);
+    \draw[->,thick] (d) -- (i);
+    \draw[->,thick] (d) -- (e);
+    \draw[->,thick] (f) -- (e);
+    \draw[->,thick] (i) -- (e);
+    \draw[->,thick,bend right=35] (e) to (a);
+  \end{tikzpicture}
+  \caption{Simplified query-cache generation state machine. Publication of
+  \texttt{COMPLETE} occurs only after all blocks and the manifest have been
+  sealed and validated.}
+  \label{fig:query-cache-state}
+\end{figure}
+
+\subsection{TTL, publication, and hybrid storage}
+
+The second GUC, \texttt{bioseq.query\_cache\_ttl}, defaults to one hour. Age
+starts when a generation becomes complete, not when its potentially long
+computation begins. A building request therefore cannot expire before it
+finishes. TTL zero still permits an executor that already registered as a
+waiter to receive a one-time just-completed entitlement. A session that first
+discovers the already complete generation receives an immediate miss. The
+consumer applies the smaller of the producer's captured TTL and its own
+current TTL.\@
+
+Publication is ordered. The producer seals every block, seals and validates
+the manifest and dependency snapshot, stores counts and handles, performs a
+release barrier, changes state to complete, and broadcasts. A reader performs
+an acquire load before following the manifest. Reader pins and waiter
+references prevent eviction while a generation is in use. Generation plus
+claim sequence prevents an old token from referring to a newly reused slot.
+
+Cached tuples are stored in row groups which are internally columnar. A row
+group contains a row ordinal interval, one chunk descriptor per column,
+validity information, offsets for variable-width values, encoded values, and
+checksums. The current wire layer uses a fixed magic and format version,
+little-endian metadata, schema identity, PostgreSQL-major and boot identity,
+block CRC32C, and a manifest digest. Direct encodings are used only for
+representations proven safe. Varlena values are flattened; external TOAST and
+expanded-object pointers are never persisted as if they were ordinary bytes.
+
+The backing store is hybrid. A pinned dynamic shared area is the hot tier.
+Larger results can use cache-owned private files, and a generation manifest
+names the tier of every sealed block. Admission is reserved with shared atomic
+counters before allocation. Memory admission observes a cache ceiling and
+system free-memory floor; file admission observes both a capacity fraction and
+a free-space floor. If neither tier can accept the next row group, caching
+fails open: the producer continues the source SQL but publishes no reusable
+result. A background janitor handles expiration, invalidation, dead owners,
+unpinned eviction, partial files, and startup purge. Version~1 does not claim
+that cache data survive a postmaster restart.
+
+\section{Vectorized processing of scalar metadata}
+\label{sec:pg-storage-vector-aggregates}
+
+Columnar storage reduces the cost of reading narrow metadata, but PostgreSQL's
+ordinary executor still evaluates most expressions and aggregate transitions
+one scalar tuple at a time. BioSeqDB adds a batch representation and a guarded
+aggregate rewrite for a useful subset of metadata queries. The term
+``metadata aggregate'' here means an aggregate over ordinary scalar columns
+stored beside a sequence, not an aggregate over packed sequence bytes.
+
+\subsection{From chunk group to vector slot}
+
+\texttt{ReadChunkGroupNextVector} fills a vector slot directly from the
+selected chunk group. Each projected \texttt{VectorColumn} contains up to
+10,000 values and a NULL mask. The slot carries a keep mask and source row
+numbers. Vector comparison and Boolean nodes update lanes, and the vector
+aggregate node invokes a transition function once per vector input rather
+than once per PostgreSQL scalar tuple.
+
+The current transition implementations are C++ lane loops. It would therefore
+be inaccurate to claim that every aggregate uses a hardware SIMD instruction.
+The gain comes from batch transport, fewer executor calls, compact NULL
+handling, and improved locality. Highway vector kernels exist elsewhere in the
+system, but ``vectorized aggregate'' describes the executor interface rather
+than promising one machine instruction per operation.
+
+The generated aggregate registry recognizes 16 scalar-to-vector
+associations:
+
+\begin{itemize}
+  \item \texttt{count(*)} and \texttt{count(any)};
+  \item \texttt{sum}, \texttt{avg}, \texttt{min}, and \texttt{max} for
+  \texttt{smallint}, \texttt{integer}, and \texttt{bigint};
+  \item \texttt{min} and \texttt{max} for \texttt{date}.
+\end{itemize}
+
+Integer averages retain PostgreSQL-compatible numeric finalization.
+\texttt{bigint} sum and average use PostgreSQL's 128-bit aggregate state
+rather than silently narrowing the sum. The registry validates the scalar
+aggregate, vector aggregate, transition and final functions, and input,
+state, and result types. It does not infer compatibility merely from a
+\texttt{v} prefix in a SQL name.
+
+\subsection{Planner eligibility and safe fallback}
+
+The planner hook is intentionally conservative. It considers a SELECT with
+exactly one range-table entry and requires vectorization to be enabled. It
+replaces only a plain PostgreSQL \texttt{Agg} whose child can publish a BioSeq
+vector tuple slot. DISTINCT aggregates and aggregate FILTER clauses are not
+rewritten. Unsupported arguments, functions, or plan shapes retain the scalar
+aggregate.
+
+Two exclusions prevent a type-confusion failure. \texttt{BioseqSliceProject}
+publishes ordinary scalar Datums, so its output cannot be interpreted as a
+\texttt{VectorColumn}. A BioSeq scan that owns an \texttt{mmsearch} expression
+publishes one scalar result row per alignment occurrence. Aggregates depending
+on that projection or executor-owned search also remain scalar. The planner
+can support joins for alignment through other custom-scan machinery, but this
+particular vector-aggregate rewrite currently rejects a statement whose range
+table has more than one entry.
+
+The vectorized aggregate is therefore an optimization, not a second SQL
+semantics. Unsupported cases fall back to PostgreSQL's ordinary plan.
+Chunk-level min/max pruning remains independent: it can reduce the batch set
+even when aggregation itself is scalar, and a vector aggregate can still
+process a chunk for which no useful extrema exist.
+
+\section{What the final storage design changes}
+\label{sec:pg-storage-evolution}
+
+The final design differs from the earliest storage prototype in several
+load-bearing ways.
+
+\begin{enumerate}
+  \item A biological sequence is not assumed to fit in one PostgreSQL Datum.
+  The parent row carries a validated version-3 locator, while fixed-size
+  fragments live in a shard chosen by length bucket.
+  \item Lazy reading is an algorithm contract, not a special case hidden in
+  one SQL function. The PostgreSQL scanner satisfies the same sequence
+  abstraction used by in-memory and synthetic fragmented inputs.
+  \item Storage identity includes database, tablespace, parent relfilenode,
+  column, bucket, shard, and immutable source epoch. A raw relfilenode or row
+  address is insufficient.
+  \item C++ objects with constructors are not placed directly in raw
+  zero-initialized PostgreSQL memory. Cache ownership is explicit, snapshots
+  are registered, and relation/resource-owner discipline differs between
+  readers and writers.
+  \item The Citus-derived column engine remains responsible for ordinary
+  scalar streams, stripes, pruning, compression, deletion masks, and TableAM
+  behavior. Sequence fragment indirection is an added layer, not a wholesale
+  replacement.
+  \item Cache names no longer imply identical scope. Fragment slots,
+  decompressed column chunks, persistent indexes, and shared query results
+  have different keys, invalidation rules, and lifetimes.
+  \item Vectorized metadata execution is guarded by exact plan and type
+  eligibility. Unsupported queries retain PostgreSQL semantics through
+  fallback rather than forcing a batch representation.
+\end{enumerate}
+
+These properties make the storage engine useful to the rest of the system.
+The minimizer and alignment stages can request bounded sequence windows.
+Metadata filters can prune chunks before those requests. Persistent indexes
+can bind their generations to immutable source epochs. Concurrent identical
+queries can coalesce without treating a half-written result as readable.
+Most importantly, each layer states what it bounds. Fragmentation bounds
+resident sequence bytes, columnar projection bounds unnecessary stream reads,
+cache admission bounds retained results, and vector eligibility bounds the
+set of executor plans that may bypass scalar transitions. The resulting
+system is more complex than a single sequence blob, but its complexity follows
+the actual lifetime and concurrency boundaries of PostgreSQL.\@
+
+\section{Implementation reference map}
+\label{sec:pg-storage-reference-map}
+
+Table~\ref{tab:storage-reference-map} records the principal source locations
+used for this chapter. These paths are preferable to historical line numbers,
+because the implementation is still actively refactored.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \caption{Current implementation anchors for the physical storage chapter.}
+  \label{tab:storage-reference-map}
+  \begin{tabular}{p{0.30\linewidth}p{0.60\linewidth}}
+    \toprule
+    \textbf{Topic} & \textbf{Current source}\\
+    \midrule
+    Page layout and WAL &
+    \path{backend/pg/column/storage_physical.cppm}\\
+    In-memory storage structures &
+    \path{backend/pg/column/metadata/types.cppm}\\
+    Generated storage catalogs &
+    \path{backend/pg/column/metadata/sql_rows.cppm}\\
+    Stripe writer and reader &
+    \path{backend/pg/table/io/writer.cppm},
+    \path{reader.cppm}, \path{reader_chunk.cppm}\\
+    Chunk pruning and decompression cache &
+    \path{backend/pg/table/io/reader_pruning.cppm},
+    \path{cache.cppm}\\
+    Locator and bucket mathematics &
+    \path{backend/storage/bucket_math.cppm}\\
+    Fragment shard manager and scanner &
+    \path{backend/pg/storage_pg/sequence_storage_manager.cppm},
+    \path{sequence_scanner_pg.cppm}\\
+    Datum serialization &
+    \path{backend/pg/pg_utils/datums.cppm}\\
+    Vector aggregate rewrite &
+    \path{backend/pg/column/planner_hook.cppm},
+    \path{backend/pg/vectorization/types/aggregates.cppm}\\
+    Shared query cache &
+    \path{bioseq_caching/core/state_machine.cppm},
+    \path{core/column_format.cppm},
+    \path{pg/shared_registry.cppm}, \path{pg/storage.cppm}\\
+    Citus comparison baseline &
+    \path{citus-main/src/backend/columnar/columnar_storage.c},
+    \path{columnar_writer.c}, \path{columnar_reader.c}\\
+    \bottomrule
+  \end{tabular}
+\end{table}
