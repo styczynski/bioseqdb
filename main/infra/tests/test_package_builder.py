@@ -251,6 +251,40 @@ class LifecycleSafetyTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_s3_verification_heads_package_and_every_signature_object(self) -> None:
+        upload = {
+            "key": "bioseq/packages/x64/postgresql17/debian_13/stable/package.deb",
+            "size": 10,
+            "etag": "package-etag",
+            "signature_verification": {
+                "objects": [
+                    {
+                        "key": (
+                            "bioseq/packages/x64/postgresql17/debian_13/"
+                            "stable/InRelease"
+                        ),
+                        "size": 20,
+                        "etag": "signature-etag",
+                    }
+                ]
+            },
+        }
+        responses = [
+            {
+                "ContentLength": 10,
+                "ETag": '"package-etag"',
+                "ServerSideEncryption": "AES256",
+            },
+            {
+                "ContentLength": 20,
+                "ETag": '"signature-etag"',
+                "ServerSideEncryption": "AES256",
+            },
+        ]
+        with mock.patch.object(package_builder, "aws_json", side_effect=responses) as aws:
+            package_builder.verify_s3_uploads("us-east-1", "bucket", [upload])
+        self.assertEqual(aws.call_count, 2)
+
     def test_success_manifest_requires_optimization_zero_and_exact_s3_key(self) -> None:
         matrix = package_builder.load_matrix()
         selection = package_builder.Selection(("x64",), ("debian_13",), (17,))
@@ -265,6 +299,7 @@ class ManifestTests(unittest.TestCase):
                 "region": "us-east-1",
                 "base_prefix": "bioseq/packages",
             },
+            "signing": {"fingerprint": "A" * 40},
             "cells": [
                 {
                     "postgres_major": 17,
@@ -344,6 +379,53 @@ class ManifestTests(unittest.TestCase):
                             "roundtrip": "ACGT",
                             "container_image": "debian:13",
                         },
+                        "signature_verification": {
+                            "passed": True,
+                            "format": "deb",
+                            "public_key_imported": True,
+                            "signing_key_fingerprint": "A" * 40,
+                            "package_signature_verified": True,
+                            "package_signature": "signed-deb-release-sha256",
+                            "repository_signature_verified": True,
+                            "objects": [
+                                {
+                                    "key": (
+                                        "bioseq/packages/x64/postgresql17/"
+                                        "debian_13/stable/Release.key"
+                                    ),
+                                    "size": 1,
+                                    "sha256": "b" * 64,
+                                    "etag": "etag-key",
+                                },
+                                {
+                                    "key": (
+                                        "bioseq/packages/x64/postgresql17/"
+                                        "debian_13/stable/Release"
+                                    ),
+                                    "size": 2,
+                                    "sha256": "c" * 64,
+                                    "etag": "etag-release",
+                                },
+                                {
+                                    "key": (
+                                        "bioseq/packages/x64/postgresql17/"
+                                        "debian_13/stable/Release.gpg"
+                                    ),
+                                    "size": 3,
+                                    "sha256": "d" * 64,
+                                    "etag": "etag-release-gpg",
+                                },
+                                {
+                                    "key": (
+                                        "bioseq/packages/x64/postgresql17/"
+                                        "debian_13/stable/InRelease"
+                                    ),
+                                    "size": 4,
+                                    "sha256": "e" * 64,
+                                    "etag": "etag-inrelease",
+                                },
+                            ],
+                        },
                     },
                 }
             ],
@@ -372,6 +454,20 @@ class ManifestTests(unittest.TestCase):
         manifest["cells"][0]["validation"]["optimization_level"] = 0
         manifest["cells"][0]["upload"]["download_smoke"]["fresh_container"] = False
         with self.assertRaisesRegex(package_builder.PackageBuilderError, "S3-download smoke"):
+            package_builder.validate_manifest(
+                manifest,
+                architecture="x64",
+                selection=selection,
+                matrix=matrix,
+                bucket="bucket",
+                region="us-east-1",
+                s3_prefix="bioseq/packages",
+            )
+        manifest["cells"][0]["upload"]["download_smoke"]["fresh_container"] = True
+        manifest["cells"][0]["upload"]["signature_verification"][
+            "signing_key_fingerprint"
+        ] = "B" * 40
+        with self.assertRaisesRegex(package_builder.PackageBuilderError, "signature verification"):
             package_builder.validate_manifest(
                 manifest,
                 architecture="x64",

@@ -1377,6 +1377,12 @@ def validate_manifest(
         or s3.get("base_prefix") != s3_prefix
     ):
         raise PackageBuilderError(f"{architecture} manifest S3 contract mismatch")
+    signing = manifest.get("signing", {})
+    signing_fingerprint = str(signing.get("fingerprint", ""))
+    if re.fullmatch(r"[0-9A-F]{40,64}", signing_fingerprint) is None:
+        raise PackageBuilderError(
+            f"{architecture} manifest signing-key fingerprint is invalid"
+        )
 
     cells = manifest.get("cells")
     expected_cells = {
@@ -1518,6 +1524,76 @@ def validate_manifest(
             distro=key[1],
             label=f"{architecture} cell {key} S3-download smoke",
         )
+        signature = upload.get("signature_verification", {})
+        expected_signature_kind = {
+            "rpm": "embedded-rpm-openpgp",
+            "deb": "signed-deb-release-sha256",
+            "pacman": "detached-pacman-openpgp",
+        }[package_format]
+        if (
+            not isinstance(signature, dict)
+            or signature.get("passed") is not True
+            or signature.get("public_key_imported") is not True
+            or signature.get("package_signature_verified") is not True
+            or signature.get("repository_signature_verified") is not True
+            or signature.get("format") != package_format
+            or signature.get("package_signature") != expected_signature_kind
+            or signature.get("signing_key_fingerprint") != signing_fingerprint
+        ):
+            raise PackageBuilderError(
+                f"{architecture} cell {key} signature verification failed: {signature}"
+            )
+        signature_base = f"{s3_prefix}/{architecture}/postgresql{key[0]}/{key[1]}"
+        expected_signature_keys = {
+            "rpm": {
+                f"{signature_base}/repodata/repomd.xml.key",
+                f"{signature_base}/repodata/repomd.xml",
+                f"{signature_base}/repodata/repomd.xml.asc",
+            },
+            "deb": {
+                f"{signature_base}/stable/Release.key",
+                f"{signature_base}/stable/Release",
+                f"{signature_base}/stable/Release.gpg",
+                f"{signature_base}/stable/InRelease",
+            },
+            "pacman": {
+                f"{signature_base}/public.key",
+                f"{expected_key}.sig",
+                f"{signature_base}/{cell['package_name']}.db.tar.gz",
+                f"{signature_base}/{cell['package_name']}.db.tar.gz.sig",
+            },
+        }[package_format]
+        signature_objects = signature.get("objects")
+        if not isinstance(signature_objects, list) or len(signature_objects) != len(
+            expected_signature_keys
+        ):
+            raise PackageBuilderError(
+                f"{architecture} cell {key} signature-object count is invalid"
+            )
+        actual_signature_keys: set[str] = set()
+        for signature_object in signature_objects:
+            if (
+                not isinstance(signature_object, dict)
+                or not isinstance(signature_object.get("key"), str)
+                or not isinstance(signature_object.get("size"), int)
+                or signature_object["size"] <= 0
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(signature_object.get("sha256", ""))
+                )
+                is None
+                or not isinstance(signature_object.get("etag"), str)
+                or not signature_object["etag"]
+            ):
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} has malformed signature object: "
+                    f"{signature_object}"
+                )
+            actual_signature_keys.add(signature_object["key"])
+        if actual_signature_keys != expected_signature_keys:
+            raise PackageBuilderError(
+                f"{architecture} cell {key} signature-object keys mismatch: "
+                f"{sorted(actual_signature_keys)}"
+            )
         uploads.append(upload)
     if seen != expected_cells:
         raise PackageBuilderError(f"{architecture} manifest omitted cells")
@@ -1526,24 +1602,34 @@ def validate_manifest(
 
 def verify_s3_uploads(region: str, bucket: str, uploads: Iterable[dict[str, Any]]) -> None:
     for upload in uploads:
-        payload = aws_json(
-            region,
-            "s3api",
-            "head-object",
-            "--bucket",
-            bucket,
-            "--key",
-            str(upload["key"]),
-        )
-        if payload.get("ContentLength") != upload.get("size"):
-            raise PackageBuilderError(
-                f"S3 object size mismatch for s3://{bucket}/{upload['key']}"
+        signature = upload.get("signature_verification", {})
+        signature_objects = signature.get("objects", []) if isinstance(signature, dict) else []
+        for attestation in [upload, *signature_objects]:
+            payload = aws_json(
+                region,
+                "s3api",
+                "head-object",
+                "--bucket",
+                bucket,
+                "--key",
+                str(attestation["key"]),
             )
-        encryption = payload.get("ServerSideEncryption")
-        if encryption not in {"AES256", "aws:kms"}:
-            raise PackageBuilderError(
-                f"S3 object is not server-side encrypted: s3://{bucket}/{upload['key']}"
-            )
+            if payload.get("ContentLength") != attestation.get("size"):
+                raise PackageBuilderError(
+                    f"S3 object size mismatch for s3://{bucket}/{attestation['key']}"
+                )
+            expected_etag = str(attestation.get("etag", ""))
+            actual_etag = str(payload.get("ETag", "")).strip('"')
+            if expected_etag and actual_etag != expected_etag:
+                raise PackageBuilderError(
+                    f"S3 object ETag mismatch for s3://{bucket}/{attestation['key']}"
+                )
+            encryption = payload.get("ServerSideEncryption")
+            if encryption not in {"AES256", "aws:kms"}:
+                raise PackageBuilderError(
+                    "S3 object is not server-side encrypted: "
+                    f"s3://{bucket}/{attestation['key']}"
+                )
 
 
 def write_last_run(payload: dict[str, Any]) -> None:
