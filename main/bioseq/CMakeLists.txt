@@ -7,6 +7,8 @@ set(CMAKE_CXX_SCAN_FOR_MODULES ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON CACHE INTERNAL "")
 option(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST
   "Run the maintainer PREPARE incremental Ninja contract during the build" ON)
+option(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST
+  "Run the maintainer SQL negative/provenance fixture suite during the build" ON)
 
 set(BIOSEQ_PG_BUILD_CONFIG_HEADER
   "${CMAKE_CURRENT_LIST_DIR}/include2/headers/pg_build_config.h")
@@ -1613,23 +1615,34 @@ set(BIOSEQ_SQL_NEGATIVE_FIXTURES
   "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/tests/negative/authored_guc_registration_type_alias.cppm")
 set(BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP
   "${BIOSEQ_SQL_CODEGEN_DIR}/negative-contracts.stamp")
-add_custom_command(
-  OUTPUT "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
-  COMMAND "${CMAKE_COMMAND}" -E make_directory
-    "${BIOSEQ_SQL_CODEGEN_DIR}"
-  COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
-  COMMAND "${CMAKE_COMMAND}" -E touch
-    "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
-  DEPENDS
-    bioseq_codegen_project
-    "${BIOSEQ_CODEGEN_EXECUTABLE}"
-    ${BIOSEQ_SQL_NEGATIVE_FIXTURES}
-    "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"
-    "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/contract_tests.cppm"
-  COMMENT
-    "Running real structural SQL negative/provenance contract fixtures"
-  VERBATIM)
+if(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST)
+  add_custom_command(
+    OUTPUT "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+      "${BIOSEQ_SQL_CODEGEN_DIR}"
+    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
+    COMMAND "${CMAKE_COMMAND}" -E touch
+      "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    DEPENDS
+      bioseq_codegen_project
+      "${BIOSEQ_CODEGEN_EXECUTABLE}"
+      ${BIOSEQ_SQL_NEGATIVE_FIXTURES}
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/index.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/collector/options.cppm"
+      "${CMAKE_CURRENT_LIST_DIR}/../codegen/sql/contract_tests.cppm"
+    COMMENT
+      "Running real structural SQL negative/provenance contract fixtures"
+    VERBATIM)
+else()
+  add_custom_command(
+    OUTPUT "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+      "${BIOSEQ_SQL_CODEGEN_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E touch
+      "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}"
+    COMMENT "Skipping disabled maintainer SQL negative/provenance fixtures"
+    VERBATIM)
+endif()
 add_custom_target(bioseq_sql_negative_contracts
   DEPENDS "${BIOSEQ_SQL_NEGATIVE_CONTRACT_STAMP}")
 if(BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST)

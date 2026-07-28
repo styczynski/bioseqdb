@@ -453,6 +453,11 @@ class StaticContractTests(unittest.TestCase):
             codegen_cmake,
         )
         self.assertIn("BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST", bioseq_cmake)
+        self.assertIn("BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST", bioseq_cmake)
+        self.assertIn(
+            "-DBIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST=OFF",
+            build_script,
+        )
         self.assertIn(
             "-DBIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST=OFF",
             build_script,
