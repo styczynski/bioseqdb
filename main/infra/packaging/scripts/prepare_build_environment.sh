@@ -13,6 +13,7 @@ readonly tool_root=/opt/bioseq-package-toolchain
 readonly llvm_root="${tool_root}/llvm-${llvm_major}"
 readonly cmake_root="${tool_root}/cmake"
 readonly vcpkg_root="${tool_root}/vcpkg"
+readonly vcpkg_cache="${tool_root}/vcpkg-binary-cache"
 
 die() {
   echo "bioseq package preparation: $*" >&2
@@ -245,8 +246,8 @@ install_vcpkg() {
       || die "vcpkg checkout did not resolve the pinned baseline"
     "${vcpkg_root}/bootstrap-vcpkg.sh" -disableMetrics
   fi
-  mkdir -p /opt/bioseq-vcpkg-cache
-  chmod -R a+rwX "${vcpkg_root}" /opt/bioseq-vcpkg-cache
+  mkdir -p "${vcpkg_cache}"
+  chmod -R a+rwX "${vcpkg_root}" "${vcpkg_cache}"
 }
 
 install_cmake
