@@ -5,7 +5,7 @@ The first computational stage of the BioSeqDB mapper converts a sequence into a
 much smaller stream of representative $k$-mers.  This stream is called a
 \emph{minimizer sketch}. The target sketch becomes an index. The query sketch
 is looked up in that index, and equal keys become the anchors consumed by
-Chapter~\ref{r:06-chaining}. Sketching is therefore more than a sampling
+Chapter~\ref{sec:chaining-purpose}. Sketching is therefore more than a sampling
 optimization. Its hash
 function, strand convention, tie rule, invalid-symbol rule, and output encoding
 jointly define the language spoken by the query and its stored target index.
@@ -17,16 +17,21 @@ implementation: BioSeqDB retains several minimizer backends instead of
 declaring one universally best algorithm.  The current public backend enum in
 \path{main/bioseq/backend/sequences/kmers/index.cppm} contains
 \texttt{Scalar}, \texttt{ExactSimd}, \texttt{PaperNtHashSimd}, and
-\texttt{VulkanSegment}.  Scalar and ExactSimd share the legacy minimap-style
-scheme. ExactSimd is the current production CPU default.
+\texttt{VulkanSegment}. Scalar and ExactSimd share the legacy minimap-style
+scheme. The initializer-level runtime default is Scalar in both
+\texttt{Minimap2Params} and the PostgreSQL GUC. ExactSimd is the
+production-targeted all-SIMD alternative selected explicitly as
+\texttt{two\_stack\_nthash}, including by named benchmark configurations.
 PaperNtHashSimd implements a separate versioned, paper-derived 32-bit ntHash
 scheme. Its persisted manifest identity is the pair $(1,1)$, while
 \texttt{PNT1} and \texttt{0x504E5431} name the human-readable scheme family
-and the checked-kernel proof magic. VulkanSegment reproduces the legacy
-minimap-style scheme on a device through the Phase C tiled kernel. Persisted
-index metadata records the selected scheme. Dispatch is not allowed to
-substitute one scheme for another merely because both outputs are called
-``minimizers''.
+and the checked-kernel proof magic. VulkanSegment targets the legacy
+minimap-style scheme on a device through the Phase C tiled kernel. Its current
+oracle contract is exact for dna4. For dna5 and the tested generic
+dna5/u8-packing route, the scalar events must be a subset of the device output
+and the number of additional events is bounded. Persisted index metadata
+records the selected scheme. Dispatch is not allowed to substitute one scheme
+for another merely because both outputs are called ``minimizers''.
 
 The implementation history is useful because it exposes three recurring
 lessons:
@@ -235,7 +240,8 @@ same legacy scheme & 32-bit rolling ntHash, wrapping forward+reverse sum &
 same legacy minimap-style scheme\\
 Equal minimum & entering/rightmost winner, special duplicate emissions &
 same event chronology & keep left and right extremes, emit both identities
-when tied & same event chronology inside each replayed tile\\
+when tied & exact dna4 chronology, scalar-event superset for dna5 and the
+tested dna5/u8-packing route\\
 Palindrome & iteration skipped & max sentinel consumes a slot &
 ntHash endpoint with recorded orientation & max sentinel\\
 Ambiguity & reset clean run & reset, one invalid ring transition, no flush &
@@ -249,7 +255,8 @@ Persisted identity & minimap2 index format & legacy-minimap-v1 &
 manifest scheme $(1,1)$ & legacy-minimap-v1\\
 Execution evidence & not part of this comparison & exact route counters and
 continuation proof & proof magic \texttt{0x504E5431} plus zero fail-closed
-counters & Phase C admission and execution proof\\
+counters & exact dna4 comparison, subset and bounded-extra checks for dna5
+and the tested dna5/u8-packing route\\
 \bottomrule
 \end{tabularx}
 \caption{The four implementations are not interchangeable merely because they
@@ -812,8 +819,9 @@ historical XXL shape.  It is intentionally distinguished in
 forensics found that historical route did not satisfy all exact palindrome and
 boundary semantics, it must be treated as an approximate resident control, not
 as proof that the segmented Exact scheme has reached report-76 speed. The
-production/default route therefore remains the audited ExactSimd
-continuation. PNT1 keeps a separate name because it is a different seed
+audited continuation is therefore the production-targeted ExactSimd route when
+\texttt{two\_stack\_nthash} is selected explicitly. Ordinary initialization
+remains Scalar. PNT1 keeps a separate name because it is a different seed
 contract, not because it repairs the resident control's compatibility.
 
 \subsection{PNT1: a versioned paper-derived alternative}
@@ -929,16 +937,19 @@ Second, changing a seed contract is an index-format migration, not a local
 micro-optimization.  The catalog and on-disk header can reject a mismatch
 before the false-negative failure reaches the chaining stage.
 
-\subsection{Vulkan Phase C: exact extraction on the device}
+\subsection{Vulkan Phase C: exact dna4 extraction and conservative superset extraction}
 \label{sec:vulkan-minimizers}
 
 The GPU implementation follows a different optimization path.  Its purpose is
 not to reproduce the eight-stream PNT1 decomposition, but to execute the
-minimap-compatible scalar state machine over device-resident packed sequences.
-It belongs to Phase C of the GPU pipeline: metadata, packed bases, sketch
-events, seed hits, and downstream work can remain on the device.  This avoids
-making a fast kernel irrelevant by repeatedly materializing sequences or
-events on the host.
+minimap-compatible scalar-derived state machine over device-resident packed
+sequences. Exact event parity is currently verified for dna4. The dna5 and
+tested generic dna5/u8-packing routes instead use a conservative contract:
+every scalar event must be present and the number of additional events is
+bounded. It belongs to Phase C of the GPU pipeline: metadata, packed bases,
+sketch events, seed hits, and downstream work can remain on the device. This
+avoids making a fast kernel irrelevant by repeatedly materializing sequences
+or events on the host.
 
 \subsubsection{Relationship to G3SA}
 
@@ -986,8 +997,9 @@ Ambiguity & skip the current position & reset rolling validity, advance one max
 sentinel through the existing chronological window state \\
 Boundary ownership & read-local & replay overlap plus half-open owned trigger
 interval \\
-Compatibility target & minimap2-inspired & scalar BioSeqDB/minimap event stream,
-including ties and final flush \\
+Compatibility target & minimap2-inspired & exact scalar BioSeqDB event stream
+for dna4, bounded conservative scalar-event superset for dna5 and the tested
+dna5/u8-packing route \\
 \bottomrule
 \end{tabularx}
 \end{table}
@@ -997,11 +1009,19 @@ including ties and final flush \\
 An output event depends on the preceding $K-1$ bases and on a minimizer window
 of $W$ candidate positions.  Starting every tile with empty state would
 therefore invent resets and lose boundary events.  Phase C solves this with
-replay and ownership.  For a tile whose owned trigger interval is
-$[b,e)$, the shader begins earlier by a conservative overlap currently bounded
-by $K+W+1$, reconstructs the exact state, and emits only events whose trigger
-position lies in $[b,e)$.  Neighboring tiles may recompute context, but they
-cannot both own the same event.
+replay and ownership. For a tile whose owned trigger interval is $[b,e)$, the
+shader begins earlier by a conservative overlap currently bounded by $K+W+1$,
+replays scalar-derived state, and emits only events whose trigger position lies
+in $[b,e)$. The half-open trigger filter is intended to prevent neighboring
+tiles from owning the same event. Exact cross-tile event parity is verified for
+dna4. For dna5 and the tested dna5/u8-packing route, the oracle instead
+requires every scalar triple to be present and limits additional triples to
+\[
+  2\,T\,(K+W+1),
+\]
+where $T$ is the tile count. This bound is a conservative acceptance contract,
+not a claim that every additional event has been localized to a particular
+boundary.
 
 The planner targets approximately 256 logical bases and rounds storage
 according to the sequence representation. A dna5 packing shape therefore
@@ -1035,24 +1055,26 @@ and deterministic count/scan/emit path.
   \draw[densely dashed] (6.2,1.05) -- (6.2,3.65);
   \node[above] at (6.2,3.65) {$e_i=b_{i+1}$};
 
-  \node[stage] (count) at (1.5,-0.15) {count exact\\events per tile};
+  \node[stage] (count) at (1.5,-0.15) {count admitted\\events per tile};
   \node[stage] (scan) at (5.15,-0.15) {exclusive device\\prefix scan};
   \node[stage] (emit) at (8.8,-0.15) {replay and emit\\owned events};
   \draw[->,thick] (count) -- node[above]{counts} (scan);
   \draw[->,thick] (scan) -- node[above]{offsets} (emit);
 \end{tikzpicture}
 \caption{Phase C tile replay and ownership for the compact deterministic route.
-Recomputed context overlaps, but the emitted trigger intervals are disjoint.
-The count and emit passes give every tile an exact, race-free output range.}
+Recomputed context overlaps, while half-open trigger intervals establish
+disjoint intended ownership. The count and emit passes give every tile an
+exact-sized, race-free allocation range. That allocation property is distinct
+from semantic parity with the scalar oracle.}
 \label{fig:phase-c-tiles}
 \end{figure}
 
 The output cardinality is data dependent. Ties and expiry events mean that a
 window does not imply exactly one stored record. The compact target/query route
 executes the state machine twice. The first pass counts events per descriptor.
-An exclusive prefix scan assigns exact offsets. The second pass replays and
-writes only to the assigned interval. This provides deterministic event order
-and makes allocation failure visible before emission.
+An exclusive prefix scan assigns offsets matching those counts. The second pass
+replays and writes only to the assigned interval. This provides deterministic
+event order and makes allocation failure visible before emission.
 
 Phase C also exposes an independent sorted-pair API used by MPF persistence.
 That route allocates a proved worst-case capacity, performs one kernel pass
@@ -1070,7 +1092,7 @@ the compact two-pass route rather than every Phase C caller.
 \Require packed sequence descriptors, $(K,W)$, half-open tile ownership
 \For{pass $\in\{\mathrm{count},\mathrm{emit}\}$}
   \ForAll{tiles in a grid-stride loop}
-    \State start at the tile's replay origin with empty scalar-equivalent state
+    \State start at the tile's replay origin with empty scalar-derived state
     \For{each logical symbol through the owned interval}
       \State decode rank from the representation-specific packed layout
       \State $\textit{candidate}\gets\infty$
@@ -1095,7 +1117,7 @@ the compact two-pass route rather than every Phase C caller.
     \EndIf
   \EndFor
   \If{pass is \textsc{count}}
-    \State exclusive-scan tile counts and allocate the exact output
+    \State exclusive-scan tile counts and allocate the counted output
   \EndIf
 \EndFor
 \end{algorithmic}
@@ -1117,15 +1139,17 @@ plausible in isolation:
   semantics-bearing path for all supported representations.
   \item The first Phase C shader still reconstructed too much state and left
   work concentrated in too few lanes.  DOC0353 replaced that structure with
-  rolling hash updates and an all-lanes, grid-stride tile schedule.  The
-  output remained bit-exact while sketch throughput increased from about
-  73 to 494\,Mbp/s in the recorded benchmark.
+  rolling hash updates and an all-lanes, grid-stride tile schedule. The
+  measured dna4 configuration remained bit-exact while sketch throughput
+  increased from about 73 to 494\,Mbp/s in the recorded benchmark.
 \end{enumerate}
 
-This sequence matters more than the name of a kernel.  The final design is the
-combination of an ABI proof, explicit replay ownership, exact scalar-equivalent
-event semantics, and a parallel schedule.  Removing any one of those
-properties reproduces a previously observed failure mode.
+This sequence matters more than the name of a kernel. The final design combines
+an ABI proof, explicit replay ownership, a parallel schedule, and a
+representation-specific oracle contract. That contract is exact for dna4 and
+is a bounded conservative superset for dna5 and the tested dna5/u8-packing
+route. Removing any one of those properties reproduces a previously observed
+failure mode.
 
 \section{Measurements, provenance, and backend choice}
 \label{sec:minimizer-results}
@@ -1216,15 +1240,18 @@ $4.733/2.923=1.62\times$ faster than the recorded minimap2 route and
 $9.256/2.923=3.17\times$ faster than that generation of the exact segmented
 SIMD route. These ratios describe the tested fixture, binary, and local
 machine. They are not universal instruction-throughput claims and they do not
-establish PNT1 as the current production default.
+establish PNT1 as the ordinary runtime default.
 
-\subsection{Current ExactSimd production state}
+\subsection{Current ExactSimd selectable production route}
 
 The current source labels \texttt{TWO\_STACK\_NTHASH} as the production
-minimizer collector and routes that selection to ExactSimd. The name preserves
-implementation history, but the execution proof identifies the exact
-minimap-compatible backend. PaperNtHashSimd remains a separately selectable
-scheme with its own manifest identity.
+minimizer collector and routes that explicit selection to ExactSimd. This role
+label does not change initialization: both \texttt{Minimap2Params} and the
+PostgreSQL GUC initialize the algorithm as Scalar. Selecting
+\texttt{two\_stack\_nthash} maps to the production-targeted ExactSimd backend.
+The name preserves implementation history, while the execution proof
+identifies the exact minimap-compatible backend. PaperNtHashSimd remains a
+separately selectable scheme with its own manifest identity.
 
 Newer measurements explain why report 103 cannot close the CPU story.
 DOC0384 report 134 measures the exact B8 query sketch at
@@ -1241,17 +1268,20 @@ production sign-off. It is structurally complete, yet it has no
 Paper-ntHash comparisons are unequal-work prototype diagnostics. Their raw
 ratios are approximately 1.46--1.48 relative to the exact-SIMD oracle, and
 normalization by recorded input volume gives approximately 1.397. The current
-evidence therefore supports ExactSimd as the production/default CPU route.
-PNT1 remains a versioned alternative whose future production use would require
-an equal-work experiment. DOC0384 identifies winner-only or rare-tie recovery
-as the evidence-based direction if that prototype is pursued.
+evidence therefore supports ExactSimd as a qualified, explicitly selectable
+all-SIMD route, not as the ordinary runtime default. A decision to migrate the
+default to an all-SIMD collector remains open pending equal-work results. PNT1
+remains a versioned alternative whose future production use would require such
+an experiment. DOC0384 identifies winner-only or rare-tie recovery as the
+evidence-based direction if that prototype is pursued.
 
 \subsection{GPU kernel progression}
 
 DOC0353 records the controlled before/after measurement of the Phase C shader
-rewrite shown in Table~\ref{tab:gpu-minimizer-rewrite}.  The primary evidence
-is bit-exact output together with the kernel improvement. The total probe also
-improved because sketching ceased to dominate the GPU pipeline.
+rewrite shown in Table~\ref{tab:gpu-minimizer-rewrite}. The primary evidence is
+bit-exact output for the recorded dna4 configuration together with the kernel
+improvement. The total probe also improved because sketching ceased to dominate
+the GPU pipeline.
 
 \begin{table}[htbp]
 \centering
@@ -1278,7 +1308,9 @@ execution and correct CIGARs for all 4096 queries, but it covered the complete
 bounded alignment route rather than a minimizer-only Phase C kernel. GPU
 execution was slower than the minimap2 control on that case.
 The honest conclusion is narrower: Phase C removed the structural GPU sketch
-bottleneck and produced exact device events, while large-scale cross-backend
+bottleneck and produced bit-exact device events for the recorded dna4
+configuration. The current dna5 and tested dna5/u8-packing oracle instead
+accepts a bounded conservative superset. Large-scale cross-backend
 qualification remained future measurement work.
 
 \subsection{Why older ``wins'' are retained but not promoted}
@@ -1302,21 +1334,24 @@ that the remaining ordinary path beats scalar code.
 \subsection{The resulting selection policy}
 \label{sec:minimizer-selection}
 
-ExactSimd is the current production/default CPU collector. The other backends
-remain explicit because portability, a different seed contract, or device
-residency can require a different route. The pipeline chooses an algorithm
-only after it has chosen a compatible sketch/index scheme:
+Scalar is the current initializer-level runtime default and semantic oracle.
+ExactSimd is the production-targeted CPU collector selected explicitly as
+\texttt{two\_stack\_nthash}. The other backends remain explicit because
+portability, a different seed contract, or device residency can require a
+different route. The pipeline chooses an algorithm only after it has chosen a
+compatible sketch/index scheme:
 
 \begin{description}
-  \item[\texttt{Scalar}.] The portability backend and semantic oracle.  It is
-  the reference for invalid-symbol resets, equal-hash identities, duplicate
-  events, position widths, and final flushes.
+  \item[\texttt{Scalar}.] The initializer-level default, portability backend,
+  and semantic oracle. It is the reference for invalid-symbol resets,
+  equal-hash identities, duplicate events, position widths, and final flushes.
 
-  \item[\texttt{ExactSimd}.] The production/default CPU implementation for the
-  minimap-compatible scheme. It uses the K15/W10 B8 specialization when that
-  shape is proved and otherwise uses the supported generic exact-vector route.
-  The selected backend accepts only a proof with zero scalar biological
-  counters. A declined proof is an error, not an implicit scalar call.
+  \item[\texttt{ExactSimd}.] The production-targeted, explicitly selectable
+  CPU implementation for the minimap-compatible scheme. It uses the K15/W10
+  B8 specialization when that shape is proved and otherwise uses the supported
+  generic exact-vector route. The selected backend accepts only a proof with
+  zero scalar biological counters. A declined proof is an error, not an
+  implicit scalar call.
 
   \item[\texttt{PaperNtHashSimd}.] A versioned unequal-work
   alternative/prototype for packed dna4 when both sides carry manifest scheme
@@ -1325,12 +1360,14 @@ only after it has chosen a compatible sketch/index scheme:
   query a minimap-compatible index by treating every minimizer as an
   interchangeable 32-bit integer.
 
-  \item[\texttt{VulkanSegment}.] The exact minimap-compatible device route
-  when Phase C admission proves the representation, tile span, buffer
-  capacity, and device features. It is favored when the next stages remain
-  resident. The planner may select a compatible host backend before Vulkan
-  execution begins. Once VulkanSegment is selected, a device decline is an
-  error rather than a silent host fallback.
+  \item[\texttt{VulkanSegment}.] The device implementation of the legacy
+  minimap-style hash and reset contract when Phase C admission proves the
+  representation, tile span, buffer capacity, and device features. Current
+  dna4 checks require exact parity. Dna5 and the tested dna5/u8-packing route
+  require all scalar events with a bounded number of additional events. It is
+  favored when the next stages remain resident. The planner may select a
+  compatible host backend before Vulkan execution begins. Once VulkanSegment
+  is selected, a device decline is an error rather than a silent host fallback.
 \end{description}
 
 Figure~\ref{fig:minimizer-selection} summarizes how persisted scheme identity
@@ -1394,13 +1431,15 @@ continuation is the common $K=15,W=10$, eight-position shape. Other supported
 shapes use its generic exact-vector route. If ExactSimd admission fails,
 dispatch may select Scalar explicitly before ExactSimd execution begins. Once
 ExactSimd is selected, failure is an error. The Phase C tile owns one serial
-scalar-equivalent state, so positions within a tile are not independently
+scalar-derived replay state, so positions within a tile are not independently
 parallel. Parallelism comes from many tiles and grid-stride work distribution.
+Its semantic acceptance remains representation-specific: exact for dna4 and a
+bounded conservative superset for dna5 and the tested dna5/u8-packing route.
 The compact route deliberately runs count and emit to obtain deterministic
 output. The sorted-pair persistence route instead uses atomic append followed
 by a stable device sort. Finally, the historical full-resident route remains
-in the source for comparison and
-must not be mistaken for an exact compatibility proof.
+in the source for comparison and must not be mistaken for an exact
+compatibility proof.
 
 The most useful next measurements are therefore not another isolated hash
 loop. They are:
@@ -1440,11 +1479,18 @@ ambiguity and tie/final-event rules \\
 557--629, 2367--3435, 4036--4085, and 5461--6020 &
 Exact continuation proofs, exact B8 path, bounded PNT1 execution, resident
 control, and current pipeline routing \\
-\texttt{main/bioseq/backend/pipeline/minimap\_port.cppm} and
-\texttt{pipe.cppm} &
-158--184, 4995--5171, 5523--5538 &
-production/default selection, backend-to-scheme routing, and fail-closed
-admission \\
+\texttt{main/bioseq/backend/pipeline/minimap\_port.cppm} &
+168--176 and 672--676 &
+\texttt{TWO\_STACK\_NTHASH} production-role label and Scalar
+\texttt{Minimap2Params} initializer \\
+\texttt{main/bioseq/backend/config/aligner\_sql\_guc\_settings.cppm} and
+\texttt{main/bioseq/backend/pipeline/pipe.cppm} &
+173--178 and 5224--5228 &
+Scalar PostgreSQL GUC initializer and explicit
+\texttt{TWO\_STACK\_NTHASH}-to-ExactSimd mapping \\
+\texttt{main/bench/bench\_e2e\_configuration.json} &
+14--23 and 120--121 &
+named benchmark configurations that select the two-stack route explicitly \\
 \texttt{main/bioseq/backend/sequences/indexing/minimizer\_hashmap\_index.cppm} &
 484--490, 689--785, 825--870, 21738--21921 &
 kernel proof magic, persisted scheme pair, contiguous PNT1 admission, MPF halo
@@ -1453,6 +1499,10 @@ ownership, and canonical sort/unique \\
 planner and dispatch regions &
 tile preparation, buffer protocol, dispatch, and supported representation
 admission \\
+\texttt{main/bioseq/backend/sequences/kmers/minimizers\_vulkan\_test.cpp} &
+232--279, 1425--1560, 2971--2992, and 3045--3128 &
+exact dna4 oracle checks and subset with bounded-extra checks for dna5 and the
+tested dna5/u8-packing route, including the sorted-pair API \\
 \texttt{main/bioseq/backend/gpu/vulkan/phase\_c\_abi.cppm} &
 1438--1584 &
 descriptor layout, replay/span bounds, and Phase C proof obligations \\
@@ -1492,16 +1542,18 @@ minimap-compatible rules explicit. The two-stack work shows how to remove
 rescans without changing them, and its failures show that SIMD width alone
 does not provide a speedup.
 
-The current production/default CPU solution is ExactSimd, which retains the
-minimap-compatible contract and fails closed when its execution proof is not
-accepted. PNT1 is a separately versioned paper-derived alternative/prototype
-bound to manifest scheme $(1,1)$. Historical report 103 demonstrates a valid
-configuration, but newer evidence does not support presenting it as a
-wholesale replacement for ExactSimd. The GPU solution adopts G3SA's
-resident-pipeline insight \cite{g3sa_paper} and reconstructs the sketch around
-BioSeqDB's packed representations, exact reset semantics, and replay
-ownership. Its compact route uses deterministic count/scan/emit allocation.
-Its sorted-pair persistence route uses atomic append followed by a stable
-device sort. In every route, an optimization is accepted only when the seed
-scheme, storage proof, boundary ownership, execution evidence, and measured
-downstream result agree.
+The current initializer-level CPU default is Scalar. ExactSimd retains the
+minimap-compatible contract as a production-targeted, explicitly selected
+all-SIMD route and fails closed when its execution proof is not accepted. PNT1
+is a separately versioned paper-derived alternative/prototype bound to manifest
+scheme $(1,1)$. Historical report 103 demonstrates a valid configuration, but
+newer evidence does not support presenting it as a wholesale replacement for
+ExactSimd. The GPU solution adopts G3SA's resident-pipeline insight
+\cite{g3sa_paper} and reconstructs the sketch around BioSeqDB's packed
+representations, reset semantics, and replay ownership. Its current oracle
+contract is exact for dna4 and a bounded conservative superset for dna5 and
+the tested dna5/u8-packing route. Its compact route uses deterministic
+count/scan/emit allocation. Its sorted-pair persistence route uses atomic
+append followed by a stable device sort. In every route, an optimization is
+accepted only when the seed scheme, storage proof, boundary ownership,
+execution evidence, and measured downstream result agree.
