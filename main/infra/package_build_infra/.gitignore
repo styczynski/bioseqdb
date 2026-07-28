@@ -1,0 +1,12 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+.secrets/
+.logs/
+.runtime/
+*.pem
+*.tfvars
+!package_build.auto.tfvars.example

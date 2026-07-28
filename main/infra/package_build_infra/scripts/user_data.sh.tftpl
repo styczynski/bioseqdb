@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 022
+
+STATE_DIR=/opt/bioseq-package-builder
+LOG_FILE=/var/log/bioseq-package-builder-bootstrap.log
+mkdir -p "$STATE_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+on_error() {
+  local rc=$?
+  trap - ERR
+  printf 'BOOTSTRAP_FAILED:%s\n' "$rc" > "$STATE_DIR/PROVISION_STATUS"
+  printf '[user-data] failed with exit %s at %s\n' "$rc" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+  exit "$rc"
+}
+trap on_error ERR
+
+printf 'BOOTSTRAP_STARTING\n' > "$STATE_DIR/PROVISION_STATUS"
+
+cat > /etc/bioseq-package-builder.env <<'EOF'
+ARTIFACT_BUCKET='${artifact_bucket_name}'
+ARTIFACT_PREFIX='${artifact_prefix}'
+AWS_ARCHITECTURE='${aws_architecture}'
+AWS_REGION='${region}'
+BIOSEQ_AMI_SCHEMA_VERSION='${schema_version}'
+BIOSEQ_BUILD_ARCHITECTURE='${builder_architecture}'
+BIOSEQ_COMPILER_RT_PRIORITY='${compiler_rt_priority}'
+BIOSEQ_DISK_SWAP_PRIORITY='${disk_swap_priority}'
+BIOSEQ_DISK_SWAP_SIZE_GB='${disk_swap_size_gb}'
+BIOSEQ_SIGNING_KEY_SECRET_ARN='${signing_key_secret_arn}'
+BIOSEQ_SOURCE_STAGING_DIR='/opt/bioseq-package-builder/workspace'
+BIOSEQ_SSH_RT_PRIORITY='${ssh_rt_priority}'
+BIOSEQ_ZRAM_FRACTION_PERCENT='${zram_fraction_percent}'
+BIOSEQ_ZRAM_SWAP_PRIORITY='${zram_swap_priority}'
+TARGET_USER='${target_user}'
+EOF
+chmod 0644 /etc/bioseq-package-builder.env
+
+# Compressing the separately versioned bootstrap keeps rendered EC2 user-data
+# comfortably below the 16 KiB API limit.
+BOOTSTRAP=/usr/local/sbin/bioseq-package-builder-bootstrap
+printf '%s' '${bootstrap_gzip_b64}' | base64 -d | gzip -d > "$BOOTSTRAP"
+chown root:root "$BOOTSTRAP"
+chmod 0755 "$BOOTSTRAP"
+
+printf '[user-data] launching package-builder bootstrap at %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+export BIOSEQ_BOOTSTRAP_LOGGED=1
+exec "$BOOTSTRAP"
