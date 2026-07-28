@@ -7,7 +7,9 @@ output "builders" {
       private_ip    = aws_instance.builder[name].private_ip
       instance_type = builder.instance_type
       architecture  = builder.aws_architecture
-      source_ami_id = aws_instance.builder[name].ami
+      # Canonical's public SSM parameter is provider-marked sensitive even
+      # though an AMI id is public metadata. Remove only that inherited marker.
+      source_ami_id = nonsensitive(aws_instance.builder[name].ami)
     }
   }
 }

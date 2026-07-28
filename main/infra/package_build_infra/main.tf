@@ -224,26 +224,12 @@ data "aws_iam_policy_document" "artifact_publish" {
     sid = "ReadArtifactBucketLocation"
     actions = [
       "s3:GetBucketLocation",
+      # OmniPackage performs HeadBucket before any prefix-scoped operation;
+      # AWS authorizes HeadBucket through s3:ListBucket without prefix context.
+      "s3:ListBucket",
       "s3:ListBucketMultipartUploads",
     ]
     resources = [aws_s3_bucket.artifacts.arn]
-  }
-
-  statement {
-    sid = "ListArtifactPrefix"
-    actions = [
-      "s3:ListBucket",
-    ]
-    resources = [aws_s3_bucket.artifacts.arn]
-
-    condition {
-      test     = "StringLike"
-      variable = "s3:prefix"
-      values = [
-        var.artifact_prefix,
-        "${var.artifact_prefix}/*",
-      ]
-    }
   }
 
   statement {
