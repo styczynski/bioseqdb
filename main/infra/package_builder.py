@@ -1880,13 +1880,6 @@ def execute_build(
                 info(f"{name} native package matrix completed")
             except Exception as error:
                 errors.append(f"{name}: {error}")
-                for other in futures:
-                    if other is not future:
-                        other.cancel()
-                # Stop the sibling SSH build immediately so the outer
-                # lifecycle can enter its exact-instance stop path promptly.
-                interrupt_active_children()
-                break
     if errors:
         raise PackageBuilderError("native package builds failed: " + "; ".join(errors))
 

@@ -293,11 +293,11 @@ class LifecycleSafetyTests(unittest.TestCase):
                 package_builder.ACTIVE_CHILDREN.discard(child)
         child.send_signal.assert_called_once_with(signal.SIGINT)
 
-    def test_first_native_build_failure_interrupts_sibling_and_fails_fast(self) -> None:
+    def test_cell_failure_is_fail_fast_without_interrupting_sibling_architecture(self) -> None:
         remote_source = inspect.getsource(package_builder.run_remote_build)
         orchestration_source = inspect.getsource(package_builder.execute_build)
         self.assertIn('"--fail-fast"', remote_source)
-        self.assertIn("interrupt_active_children()", orchestration_source)
+        self.assertNotIn("interrupt_active_children()", orchestration_source)
 
 
 class ManifestTests(unittest.TestCase):
