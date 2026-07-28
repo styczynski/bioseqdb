@@ -14,6 +14,12 @@ output "builders" {
   }
 }
 
+output "builder_user_data" {
+  description = "Exact rendered bootstrap user data, consumed only for safe stopped-instance refresh before AMI snapshots."
+  value       = local.builder_user_data
+  sensitive   = true
+}
+
 output "ssh_private_key_path" {
   description = "Absolute path to the generated package-builder SSH private key."
   value       = abspath(local_sensitive_file.ssh_private_key.filename)

@@ -17,6 +17,8 @@ in OpenTofu state.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import concurrent.futures
 import contextlib
 import datetime as dt
@@ -1056,6 +1058,7 @@ def create_cached_ami(
     architecture: Architecture,
     matrix: Matrix,
     key_path: Path,
+    user_data: str,
 ) -> tuple[dict[str, Any], Builder]:
     # Snapshot only a stopped, fully validated pre-source machine. Explicit
     # --no-reboot prevents CreateImage from attempting its default reboot after
@@ -1067,6 +1070,12 @@ def create_cached_ami(
         "sudo cloud-init clean --logs --machine-id",
     )
     stop_builders(region, {architecture.name: builder}, matrix)
+    stopped_record = describe_builder(region, builder, architecture)
+    if instance_state(stopped_record) != "stopped":
+        raise PackageBuilderError(
+            f"refusing user-data refresh on non-stopped builder {builder.instance_id}"
+        )
+    update_stopped_builder_user_data(region, builder, user_data)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = f"bioseq-package-builder-{architecture.name}-schema{BOOTSTRAP_SCHEMA}-{stamp}"
     payload = aws_json(
@@ -1110,6 +1119,70 @@ def create_cached_ami(
     image = wait_for_cached_ami(region, image_id)
     info(f"created reusable {architecture.name} package-builder AMI {image_id}")
     return image, refreshed
+
+
+def rendered_builder_user_data(outputs: dict[str, Any], architecture: str) -> str:
+    values = outputs.get("builder_user_data")
+    if not isinstance(values, dict) or set(values) != {"arm64", "x64"}:
+        raise PackageBuilderError("OpenTofu output `builder_user_data` is incomplete")
+    user_data = values.get(architecture)
+    if not isinstance(user_data, str) or not user_data.startswith("#!/usr/bin/env bash\n"):
+        raise PackageBuilderError(
+            f"OpenTofu rendered invalid user data for {architecture}"
+        )
+    size = len(user_data.encode("utf-8"))
+    if size > 16 * 1024:
+        raise PackageBuilderError(
+            f"OpenTofu rendered {size} bytes of {architecture} user data; EC2 allows 16384"
+        )
+    return user_data
+
+
+def update_stopped_builder_user_data(
+    region: str, builder: Builder, user_data: str
+) -> None:
+    """Refresh exact EC2 user data without replacing a persistent builder."""
+
+    encoded = base64.b64encode(user_data.encode("utf-8"))
+    with tempfile.NamedTemporaryFile(
+        prefix=f"bioseq-{builder.architecture}-user-data-",
+        mode="w+b",
+    ) as payload_file:
+        os.fchmod(payload_file.fileno(), 0o600)
+        payload_file.write(encoded)
+        payload_file.flush()
+        aws_no_output(
+            region,
+            "ec2",
+            "modify-instance-attribute",
+            "--instance-id",
+            builder.instance_id,
+            "--attribute",
+            "userData",
+            "--value",
+            f"fileb://{payload_file.name}",
+        )
+    response = aws_json(
+        region,
+        "ec2",
+        "describe-instance-attribute",
+        "--instance-id",
+        builder.instance_id,
+        "--attribute",
+        "userData",
+    )
+    remote_value = response.get("UserData", {}).get("Value")
+    try:
+        remote_user_data = base64.b64decode(remote_value, validate=True).decode("utf-8")
+    except (TypeError, ValueError, binascii.Error, UnicodeDecodeError) as error:
+        raise PackageBuilderError(
+            f"EC2 returned invalid user data for {builder.instance_id}"
+        ) from error
+    if remote_user_data != user_data:
+        raise PackageBuilderError(
+            f"EC2 did not persist exact user data for {builder.instance_id}"
+        )
+    info(f"refreshed exact stopped-instance user data on {builder.architecture}")
 
 
 def wait_for_cached_ami(
@@ -1701,6 +1774,7 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
                     matrix.architectures[name],
                     matrix,
                     key_path,
+                    rendered_builder_user_data(outputs, name),
                 )
     return outputs, builders, records, cache_hits
 

@@ -214,8 +214,39 @@ class LifecycleSafetyTests(unittest.TestCase):
     def test_cached_ami_uses_stopped_instance_and_no_reboot_snapshot(self) -> None:
         source = inspect.getsource(package_builder.create_cached_ami)
         self.assertIn("stop_builders", source)
+        self.assertIn("update_stopped_builder_user_data", source)
         self.assertIn("cloud-init clean", source)
         self.assertIn("--no-reboot", source)
+
+    def test_stopped_user_data_refresh_is_exact_and_file_backed(self) -> None:
+        builder = package_builder.Builder(
+            architecture="arm64",
+            instance_id="i-0aaabbbcccdddeee1",
+            instance_type="c7g.xlarge",
+            aws_architecture="arm64",
+            public_ip="203.0.113.1",
+            private_ip="10.0.0.1",
+            source_ami_id="ami-0123456789abcdef0",
+        )
+        user_data = "#!/usr/bin/env bash\nprintf 'ready\\n'\n"
+        observed: dict[str, bytes] = {}
+
+        def capture_payload(*args: str) -> None:
+            file_argument = next(value for value in args if value.startswith("fileb://"))
+            observed["payload"] = Path(file_argument.removeprefix("fileb://")).read_bytes()
+
+        encoded = package_builder.base64.b64encode(user_data.encode()).decode()
+        with mock.patch.object(
+            package_builder, "aws_no_output", side_effect=capture_payload
+        ), mock.patch.object(
+            package_builder,
+            "aws_json",
+            return_value={"UserData": {"Value": encoded}},
+        ):
+            package_builder.update_stopped_builder_user_data(
+                "us-east-1", builder, user_data
+            )
+        self.assertEqual(observed["payload"], encoded.encode())
 
     def test_large_cached_ami_has_explicit_long_polling(self) -> None:
         pending = {"Images": [{"ImageId": "ami-0123456789abcdef0", "State": "pending"}]}

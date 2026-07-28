@@ -332,6 +332,28 @@ resource "aws_security_group" "builder" {
   }
 }
 
+locals {
+  builder_user_data = {
+    for name, builder in local.builders : name => templatefile("${path.module}/scripts/user_data.sh.tftpl", {
+      artifact_bucket_name   = aws_s3_bucket.artifacts.bucket
+      artifact_prefix        = var.artifact_prefix
+      aws_architecture       = builder.aws_architecture
+      bootstrap_gzip_b64     = base64gzip(file("${path.module}/scripts/bootstrap.sh"))
+      builder_architecture   = name
+      compiler_rt_priority   = var.compiler_rt_priority
+      disk_swap_priority     = 10
+      disk_swap_size_gb      = var.disk_swap_size_gb
+      region                 = var.region
+      schema_version         = var.ami_schema_version
+      signing_key_secret_arn = aws_secretsmanager_secret.omnipackage_signing_key.arn
+      ssh_rt_priority        = 2
+      target_user            = var.target_user
+      zram_fraction_percent  = var.zram_fraction_percent
+      zram_swap_priority     = 100
+    })
+  }
+}
+
 resource "aws_instance" "builder" {
   for_each = local.builders
 
@@ -360,23 +382,7 @@ resource "aws_instance" "builder" {
     instance_metadata_tags      = "enabled"
   }
 
-  user_data = templatefile("${path.module}/scripts/user_data.sh.tftpl", {
-    artifact_bucket_name   = aws_s3_bucket.artifacts.bucket
-    artifact_prefix        = var.artifact_prefix
-    aws_architecture       = each.value.aws_architecture
-    bootstrap_gzip_b64     = base64gzip(file("${path.module}/scripts/bootstrap.sh"))
-    builder_architecture   = each.key
-    compiler_rt_priority   = var.compiler_rt_priority
-    disk_swap_priority     = 10
-    disk_swap_size_gb      = var.disk_swap_size_gb
-    region                 = var.region
-    schema_version         = var.ami_schema_version
-    signing_key_secret_arn = aws_secretsmanager_secret.omnipackage_signing_key.arn
-    ssh_rt_priority        = 2
-    target_user            = var.target_user
-    zram_fraction_percent  = var.zram_fraction_percent
-    zram_swap_priority     = 100
-  })
+  user_data                   = local.builder_user_data[each.key]
   user_data_replace_on_change = false
 
   volume_tags = {
@@ -400,13 +406,14 @@ resource "aws_instance" "builder" {
 
   lifecycle {
     prevent_destroy = true
-    # A newly selected cache AMI applies only when a builder is first created;
-    # never replace a persistent builder merely to change its source image.
-    # User data is intentionally *not* ignored: OpenTofu must update the
-    # stopped-instance attribute when bootstrap fixes land so cloud-init clean
-    # and the post-snapshot restart execute the current idempotent bootstrap.
+    # Cache AMIs apply only at first creation. User data is updated explicitly
+    # by the exact stopped-instance snapshot workflow: AWS reports public-IP
+    # association and user-data drift in ways that otherwise propose replacing
+    # these prevent_destroy persistent builders.
     ignore_changes = [
       ami,
+      associate_public_ip_address,
+      user_data,
     ]
   }
 
