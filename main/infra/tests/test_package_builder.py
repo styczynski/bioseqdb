@@ -172,10 +172,23 @@ class ManifestTests(unittest.TestCase):
                     "validation": {
                         "passed": True,
                         "six_artifacts": True,
-                        "elf_architecture": "x86_64",
                         "rpath_absent": True,
                         "compiler_runtime_safe": True,
                         "optimization_level": 0,
+                        "binaries": [
+                            {
+                                "path": "/tmp/bioseq.so",
+                                "elf_architecture": "x86_64",
+                                "rpath_absent": True,
+                                "compiler_runtime_safe": True,
+                            },
+                            {
+                                "path": "/tmp/bioseq_cache.so",
+                                "elf_architecture": "x86_64",
+                                "rpath_absent": True,
+                                "compiler_runtime_safe": True,
+                            },
+                        ],
                     },
                     "upload": {
                         "published": True,

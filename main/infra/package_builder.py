@@ -1175,15 +1175,44 @@ def validate_manifest(
                 f"{architecture} cell {key} failed validation: {validation}"
             )
         expected_elf = matrix.architectures[architecture].artifact_architecture
-        actual_elf = str(validation.get("elf_architecture", "")).lower()
         elf_aliases = {
             "arm64": {"aarch64", "arm64"},
             "x64": {"x86_64", "x86-64", "advanced micro devices x86-64"},
         }
-        if actual_elf not in elf_aliases[architecture] and expected_elf not in actual_elf:
+        binaries = validation.get("binaries")
+        if not isinstance(binaries, list) or len(binaries) != 2:
             raise PackageBuilderError(
-                f"{architecture} cell {key} ELF architecture mismatch: {actual_elf!r}"
+                f"{architecture} cell {key} must attest exactly two extension DSOs"
             )
+        binary_names = {
+            Path(str(binary.get("path", ""))).name
+            for binary in binaries
+            if isinstance(binary, dict)
+        }
+        if binary_names != {"bioseq.so", "bioseq_cache.so"}:
+            raise PackageBuilderError(
+                f"{architecture} cell {key} binary attestations are {sorted(binary_names)}"
+            )
+        for binary in binaries:
+            if not isinstance(binary, dict):
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} has malformed binary validation"
+                )
+            actual_elf = str(binary.get("elf_architecture", "")).lower()
+            if (
+                actual_elf not in elf_aliases[architecture]
+                and expected_elf not in actual_elf
+            ):
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} ELF architecture mismatch: {actual_elf!r}"
+                )
+            if (
+                binary.get("rpath_absent") is not True
+                or binary.get("compiler_runtime_safe") is not True
+            ):
+                raise PackageBuilderError(
+                    f"{architecture} cell {key} binary safety attestation failed"
+                )
         artifact = cell.get("artifact", {})
         filename = str(artifact.get("filename", ""))
         suffix = expected_artifact_suffix(matrix.distributions[key[1]].package_format)

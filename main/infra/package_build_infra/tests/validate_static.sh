@@ -60,6 +60,8 @@ assert_literal "$BOOTSTRAP" 'CPUSchedulingResetOnFork=true'
 assert_literal "$BOOTSTRAP" '/usr/local/sbin/bioseq-package-builder-verify'
 assert_literal "$BOOTSTRAP" 'BIOSEQ_SOURCE_STAGING_DIR'
 assert_literal "$BOOTSTRAP" 'status READY'
+assert_literal "$BOOTSTRAP" 'rpm rpm2cpio rsync'
+assert_literal "$BOOTSTRAP" 'cpio dpkg-deb readelf rpm rpm2cpio tar zstd'
 
 # Protected development instances must never become targets of this isolated
 # stack. Their ids belong only in the orchestrator's explicit denylist.

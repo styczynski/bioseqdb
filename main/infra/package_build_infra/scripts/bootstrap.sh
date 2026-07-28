@@ -70,8 +70,9 @@ retry() {
 export DEBIAN_FRONTEND=noninteractive
 retry apt-get update -y
 retry apt-get install -y --no-install-recommends \
-  build-essential ca-certificates clang cmake curl docker.io file git gnupg jq \
-  lsb-release ninja-build pkg-config python3 rsync sudo unzip util-linux xz-utils zip
+  binutils build-essential ca-certificates clang cmake cpio curl docker.io file \
+  git gnupg jq lsb-release ninja-build pkg-config python3 rpm rpm2cpio rsync \
+  sudo unzip util-linux xz-utils zip zstd
 
 systemctl enable --now docker
 usermod -aG docker "$TARGET_USER"
@@ -313,6 +314,9 @@ sudo -u "$TARGET_USER" -H /usr/local/bin/bioseq-compiler-rt-launcher --preflight
 sudo -u "$TARGET_USER" -H bash -lc 'rustc --version && cargo --version'
 sudo -u "$TARGET_USER" -H bash -lc 'docker version --format "{{.Server.Version}}"'
 gpg --version | head -1
+for tool in cpio dpkg-deb readelf rpm rpm2cpio tar zstd; do
+  command -v "$tool" >/dev/null || fail "package validation tool is missing: $tool"
+done
 
 aws_ready=0
 for attempt in 1 2 3 4 5 6; do
