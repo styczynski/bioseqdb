@@ -107,12 +107,14 @@
     alphabet-generic bit-packed sequence views, scalar and
     single-instruction, multiple-data (SIMD) minimizer extraction, and
     implementations for graphics processing units (GPUs) using Vulkan for
-    selected sketching and chaining operations, exact extension based on
+    selected sketching and chaining operations, bounded base-level extension
+    based on
     established dynamic-programming kernels, and optional SneakySnake and
     GateKeeper prefilters.  It also develops persistent database-resident
     minimizer indexes, bounded sequence ingestion, external sequence
     providers, a cache with request coordination, and structural
-    generation of the PostgreSQL SQL and function-manager boundary.
+    generation of PostgreSQL Structured Query Language (SQL) installation code
+    and the function-manager boundary.
 
     BioSeqDB does not expose alignment as an ordinary row-by-row scalar
     function.  Planner support functions introduce custom paths whose
@@ -161,10 +163,11 @@
     BioSeqDB investigates the boundary between these two systems.  It is
     implemented as a PostgreSQL extension whose non-database core is
     written in C++26.  Biological symbols are represented by generic
-    compact ranges rather than by a DNA-only byte string.  The alignment
+    compact ranges rather than by a deoxyribonucleic acid (DNA)-only byte
+    string.  The alignment
     path is derived from minimap2: representative $k$-mers are extracted
     as minimizers, matching minimizers become anchors, compatible anchors
-    are chained, and exact dynamic programming extends the selected
+    are chained, and bounded dynamic-programming kernels extend the selected
     regions.  The port is not a line-for-line translation.  The
     implementation introduces template-selected alphabets and layouts,
     Highway SIMD kernels, task-based parallel execution, Vulkan compute

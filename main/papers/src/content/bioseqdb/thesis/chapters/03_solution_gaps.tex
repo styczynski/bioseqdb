@@ -121,8 +121,9 @@ one small target often cannot.
 The current project reports demonstrate both sides of this boundary.  A
 resident multi-query GPU path can enter GPU seeding, chaining, and bounded
 CIGAR construction with no CPU or SIMD fallback.  The same reports state
-that the general G3SA traceback design is not reproduced in every case
-and that a small bounded-CIGAR workload remained faster in minimap2.
+that the full gridded traceback design of the G3SA GPU-alignment
+framework~\cite{g3sa_paper} is not reproduced in every case and that
+minimap2 remained faster on a small bounded-CIGAR workload.
 Likewise, a one-query multi-gigabase workload is not valid evidence for a
 resident GPU batch when the batch branch is not admitted.\footnote{
 \texttt{DOC0356}, batched resident GPU implementation report, and
@@ -190,7 +191,7 @@ Functions'', \emph{PostgreSQL 17 Documentation},
 ``SQL Functions Returning Sets'',
 \url{https://www.postgresql.org/docs/17/xfunc-sql.html}.} Standard SQL can
 therefore express result multiplicity.  Those mechanisms do not by themselves
-give one alignment scan ownership of cross-tuple batching, shared
+allow one alignment scan to own cross-tuple batching, shared
 multi-field projections, or accelerator admission.  A scalar Boolean
 \(\operatorname{mmsearch}(target, query)\) is especially unsuitable as the
 primary execution model for those responsibilities.
@@ -266,10 +267,11 @@ four-byte-header payload.\footnote{PostgreSQL Global Development Group,
 ``TOAST'', \emph{PostgreSQL 17 Documentation},
 \url{https://www.postgresql.org/docs/17/storage-toast.html}.}
 
-The April integration design illustrates the problem.  A PostgreSQL Datum,
-the generic C-level value carrier, obtained
-from a tuple slot cannot be retained after the slot is reused.  A toasted
-value may have to be detoasted into memory owned by a PostgreSQL context.
+The April integration design illustrates the problem.  PostgreSQL
+\texttt{Datum} is the generic C-level value carrier.  A borrowed
+by-reference sequence datum obtained from a tuple slot cannot be retained
+after the slot is reused unless independent ownership is established.  A
+toasted value may have to be detoasted into memory owned by a PostgreSQL context.
 The first real batch design therefore copied each complete varlena into an
 owned C++ byte vector and then constructed an owning
 compact-sequence range for each row.  This was a reasonable
@@ -349,7 +351,8 @@ documents share the numeric identifier DOC0381.}
 
 The resulting requirement is stronger than persistence.  The stored form
 must already support the dominant query access pattern, and the reader
-must authenticate and materialize it once under a linear memory ledger.
+must validate its integrity and source provenance, then materialize it once
+under a linear memory ledger.
 The index chapter describes the current generation and loading design.
 
 \section{Bounded memory and parallel work must be designed together}
@@ -429,9 +432,11 @@ implementations changed when the index delivery path changed.
 Table~\ref{tab:integration-evidence} contains three dated measurements.  They
 are not combined into one speedup claim because the reports use different
 artifacts and acceptance states.  In the first two rows, minimizers per
-fragment (MPF) is the persisted-index layout, and the BioSeqDB route uses
-Block Aligner, SIMD chaining, and the matching MPF sketch scheme.  Their source
-is the local Darwin-on-Arm report
+fragment (MPF) names the persisted-index layout.  The BioSeqDB route uses
+Block Aligner, SIMD chaining, and two-stack ntHash
+(\texttt{ExactSimd}) minimizer extraction.  The extractor is selected
+independently of the MPF physical layout.  Their source is the local
+Darwin-on-Arm report
 \path{main/DOCS/CURRENT/REPORTS/0369_LOCAL_E2E_2_AND_4_GBP_SIMD_MINIMAP2_GPU_BENCHMARK_REPORT_2026_07_07.md}.
 The third row comes from
 \path{main/DOCS/CURRENT/BENCHMARK_FRAMEWORK/0384_DOC0383_IMPLEMENTATION_HANDOFF_FRAGMENT_NATIVE_MPF_PIPELINE_AND_MAPPED_GENERATION_STORAGE.md}.

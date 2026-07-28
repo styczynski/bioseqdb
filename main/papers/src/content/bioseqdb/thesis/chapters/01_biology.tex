@@ -13,15 +13,17 @@
 \section{Biological sequences as information-bearing observations}
 \label{sec:biology-sequences}
 
-The data processed by BioSeqDB originate in molecules, but an alignment
-algorithm does not receive a molecule. It receives an ordered sequence of
-symbols. This distinction is elementary and important. A physical DNA molecule
-has chemical structure, direction, complementary strands and a history inside
-a cell. A database value is a finite string together with metadata that
-describes how the string was obtained and how its symbols should be
-interpreted. A reliable computational system must preserve enough of that
-interpretation to distinguish, for example, a nucleotide sequence from a
-protein sequence and an unknown base from an ordinary base.
+Most biological records processed by BioSeqDB ultimately derive from molecular
+observations, although synthetic and computationally constructed sequences are
+valid inputs as well. In either case, an alignment algorithm does not receive a
+molecule. It receives an ordered sequence of symbols. This distinction is
+elementary and important. A physical DNA molecule has chemical structure,
+direction, complementary strands and a history inside a cell. A database value
+is a finite string together with metadata that describes how the string was
+obtained and how its symbols should be interpreted. A reliable computational
+system must preserve enough of that interpretation to distinguish, for
+example, a nucleotide sequence from a protein sequence and an unknown base
+from an ordinary base.
 
 \subsection{DNA, RNA and protein alphabets}
 
@@ -195,8 +197,8 @@ perfectly. A single-nucleotide variant changes one nucleotide. An insertion or
 deletion changes sequence length. Larger structural variants can duplicate,
 invert, move or remove longer intervals. Recombination and horizontal transfer
 can join segments with different histories. In transcript data, splicing
-removes introns and joins exons, so a mature RNA or cDNA read can correspond to
-multiple separated intervals in a genomic reference.
+removes introns and joins exons, so a mature RNA or complementary DNA (cDNA)
+read can correspond to multiple separated intervals in a genomic reference.
 
 The algorithm sees many of these events through the same small vocabulary:
 matches, substitutions and gaps. A mismatch may represent a true variant or a
@@ -222,14 +224,14 @@ measurement error can produce the same observed disagreement.
     ]
     \node[box] (reference) {reference\\assembly};
     \node[box, below=of reference] (sample) {sample's true\\molecule};
-    \node[cause, right=of sample] (variation) {biological\\variation};
-    \node[cause, right=of variation] (sequencing) {sequencing and\\base calling};
+    \node[cause, right=of sample] (sequencing) {sequencing and\\base calling};
     \node[box, right=of sequencing] (read) {observed\\query read};
     \node[box, above=of read] (comparison) {sequence\\comparison};
 
-    \draw[->] (sample) -- node[above, font=\scriptsize] {differs from reference}
-      (variation);
-    \draw[->] (variation) -- node[above, font=\scriptsize] {true sample string}
+    \draw[<->, densely dashed] (reference) --
+      node[right, font=\scriptsize, align=left] {biological\\variation}
+      (sample);
+    \draw[->] (sample) -- node[above, font=\scriptsize] {true sample string}
       (sequencing);
     \draw[->] (sequencing) -- node[above, font=\scriptsize] {may add error}
       (read);
@@ -246,9 +248,10 @@ measurement error can produce the same observed disagreement.
 
 Figure~\ref{fig:variation-versus-error} explains why exact string equality is
 too strict and why alignment alone is not a variant caller. The comparison
-stage must tolerate plausible differences. A later stage must then combine
-the alignment with coverage, base qualities, sample relationships and other
-evidence before assigning a biological interpretation.
+stage must tolerate plausible differences. Assigning a biological
+interpretation generally requires task-specific corroboration. Depending on
+the question, that evidence can include coverage, base qualities, sample
+relationships or experimental metadata.
 Table~\ref{tab:alignment-ambiguity} maps common alignment patterns to the
 distinct causes that remain unresolved at this stage.
 
@@ -289,8 +292,8 @@ distinct causes that remain unresolved at this stage.
 \label{sec:reference-query-roles}
 
 Throughout this thesis, the \emph{reference} or \emph{target} is the sequence
-collection that is prepared for search, often by building an index. The
-\emph{query} is the sequence presented for comparison against that collection.
+or sequence collection prepared for search, sometimes by building an index.
+The \emph{query} is the sequence presented for comparison against that target.
 These are roles in an operation, not fixed classes of molecule. A chromosome
 assembly can be a reference when reads are mapped to it and a query when it is
 compared with another assembly. A read set can be searched against a reference
@@ -345,15 +348,10 @@ product of their lengths. Genome-scale tools therefore avoid evaluating most
 matrix cells. Modern mappers commonly identify short exact or near-exact
 anchors, connect mutually consistent anchors into chains, and perform detailed
 alignment only around promising chains. Minimap2 is a prominent example of
-this organization around seeding, chaining, and alignment.\footnote{H. Li,
-``Minimap2: pairwise
-alignment for nucleotide sequences'', \emph{Bioinformatics} 34(18), 2018,
-pp.~3094--3100, \url{https://doi.org/10.1093/bioinformatics/bty191}.}
-BioSeqDB's current alignment pipeline is minimap2-based, while replacing or
-extending individual stages with CPU SIMD and GPU-oriented implementations.
-The following chapter introduces these algorithmic families without assuming
-that every method uses the same seed representation or the same final
-alignment kernel.
+this organization around seeding, chaining, and
+alignment~\cite{minimap2_paper}.
+BioSeqDB's current alignment pipeline is minimap2-derived. Individual stages
+are replaced or extended with CPU SIMD and GPU-oriented implementations.
 
 The biological discussion above determines what those algorithms must
 preserve. They must handle strand orientation, tolerate both substitutions and
@@ -445,12 +443,15 @@ similarity decision. It is a defensible correspondence between positions,
 accompanied by enough score and coordinate information for later
 interpretation.
 
-The next chapter develops the algorithms that approximate this correspondence
-at scale. It begins with exact dynamic programming to establish what an
-alignment optimizes. It then explains seed-and-extend methods, minimizer-based
-seeding and graph-based alternatives such as de Bruijn graphs. That progression
-connects the biological sources of disagreement described here to the design
-of BioSeqDB's processing pipeline: minimizer extraction proposes candidate
-anchors, chaining assembles them into coherent placements, prefilters reject
-unlikely pairs, and the final alignment step produces a base-level account of
-matches, substitutions and gaps.
+The next chapter develops the algorithms that compute or approximate this
+correspondence at scale. It begins with exact dynamic programming to establish
+what an alignment optimizes. It then explains seed-and-extend methods,
+minimizer-based seeding and graph-based alternatives such as de Bruijn graphs.
+That progression connects the biological sources of disagreement described
+here to the design of BioSeqDB's processing pipeline. Minimizer extraction
+produces sketches, and target-index lookup turns matching sketches into
+candidate anchors. Chaining assembles the anchors into coherent placements.
+When an applicable edit predicate is present, an optional prefilter can reject
+candidates before final alignment. The final step computes alignment results
+and can emit a base-level traceback of matches, substitutions and gaps when the
+query requests it.
