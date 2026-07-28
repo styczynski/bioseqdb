@@ -1,0 +1,654 @@
+\section{Why a fast mapper is not yet a database system}
+\label{sec:solution-gap-scope}
+
+The previous chapter introduced several ways to search biological
+sequences.  A specialized mapper such as minimap2 is already a highly
+engineered answer to the algorithmic question.  It avoids whole-matrix
+dynamic programming, reduces the seed set with minimizers, chains
+compatible anchors, and invokes expensive alignment only for selected
+regions.  It also provides a persistent \texttt{.mmi} representation for
+reuse of a reference index.  It would therefore be misleading to motivate
+BioSeqDB by claiming that existing mappers are generally slow or
+algorithmically naive.
+
+The missing capability lies at a different boundary.  A mapper normally
+owns a process, reads files or an index image, maps a stream of queries,
+and writes another file or stream.  PostgreSQL owns relations, snapshots,
+transactions, typed expressions, joins, memory contexts, and a
+cost-based plan.  Calling the first system from the second does not make
+their execution models coincide.  The database still needs to know when
+alignment will run, which rows supply its operands, whether one input row
+can yield several outputs, which intermediate data can be reused, and how
+the work is bounded when a relation contains billions of bases.
+
+BioSeqDB addresses this mismatch.  Its problem is not merely
+``alignment from SQL''.  A scalar PostgreSQL function can invoke a mapper
+and satisfy that literal description.  The stronger objective is to make
+sequence search a planned, batch-oriented, resource-accounted database
+operation while retaining a credible minimap2-derived algorithmic
+baseline.  This chapter separates the scientific limitations of
+alignment heuristics from the systems limitations created by storage and
+query integration.  This separation is important because the remedies
+are different.  A missed seed needs an algorithmic remedy.  Repeated
+detosting, cold sidecar reads, or one function call per tuple needs a
+systems remedy.
+
+\section{Scientific limitations do not disappear with optimization}
+\label{sec:scientific-solution-gaps}
+
+\subsection{Seed selection trades work for evidence}
+
+Minimizers make large-scale mapping feasible by retaining a sparse subset
+of the available \(k\)-mers.  The reduction is valuable precisely because
+the aligner no longer examines every possible local match.  It also means
+that the seed set is evidence for an alignment, not a proof that every
+biologically meaningful alignment has been retained.  Sensitivity depends
+on \(k\), the minimizer window, the hash and tie policy, the treatment of
+ambiguous symbols, and the error pattern in the query.  A short query may
+contain too few representatives.  A repetitive region may produce a very
+large posting list.  A mutation or sequencing error can remove a seed
+that would otherwise connect two parts of a chain.
+
+No database integration can eliminate this trade-off.  BioSeqDB must
+preserve it and make the selected policy explicit.  A persisted index is
+usable only when its alphabet, \(k\), window, layout, hash semantics, and
+source generation agree with the query path.  Reading an incompatible
+index quickly would be a correctness failure.  Recomputing every index
+for safety would discard the central benefit of persistence.  The system
+therefore needs compatibility metadata and a fail-closed dispatch policy,
+not only serialized posting lists.
+
+The same point applies to vectorized minimizer extraction.  SIMD changes
+how several candidate positions are evaluated.  It must not silently
+change which positions are emitted unless the alternative sketch is
+deliberately defined as a different algorithm.  An early BioSeqDB
+incident illustrates the risk.  A circular-buffer slot equality was
+interpreted as distance zero even though it represented one complete
+window.  The resulting position shift then caused a later valid
+minimizer to be removed by position deduplication.  Adjacent off-by-one
+and inactive-lane problems were exposed by the same test
+campaign.\footnote{\texttt{DOC0068}, ``Why kmers\_test.cpp Was
+Failing'', 2026-04-23.}  The lesson is broader than that defect.  An
+implementation is not semantically equivalent merely because it is a
+vector form of the same pseudocode.
+
+\subsection{Chaining and extension remain heuristic filters}
+
+Chaining ranks collinear anchors without evaluating every possible
+alignment path.  Parameters such as maximum predecessor distance,
+occurrence filtering, chain score, skip limits, and gap penalties
+determine which evidence survives.  Their useful values vary with read
+length, error profile, repeat structure, and reference scale.  A policy
+that is effective for a long noisy read can remove all evidence for a
+short exact probe.  A permissive policy can retain too many candidates
+and transfer the cost to sorting, chaining, or final alignment.
+
+The final extension step is exact only within the regions and score model
+that reach it.  Affine-gap dynamic programming can establish the best
+alignment inside a selected band, but it cannot recover a candidate that
+seeding or chaining removed.  Banded or block-based methods introduce
+additional resource and boundary choices.  Traceback and CIGAR
+construction can also require substantially more memory than score-only
+evaluation.  Consequently, ``alignment accuracy'' is not a single
+counter.  At minimum, evaluation must distinguish whether a result was
+found, whether its coordinate is correct within a stated tolerance,
+whether the expected strand was selected, and whether a requested CIGAR
+was produced correctly.
+
+These properties explain why BioSeqDB keeps minimap2 as a comparison
+baseline and tests intermediate algorithms against biological result
+receipts.  A faster stage is not a contribution when it moves an anchor,
+changes a primary result, or falls back to another implementation without
+reporting the fallback.  Later chapters give the exact policies used for
+minimizer extraction, chaining, and extension.
+
+\subsection{No processor path dominates every workload}
+
+Scalar, SIMD, and GPU execution have different fixed and variable costs.
+SIMD is attractive when independent lanes can perform similar work with
+regular memory access.  It is less attractive when lane-local rescans,
+divergent control flow, gathers, or conversion between array layouts
+dominates the useful arithmetic.  A GPU adds command submission, buffer
+management, synchronization, and transfer or residency requirements.  A
+large resident batch can amortize these costs.  One short query against
+one small target often cannot.
+
+The current project reports demonstrate both sides of this boundary.  A
+resident multi-query GPU path can enter GPU seeding, chaining, and bounded
+CIGAR construction with no CPU or SIMD fallback.  The same reports state
+that the general G3SA traceback design is not reproduced in every case
+and that a small bounded-CIGAR workload remained faster in minimap2.
+Likewise, a one-query multi-gigabase workload is not valid evidence for a
+resident GPU batch when the batch branch is not admitted.\footnote{
+\texttt{DOC0356}, batched resident GPU implementation report, and
+\texttt{DOC0369}, local end-to-end benchmark report dated 2026-07-08.}
+
+BioSeqDB therefore needs an explicit dispatch contract.  It must record
+which path was selected, why an accelerator declined work, whether a
+fallback occurred, and which correctness receipts belong to the selected
+path.  ``GPU enabled'' or ``SIMD case'' is not sufficient evidence.
+This is an algorithmic and experimental limitation of heterogeneous
+execution, not a PostgreSQL-specific defect.
+
+\section{The file-oriented workflow leaves systems work outside the mapper}
+\label{sec:file-workflow-gap}
+
+In a conventional workflow, relational metadata and biological sequences
+often meet only in orchestration code.  A query selects samples or
+identifiers.  A script exports sequences to FASTA or FASTQ.  A mapper
+opens or constructs an index and emits PAF, SAM, or BAM.  Another step
+parses the results and joins them with annotations.  Workflow engines can
+make this process repeatable, but the mapper and the database still
+optimize different fragments of the computation.
+
+This separation has several consequences.
+
+\begin{enumerate}
+  \item The database planner cannot compare an alignment path with another
+  relational plan because the expensive operation occurs after export.
+  Selective predicates and joins may be applied too early, too late, or in
+  duplicated scripts.
+
+  \item Sequence bytes cross representation boundaries.  They may be
+  decoded from a packed database value, rendered as text, parsed by the
+  mapper, and parsed again when results return.
+
+  \item The lifetime of an index is external to the source relation.
+  Scripts must decide whether an index is current, compatible, and safe to
+  reuse after updates.
+
+  \item Failures span several durability domains.  A committed database
+  change, a partially written file, and a terminated mapper process do not
+  automatically form one atomic operation.
+
+  \item Alignment results are detached from SQL expression semantics.
+  Producing several matches for one sequence requires an explicit result
+  table or file expansion before relational processing can resume.
+\end{enumerate}
+
+These costs are not evidence that file formats are unnecessary.  FASTA,
+FASTQ, PAF, SAM, BAM, and mapper indexes are valuable interchange and
+archival formats.  The gap is that they become mandatory execution
+boundaries even when both the source data and the desired analysis already
+belong to one database query.
+
+\section{Why an ordinary SQL function is insufficient}
+\label{sec:scalar-function-gap}
+
+PostgreSQL makes it straightforward to expose C or C++ code as a typed
+function.  A direct implementation of
+\(\operatorname{mmsearch}(target, query)\) could decode its two arguments,
+run the mapper, and return a Boolean or a result value.  This form is a
+useful correctness fallback.  It is a poor primary execution model for
+BioSeqDB.
+
+First, PostgreSQL normally evaluates a scalar expression for one tuple at
+a time.  That makes batching accidental.  It prevents a scan from
+collecting many targets or queries before choosing an implementation, and
+it makes accelerator submission costs recur at tuple granularity.
+Second, one sequence pair can produce zero, one, or several matches.  A
+Boolean predicate alone cannot express the result cardinality needed by
+the projection.  Third, score, coordinates, strand, CIGAR, divergence,
+and mapping quality belong to the same alignment result.  Re-evaluating
+one expensive function for each projected field would duplicate work.
+Fourth, the ordinary function is evaluated before a later batch could
+know that a row has no result.
+
+The early custom-scan proof exposed these issues directly.  It could
+replace one function call with one mutable constant and could buffer
+tuples, but it did not yet invoke the real aligner, return the complete
+result, filter a no-match row after batch execution, support the
+vectorized scan path, or emit multiple rows for one input.\footnote{
+\texttt{DOC0054}, ``Wiring the real aligner batch through the Postgres
+custom scan'', 2026-04-21.  This archived design is used as history.
+The current contract is stated in \texttt{DOC0321}.}
+
+The present design keeps an ordinary function body so that PostgreSQL can
+resolve types and so that unsupported contexts have a defined fallback.
+Its planner cost is intentionally high.  A support function and relation
+path hook offer a cheaper custom scan when the expression has a supported
+shape.  The custom plan owns batching and replaces result-bearing
+expressions with nodes whose values are populated for each emitted match.
+The custom scan can therefore return no row for a target without a match
+or several rows for a target with several matches.  Current project
+guidelines require this plan choice to be verified with
+\texttt{EXPLAIN (ANALYZE)} and require both vectorized and
+non-vectorized execution to be tested.\footnote{\texttt{DOC0321},
+Sections 7.2 to 7.4, current code and workflow guidelines.}
+
+This planner arrangement also creates obligations that a standalone
+mapper does not have.  PostgreSQL may copy expression trees, rescan an
+inner plan, evaluate constants during planning, or reset a memory context.
+The extension must keep node identity, ownership, and rescan state valid
+under those operations.  Plan costs and EXPLAIN annotations must describe
+the path that will actually execute.  Hidden thread-local state is
+inappropriate because it changes function behavior without changing its
+arguments and interacts badly with constant folding and error unwinding.
+
+\section{Representation and lifetime are part of performance}
+\label{sec:representation-gap}
+
+A biological sequence is logically a range of symbols.  At the storage
+boundary it may be a PostgreSQL varlena value, an inline packed payload, a
+fragmented column, a lazy slice, a concatenation, a reverse view, a
+mapped external page, or a materialized C++ container.  Treating all of
+these as \texttt{std::string} would simplify an interface by hiding the
+most important cost.
+
+The April integration design illustrates the problem.  A Datum obtained
+from a tuple slot cannot be retained after the slot is reused.  A toasted
+value may have to be detoasted into memory owned by a PostgreSQL context.
+The first real batch design therefore copied each complete varlena into an
+owned C++ byte vector and then constructed an owning
+\texttt{compact\_sequence\_range} for each row.  This was a reasonable
+correctness step.  The same document explicitly listed a non-owning
+compact view and batch-level target-index reuse as follow-up
+work.\footnote{\texttt{DOC0058}, Sections 4, 7, and 11, archived
+2026-04-21 design.}
+
+At scale, ownership conversion can dominate an algorithm that was
+optimized to avoid touching most symbols.  Eagerly materializing a long
+fragmented sequence creates work proportional to the whole sequence even
+when minimizer extraction or alignment needs one subrange.  Reversing by
+copying doubles traffic.  Decoding a packed sequence to bytes discards
+the storage density that made database scans feasible.  Rebuilding a
+contiguous target so worker threads can share it may be worthwhile, but
+that cost must be a deliberate stage with a memory budget rather than an
+implicit function argument conversion.
+
+This motivates the common sequence abstraction developed later in the
+thesis.  Algorithms consume a compact range contract and convert only the
+needed region at the point of use.  PostgreSQL-specific ownership remains
+outside the numeric kernels.  Packed, fragmented, and lazy views must
+preserve alphabet information, base-pair length, and iteration semantics.
+Zero copy is not an unconditional objective.  It is useful only when the
+borrowed lifetime is proven and when irregular access does not cost more
+than one bounded materialization.
+
+\section{A persisted index is a database object, not merely a byte image}
+\label{sec:persistence-gap}
+
+The ability to save an index is necessary but not sufficient for
+database-resident reuse.  A PostgreSQL index representation must answer
+questions that an external reference image can leave to the caller:
+
+\begin{enumerate}
+  \item Which exact source relation and generation produced the index?
+
+  \item Which alphabet, minimizer parameters, hash scheme, position
+  width, and layout can consume it?
+
+  \item Does a transaction see the old generation or the new generation
+  while an update is being published?
+
+  \item How are an aborted publication, a dropped table, a tablespace
+  move, a crash, and an orphaned generation handled?
+
+  \item Can a cold reader select only the needed extents before allocating
+  memory, or must it reconstruct the entire index?
+
+  \item How are checksum work, decoded buffers, posting lists, GPU
+  residency, and temporary query projections charged to one memory
+  budget?
+\end{enumerate}
+
+The project's first answer was a shared sidecar keyed by relation and row
+number with a flat serialized target index.  It was deliberately a
+proof-of-concept.  It accepted orphan cleanup, native-layout serialization,
+and coarse shared-table locality.  Later designs moved toward immutable
+generations, explicit wire formats, compatibility manifests, bounded
+selective loading, and PostgreSQL-owned publication.  This progression is
+important.  It shows why ``store the minimizers in a bytea'' describes the
+first write operation but not the lifecycle of an index.
+
+Cold loading also changes the performance question.  A precomputed index
+can be slower than recomputation when the reader performs many small tuple
+fetches, validates the same payload twice, builds a query-projected facade,
+sorts data again, or repeatedly walks all selected extents for memory
+accounting.  The July 15 diagnosis found both an
+\(O(E^2)\) ownership-accounting path over selected extents and a duplicate
+4.46 GB checksum traversal in the then-current Format 5 reader.
+It explicitly warned that its payload timer also included C++ routing and
+decode work, so it could not be interpreted as a pure PostgreSQL storage
+timer.\footnote{\texttt{DOC0381}, Sections 2 and 3,
+``Bioseq just\_index cold-load acceleration'', 2026-07-15.}
+
+The resulting requirement is stronger than persistence.  The stored form
+must already support the dominant query access pattern, and the reader
+must authenticate and materialize it once under a linear memory ledger.
+The index chapter describes the current generation and loading design.
+
+\section{Bounded memory and parallel work must be designed together}
+\label{sec:resource-gap}
+
+Sequence workloads combine large immutable inputs with variable-size
+derived structures.  Target minimizers, posting lists, query hashes,
+anchors, chain state, alignment matrices, traceback, and output rows can
+be live at overlapping times.  A planner estimate based only on source
+sequence bytes misses this amplification.  A GPU path adds device buffers
+and often a host staging representation.
+
+The naive responses are both undesirable.  Keeping every intermediate
+resident can exceed the backend or device budget.  Spilling immediately
+can leave most CPU cores idle while storage becomes the bottleneck.
+BioSeqDB instead needs phase-aware admission.  Before a task starts, the
+system estimates its source, derived, scratch, and output ownership.  It
+admits parallel tasks while their combined peak remains within the
+budget.  Buffers are released or their authority is transferred when a
+phase completes.  External runs or recomputation remain fallbacks, not
+the default while memory is available.
+
+PostgreSQL adds a thread-affinity constraint.  Catalog access, tuple
+formation, snapshots, and many memory-context operations must remain on
+the backend thread.  CPU workers can operate on immutable C++ views after
+the backend has acquired and validated them.  Their tasks must join
+before the backend releases PostgreSQL-owned resources.  This boundary
+prevents a direct translation of a standalone mapper's thread pool.
+Task parallelism is valuable only after input ownership is safe and the
+PostgreSQL calls have been removed from worker closures.
+
+These concerns explain an otherwise surprising observation from the
+no-index investigation.  A benchmark labeled parallel did not prove that
+PostgreSQL-backed target-index construction was parallel.  The fast cells
+benefited from prebuilt indexes and backend-local residency, while the
+no-index path included serial loading and failed worker-shareability
+gates for lazy PostgreSQL-backed sequences.\footnote{\texttt{DOC0318},
+executive verdict and root-cause sections, 2026-06-07.}  Stage labels
+must therefore be supported by execution receipts and resource
+accounting.
+
+\section{Ingestion, metadata, and external data are part of the query}
+\label{sec:ingestion-gap}
+
+An integrated system must load data reliably before it can align it.
+FASTA and FASTQ records are not only symbol strings.  They contain
+identifiers, descriptions, quality information, source-specific fields,
+and sometimes multiline records.  Compression and remote delivery change
+how much input can be buffered.  A database loader must turn this stream
+into typed columns while preserving record boundaries and reporting the
+record that caused a conversion error.
+
+This task should not be embedded in the mapper.  The non-PostgreSQL IO
+module parses and decompresses sequence records.  A concept-constrained
+writer defines the boundary.  The PostgreSQL implementation maps parsed
+fields to destination columns and invokes the appropriate type input
+functions.  The current implementation report records a single-pass
+FASTA and FASTQ header parser, typed multi-column mapping, integration
+tests, and a non-empty \texttt{mmsearch} over data loaded through that
+path.\footnote{\texttt{DOC0319}, implementation report dated
+2026-06-09.}
+
+Remote sequence databases create the same separation at another scale.
+An external provider can expose data as a relation, but network failure,
+pagination, authentication, retry policy, and bounded streaming remain
+provider responsibilities.  The alignment pipeline should see the same
+sequence abstraction whether the source is a local column, a loaded file,
+or an external relation.  Otherwise every new source multiplies the
+algorithm implementations and their correctness surface.
+
+\section{Evidence from intermediate results}
+\label{sec:solution-gap-evidence}
+
+The strongest illustration of the systems gap is that the ranking of two
+implementations changed when the index delivery path changed.  Table
+\ref{tab:integration-evidence} contains three dated measurements.  They
+are not combined into one speedup claim because the reports use different
+artifacts and acceptance states.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabular}{p{0.16\linewidth}p{0.25\linewidth}p{0.20\linewidth}p{0.29\linewidth}}
+    \toprule
+    Evidence & BioSeqDB measured region & minimap2 measured region &
+    Interpretation \\
+    \midrule
+    2026-07-08, 2 Gbp DNA4, no index, MPF &
+    23.888 s &
+    73.566 s &
+    Both found the expected result.  The BioSeqDB recompute path was
+    faster in this case. \\
+    2026-07-08, 2 Gbp DNA4, forced cold restart, MPF persisted index &
+    36.187 s &
+    15.465 s &
+    Both produced the expected match.  BioSeqDB was 2.34 times slower,
+    showing that persisted delivery dominated the saved computation. \\
+    2026-07-17 handoff, six-run lower-middle P50 &
+    5.368746 s &
+    16.487527084 s &
+    The report records 16 of 16 parity and a 3.071020 times advantage
+    after a fragment-native and compact-direct redesign.  Its final
+    isolated rerun was still pending. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Intermediate performance evidence for the integration problem.
+    The first two rows come from \texttt{DOC0369}, reports 73 and 76.
+    The third comes from the current summary of \texttt{DOC0384}.
+    The rows demonstrate that storage, reconstruction, and batching can
+    reverse the ranking of the same broad alignment pipeline.  They do not
+    establish a machine-independent final speedup.}
+  \label{tab:integration-evidence}
+\end{table}
+
+The first two rows are especially useful because they reject a simple
+story.  BioSeqDB could be faster than minimap2 while rebuilding
+minimizers, yet slower after being given a persisted index.  The
+alignment kernels alone cannot explain that ordering.  The forced restart
+removed backend-local warmth, and the later investigation identified
+index reconstruction, query projection, checksum, tuple delivery, and
+memory-accounting work.  The July 17 handoff then reported that a
+fragment-native and compact-direct route reversed the comparison on its
+paired framework samples.
+
+The third row is reported with its open gate.  A lower-middle P50 from six
+observations is valuable evidence for a design decision.  It is not a
+license to claim that every BioSeqDB query is three times faster than
+minimap2.  The report itself required a final contemporary rerun and
+separated the retained \texttt{just\_index} result from later XXL memory
+work.  This thesis follows that distinction.
+
+\section{Comparison of solution classes}
+\label{sec:solution-class-comparison}
+
+Table \ref{tab:solution-class-gaps} summarizes the roles of the principal
+solution classes.  The wording is deliberately scoped.  A blank in the
+BioSeqDB problem column does not mean that a tool is defective.  It means
+that the concern belongs to another layer.
+
+\begin{table}[ht]
+  \centering
+  \small
+  \begin{tabular}{p{0.16\linewidth}p{0.22\linewidth}p{0.27\linewidth}p{0.25\linewidth}}
+    \toprule
+    Solution class & Primary strength & Gap at the BioSeqDB boundary &
+    Requirement derived for this thesis \\
+    \midrule
+    Standalone minimap2 &
+    Mature seed, chain, and extend mapping with reusable reference
+    indexes &
+    Does not own PostgreSQL snapshots, relational joins, tuple
+    cardinality, or extension memory contexts &
+    Preserve a minimap2-derived baseline while adapting data and control
+    flow to a custom scan. \\
+    File and workflow pipeline &
+    Portable interchange, reproducible orchestration, and composition of
+    specialized programs &
+    Parsing, index validation, failure handling, and joins remain across
+    process and file boundaries &
+    Keep file IO but remove mandatory export and re-import for
+    database-resident queries. \\
+    Scalar PostgreSQL function &
+    Simple typed SQL surface with a well-defined fallback &
+    Per-row evaluation hides batching, duplicates multi-field work, and
+    cannot naturally emit several matches per input &
+    Use planner support and a batch-owning custom scan with per-match
+    result substitution. \\
+    Generic columnar storage &
+    Compression, projection, and scan bandwidth for typed columns &
+    Does not define sequence alphabets, minimizer compatibility, or
+    alignment-specific derived data &
+    Add compact sequence types, sequence metadata, and versioned
+    persistent indexes. \\
+    Accelerator-first mapper &
+    High throughput when enough regular work is resident on the device &
+    Submission, transfer, memory admission, and fallback can dominate
+    small or irregular SQL batches &
+    Dispatch by measured workload shape and expose path and fallback
+    receipts. \\
+    BioSeqDB target design &
+    One relational surface for storage, filtering, joining, and batched
+    alignment &
+    Adds planner, lifecycle, ownership, compatibility, and resource
+    obligations to every optimized kernel &
+    Treat these obligations as first-class contributions and validate
+    them separately from algorithm speed. \\
+    \bottomrule
+  \end{tabular}
+  \caption{Existing solution classes and the additional requirements
+    introduced by database-resident alignment.}
+  \label{tab:solution-class-gaps}
+\end{table}
+
+\section{Problem statement and design requirements}
+\label{sec:bioseq-problem-statement}
+
+The design problem can now be stated precisely:
+
+\begin{quote}
+  Given biological sequences and relational metadata managed by
+  PostgreSQL, execute a minimap2-derived search as a planned,
+  set-oriented operation that can reuse compatible persistent indexes,
+  operate over compact or lazy representations, remain within explicit
+  host and device memory budgets, and return zero or more typed alignment
+  rows without sacrificing a correct ordinary SQL fallback.
+\end{quote}
+
+This statement yields eight requirements.
+
+\begin{enumerate}
+  \item \textbf{Algorithmic fidelity.}  Scalar, SIMD, and GPU variants
+  need explicit semantics and correctness receipts.  A dispatch label is
+  not proof of the executed algorithm.
+
+  \item \textbf{Planner ownership.}  PostgreSQL must be able to choose a
+  custom path whose cost reflects the expensive fallback.  EXPLAIN must
+  identify the chosen alignment, index, vectorization, and accelerator
+  path at the level needed to audit a query.
+
+  \item \textbf{Set-valued batching.}  The executor must collect enough
+  work to amortize indexing and accelerator costs, then emit zero, one, or
+  several results for each input row.
+
+  \item \textbf{Representation independence.}  Numeric kernels must
+  consume a common compact range instead of PostgreSQL Datum or an eager
+  byte vector.  Alphabet and layout compatibility remain explicit.
+
+  \item \textbf{Transactional persistence.}  Derived indexes need a
+  versioned format, source identity, atomic publication, invalidation,
+  crash and abort behavior, and bounded cold loading.
+
+  \item \textbf{Resource accounting.}  Source, decoded, index, scratch,
+  output, and device allocations must belong to one phase-aware budget.
+  Parallel tasks may use only resources whose ownership survives their
+  lifetime.
+
+  \item \textbf{Reliable data entry.}  Local and remote sources need
+  bounded streaming, record-aware errors, typed metadata mapping, and a
+  clean boundary between provider code and the mapper.
+
+  \item \textbf{Reproducible evidence.}  Performance results must name the
+  workload, index state, cache or restart state, selected implementation,
+  fallback counters, biological result receipts, and measured region.
+\end{enumerate}
+
+The requirements can conflict.  A zero-copy view can prevent safe worker
+sharing.  A persistent representation optimized for dense reading can
+waste work for a selective query.  A GPU batch can improve throughput
+while increasing latency.  An exact compatibility check can add cold
+startup work.  The design must make these trade-offs visible instead of
+hiding them behind a single function.
+
+\section{Research questions and contributions}
+\label{sec:solution-gap-questions}
+
+The thesis investigates four questions derived from the gap analysis.
+
+\begin{enumerate}
+  \item How can a minimap2-derived pipeline operate over packed,
+  fragmented, PostgreSQL-backed, and lazily composed sequences without
+  converting every input to one owning byte representation?
+
+  \item How can PostgreSQL plan a familiar typed expression while a custom
+  executor performs batch-oriented, potentially set-valued alignment and
+  supplies all projected result fields from one execution?
+
+  \item How can minimizer indexes and derived metadata be stored,
+  versioned, validated, loaded, cached, and replaced under PostgreSQL
+  lifecycle rules without making cold reuse slower than recomputation?
+
+  \item Under which workload and resource conditions should scalar, SIMD,
+  or Vulkan stages execute, and what evidence is sufficient to show that
+  the selected path was both faster and biologically acceptable?
+\end{enumerate}
+
+The contributions claimed in this thesis are correspondingly
+systems-oriented and algorithm-aware.
+
+\begin{enumerate}
+  \item A common compact sequence interface connects owning, bit-packed,
+  fragmented, PostgreSQL-backed, and lazy representations to the same
+  pipeline while keeping alphabet dispatch explicit.
+
+  \item A custom-scan execution model converts supported SQL expressions
+  into batch alignment, supports one-to-many results, and substitutes
+  score, coordinate, strand, and CIGAR fields without re-running the
+  mapper for every projection.
+
+  \item PostgreSQL-resident sequence and minimizer storage ties derived
+  generations to source identity and supports compatibility checks,
+  bounded loading, caching, and controlled recomputation.
+
+  \item CPU vector and Vulkan implementations are integrated behind
+  explicit selection and fallback contracts rather than exposed as
+  unconditional replacements for the baseline.
+
+  \item Bounded ingestion, typed header mapping, external providers, and
+  generated PostgreSQL boundary code extend the same typed data plane
+  beyond the alignment kernels.
+\end{enumerate}
+
+These are not claims that BioSeqDB replaces every mapper, workflow engine,
+or sequence format.  They establish a design for workloads whose data,
+metadata, and desired results already benefit from relational storage and
+query planning.  They also do not imply that every experimental
+optimization became part of the final route.  The later chapters identify
+which intermediate algorithms were retained, which were rejected, and
+which benchmark gates remained open at the documented cutoff.
+
+\section{Scope of the evaluation}
+\label{sec:solution-gap-evaluation-scope}
+
+Three cautions govern the evaluation in the remainder of the thesis.
+First, minimap2 is a baseline for comparable mapping work, not a proxy for
+all external workflow costs.  A comparison must state whether loading,
+index construction, index opening, PostgreSQL restart, result parsing, and
+correctness audits are inside the timer.  Second, one local machine cannot
+establish portability or universal throughput.  The July 8 report, for
+example, explicitly identifies its environment as Darwin on Arm and
+rejects conclusions about x86-64 Linux.  Third, historical reports describe
+the implementation that produced them.  A newer architecture can
+supersede their design conclusions without making the earlier measurement
+false.
+
+For these reasons, the thesis uses numbers to answer bounded questions.
+A microbenchmark identifies a kernel bottleneck.  A selective end-to-end
+case demonstrates SQL integration and a real result.  A cold-index run
+tests persistence rather than backend-local cache residency.  A GPU
+result needs branch, dispatch, and fallback receipts.  No single chart is
+asked to prove all of these properties.
+
+The next chapter follows one query through the resulting pipeline.  It
+defines the stage boundaries that make these separate forms of evidence
+possible.  The algorithm chapters then compare each retained stage with
+its minimap2 or research origin.  The systems chapters return to the
+sequence, planner, storage, index, and IO requirements established here.
