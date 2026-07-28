@@ -400,9 +400,13 @@ resource "aws_instance" "builder" {
 
   lifecycle {
     prevent_destroy = true
+    # A newly selected cache AMI applies only when a builder is first created;
+    # never replace a persistent builder merely to change its source image.
+    # User data is intentionally *not* ignored: OpenTofu must update the
+    # stopped-instance attribute when bootstrap fixes land so cloud-init clean
+    # and the post-snapshot restart execute the current idempotent bootstrap.
     ignore_changes = [
       ami,
-      user_data,
     ]
   }
 

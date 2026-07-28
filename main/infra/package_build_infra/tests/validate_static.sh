@@ -33,6 +33,10 @@ assert_literal "$MAIN_TF" 'encrypted             = true'
 assert_literal "$MAIN_TF" 'disable_api_termination              = true'
 assert_literal "$MAIN_TF" 'instance_initiated_shutdown_behavior = "stop"'
 assert_literal "$MAIN_TF" 'prevent_destroy = true'
+assert_literal "$MAIN_TF" 'ignore_changes = ['
+if sed -n '/ignore_changes = \[/,/]/p' "$MAIN_TF" | rg --quiet 'user_data'; then
+  fail "builder user_data must remain updateable for post-snapshot bootstrap"
+fi
 assert_literal "$MAIN_TF" 'block_public_policy     = true'
 assert_literal "$MAIN_TF" 'status = "Enabled"'
 assert_literal "$MAIN_TF" 'sse_algorithm = "AES256"'
