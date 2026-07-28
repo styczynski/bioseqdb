@@ -444,37 +444,46 @@ alignment dispatch, and match-by-match projection occur.
 \begin{algorithm}[htbp]
 \caption{Conceptual execution of a scan-owned \texttt{mmsearch}}
 \label{alg:customscan-write-read}
-\begin{algorithmic}[1]
-\State initialize an empty dispatch buffer and per-scan runtime
-\While{the source is not exhausted or buffered output remains}
-  \If{the buffer is in read mode}
-    \State \(o \gets\) next match cursor entry
-    \If{\(o\) exists}
-      \State populate all requested placeholder constants from \(o.match\)
-      \State temporarily promote lazy sources needed by the projection
-      \State emit \Call{Project}{\(o.input\_row\), placeholders}
-      \State restore the stable locator-backed input row
-    \ElsIf{the source is exhausted}
-      \State \Return end of scan
-    \Else
-      \State release the completed physical batch and return to write mode
-    \EndIf
-  \Else
-    \State \(r \gets\) next scalar row or next kept row from a vector batch
-    \If{\(r\) does not exist}
-      \State mark source exhausted and process the terminal batch
-    \Else
-      \State evaluate residual qualifications and owned operand expressions
-      \If{the residual frontier passes and operands are non-null}
-        \State copy stable row/source references into the dispatch arena
-        \If{the buffer reaches capacity}
-          \State process the batch and construct per-input match cursors
-        \EndIf
-      \EndIf
-    \EndIf
-  \EndIf
-\EndWhile
-\end{algorithmic}
+\small
+\textbf{Initialization.} Initialize an empty dispatch buffer and per-scan
+runtime.
+
+\textbf{Loop.} While the source is not exhausted or buffered output remains,
+repeat the applicable branch:
+\begin{enumerate}
+  \item \textbf{Read mode.}
+    \begin{enumerate}
+      \item Set \(o \gets\) the next match cursor entry.
+      \item If \(o\) exists:
+        \begin{enumerate}
+          \item Populate all requested placeholder constants from \(o.match\).
+          \item Temporarily promote lazy sources needed by the projection.
+          \item Emit \textsc{Project}(\(o.input\_row\), placeholders).
+          \item Restore the stable locator-backed input row.
+        \end{enumerate}
+      \item Otherwise, if the source is exhausted, return end of scan.
+      \item Otherwise, release the completed physical batch and return to
+            write mode.
+    \end{enumerate}
+  \item \textbf{Write mode.}
+    \begin{enumerate}
+      \item Set \(r \gets\) the next scalar row or the next kept row from a
+            vector batch.
+      \item If \(r\) does not exist, mark the source exhausted and process the
+            terminal batch.
+      \item Otherwise:
+        \begin{enumerate}
+          \item Evaluate residual qualifications and owned operand
+                expressions.
+          \item If the residual frontier passes and operands are non-null:
+            \begin{enumerate}
+              \item Copy stable row/source references into the dispatch arena.
+              \item If the buffer reaches capacity, process the batch and
+                    construct per-input match cursors.
+            \end{enumerate}
+        \end{enumerate}
+    \end{enumerate}
+\end{enumerate}
 \end{algorithm}
 
 During the write phase PostgreSQL owns the active scan slot and is free to

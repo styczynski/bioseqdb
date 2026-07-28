@@ -322,35 +322,42 @@ legacy directory-last completion from opt-in generation publication.
   \caption{Bounded MPS construction and mode-specific publication}
   \label{alg:mps-build}
   \small
-  \begin{algorithmic}[1]
-    \Require source sequence identity \(I\), parameters \(k,w\), memory budget
-    \State reserve a new build identity and snapshot the selected persistence mode
-    \For{each 32,768-base source range with minimizer halo}
-      \State sketch the range and convert local occurrences to global positions
-      \State append 16-byte \((hash,encodedPosition)\) pairs to the active run
-      \If{the run budget is full}
-        \State sort the run and retain it only if a residency permit is available
-        \State otherwise spill it to a PostgreSQL \texttt{BufFile}
-      \EndIf
-    \EndFor
-    \State finish and sort the last run
-    \While{more runs exist than can be opened simultaneously}
-      \State merge one bounded fan-in group into a new run
-    \EndWhile
-    \State merge remaining runs in hash order
-    \State form approximately 8 MiB buckets and spill a heavy-hash accumulator
-          when necessary
-    \State write every bucket with length, checksum, source, and compatibility
-          identity
-    \State write the ordered directory \textbf{last}
-    \If{grouped generation mode is enabled}
-      \State validate the complete unpublished generation
-      \State atomically publish its descriptor as the current generation
-    \Else
-      \State finish the legacy replace-in-place update with the directory as
-            completeness witness
-    \EndIf
-  \end{algorithmic}
+  \textbf{Input.} Source sequence identity \(I\), parameters \(k,w\), and a
+  memory budget.
+  \begin{enumerate}
+    \item Reserve a new build identity and snapshot the selected persistence
+          mode.
+    \item For each 32,768-base source range with minimizer halo:
+      \begin{enumerate}
+        \item Sketch the range and convert local occurrences to global
+              positions.
+        \item Append 16-byte \((hash,encodedPosition)\) pairs to the active
+              run.
+        \item If the run budget is full:
+          \begin{enumerate}
+            \item Sort the run and retain it only if a residency permit is
+                  available.
+            \item Otherwise, spill it to a PostgreSQL \texttt{BufFile}.
+          \end{enumerate}
+      \end{enumerate}
+    \item Finish and sort the last run.
+    \item While more runs exist than can be opened simultaneously, merge one
+          bounded fan-in group into a new run.
+    \item Merge the remaining runs in hash order.
+    \item Form approximately 8 MiB buckets and spill a heavy-hash accumulator
+          when necessary.
+    \item Write every bucket with length, checksum, source, and compatibility
+          identity.
+    \item Write the ordered directory \textbf{last}.
+    \item Select the publication path:
+      \begin{enumerate}
+        \item If grouped generation mode is enabled, validate the complete
+              unpublished generation and atomically publish its descriptor as
+              the current generation.
+        \item Otherwise, finish the legacy replace-in-place update with the
+              directory as completeness witness.
+      \end{enumerate}
+  \end{enumerate}
 \end{algorithm}
 
 Bounded does not automatically mean fast. DOC0300's first implementation used
@@ -982,28 +989,36 @@ Algorithm~\ref{alg:index-runtime-selection} states the main decision shape.
   \caption{Persisted-index selection in the alignment dispatcher}
   \label{alg:index-runtime-selection}
   \small
-  \begin{algorithmic}[1]
-    \Require source identity \(I\), query sketch \(Q\), active index policy \(P\)
-    \State resolve the active read name for the source column
-    \State inspect a visible persisted generation only if stored reads are enabled
-    \If{a generation is present}
-      \State validate source epoch, algorithm digest, format, lengths and checksums
-      \If{the active name is MPF}
-        \State select the configured relation reader route
-        \State assemble from rows, or map the sealed sidecar for compact direct
-      \ElsIf{the active name is MPS}
-        \State load the directory, selected buckets/controls, and authorized postings
-        \State build the query-specific clipped lookup
-      \EndIf
-      \State optionally obtain a compatible cached CPU or accelerator view
-    \ElsIf{\(P\) requires a compatible persisted index}
-      \State fail closed
-    \Else
-      \State sketch the target and build a transient index
-      \State optionally schedule identity-only persistence when all gates permit it
-    \EndIf
-    \State execute seed lookup and retain the selected generation/view until the batch ends
-  \end{algorithmic}
+  \textbf{Input.} Source identity \(I\), query sketch \(Q\), and active index
+  policy \(P\).
+  \begin{enumerate}
+    \item Resolve the active read name for the source column.
+    \item Inspect a visible persisted generation only if stored reads are
+          enabled.
+    \item Select the index path:
+      \begin{enumerate}
+        \item If a generation is present:
+          \begin{enumerate}
+            \item Validate source epoch, algorithm digest, format, lengths,
+                  and checksums.
+            \item If the active name is MPF, select the configured relation
+                  reader route, then assemble from rows or map the sealed
+                  sidecar for compact direct.
+            \item Otherwise, if the active name is MPS, load the directory,
+                  selected buckets/controls, and authorized postings, then
+                  build the query-specific clipped lookup.
+            \item Optionally obtain a compatible cached CPU or accelerator
+                  view.
+          \end{enumerate}
+        \item Otherwise, if \(P\) requires a compatible persisted index, fail
+              closed.
+        \item Otherwise, sketch the target and build a transient index, then
+              optionally schedule identity-only persistence when all gates
+              permit it.
+      \end{enumerate}
+    \item Execute seed lookup and retain the selected generation/view until
+          the batch ends.
+  \end{enumerate}
 \end{algorithm}
 
 An absent index is thus not always an error, and a present index is not always
