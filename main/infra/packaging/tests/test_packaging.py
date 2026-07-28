@@ -440,6 +440,7 @@ class StaticContractTests(unittest.TestCase):
         pipeline = (PACKAGING.parents[1] / "bioseq/backend/pipeline/pipe.cppm").read_text()
         bioseq_cmake = (PACKAGING.parents[1] / "bioseq/CMakeLists.txt").read_text()
         codegen_cmake = (PACKAGING.parents[1] / "cmake/BioseqCodegen.cmake").read_text()
+        build_script = (SCRIPTS / "build_and_stage.sh").read_text()
         self.assertIn("!defined(BIOSEQ_PACKAGE_O0_PROFILE)", pipeline)
         self.assertIn(
             "BIOSEQ_PACKAGE_O0_PROFILE requires BIOSEQ_PIPELINE_FORCE_INLINE=0",
@@ -450,6 +451,11 @@ class StaticContractTests(unittest.TestCase):
         self.assertIn(
             "-DBIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS:BOOL=OFF",
             codegen_cmake,
+        )
+        self.assertIn("BIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST", bioseq_cmake)
+        self.assertIn(
+            "-DBIOSEQ_SQL_RUN_PREPARE_INCREMENTAL_SELF_TEST=OFF",
+            build_script,
         )
 
 
