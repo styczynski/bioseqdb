@@ -718,6 +718,10 @@ function(bioseq_add_codegen)
       "-DCMAKE_C_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_c_launcher_argument}"
       "-DCMAKE_CXX_COMPILER_LAUNCHER:STRING=${_bioseq_codegen_package_cxx_launcher_argument}"
       "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON"
+      # The extension link proof runs the same SQL/safety suite after the
+      # generated closure is ready. Avoid repeating it as a generator
+      # POST_BUILD hook in every package cell.
+      "-DBIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS:BOOL=OFF"
       "-DCMAKE_C_FLAGS:STRING="
       "-DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ -fno-rtti"
       "-DCMAKE_C_FLAGS_RELEASE:STRING=-O0 -DNDEBUG -fno-omit-frame-pointer"

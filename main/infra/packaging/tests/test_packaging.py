@@ -439,6 +439,7 @@ class StaticContractTests(unittest.TestCase):
     def test_explicit_package_O0_profile_relaxes_only_the_pipeline_guard(self):
         pipeline = (PACKAGING.parents[1] / "bioseq/backend/pipeline/pipe.cppm").read_text()
         bioseq_cmake = (PACKAGING.parents[1] / "bioseq/CMakeLists.txt").read_text()
+        codegen_cmake = (PACKAGING.parents[1] / "cmake/BioseqCodegen.cmake").read_text()
         self.assertIn("!defined(BIOSEQ_PACKAGE_O0_PROFILE)", pipeline)
         self.assertIn(
             "BIOSEQ_PACKAGE_O0_PROFILE requires BIOSEQ_PIPELINE_FORCE_INLINE=0",
@@ -446,6 +447,10 @@ class StaticContractTests(unittest.TestCase):
         )
         self.assertIn("BIOSEQ_PACKAGE_O0_PROFILE=1", bioseq_cmake)
         self.assertIn("BIOSEQ_PIPELINE_FORCE_INLINE=0", bioseq_cmake)
+        self.assertIn(
+            "-DBIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS:BOOL=OFF",
+            codegen_cmake,
+        )
 
 
 if __name__ == "__main__":

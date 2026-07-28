@@ -85,6 +85,9 @@ endif()
 
 project(bioseq_codegen LANGUAGES C CXX)
 
+option(BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS
+  "Run generator contracts immediately after linking the host tool" ON)
+
 if(_bioseq_codegen_gcc_only
     AND (NOT CMAKE_C_COMPILER_ID STREQUAL "GNU"
       OR NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
@@ -533,9 +536,11 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
     "${_codegen_src}/sql/tests/annotation_probe.cpp"
     PROPERTIES COMPILE_OPTIONS
       "$<$<CXX_COMPILER_ID:GNU>:-Wno-attributes=bioseq_sql::>;$<$<CXX_COMPILER_ID:Clang,AppleClang>:-Wno-unknown-attributes>")
-  add_custom_command(TARGET bioseq_codegen POST_BUILD
-    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
-    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test safety
-    COMMENT "Running SQL and PostgreSQL safety code-generator contracts"
-    VERBATIM)
+  if(BIOSEQ_CODEGEN_RUN_POST_BUILD_SELF_TESTS)
+    add_custom_command(TARGET bioseq_codegen POST_BUILD
+      COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql
+      COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test safety
+      COMMENT "Running SQL and PostgreSQL safety code-generator contracts"
+      VERBATIM)
+  endif()
 endif()
