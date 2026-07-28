@@ -25,13 +25,20 @@ compatible persisted index must not silently obtain a recomputed approximation.
 
 For these reasons BioSeqDB treats a persistent sequence index as
 \emph{derived database state with an explicit identity}. The data plane may be
-a PostgreSQL relation or, for the newer MPF path, an immutable mapped file, but
-the control plane remains inside PostgreSQL. Catalog state decides which
-generation is current; a snapshot determines which descriptor a reader can
-see; compatibility metadata decides whether the generation can be consumed;
-and memory permits bound the pieces admitted into a backend. This is more
-machinery than a conventional \texttt{.mmi} file, but it solves a different
-problem: making indexed alignment participate safely in transactional SQL.
+a legacy PostgreSQL sidecar relation or an opt-in grouped generation stored by
+the \texttt{postgres\_relation} provider. A grouped MPF generation may also
+seal an immutable MPF5 sidecar that the \texttt{compact\_h32\_direct} reader
+maps. The sidecar is a reader route, not provider value 1. Requests for the
+\texttt{mapped\_file} provider are currently rejected before mutation because
+its independent lifecycle is not installed. The control plane remains inside
+PostgreSQL. Catalog state decides which index state is current. A snapshot
+determines which descriptor a grouped-generation reader can see.
+Compatibility metadata decides whether the representation can be consumed.
+Memory permits bound decoded working structures and caches, but they do not
+admit the virtual length of an mmap or bound operating-system page-cache
+residency. This is more machinery than a conventional \texttt{.mmi} file, but
+it solves a different problem: making indexed alignment participate safely in
+transactional SQL.
 
 The index subsystem is deliberately separate from the base sequence storage
 described in Chapter~11. The base relation owns rows and sequence locators.
@@ -53,11 +60,11 @@ structure under a source and algorithm identity.
     \node[strong] (base) {BioSeq table\\sequence column};
     \node[box,right=of base] (identity) {physical relation identity\\column + source epoch};
     \node[box,right=of identity] (policy) {index policy\\name + update mode};
-    \node[strong,below=1.05cm of identity] (head) {current-generation\\descriptor};
+    \node[strong,below=1.05cm of identity] (head) {visible index state\\legacy or generation};
     \node[box,below left=.95cm and .45cm of head] (pg) {
-      PostgreSQL relation\\provider \(=0\), default};
+      PostgreSQL relation\\authority, provider \(=0\)};
     \node[box,below right=.95cm and .45cm of head] (mpf) {
-      immutable mapped file\\provider \(=1\), opt-in MPF};
+      sealed MPF5 sidecar\\compact-direct reader};
     \node[box,below=1.0cm of pg] (select) {selective reader\\and residency cache};
     \node[box,below=1.0cm of mpf] (accel) {CPU or accelerator\\runtime view};
 
@@ -66,15 +73,16 @@ structure under a source and algorithm identity.
     \draw[->,thick] (policy.south) |- (head.east);
     \draw[->,thick] (identity.south)--(head.north);
     \draw[->,thick] (head)--(pg);
-    \draw[->,thick] (head)--(mpf);
+    \draw[->,thick] (pg)--(mpf);
     \draw[->,thick] (pg)--(select);
     \draw[->,thick] (mpf)--(accel);
     \draw[->,thick] (select)--(accel);
   \end{tikzpicture}
   \caption{Persistent-index control and data planes. The descriptor visible
-  through PostgreSQL selects a provider and binds the payload to source and
-  algorithm identities; the current provider setting is never consulted to
-  reinterpret an existing generation.}
+  through PostgreSQL binds the payload to source and algorithm identities.
+  The relation provider remains authoritative when a grouped MPF generation
+  seals a sidecar for the compact-direct reader. Provider value 1 is not a
+  production branch.}
   \label{fig:index-control-data-plane}
 \end{figure}
 
@@ -203,7 +211,8 @@ identifies only the intersecting bucket sub-keys. Those buckets are loaded,
 global occurrence limits are applied, positions are clipped to the requested
 target interval, and a transient lookup is assembled. In a DOC0301 experiment
 the query selected 4,227,179 of 523,428,324 target minimizers, or
-0.8078 percent. That result demonstrated the value of query selection, but the
+approximately 0.8076 percent. That result demonstrated the value of query
+selection, but the
 specific A16 path was transient and persisted nothing; it is not evidence for
 a durable MPS build.
 
@@ -286,12 +295,12 @@ frequent \(k\)-mer, so neither the number of runs nor a heavy hitter can bypass
 the memory contract.
 
 \begin{algorithm}[ht]
-  \caption{Bounded MPS construction and directory-last publication}
+  \caption{Bounded MPS construction and mode-specific publication}
   \label{alg:mps-build}
   \small
   \begin{algorithmic}[1]
     \Require source sequence identity \(I\), parameters \(k,w\), memory budget
-    \State reserve a new build identity and snapshot the selected provider
+    \State reserve a new build identity and snapshot the selected persistence mode
     \For{each 32,768-base source range with minimizer halo}
       \State sketch the range and convert local occurrences to global positions
       \State append 16-byte \((hash,encodedPosition)\) pairs to the active run
@@ -310,8 +319,13 @@ the memory contract.
     \State write every bucket with length, checksum, source, and compatibility
           identity
     \State write the ordered directory \textbf{last}
-    \State validate the complete unpublished generation
-    \State atomically publish its descriptor as the current generation
+    \If{grouped generation mode is enabled}
+      \State validate the complete unpublished generation
+      \State atomically publish its descriptor as the current generation
+    \Else
+      \State finish the legacy replace-in-place update with the directory as
+            completeness witness
+    \EndIf
   \end{algorithmic}
 \end{algorithm}
 
@@ -337,9 +351,11 @@ The current asynchronous MPS route uses an \emph{identity-only job}. The
 submitting backend transfers stable identifiers and parameters, not live
 PostgreSQL pointers, relation handles, snapshots, or memory-context objects.
 The PostgreSQL worker rechecks relation identity and policy, registers its own
-snapshot, reopens the source, and rebuilds the MPS representation. The mapped
-provider is rejected for this MPS asynchronous route. Current settings also
-separate \texttt{index\_async\_persist} from
+snapshot, reopens the source, and rebuilds the MPS representation. The current
+index administration path rejects any minimizer \texttt{mapped\_file} request
+before it mutates either the catalog or an artifact. This rule also covers the
+asynchronous MPS route. Current settings separate
+\texttt{index\_async\_persist} from
 \texttt{recompute\_async\_persist}; both must permit the deferred write, and
 the production gate is restricted to the supported \(k=15,w=10\) profile.
 
@@ -415,12 +431,15 @@ legacy adapters; it is not the strongest lifecycle now available.
 \subsection{Immutable generations}
 \label{sec:index-generations}
 
-The generation design changes the unit of publication. A writer allocates a
-positive generation identifier and appends all of its rows without modifying
-the generation visible to current readers. It validates the finished object
-and only then atomically replaces a distinguished generation-zero head. The
-old descriptor becomes a predecessor or retired generation rather than being
-overwritten under a reader.
+The immutable-generation design is an opt-in mode. The checked-in
+\texttt{grouped32\_persisted\_generation\_enabled} setting is false, so the
+default path uses the legacy relation adapters and replace-in-place updates.
+When the setting is enabled, a writer allocates a positive generation
+identifier and appends all of its rows without modifying the generation visible
+to current readers. It validates the finished object and only then atomically
+replaces a distinguished generation-zero head. The old descriptor becomes a
+predecessor or retired generation rather than being overwritten under a
+reader.
 
 The PostgreSQL-relation provider uses an eight-column row:
 \[
@@ -476,15 +495,15 @@ PostgreSQL page, avoiding a TOAST fetch for every small cold-read unit.
     \draw[->,dashed,thick] (retire.east) -| node[pos=.25,right]
       {bounded reaper} (new.south);
   \end{tikzpicture}
-  \caption{Copy-on-publish generation lifecycle. A failed build can leave
-  removable unpublished material, but it cannot make a partial generation
-  current. Readers that resolved the predecessor under an older snapshot may
-  finish before reclamation.}
+  \caption{Copy-on-publish lifecycle in the opt-in grouped-generation mode. A
+  failed build can leave removable unpublished material, but it cannot make a
+  partial generation current. Readers that resolved the predecessor under an
+  older snapshot may finish before reclamation.}
   \label{fig:index-generation-lifecycle}
 \end{figure}
 
-\subsection{The optional mapped-file provider}
-\label{sec:index-mapped-provider}
+\subsection{The relation-provider MPF5 sealed sidecar}
+\label{sec:index-mpf5-sidecar}
 
 The storage history contains an important reversal. DOC0381 rejected an mmap
 fallback under a strict interpretation that every index byte had to reside in
@@ -493,7 +512,7 @@ a PostgreSQL relation. Its diagnosis was nevertheless decisive: a cold
 17.168589792 s for minimap2, a 6.048x region disadvantage. Of the BioSeqDB
 time, 62.519740125 s read 4,463,431,732 payload bytes from 562,075 rows and
 41.319820292 s remained outside raw payload fetch. The old accounting loop
-made 103,003 passes over the extent set---about 1.768 billion visits---and a
+made 103,003 passes over the extent set, or about 1.768 billion visits. A
 second checksum pass reread the same 4.46 GB. The primary-index route then
 performed roughly 562,000 heap fetches. PostgreSQL ownership alone did not
 make this tuple shape an efficient large immutable image.
@@ -502,34 +521,43 @@ DOC0383 reframed ownership more precisely. PostgreSQL 17 does not expose a
 supported extension hook for a custom storage manager, so forcing a
 tuple-per-page emulation was not the only safe option. BioSeqDB could keep the
 \emph{lifecycle and authority} in PostgreSQL while placing the immutable MPF
-data plane in an extension-owned file. DOC0384 records that implementation.
-\texttt{postgres\_relation} remains provider value 0 and the default;
-\texttt{mapped\_file} is provider value 1 and opt-in. A generation descriptor
-stores its provider, and every read obeys that stored value rather than the
-current configuration setting. Changing a GUC can affect a future build but
-cannot reinterpret an existing descriptor.
+reader plane in an extension-owned file. DOC0384 records the implementation,
+but the production descriptor still stores provider value 0,
+\texttt{postgres\_relation}. The build first creates and authenticates the
+PostgreSQL generation. It then rereads the complete READY generation and seals
+an MPF5 sidecar with same-inode publication checks for the
+\texttt{compact\_h32\_direct} reader. The file is therefore a derived reader
+representation governed by the relation generation. It is not an independently
+selectable provider. Although provider value 1 and its GUC-facing name remain
+visible, normal MPF and MPS updates reject that value with SQLSTATE
+\texttt{0A000} before mutation.
 
-The mapped MPF image has an explicit little-endian MPF5 version-2 layout and a
-4096-byte header. Unlike a dump of native C++ objects, its offsets, lengths,
-alignment, reserved bytes, and integer widths are format contracts. The open
-path validates the header and identity without performing an eager CRC over
-several gigabytes. When a selected extent is used, its address-bound checksum
-is verified. Thus a cold reader pays integrity cost for the material it
-actually admits rather than hashing the entire index twice before the first
-lookup.
+The sealed image has an explicit little-endian MPF5 version-2 layout and a
+4096-byte outer header. Unlike a dump of native C++ objects, its offsets,
+lengths, alignment, reserved bytes, and integer widths are format contracts.
+The timed compact-direct open authenticates the outer header and the nested
+256-byte direct header, together with identity receipts and layout arithmetic.
+It deliberately examines zero payload bytes for CRC work. Full section CRCs
+are verified when the image is published and by full validation used for
+offline scrubbing and fault tests. They are not recomputed lazily for each
+selected lookup. This differs from relation Format~5 and Format~6 readers,
+which authenticate their addressed rows or extents at the granularity they
+admit.
 
 Publication follows a filesystem protocol designed to make the descriptor
 truthful:
 
 \begin{enumerate}
   \item create a private temporary file with mode 0600 in the extension-owned
-  database/tablespace directory;
-  \item write the complete image, finalize its header, and synchronize it;
-  \item publish with a no-replace operation so an existing generation cannot
-  be silently overwritten;
-  \item synchronize the containing directory, record device/inode identity,
-  and make the immutable artifact mode 0400; and
-  \item publish the PostgreSQL descriptor transactionally.
+  database or tablespace directory and record its device and inode identity.
+  \item write the complete image, finalize its header, change its mode to
+  0400, and synchronize the file.
+  \item publish with a no-replace link so an existing generation cannot be
+  silently overwritten, then unlink the temporary name.
+  \item validate that the final name identifies the exact recorded inode with
+  the required mode, then synchronize the containing directory.
+  \item publish the relation-generation descriptor transactionally only after
+  the compact-direct artifact has passed final validation.
 \end{enumerate}
 
 Mappings are registered with a PostgreSQL \texttt{ResourceOwner}, so error
@@ -540,16 +568,27 @@ armed. Replacement records a full transaction identifier. The reaper waits
 until PostgreSQL's global visibility test says that identifier is removable,
 then reclaims the retired descriptor and artifact. Its work is bounded per
 pass: at most 64 descriptors, 4096 relation rows, 64 MiB of relation payload,
-64 files, and 64 orphan candidates. Readers remain lock-free after resolving
-the descriptor under one registered snapshot; writers, replacement, clear,
-and reaping are serialized by an advisory transaction lock.
+64 files, and 64 orphan candidates. Readers do not acquire the writer advisory
+transaction lock. They retain ordinary \texttt{AccessShareLock} relation
+references and a registered MVCC snapshot for the lifetime of the read
+session. Writers, replacement, clear, and reaping are serialized by an
+advisory transaction lock.
+
+The mapping lifetime is also distinct from memory admission. A ResourceOwner
+ensures that the mapping is released on normal completion and PostgreSQL error
+unwinding. It does not charge the image's virtual length to a
+\texttt{MemoryPermit}. Permits instead cover decoded or assembled working
+owners and resident caches. Kernel page-cache residency remains outside that
+byte counter.
 
 This design should not be described as “an arbitrary external cache file.”
 The file is immutable, privately named, identity checked, transactionally
 described, visibility-delayed on deletion, and unable to select itself. It is
-an extension-owned data plane governed by PostgreSQL. Conversely, it should
-not be described as PostgreSQL heap storage: backups, replication, crash
-handling, and administration must account for the provider distinction.
+an extension-owned reader representation governed by the PostgreSQL relation
+generation. Conversely, it should not be described as PostgreSQL heap storage.
+Backup, replication, crash handling, and administration must either preserve
+the sealed artifact with its descriptor or regenerate it from the
+authenticated relation generation or durable source.
 
 \section{Formats 5 and 6: from complete images to selective streams}
 \label{sec:index-formats}
@@ -569,8 +608,8 @@ The essential change is that the persistent shape is no longer merely “some
 bytes that deserialize into a C++ hash map.” It is a specified arrangement of
 controls and positions that can be range checked, checksummed, and adapted
 without rebuilding the original container. The same logical Format-5
-generation can be backed by PostgreSQL rows; the MPF mapped image carries a
-closely related direct layout with a provider-specific outer header.
+generation is backed by PostgreSQL rows. The MPF5 sidecar carries a closely
+related direct layout with its own authenticated outer header.
 
 \subsection{Hash-major Format 6}
 \label{sec:index-format6}
@@ -708,9 +747,9 @@ the query must exercise the no-index route.
     minimizers.\\
     Unsupported position width & A decoded occurrence can truncate or wrap &
     Reject before allocation or device upload.\\
-    Current GUC names a different provider & The generation's data plane does
-    not move when configuration changes & Use the provider stored in its
-    descriptor.\\
+    Descriptor names provider 1 & The independent mapped-file lifecycle is not
+    installed & Reject the descriptor or update request. Never reinterpret it
+    as provider 0.\\
     Checksum or section-bound failure & Payload is corrupt, misaddressed, or
     incomplete & Reject the selected extent/generation; never continue with
     partial postings.\\
@@ -769,8 +808,8 @@ The corrective design therefore attacks both axes:
   rescanning the whole set for every batch;
   \item adjacent physical ranges are coalesced into bounded slabs;
   \item checksums are computed at the same granularity as authorization; and
-  \item the optional mapped MPF image removes tuple and heap-fetch overhead
-  where a complete directly consumable image is the better representation.
+  \item the relation-provider MPF5 sidecar removes tuple and heap-fetch
+  overhead when the explicit compact-direct reader route is selected.
 \end{enumerate}
 
 \subsection{Backend-local residency caches}
@@ -831,7 +870,8 @@ The main decision shape is:
     \If{a generation is present}
       \State validate source epoch, algorithm digest, format, lengths and checksums
       \If{the active name is MPF}
-        \State assemble or map the fragment-native lookup under memory permits
+        \State select the configured relation reader route
+        \State assemble from rows, or map the sealed sidecar for compact direct
       \ElsIf{the active name is MPS}
         \State load the directory, selected buckets/controls, and authorized postings
         \State build the query-specific clipped lookup
@@ -856,12 +896,14 @@ attestations can be a recomputation result, a warm assembled cache, or a
 different algorithm.
 
 The default active read name is MPF. Stored MPF is assembled from fragment
-images or consumed through the supported direct provider. Stored MPS uses its
-directory to form a query-specific index. If policy allows recomputation, both
-routes can fall back to a transient target index. Deferred persistence scans
-the enabled preference list in MPF-then-MPS order; MPF wins if both are
-eligible. This deterministic priority prevents two background products from
-being presented as one implicit “best index.”
+images under the checked-in legacy default. In grouped mode it is consumed
+through the relation-backed Format~5 control-scan route by default, while an
+explicit \texttt{compact\_h32\_direct} route maps the sealed MPF5 sidecar.
+Stored MPS uses its directory to form a query-specific index. If policy allows
+recomputation, both routes can fall back to a transient target index. Deferred
+persistence scans the enabled preference list in MPF-then-MPS order. MPF wins
+if both are eligible. This deterministic priority prevents two background
+products from being presented as one implicit “best index.”
 
 \section{Comparison with minimap2's \texttt{.mmi} index}
 \label{sec:index-minimap2-comparison}
@@ -912,20 +954,24 @@ reuse is a reference file.
     provide specified controls and positions streams.\\
     Load granularity & Reconstruct complete bucket arrays and optional
     reference with \texttt{fread} &
-    Full MPF image when appropriate, or query-selected MPS/Format-6 controls
-    and postings; bounded admission and backend LRU reuse.\\
+    Full MPF image when appropriate, or query-selected MPS and Format-6
+    controls and postings, with bounded working-memory admission and backend
+    LRU reuse.\\
     Update & User rebuilds/replaces a file &
-    Manual or insert policy; validate unpublished generation, atomic head
-    replacement, snapshot-safe predecessor retirement.\\
+    Manual or insert policy. The checked-in legacy mode replaces relation
+    content. Opt-in grouped mode validates unpublished generations before
+    atomic head replacement and snapshot-safe predecessor retirement.\\
     Compatibility & File parameters and flags; mapper-specific load contract &
     Alphabet, widths, \(k,w\), scheme/version, producer, occurrence policy,
     source epoch, and optional accelerator ABI digest.\\
     Transactions & Outside database transaction semantics &
-    Descriptor publication, abort cleanup, registered snapshots,
+    Legacy transactional relation updates, plus grouped-mode descriptor
+    publication, abort cleanup, registered snapshots,
     \texttt{ResourceOwner} mappings, and visibility-delayed reaping.\\
     Physical providers & Ordinary file &
-    Default unlogged PostgreSQL relation; optional PostgreSQL-governed immutable
-    mapped file for supported MPF generations.\\
+    PostgreSQL relation authority. An opt-in grouped MPF generation can seal
+    an immutable MPF5 sidecar for direct reading while still recording
+    provider 0. Provider 1 is rejected.\\
     SQL batch sharing & One process consumes one loaded index &
     Query batch shares occurrence analysis and assembled views; planner and
     custom scan choose the route.\\
@@ -990,7 +1036,8 @@ enabled. It records what each stage taught the next one.
     DOC0301 &
     Durable, lazy, adaptive, and query-filtered variants &
     Durable A6 completed correctly but took 303.399 s wall; transient A16 took
-    about 26.3 s by retaining 0.8078 percent and persisted nothing &
+    about 26.3 s by retaining approximately 0.8076 percent and persisted
+    nothing &
     Persistence attestation is mandatory; query selectivity was retained as a
     design goal, not confused with a completed durable build.\\
     DOC0307--DOC0311 &
@@ -1009,14 +1056,14 @@ enabled. It records what each stage taught the next one.
     Instrumented cold PostgreSQL relation reader &
     103.840 s index/map region, quadratic accounting, duplicate CRC, and about
     562,000 heap fetches &
-    Linear accounting, coalesced ranges, address-bound CRC; reconsider physical
-    provider rather than optimizing only logical selectivity.\\
+    Linear accounting, coalesced ranges, address-bound CRC, and a reconsidered
+    physical read route rather than optimization of logical selectivity alone.\\
     DOC0383--DOC0384 &
-    Fragment-native MPF plus PostgreSQL-governed mapped generation &
+    Fragment-native MPF plus a relation-provider sealed MPF5 sidecar &
     Implemented six-run P50 5.368746 s versus minimap2 16.487527 s, narrowly
     satisfying a 3x gate under documented caveats &
-    Default PostgreSQL provider plus opt-in immutable mapped MPF provider,
-    transactional descriptor, snapshot-safe retirement, bounded reaper.\\
+    Provider 0 remains authoritative. The opt-in compact-direct reader maps
+    the sealed sidecar. Provider 1 remains fail-closed.\\
     DOC0385 &
     Per-query occurrence-merge prototype &
     Slower and higher RSS on every tested workload &
@@ -1031,23 +1078,55 @@ The phrase ``final index format'' would be misleading because the current
 system deliberately preserves more than one verified route. The default
 policy is nevertheless concrete:
 
-\begin{enumerate}
-  \item MPF is the default active minimizer index and is enabled for
-  update-on-insert. It matches the fragment-native sequence store and avoids a
-  global MPS build.
-  \item The default generation data provider is an unlogged PostgreSQL
-  relation. The immutable mapped-file provider is implemented and opt-in for
-  the supported MPF path.
-  \item Format~5 is the generally applicable shape-aware generation format.
-  The specialized MPS Format-6 hash-major path is available for its registered
-  dna4 \(k=15,w=10\) profile, but the grouped persisted-generation setting is
-  disabled by default.
-  \item MPS remains a manual index option when query-selective cold loading is
-  worth its construction and merge cost.
-  \item A strict persisted-read request fails closed. An ordinary request can
-  recompute, and may schedule an identity-only persistence job when the
-  explicit asynchronous gates allow it.
-\end{enumerate}
+\begin{table}[ht]
+  \centering
+  \scriptsize
+  \caption{Current persistence and reader-mode matrix. The first row is the
+  checked-in default. Rows two and three require grouped persisted generations.}
+  \label{tab:index-current-mode-matrix}
+  \begin{tabularx}{\linewidth}{p{.20\linewidth}p{.23\linewidth}
+                               p{.23\linewidth}X}
+    \toprule
+    \textbf{Mode} & \textbf{Selector} & \textbf{Physical representation} &
+    \textbf{Current consequence}\\
+    \midrule
+    Checked-in default &
+    \shortstack[l]{\texttt{grouped32\_persisted}\\
+                   \texttt{\_generation\_enabled}\\
+                   \texttt{=false}} &
+    Legacy PostgreSQL relation adapters &
+    MPF is active by default. Updates use replace-in-place relation semantics,
+    not immutable generation publication.\\
+    Opt-in grouped publication &
+    Grouped setting enabled, provider \(=0\) &
+    Authenticated PostgreSQL generation &
+    MPF uses Format~5. A registered MPS dna4 \(k=15,w=10\) profile may use
+    Format~6. Copy-on-publish and predecessor retirement apply here.\\
+    Grouped MPF reader choice &
+    \shortstack[l]{\texttt{mpf\_format5\_lookup}\\
+                   \texttt{\_route}\\
+                   default:\\
+                   \texttt{format5\_control\_scans}\\
+                   explicit:\\
+                   \texttt{compact\_h32\_direct}} &
+    Relation rows, with a sealed MPF5 sidecar for the direct route &
+    The default grouped reader scans authenticated relation controls. The
+    explicit direct reader maps the sidecar without changing provider.\\
+    Unsupported provider request &
+    \texttt{mapped\_file}, provider \(=1\) &
+    No production artifact &
+    MPF and MPS update requests fail with SQLSTATE \texttt{0A000} before
+    catalog or file mutation.\\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+MPF is the default active minimizer index and is enabled for update-on-insert.
+It matches the fragment-native sequence store and avoids a global MPS build.
+MPS remains a manual option when query-selective cold loading is worth its
+construction and merge cost. A strict persisted-read request fails closed. An
+ordinary request can recompute and may schedule identity-only persistence when
+the explicit asynchronous gates allow it.
 
 This is the point at which the BioSeqDB design differs most clearly from its
 original minimap2 inspiration. Minimap2 chooses one self-contained reference
@@ -1066,7 +1145,7 @@ DOC0288 measured a PostgreSQL E2E workflow after the loader's flush/finish
 states triggered \texttt{bioseq.update\_index} through SPI and reset the
 backend cache. Table~\ref{tab:index-doc0288} reproduces its
 \texttt{just\_index} results. They are historical results from that
-implementation, not current-provider claims.
+implementation, not current reader-route claims.
 
 \begin{table}[ht]
   \centering
@@ -1099,9 +1178,9 @@ not isolate a wire format.
 The apparent success of the \texttt{just\_index} rows coexisted with the
 80--93 GB temporary peaks described earlier. This is why the later work did not
 stop at “persisted queries are fast.” It pursued bounded construction,
-query-selective reading, immutable publication, and finally a physical provider
-that did not turn a multi-gigabyte image into hundreds of thousands of heap
-fetches.
+query-selective reading, opt-in immutable publication, and finally a
+compact-direct reader route that did not turn a multi-gigabyte image into
+hundreds of thousands of heap fetches.
 
 \subsection{Intermediate results must retain their persistence label}
 
@@ -1143,7 +1222,8 @@ fetches.
     query-filtered transient target index &
     26.312--26.454 / 25.071--25.113 s &
     none; audit rows \(=0\) &
-    Kept 0.8078 percent of target minimizers and returned the correct 2 bp
+    Kept approximately 0.8076 percent of target minimizers and returned the
+    correct 2 bp
     offset. Demonstrates selectivity only.\\
     \bottomrule
   \end{tabularx}
@@ -1155,13 +1235,17 @@ not need most target minimizers. The final storage work then had to preserve
 that advantage without making construction, integrity verification, or tuple
 access dominate.
 
-\subsection{Current mapped-provider evidence}
+\subsection{Current relation-provider compact-direct evidence}
 
 DOC0384 reports six retained BioSeqDB \texttt{just\_index} samples:
 \[
   6.389712833,\ 5.401551458,\ 5.343038250,\ 5.368746000,\
   5.610243750,\ 5.321436000\ \mathrm{s}.
 \]
+The run explicitly selected \texttt{compact\_h32\_direct}. Its
+\texttt{provider\_opened=0} attestation identifies the authoritative
+\texttt{postgres\_relation} provider. It is not evidence that provider 1
+opened successfully.
 DOC0384 labels 5.368746 s as P50 by selecting the lower-middle order statistic.
 For six samples this is not the conventional arithmetic median, which is
 \((5.368746000 + 5.401551458)/2 = 5.385148729\) s.  The report's 3.071020x
@@ -1191,11 +1275,11 @@ the report-defined P50 so that its acceptance decision remains reproducible.
     \node[anchor=east] at (-.2,2.40) {minimap2};
     \node[anchor=west,font=\scriptsize] at (16.62,2.40) {16.488};
   \end{tikzpicture}
-  \caption{DOC0384 report-defined P50 comparison for the implemented mapped
-  MPF path. The BioSeqDB bar uses the lower-middle order statistic chosen by
-  the report; its conventional six-sample median is 5.385149 s. The thin line
-  shows the retained BioSeqDB range, while the report supplies a minimap2 P50
-  rather than a paired range.}
+  \caption{DOC0384 report-defined P50 comparison for the relation-provider
+  MPF \texttt{compact\_h32\_direct} route. The BioSeqDB bar uses the
+  lower-middle order statistic chosen by the report. Its conventional
+  six-sample median is 5.385149 s. The thin line shows the retained BioSeqDB
+  range, while the report supplies a minimap2 P50 rather than a paired range.}
   \label{fig:index-doc0384-bars}
 \end{figure}
 
@@ -1214,7 +1298,7 @@ These qualifications are not incidental. DOC0381 had shown a 6.220x outer
 wall-clock disadvantage for the prior cold relation path; DOC0384 shows that a
 different physical data plane can reverse the result. Neither number is a
 universal property of “indexes in PostgreSQL.” They measure particular source
-states, provider paths, and attested execution regions.
+states, reader routes, and attested execution regions.
 
 \section{Operational consequences and limitations}
 \label{sec:index-operational}
@@ -1226,14 +1310,16 @@ does not face:
   \item An unlogged relation can be reset after a crash and must be rebuilt
   from the durable source. The system must not advertise its pre-crash
   descriptor as reusable.
-  \item The mapped provider needs backup, restore, replication, and tablespace
-  procedures that preserve the private artifact together with its descriptor,
-  or else deliberately discard and rebuild it.
+  \item A sealed MPF5 sidecar needs backup, restore, replication, and
+  tablespace procedures that preserve it with its authoritative relation
+  descriptor. An alternative procedure may deliberately discard and
+  regenerate the derived sidecar.
   \item Source updates need a new epoch and generation. Incremental mutation of
   an image in place would defeat snapshot safety and compatibility checks.
-  \item The mapped provider currently solves the supported MPF path; MPS
-  asynchronous persistence and specialized Format~6 have narrower gates.
-  A benchmark of one route should not be generalized to every index policy.
+  \item The compact-direct sidecar route currently serves supported grouped
+  MPF. MPS asynchronous persistence and specialized Format~6 have narrower
+  gates. A benchmark of one reader route should not be generalized to every
+  index policy.
   \item Backend and device caches reduce warm cost but cannot be used as
   evidence for cold performance unless their state is measured and reported.
   \item Reaping is intentionally bounded and may take several passes. This
@@ -1264,17 +1350,19 @@ possible, and convert safely into CPU and GPU views.
 The final architecture combines several retained decisions:
 
 \begin{enumerate}
-  \item typed MPF, MPS, and metadata indexes rather than one opaque blob API;
-  \item fragment-native MPF as the default, with MPS available for
-  sequence-wide selective loading;
-  \item immutable generation descriptors and fail-closed compatibility;
-  \item Format~5 as the general shape-aware format and a gated hash-major
-  Format~6 route;
-  \item a default unlogged PostgreSQL-relation provider and an implemented
-  opt-in mapped MPF provider whose lifecycle is governed by PostgreSQL;
-  \item explicit memory permits, bounded construction spill, and backend/device
-  residency caches; and
-  \item deterministic runtime policy and identity-only background persistence.
+  \item Typed MPF, MPS, and metadata indexes replace one opaque blob API.
+  \item Fragment-native MPF remains the default, with MPS available for
+  sequence-wide selective loading.
+  \item Legacy replace-in-place relations are the checked-in default. Opt-in
+  immutable generation descriptors add fail-closed compatibility.
+  \item Format~5 is the general shape-aware format, with a gated hash-major
+  Format~6 route.
+  \item PostgreSQL relations remain authoritative for grouped generations. An
+  explicit MPF compact-direct reader uses a sealed MPF5 sidecar.
+  \item Explicit memory permits bound working state. Bounded construction
+  spill and backend or device residency caches control other large owners.
+  \item Deterministic runtime policy governs identity-only background
+  persistence.
 \end{enumerate}
 
 The intermediate results explain why each piece exists. A global build could
@@ -1284,5 +1372,5 @@ transient index could be fast yet solve no persistence problem. A logically
 selective PostgreSQL representation could still lose to hundreds of thousands
 of heap fetches. The current solution is therefore not simply “store the
 minimap2 index in a table.” It separates logical organization, physical
-provider, compatibility, publication, and runtime view so each can be measured
-and changed without weakening the others.
+representation, reader route, compatibility, publication, and runtime view so
+each can be measured and changed without weakening the others.
