@@ -449,7 +449,7 @@ fields using PostgreSQL types.
 BioSeqDB's parser recognises AUTO and PLAIN modes plus UniProtKB, UniRef,
 UniParc, UniMes, SPD, NCBI generic, NCBI GI, NCBI PDB, RefSeq, GenBank,
 GISAID, and IMGT dialects.  Format definitions are constexpr tables in
-\texttt{\detokenize{io/identifier_parser/identifier_formats.cppm}}.  They state
+\path{io/identifier_parser/identifier_formats.cppm}.  They state
 whether a field is positional, free description text, a
 \texttt{KEY=VALUE} tag, or a bracket tag, together with canonical names and
 aliases.  Column-name comparison lowercases ASCII and removes underscores and
@@ -694,7 +694,11 @@ corpora and measured boundaries differ.
 \begin{table}[htbp]
 \centering
 \scriptsize
-\begin{tabular}{p{0.27\textwidth}r r p{0.34\textwidth}}
+\begin{tabularx}{\textwidth}{
+  p{0.18\textwidth}
+  >{\raggedleft\arraybackslash}p{0.14\textwidth}
+  >{\raggedleft\arraybackslash}p{0.20\textwidth}
+  X}
 \toprule
 \textbf{Experiment} & \textbf{Baseline} & \textbf{BioSeqDB/result} &
 \textbf{Interpretation}\\
@@ -721,7 +725,7 @@ overlap setting default off, later run &
 task 13.744 s & wall 14.460 s &
 supports keeping the optional path disabled by default\\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \caption{Selected I/O evidence.  Units and measurement boundaries are retained
 from the named project reports; rows are not directly comparable across
 corpora.}

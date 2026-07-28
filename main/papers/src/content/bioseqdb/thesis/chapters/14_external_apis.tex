@@ -518,7 +518,7 @@ Packing occurs on the PostgreSQL thread in
 \texttt{set\_seq} within
 \path{main/bioseq/backend/pg/external/row_writer.cppm}.  The function calls the
 active SIMD target's
-\texttt{stdc\_convert\_from\_cstr<bioseq::pg\_types::seq,\ldots>} with
+\path{stdc_convert_from_cstr<bioseq::pg_types::seq,...>} with
 \texttt{pg\_alloc}.  It normalises nucleotide input according to the configured
 PostgreSQL sequence alphabet and creates a varlena \texttt{bioseq.seq} datum in
 the current memory context.  A chunk lease is released only after this datum

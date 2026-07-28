@@ -343,6 +343,8 @@ declaration is in \texttt{sequences.cppm}, lines 2076--2255.  Listing
   language=C++,
   basicstyle=\ttfamily\footnotesize,
   breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
   caption={Abridged standard-layout sequence API.  Methods are declarations;
   implementations and factories are omitted.},
   label={lst:compact-stdc-api}]
@@ -422,7 +424,7 @@ flat PostgreSQL value and the resident algorithm interface.
 The copied minimap2 reference makes a different, internally consistent
 trade-off.  Its input record \texttt{mm\_bseq1\_t} stores an integer length and
 \texttt{char*} fields for name, sequence, quality, and comment
-(\texttt{main/bench/tool\_minimap2/minimap2/bseq.h}, lines 14--17).  Mapping
+(\path{main/bench/tool_minimap2/minimap2/bseq.h}, lines 14--17).  Mapping
 entry points such as \texttt{mm\_map} receive the query as
 \texttt{const char*}.  The reference index uses another representation:
 \texttt{mm\_idx\_t::S} is a \texttt{uint32\_t*} containing a four-bit packed
@@ -461,7 +463,7 @@ compile-time alphabet pack selected once from run-time datum metadata\\
 The BioSeqDB benchmark adapter preserves the reference contract rather than
 pretending minimap2 accepts the lazy facade.  The helper
 \texttt{compact\_sequence\_to\_acgt} in
-\texttt{main/bench/tool\_minimap2/tool\_minimap2.cppm}, lines 58--87, performs
+\path{main/bench/tool_minimap2/tool_minimap2.cppm}, lines 58--87, performs
 one \(O(N)\) rank-to-character pass.  The reference wrapper then calls
 \texttt{mm\_idx\_str} and \texttt{mm\_map} with those strings (lines
 218--310).  BioSeqDB-native routes avoid that boundary when their kernels
@@ -504,7 +506,7 @@ seq::dispatch_instance(runtime_alphabet_code, runtime_width,
 \end{lstlisting}
 
 The exact PostgreSQL profile is in
-\texttt{main/bioseq/backend/pg/types/compact\_sequence/flat\_abi.cppm}.
+\path{main/bioseq/backend/pg/types/compact_sequence/flat_abi.cppm}.
 At optimization profile 0, \texttt{pgseq\_supported\_alphabets} contains only
 DNA4; higher profiles add DNA5.  Profiles 0 and 1 enable only an eight-byte
 physical unit, while profile 2 enables \(\{1,2,4,8\}\).  SQL width requests
@@ -592,6 +594,8 @@ region.  Listing~\ref{lst:lazy-facade-api} shows the essential API from
   language=C++,
   basicstyle=\ttfamily\footnotesize,
   breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
   caption={Abridged declaration-only form of the canonical lazy facade.},
   label={lst:lazy-facade-api}]
 template<sequence_alphabet Alphabet>
@@ -671,11 +675,11 @@ probe is what permits a zero-copy packed borrow.
 \subsection{Ownership is part of the abstraction}
 
 A borrowed view without a lifetime is an unsafe pointer with a better name.
-\texttt{lazy\_sequence\_call\_owner<Alphabet>} is therefore a move-only RAII
+\path{lazy_sequence_call_owner<Alphabet>} is therefore a move-only RAII
 object containing the facade and the release action for its state.  PostgreSQL
 constructs these owners in a read-session memory context.  The helper
-\texttt{with\_pg\_sequence\_view<Result>} in
-\texttt{view\_session.cppm}, lines 995--1064, enforces at compile time that a
+\path{with_pg_sequence_view<Result>} in
+\path{view_session.cppm}, lines 995--1064, enforces at compile time that a
 callback result is not a pointer, reference, range view, or iterator and is
 trivially destructible.  The view cannot accidentally escape after a detoast
 copy, source domain, or memory context has been released.
@@ -705,13 +709,15 @@ lifetime: its memory can be detoasted, copied, or reset, and an arbitrary
 slice may begin in the middle of a packed word.  The final representation is
 a PostgreSQL expanded object whose payload is an immutable balanced piece
 tree.  The public POD shapes are declared in
-\texttt{main/bioseq/backend/pg/types/compact\_sequence/tree\_types.cppm},
+\path{main/bioseq/backend/pg/types/compact_sequence/tree_types.cppm},
 lines 31--222, and are abridged in Listing~\ref{lst:piece-tree-api}.
 
 \begin{lstlisting}[
   language=C++,
   basicstyle=\ttfamily\footnotesize,
   breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible,
   caption={Persistent sequence-piece API.  Transforms are edge metadata;
   there is no payload-bearing reverse node.},
   label={lst:piece-tree-api}]
