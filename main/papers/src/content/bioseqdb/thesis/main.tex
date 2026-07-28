@@ -219,14 +219,14 @@
     four supporting questions:
 
     \begin{enumerate}
-        \item Which parts of seeding, chaining, and extension can be expressed
+        \item[\textbf{RQ1.}] Which parts of seeding, chaining, and extension can be expressed
         over a common compact sequence abstraction without eager conversion?
-        \item Which scalar operations benefit from SIMD or GPU execution,
+        \item[\textbf{RQ2.}] Which scalar operations benefit from SIMD or GPU execution,
         and which overheads move the break-even point?
-        \item How can PostgreSQL plan and execute a set-valued,
+        \item[\textbf{RQ3.}] How can PostgreSQL plan and execute a set-valued,
         batch-oriented search while presenting an ordinary typed SQL
         interface?
-        \item How should sequences, indexes, ingestion, external data,
+        \item[\textbf{RQ4.}] How should sequences, indexes, ingestion, external data,
         caches, and generated boundary code fit around the kernels so
         that the resulting system remains inspectable and reliable?
     \end{enumerate}
@@ -245,29 +245,33 @@
     The main contributions developed in the following chapters are:
 
     \begin{enumerate}
-        \item an alphabet-generic sequence representation that supports
+        \item[\textbf{C1.}] An alphabet-generic sequence representation that supports
         packed, fragmented, PostgreSQL-backed, and lazily composed data
         through a common range contract.
-        \item a staged minimap2-derived mapper with scalar, SIMD, and
+        \item[\textbf{C2.}] A staged minimap2-derived mapper with scalar, SIMD, and
         Vulkan components, including explicit dispatch and evidence for
         intermediate optimization decisions.
-        \item optional GPU-capable SneakySnake and GateKeeper candidate
+        \item[\textbf{C3.}] Optional GPU-capable SneakySnake and GateKeeper candidate
         filters integrated without changing the meaning of an accepted
         alignment.
-        \item persistent sequence and minimizer-index storage derived from
+        \item[\textbf{C4.}] Persistent sequence and minimizer-index storage derived from
         a columnar PostgreSQL access method, with bounded loading,
         caching, and selective cold-index reads.
-        \item a planner and custom-scan interface that connects SQL
+        \item[\textbf{C5.}] A planner and custom-scan interface that connects SQL
         expressions and joins to batch-oriented alignment.
-        \item structural generation and validation of SQL installation
+        \item[\textbf{C6.}] Structural generation and validation of SQL installation
         definitions and PostgreSQL function-manager boundary declarations
         from annotated C++ sources.
     \end{enumerate}
 
-    The document follows the same progression as a query.  It first
+    The document first
     establishes the biological and algorithmic context, then states the
-    shortcomings that motivate an integrated system.  It follows data
-    through minimizer extraction, chaining, extension, and prefiltering.
+    shortcomings that motivate an integrated system.  The algorithm chapters
+    follow data through minimizer extraction and chaining.  They then describe
+    the expensive downstream alignment stage before stepping back to the
+    prefilter that guards that stage.  This expository inversion makes the
+    filter's safety and cost contract concrete without changing the runtime
+    order, which remains chaining, prefiltering, and alignment.
     It then moves outward through sequence abstractions, PostgreSQL
     planning, physical storage, persistent indexes, ingestion, external
     providers, and generated SQL boundary code.

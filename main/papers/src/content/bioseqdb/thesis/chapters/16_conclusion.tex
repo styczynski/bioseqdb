@@ -26,7 +26,8 @@ whether failure is allowed to fall back.  A generated SQL boundary states the
 source entity, dependency, public symbol, and ownership policy from which an
 installed object was derived.
 
-The system built around these contracts has five main layers:
+The implementation built around these contracts can be read as five layers.
+These are structural layers, not a second contribution list:
 
 \begin{enumerate}
   \item The sequence layer represents packed, fragmented,
@@ -55,6 +56,65 @@ Together these layers are the principal contribution.  Any one kernel could
 be called from PostgreSQL with much less work.  The difficult part is
 preserving coordinate, lifetime, failure, and resource semantics across the
 complete query.
+
+The six canonical contributions stated in the Introduction and
+Chapter~\ref{sec:solution-gap-questions} are assessed against their principal
+evidence in Table~\ref{tab:conclusion-contribution-evidence}.  Repeating the
+same identifiers here prevents a subsystem layer or an experimental backend
+from becoming an additional, unsupported contribution claim.
+
+\begin{table}[p]
+  \centering
+  \scriptsize
+  \caption{Canonical contribution claims and the evidence that supports them.}
+  \label{tab:conclusion-contribution-evidence}
+  \begin{tabularx}{\linewidth}{p{.07\linewidth}p{.47\linewidth}X}
+    \toprule
+    ID & Canonical contribution & Principal evidence and qualification \\
+    \midrule
+    C1 &
+    An alphabet-generic sequence representation that supports
+    packed, fragmented, PostgreSQL-backed, and lazily composed data
+    through a common range contract. &
+    Chapter 9 defines the representation and access contracts. Chapters 11
+    and 13 connect them to PostgreSQL storage and bounded loading. The
+    rvalue-lifetime limitation stated below remains open. \\
+    C2 &
+    A staged minimap2-derived mapper with scalar, SIMD, and
+    Vulkan components, including explicit dispatch and evidence for
+    intermediate optimization decisions. &
+    Chapters 4--7 reconstruct the stages and compare their retained and
+    rejected routes. Scalar remains the default for minimizers and chaining.
+    SIMD and Vulkan conclusions remain route- and workload-specific. \\
+    C3 &
+    Optional GPU-capable SneakySnake and GateKeeper candidate
+    filters integrated without changing the meaning of an accepted
+    alignment. &
+    Chapter 8 establishes safe rejection domains, exact survivor
+    enforcement, backend selection, and qualified CPU and GPU evidence. \\
+    C4 &
+    Persistent sequence and minimizer-index storage derived from
+    a columnar PostgreSQL access method, with bounded loading,
+    caching, and selective cold-index reads. &
+    Chapters 11--13 establish the physical and lifecycle mechanisms. The
+    checked-in MPF default is legacy replace-in-place. Authenticated immutable
+    grouped generations and Format 5/6 publication are opt-in. \\
+    C5 &
+    A planner and custom-scan interface that connects SQL
+    expressions and joins to batch-oriented alignment. &
+    Chapter 10 supplies planner ownership, node substitution, cardinality,
+    join, EXPLAIN, and covered SQL-fixture evidence. Unsupported shapes fail
+    closed rather than executing a permissive scalar body. \\
+    C6 &
+    Structural generation and validation of SQL installation
+    definitions and PostgreSQL function-manager boundary declarations
+    from annotated C++ sources. &
+    Chapter 15 supplies the annotation model, dependency and physical
+    ledgers, generated artifact shapes, and completeness checks. The intended
+    deployment matrix still requires qualification. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 \section{From the original pipeline to the final architecture}
 
@@ -94,25 +154,29 @@ GateKeeper~\cite{gatekeeper_paper,gatekeeper_gpu_paper}.
     Stage composition selected by bounded runtime-to-template dispatch \\
     Minimizers &
     Scalar circular-window sketching over encoded DNA &
-    Scalar parity path, Highway variants, rolling ntHash work, and bounded
-    Vulkan sketch routes with explicit tie and invalid-symbol semantics \\
+    Scalar default and oracle, explicitly selected ExactSimd, versioned PNT1,
+    and admitted Vulkan sketch routes with explicit tie and invalid-symbol
+    semantics \\
     Chaining &
     Scalar dynamic programming and minimap2 RMQ variants &
-    Scalar reference path plus bounded SIMD, RMQ, and tiled Vulkan options,
-    each described with its actual predecessor and coordinate rules \\
+    Scalar default plus exact or explicitly approximate SIMD and admitted
+    tiled Vulkan options. RMQ remains experimental because its current
+    predecessor checks do not establish scalar or minimap2 parity \\
     Extension &
     KSW2 in the CPU mapper &
-    Selectable KSW2, Block Aligner, batched CPU work, and Vulkan GPU DP or
-    gridded traceback for supported jobs, followed by host result and CIGAR
-    object construction on the recomputed resident route \\
+    CPU Block default, selectable KSW2, experimental batched CPU work, and
+    admitted Vulkan GPU DP or gridded traceback, followed by host result and
+    CIGAR object construction on the recomputed resident route \\
     Candidate filtering &
     Pipeline heuristics and alignment-stage rejection &
-    Optional SneakySnake and GateKeeper processing of mandatory global gaps,
-    followed by exact post-traceback predicate enforcement \\
+    Predicate-dependent SneakySnake and GateKeeper processing of mandatory
+    global gaps, followed by exact post-traceback predicate enforcement \\
     Index ownership &
     Mapper process and \texttt{.mmi} files &
-    Versioned PostgreSQL generations, fragment-native formats, metadata
-    compatibility checks, selective cold reads, and accelerator residency \\
+    Checked-in default MPF relations with legacy replace-in-place publication.
+    Opt-in authenticated grouped generations use Format 5 or the admitted
+    Format 6 specialization, with compatibility checks, selective cold reads,
+    and accelerator residency \\
     Execution interface &
     Command-line invocation and mapper output records &
     Planner support, custom paths and scans, batched multi-row results, and
@@ -125,7 +189,8 @@ GateKeeper~\cite{gatekeeper_paper,gatekeeper_gpu_paper}.
   \end{tabular}
   \caption{The transformation from the minimap2-derived starting point to the
   final \mbox{BioSeqDB} architecture.  The right column describes implemented
-  system structure, not a claim that every route is selected for every query.}
+  system structure. Default, opt-in, experimental, and unsupported routes are
+  separated explicitly in Table~\ref{tab:conclusion-system-status}.}
   \label{tab:conclusion-transformation}
 \end{table}
 
@@ -149,14 +214,162 @@ resident state.  Fragment-native preparation can construct canonical
 per-query anchors once and hand borrowed spans to the logical seed stage
 without another allocation, copy, or global sort.  Mandatory and optional
 alignment regions are distinguished before prefiltering.  Persistent index
-generations are accepted only after format and compatibility validation.
+generations in the opt-in grouped-publication route are accepted only after
+format and compatibility validation. The checked-in MPF default instead uses
+the legacy replace-in-place relation lifecycle described in Chapter 12.
 PostgreSQL expression replacement is performed during planning, while per-row
 values are installed during custom scan execution.  Generated SQL is accepted
 only when the dependency and physical ledgers are complete.
 
+\section{Canonical terminology and route status}
+
+Several names that recur across the implementation describe different layers.
+Table~\ref{tab:conclusion-glossary} fixes their meaning at the thesis cutoff.
+In particular, ExactSimd is a minimizer backend, while
+\texttt{exact\_visited} and bounded SIMD are chaining policies.
+
+\begin{table}[p]
+  \centering
+  \small
+  \caption{Canonical terminology used in the architecture and status tables.}
+  \label{tab:conclusion-glossary}
+  \begin{tabularx}{\linewidth}{p{.18\linewidth}X}
+    \toprule
+    Term & Meaning at the thesis cutoff \\
+    \midrule
+    DNA4 & Four-symbol DNA alphabet \(A,C,G,T\), commonly packed at two bits
+    per base. It cannot represent an ambiguous \texttt{N}. \\
+    DNA5 & Five-symbol DNA alphabet \(A,C,G,T,N\). It preserves the common
+    ambiguity symbol at a lower packing density than DNA4. \\
+    MPF & Minimizers per fragment. It matches fragment-native storage and is
+    the default registered minimizer-index organization. \\
+    MPS & Minimizers per sequence. It performs more sequence-wide construction
+    so a selective query can avoid unrelated hash ranges. It is an explicit
+    alternative, not the default. \\
+    Format 5 & General shape-aware representation used by opt-in grouped MPF
+    publication and by compatible MPS fallback profiles. \\
+    Format 6 & Specialized hash-major MPS representation admitted for the
+    registered DNA4 \(k=15,w=10\) profile when grouped publication is enabled. \\
+    Shape V5 & Resident partition representation consumed by the direct
+    persisted Phase C GPU route. The authenticated current route is
+    coordinate-only. Persisted CIGAR is unsupported. \\
+    Phase C & Tiled Vulkan front end that can keep packed inputs, minimizers,
+    seed hits, and downstream coordinate work resident. It is an execution
+    phase, not an index-format version or a universal default. \\
+    PNT1 & Versioned PaperNtHashSimd seed scheme with manifest identity
+    \((1,1)\) and checked proof magic \texttt{0x504E5431}. It is not
+    interchangeable with a minimap-compatible index. \\
+    ExactSimd & Explicitly selected Highway minimizer collector that preserves
+    the BioSeqDB scalar legacy seed contract. Scalar initialization remains the
+    default. \\
+    \texttt{exact\_visited} & SIMD chaining policy that replays ordered
+    stopping decisions and is exact to the BioSeqDB scalar \(f/p\) contract
+    within its admitted coordinate domain. \\
+    bounded SIMD & Explicitly approximate chaining policy that stops at batch
+    boundaries to reduce predecessor work. PostgreSQL's selected SIMD chainer
+    maps to this policy. It is not ExactSimd. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+Table~\ref{tab:conclusion-system-status} separates the checked-in default from
+qualified alternatives, experimental work, and unsupported claims. An
+implemented selector is not automatically a qualified final route.
+
+\begin{table}[p]
+  \centering
+  \scriptsize
+  \setlength{\tabcolsep}{3pt}
+  \caption{System-wide implementation and evidence status at code snapshot
+  \texttt{2c6dd51a2bd3}.}
+  \label{tab:conclusion-system-status}
+  \begin{tabularx}{\linewidth}{p{.12\linewidth}XXXXX}
+    \toprule
+    Component & Checked-in default & Qualified opt-in &
+    Experimental & Unsupported or open & Evidence \\
+    \midrule
+    Minimizer extraction &
+    Scalar initializer and semantic oracle. &
+    ExactSimd when explicitly selected and proved. Admitted Phase C Vulkan
+    shapes retain route evidence. &
+    PNT1 remains a versioned alternative whose equal-work production decision
+    is open. &
+    Unconditional all-alphabet GPU parity or interchange between PNT1 and
+    minimap-compatible indexes. &
+    Chapter 5 route contracts and qualified reports. \\
+    Chaining &
+    Scalar minimap2-compatible selection. &
+    \texttt{exact\_visited}, explicitly approximate bounded SIMD, and admitted
+    tiled Vulkan shapes. &
+    RMQ, because bandwidth and equal-\(q\) predecessor gaps remain and its
+    minimap2 benchmark reference was miswired. &
+    General scalar equivalence for bounded SIMD or Vulkan, and production RMQ
+    parity. &
+    Chapter 6 policy table and report 192 qualifications. \\
+    Final alignment &
+    Native CPU Block selection. &
+    KSW2 when two-piece-affine and endpoint semantics are needed. Dedicated
+    Vulkan is admitted only for its complete statement shape. &
+    Descriptor-batched KSW2 without fused inter-sequence SIMD. &
+    Full minimap2 splice and inversion modes, persisted Shape V5 CIGAR, and
+    unimplemented GPU band or Z-drop semantics. &
+    Chapter 7 selection table and Report 47 boundaries. \\
+    Prefiltering &
+    Inactive without a representable positive strict edit bound. When active,
+    scalar or Highway follows the ordinary vectorization choice. &
+    Safe-domain SneakySnake or GateKeeper, with Vulkan following an admitted
+    GPU route or an explicit request. &
+    Broader direct-test domains and unqualified first-submission GPU latency. &
+    Treating filter acceptance as alignment, or rejecting outside the proved
+    mandatory-global-gap domain. &
+    Chapter 8 safe-domain proofs and reports 150--151. \\
+    Persistent indexes &
+    MPF with legacy replace-in-place PostgreSQL relation adapters. &
+    Provider 0 grouped publication with authenticated Format 5 or registered
+    Format 6. The MPF5 compact-direct reader is explicit. &
+    Authenticated persisted Shape V5 coordinate execution without an accepted
+    fresh-postmaster ratio. &
+    Provider 1 \texttt{mapped\_file}, persisted Shape V5 CIGAR, and claims that
+    immutable generations are the checked-in default. &
+    Chapter 12 mode matrix and cold-index evidence. \\
+    VectorAgg &
+    PostgreSQL scalar aggregation is the semantic reference. The rewrite is
+    considered only for an eligible vector plan. &
+    No affected aggregate is accepted as semantically interchangeable until
+    scalar parity is restored. &
+    Current vector transition and final functions for eligible shapes. &
+    Correct empty or all-NULL \texttt{sum}, \texttt{min}, and \texttt{max}
+    results in the current route. &
+    Chapter 11 semantic-difference table. \\
+    Local IO &
+    Bounded \texttt{bioseq.load}, mmap or POSIX plain input, zlib gzip, and
+    overlap disabled. &
+    Explicit overlap and the general-reader parallel-gzip backend are separate
+    choices. DNA5 or prevalidated input preserves ambiguity. &
+    Custom parallel gzip until footer verification and corrupted-member tests
+    pass. &
+    Wired \texttt{strict\_alphabet}, dropped-symbol diagnostics, and SQL E2E
+    proof for FASTQ or gzip. &
+    Chapter 13 unit, integration, and throughput evidence. \\
+    External providers &
+    Public privileges revoked. No outbound request occurs without an
+    authorized scan. &
+    Authorized provider relations through \texttt{BioseqExternalScan}, with
+    provider-specific capabilities. &
+    The remote data plane remains privileged experimental functionality. &
+    Complete special-use-address exclusion, cluster-wide rate limiting,
+    structured SQLSTATE mapping, immediate cancellation, UniProt sequence
+    materialization, and EBI sequence retrieval. &
+    Chapter 14 capability and live-proof tables. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
 \section{Answers to the research questions}
 
-\paragraph{Can the pipeline operate on a common compact sequence model?}
+\paragraph{\textbf{RQ1.} Which parts of seeding, chaining, and extension can
+be expressed over a common compact sequence abstraction without eager
+conversion?}
 Yes, for the implemented paths, but the answer requires more than a range
 concept at a public function boundary.  Iterators need precise symbol and bit
 geometry.  Fragments need stable ownership and cross-boundary context.
@@ -166,7 +379,8 @@ need lifetimes that survive planner and executor transitions.  The final
 abstraction makes these choices visible instead of converting every value
 eagerly.
 
-\paragraph{Which work benefits from SIMD or GPU execution?}
+\paragraph{\textbf{RQ2.} Which scalar operations benefit from SIMD or GPU
+execution, and which overheads move the break-even point?}
 There is no stage-only answer.  Benefit depends on length, error profile,
 alphabet, intermediate representation, batch size, residency, submission
 count, and the amount of exact post-processing that remains on the host.
@@ -210,7 +424,7 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
     establish exact row-set parity.  The CIGAR fixture exercised GPU dynamic
     programming (DP) and traceback followed by host result construction.  It
     does not demonstrate persisted all-GPU CIGAR. \\
-    Current authenticated persisted-format route (Shape V5) &
+    Current opt-in authenticated persisted-format route (Shape V5) &
     No accepted performance ratio after a fresh PostgreSQL postmaster start &
     Direct coordinate execution and fail-closed attestation machinery exist.
     Persisted CIGAR is unsupported, and the evidence set does not establish an
@@ -219,7 +433,8 @@ recomputed Vulkan execution, and the current persisted GPU boundary.
   \end{tabularx}
 \end{table}
 
-\paragraph{Can a batch mapper retain an ordinary SQL surface?}
+\paragraph{\textbf{RQ3.} How can PostgreSQL plan and execute a set-valued,
+batch-oriented search while presenting an ordinary typed SQL interface?}
 Yes.  The ordinary \texttt{mmsearch} definition supplies PostgreSQL types and
 a fail-closed direct-call contract.  Planner support and custom-path hooks
 identify supported shapes, while the ordinary function's high cost makes
@@ -233,11 +448,13 @@ other projection helpers return diagnostic sentinels if rewriting fails.
 Exact ownership and placeholder rewriting therefore remain correctness
 invariants.
 
-\paragraph{Can the surrounding system remain reliable and inspectable?}
+\paragraph{\textbf{RQ4.} How should sequences, indexes, ingestion, external
+data, caches, and generated boundary code fit around the kernels so that the
+resulting system remains inspectable and reliable?}
 The implementation provides strong mechanisms, but the result is not
-uniformly complete.  Versioned storage, explicit memory admission, bounded
-PostgreSQL loading, transaction-aware persistence, custom-scan ownership and
-plan-shape checks,
+uniformly complete. Opt-in versioned storage, legacy default MPF relations,
+explicit memory admission, bounded PostgreSQL loading, transaction-aware
+persistence, custom-scan ownership and plan-shape checks,
 hardware-only accelerator qualification, and generated physical ledgers make
 important failures visible.  The chapter audits also identify places where an
 option exists but is not wired, a footer is accumulated but not validated, a
@@ -273,13 +490,58 @@ sanity warnings.  The terminating strict-Vulkan sketch request was short by
 8,210,340 bytes, approximately \(7.83\ \mathrm{MiB}\).  Because the run was
 incomplete, none of its timing cells is used as current performance evidence.
 
-The fourth limitation is operational hardening.  The IO chapter identifies
-strict-alphabet configuration that is exposed but not connected to the active
-reader, gzip paths that do not yet compare every accumulated integrity value
-with the footer, and standalone output paths without atomic replacement and
-durability guarantees.  External providers have a useful PostgreSQL data
-plane, but generation, authentication, cancellation, and structured error
-coverage are not equally mature for every service.
+\paragraph{Representation lifetime and SQL aggregate semantics.}
+The proper-container specialization of
+\texttt{compact\_sequence\_range} stores a \texttt{const R\&} but currently
+accepts an rvalue. A temporary can therefore leave a dangling reference.
+Until the constructor is deleted or constrained, or rvalues are moved into
+owned storage, this specialization is lvalue-only. Its source object must
+outlive every iterator and range use.
+
+VectorAgg also has a semantic rather than merely performance-related
+limitation. For empty or all-NULL supported input, current vector
+\texttt{sum}, \texttt{min}, and \texttt{max} states can return zero, type
+extrema, or date infinities where PostgreSQL returns NULL. PostgreSQL scalar
+aggregation remains the semantic reference. The affected rewrite must not be
+described as interchangeable until regression tests establish scalar parity
+for empty, all-NULL, mixed-NULL, and ordinary nonempty inputs across every
+registered aggregate type and eligible plan shape.
+
+\paragraph{Ingestion integrity and symbol preservation.}
+Both active FASTA and FASTQ parsers invoke the compact encoder with
+\texttt{unknown\_byte\_policy::DROP}. The exposed
+\texttt{strict\_alphabet} option is not consulted. Loading an ambiguity such
+as \texttt{N} into DNA4 can therefore delete that symbol, shorten the stored
+sequence, and shift every later coordinate. This behavior is not alphabet
+validation and must not be hidden inside an unqualified ``reliable loading''
+claim. Until strict enforcement and diagnostics are wired, an input that may
+contain ambiguity should use DNA5 or be validated and normalized explicitly
+before loading. A production loader should also report per-record and total
+dropped-symbol counts whenever permissive cleaning is requested.
+
+The custom parallel-gzip decoder contains the expected footer CRC32 and ISIZE
+fields and accumulates a running CRC, but no current path compares the
+observed values with the footer. The
+\texttt{parallel\_gzip\_verify\_crc} name therefore does not establish
+end-to-end integrity. The zlib route retains zlib's ordinary validation.
+Qualification of the custom route requires CRC32 and ISIZE comparisons plus
+truncated, corrupted, concatenated-member, and wrong-size tests. The
+PostgreSQL loader suite is also FASTA-centric. It does not yet prove a FASTQ
+or gzip \texttt{bioseq.load} end-to-end case. Standalone output paths further
+omit atomic replacement and full durability guarantees.
+
+\paragraph{Privileged external-provider boundary.}
+The external schema revokes public access because a SELECT may create outbound
+traffic. Authorized provider scans should still be treated as privileged
+experimental functionality. The locator firewall does not exhaust every
+special-use address range or comprehensively classify IPv4-mapped IPv6
+addresses. The implemented rate policy is not wired into requests and is not
+cluster-wide. Most provider failures still collapse to SQLSTATE
+\texttt{38000}. Cancellation can be delayed by blocking DNS resolution and
+non-stop-aware retry sleeps. Production qualification requires a complete
+public-address policy, cluster-wide quota enforcement, the documented
+structured SQLSTATE mapping, and stop-aware DNS and backoff behavior in
+addition to provider-specific capability tests.
 
 Finally, database integration increases the amount of correctness surface.
 PostgreSQL can abort through a non-local jump
@@ -300,14 +562,18 @@ The most valuable future work follows directly from the limitations:
   \item strengthen algorithm parity tests for RMQ predecessor admissibility,
   backtracking order, full emitted row sets, and all supported alphabet and
   coordinate widths.
-  \item finish reader integrity and strict-alphabet enforcement, then measure
-  multi-record FASTQ and compressed workloads where bounded producer and
-  consumer overlap has genuine independent work.
+  \item make the proper-container compact range reject or own rvalues, and
+  restore VectorAgg scalar parity for empty, all-NULL, mixed-NULL, and ordinary
+  inputs before enabling an affected rewrite.
+  \item finish strict-alphabet enforcement and explicit dropped-symbol
+  accounting. Wire gzip CRC32 and ISIZE validation, add corrupted-member
+  tests, and prove multi-record FASTQ and compressed
+  \texttt{bioseq.load} through PostgreSQL.
   \item harden standalone writer durability with an explicit temporary-file,
   flush, synchronization, and atomic-publication protocol.
-  \item extend external providers with generated clients, cancellation-safe
-  streaming, bounded retries, credential handling, and uniform structured
-  SQL errors.
+  \item extend external providers with a complete public-address policy,
+  cluster-wide rate limiting, cancellation-safe DNS and retry waits,
+  credential handling, and uniform structured SQL errors.
   \item qualify the generated SQL and fmgr boundary across the intended
   PostgreSQL, operating-system, and architecture matrix.
   \item maintain benchmark qualifications as versioned evidence whose

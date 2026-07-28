@@ -698,48 +698,161 @@ hiding them behind a single function.
 The thesis investigates four questions derived from the gap analysis.
 
 \begin{enumerate}
-  \item How can a minimap2-derived pipeline operate over packed,
-  fragmented, PostgreSQL-backed, and lazily composed sequences without
-  converting every input to one owning byte representation?
+  \item[\textbf{RQ1.}] Which parts of seeding, chaining, and extension can be expressed
+  over a common compact sequence abstraction without eager conversion?
 
-  \item How can PostgreSQL plan a familiar typed expression while a custom
-  executor performs batch-oriented, potentially set-valued alignment and
-  supplies all projected result fields from one execution?
+  \item[\textbf{RQ2.}] Which scalar operations benefit from SIMD or GPU execution,
+  and which overheads move the break-even point?
 
-  \item How can minimizer indexes and derived metadata be stored,
-  versioned, validated, loaded, cached, and replaced under PostgreSQL
-  lifecycle rules without making cold reuse slower than recomputation?
+  \item[\textbf{RQ3.}] How can PostgreSQL plan and execute a set-valued,
+  batch-oriented search while presenting an ordinary typed SQL
+  interface?
 
-  \item Under which workload and resource conditions should scalar, SIMD,
-  or Vulkan stages execute, and what evidence is sufficient to show that
-  the selected path was both faster and biologically acceptable?
+  \item[\textbf{RQ4.}] How should sequences, indexes, ingestion, external data,
+  caches, and generated boundary code fit around the kernels so
+  that the resulting system remains inspectable and reliable?
 \end{enumerate}
 
 The thesis therefore claims systems contributions grounded in algorithmic
 behavior.
 
 \begin{enumerate}
-  \item A common compact sequence interface connects several representations
-  to the same pipeline: owning, bit-packed, fragmented, PostgreSQL-backed,
-  and lazy.  Alphabet dispatch remains explicit.
+  \item[\textbf{C1.}] An alphabet-generic sequence representation that supports
+  packed, fragmented, PostgreSQL-backed, and lazily composed data
+  through a common range contract.
 
-  \item A custom-scan execution model converts supported SQL expressions
-  into batch alignment, supports one-to-many results, and substitutes
-  score, coordinate, strand, and CIGAR fields without re-running the
-  mapper for every projection.
+  \item[\textbf{C2.}] A staged minimap2-derived mapper with scalar, SIMD, and
+  Vulkan components, including explicit dispatch and evidence for
+  intermediate optimization decisions.
 
-  \item PostgreSQL-resident sequence and minimizer storage ties derived
-  generations to source identity and supports compatibility checks,
-  bounded loading, caching, and controlled recomputation.
+  \item[\textbf{C3.}] Optional GPU-capable SneakySnake and GateKeeper candidate
+  filters integrated without changing the meaning of an accepted
+  alignment.
 
-  \item CPU vector and Vulkan implementations are integrated behind
-  explicit selection and fallback contracts rather than exposed as
-  unconditional replacements for the baseline.
+  \item[\textbf{C4.}] Persistent sequence and minimizer-index storage derived from
+  a columnar PostgreSQL access method, with bounded loading,
+  caching, and selective cold-index reads.
 
-  \item Bounded ingestion, typed header mapping, external providers, and
-  generated PostgreSQL boundary code extend the same typed data plane
-  beyond the alignment kernels.
+  \item[\textbf{C5.}] A planner and custom-scan interface that connects SQL
+  expressions and joins to batch-oriented alignment.
+
+  \item[\textbf{C6.}] Structural generation and validation of SQL installation
+  definitions and PostgreSQL function-manager boundary declarations
+  from annotated C++ sources.
 \end{enumerate}
+
+Table~\ref{tab:solution-contribution-evidence} maps this canonical contribution
+list to the evidence developed later.  The table does not make every
+historical measurement evidence for the current default.  It identifies the
+chapter in which implementation state, route selection, and qualifications
+are audited together.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Canonical thesis contributions and their principal evidence.}
+  \label{tab:solution-contribution-evidence}
+  \begin{tabularx}{\linewidth}{p{.09\linewidth}p{.31\linewidth}X}
+    \toprule
+    Contribution & Principal implementation claim & Evidence location \\
+    \midrule
+    C1 & One alphabet-aware contract spans packed, fragmented,
+    PostgreSQL-backed, and lazy sequences. &
+    Chapters 9, 11, and 13: representation specializations, lifetime and
+    materialization rules, PostgreSQL adapters, and bounded ingestion. \\
+    C2 & One staged mapper exposes scalar, SIMD, and Vulkan routes with
+    explicit semantic and admission contracts. &
+    Chapters 4--7 and 12: scalar oracles, route proofs, qualified benchmark
+    reports, and persistent-index admission. \\
+    C3 & Candidate filters may save alignment work without replacing the
+    exact SQL edit predicate. &
+    Chapter 8: safe-domain derivations, scalar/SIMD/Vulkan tests, route
+    counters, and exact post-traceback enforcement. \\
+    C4 & PostgreSQL owns sequence fragments, caches, and reusable minimizer
+    representations under explicit lifecycle rules. &
+    Chapters 11--13: physical layouts, cache state machines, default and
+    opt-in persistence modes, cold-read evidence, and transactional loading. \\
+    C5 & A typed scalar-looking expression is executed by one set-valued,
+    batch-oriented custom owner. &
+    Chapter 10: planner-shape proofs, EXPLAIN properties, join ownership,
+    node injection, and covered SQL integration fixtures. \\
+    C6 & Annotated C++ source is the structural authority for installed SQL
+    and fmgr declarations. &
+    Chapter 15: extraction, dependency and physical ledgers, generated
+    artifacts, and completeness validation. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+The contribution boundary is also an attribution boundary.
+Table~\ref{tab:solution-attribution} distinguishes an adopted algorithmic
+mechanism from a BioSeqDB adaptation or systems contribution.  In particular,
+the thesis does not claim authorship of minimap2, ntHash, the cited filters,
+or the storage and planner patterns from which the implementation began.
+
+\begin{table}[p]
+  \centering
+  \scriptsize
+  \caption{Attribution of retained mechanisms and BioSeqDB-specific changes.}
+  \label{tab:solution-attribution}
+  \begin{tabularx}{\linewidth}{p{.15\linewidth}p{.22\linewidth}
+                               p{.31\linewidth}X}
+    \toprule
+    Origin & Retained mechanism & BioSeqDB-specific change &
+    Novelty category and evidence \\
+    \midrule
+    minimap2~\cite{minimap2_paper,minimap2_software} &
+    Minimizer seeding, anchor chaining, region construction, and KSW2
+    extension. &
+    Alphabet-generic and lazy inputs, PostgreSQL-owned indexes, staged
+    dispatch, batch SQL ownership, and alternate qualified kernels. &
+    Adopted algorithmic baseline with a new database execution
+    architecture. Chapters 2 and 4--7, 10, and 12. \\
+    SIMD-Minimizers and ntHash
+    \cite{groot_koerkamp_simd_minimizers_2025,nthash_2016} &
+    Rolling canonical hashes, multiple streams, and data-independent window
+    minima. &
+    PNT1 receives a distinct persisted scheme identity, BioSeqDB tie rules,
+    fragmented replay, and checked Highway admission. ExactSimd remains a
+    separate minimap-compatible route. &
+    Algorithm adaptation and compatibility-contract contribution.
+    Chapter 5. \\
+    G3SA~\cite{g3sa_paper} &
+    GPU-resident seed-to-alignment motivation and border/recompute traceback. &
+    Vulkan kernels, tile ownership, full-width coordinates, admitted
+    two-piece-affine work, PostgreSQL batching, and fail-closed attestation. &
+    Independently implemented, paper-inspired accelerator architecture.
+    Chapters 5--7 and 12. \\
+    Block Aligner~\cite{block_aligner_paper} &
+    Adaptive block dynamic programming with SIMD-friendly score updates. &
+    Highway portability, compact-range input, compressed trace masks, fused
+    edit accounting, certificates, and database route evidence. &
+    Port and systems integration. Chapter 7. \\
+    SneakySnake~\cite{sneakysnake_paper} &
+    A chip-maze lower-bound filter for edit-bounded candidates. &
+    Mandatory-gap decomposition, explicit safe domains, scalar/SIMD/Vulkan
+    routes, and exact survivor enforcement. &
+    Safety-preserving algorithm integration. Chapter 8. \\
+    GateKeeper~\cite{gatekeeper_paper,gatekeeper_gpu_paper} &
+    Shifted-Hamming masks and amendment for short-read filtering. &
+    Length lower bounds, compact-rank batches, guarded production domains,
+    Vulkan dispatch, and SQL-bound normalization. &
+    Safety-preserving algorithm integration. Chapter 8. \\
+    ParadeDB~\cite{paradedb_pg_search_customscan} &
+    Planner placeholders, mutable typed \texttt{Const} nodes, and
+    \texttt{PlaceHolderVar} placement. &
+    Exact \texttt{mmsearch} ownership, multi-field alignment results,
+    set-valued scans, recipe lineage, and join-level expression removal. &
+    PostgreSQL planner/executor adaptation. Chapter 10. \\
+    Citus Columnar~\cite{citus_columnar_storage} &
+    Stripes, chunk groups, column streams, compression, pruning, and TableAM
+    lifecycle. &
+    Fragment locators, alphabet-aware sequence storage, cache coordination,
+    derived indexes, and guarded vector metadata execution. &
+    Storage-engine adaptation for biological sequences. Chapters 11 and 12. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 These are not claims that BioSeqDB replaces every mapper, workflow engine,
 or sequence format.  They establish a design for workloads whose data,
@@ -752,17 +865,80 @@ which benchmark gates remained open at the documented cutoff.
 \section{Scope of the evaluation}
 \label{sec:solution-gap-evaluation-scope}
 
-Three cautions govern the evaluation in the remainder of the thesis.
-First, minimap2 is a baseline for comparable mapping work, not a proxy for
-all external workflow costs.  A comparison must state whether loading,
-index construction, index opening, PostgreSQL restart, result parsing, and
-correctness audits are inside the timer.  Second, one local machine cannot
-establish portability or universal throughput.  The July 8 report, for
-example, explicitly identifies its environment as Darwin on Arm and
-rejects conclusions about x86-64 Linux.  Third, historical reports describe
-the implementation that produced them.  A newer architecture can
-supersede their design conclusions without making the earlier measurement
-false.
+The evaluation uses one canonical protocol so that a source audit, a
+microbenchmark, and an end-to-end SQL run are not treated as interchangeable
+evidence.  Statements about the current implementation are pinned to code
+snapshot
+\path{2c6dd51a2bd36dce613f58c1578227de9fcea4d5}, dated 28 July 2026.
+The document corpus has the same cutoff date.  Later repository changes and
+later documents are outside the evidentiary scope of this draft.
+Table~\ref{tab:solution-evaluation-protocol} defines the remaining rules.
+
+\begin{table}[p]
+  \centering
+  \small
+  \caption{Canonical evidence and reproducibility protocol used by this
+  thesis.}
+  \label{tab:solution-evaluation-protocol}
+  \begin{tabularx}{\linewidth}{p{.23\linewidth}X}
+    \toprule
+    Question & Rule \\
+    \midrule
+    Which source is authoritative? &
+    The pinned code snapshot governs claims about implemented behavior.
+    Within the document corpus, calendar date takes precedence over document
+    number, directory, or an \texttt{active} tag. Current code overrides a
+    conflicting design document. An older report remains evidence only for
+    the implementation that produced it. \\
+    When is a performance result admitted? &
+    The report must identify the workload, hardware, implementation and
+    configuration, sample count, measured region, and enough raw values to
+    reproduce the stated aggregate. It must also record the relevant
+    biological result and route-selection evidence. A missing field narrows
+    the claim rather than being filled by assumption. \\
+    How are incomplete reports treated? &
+    A terminated or structurally incomplete report is excluded from current
+    timing claims. Its diagnostics may explain why a run ended, but completed
+    cells are not silently promoted to a benchmark result. \\
+    How are dirty or history-ineligible runs treated? &
+    A report marked \texttt{dirty=true} or
+    \texttt{history\_eligible=false} cannot establish a clean historical
+    regression baseline. It may be retained as a qualified development
+    observation when its raw samples, configuration, route counters, and
+    correctness result are available. The qualification remains attached to
+    every reuse of the number. \\
+    What must a timer contain? &
+    Every comparison states whether it includes input loading, index
+    construction or opening, PostgreSQL planning and execution, accelerator
+    submission and synchronization, result materialization, parsing, and
+    correctness auditing. Ratios are computed only for comparable boundaries,
+    or are explicitly labeled unequal-work diagnostics. \\
+    Which cache and persistence state applies? &
+    A result identifies warm or cold process state, backend-cache state,
+    persisted versus recomputed indexes, and whether PostgreSQL was restarted.
+    ``Cold'' is not inferred merely from opening a new SQL statement. \\
+    What proves correctness? &
+    The predicate follows the claim. A selective smoke test requires a real
+    hit position. Coordinate claims compare the emitted row set, coordinates,
+    and strand. Alignment claims additionally compare score, edit count, and
+    CIGAR where requested. Accelerator claims require selected-branch,
+    no-fallback, and route-completion evidence. One expected hit does not prove
+    exact row-set parity. \\
+    How broad is the platform claim? &
+    Hardware and operating system remain part of the result. A Darwin Arm
+    measurement does not establish x86-64 Linux behavior, and a MoltenVK run
+    does not establish the same break-even point on a native Vulkan driver.
+    Cross-platform claims require separate qualified runs. \\
+    How are quantiles reported? &
+    The conventional median is the arithmetic mean of the two middle ordered
+    samples for an even sample count. If a project report instead selects the
+    lower middle sample, the thesis calls it the
+    \emph{report-defined P50}, preserves it for reproducibility, and gives the
+    conventional median when the raw samples permit it. A two-sample lower
+    observation is not called a median. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
 
 For these reasons, the thesis uses numbers to answer bounded questions.
 A microbenchmark identifies a kernel bottleneck.  A selective end-to-end
