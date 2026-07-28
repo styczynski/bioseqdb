@@ -528,7 +528,8 @@ boundaries without implying a change to minimap2's mapping algorithm.
 
 \begin{table}[ht]
 \centering
-\caption{Representation boundary in the minimap2 reference and BioSeqDB.}
+\caption{Representation boundary in the minimap2 reference and
+\mbox{BioSeqDB}.}
 \label{tab:minimap2-sequence-representation}
 \begin{tabular}{p{0.23\textwidth}p{0.31\textwidth}p{0.36\textwidth}}
 \textbf{Aspect} & \textbf{minimap2 reference} & \textbf{BioSeqDB}\\
@@ -918,9 +919,9 @@ compose without copying source payloads.
     {source leaf\\handle \(S_1\), [500000,500064)};
   \node[node,fill=green!10] (right) at (3.2,1.2)
     {branch\\length 66};
-  \node[node,fill=blue!9] (rsrc) at (1.8,-0.4)
+  \node[node,fill=blue!9] (rsrc) at (1.0,-0.4)
     {source leaf\\handle \(S_1\), [\(N-64,N\))};
-  \node[node,fill=gray!12] (lit) at (4.6,-0.4)
+  \node[node,fill=gray!12] (lit) at (5.4,-0.4)
     {literal leaf\\``AC''};
   \draw[->,thick] (root) -- node[left] {identity} (left);
   \draw[->,thick] (root) -- (right);
@@ -1142,20 +1143,26 @@ each route.
 \centering
 \caption{The three current access routes.}
 \label{tab:lazy-access-routes}
-\begin{tabular}{p{0.20\textwidth}p{0.28\textwidth}p{0.42\textwidth}}
+\begin{tabularx}{\textwidth}{
+  >{\raggedright\arraybackslash}p{0.25\textwidth}
+  >{\raggedright\arraybackslash}p{0.27\textwidth}
+  >{\raggedright\arraybackslash}X}
 \textbf{Route} & \textbf{Typical producer/consumer} &
 \textbf{Copy and lifetime rule}\\
 \hline
-\texttt{stream\_symbols} & fragment/source tree to a forward minimizer or
+\texttt{stream\_\allowbreak symbols} &
+fragment/source tree to a forward minimizer or
 conversion loop & decodes bounded rank chunks into caller scratch.  No
 whole-sequence packed allocation\\
-\texttt{borrow\_resident} & aligned flat payload to a typed CPU kernel, or
+\texttt{borrow\_\allowbreak resident} &
+aligned flat payload to a typed CPU kernel, or
 strict byte-compatible GPU upload & no payload copy.  The owner of the flat
 datum must remain live.  Typed and byte-only receipts are distinct\\
-\texttt{materialize\_admitted} & unaligned flat range, source/tree range, or
+\texttt{materialize\_\allowbreak admitted} &
+unaligned flat range, source/tree range, or
 resident-only CPU/SIMD/GPU kernel & packs exactly the selected interval.
 Allocation and memory permit live through the consumer/fence\\
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 \subsection{What ``zero copy'' does and does not mean}
@@ -1391,24 +1398,28 @@ and an eager comparison reported the same output length of 6,291,456 symbols
 and exact matching high and low hashes.  This is the correctness receipt that
 the artifact records.  It is not presented as a byte-for-byte output
 comparison.  Table~\ref{tab:lazy-io-results} shows the allocation and time
-differences.
+differences.  The source artifact is
+\texttt{bioseq\_io\_bench/report\_7.json}.
 
 \begin{table}[ht]
 \centering
-\caption{Focused deferred/eager lazy-I/O evidence from
-\texttt{bioseq\_io\_bench/report\_7.json}.}
+\caption{Deferred and eager lazy-I/O benchmark evidence.}
 \label{tab:lazy-io-results}
-\begin{tabular}{lrrp{0.22\textwidth}}
+\begin{tabularx}{\textwidth}{
+  >{\raggedright\arraybackslash}p{0.29\textwidth}
+  r
+  r
+  >{\raggedright\arraybackslash}X}
 \textbf{Metric} & \textbf{deferred} & \textbf{eager} &
-\textbf{reported comparison}\\
+\textbf{reported ratio}\\
 \hline
 wall-time median (P50) & 22,503,667 ns & 69,166,708 ns &
-median paired-iteration ratio 0.3243467\\
+paired median: 0.3243467\\
 payload materializations & 1 & 6 & 0.16667\\
 intermediate materializations & 0 & 5 & 0\\
 payload bytes & 1,572,864 & 6,815,744 & 0.23077\\
 admitted bytes & 1,572,952 & 6,816,272 & 0.23076\\
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 The timing comparison in the last column is the median of the twelve paired
