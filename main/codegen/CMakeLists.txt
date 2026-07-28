@@ -247,9 +247,11 @@ if(BIOSEQ_CODEGEN_ENABLE_SQL)
   endif()
   set(_bioseq_prepare_test_compiler_inventory "")
   file(GLOB _bioseq_prepare_test_multiarch_inventories
-    "${_bioseq_llvm_prefix}/lib/*/c++/libc++.modules.json")
+    "${_bioseq_llvm_prefix}/lib/*/c++/libc++.modules.json"
+    "${_bioseq_llvm_prefix}/lib/*/libc++.modules.json")
   list(SORT _bioseq_prepare_test_multiarch_inventories)
   foreach(_bioseq_prepare_test_inventory_candidate IN ITEMS
+      "${CMAKE_CXX_STDLIB_MODULES_JSON}"
       "${_bioseq_llvm_libdir}/c++/libc++.modules.json"
       "${_bioseq_llvm_prefix}/lib/c++/libc++.modules.json"
       ${_bioseq_prepare_test_multiarch_inventories}
