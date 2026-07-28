@@ -1,0 +1,109 @@
+version_extractors:
+  - name: bioseq_project_version
+    provider: constant
+    constant:
+      version: "4.2.3"
+
+# OmniPackage passes only declared secrets into its build/repository
+# containers. GPG_PRIVATE_KEY is a base64-encoded, ASCII-armored private key;
+# build_packages.py obtains it from Secrets Manager on AWS and never writes it
+# to the manifest or command line.
+secrets:
+  GPG_PRIVATE_KEY: ${GPG_PRIVATE_KEY}
+
+repositories:
+  - name: s3
+    provider: s3
+    package_name: ${BIOSEQ_PACKAGE_NAME}
+    description: Bioseq PostgreSQL ${BIOSEQ_POSTGRES_MAJOR} packages
+    # Each matrix cell publishes the fixed Bioseq version afresh. Retaining a
+    # same-name prior artifact makes OmniPackage skip the replacement and can
+    # silently verify stale bytes, so the cell repository is rebuilt in full.
+    retain_packages: 0
+    gpg_private_key_base64: ${GPG_PRIVATE_KEY}
+    s3:
+      bucket: ${BIOSEQ_S3_BUCKET}
+      endpoint: https://s3.${BIOSEQ_S3_REGION}.amazonaws.com
+      region: ${BIOSEQ_S3_REGION}
+      path_in_bucket: ${BIOSEQ_S3_PREFIX}
+
+common: &common
+  package_name: ${BIOSEQ_PACKAGE_NAME}
+  maintainer: "Bioseq Packaging <packages@bioseq.dev>"
+  homepage: https://github.com/bioseq/bioseq
+  description: Bioseq and bioseq_cache extensions for PostgreSQL ${BIOSEQ_POSTGRES_MAJOR}
+  postgres_major: ${BIOSEQ_POSTGRES_MAJOR}
+  package_version: "4.2.3"
+  optimization_level: 0
+  architecture: ${BIOSEQ_ARCHITECTURE}
+  container_capabilities: [SYS_NICE]
+  before_build_script: >-
+    BIOSEQ_POSTGRES_MAJOR=${BIOSEQ_POSTGRES_MAJOR}
+    BIOSEQ_OPTTIMIZATION_LEVEL=0
+    BIOSEQ_ARCHITECTURE=${BIOSEQ_ARCHITECTURE}
+    /source/infra/packaging/scripts/prepare_build_environment.sh
+
+rpm: &rpm
+  <<: *common
+  rpm:
+    spec_template: infra/packaging/rpm/bioseq.spec.liquid
+
+deb: &deb
+  <<: *common
+  deb:
+    debian_templates: infra/packaging/deb
+
+pacman: &pacman
+  <<: *common
+  pacman:
+    pkgbuild_template: infra/packaging/pacman/PKGBUILD.liquid
+
+builds:
+  - distro: opensuse_16.0
+    <<: *rpm
+    build_dependencies: [bash, ca-certificates, curl, git, gzip, python3, tar, xz]
+    runtime_dependencies:
+      - ${BIOSEQ_OPENSUSE_POSTGRES_RUNTIME}
+      - libvulkan1
+
+  - distro: fedora_44
+    <<: *rpm
+    build_dependencies: [bash, ca-certificates, curl, git, gzip, python3, tar, xz]
+    runtime_dependencies:
+      - ${BIOSEQ_FEDORA_POSTGRES_RUNTIME}
+      - vulkan-loader
+
+  - distro: debian_13
+    <<: *deb
+    build_dependencies: [bash, ca-certificates, curl, git, gnupg, python3, tar, xz-utils]
+    runtime_dependencies:
+      - ${BIOSEQ_DEB_POSTGRES_RUNTIME}
+      - libvulkan1
+
+  - distro: ubuntu_26.04
+    <<: *deb
+    build_dependencies: [bash, ca-certificates, curl, git, gnupg, python3, tar, xz-utils]
+    runtime_dependencies:
+      - ${BIOSEQ_DEB_POSTGRES_RUNTIME}
+      - libvulkan1
+
+  - distro: arch
+    <<: *pacman
+    # x64 uses archlinux:latest. The arm64 worker overrides this with the
+    # native menci/archlinuxarm image; OmniPackage intentionally does not use
+    # emulation or inject --platform.
+    container_image: ${BIOSEQ_ARCH_CONTAINER_IMAGE}
+    build_dependencies: [bash, ca-certificates, curl, git, gzip, python, tar, xz]
+    runtime_dependencies:
+      - ${BIOSEQ_ARCH_POSTGRES_RUNTIME}
+      - vulkan-icd-loader
+
+ignore_source_files:
+  - .git
+  - build
+  - DOCS
+  - papers
+  - website
+  - __pycache__
+  - "*.pyc"
+  - "report_build_*.json"

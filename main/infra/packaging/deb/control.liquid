@@ -1,0 +1,15 @@
+Source: {{ package_name }}
+Section: database
+Priority: optional
+Maintainer: {{ maintainer }}
+Build-Depends: debhelper-compat (= 13), {{ build_dependencies | join: ", " }}
+Standards-Version: 4.7.0
+Homepage: {{ homepage }}
+Rules-Requires-Root: no
+
+Package: {{ package_name }}
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, {{ runtime_dependencies | join: ", " }}
+Description: {{ description }}
+ Bioseq provides compact biological sequence types and alignment operations.
+ This ABI-specific package also includes the independent bioseq_cache provider.

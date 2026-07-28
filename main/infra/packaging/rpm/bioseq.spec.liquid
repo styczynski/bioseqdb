@@ -1,0 +1,43 @@
+Name:           {{ package_name }}
+Version:        {{ version }}
+Release:        1%{?dist}
+Summary:        {{ description }}
+License:        Apache-2.0
+URL:            {{ homepage }}
+Source0:        {{ source_folder_name }}.tar.gz
+
+BuildRequires:  {{ build_dependencies | join: ", " }}
+{% for dependency in runtime_dependencies %}Requires:       {{ dependency }}
+{% endfor %}
+
+%define debug_package %{nil}
+%define _build_id_links none
+
+%description
+{{ description }}. The package contains the bioseq and bioseq_cache extension
+DSOs, control files, and version-1.0 installation SQL generated against the
+exact PostgreSQL {{ postgres_major }} server ABI.
+
+%prep
+%setup -q -n {{ source_folder_name }}
+
+%build
+export BIOSEQ_OPTTIMIZATION_LEVEL=0
+test "${BIOSEQ_OPTTIMIZATION_LEVEL}" = "{{ optimization_level }}"
+infra/packaging/scripts/build_and_stage.sh build \
+  "%{_builddir}/{{ source_folder_name }}/_bioseq-package-build" \
+  "{{ postgres_major }}"
+
+%install
+export BIOSEQ_OPTTIMIZATION_LEVEL=0
+test "${BIOSEQ_OPTTIMIZATION_LEVEL}" = "{{ optimization_level }}"
+infra/packaging/scripts/build_and_stage.sh install \
+  "%{_builddir}/{{ source_folder_name }}/_bioseq-package-build" \
+  "%{buildroot}" \
+  "{{ postgres_major }}"
+
+%files -f %{_builddir}/{{ source_folder_name }}/_bioseq-package-build/package-files.list
+
+%changelog
+* Tue Jul 28 2026 Bioseq Packaging <packages@bioseq.dev> - {{ version }}-1
+- Native {{ architecture }} build for PostgreSQL {{ postgres_major }}.
