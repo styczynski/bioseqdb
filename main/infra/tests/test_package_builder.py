@@ -55,6 +55,16 @@ class MatrixTests(unittest.TestCase):
                 matrix,
             )
 
+    def test_s3_prefix_is_validated_before_it_reaches_opentofu(self) -> None:
+        self.assertEqual(
+            package_builder.normalize_s3_prefix("bioseq/packages"), "bioseq/packages"
+        )
+        for invalid in ("", "/bioseq", "bioseq/", "bioseq//packages", "bioseq packages"):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                package_builder.PackageBuilderError
+            ):
+                package_builder.normalize_s3_prefix(invalid)
+
 
 class OpenTofuOnlyTests(unittest.TestCase):
     def test_there_is_no_alternate_cli_fallback(self) -> None:
@@ -233,6 +243,12 @@ class LifecycleSafetyTests(unittest.TestCase):
                 package_builder.ACTIVE_CHILDREN.discard(child)
         child.send_signal.assert_called_once_with(signal.SIGINT)
 
+    def test_first_native_build_failure_interrupts_sibling_and_fails_fast(self) -> None:
+        remote_source = inspect.getsource(package_builder.run_remote_build)
+        orchestration_source = inspect.getsource(package_builder.execute_build)
+        self.assertIn('"--fail-fast"', remote_source)
+        self.assertIn("interrupt_active_children()", orchestration_source)
+
 
 class ManifestTests(unittest.TestCase):
     def test_success_manifest_requires_optimization_zero_and_exact_s3_key(self) -> None:
@@ -260,6 +276,8 @@ class ManifestTests(unittest.TestCase):
                         "filename": artifact_name,
                         "size": 123,
                         "sha256": "a" * 64,
+                        "build_size": 123,
+                        "build_sha256": "a" * 64,
                     },
                     "validation": {
                         "passed": True,
@@ -282,14 +300,50 @@ class ManifestTests(unittest.TestCase):
                             },
                         ],
                     },
+                    "smoke": {
+                        "passed": True,
+                        "package_installed": True,
+                        "preload_active": True,
+                        "bioseq_extension_created": True,
+                        "bioseq_cache_extension_created": True,
+                        "nonempty_roundtrip": True,
+                        "fresh_container": True,
+                        "architecture": "x64",
+                        "postgres_major": 17,
+                        "distro": "debian_13",
+                        "roundtrip": "ACGT",
+                        "container_image": "debian:13",
+                    },
                     "upload": {
                         "published": True,
                         "bucket": "bucket",
                         "key": (
-                            "bioseq/packages/x64/postgresql17/debian_13/"
+                            "bioseq/packages/x64/postgresql17/debian_13/stable/"
                             + artifact_name
                         ),
                         "size": 123,
+                        "sha256": "a" * 64,
+                        "download_validation": {
+                            "passed": True,
+                            "six_artifacts": True,
+                            "rpath_absent": True,
+                            "compiler_runtime_safe": True,
+                            "optimization_level": 0,
+                        },
+                        "download_smoke": {
+                            "passed": True,
+                            "package_installed": True,
+                            "preload_active": True,
+                            "bioseq_extension_created": True,
+                            "bioseq_cache_extension_created": True,
+                            "nonempty_roundtrip": True,
+                            "fresh_container": True,
+                            "architecture": "x64",
+                            "postgres_major": 17,
+                            "distro": "debian_13",
+                            "roundtrip": "ACGT",
+                            "container_image": "debian:13",
+                        },
                     },
                 }
             ],
@@ -306,6 +360,18 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(len(uploads), 1)
         manifest["cells"][0]["validation"]["optimization_level"] = 1
         with self.assertRaisesRegex(package_builder.PackageBuilderError, "failed validation"):
+            package_builder.validate_manifest(
+                manifest,
+                architecture="x64",
+                selection=selection,
+                matrix=matrix,
+                bucket="bucket",
+                region="us-east-1",
+                s3_prefix="bioseq/packages",
+            )
+        manifest["cells"][0]["validation"]["optimization_level"] = 0
+        manifest["cells"][0]["upload"]["download_smoke"]["fresh_container"] = False
+        with self.assertRaisesRegex(package_builder.PackageBuilderError, "S3-download smoke"):
             package_builder.validate_manifest(
                 manifest,
                 architecture="x64",

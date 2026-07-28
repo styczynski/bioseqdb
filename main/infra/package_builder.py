@@ -77,6 +77,7 @@ DEFAULT_S3_PREFIX = "bioseq/packages"
 REMOTE_ROOT = "/opt/bioseq-package-builder/workspace/builds"
 INSTANCE_ID_RE = re.compile(r"^i-[0-9a-f]{8,17}$")
 AMI_ID_RE = re.compile(r"^ami-[0-9a-f]{8,17}$")
+S3_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 ACTIVE_CHILDREN: set[subprocess.Popen[str]] = set()
 ACTIVE_CHILDREN_LOCK = threading.RLock()
 
@@ -571,6 +572,7 @@ def tofu_apply(
     ssh_cidr: str,
     cached_amis: dict[str, str],
     artifact_bucket_name: str,
+    artifact_prefix: str,
 ) -> dict[str, Any]:
     guard_local_state_against_protected_instances()
     tofu_init()
@@ -580,6 +582,7 @@ def tofu_apply(
         "arm64_ami_id": cached_amis.get("arm64", ""),
         "x64_ami_id": cached_amis.get("x64", ""),
         "artifact_bucket_name": artifact_bucket_name,
+        "artifact_prefix": artifact_prefix,
         "ami_schema_version": BOOTSTRAP_SCHEMA,
         "root_volume_size_gb": "500",
         "compiler_rt_priority": "1",
@@ -605,6 +608,20 @@ def aws_preflight(region: str) -> dict[str, Any]:
     aws_json(region, "ec2", "describe-availability-zones", "--filters", "Name=state,Values=available")
     info(f"AWS preflight passed for account {account} in {region} ({arn})")
     return identity
+
+
+def normalize_s3_prefix(value: str) -> str:
+    if (
+        not 1 <= len(value) <= 128
+        or S3_PREFIX_RE.fullmatch(value) is None
+        or value.endswith("/")
+        or "//" in value
+    ):
+        raise PackageBuilderError(
+            "S3 prefix must be a 1-128 character relative key prefix without "
+            "a trailing or doubled slash"
+        )
+    return value
 
 
 def latest_cached_ami(region: str, architecture: Architecture) -> dict[str, Any] | None:
@@ -1251,6 +1268,7 @@ def run_remote_build(
         ",".join(str(value) for value in selection.postgresql_majors),
         "--distros",
         ",".join(selection.distributions),
+        "--fail-fast",
     ]
     remote_command = (
         "set -o pipefail; "
@@ -1298,6 +1316,36 @@ def expected_artifact_suffix(package_format: str) -> str:
         "rpm": ".rpm",
         "pacman": ".pkg.tar.zst",
     }[package_format]
+
+
+def require_smoke_attestation(
+    smoke: object,
+    *,
+    architecture: str,
+    postgres_major: int,
+    distro: str,
+    label: str,
+) -> None:
+    required_true = (
+        "passed",
+        "package_installed",
+        "preload_active",
+        "bioseq_extension_created",
+        "bioseq_cache_extension_created",
+        "nonempty_roundtrip",
+        "fresh_container",
+    )
+    if not isinstance(smoke, dict) or any(smoke.get(name) is not True for name in required_true):
+        raise PackageBuilderError(f"{label} did not pass every assertion: {smoke}")
+    if (
+        smoke.get("architecture") != architecture
+        or smoke.get("postgres_major") != postgres_major
+        or smoke.get("distro") != distro
+        or smoke.get("roundtrip") != "ACGT"
+        or not isinstance(smoke.get("container_image"), str)
+        or not smoke["container_image"].strip()
+    ):
+        raise PackageBuilderError(f"{label} attested the wrong matrix cell: {smoke}")
 
 
 def validate_manifest(
@@ -1354,6 +1402,13 @@ def validate_manifest(
             raise PackageBuilderError(f"{architecture} cell {key} was not uploaded")
         if cell.get("package_name") != f"bioseq-postgresql{key[0]}":
             raise PackageBuilderError(f"{architecture} cell {key} package name mismatch")
+        require_smoke_attestation(
+            cell.get("smoke"),
+            architecture=architecture,
+            postgres_major=key[0],
+            distro=key[1],
+            label=f"{architecture} cell {key} built-package smoke",
+        )
         validation = cell.get("validation", {})
         required_validation = {
             "passed": True,
@@ -1416,18 +1471,53 @@ def validate_manifest(
             raise PackageBuilderError(f"{architecture} cell {key} artifact is empty")
         if not re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("sha256", ""))):
             raise PackageBuilderError(f"{architecture} cell {key} SHA-256 is invalid")
+        if (
+            not isinstance(artifact.get("build_size"), int)
+            or artifact["build_size"] <= 0
+            or not re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("build_sha256", "")))
+        ):
+            raise PackageBuilderError(f"{architecture} cell {key} build provenance is invalid")
+        package_format = matrix.distributions[key[1]].package_format
+        # RPM signing mutates the package header during publish. DEB and
+        # pacman publishing must preserve the package bytes exactly.
+        if package_format != "rpm" and (
+            artifact.get("build_size") != artifact.get("size")
+            or artifact.get("build_sha256") != artifact.get("sha256")
+        ):
+            raise PackageBuilderError(
+                f"{architecture} cell {key} downloaded artifact differs from built package"
+            )
         upload = cell.get("upload", {})
-        expected_prefix = f"{s3_prefix}/{architecture}/postgresql{key[0]}/{key[1]}/"
+        expected_directory = f"{s3_prefix}/{architecture}/postgresql{key[0]}/{key[1]}"
+        if package_format == "deb":
+            expected_directory += "/stable"
+        expected_key = f"{expected_directory}/{filename}"
         if (
             upload.get("published") is not True
             or upload.get("bucket") != bucket
-            or not str(upload.get("key", "")).startswith(expected_prefix)
-            or not str(upload.get("key", "")).endswith(filename)
+            or upload.get("key") != expected_key
             or upload.get("size") != artifact.get("size")
+            or upload.get("sha256") != artifact.get("sha256")
         ):
             raise PackageBuilderError(
                 f"{architecture} cell {key} upload contract mismatch: {upload}"
             )
+        downloaded_validation = upload.get("download_validation", {})
+        if any(
+            downloaded_validation.get(name) != value
+            for name, value in required_validation.items()
+        ):
+            raise PackageBuilderError(
+                f"{architecture} cell {key} downloaded package failed validation: "
+                f"{downloaded_validation}"
+            )
+        require_smoke_attestation(
+            upload.get("download_smoke"),
+            architecture=architecture,
+            postgres_major=key[0],
+            distro=key[1],
+            label=f"{architecture} cell {key} S3-download smoke",
+        )
         uploads.append(upload)
     if seen != expected_cells:
         raise PackageBuilderError(f"{architecture} manifest omitted cells")
@@ -1479,6 +1569,7 @@ def exclusive_lock() -> Iterable[None]:
 def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
     dict[str, Any], dict[str, Builder], dict[str, dict[str, Any]], dict[str, bool]
 ]:
+    artifact_prefix = normalize_s3_prefix(args.s3_prefix)
     aws_preflight(args.region)
     ssh_cidr = normalize_ssh_cidr(args.ssh_cidr)
     info(f"SSH ingress is fail-closed to {ssh_cidr}")
@@ -1497,6 +1588,7 @@ def provision_and_start(args: argparse.Namespace, matrix: Matrix) -> tuple[
         ssh_cidr=ssh_cidr,
         cached_amis=cached,
         artifact_bucket_name=args.bucket_name or "",
+        artifact_prefix=artifact_prefix,
     )
     builders = output_builders(outputs, matrix)
     records = start_builders(args.region, builders, matrix)
@@ -1590,6 +1682,13 @@ def execute_build(
                 info(f"{name} native package matrix completed")
             except Exception as error:
                 errors.append(f"{name}: {error}")
+                for other in futures:
+                    if other is not future:
+                        other.cancel()
+                # Stop the sibling SSH build immediately so the outer
+                # lifecycle can enter its exact-instance stop path promptly.
+                interrupt_active_children()
+                break
     if errors:
         raise PackageBuilderError("native package builds failed: " + "; ".join(errors))
 
@@ -1762,6 +1861,11 @@ def add_common_options(parser: argparse.ArgumentParser) -> None:
         help="optional globally unique artifact bucket name (OpenTofu derives one by default)",
     )
     parser.add_argument(
+        "--s3-prefix",
+        default=DEFAULT_S3_PREFIX,
+        help="artifact key prefix; the builder IAM policy is scoped to this exact prefix",
+    )
+    parser.add_argument(
         "--from-scratch",
         action="store_true",
         help="ignore matching package-builder AMI caches for this apply",
@@ -1800,7 +1904,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_options(run_parser)
     add_matrix_options(run_parser)
-    run_parser.add_argument("--s3-prefix", default=DEFAULT_S3_PREFIX)
     run_parser.set_defaults(handler=cmd_run)
 
     up_parser = subparsers.add_parser(
