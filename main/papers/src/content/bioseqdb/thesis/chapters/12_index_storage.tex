@@ -1162,9 +1162,13 @@ DOC0384 reports six retained BioSeqDB \texttt{just\_index} samples:
   6.389712833,\ 5.401551458,\ 5.343038250,\ 5.368746000,\
   5.610243750,\ 5.321436000\ \mathrm{s}.
 \]
-Their median is 5.368746 s. The report's minimap2 median is 16.487527 s, giving
-a 3.071020x ratio. Figure~\ref{fig:index-doc0384-bars} displays the medians on
-one scale.
+DOC0384 labels 5.368746 s as P50 by selecting the lower-middle order statistic.
+For six samples this is not the conventional arithmetic median, which is
+\((5.368746000 + 5.401551458)/2 = 5.385148729\) s.  The report's 3.071020x
+ratio uses its stated P50 convention against a minimap2 P50 of 16.487527 s.
+Using the conventional BioSeqDB median while leaving that baseline unchanged
+would give approximately 3.062x. Figure~\ref{fig:index-doc0384-bars} preserves
+the report-defined P50 so that its acceptance decision remains reproducible.
 
 \begin{figure}[ht]
   \centering
@@ -1187,15 +1191,17 @@ one scale.
     \node[anchor=east] at (-.2,2.40) {minimap2};
     \node[anchor=west,font=\scriptsize] at (16.62,2.40) {16.488};
   \end{tikzpicture}
-  \caption{DOC0384 six-run median comparison for the implemented mapped MPF
-  path. The thin line shows the range of the six retained BioSeqDB samples; the
-  report supplies a minimap2 median rather than a paired range.}
+  \caption{DOC0384 report-defined P50 comparison for the implemented mapped
+  MPF path. The BioSeqDB bar uses the lower-middle order statistic chosen by
+  the report; its conventional six-sample median is 5.385149 s. The thin line
+  shows the retained BioSeqDB range, while the report supplies a minimap2 P50
+  rather than a paired range.}
   \label{fig:index-doc0384-bars}
 \end{figure}
 
 Correctness was exact for all 16 checked cases in match position, strand, and
-CIGAR. The speed result must retain its caveats. The median was only
-0.127096 s below the time corresponding to the report's 3x acceptance limit.
+CIGAR. The speed result must retain its caveats. The report-defined P50 was only
+0.127096 s below the time corresponding to its 3x acceptance limit.
 The run used a manually assembled, dirty worktree, process-cold operating-system
 cache state was not fully specified, and not every individual run passed the
 3x boundary. A later fresh E2E row in the same report measured

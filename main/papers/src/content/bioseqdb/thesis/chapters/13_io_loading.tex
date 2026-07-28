@@ -227,8 +227,9 @@ necessary, resolve them from preceding windows, and drain results in order.
 An archived June benchmark on a roughly 6 GiB uncompressed FASTQ corpus
 reported 69.4 MiB/s of compressed input, approximately 222 MiB/s of
 decompressed output, for the then-current parallel path, compared with about
-174 MiB/s decompressed for zlib.  It therefore measured a 22\% improvement
-over the zlib route, not the multi-gigabyte rate originally targeted.  A later
+174 MiB/s decompressed for zlib.  These rounded values imply an approximately
+27.6\% throughput increase over the zlib route, not the multi-gigabyte rate
+originally targeted.  A later
 forensic note is important: a notebook chart displayed approximately
 4315 MiB/s under a ``parallel gzip'' label because the same dispatcher had
 been run on a \emph{plain} corpus and fell through to mmap; the chart omitted
@@ -708,7 +709,7 @@ plain mmap FASTA reader, final archived v3 buckets &
 range across synthetic/real buckets; page-cache reader throughput\\
 6 GiB gzip FASTQ, decompressed basis &
 zlib 174 MiB/s & parallel 222 MiB/s &
-22\% over zlib; actual gzip bucket, not mislabeled plain mmap\\
+approximately 27.6\% over zlib; actual gzip bucket, not mislabeled plain mmap\\
 234 MiB FASTA writer &
 \texttt{ofstream} 311 MiB/s & best 2649 MiB/s &
 page-cache output, no \texttt{fsync}\\
