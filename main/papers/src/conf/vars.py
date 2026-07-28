@@ -626,7 +626,11 @@ def _yaml_partial(main_file_name):
         values = load.construct_mapping(node)
         path = values["path"]
         del values["path"]
-        ref = "".join(os.path.basename(path).lower().split(" ")).strip()
+        ref = (
+            "".join(os.path.basename(path).lower().split(" "))
+            .replace("_", "-")
+            .strip()
+        )
         values["ref"] = ref
         values["path"] = f"{path}.tex"
         full_path = os.path.join(resource_base_path, f"{path}.tex")
