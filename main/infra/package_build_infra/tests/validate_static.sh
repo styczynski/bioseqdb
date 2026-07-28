@@ -54,6 +54,7 @@ done
 
 assert_literal "$BOOTSTRAP" 'BIOSEQ_ZRAM_SWAP_PRIORITY'
 assert_literal "$BOOTSTRAP" 'BIOSEQ_DISK_SWAP_PRIORITY'
+assert_literal "$BOOTSTRAP" 'allocated_device=$(zramctl --find)'
 assert_literal "$BOOTSTRAP" 'CPUSchedulingPriority=$BIOSEQ_SSH_RT_PRIORITY'
 assert_literal "$BOOTSTRAP" '/usr/bin/chrt --rr "$BIOSEQ_COMPILER_RT_PRIORITY"'
 assert_literal "$BOOTSTRAP" 'CPUSchedulingResetOnFork=true'

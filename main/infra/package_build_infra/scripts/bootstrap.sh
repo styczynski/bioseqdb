@@ -121,6 +121,16 @@ case "${1:-start}" in
       swapoff "$device"
     fi
     modprobe zram num_devices=1
+    # Current AWS kernels can expose zram's hot-add interface without honoring
+    # the legacy num_devices module option. Allocate the first device explicitly
+    # when modprobe did not create it.
+    if [[ ! -b $device ]]; then
+      allocated_device=$(zramctl --find)
+      [[ $allocated_device == "$device" ]] || {
+        printf 'expected %s but zram allocated %s\n' "$device" "$allocated_device" >&2
+        exit 1
+      }
+    fi
     zramctl --reset "$device" 2>/dev/null || true
     memory_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
     zram_bytes=$((memory_kib * 1024 * BIOSEQ_ZRAM_FRACTION_PERCENT / 100))
