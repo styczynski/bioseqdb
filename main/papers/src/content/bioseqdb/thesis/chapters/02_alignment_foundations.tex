@@ -247,8 +247,8 @@ independently of either implementation.
   \label{alg:affine-dp}
   \begin{algorithmic}[1]
     \Require sequences \(X[1..n]\), \(Y[1..m]\), substitution score \(s\),
-      gap-open cost \(q\), extension cost \(e\)
-    \Require no adjacent opposite gap runs, under the scoring assumption above
+      gap-open cost \(q\), extension cost \(e\), and the normalized gap-path
+      convention under the scoring assumption stated above
     \State initialize \(M,I,D\) for the selected boundary objective
     \For{\(i=1,\ldots,n\)}
       \For{\(j=1,\ldots,m\)}
