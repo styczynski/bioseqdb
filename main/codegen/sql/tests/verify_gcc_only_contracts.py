@@ -1689,10 +1689,12 @@ def verify_cmake_wiring(root: Path) -> None:
         "--allowed-core-generated-source",
         "--allowed-production-guc-generated-source",
         "--allowed-test-indexes-guc-generated-source",
+        "if(BIOSEQ_SQL_RUN_NEGATIVE_CONTRACT_SELF_TEST)",
         '"$<TARGET_FILE:bioseq_codegen>" self_test sql',
-        'COMMAND "${CMAKE_COMMAND}" -E make_directory\n'
-        '    "${BIOSEQ_SQL_CODEGEN_DIR}"\n'
-        '  COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql',
+        '    COMMAND "${CMAKE_COMMAND}" -E make_directory\n'
+        '      "${BIOSEQ_SQL_CODEGEN_DIR}"\n'
+        '    COMMAND "$<TARGET_FILE:bioseq_codegen>" self_test sql',
+        "Skipping disabled maintainer SQL negative/provenance fixtures",
         "OBJECT EXCLUDE_FROM_ALL",
         "BIOSEQ_SQL_GCC_CONTRACT_SOURCE_INPUTS",
         '"${CMAKE_SOURCE_DIR}/CMakeLists.txt"',
