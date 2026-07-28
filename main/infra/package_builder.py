@@ -28,6 +28,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -401,6 +402,92 @@ def tofu_outputs() -> dict[str, Any]:
     }
 
 
+def _walk_state_modules(module: dict[str, Any]) -> Iterable[dict[str, Any]]:
+    resources = module.get("resources", [])
+    if isinstance(resources, list):
+        for resource in resources:
+            if isinstance(resource, dict):
+                yield resource
+    children = module.get("child_modules", [])
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                yield from _walk_state_modules(child)
+
+
+def tofu_state_builders(matrix: Matrix) -> dict[str, Builder]:
+    """Recover only exact package-builder resources after a partial apply.
+
+    Aggregate outputs can be unknown when one side of the ``for_each`` failed.
+    OpenTofu's JSON state still records each instance that did succeed. No
+    sensitive state content is printed or persisted by this recovery path.
+    """
+
+    result = run_command(
+        [tofu_executable(), "show", "-json"],
+        cwd=STACK_DIR,
+        capture=True,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return {}
+    try:
+        state = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise PackageBuilderError(f"OpenTofu state JSON is malformed: {error}") from error
+    values = state.get("values", {}) if isinstance(state, dict) else {}
+    root_module = values.get("root_module", {}) if isinstance(values, dict) else {}
+    if not isinstance(root_module, dict):
+        return {}
+    expected_addresses = {
+        f'aws_instance.builder["{name}"]': name for name in matrix.architectures
+    }
+    builders: dict[str, Builder] = {}
+    for resource in _walk_state_modules(root_module):
+        address = resource.get("address")
+        if address not in expected_addresses:
+            continue
+        name = expected_addresses[address]
+        if name in builders:
+            raise PackageBuilderError(
+                f"OpenTofu state contains duplicate builder resource for {name}"
+            )
+        resource_values = resource.get("values", {})
+        if not isinstance(resource_values, dict):
+            raise PackageBuilderError(
+                f"OpenTofu state values for {name} are malformed"
+            )
+        instance_id = str(resource_values.get("id", ""))
+        if not INSTANCE_ID_RE.match(instance_id):
+            # A planned/unknown resource is not an actionable instance.
+            continue
+        if instance_id in PROTECTED_INSTANCE_IDS:
+            raise PackageBuilderError(
+                f"refusing protected development instance {instance_id} in OpenTofu state"
+            )
+        architecture = matrix.architectures[name]
+        builders[name] = Builder(
+            architecture=name,
+            instance_id=instance_id,
+            instance_type=architecture.instance_type,
+            aws_architecture=architecture.aws_architecture,
+            public_ip=str(resource_values.get("public_ip") or ""),
+            private_ip=str(resource_values.get("private_ip") or ""),
+            source_ami_id=str(resource_values.get("ami") or ""),
+        )
+    return builders
+
+
+def recover_managed_builders(matrix: Matrix) -> dict[str, Builder]:
+    outputs = tofu_outputs()
+    if outputs:
+        try:
+            return output_builders(outputs, matrix)
+        except PackageBuilderError as output_error:
+            info(f"aggregate builder output unavailable; recovering exact state: {output_error}")
+    return tofu_state_builders(matrix)
+
+
 def guard_local_state_against_protected_instances() -> None:
     """Reject a poisoned/imported local state before OpenTofu can mutate it."""
 
@@ -717,7 +804,27 @@ def stop_builders(
             if state in {"stopped", "stopping"}:
                 info(f"{name} builder {builder.instance_id} is {state}; no stop needed")
                 continue
-            if state not in {"pending", "running"}:
+            if state == "pending":
+                # StopInstances rejects an EBS-backed instance that has not
+                # reached running yet. Finish the bounded launch waiter, then
+                # revalidate ownership/lifecycle invariants before stopping.
+                run_command(
+                    [
+                        require_executable("aws"),
+                        "--region",
+                        region,
+                        "ec2",
+                        "wait",
+                        "instance-running",
+                        "--instance-ids",
+                        builder.instance_id,
+                    ]
+                )
+                record = describe_builder(
+                    region, builder, matrix.architectures[name]
+                )
+                state = instance_state(record)
+            if state != "running":
                 raise PackageBuilderError(
                     f"refusing to stop {builder.instance_id} from unexpected state {state!r}"
                 )
@@ -1487,7 +1594,23 @@ def cmd_stop(args: argparse.Namespace) -> None:
 
 def cmd_up(args: argparse.Namespace) -> None:
     matrix = load_matrix()
-    outputs, builders, _, _ = provision_and_start(args, matrix)
+    try:
+        outputs, builders, _, _ = provision_and_start(args, matrix)
+    except BaseException as failure:
+        recovery_error: BaseException | None = None
+        try:
+            partial_builders = recover_managed_builders(matrix)
+            if partial_builders:
+                stop_builders(args.region, partial_builders, matrix)
+                info("stopped exact state-backed builders after incomplete up")
+        except BaseException as error:
+            recovery_error = error
+        if recovery_error is not None:
+            raise PackageBuilderError(
+                f"up failed ({failure}); partial-instance cleanup also failed "
+                f"({recovery_error})"
+            ) from failure
+        raise
     payload = {
         "region": args.region,
         "bucket": outputs.get("package_bucket_name"),
@@ -1511,9 +1634,16 @@ def cmd_run(args: argparse.Namespace) -> None:
         failure = error
     finally:
         if not builders:
-            with contextlib.suppress(Exception):
-                existing_outputs = tofu_outputs()
-                builders = output_builders(existing_outputs, matrix) if existing_outputs else {}
+            try:
+                builders = recover_managed_builders(matrix)
+            except BaseException as recovery_error:
+                if failure is None:
+                    failure = recovery_error
+                else:
+                    failure = PackageBuilderError(
+                        f"build failed ({failure}); exact OpenTofu state recovery also "
+                        f"failed ({recovery_error})"
+                    )
         if builders:
             try:
                 stop_builders(args.region, builders, matrix)
@@ -1615,6 +1745,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def interrupt_for_cleanup(signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt(f"received signal {signum}")
+
+    signal.signal(signal.SIGTERM, interrupt_for_cleanup)
     try:
         with exclusive_lock():
             args.handler(args)
@@ -1624,6 +1760,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except PackageBuilderError as error:
         print(f"package-builder failed: {error}", file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
     return 0
 
 

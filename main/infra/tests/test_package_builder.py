@@ -141,6 +141,53 @@ class LifecycleSafetyTests(unittest.TestCase):
                 package_builder.cmd_run(args)
         stop.assert_called_once_with("us-east-1", builders, self.matrix)
 
+    def test_partial_apply_recovers_exact_state_instance_and_stops_it(self) -> None:
+        state = {
+            "values": {
+                "root_module": {
+                    "resources": [
+                        {
+                            "address": 'aws_instance.builder["x64"]',
+                            "values": {
+                                "id": "i-0123456789abcdef0",
+                                "ami": "ami-0123456789abcdef0",
+                                "public_ip": "203.0.113.2",
+                                "private_ip": "10.0.0.2",
+                            },
+                        },
+                        {
+                            "address": "aws_s3_bucket.artifacts",
+                            "values": {"id": "unrelated"},
+                        },
+                    ]
+                }
+            }
+        }
+        completed = subprocess.CompletedProcess([], 0, json.dumps(state), "")
+        with mock.patch.object(package_builder, "run_command", return_value=completed):
+            recovered = package_builder.tofu_state_builders(self.matrix)
+        self.assertEqual(set(recovered), {"x64"})
+        self.assertEqual(recovered["x64"].instance_id, "i-0123456789abcdef0")
+        self.assertEqual(recovered["x64"].instance_type, "m4.xlarge")
+
+        args = argparse.Namespace(
+            architectures=None,
+            distros=None,
+            postgres=None,
+            region="us-east-1",
+            s3_prefix="bioseq/packages",
+        )
+        with mock.patch.object(
+            package_builder,
+            "provision_and_start",
+            side_effect=package_builder.PackageBuilderError("partial apply"),
+        ), mock.patch.object(
+            package_builder, "recover_managed_builders", return_value=recovered
+        ), mock.patch.object(package_builder, "stop_builders") as stop:
+            with self.assertRaisesRegex(package_builder.PackageBuilderError, "partial apply"):
+                package_builder.cmd_run(args)
+        stop.assert_called_once_with("us-east-1", recovered, self.matrix)
+
 
 class ManifestTests(unittest.TestCase):
     def test_success_manifest_requires_optimization_zero_and_exact_s3_key(self) -> None:
