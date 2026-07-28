@@ -8,6 +8,21 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+fn make_debian_rules_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = std::fs::metadata(path).with_context(|| format!("cannot inspect {}", path.display()))?.permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).with_context(|| format!("cannot make {} executable", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_debian_rules_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Deb {
     pub distro: Distro,
@@ -53,16 +68,26 @@ impl Deb {
                 .into_owned();
             let dest = to.join(&file_name);
 
-            if path.extension().and_then(|e| e.to_str()) == Some("liquid") {
+            if path.is_dir() {
+                self.render_templates(vars.clone(), path, dest)?;
+                continue;
+            }
+
+            let rendered_dest = if path.extension().and_then(|e| e.to_str()) == Some("liquid") {
                 let stem = path
                     .file_stem()
                     .ok_or_else(|| anyhow::anyhow!("cannot get file stem for {}", path.display()))?
                     .to_string_lossy()
                     .into_owned();
                 let dest_without_ext = to.join(stem);
-                Template::from_file(&path)?.render_to_file(vars.clone(), dest_without_ext)?;
+                Template::from_file(&path)?.render_to_file(vars.clone(), dest_without_ext.clone())?;
+                dest_without_ext
             } else {
                 std::fs::copy(&path, &dest).with_context(|| format!("cannot copy {} to {}", path.display(), dest.display()))?;
+                dest
+            };
+            if rendered_dest.file_name().and_then(|name| name.to_str()) == Some("rules") {
+                make_debian_rules_executable(&rendered_dest)?;
             }
         }
 
@@ -396,6 +421,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_setup_build_recurses_and_makes_rules_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let templates_dir = dir.path().join("source").join("debian-templates");
+        std::fs::create_dir_all(templates_dir.join("source")).unwrap();
+        std::fs::write(templates_dir.join("rules.liquid"), "#!/usr/bin/make -f\n").unwrap();
+        std::fs::write(templates_dir.join("source").join("format"), "3.0 (native)\n").unwrap();
+
+        let mut deb = make_deb(&dir);
+        deb.setup_build(make_build_config(&dir)).unwrap();
+
+        let debian_dir = deb.distro_build_dir().join("build").join("debian");
+        let rules = debian_dir.join("rules");
+        let mode = std::fs::metadata(&rules).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+        assert_eq!(std::fs::read_to_string(debian_dir.join("source").join("format")).unwrap(), "3.0 (native)\n");
+    }
+
+    #[test]
     fn test_setup_build_adds_mounts() {
         let dir = tempfile::tempdir().unwrap();
         let mut deb = make_deb(&dir);
@@ -602,6 +648,12 @@ mod tests {
         let repo_dir = deb.build_output_dir();
         assert!(home_dir.join("key.priv").exists());
         assert!(repo_dir.join("public.key").exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(home_dir.join("key.priv")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]
@@ -614,6 +666,19 @@ mod tests {
         config.gpg_private_key_base64 = general_purpose::STANDARD.encode("not a real key");
 
         assert!(deb.setup_repository(config).is_err());
+    }
+
+    #[test]
+    fn test_teardown_removes_temporary_private_key_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let deb = make_deb(&dir);
+        let home_dir = deb.distro_build_dir().join("home");
+        std::fs::create_dir_all(&home_dir).unwrap();
+        std::fs::write(home_dir.join("key.priv"), "test-only-secret").unwrap();
+
+        deb.teardown().unwrap();
+
+        assert!(!home_dir.exists());
     }
 
     // ── clone_box() ──────────────────────────────────────────────────────────

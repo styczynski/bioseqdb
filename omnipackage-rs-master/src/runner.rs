@@ -64,6 +64,26 @@ impl Runner {
     }
 
     fn execute(&self) -> Result<Vec<PathBuf>, ExecuteError> {
+        let result = self.execute_inner();
+        // setup_repository writes key.priv under home_dir. Cleanup must run
+        // even when registry login or container startup fails before the old
+        // end-of-function teardown point.
+        match self.package.teardown() {
+            Ok(()) => result,
+            Err(cleanup_error) => {
+                let log_path = self.package.distro_build_dir().join("runner.log");
+                match result {
+                    Ok(_) => Err((cleanup_error, log_path)),
+                    Err((execution_error, existing_log_path)) => Err((
+                        anyhow::anyhow!("container execution failed ({execution_error:#}) and private-key cleanup failed ({cleanup_error:#})"),
+                        existing_log_path,
+                    )),
+                }
+            }
+        }
+    }
+
+    fn execute_inner(&self) -> Result<Vec<PathBuf>, ExecuteError> {
         let mut args = vec!["run".to_string(), "--rm".to_string(), "--entrypoint".to_string(), "/bin/bash".to_string()];
         args.extend(container_capability_args(&self.package.container_capabilities()));
 
@@ -84,8 +104,7 @@ impl Runner {
 
         let mut env_vars: HashMap<String, String> = [("GPG_TTY".to_string(), "".to_string())].into_iter().collect();
         env_vars.extend(self.job_variables.secrets.clone());
-        let env_args: Vec<String> = env_vars.iter().flat_map(|(k, v)| ["-e".to_string(), format!("{k}={v}")]).collect();
-        args.extend(env_args);
+        args.extend(container_environment_args(&env_vars));
 
         let log_path = self.package.distro_build_dir().join("runner.log");
         let _ = std::fs::remove_file(&log_path);
@@ -104,15 +123,16 @@ impl Runner {
         args.push("-c".to_string());
         args.push(commands.join(" && "));
 
-        let result = Command::container(args)
-            .stream_output_to(self.container_logger())
-            .log_to(&log_path)
+        let mut container_command = Command::container(args).stream_output_to(self.container_logger()).log_to(&log_path);
+        for (key, value) in env_vars {
+            // `docker run -e KEY` inherits KEY from the Docker CLI process.
+            // Keeping VALUE out of argv prevents exposure through ps/procfs.
+            container_command = container_command.with_env(key, value);
+        }
+        container_command
             .run()
             .map(|_| self.package.artefacts().into_iter().filter(|p| !preexisting.contains(p)).collect())
-            .map_err(|e| (e, log_path.clone()));
-
-        self.package.teardown();
-        result
+            .map_err(|e| (e, log_path))
     }
 
     fn container_logger(&self) -> Logger {
@@ -122,6 +142,12 @@ impl Runner {
 
 fn container_capability_args(capabilities: &[ContainerCapability]) -> Vec<String> {
     capabilities.iter().flat_map(|capability| ["--cap-add".to_string(), capability.to_string()]).collect()
+}
+
+fn container_environment_args(environment: &HashMap<String, String>) -> Vec<String> {
+    let mut names = environment.keys().cloned().collect::<Vec<_>>();
+    names.sort();
+    names.into_iter().flat_map(|name| ["-e".to_string(), name]).collect()
 }
 
 #[cfg(test)]
@@ -136,5 +162,14 @@ mod tests {
     #[test]
     fn container_capability_args_is_empty_by_default() {
         assert!(container_capability_args(&[]).is_empty());
+    }
+
+    #[test]
+    fn container_environment_args_never_contain_secret_values() {
+        let environment = HashMap::from([("GPG_PRIVATE_KEY".to_string(), "super-secret-value".to_string()), ("GPG_TTY".to_string(), "".to_string())]);
+        let args = container_environment_args(&environment);
+        assert_eq!(args, vec!["-e", "GPG_PRIVATE_KEY", "-e", "GPG_TTY"].into_iter().map(str::to_string).collect::<Vec<_>>());
+        assert!(!args.iter().any(|argument| argument.contains("super-secret-value")));
+        assert!(!args.iter().any(|argument| argument.contains('=')));
     }
 }

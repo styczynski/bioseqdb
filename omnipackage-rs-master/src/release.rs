@@ -20,6 +20,24 @@ fn apply_retention(repository_config: &Repository, pkg: &dyn Package) -> Result<
     }
 }
 
+fn setup_repository_and_retention(repository_config: &Repository, pkg: &mut dyn Package) -> Result<HashSet<PathBuf>, anyhow::Error> {
+    if let Err(error) = pkg.setup_repository(repository_config.clone()) {
+        // setup_repository may already have written home/key.priv before a
+        // later repository preparation step failed.
+        return match pkg.teardown() {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(anyhow::anyhow!("repository setup failed ({error:#}) and private-key cleanup failed ({cleanup_error:#})")),
+        };
+    }
+    match apply_retention(repository_config, pkg) {
+        Ok(skip_upload) => Ok(skip_upload),
+        Err(error) => match pkg.teardown() {
+            Ok(()) => Err(error),
+            Err(cleanup_error) => Err(anyhow::anyhow!("retention setup failed ({error:#}) and private-key cleanup failed ({cleanup_error:#})")),
+        },
+    }
+}
+
 struct JobSetup {
     job_variables: job_variables::JobVariables,
     build_dir: PathBuf,
@@ -91,8 +109,7 @@ pub fn publish(args: PublishArgs) -> Result<(), anyhow::Error> {
 
     for build_config in detect_builds(args.job.clone(), config)? {
         let mut pkg = setup.make_package(&build_config)?;
-        pkg.setup_repository(repository_config.clone())?;
-        let skip_upload = apply_retention(&repository_config, pkg.as_ref())?;
+        let skip_upload = setup_repository_and_retention(&repository_config, pkg.as_mut())?;
 
         let runner = Runner::new(pkg.clone(), args.logging.clone(), setup.job_variables.clone());
         let build_ok = fail_fast_or_continue(runner.run(), args.job.fail_fast)?;
@@ -117,8 +134,7 @@ pub fn release(args: ReleaseArgs) -> Result<(), anyhow::Error> {
     for build_config in detect_builds(args.job.clone(), config)? {
         let mut pkg = setup.make_package(&build_config)?;
         pkg.setup_build(build_config.clone())?;
-        pkg.setup_repository(repository_config.clone())?;
-        let skip_upload = apply_retention(&repository_config, pkg.as_ref())?;
+        let skip_upload = setup_repository_and_retention(&repository_config, pkg.as_mut())?;
 
         let runner = Runner::new(pkg.clone(), args.logging.clone(), setup.job_variables.clone());
         let build_ok = fail_fast_or_continue(runner.run(), args.job.fail_fast)?;

@@ -64,11 +64,12 @@ pub trait Package {
         self.distro().container_capabilities
     }
 
-    fn teardown(&self) {
+    fn teardown(&self) -> Result<(), anyhow::Error> {
         let dir = self.home_dir();
         if dir.exists() {
-            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::remove_dir_all(&dir).with_context(|| format!("cannot remove temporary package secret directory {}", dir.display()))?;
         }
+        Ok(())
     }
 
     fn setup_stage_name(&self) -> String {
@@ -122,7 +123,15 @@ pub trait Package {
 
     fn write_gpg_keys(&self, key: &Key, home_dir: &Path, repo_dir: &Path) -> Result<(), anyhow::Error> {
         std::fs::write(repo_dir.join("public.key"), &key.pub_key)?;
-        std::fs::write(home_dir.join("key.priv"), &key.priv_key)?;
+        let private_key_path = home_dir.join("key.priv");
+        std::fs::write(&private_key_path, &key.priv_key)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&private_key_path)?.permissions();
+            permissions.set_mode(0o600);
+            std::fs::set_permissions(&private_key_path, permissions)?;
+        }
         Ok(())
     }
 
